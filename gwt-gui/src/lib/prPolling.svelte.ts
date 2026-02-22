@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { PrStatusInfo, PrStatusResponse, GhCliStatus } from "./types";
+import type { PrStatusLite, PrStatusResponse, GhCliStatus } from "./types";
 
 const POLL_INTERVAL_MS = 30_000;
 
 export interface PrPollingState {
-  statuses: Record<string, PrStatusInfo | null>;
+  statuses: Record<string, PrStatusLite | null>;
   ghStatus: GhCliStatus | null;
   loading: boolean;
   error: string | null;
@@ -42,7 +42,12 @@ export function createPrPolling(
       state.statuses = result.statuses;
       state.ghStatus = result.ghStatus;
     } catch (err) {
-      state.error = err instanceof Error ? err.message : String(err);
+      state.error =
+        err instanceof Error
+          ? err.message
+          : err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
     } finally {
       state.loading = false;
     }

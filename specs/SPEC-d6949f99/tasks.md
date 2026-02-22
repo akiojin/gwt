@@ -55,3 +55,12 @@
 - [x] T033 [US5] [テスト] WorktreeSummaryPanel.test.ts に4タブ表示とGit展開固定の検証を追加 `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
 - [x] T034 [US5] [検証] `pnpm --dir gwt-gui test -- src/lib/components/WorktreeSummaryPanel.test.ts` を実行し回帰がないことを確認
 - [x] T035 [US5] [検証] `pnpm --dir gwt-gui check` を実行し型エラーがないことを確認
+
+## Phase 8: GraphQL最適化 + レートリミット耐性（2026-02-22 追補）
+
+- [x] T036 [US1] [実装] `fetch_pr_status` のGraphQL取得を Open PR 一覧ベースへ変更（branch alias 廃止） `crates/gwt-core/src/git/graphql.rs`
+- [x] T037 [US1] [実装] `fetch_pr_status` のレスポンスを軽量サマリーへ変更し `fetch_pr_detail` と責務分離 `crates/gwt-tauri/src/commands/pullrequest.rs` `gwt-gui/src/lib/types.ts`
+- [x] T038 [US4] [実装] バックエンド側に TTL キャッシュ + rate-limit クールダウンを追加（stale cache 返却） `crates/gwt-tauri/src/commands/pullrequest.rs`
+- [x] T039 [US1] [テスト] Open PR 軽量クエリと rate-limit 判定のユニットテスト追加 `crates/gwt-core/src/git/graphql.rs`
+- [x] T040 [US1] [テスト] pullrequest コマンドのシリアライズ/変換テストを軽量レスポンス仕様へ更新 `crates/gwt-tauri/src/commands/pullrequest.rs`
+- [x] T041 [P] [検証] `cargo test -p gwt-core graphql` / `cargo test -p gwt-tauri pullrequest` / `pnpm --dir gwt-gui test src/lib/prPolling.test.ts src/lib/components/Sidebar.test.ts src/lib/components/WorktreeSummaryPanel.test.ts` を実行

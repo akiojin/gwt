@@ -58,6 +58,21 @@
 3. `fetch_ci_log` コマンド: `gh run view <run_id> --log` を実行しログテキストを返す
 4. `check_gh_status` コマンド: 既存の `GhCliStatus` パターンを流用
 
+### Phase 2.5: バックエンド — レートリミット最適化（2026-02-22 追補）
+
+**対象ファイル**: `crates/gwt-core/src/git/graphql.rs`, `crates/gwt-tauri/src/commands/pullrequest.rs`
+
+1. `fetch_pr_status` の GraphQL 取得を Open PR 一覧クエリへ変更
+   - `pullRequests(states: OPEN)` を1回実行し、`headRefName` で対象ブランチへマップ
+   - ツリー表示に不要な詳細フィールド（reviews/labels/assignees/changes）は取得しない
+2. バックエンド側でレートリミット予防を実装
+   - リポジトリ単位 TTL キャッシュ（30秒）
+   - レートリミット検知時の stale cache 返却
+   - `rateLimit.resetAt` 優先 + fallback 60秒のクールダウン
+3. `fetch_pr_status` レスポンスを軽量化
+   - Summary 用は number/state/url/mergeable/base/head/check suites のみ
+   - 詳細は `fetch_pr_detail` で継続取得（責務分離）
+
 ### Phase 3: フロントエンド — Worktreeツリー展開
 
 **対象ファイル**: `gwt-gui/src/lib/`

@@ -10,6 +10,7 @@ use gwt_core::git::{
     get_spec_issue_detail, is_gh_cli_authenticated, is_gh_cli_available,
 };
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::StructuredError;
 use serde::Serialize;
 use std::path::Path;
 
@@ -136,12 +137,14 @@ pub fn fetch_github_issues(
     page: u32,
     per_page: u32,
     state: Option<String>,
-) -> Result<FetchIssuesResponse, String> {
+) -> Result<FetchIssuesResponse, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_github_issues"))?;
     let state = state.unwrap_or_else(|| "open".to_string());
 
-    let result = fetch_open_issues(&repo_path, page, per_page, &state)?;
+    let result = fetch_open_issues(&repo_path, page, per_page, &state)
+        .map_err(|e| StructuredError::internal(&e, "fetch_github_issues"))?;
 
     let issues = result.issues.into_iter().map(issue_to_info).collect();
 
@@ -156,11 +159,13 @@ pub fn fetch_github_issues(
 pub fn fetch_github_issue_detail(
     project_path: String,
     issue_number: u64,
-) -> Result<IssueInfo, String> {
+) -> Result<IssueInfo, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_github_issue_detail"))?;
 
-    let issue = fetch_issue_detail(&repo_path, issue_number)?;
+    let issue = fetch_issue_detail(&repo_path, issue_number)
+        .map_err(|e| StructuredError::internal(&e, "fetch_github_issue_detail"))?;
     Ok(issue_to_info(issue))
 }
 
@@ -196,13 +201,14 @@ fn is_issue_not_found_error(message: &str) -> bool {
 pub fn fetch_branch_linked_issue(
     project_path: String,
     branch: String,
-) -> Result<Option<BranchLinkedIssueInfo>, String> {
+) -> Result<Option<BranchLinkedIssueInfo>, StructuredError> {
     let Some(issue_number) = extract_issue_number_from_branch(&branch) else {
         return Ok(None);
     };
 
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_branch_linked_issue"))?;
 
     match get_spec_issue_detail(&repo_path, issue_number) {
         Ok(detail) => Ok(Some(BranchLinkedIssueInfo {
@@ -213,13 +219,13 @@ pub fn fetch_branch_linked_issue(
             url: detail.url,
         })),
         Err(err) if is_issue_not_found_error(&err) => Ok(None),
-        Err(err) => Err(err),
+        Err(err) => Err(StructuredError::internal(&err, "fetch_branch_linked_issue")),
     }
 }
 
 /// Check gh CLI availability and authentication (FR-011)
 #[tauri::command]
-pub fn check_gh_cli_status(_project_path: String) -> Result<GhCliStatus, String> {
+pub fn check_gh_cli_status(_project_path: String) -> Result<GhCliStatus, StructuredError> {
     let available = is_gh_cli_available();
     let authenticated = if available {
         is_gh_cli_authenticated()
@@ -238,11 +244,13 @@ pub fn check_gh_cli_status(_project_path: String) -> Result<GhCliStatus, String>
 pub fn find_existing_issue_branch(
     project_path: String,
     issue_number: u64,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "find_existing_issue_branch"))?;
 
     find_branch_for_issue(&repo_path, issue_number)
+        .map_err(|e| StructuredError::internal(&e, "find_existing_issue_branch"))
 }
 
 /// Link a branch to a GitHub issue via `gh issue develop` (FR-013)
@@ -251,11 +259,13 @@ pub fn link_branch_to_issue(
     project_path: String,
     issue_number: u64,
     branch_name: String,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "link_branch_to_issue"))?;
 
     create_linked_branch(&repo_path, issue_number, &branch_name)
+        .map_err(|e| StructuredError::internal(&e, "link_branch_to_issue"))
 }
 
 /// Rollback an issue-linked branch (FR-014)
@@ -266,12 +276,14 @@ pub fn rollback_issue_branch(
     project_path: String,
     branch_name: String,
     delete_remote: bool,
-) -> Result<RollbackResult, String> {
+) -> Result<RollbackResult, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "rollback_issue_branch"))?;
 
     // Local rollback must remove worktree first, then delete the branch.
-    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+    let manager = WorktreeManager::new(&repo_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "rollback_issue_branch"))?;
     let (local_deleted, local_error) = match manager.cleanup_branch(&branch_name, true, true) {
         Ok(()) => (true, None),
         Err(err) => (false, Some(err.to_string())),
@@ -283,7 +295,12 @@ pub fn rollback_issue_branch(
             .args(["push", "origin", "--delete", &branch_name])
             .current_dir(&repo_path)
             .output()
-            .map_err(|e| format!("Failed to execute git push --delete: {}", e))?;
+            .map_err(|e| {
+                StructuredError::internal(
+                    &format!("Failed to execute git push --delete: {}", e),
+                    "rollback_issue_branch",
+                )
+            })?;
 
         if remote_output.status.success() {
             (true, None)
@@ -329,8 +346,9 @@ pub fn classify_issue_branch_prefix(
     title: String,
     labels: Vec<String>,
     body: Option<String>,
-) -> Result<ClassifyResult, String> {
-    let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
+) -> Result<ClassifyResult, StructuredError> {
+    let profiles = ProfilesConfig::load()
+        .map_err(|e| StructuredError::from_gwt_error(&e, "classify_issue_branch_prefix"))?;
     let ai = profiles.resolve_active_ai_settings();
     let Some(settings) = ai.resolved else {
         return Ok(ClassifyResult {
@@ -340,7 +358,8 @@ pub fn classify_issue_branch_prefix(
         });
     };
 
-    let client = AIClient::new(settings).map_err(|e| e.to_string())?;
+    let client = AIClient::new(settings)
+        .map_err(|e| StructuredError::internal(&e.to_string(), "classify_issue_branch_prefix"))?;
     match core_classify_issue_prefix(&client, &title, &labels, body.as_deref()) {
         Ok(prefix) => Ok(ClassifyResult {
             status: "ok".to_string(),

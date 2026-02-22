@@ -342,7 +342,7 @@
       skillStatusMessage = "";
     }
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const status = await invoke<SkillRegistrationStatus>("get_skill_registration_status_cmd");
       skillStatus = normalizeSkillStatus(status);
       if (showRefreshMessage) {
@@ -363,7 +363,7 @@
     skillStatusRepairing = true;
     skillStatusMessage = "";
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const status = await invoke<SkillRegistrationStatus>("repair_skill_registration_cmd");
       skillStatus = normalizeSkillStatus(status);
       skillStatusMessage =
@@ -390,7 +390,7 @@
     aiModelsError = null;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const models = await invoke<AIModelInfo[]>("list_ai_models", {
         endpoint,
         apiKey,
@@ -435,7 +435,7 @@
     loadingProfiles = true;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const [loadedSettings, loadedProfiles] = await Promise.all([
         invoke<SettingsData>("get_settings"),
         invoke<ProfilesConfig>("get_profiles"),
@@ -519,7 +519,7 @@
         agent_skill_registration_gemini_scope: normalizedGeminiScope,
       };
 
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("save_settings", { settings });
       if (profiles) {
         await invoke("save_profiles", { config: profiles });
@@ -1744,6 +1744,7 @@
   }
 
   .ai-field input[type="text"],
+  .ai-field input[type="password"],
   .ai-field select {
     padding: 8px 12px;
     background: var(--bg-secondary);

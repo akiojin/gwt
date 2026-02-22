@@ -4,7 +4,7 @@
     WorktreeInfo,
     CleanupProgress,
     LaunchAgentRequest,
-    PrStatusInfo,
+    PrStatusLite,
     GhCliStatus,
     SettingsData,
   } from "../types";
@@ -74,7 +74,7 @@
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
     appLanguage?: SettingsData["app_language"];
-    prStatuses?: Record<string, PrStatusInfo | null>;
+    prStatuses?: Record<string, PrStatusLite | null>;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
 
@@ -88,7 +88,7 @@
 
   // PR Polling — inline to avoid .svelte.ts import issues in tests
   const PR_POLL_INTERVAL_MS = 30_000;
-  let pollingStatuses: Record<string, PrStatusInfo | null> = $state({});
+  let pollingStatuses: Record<string, PrStatusLite | null> = $state({});
   let pollingGhCliStatus: GhCliStatus | null = $state(null);
   let prPollingBootstrappedPath: string | null = null;
   let prPollingActivePath: string | null = null;
@@ -137,12 +137,12 @@
         }
         const invoke = await getInvoke();
         const result = await invoke<{
-          statuses: Record<string, PrStatusInfo | null>;
+          statuses: Record<string, PrStatusLite | null>;
           ghStatus: GhCliStatus;
         }>("fetch_pr_status", { projectPath: path, branches: queryBranches });
         if (!destroyed) {
           const statuses = result.statuses ?? {};
-          const mappedStatuses: Record<string, PrStatusInfo | null> = {};
+          const mappedStatuses: Record<string, PrStatusLite | null> = {};
           for (const branch of branches) {
             const key = branchKeyByName.get(branch.name) ?? branch.name;
             mappedStatuses[branch.name] = statuses[key] ?? null;
@@ -879,14 +879,8 @@
   }
 
   async function getInvoke(): Promise<TauriInvoke> {
-    const tauriCore = (await import("@tauri-apps/api/core")) as
-      | { invoke?: TauriInvoke; default?: { invoke?: TauriInvoke } }
-      | undefined;
-    const invokeFn = tauriCore?.invoke ?? tauriCore?.default?.invoke;
-    if (!invokeFn) {
-      throw new Error("Tauri invoke API is unavailable");
-    }
-    return invokeFn;
+    const { invoke } = await import("$lib/tauriInvoke");
+    return invoke as TauriInvoke;
   }
 
   async function getEventListen(): Promise<TauriEventListen> {

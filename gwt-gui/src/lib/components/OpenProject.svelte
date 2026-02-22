@@ -61,7 +61,7 @@
 
   async function loadRecentProjects() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const projects = await invoke<RecentProject[]>("get_recent_projects");
       recentProjects = projects;
     } catch (err) {
@@ -89,7 +89,7 @@
     opening = true;
     errorMessage = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<OpenProjectResult>("open_project", {
         path: projectPath,
       });
@@ -107,7 +107,7 @@
     opening = true;
     errorMessage = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const probe = await invoke<ProbePathResult>("probe_path", { path });
 
       if (probe.kind === "gwtProject" && probe.projectPath) {
@@ -168,7 +168,7 @@
         cloneProgress = event.payload;
       });
 
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<OpenProjectResult>("create_project", {
         request: { repoUrl, parentDir, shallow: shallowClone },
       });

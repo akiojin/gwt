@@ -15,7 +15,7 @@ let settings: {
   terminal_font_family: string;
 } | null = null;
 try {
-  const { invoke } = await import("@tauri-apps/api/core");
+  const { invoke } = await import("$lib/tauriInvoke");
   settings = await invoke<{
     ui_font_size: number;
     terminal_font_size: number;

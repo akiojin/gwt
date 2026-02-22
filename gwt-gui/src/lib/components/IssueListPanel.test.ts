@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, fireEvent, waitFor } from "@testing-library/svelte";
 import type { GitHubIssueInfo, GhCliStatus, FetchIssuesResponse } from "../types";
 
-// Mock @tauri-apps/api/core
+// Mock $lib/tauriInvoke
 const mockInvoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
 }));
 

@@ -1,5 +1,15 @@
 export type AgentStatusValue = "unknown" | "running" | "waiting_input" | "stopped";
 
+export interface StructuredError {
+  severity: "info" | "warning" | "error" | "critical";
+  code: string;
+  message: string;
+  command: string;
+  category: string;
+  suggestions: string[];
+  timestamp: string;
+}
+
 export interface BranchInfo {
   name: string;
   commit: string;
@@ -574,6 +584,17 @@ export interface PrStatusInfo {
   changedFilesCount: number;
   additions: number;
   deletions: number;
+  mergeStateStatus?: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
+}
+
+export interface PrStatusLite {
+  number: number;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  url: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  baseBranch: string;
+  headBranch: string;
+  checkSuites: WorkflowRunInfo[];
 }
 
 export interface BranchPrReference {
@@ -596,6 +617,7 @@ export interface WorkflowRunInfo {
     | "action_required"
     | "skipped"
     | null;
+  isRequired?: boolean;
 }
 
 export interface ReviewInfo {
@@ -618,7 +640,7 @@ export interface ReviewComment {
 }
 
 export interface PrStatusResponse {
-  statuses: Record<string, PrStatusInfo | null>;
+  statuses: Record<string, PrStatusLite | null>;
   ghStatus: GhCliStatus;
 }
 

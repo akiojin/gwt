@@ -18,6 +18,7 @@ use gwt_core::terminal::runner::{
 use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::StructuredError;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -1955,16 +1956,21 @@ pub fn launch_terminal(
     branch: String,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err("No project opened".to_string());
+            return Err(StructuredError::internal(
+                "No project opened",
+                "launch_terminal",
+            ));
         };
         PathBuf::from(p)
     };
 
-    let repo_path = resolve_repo_path_for_project_root(&project_root)?;
-    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch)?;
+    let repo_path = resolve_repo_path_for_project_root(&project_root)
+        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))?;
+    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch)
+        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))?;
 
     let config = BuiltinLaunchConfig {
         command: agent_name.clone(),
@@ -1978,6 +1984,7 @@ pub fn launch_terminal(
     };
 
     launch_with_config(&repo_path, config, None, &state, app_handle)
+        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))
 }
 
 fn non_empty_env_var(key: &str) -> Option<String> {
@@ -2083,7 +2090,7 @@ pub fn spawn_shell(
     shell: Option<String>,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let shell_id = resolve_shell_id_for_spawn(shell.as_deref());
     let (shell_cmd, shell_args) = resolve_shell_for_spawn(shell_id.as_deref());
 
@@ -2101,7 +2108,12 @@ pub fn spawn_shell(
         if cfg!(target_os = "windows") && shell_id.as_deref() == Some("wsl") {
             let wsl_path =
                 gwt_core::terminal::shell::windows_to_wsl_path(&resolved_dir.to_string_lossy())
-                    .map_err(|e| format!("WSL path conversion failed: {e}"))?;
+                    .map_err(|e| {
+                        StructuredError::internal(
+                            &format!("WSL path conversion failed: {e}"),
+                            "spawn_shell",
+                        )
+                    })?;
             (
                 "wsl.exe".to_string(),
                 vec!["--cd".to_string(), wsl_path],
@@ -2123,27 +2135,34 @@ pub fn spawn_shell(
     };
 
     let pane_id = {
-        let mut manager = state
-            .pane_manager
-            .lock()
-            .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
-        manager
-            .spawn_shell(config, 24, 80)
-            .map_err(|e| format!("Failed to spawn shell: {}", e))?
+        let mut manager = state.pane_manager.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to lock pane manager: {}", e),
+                "spawn_shell",
+            )
+        })?;
+        manager.spawn_shell(config, 24, 80).map_err(|e| {
+            StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
+        })?
     };
 
     let reader = {
-        let manager = state
-            .pane_manager
-            .lock()
-            .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+        let manager = state.pane_manager.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to lock pane manager: {}", e),
+                "spawn_shell",
+            )
+        })?;
         let pane = manager
             .panes()
             .iter()
             .find(|p| p.pane_id() == pane_id)
-            .ok_or_else(|| "Pane not found after creation".to_string())?;
-        pane.take_reader()
-            .map_err(|e| format!("Failed to take reader: {}", e))?
+            .ok_or_else(|| {
+                StructuredError::internal("Pane not found after creation", "spawn_shell")
+            })?;
+        pane.take_reader().map_err(|e| {
+            StructuredError::internal(&format!("Failed to take reader: {}", e), "spawn_shell")
+        })?
     };
 
     let pane_id_clone = pane_id.clone();
@@ -4347,14 +4366,18 @@ pub fn launch_agent(
     request: LaunchAgentRequest,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err("No project opened".to_string());
+            return Err(StructuredError::internal(
+                "No project opened",
+                "launch_agent",
+            ));
         };
         PathBuf::from(p)
     };
     launch_agent_for_project_root(project_root, request, &state, app_handle, None, None)
+        .map_err(|e| StructuredError::internal(&e, "launch_agent"))
 }
 
 /// Start an async launch job with progress events (SPEC-3b0ed29b US15).
@@ -4364,10 +4387,13 @@ pub fn start_launch_job(
     request: LaunchAgentRequest,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err("No project opened".to_string());
+            return Err(StructuredError::internal(
+                "No project opened",
+                "start_launch_job",
+            ));
         };
         p
     };
@@ -4461,7 +4487,7 @@ pub fn start_launch_job(
 
 /// Cancel a running launch job (best-effort).
 #[tauri::command]
-pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), String> {
+pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), StructuredError> {
     let id = job_id.trim();
     if id.is_empty() {
         return Ok(());
@@ -4931,26 +4957,32 @@ pub fn write_terminal(
     data: Vec<u8>,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let close_requested = is_enter_only(&data);
 
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "write_terminal",
+        )
+    })?;
 
     let should_close = {
-        let pane = manager
-            .pane_mut_by_id(&pane_id)
-            .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+        let pane = manager.pane_mut_by_id(&pane_id).ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "write_terminal")
+        })?;
 
         // Ensure we don't treat a completed pane as running due to stale status.
         let _ = pane.check_status();
 
         match pane.status() {
             PaneStatus::Running => {
-                pane.write_input(&data)
-                    .map_err(|e| format!("Failed to write to terminal: {}", e))?;
+                pane.write_input(&data).map_err(|e| {
+                    StructuredError::internal(
+                        &format!("Failed to write to terminal: {}", e),
+                        "write_terminal",
+                    )
+                })?;
                 return Ok(());
             }
             PaneStatus::Completed(_) | PaneStatus::Error(_) => close_requested,
@@ -4965,7 +4997,9 @@ pub fn write_terminal(
         .panes()
         .iter()
         .position(|p| p.pane_id() == pane_id)
-        .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+        .ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "write_terminal")
+        })?;
 
     manager.close_pane(index);
     let _ = app_handle.emit(
@@ -5051,14 +5085,16 @@ pub fn send_keys_to_pane(
     pane_id: String,
     text: String,
     state: State<AppState>,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     send_keys_to_pane_from_state(&state, &pane_id, &text)
+        .map_err(|e| StructuredError::internal(&e, "send_keys_to_pane"))
 }
 
 /// Broadcast text to all running terminal panes. Returns number of panes sent.
 #[tauri::command]
-pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize, String> {
+pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize, StructuredError> {
     send_keys_broadcast_from_state(&state, &text)
+        .map_err(|e| StructuredError::internal(&e, "send_keys_broadcast"))
 }
 
 /// Resize a terminal pane
@@ -5068,16 +5104,22 @@ pub fn resize_terminal(
     rows: u16,
     cols: u16,
     state: State<AppState>,
-) -> Result<(), String> {
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
-    let pane = manager
-        .pane_mut_by_id(&pane_id)
-        .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
-    pane.resize(rows, cols)
-        .map_err(|e| format!("Failed to resize terminal: {}", e))
+) -> Result<(), StructuredError> {
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "resize_terminal",
+        )
+    })?;
+    let pane = manager.pane_mut_by_id(&pane_id).ok_or_else(|| {
+        StructuredError::internal(&format!("Pane not found: {}", pane_id), "resize_terminal")
+    })?;
+    pane.resize(rows, cols).map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to resize terminal: {}", e),
+            "resize_terminal",
+        )
+    })
 }
 
 /// Close a terminal pane
@@ -5086,17 +5128,21 @@ pub fn close_terminal(
     pane_id: String,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<(), String> {
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+) -> Result<(), StructuredError> {
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "close_terminal",
+        )
+    })?;
 
     let index = manager
         .panes()
         .iter()
         .position(|p| p.pane_id() == pane_id)
-        .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+        .ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "close_terminal")
+        })?;
 
     manager.close_pane(index);
     let _ = app_handle.emit(
@@ -5278,8 +5324,9 @@ fn probe_terminal_ansi_from_state(
 pub fn probe_terminal_ansi(
     state: State<AppState>,
     pane_id: String,
-) -> Result<TerminalAnsiProbe, String> {
+) -> Result<TerminalAnsiProbe, StructuredError> {
     probe_terminal_ansi_from_state(&state, &pane_id)
+        .map_err(|e| StructuredError::internal(&e, "probe_terminal_ansi"))
 }
 
 /// Capture the scrollback tail for a pane as plain text (ANSI stripped).
@@ -5288,9 +5335,10 @@ pub fn capture_scrollback_tail(
     state: State<AppState>,
     pane_id: String,
     max_bytes: Option<usize>,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let max_bytes = max_bytes.unwrap_or(DEFAULT_SCROLLBACK_TAIL_BYTES);
     capture_scrollback_tail_from_state(&state, &pane_id, max_bytes)
+        .map_err(|e| StructuredError::internal(&e, "capture_scrollback_tail"))
 }
 
 // ---------------------------------------------------------------------------
@@ -5368,7 +5416,7 @@ pub struct ShellInfo {
 ///
 /// On non-Windows platforms this always returns an empty list.
 #[tauri::command]
-pub async fn get_available_shells() -> Result<Vec<ShellInfo>, String> {
+pub async fn get_available_shells() -> Result<Vec<ShellInfo>, StructuredError> {
     #[cfg(target_os = "windows")]
     {
         use gwt_core::terminal::shell::WindowsShell;

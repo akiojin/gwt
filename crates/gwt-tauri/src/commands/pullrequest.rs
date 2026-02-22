@@ -1,11 +1,13 @@
 //! Pull Request status commands (SPEC-d6949f99)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
+use chrono::{DateTime, Utc};
 use gwt_core::git::graphql;
 use gwt_core::git::{
     is_gh_cli_authenticated, is_gh_cli_available, PrCache, PrStatusInfo, Remote, ReviewComment,
     ReviewInfo, WorkflowRunInfo,
 };
+use gwt_core::StructuredError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,31 +26,23 @@ pub struct GhCliStatusInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrStatusResponse {
-    pub statuses: HashMap<String, Option<PrStatusSummary>>,
+    pub statuses: HashMap<String, Option<PrStatusLiteSummary>>,
     pub gh_status: GhCliStatusInfo,
 }
 
-/// Serializable PR status summary for the frontend
+/// Lightweight PR status summary for Sidebar polling.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PrStatusSummary {
+pub struct PrStatusLiteSummary {
     pub number: u64,
-    pub title: String,
     pub state: String,
     pub url: String,
     pub mergeable: String,
+    pub merge_state_status: Option<String>,
     pub author: String,
     pub base_branch: String,
     pub head_branch: String,
-    pub labels: Vec<String>,
-    pub assignees: Vec<String>,
-    pub milestone: Option<String>,
-    pub linked_issues: Vec<u64>,
     pub check_suites: Vec<WorkflowRunSummary>,
-    pub reviews: Vec<ReviewSummary>,
-    pub changed_files_count: u64,
-    pub additions: u64,
-    pub deletions: u64,
 }
 
 /// Serializable workflow run info for the frontend
@@ -59,6 +53,7 @@ pub struct WorkflowRunSummary {
     pub run_id: u64,
     pub status: String,
     pub conclusion: Option<String>,
+    pub is_required: Option<bool>,
 }
 
 /// Serializable review info for the frontend
@@ -90,6 +85,7 @@ pub struct PrDetailResponse {
     pub state: String,
     pub url: String,
     pub mergeable: String,
+    pub merge_state_status: Option<String>,
     pub author: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -122,6 +118,20 @@ struct LatestBranchPrCacheEntry {
 }
 
 const LATEST_BRANCH_PR_CACHE_TTL: Duration = Duration::from_secs(30);
+const PR_STATUS_CACHE_TTL: Duration = Duration::from_secs(30);
+const PR_STATUS_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Default)]
+struct RepoPrStatusCacheEntry {
+    statuses_by_head_branch: HashMap<String, PrStatusLiteSummary>,
+    fetched_at: Option<Instant>,
+    cooldown_until: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct PrStatusCommandCache {
+    repos: HashMap<String, RepoPrStatusCacheEntry>,
+}
 
 fn latest_branch_pr_cache() -> &'static Mutex<HashMap<String, LatestBranchPrCacheEntry>> {
     static CACHE: OnceLock<Mutex<HashMap<String, LatestBranchPrCacheEntry>>> = OnceLock::new();
@@ -151,6 +161,39 @@ fn write_latest_branch_pr_cache(cache_key: String, value: Option<BranchPrReferen
     );
 }
 
+fn pr_status_cache() -> &'static Mutex<PrStatusCommandCache> {
+    static CACHE: OnceLock<Mutex<PrStatusCommandCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PrStatusCommandCache::default()))
+}
+
+fn map_cached_statuses(
+    branches: &[String],
+    cached: &HashMap<String, PrStatusLiteSummary>,
+) -> HashMap<String, Option<PrStatusLiteSummary>> {
+    branches
+        .iter()
+        .map(|branch| (branch.clone(), cached.get(branch).cloned()))
+        .collect()
+}
+
+fn parse_reset_at_to_instant(reset_at: &str) -> Option<Instant> {
+    let parsed = DateTime::parse_from_rfc3339(reset_at).ok()?;
+    let reset_utc = parsed.with_timezone(&Utc);
+    let now = Utc::now();
+    if reset_utc <= now {
+        return None;
+    }
+    let delta = reset_utc - now;
+    let seconds = u64::try_from(delta.num_seconds()).ok()?;
+    Some(Instant::now() + Duration::from_secs(seconds))
+}
+
+fn rate_limit_cooldown_until(reset_at: Option<&str>) -> Instant {
+    reset_at
+        .and_then(parse_reset_at_to_instant)
+        .unwrap_or_else(|| Instant::now() + PR_STATUS_RATE_LIMIT_BACKOFF)
+}
+
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
     let trimmed = branch.trim();
     let Some((first, rest)) = trimmed.split_once('/') else {
@@ -168,6 +211,7 @@ fn to_workflow_run_summary(info: &WorkflowRunInfo) -> WorkflowRunSummary {
         run_id: info.run_id,
         status: info.status.clone(),
         conclusion: info.conclusion.clone(),
+        is_required: info.is_required,
     }
 }
 
@@ -189,29 +233,21 @@ fn to_review_comment_summary(comment: &ReviewComment) -> ReviewCommentSummary {
     }
 }
 
-fn to_pr_status_summary(info: &PrStatusInfo) -> PrStatusSummary {
-    PrStatusSummary {
+fn to_pr_status_summary(info: &PrStatusInfo) -> PrStatusLiteSummary {
+    PrStatusLiteSummary {
         number: info.number,
-        title: info.title.clone(),
         state: info.state.clone(),
         url: info.url.clone(),
         mergeable: info.mergeable.clone(),
+        merge_state_status: info.merge_state_status.clone(),
         author: info.author.clone(),
         base_branch: info.base_branch.clone(),
         head_branch: info.head_branch.clone(),
-        labels: info.labels.clone(),
-        assignees: info.assignees.clone(),
-        milestone: info.milestone.clone(),
-        linked_issues: info.linked_issues.clone(),
         check_suites: info
             .check_suites
             .iter()
             .map(to_workflow_run_summary)
             .collect(),
-        reviews: info.reviews.iter().map(to_review_summary).collect(),
-        changed_files_count: info.changed_files_count,
-        additions: info.additions,
-        deletions: info.deletions,
     }
 }
 
@@ -222,6 +258,7 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
         state: info.state.clone(),
         url: info.url.clone(),
         mergeable: info.mergeable.clone(),
+        merge_state_status: info.merge_state_status.clone(),
         author: info.author.clone(),
         base_branch: info.base_branch.clone(),
         head_branch: info.head_branch.clone(),
@@ -253,7 +290,7 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
 pub fn fetch_pr_status(
     project_path: String,
     branches: Vec<String>,
-) -> Result<PrStatusResponse, String> {
+) -> Result<PrStatusResponse, StructuredError> {
     let available = is_gh_cli_available();
     let authenticated = if available {
         is_gh_cli_authenticated()
@@ -275,14 +312,77 @@ pub fn fetch_pr_status(
     }
 
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_pr_status"))?;
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let now = Instant::now();
 
-    let results = graphql::fetch_pr_statuses(&repo_path, &branches)?;
+    {
+        let cache = pr_status_cache();
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        let entry = guard.repos.entry(repo_key.clone()).or_default();
 
-    let statuses = results
-        .into_iter()
-        .map(|(branch, info)| (branch, info.as_ref().map(to_pr_status_summary)))
-        .collect();
+        let cache_is_fresh = entry
+            .fetched_at
+            .map(|fetched_at| now.saturating_duration_since(fetched_at) < PR_STATUS_CACHE_TTL)
+            .unwrap_or(false);
+        let in_cooldown = entry
+            .cooldown_until
+            .map(|until| now < until)
+            .unwrap_or(false);
+
+        if cache_is_fresh || in_cooldown {
+            let statuses = map_cached_statuses(&branches, &entry.statuses_by_head_branch);
+            return Ok(PrStatusResponse {
+                statuses,
+                gh_status,
+            });
+        }
+    }
+
+    let fetch_result = graphql::fetch_pr_statuses_with_meta(&repo_path, &branches);
+
+    let (statuses_by_head_branch, cooldown_until) = match fetch_result {
+        Ok(result) => {
+            let statuses_by_head_branch = result
+                .by_head_branch
+                .iter()
+                .map(|(branch, info)| (branch.clone(), to_pr_status_summary(info)))
+                .collect::<HashMap<_, _>>();
+            let cooldown_until = match result.rate_limit.remaining {
+                Some(0) => Some(rate_limit_cooldown_until(
+                    result.rate_limit.reset_at.as_deref(),
+                )),
+                _ => None,
+            };
+            (statuses_by_head_branch, cooldown_until)
+        }
+        Err(error) => {
+            let cache = pr_status_cache();
+            let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+            let entry = guard.repos.entry(repo_key).or_default();
+            if graphql::is_rate_limit_error(&error) {
+                entry.cooldown_until = Some(Instant::now() + PR_STATUS_RATE_LIMIT_BACKOFF);
+            }
+            // Silent degrade: use stale cache if available, otherwise no statuses.
+            let statuses = map_cached_statuses(&branches, &entry.statuses_by_head_branch);
+            return Ok(PrStatusResponse {
+                statuses,
+                gh_status,
+            });
+        }
+    };
+
+    {
+        let cache = pr_status_cache();
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        let entry = guard.repos.entry(repo_key).or_default();
+        entry.statuses_by_head_branch = statuses_by_head_branch.clone();
+        entry.fetched_at = Some(now);
+        entry.cooldown_until = cooldown_until;
+    }
+
+    let statuses = map_cached_statuses(&branches, &statuses_by_head_branch);
 
     Ok(PrStatusResponse {
         statuses,
@@ -292,11 +392,16 @@ pub fn fetch_pr_status(
 
 /// Fetch detailed PR information for a single PR (T010)
 #[tauri::command]
-pub fn fetch_pr_detail(project_path: String, pr_number: u64) -> Result<PrDetailResponse, String> {
+pub fn fetch_pr_detail(
+    project_path: String,
+    pr_number: u64,
+) -> Result<PrDetailResponse, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_pr_detail"))?;
 
-    let info = graphql::fetch_pr_detail(&repo_path, pr_number)?;
+    let info = graphql::fetch_pr_detail(&repo_path, pr_number)
+        .map_err(|e| StructuredError::internal(&e, "fetch_pr_detail"))?;
     Ok(to_pr_detail_response(&info))
 }
 
@@ -305,9 +410,10 @@ pub fn fetch_pr_detail(project_path: String, pr_number: u64) -> Result<PrDetailR
 pub fn fetch_latest_branch_pr(
     project_path: String,
     branch: String,
-) -> Result<Option<BranchPrReference>, String> {
+) -> Result<Option<BranchPrReference>, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_latest_branch_pr"))?;
     let remotes = Remote::list(&repo_path).unwrap_or_default();
     let normalized = strip_known_remote_prefix(&branch, &remotes);
     if normalized.is_empty() {
@@ -333,12 +439,50 @@ pub fn fetch_latest_branch_pr(
 
 /// Fetch CI run log for a specific check run/job ID (T011)
 #[tauri::command]
-pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, String> {
+pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, StructuredError> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_ci_log"))?;
+
+    let output = gwt_core::git::graphql::gh_run_view_log(&repo_path, run_id)
+        .map_err(|e| StructuredError::internal(&e, "fetch_ci_log"))?;
+    Ok(output)
+}
+
+/// Update a PR branch with the latest base branch changes (SPEC-de3290fc T008)
+#[tauri::command]
+pub fn update_pr_branch(project_path: String, pr_number: u64) -> Result<String, String> {
+    use gwt_core::git::gh_cli::gh_command;
+    use gwt_core::git::resolve_repo_slug;
+
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
-    let output = gwt_core::git::graphql::gh_run_view_log(&repo_path, run_id)?;
-    Ok(output)
+    let slug = resolve_repo_slug(&repo_path)
+        .ok_or_else(|| "Failed to resolve repository slug".to_string())?;
+    let parts: Vec<&str> = slug.split('/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid repo slug: {}", slug));
+    }
+    let (owner, repo) = (parts[0], parts[1]);
+
+    let output = gh_command()
+        .args([
+            "api",
+            "-X",
+            "PUT",
+            &format!("/repos/{owner}/{repo}/pulls/{pr_number}/update-branch"),
+        ])
+        .current_dir(&repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh api: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to update PR branch: {}", stderr));
+    }
+
+    Ok("Branch updated successfully".to_string())
 }
 
 #[cfg(test)]
@@ -380,32 +524,22 @@ mod tests {
         let mut statuses = HashMap::new();
         statuses.insert(
             "feature/x".to_string(),
-            Some(PrStatusSummary {
+            Some(PrStatusLiteSummary {
                 number: 42,
-                title: "Add feature X".to_string(),
                 state: "OPEN".to_string(),
                 url: "https://github.com/o/r/pull/42".to_string(),
                 mergeable: "MERGEABLE".to_string(),
+                merge_state_status: None,
                 author: "alice".to_string(),
                 base_branch: "main".to_string(),
                 head_branch: "feature/x".to_string(),
-                labels: vec!["enhancement".to_string()],
-                assignees: vec!["bob".to_string()],
-                milestone: Some("v2.0".to_string()),
-                linked_issues: vec![10],
                 check_suites: vec![WorkflowRunSummary {
                     workflow_name: "CI".to_string(),
                     run_id: 12345,
                     status: "completed".to_string(),
                     conclusion: Some("success".to_string()),
+                    is_required: None,
                 }],
-                reviews: vec![ReviewSummary {
-                    reviewer: "charlie".to_string(),
-                    state: "APPROVED".to_string(),
-                }],
-                changed_files_count: 5,
-                additions: 100,
-                deletions: 20,
             }),
         );
         statuses.insert("feature/y".to_string(), None);
@@ -426,7 +560,7 @@ mod tests {
         assert!(json.contains("\"baseBranch\":\"main\""));
         assert!(json.contains("\"checkSuites\""));
         assert!(json.contains("\"workflowName\":\"CI\""));
-        assert!(json.contains("\"changedFilesCount\":5"));
+        assert!(!json.contains("changedFilesCount"));
     }
 
     #[test]
@@ -456,6 +590,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://github.com/o/r/pull/42".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: None,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/detail".to_string(),
@@ -500,6 +635,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://example.com".to_string(),
             mergeable: "UNKNOWN".to_string(),
+            merge_state_status: None,
             author: "user".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/test".to_string(),
@@ -512,6 +648,7 @@ mod tests {
                 run_id: 100,
                 status: "completed".to_string(),
                 conclusion: Some("success".to_string()),
+                is_required: None,
             }],
             reviews: vec![ReviewInfo {
                 reviewer: "r1".to_string(),
@@ -525,11 +662,10 @@ mod tests {
 
         let summary = to_pr_status_summary(&info);
         assert_eq!(summary.number, 1);
-        assert_eq!(summary.labels, vec!["label"]);
+        assert_eq!(summary.head_branch, "feature/test");
         assert_eq!(summary.check_suites.len(), 1);
         assert_eq!(summary.check_suites[0].workflow_name, "CI");
-        assert_eq!(summary.reviews.len(), 1);
-        assert_eq!(summary.reviews[0].reviewer, "r1");
+        assert_eq!(summary.mergeable, "UNKNOWN");
     }
 
     #[test]
@@ -540,6 +676,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://example.com/10".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: None,
             author: "user".to_string(),
             base_branch: "main".to_string(),
             head_branch: "fix/bug".to_string(),

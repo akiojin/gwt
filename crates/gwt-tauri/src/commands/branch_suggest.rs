@@ -6,6 +6,7 @@ use gwt_core::ai::{
     format_error_for_display, suggest_branch_names as core_suggest_branch_names, AIClient,
 };
 use gwt_core::config::ProfilesConfig;
+use gwt_core::StructuredError;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,13 +23,17 @@ pub struct BranchSuggestResult {
 ///
 /// This never writes config/history files.
 #[tauri::command]
-pub fn suggest_branch_names(description: String) -> Result<BranchSuggestResult, String> {
+pub fn suggest_branch_names(description: String) -> Result<BranchSuggestResult, StructuredError> {
     let description = description.trim().to_string();
     if description.is_empty() {
-        return Err("Description is required".to_string());
+        return Err(StructuredError::internal(
+            "Description is required",
+            "suggest_branch_names",
+        ));
     }
 
-    let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
+    let profiles = ProfilesConfig::load()
+        .map_err(|e| StructuredError::from_gwt_error(&e, "suggest_branch_names"))?;
     let ai = profiles.resolve_active_ai_settings();
     let Some(settings) = ai.resolved else {
         return Ok(BranchSuggestResult {
@@ -38,7 +43,8 @@ pub fn suggest_branch_names(description: String) -> Result<BranchSuggestResult, 
         });
     };
 
-    let client = AIClient::new(settings).map_err(|e| e.to_string())?;
+    let client = AIClient::new(settings)
+        .map_err(|e| StructuredError::internal(&e.to_string(), "suggest_branch_names"))?;
     match core_suggest_branch_names(&client, &description) {
         Ok(suggestions) => Ok(BranchSuggestResult {
             status: "ok".to_string(),

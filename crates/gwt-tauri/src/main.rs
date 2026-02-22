@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(clippy::result_large_err)]
 
 mod agent_logger;
 mod agent_master;

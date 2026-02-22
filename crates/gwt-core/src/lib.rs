@@ -19,4 +19,4 @@ pub mod terminal;
 pub mod update;
 pub mod worktree;
 
-pub use error::{GwtError, Result};
+pub use error::{ErrorSeverity, GwtError, Result, StructuredError};
