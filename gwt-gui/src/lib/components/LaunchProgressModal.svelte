@@ -96,14 +96,14 @@
 
 {#if open}
   <div
-    class="overlay"
+    class="overlay modal-overlay"
     role="dialog"
     aria-modal="true"
     aria-label="Preparing Launch"
     tabindex="0"
     onkeydown={handleKeydown}
   >
-    <div class="dialog">
+    <div class="dialog modal-dialog-shell">
       <div class="header">
         <h2>Preparing Launch</h2>
         <button class="close-btn" onclick={onCancel} disabled={status !== "running"} aria-label="Close">&times;</button>

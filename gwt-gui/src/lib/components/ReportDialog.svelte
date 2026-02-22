@@ -91,34 +91,41 @@
   let targets = $state<ReportTarget[]>([GWT_TARGET]);
   let selectedTargetIndex = $state(0);
 
-  let dialogRef: HTMLDialogElement | undefined = $state();
+  let wasOpen = false;
 
   $effect(() => {
-    if (open && dialogRef) {
-      activeTab = mode;
-      showPreview = false;
-      submitMessage = "";
-      submitSuccess = false;
-      submitError = false;
-      submitIssueUrl = "";
-      submitBodyMarkdown = "";
-      if (!dialogRef.open) {
-        dialogRef.showModal();
-      }
-      detectTarget();
-    } else if (!open && dialogRef?.open) {
-      dialogRef.close();
+    if (!open) {
+      wasOpen = false;
+      return;
     }
+
+    activeTab = mode;
+    showPreview = false;
+    if (wasOpen) return;
+
+    wasOpen = true;
+    submitMessage = "";
+    submitSuccess = false;
+    submitError = false;
+    submitIssueUrl = "";
+    submitBodyMarkdown = "";
   });
 
-  async function detectTarget() {
-    if (!projectPath) {
+  $effect(() => {
+    if (!open) return;
+    void detectTarget(projectPath);
+  });
+
+  async function detectTarget(targetProjectPath: string) {
+    if (!targetProjectPath) {
       targets = [GWT_TARGET];
       selectedTargetIndex = 0;
       return;
     }
     try {
-      const detected = await invoke<ReportTarget>("detect_report_target", { projectPath });
+      const detected = await invoke<ReportTarget>("detect_report_target", {
+        projectPath: targetProjectPath,
+      });
       if (detected.display === GWT_TARGET.display) {
         targets = [GWT_TARGET];
       } else {
@@ -282,20 +289,32 @@
     onclose();
   }
 
-  function handleDialogClose() {
-    if (open) {
-      onclose();
-    }
+  function handleOverlayClick(e: MouseEvent) {
+    if (e.target !== e.currentTarget) return;
+    onclose();
+  }
+
+  function handleOverlayKeydown(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    onclose();
   }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<dialog
-  bind:this={dialogRef}
-  class="report-dialog"
-  onclose={handleDialogClose}
-  onkeydown={(e) => { if (e.key === "Escape") handleCancel(); }}
->
+{#if open}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div
+    class="modal-overlay report-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Report"
+    tabindex="0"
+    onclick={handleOverlayClick}
+    onkeydown={handleOverlayKeydown}
+  >
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="report-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
   <div class="dialog-header">
     <h2>Report</h2>
     <button class="close-btn" onclick={handleCancel} aria-label="Close">&times;</button>
@@ -523,15 +542,17 @@
       {submitting ? "Submitting..." : "Submit"}
     </button>
   </div>
-</dialog>
+    </div>
+  </div>
+{/if}
 
 <style>
+  .report-overlay {
+    z-index: 1000;
+  }
+
   .report-dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
     padding: 0;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
     max-width: 680px;
     width: min(680px, 94vw);
     height: min(820px, 92vh);
@@ -542,13 +563,6 @@
     flex-direction: column;
     color: var(--text-primary);
     font-family: inherit;
-  }
-
-  .report-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.6);
-  }
-
-  .report-dialog[open] {
     animation: dialog-fade-in 0.15s ease-out;
   }
 
