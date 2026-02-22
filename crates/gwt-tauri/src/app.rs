@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use gwt_core::config::os_env;
 
 #[cfg(not(test))]
-use gwt_core::config::{skill_registration, Settings};
+use gwt_core::config::{skill_registration, OsEnvCaptureMode, Settings};
 #[cfg(not(test))]
 use tokio::io::AsyncReadExt;
 
@@ -59,12 +59,67 @@ fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
 }
 
 #[cfg_attr(test, allow(dead_code))]
-fn apply_captured_path_to_process_env(env: &HashMap<String, String>) -> bool {
+pub(crate) fn apply_captured_path_to_process_env(env: &HashMap<String, String>) -> bool {
     let Some(path) = captured_path_from_env(env) else {
         return false;
     };
     std::env::set_var("PATH", path);
     true
+}
+
+#[cfg(not(test))]
+pub(crate) fn spawn_login_shell_env_capture(app_handle: tauri::AppHandle<tauri::Wry>) {
+    {
+        let state = app_handle.state::<AppState>();
+        if !state.begin_os_env_capture() {
+            tracing::info!(
+                category = "os_env",
+                "Login shell environment capture already running; skip duplicate request"
+            );
+            return;
+        }
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let result = os_env::capture_login_shell_env().await;
+
+        match &result.source {
+            os_env::EnvSource::LoginShell => {
+                tracing::info!(
+                    category = "os_env",
+                    count = result.env.len(),
+                    "Captured login shell environment"
+                );
+            }
+            os_env::EnvSource::ProcessEnv => {
+                tracing::info!(
+                    category = "os_env",
+                    count = result.env.len(),
+                    "Using process environment"
+                );
+            }
+            os_env::EnvSource::StdEnvFallback { reason } => {
+                tracing::warn!(
+                    category = "os_env",
+                    reason = %reason,
+                    "Login shell env capture failed, using process env fallback"
+                );
+                let _ = app_handle.emit("os-env-fallback", reason.clone());
+            }
+        };
+
+        if apply_captured_path_to_process_env(&result.env) {
+            tracing::info!(
+                category = "os_env",
+                "Updated process PATH from captured environment"
+            );
+        }
+
+        let source = result.source;
+        let env = result.env;
+        let state = app_handle.state::<AppState>();
+        state.set_os_env_snapshot(env, source);
+    });
 }
 
 #[cfg(any(not(test), target_os = "macos"))]
@@ -298,13 +353,53 @@ pub fn build_app(
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
 
+                // Startup shell environment behavior.
+                {
+                    let state = _app.state::<AppState>();
+                    let mode = match Settings::load_global() {
+                        Ok(settings) => settings.os_env_capture_mode,
+                        Err(err) => {
+                            warn!(
+                                category = "os_env",
+                                error = %err,
+                                "Failed to load settings for os env mode; using process environment"
+                            );
+                            None
+                        }
+                    };
+
+                    match mode {
+                        Some(OsEnvCaptureMode::LoginShell) => {
+                            info!(
+                                category = "os_env",
+                                mode = "login_shell",
+                                "Startup shell environment capture mode enabled"
+                            );
+                            spawn_login_shell_env_capture(_app.handle().clone());
+                        }
+                        Some(OsEnvCaptureMode::ProcessEnv) => {
+                            state.set_os_env_process_env_snapshot();
+                            info!(
+                                category = "os_env",
+                                mode = "process_env",
+                                "Using process environment only"
+                            );
+                        }
+                        None => {
+                            state.set_os_env_process_env_snapshot();
+                            info!(
+                                category = "os_env",
+                                mode = "unset",
+                                "Shell environment capture mode not selected; waiting for user choice"
+                            );
+                        }
+                    }
+                }
+
                 // Skill bundles: ensure managed skills are registered for supported agents.
-                // Delay briefly so login-shell PATH capture can complete first.
                 {
                     let app_handle = _app.handle().clone();
                     tauri::async_runtime::spawn(async move {
-                        let state = app_handle.state::<AppState>();
-                        let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
                         let settings = match Settings::load_global() {
                             Ok(settings) => settings,
                             Err(err) => {
@@ -321,6 +416,7 @@ pub fn build_app(
                                 &settings,
                                 None,
                             );
+                        let state = app_handle.state::<AppState>();
                         state.set_skill_registration_status(status.clone());
                         match status.overall.as_str() {
                             "ok" => {
@@ -341,53 +437,6 @@ pub fn build_app(
                                 );
                             }
                         }
-                    });
-                }
-
-                // Background task: capture login shell environment
-                {
-                    let state = _app.state::<AppState>();
-                    let os_env_cell = state.os_env.clone();
-                    let os_env_source_cell = state.os_env_source.clone();
-                    let app_handle_clone = _app.handle().clone();
-
-                    tauri::async_runtime::spawn(async move {
-                        let result = os_env::capture_login_shell_env().await;
-
-                        match &result.source {
-                            os_env::EnvSource::LoginShell => {
-                                tracing::info!(
-                                    category = "os_env",
-                                    count = result.env.len(),
-                                    "Captured login shell environment"
-                                );
-                            }
-                            os_env::EnvSource::ProcessEnv => {
-                                tracing::info!(
-                                    category = "os_env",
-                                    count = result.env.len(),
-                                    "Using process environment"
-                                );
-                            }
-                            os_env::EnvSource::StdEnvFallback { reason } => {
-                                tracing::warn!(
-                                    category = "os_env",
-                                    reason = %reason,
-                                    "Login shell env capture failed, using process env fallback"
-                                );
-                                let _ = app_handle_clone.emit("os-env-fallback", reason.clone());
-                            }
-                        };
-
-                        if apply_captured_path_to_process_env(&result.env) {
-                            tracing::info!(
-                                category = "os_env",
-                                "Updated process PATH from captured environment"
-                            );
-                        }
-
-                        let _ = os_env_source_cell.set(result.source);
-                        let _ = os_env_cell.set(result.env);
                     });
                 }
 
@@ -677,6 +726,8 @@ pub fn build_app(
             crate::commands::update::check_app_update,
             crate::commands::update::apply_app_update,
             crate::commands::terminal::get_captured_environment,
+            crate::commands::terminal::get_os_env_capture_status,
+            crate::commands::terminal::set_os_env_capture_mode,
             crate::commands::terminal::is_os_env_ready,
             crate::commands::terminal::get_available_shells,
             crate::commands::git_view::get_git_change_summary,
