@@ -197,7 +197,7 @@ test("opens report dialogs from menu actions and keeps form text readable", asyn
 
   await waitForMenuActionListener(page);
 
-  const reportDialog = page.locator("dialog.report-dialog");
+  const reportDialog = page.locator(".report-dialog");
 
   await page.evaluate(() => {
     const globalWindow = window as unknown as {
@@ -208,7 +208,7 @@ test("opens report dialogs from menu actions and keeps form text readable", asyn
     });
   });
 
-  await expect(reportDialog).toHaveAttribute("open", "");
+  await expect(reportDialog).toBeVisible();
   await expect(reportDialog.getByText("Bug Report")).toBeVisible();
   await expect(reportDialog.locator("#bug-title")).toBeVisible();
   await expect(reportDialog.locator("#steps")).toBeVisible();
@@ -255,7 +255,7 @@ test("opens report dialogs from menu actions and keeps form text readable", asyn
     });
   });
 
-  await expect(reportDialog).toHaveAttribute("open", "");
+  await expect(reportDialog).toBeVisible();
   await expect(reportDialog.getByText("Feature Request")).toBeVisible();
   await expect(reportDialog.locator("#feature-desc")).toBeVisible();
 

@@ -395,7 +395,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div
-    class="overlay"
+    class="overlay modal-overlay"
     onclick={onClose}
     onkeydown={handleKeydown}
     role="dialog"
@@ -404,7 +404,7 @@
   >
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div class="dialog" onclick={(e) => e.stopPropagation()}>
+    <div class="dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
       <div class="dialog-header">
         <h2>Cleanup Worktrees</h2>
         <button class="close-btn" onclick={onClose} aria-label="Close">&times;</button>
@@ -580,7 +580,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
-        class="overlay confirm-overlay"
+        class="overlay modal-overlay confirm-overlay"
         onclick={(e) => e.stopPropagation()}
       >
         <div class="confirm-dialog">
@@ -631,7 +631,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div
-    class="overlay"
+    class="overlay modal-overlay"
     onclick={closeResults}
     role="dialog"
     aria-modal="true"
@@ -639,7 +639,7 @@
   >
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div class="dialog" onclick={(e) => e.stopPropagation()}>
+    <div class="dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
       <div class="dialog-header">
         <h2>Cleanup Results</h2>
         <button class="close-btn" onclick={closeResults} aria-label="Close">&times;</button>
@@ -676,7 +676,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div
-    class="overlay"
+    class="overlay modal-overlay"
     onclick={closeFailures}
     role="dialog"
     aria-modal="true"
@@ -684,7 +684,7 @@
   >
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div class="dialog" onclick={(e) => e.stopPropagation()}>
+    <div class="dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
       <div class="dialog-header">
         <h2>Cleanup Failed</h2>
         <button class="close-btn" onclick={closeFailures} aria-label="Close">&times;</button>
