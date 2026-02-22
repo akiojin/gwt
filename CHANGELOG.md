@@ -1,6 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.10.1] - 2026-02-22
+
+### Bug Fixes
+
+- **release:** Propagate closing issue keywords to release PR (#1174)
+- AI設定のAPIキー入力にCSSスタイルが適用されない問題を修正
+- リモートブランチ削除を冪等にし422 Reference does not existを成功扱いにする (#1176)
+- **gui:** Improve update-branch refresh and error visibility (#1177)
+- Cmd+` ウィンドウ切り替えが全ウィンドウを巡回するようローテーション方式に変更
+- **e2e:** Align summary smoke flow with PR checks UI (#1179)
+- Optimize graphql pr status polling rate-limit handling (#1180)
+- Resolve report dialog and log collection regressions (#1178)
+
+### Refactor
+
+- レガシー Hook 直接登録コードを削除 (#1175)
+
 ## [7.10.0] - 2026-02-21
 
 ### Bug Fixes
