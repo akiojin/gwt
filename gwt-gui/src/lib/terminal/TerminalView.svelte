@@ -64,6 +64,17 @@
     return !!el && rootEl.contains(el);
   }
 
+  function hasFocusedModalOutsideTerminal(rootEl: HTMLElement): boolean {
+    const activeEl = document.activeElement;
+    if (!(activeEl instanceof HTMLElement)) return false;
+    if (rootEl.contains(activeEl)) return false;
+
+    const modalHost = activeEl.closest(
+      '[role="dialog"][aria-modal="true"], dialog[open], .modal-overlay',
+    );
+    return modalHost instanceof HTMLElement;
+  }
+
   function focusTerminalIfNeeded(rootEl: HTMLElement, immediate = false) {
     if (!active) return;
     if (!terminal) return;
@@ -451,6 +462,7 @@
       focusTerminalIfNeeded(rootEl, true);
     };
     const handleWindowFocus = () => {
+      if (hasFocusedModalOutsideTerminal(rootEl)) return;
       focusTerminalIfNeeded(rootEl, true);
     };
     const handleVisibilityChange = () => {

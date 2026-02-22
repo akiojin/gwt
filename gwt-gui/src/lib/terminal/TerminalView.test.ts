@@ -487,6 +487,39 @@ describe("TerminalView", () => {
     expect(term.focus).toHaveBeenCalledTimes(1);
   });
 
+  it("does not steal focus from an active modal on window focus", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-window-modal",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    term.focus.mockClear();
+
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    const input = document.createElement("input");
+    overlay.appendChild(input);
+    document.body.appendChild(overlay);
+    input.focus();
+
+    try {
+      expect(document.activeElement).toBe(input);
+
+      window.dispatchEvent(new Event("focus"));
+
+      expect(term.focus).not.toHaveBeenCalled();
+    } finally {
+      overlay.remove();
+    }
+  });
+
   it("scrolls terminal viewport when wheel is used", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-2",
