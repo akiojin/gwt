@@ -122,6 +122,26 @@ async function openRecentProject(page: Page) {
   await recentItem.click();
 }
 
+async function waitForMenuActionListener(page: Page) {
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        const globalWindow = window as unknown as {
+          __GWT_TAURI_INVOKE_LOG__?: Array<{
+            cmd: string;
+            args?: { event?: string };
+          }>;
+        };
+        return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
+          (entry) =>
+            entry.cmd === "plugin:event|listen" &&
+            entry.args?.event === "menu-action",
+        );
+      });
+    })
+    .toBe(true);
+}
+
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page, {
     commandResponses: {
@@ -160,6 +180,104 @@ test("launches and completes open-project -> project mode send smoke flow", asyn
 
   expect(invokeCommands).toContain("open_project");
   expect(invokeCommands).toContain("send_project_mode_message_cmd");
+});
+
+test("opens report dialogs from menu actions and keeps form text readable", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("button", { name: "Open Project..." }),
+  ).toBeVisible();
+  await openRecentProject(page);
+  await expect(
+    page.getByPlaceholder("Type a task and press Enter..."),
+  ).toBeVisible();
+
+  await waitForMenuActionListener(page);
+
+  const reportDialog = page.locator(".report-dialog");
+
+  await page.evaluate(() => {
+    const globalWindow = window as unknown as {
+      __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
+    };
+    globalWindow.__GWT_MOCK_EMIT_EVENT__?.("menu-action", {
+      action: "report-issue",
+    });
+  });
+
+  await expect(reportDialog).toBeVisible();
+  await expect(reportDialog.getByText("Bug Report")).toBeVisible();
+  await expect(reportDialog.locator("#bug-title")).toBeVisible();
+  await expect(reportDialog.locator("#steps")).toBeVisible();
+
+  const bugDialogViewport = await reportDialog.evaluate((dialog) => {
+    const rect = dialog.getBoundingClientRect();
+    return {
+      heightPx: rect.height,
+      viewportHeightPx: window.innerHeight,
+    };
+  });
+
+  expect(bugDialogViewport.heightPx).toBeGreaterThanOrEqual(
+    bugDialogViewport.viewportHeightPx * 0.88,
+  );
+
+  const bugTypography = await reportDialog.evaluate((dialog) => {
+    const titleLabel = dialog.querySelector<HTMLLabelElement>(
+      "label[for='bug-title']",
+    );
+    const titleInput = dialog.querySelector<HTMLInputElement>("#bug-title");
+    const tabButton = dialog.querySelector<HTMLButtonElement>(".tab-btn.active");
+    if (!titleLabel || !titleInput || !tabButton) {
+      return null;
+    }
+    return {
+      labelFontSizePx: parseFloat(getComputedStyle(titleLabel).fontSize),
+      inputFontSizePx: parseFloat(getComputedStyle(titleInput).fontSize),
+      tabFontSizePx: parseFloat(getComputedStyle(tabButton).fontSize),
+    };
+  });
+
+  expect(bugTypography).not.toBeNull();
+  expect(bugTypography?.labelFontSizePx ?? 0).toBeGreaterThanOrEqual(13);
+  expect(bugTypography?.inputFontSizePx ?? 0).toBeGreaterThanOrEqual(14);
+  expect(bugTypography?.tabFontSizePx ?? 0).toBeGreaterThanOrEqual(13);
+
+  await page.evaluate(() => {
+    const globalWindow = window as unknown as {
+      __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
+    };
+    globalWindow.__GWT_MOCK_EMIT_EVENT__?.("menu-action", {
+      action: "suggest-feature",
+    });
+  });
+
+  await expect(reportDialog).toBeVisible();
+  await expect(reportDialog.getByText("Feature Request")).toBeVisible();
+  await expect(reportDialog.locator("#feature-desc")).toBeVisible();
+
+  const featureTypography = await reportDialog.evaluate((dialog) => {
+    const descLabel = dialog.querySelector<HTMLLabelElement>(
+      "label[for='feature-desc']",
+    );
+    const descTextArea = dialog.querySelector<HTMLTextAreaElement>(
+      "#feature-desc",
+    );
+    if (!descLabel || !descTextArea) {
+      return null;
+    }
+    return {
+      labelFontSizePx: parseFloat(getComputedStyle(descLabel).fontSize),
+      textareaFontSizePx: parseFloat(getComputedStyle(descTextArea).fontSize),
+    };
+  });
+
+  expect(featureTypography).not.toBeNull();
+  expect(featureTypography?.labelFontSizePx ?? 0).toBeGreaterThanOrEqual(13);
+  expect(featureTypography?.textareaFontSizePx ?? 0).toBeGreaterThanOrEqual(14);
 });
 
 test("launches agent from Launch Agent dialog and opens agent terminal tab", async ({
@@ -363,23 +481,7 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
     })
     .toBe(true);
 
-  await expect
-    .poll(async () => {
-      return page.evaluate(() => {
-        const globalWindow = window as unknown as {
-          __GWT_TAURI_INVOKE_LOG__?: Array<{
-            cmd: string;
-            args?: { event?: string };
-          }>;
-        };
-        return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
-          (entry) =>
-            entry.cmd === "plugin:event|listen" &&
-            entry.args?.event === "menu-action",
-        );
-      });
-    })
-    .toBe(true);
+  await waitForMenuActionListener(page);
 
   await page.evaluate(() => {
     const globalWindow = window as unknown as {

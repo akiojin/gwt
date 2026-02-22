@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.10.2] - 2026-02-22
+
+### Bug Fixes
+
+- **gui:** Improve report dialog height and readability (#1182)
+- **gui:** Unify close button style with report dialog (#1183)
+- Skip New Window in Cmd+` window rotation (#1184)
+- **gui:** Unify modal windows and report issue behavior (#1185)
+- **gui:** Normalize PR merge status badges (#1186)
+- MacOS起動時のOS環境アクセス許可ダイアログ表示を改善 (#1187)
+- Detect remote-only branches in find_branch_for_issue (#1188)
+- Worktree作成時にupstream trackingを自動設定する (#SPEC-b3f1a4e2) (#1189)
+
 ## [7.10.1] - 2026-02-22
 
 ### Bug Fixes

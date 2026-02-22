@@ -555,6 +555,21 @@ impl WorktreeManager {
             );
         }
 
+        // SPEC-b3f1a4e2 FR-004: Set upstream tracking config (non-fatal)
+        if let Ok(Some(remote_name)) = Remote::default_name(&self.repo_root) {
+            if let Err(e) =
+                Branch::set_upstream_config(&self.repo_root, &resolved_branch, &remote_name)
+            {
+                warn!(
+                    category = "worktree",
+                    branch = resolved_branch.as_str(),
+                    remote = remote_name.as_str(),
+                    error = %e,
+                    "Failed to set upstream config (non-fatal)"
+                );
+            }
+        }
+
         // Return the created worktree
         let worktree = self
             .get_by_path(&path)?
@@ -752,6 +767,20 @@ impl WorktreeManager {
                 error = %e,
                 "Submodule initialization failed (non-fatal)"
             );
+        }
+
+        // SPEC-b3f1a4e2 FR-003: Set upstream tracking config (non-fatal)
+        if let Ok(Some(remote_name)) = Remote::default_name(&self.repo_root) {
+            if let Err(e) = Branch::set_upstream_config(&self.repo_root, branch_name, &remote_name)
+            {
+                warn!(
+                    category = "worktree",
+                    branch = branch_name,
+                    remote = remote_name.as_str(),
+                    error = %e,
+                    "Failed to set upstream config (non-fatal)"
+                );
+            }
         }
 
         // Return the created worktree
@@ -1322,6 +1351,61 @@ mod tests {
 
         let worktrees = manager.list().unwrap();
         assert_eq!(worktrees.len(), 2);
+    }
+
+    // SPEC-b3f1a4e2: Verify upstream is set when remote exists
+    #[test]
+    fn test_create_new_branch_worktree_sets_upstream() {
+        let temp = create_test_repo();
+
+        // Add a remote
+        let remote = TempDir::new().unwrap();
+        run_git_in(remote.path(), &["init", "--bare"]);
+        run_git_in(
+            temp.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        let default_branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        run_git_in(
+            temp.path(),
+            &["push", "-u", "origin", default_branch.as_str()],
+        );
+
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let wt = manager.create_new_branch("feature/upstream", None).unwrap();
+        assert_eq!(wt.branch, Some("feature/upstream".to_string()));
+
+        // Verify upstream config was set
+        let remote_val = git_stdout(temp.path(), &["config", "branch.feature/upstream.remote"]);
+        assert_eq!(remote_val, "origin");
+
+        let merge_val = git_stdout(temp.path(), &["config", "branch.feature/upstream.merge"]);
+        assert_eq!(merge_val, "refs/heads/feature/upstream");
+    }
+
+    // SPEC-b3f1a4e2: Verify no error when no remote exists
+    #[test]
+    fn test_create_new_branch_no_remote_skips_upstream() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        // No remote added
+        let wt = manager
+            .create_new_branch("feature/no-remote", None)
+            .unwrap();
+        assert_eq!(wt.branch, Some("feature/no-remote".to_string()));
+        assert!(wt.path.exists());
+
+        // Upstream config should NOT be set
+        let output = crate::process::command("git")
+            .args(["config", "branch.feature/no-remote.remote"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "branch.feature/no-remote.remote should not be set when no remote exists"
+        );
     }
 
     #[test]

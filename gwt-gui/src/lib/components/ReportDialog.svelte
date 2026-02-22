@@ -91,34 +91,41 @@
   let targets = $state<ReportTarget[]>([GWT_TARGET]);
   let selectedTargetIndex = $state(0);
 
-  let dialogRef: HTMLDialogElement | undefined = $state();
+  let wasOpen = false;
 
   $effect(() => {
-    if (open && dialogRef) {
-      activeTab = mode;
-      showPreview = false;
-      submitMessage = "";
-      submitSuccess = false;
-      submitError = false;
-      submitIssueUrl = "";
-      submitBodyMarkdown = "";
-      if (!dialogRef.open) {
-        dialogRef.showModal();
-      }
-      detectTarget();
-    } else if (!open && dialogRef?.open) {
-      dialogRef.close();
+    if (!open) {
+      wasOpen = false;
+      return;
     }
+
+    activeTab = mode;
+    showPreview = false;
+    if (wasOpen) return;
+
+    wasOpen = true;
+    submitMessage = "";
+    submitSuccess = false;
+    submitError = false;
+    submitIssueUrl = "";
+    submitBodyMarkdown = "";
   });
 
-  async function detectTarget() {
-    if (!projectPath) {
+  $effect(() => {
+    if (!open) return;
+    void detectTarget(projectPath);
+  });
+
+  async function detectTarget(targetProjectPath: string) {
+    if (!targetProjectPath) {
       targets = [GWT_TARGET];
       selectedTargetIndex = 0;
       return;
     }
     try {
-      const detected = await invoke<ReportTarget>("detect_report_target", { projectPath });
+      const detected = await invoke<ReportTarget>("detect_report_target", {
+        projectPath: targetProjectPath,
+      });
       if (detected.display === GWT_TARGET.display) {
         targets = [GWT_TARGET];
       } else {
@@ -282,20 +289,32 @@
     onclose();
   }
 
-  function handleDialogClose() {
-    if (open) {
-      onclose();
-    }
+  function handleOverlayClick(e: MouseEvent) {
+    if (e.target !== e.currentTarget) return;
+    onclose();
+  }
+
+  function handleOverlayKeydown(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    onclose();
   }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<dialog
-  bind:this={dialogRef}
-  class="report-dialog"
-  onclose={handleDialogClose}
-  onkeydown={(e) => { if (e.key === "Escape") handleCancel(); }}
->
+{#if open}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div
+    class="modal-overlay report-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Report"
+    tabindex="0"
+    onclick={handleOverlayClick}
+    onkeydown={handleOverlayKeydown}
+  >
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="report-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
   <div class="dialog-header">
     <h2>Report</h2>
     <button class="close-btn" onclick={handleCancel} aria-label="Close">&times;</button>
@@ -523,29 +542,27 @@
       {submitting ? "Submitting..." : "Submit"}
     </button>
   </div>
-</dialog>
+    </div>
+  </div>
+{/if}
 
 <style>
+  .report-overlay {
+    z-index: 1000;
+  }
+
   .report-dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
     padding: 0;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-    max-width: 640px;
-    width: min(640px, 92vw);
-    max-height: 85vh;
+    max-width: 680px;
+    width: min(680px, 94vw);
+    height: min(820px, 92vh);
+    min-height: min(560px, 92vh);
+    max-height: 92vh;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     color: var(--text-primary);
     font-family: inherit;
-  }
-
-  .report-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.6);
-  }
-
-  .report-dialog[open] {
     animation: dialog-fade-in 0.15s ease-out;
   }
 
@@ -568,10 +585,11 @@
   }
 
   .dialog-header h2 {
-    font-size: var(--ui-font-xl, 18px);
+    font-size: var(--ui-font-2xl, 20px);
     font-weight: 700;
     color: var(--text-primary);
     margin: 0;
+    line-height: 1.3;
   }
 
   .close-btn {
@@ -602,11 +620,13 @@
     border: 1px solid transparent;
     border-bottom: none;
     border-radius: 6px 6px 0 0;
-    padding: 6px 14px;
-    color: var(--text-muted);
+    padding: 8px 16px;
+    color: var(--text-secondary);
     cursor: pointer;
     font-family: inherit;
-    font-size: var(--ui-font-sm, 13px);
+    font-size: var(--ui-font-base, 14px);
+    font-weight: 600;
+    line-height: 1.35;
   }
 
   .tab-btn:hover {
@@ -615,12 +635,12 @@
   }
 
   .tab-btn.active {
-    color: var(--accent);
-    border-color: var(--border-color);
+    color: var(--text-primary);
+    border-color: var(--accent);
     border-bottom-color: var(--bg-secondary);
-    background: var(--bg-secondary);
+    background: rgba(137, 180, 250, 0.18);
     margin-bottom: -1px;
-    padding-bottom: 7px;
+    padding-bottom: 9px;
   }
 
   .dialog-body {
@@ -629,29 +649,36 @@
     padding: 16px 20px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 14px;
   }
 
   .form-section {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
   }
 
   .form-label {
-    font-size: var(--ui-font-sm, 13px);
-    color: var(--text-secondary);
-    font-weight: 500;
+    font-size: var(--ui-font-base, 14px);
+    color: var(--text-primary);
+    font-weight: 600;
+    line-height: 1.4;
   }
 
   .form-input {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    padding: 6px 10px;
+    padding: 8px 12px;
     color: var(--text-primary);
     font-family: inherit;
-    font-size: var(--ui-font-base, 14px);
+    font-size: var(--ui-font-lg, 14px);
+    line-height: 1.45;
+  }
+
+  .form-input::placeholder {
+    color: var(--text-muted);
+    opacity: 0.9;
   }
 
   .form-input:focus {
@@ -663,12 +690,18 @@
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    padding: 6px 10px;
+    padding: 8px 12px;
     color: var(--text-primary);
     font-family: inherit;
-    font-size: var(--ui-font-base, 14px);
+    font-size: var(--ui-font-lg, 14px);
+    line-height: 1.5;
     resize: vertical;
-    min-height: 40px;
+    min-height: 52px;
+  }
+
+  .form-textarea::placeholder {
+    color: var(--text-muted);
+    opacity: 0.9;
   }
 
   .form-textarea:focus {
@@ -682,10 +715,11 @@
     gap: 6px;
     background: none;
     border: none;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     font-family: inherit;
-    font-size: var(--ui-font-sm, 13px);
-    font-weight: 500;
+    font-size: var(--ui-font-base, 14px);
+    font-weight: 600;
+    line-height: 1.4;
     cursor: pointer;
     padding: 4px 0;
   }
@@ -706,10 +740,10 @@
 
   .error-code {
     font-family: monospace;
-    font-size: var(--ui-font-xs, 12px);
-    color: var(--text-muted);
+    font-size: var(--ui-font-sm, 13px);
+    color: var(--text-secondary);
     background: var(--bg-primary);
-    padding: 1px 6px;
+    padding: 2px 7px;
     border-radius: 4px;
     margin-left: auto;
   }
@@ -718,38 +752,40 @@
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    padding: 8px 12px;
+    padding: 10px 12px;
     margin-top: 4px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    font-size: var(--ui-font-sm, 13px);
+    gap: 6px;
+    font-size: var(--ui-font-base, 14px);
   }
 
   .error-row {
-    color: var(--text-secondary);
+    color: var(--text-primary);
+    line-height: 1.45;
     word-break: break-word;
   }
 
   .error-key {
-    color: var(--text-muted);
+    color: var(--text-secondary);
     font-weight: 600;
   }
 
   .diagnostics-section {
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    padding: 10px 14px;
+    padding: 12px 14px;
     margin: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
+    background: var(--bg-primary);
   }
 
   .diagnostics-section legend {
-    font-size: var(--ui-font-sm, 13px);
-    color: var(--text-muted);
-    font-weight: 500;
+    font-size: var(--ui-font-base, 14px);
+    color: var(--text-secondary);
+    font-weight: 600;
     padding: 0 4px;
   }
 
@@ -757,8 +793,9 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: var(--ui-font-sm, 13px);
-    color: var(--text-secondary);
+    font-size: var(--ui-font-base, 14px);
+    color: var(--text-primary);
+    line-height: 1.4;
     cursor: pointer;
   }
 
@@ -794,8 +831,8 @@
   }
 
   .capture-status {
-    font-size: var(--ui-font-xs, 12px);
-    color: var(--text-muted);
+    font-size: var(--ui-font-sm, 13px);
+    color: var(--text-secondary);
   }
 
   .preview-section {
@@ -806,22 +843,22 @@
   }
 
   .preview-section h3 {
-    font-size: var(--ui-font-sm, 13px);
-    color: var(--text-muted);
+    font-size: var(--ui-font-base, 14px);
+    color: var(--text-secondary);
     font-weight: 600;
     margin: 0 0 8px;
   }
 
   .preview-content {
     font-family: monospace;
-    font-size: var(--ui-font-xs, 12px);
-    color: var(--text-secondary);
+    font-size: var(--ui-font-sm, 13px);
+    color: var(--text-primary);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 200px;
     overflow-y: auto;
     margin: 0;
-    line-height: 1.5;
+    line-height: 1.55;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 6px;
@@ -842,8 +879,8 @@
   }
 
   .submit-message {
-    font-size: var(--ui-font-sm, 13px);
-    color: var(--text-muted);
+    font-size: var(--ui-font-base, 14px);
+    color: var(--text-primary);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 6px;
@@ -870,7 +907,7 @@
     border: none;
     color: var(--accent);
     font-family: inherit;
-    font-size: var(--ui-font-sm, 13px);
+    font-size: var(--ui-font-base, 14px);
     cursor: pointer;
     text-decoration: underline;
     padding: 0;
@@ -898,9 +935,36 @@
     padding: 6px 16px;
     border-radius: 6px;
     font-family: inherit;
-    font-size: var(--ui-font-sm, 13px);
+    font-size: var(--ui-font-base, 14px);
+    font-weight: 600;
     cursor: pointer;
     border: 1px solid var(--border-color);
+  }
+
+  @media (max-height: 760px) {
+    .report-dialog {
+      width: min(640px, 96vw);
+      height: 94vh;
+      min-height: 0;
+      max-height: 94vh;
+    }
+
+    .dialog-header {
+      padding: 12px 16px 0;
+    }
+
+    .tab-bar {
+      padding: 8px 16px 0;
+    }
+
+    .dialog-body {
+      padding: 12px 16px;
+      gap: 12px;
+    }
+
+    .dialog-footer {
+      padding: 10px 16px 12px;
+    }
   }
 
   .btn:disabled {

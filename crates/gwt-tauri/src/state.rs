@@ -8,9 +8,9 @@ use gwt_core::update::UpdateManager;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone)]
 pub struct AgentVersionsCache {
@@ -120,8 +120,10 @@ pub struct AppState {
     /// Prevent multiple exit confirmation dialogs from showing at once.
     #[cfg(any(not(test), target_os = "macos"))]
     pub exit_confirm_inflight: AtomicBool,
-    pub os_env: Arc<OnceCell<HashMap<String, String>>>,
-    pub os_env_source: Arc<OnceCell<EnvSource>>,
+    pub os_env: Arc<RwLock<HashMap<String, String>>>,
+    pub os_env_source: Arc<RwLock<EnvSource>>,
+    pub os_env_ready: Arc<AtomicBool>,
+    pub os_env_capture_inflight: Arc<AtomicBool>,
     /// Last observed skill registration health snapshot.
     pub skill_registration_status: Arc<Mutex<SkillRegistrationStatus>>,
     pub update_manager: UpdateManager,
@@ -135,6 +137,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        let initial_env = std::env::vars().collect();
         Self {
             system_monitor: Mutex::new(gwt_core::system_info::SystemMonitor::new()),
             window_projects: Mutex::new(HashMap::new()),
@@ -158,8 +161,10 @@ impl AppState {
             is_quitting: AtomicBool::new(false),
             #[cfg(any(not(test), target_os = "macos"))]
             exit_confirm_inflight: AtomicBool::new(false),
-            os_env: Arc::new(OnceCell::new()),
-            os_env_source: Arc::new(OnceCell::new()),
+            os_env: Arc::new(RwLock::new(initial_env)),
+            os_env_source: Arc::new(RwLock::new(EnvSource::ProcessEnv)),
+            os_env_ready: Arc::new(AtomicBool::new(true)),
+            os_env_capture_inflight: Arc::new(AtomicBool::new(false)),
             skill_registration_status: Arc::new(Mutex::new(SkillRegistrationStatus::default())),
             update_manager: UpdateManager::new(),
             gh_available: AtomicBool::new(false),
@@ -170,7 +175,7 @@ impl AppState {
 
     /// Whether OS environment capture has completed.
     pub fn is_os_env_ready(&self) -> bool {
-        self.os_env.initialized()
+        self.os_env_ready.load(Ordering::SeqCst)
     }
 
     /// Wait briefly for OS environment capture to complete.
@@ -183,6 +188,49 @@ impl AppState {
             std::thread::sleep(Duration::from_millis(50));
         }
         self.is_os_env_ready()
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn begin_os_env_capture(&self) -> bool {
+        let started = self
+            .os_env_capture_inflight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if !started {
+            return false;
+        }
+        self.os_env_ready.store(false, Ordering::SeqCst);
+        true
+    }
+
+    pub fn set_os_env_snapshot(&self, env: HashMap<String, String>, source: EnvSource) {
+        if let Ok(mut slot) = self.os_env.write() {
+            *slot = env;
+        }
+        if let Ok(mut source_slot) = self.os_env_source.write() {
+            *source_slot = source;
+        }
+        self.os_env_ready.store(true, Ordering::SeqCst);
+        self.os_env_capture_inflight.store(false, Ordering::SeqCst);
+    }
+
+    pub fn set_os_env_process_env_snapshot(&self) {
+        self.set_os_env_snapshot(std::env::vars().collect(), EnvSource::ProcessEnv);
+    }
+
+    pub fn os_env_snapshot(&self) -> HashMap<String, String> {
+        self.os_env
+            .read()
+            .map(|env| env.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn os_env_source_snapshot(&self) -> Option<EnvSource> {
+        self.os_env_source.read().ok().map(|source| source.clone())
+    }
+
+    pub fn is_os_env_capture_inflight(&self) -> bool {
+        self.os_env_capture_inflight.load(Ordering::SeqCst)
     }
 
     /// Atomically claim a project identity for a window and persist its project path.
@@ -231,6 +279,7 @@ impl AppState {
         if let Ok(mut map) = self.window_project_modes.lock() {
             map.remove(window_label);
         }
+        self.remove_window_from_history(window_label);
     }
 
     pub fn clear_window_state(&self, window_label: &str) {
@@ -415,6 +464,18 @@ impl AppState {
         let back = history.pop().unwrap();
         history.insert(0, back.clone());
         Some(back)
+    }
+
+    /// Get the most recently focused window without rotating history.
+    pub fn most_recent_window(&self) -> Option<String> {
+        let history = self.window_focus_history.lock().ok()?;
+        history.first().cloned()
+    }
+
+    /// Get the least recently focused window without rotating history.
+    pub fn least_recent_window(&self) -> Option<String> {
+        let history = self.window_focus_history.lock().ok()?;
+        history.last().cloned()
     }
 
     /// Remove window from MRU history (on window destroy).
@@ -604,6 +665,30 @@ mod tests {
     }
 
     #[test]
+    fn clear_project_for_window_removes_window_from_mru_history() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        state.clear_project_for_window("B");
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["A", "C"]);
+    }
+
+    #[test]
+    fn window_rotation_skips_window_after_project_close() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        state.clear_project_for_window("B");
+        assert_eq!(state.next_window(), Some("C".to_string()));
+        assert_eq!(state.next_window(), Some("A".to_string()));
+    }
+
+    #[test]
     fn mru_push_moves_to_front() {
         let state = AppState::new();
         state.push_window_focus("A");
@@ -641,6 +726,19 @@ mod tests {
         state.push_window_focus("C");
         // History: [C, B, A] → rotate right → [A, C, B] → previous = A
         assert_eq!(state.previous_window(), Some("A".to_string()));
+    }
+
+    #[test]
+    fn mru_peek_recent_and_oldest_without_rotation() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        // History: [C, B, A]
+        assert_eq!(state.most_recent_window(), Some("C".to_string()));
+        assert_eq!(state.least_recent_window(), Some("A".to_string()));
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["C", "B", "A"]);
     }
 
     #[test]

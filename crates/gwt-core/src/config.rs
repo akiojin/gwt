@@ -44,7 +44,9 @@ pub use session::{
     agent_has_hook_support, get_session_for_branch, infer_agent_status,
     load_sessions_from_worktrees, AgentStatus, Session,
 };
-pub use settings::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
+pub use settings::{
+    OsEnvCaptureMode, Settings, SkillRegistrationPreferences, SkillRegistrationScope,
+};
 pub use skill_registration::{
     get_skill_registration_status, get_skill_registration_status_with_settings_at_project_root,
     register_agent_skills, register_agent_skills_with_settings_at_project_root,
