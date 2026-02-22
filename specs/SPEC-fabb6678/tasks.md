@@ -65,8 +65,8 @@
 - [x] T042 [US5] フロントエンド診断情報収集ユーティリティを作成する `gwt-gui/src/lib/diagnostics.ts`
 - [x] T043 [US2] Issue テンプレート生成ユーティリティを作成する（Bug Report / Feature Request 両方） `gwt-gui/src/lib/issueTemplate.ts`
 - [x] T044 [US2] T043 のユニットテストを作成する `gwt-gui/src/lib/issueTemplate.test.ts`
-- [x] T045 [US2][US3] ReportDialog.svelte を作成する（統合報告モーダル、Bug Report / Feature Request タブ、フォームフィールド、診断情報チェックボックス、プレビュー） `gwt-gui/src/lib/components/ReportDialog.svelte`
-- [x] T046 [US2][US3] ReportDialog のユニットテストを作成する `gwt-gui/src/lib/components/ReportDialog.test.ts`
+- [x] T045 [US2] [US3] ReportDialog.svelte を作成する（統合報告モーダル、Bug Report / Feature Request タブ、フォームフィールド、診断情報チェックボックス、プレビュー） `gwt-gui/src/lib/components/ReportDialog.svelte`
+- [x] T046 [US2] [US3] ReportDialog のユニットテストを作成する `gwt-gui/src/lib/components/ReportDialog.test.ts`
 - [x] T047 [US2] App.svelte に ReportDialog の表示制御を追加する（showReportDialog 関数、トースト Report リンクとの連携） `gwt-gui/src/App.svelte`
 
 ## Phase 4: GitHub Issues 連携 (US6, US8)
