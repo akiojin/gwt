@@ -11,6 +11,11 @@ vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) =>
+    invokeMock(...(args as [string, Record<string, unknown> | undefined])),
+}));
+
 async function renderLaunchForm(props: any) {
   const { default: AgentLaunchForm } = await import("./AgentLaunchForm.svelte");
   return render(AgentLaunchForm, { props });
@@ -839,7 +844,7 @@ describe("AgentLaunchForm", () => {
               number: 99,
               title: "Issue 99",
               updatedAt: "2026-02-13T00:00:00Z",
-              labels: [],
+              labels: [{ name: "bug" }],
             },
           ],
           hasNextPage: false,
@@ -888,6 +893,9 @@ describe("AgentLaunchForm", () => {
     await fireEvent.click(issueButton);
 
     const launchButton = rendered.getByRole("button", { name: "Launch" });
+    await waitFor(() => {
+      expect((launchButton as HTMLButtonElement).disabled).toBe(false);
+    });
     await fireEvent.click(launchButton);
 
     await waitFor(() => {
