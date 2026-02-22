@@ -7,9 +7,9 @@ use std::fs;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 use tracing::{error, warn};
+use gwt_core::process::command_os;
 
 const VOICE_PYTHON_ENV: &str = "GWT_VOICE_PYTHON";
 const VOICE_SKIP_PROBE_ENV: &str = "GWT_VOICE_SKIP_QWEN_PROBE";
@@ -248,7 +248,7 @@ fn run_qwen_runner_with_python(
 ) -> Result<QwenRunnerResponse, String> {
     let script = ensure_qwen_runner_script()?;
 
-    let mut cmd = Command::new(python);
+    let mut cmd = command_os(python.as_os_str());
     cmd.arg(&script).arg("--action").arg(action);
 
     if let Some(model_id) = model_id {
@@ -334,7 +334,7 @@ fn probe_qwen_runtime_cached() -> Result<(), String> {
     result
 }
 
-fn run_command_with_output(mut cmd: Command, context: &str) -> Result<(), String> {
+fn run_command_with_output(mut cmd: std::process::Command, context: &str) -> Result<(), String> {
     let output = cmd
         .output()
         .map_err(|e| format!("{context}: failed to start command: {e}"))?;
@@ -380,13 +380,13 @@ fn ensure_managed_voice_runtime_sync() -> Result<VoiceRuntimeSetupResult, String
 
     if !managed_python.is_file() {
         let bootstrap_python = find_bootstrap_python_binary()?;
-        let mut cmd = Command::new(bootstrap_python);
+        let mut cmd = command_os(bootstrap_python.as_os_str());
         cmd.arg("-m").arg("venv").arg(&venv_dir);
         run_command_with_output(cmd, "Failed to create voice runtime virtual environment")?;
         installed = true;
     }
 
-    let mut pip_upgrade = Command::new(&managed_python);
+    let mut pip_upgrade = command_os(managed_python.as_os_str());
     pip_upgrade
         .arg("-m")
         .arg("pip")
@@ -398,7 +398,7 @@ fn ensure_managed_voice_runtime_sync() -> Result<VoiceRuntimeSetupResult, String
 
     let probe_result = run_qwen_runner_with_python(&managed_python, "probe", None, None, None);
     if probe_result.is_err() {
-        let mut install = Command::new(&managed_python);
+        let mut install = command_os(managed_python.as_os_str());
         install.arg("-m").arg("pip").arg("install").arg("--upgrade");
         for dep in VOICE_RUNTIME_PIP_DEPS {
             install.arg(dep);

@@ -1,20 +1,27 @@
 pub mod agent_config;
-pub mod agent_mode;
 pub mod agents;
 pub mod branch_suggest;
 pub mod branches;
 pub mod cleanup;
 pub mod docker;
 pub mod git_view;
-pub mod hooks;
+pub mod issue;
+pub mod issue_spec;
 pub mod profiles;
 pub mod project;
+pub mod project_mode;
+pub mod pullrequest;
 pub mod recent_projects;
+pub mod report;
 pub mod sessions;
 pub mod settings;
+pub mod skills;
+pub mod system;
 pub mod terminal;
+pub mod update;
 pub mod version_history;
 pub mod voice;
+pub mod window;
 pub mod window_tabs;
 
 #[cfg(test)]

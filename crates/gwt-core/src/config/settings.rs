@@ -38,8 +38,15 @@ pub struct Settings {
     pub docker: DockerSettings,
     /// Appearance settings
     pub appearance: AppearanceSettings,
+    /// Preferred summary language ("auto" | "ja" | "en")
+    pub app_language: String,
     /// Voice input settings
     pub voice_input: VoiceInputSettings,
+    /// Terminal settings
+    pub terminal: TerminalSettings,
+    /// Shell environment capture mode at startup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_env_capture_mode: Option<OsEnvCaptureMode>,
 }
 
 impl Default for Settings {
@@ -58,9 +65,20 @@ impl Default for Settings {
             agent: AgentSettings::default(),
             docker: DockerSettings::default(),
             appearance: AppearanceSettings::default(),
+            app_language: "auto".to_string(),
             voice_input: VoiceInputSettings::default(),
+            terminal: TerminalSettings::default(),
+            os_env_capture_mode: None,
         }
     }
+}
+
+/// Mode for shell environment capture at startup.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OsEnvCaptureMode {
+    LoginShell,
+    ProcessEnv,
 }
 
 /// Agent settings
@@ -77,6 +95,45 @@ pub struct AgentSettings {
     pub gemini_path: Option<PathBuf>,
     /// Auto install dependencies before launching agent
     pub auto_install_deps: bool,
+    /// Default GitHub Project V2 ID for issue-first spec sync.
+    pub github_project_id: Option<String>,
+    /// Skill / plugin registration scope preferences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_registration: Option<SkillRegistrationPreferences>,
+}
+
+/// Scope for skill / plugin registration paths.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillRegistrationScope {
+    #[default]
+    User,
+    Project,
+    Local,
+}
+
+/// Scope preferences for managed skill / plugin registration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SkillRegistrationPreferences {
+    pub default_scope: SkillRegistrationScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_scope: Option<SkillRegistrationScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_scope: Option<SkillRegistrationScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_scope: Option<SkillRegistrationScope>,
+}
+
+impl Default for SkillRegistrationPreferences {
+    fn default() -> Self {
+        Self {
+            default_scope: SkillRegistrationScope::User,
+            codex_scope: None,
+            claude_scope: None,
+            gemini_scope: None,
+        }
+    }
 }
 
 /// Docker settings
@@ -85,6 +142,14 @@ pub struct AgentSettings {
 pub struct DockerSettings {
     /// Force host launch (skip docker) even when Docker files are detected
     pub force_host: bool,
+}
+
+/// Terminal settings
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalSettings {
+    /// Default shell program (None = use system default)
+    pub default_shell: Option<String>,
 }
 
 /// Appearance settings (font sizes)
