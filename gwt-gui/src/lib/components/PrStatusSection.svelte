@@ -40,8 +40,10 @@
   }
 
   function mergeableLabel(
+    state: "OPEN" | "CLOSED" | "MERGED",
     m: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
   ): string {
+    if (state === "MERGED") return "Merged";
     switch (m) {
       case "MERGEABLE":
         return "Mergeable";
@@ -53,8 +55,10 @@
   }
 
   function mergeableClass(
+    state: "OPEN" | "CLOSED" | "MERGED",
     m: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
   ): string {
+    if (state === "MERGED") return "merged";
     switch (m) {
       case "MERGEABLE":
         return "mergeable";
@@ -65,9 +69,27 @@
     }
   }
 
-  /** States that should display an additional badge. CLEAN, HAS_HOOKS, UNKNOWN are hidden. */
-  function shouldShowMergeStateBadge(s: string | null | undefined): boolean {
+  function shouldShowMergeableBadge(
+    state: "OPEN" | "CLOSED" | "MERGED",
+    mergeStateStatus: string | null | undefined
+  ): boolean {
+    if (state === "MERGED") return true;
+    return mergeStateStatus !== "BLOCKED";
+  }
+
+  /**
+   * States that should display an additional badge.
+   * CLEAN, HAS_HOOKS, UNKNOWN are hidden.
+   * DIRTY + CONFLICTING is hidden to avoid duplicate "Conflicting/Conflicts" badges.
+   */
+  function shouldShowMergeStateBadge(
+    state: "OPEN" | "CLOSED" | "MERGED",
+    mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN",
+    s: string | null | undefined
+  ): boolean {
     if (!s) return false;
+    if (state === "MERGED") return false;
+    if (s === "DIRTY" && mergeable === "CONFLICTING") return false;
     return ["BEHIND", "BLOCKED", "DIRTY", "DRAFT", "UNSTABLE"].includes(s);
   }
 
@@ -145,15 +167,17 @@
       <div class="pr-meta-item">
         <span class="pr-meta-label">Merge</span>
         <span class="pr-meta-value merge-meta-value">
-          <span class="mergeable-badge {mergeableClass(prDetail.mergeable)}">
-            {mergeableLabel(prDetail.mergeable)}
-          </span>
-          {#if shouldShowMergeStateBadge(prDetail.mergeStateStatus)}
+          {#if shouldShowMergeableBadge(prDetail.state, prDetail.mergeStateStatus)}
+            <span class="mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}">
+              {mergeableLabel(prDetail.state, prDetail.mergeable)}
+            </span>
+          {/if}
+          {#if shouldShowMergeStateBadge(prDetail.state, prDetail.mergeable, prDetail.mergeStateStatus)}
             <span class="merge-state-badge {mergeStateClass(prDetail.mergeStateStatus!)}">
               {mergeStateLabel(prDetail.mergeStateStatus!)}
             </span>
           {/if}
-          {#if prDetail.mergeStateStatus === "BEHIND"}
+          {#if prDetail.state !== "MERGED" && prDetail.mergeStateStatus === "BEHIND"}
             <button
               class="update-branch-btn"
               disabled={updatingBranch}
@@ -323,6 +347,11 @@
   }
 
   .mergeable-badge.mergeable {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--green);
+  }
+
+  .mergeable-badge.merged {
     background: rgba(63, 185, 80, 0.15);
     color: var(--green);
   }

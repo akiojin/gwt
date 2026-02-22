@@ -2,7 +2,7 @@
 
 **仕様ID**: `SPEC-d6949f99`
 **作成日**: 2026-02-14
-**更新日**: 2026-02-14
+**更新日**: 2026-02-22
 **ステータス**: レビュー済み
 **カテゴリ**: GUI
 
@@ -152,7 +152,7 @@
 - **FR-008**: PR Statusセクションにレビュー情報（レビューアー名、承認/要変更ステータス）を表示する
 - **FR-009**: レビューコメント（inline含む）をファイルパス・行番号・コードスニペット（シンタックスハイライト付き）・コメント本文のフルレンダリングで表示する（読み取り専用、返信機能なし）
 - **FR-010**: PR Statusセクションに変更サマリー（変更ファイル一覧、追加/削除行数、コミット一覧）を表示する
-- **FR-011**: GitHubの `mergeable` フィールドをそのまま表示する（MERGEABLE / CONFLICTING / UNKNOWN）
+- **FR-011**: GitHubの `mergeable` フィールドをそのまま表示する（MERGEABLE / CONFLICTING / UNKNOWN）。ただしPRの `state` が `MERGED` の場合は、`mergeable` 値に関わらず `Merged` を表示する。`mergeable=CONFLICTING` かつ `mergeStateStatus=DIRTY` の場合は重複回避のため `Conflicting` のみ表示する。`mergeStateStatus=BLOCKED` の場合は `Blocked` のみ表示し、`Mergeable` を併記しない
 - **FR-012**: PRが存在しないブランチには「No PR」を表示する
 - **FR-013**: gh CLIが未認証の場合、PR関連UIで「GitHub not connected」と表示するグレースフルデグレード（既存の `GhCliStatus` パターンを流用）
 - **FR-014**: GraphQL APIを段階取得する。ツリー用は軽量クエリ（PRステータス + 最新CI結果のみ）、PRサブタブ用は詳細クエリ（レビューコメント、変更サマリー等）を選択中ブランチのPRに対してのみ取得する

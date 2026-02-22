@@ -64,3 +64,11 @@
 - [x] T039 [US1] [テスト] Open PR 軽量クエリと rate-limit 判定のユニットテスト追加 `crates/gwt-core/src/git/graphql.rs`
 - [x] T040 [US1] [テスト] pullrequest コマンドのシリアライズ/変換テストを軽量レスポンス仕様へ更新 `crates/gwt-tauri/src/commands/pullrequest.rs`
 - [x] T041 [P] [検証] `cargo test -p gwt-core graphql` / `cargo test -p gwt-tauri pullrequest` / `pnpm --dir gwt-gui test src/lib/prPolling.test.ts src/lib/components/Sidebar.test.ts src/lib/components/WorktreeSummaryPanel.test.ts` を実行
+
+## Phase 9: Merge表示整合 + 重複抑制（2026-02-22 追補）
+
+- [x] T042 [US2] [実装] `PrStatusSection` で `state=MERGED` を優先し `Merged` バッジを表示、`mergeStateStatus` バッジと `Update Branch` を非表示化 `gwt-gui/src/lib/components/PrStatusSection.svelte`
+- [x] T043 [US2] [実装] `mergeable=CONFLICTING` かつ `mergeStateStatus=DIRTY` の重複表示を抑制し `Conflicting` のみ表示 `gwt-gui/src/lib/components/PrStatusSection.svelte`
+- [x] T044 [US2] [実装] `mergeStateStatus=BLOCKED` では `Blocked` のみ表示し `Mergeable` 併記を禁止 `gwt-gui/src/lib/components/PrStatusSection.svelte`
+- [x] T045 [US2] [テスト] Merge表示整合の回帰テスト追加（`MERGED` / `CONFLICTING+DIRTY` / `BLOCKED`） `gwt-gui/src/lib/components/PrStatusSection.test.ts`
+- [x] T046 [P] [検証] `pnpm --dir gwt-gui test src/lib/components/PrStatusSection.test.ts src/lib/components/WorktreeSummaryPanel.test.ts` を実行
