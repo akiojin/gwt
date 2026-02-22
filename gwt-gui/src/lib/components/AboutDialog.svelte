@@ -101,7 +101,7 @@
 
   async function loadAgents() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       agents = await invoke<AgentInfo[]>("detect_agents");
     } catch {
       agents = [];
@@ -111,7 +111,7 @@
   async function loadStats() {
     statsLoading = true;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       statsData = await invoke<StatsResponse>("get_stats");
     } catch {
       statsData = null;

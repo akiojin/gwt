@@ -50,7 +50,7 @@
 
     const key = projectPath;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const out = await invoke<ProjectVersions>("list_project_versions", {
         projectPath,
         limit: 10,

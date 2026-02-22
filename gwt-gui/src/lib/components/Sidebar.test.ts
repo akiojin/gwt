@@ -17,7 +17,7 @@ const listenMock = vi.fn(async (eventName: string, handler: TauriEventHandler) =
   };
 });
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
 }));
 

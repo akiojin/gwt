@@ -7,6 +7,7 @@ use gwt_core::git::{
     is_gh_cli_authenticated, is_gh_cli_available, PrCache, PrStatusInfo, Remote, ReviewComment,
     ReviewInfo, WorkflowRunInfo,
 };
+use gwt_core::StructuredError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -289,7 +290,7 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
 pub fn fetch_pr_status(
     project_path: String,
     branches: Vec<String>,
-) -> Result<PrStatusResponse, String> {
+) -> Result<PrStatusResponse, StructuredError> {
     let available = is_gh_cli_available();
     let authenticated = if available {
         is_gh_cli_authenticated()
@@ -311,7 +312,8 @@ pub fn fetch_pr_status(
     }
 
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_pr_status"))?;
     let repo_key = repo_path.to_string_lossy().to_string();
     let now = Instant::now();
 
@@ -390,11 +392,16 @@ pub fn fetch_pr_status(
 
 /// Fetch detailed PR information for a single PR (T010)
 #[tauri::command]
-pub fn fetch_pr_detail(project_path: String, pr_number: u64) -> Result<PrDetailResponse, String> {
+pub fn fetch_pr_detail(
+    project_path: String,
+    pr_number: u64,
+) -> Result<PrDetailResponse, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_pr_detail"))?;
 
-    let info = graphql::fetch_pr_detail(&repo_path, pr_number)?;
+    let info = graphql::fetch_pr_detail(&repo_path, pr_number)
+        .map_err(|e| StructuredError::internal(&e, "fetch_pr_detail"))?;
     Ok(to_pr_detail_response(&info))
 }
 
@@ -403,9 +410,10 @@ pub fn fetch_pr_detail(project_path: String, pr_number: u64) -> Result<PrDetailR
 pub fn fetch_latest_branch_pr(
     project_path: String,
     branch: String,
-) -> Result<Option<BranchPrReference>, String> {
+) -> Result<Option<BranchPrReference>, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_latest_branch_pr"))?;
     let remotes = Remote::list(&repo_path).unwrap_or_default();
     let normalized = strip_known_remote_prefix(&branch, &remotes);
     if normalized.is_empty() {
@@ -431,11 +439,13 @@ pub fn fetch_latest_branch_pr(
 
 /// Fetch CI run log for a specific check run/job ID (T011)
 #[tauri::command]
-pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, String> {
+pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_ci_log"))?;
 
-    let output = gwt_core::git::graphql::gh_run_view_log(&repo_path, run_id)?;
+    let output = gwt_core::git::graphql::gh_run_view_log(&repo_path, run_id)
+        .map_err(|e| StructuredError::internal(&e, "fetch_ci_log"))?;
     Ok(output)
 }
 

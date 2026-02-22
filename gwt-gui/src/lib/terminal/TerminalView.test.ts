@@ -19,11 +19,8 @@ const terminalInstances: any[] = [];
 const fitAddonInstances: any[] = [];
 const resizeObserverInstances: Array<{ __trigger: () => void }> = [];
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
-  default: {
-    invoke: invokeMock,
-  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

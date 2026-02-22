@@ -36,7 +36,7 @@
 
   async function refreshState() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       state = await invoke<ProjectModeState>("get_project_mode_state_cmd");
     } catch (err) {
       state = {
@@ -52,7 +52,7 @@
     if (!text) return;
     sending = true;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       state = await invoke<ProjectModeState>("send_project_mode_message_cmd", {
         input: text,
       });

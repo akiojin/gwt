@@ -14,7 +14,7 @@ export async function tryAcquireWindowSessionRestoreLead(
   }
 
   try {
-    const invoke = invokeFn ?? (await import("@tauri-apps/api/core")).invoke;
+    const invoke = invokeFn ?? (await import("$lib/tauriInvoke")).invoke;
     const acquired = await invoke<boolean>("try_acquire_window_restore_leader", {
       label: normalizedLabel,
     });
@@ -34,7 +34,7 @@ export async function releaseWindowSessionRestoreLead(
   }
 
   try {
-    const invoke = invokeFn ?? (await import("@tauri-apps/api/core")).invoke;
+    const invoke = invokeFn ?? (await import("$lib/tauriInvoke")).invoke;
     await invoke("release_window_restore_leader", {
       label: normalizedLabel,
     });

@@ -6,11 +6,8 @@ const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const openExternalUrlMock = vi.fn();
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
-  default: {
-    invoke: invokeMock,
-  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

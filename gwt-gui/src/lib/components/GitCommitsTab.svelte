@@ -69,7 +69,7 @@
     commits = [];
     hasMore = false;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<CommitEntry[]>("get_branch_commits", {
         projectPath,
         branch,
@@ -95,7 +95,7 @@
     const requestId = commitsRequestId;
     loadingMore = true;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<CommitEntry[]>("get_branch_commits", {
         projectPath,
         branch,

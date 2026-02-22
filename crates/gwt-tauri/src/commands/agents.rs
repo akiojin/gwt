@@ -4,6 +4,7 @@ use crate::commands::terminal::builtin_agent_def;
 use crate::state::{AgentVersionsCache, AppState};
 use gwt_core::agent::{claude, codex, gemini, AgentInfo};
 use gwt_core::terminal::runner::{choose_fallback_runner, resolve_command_path, FallbackRunner};
+use gwt_core::StructuredError;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -327,15 +328,19 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
 pub fn list_agent_versions(
     agent_id: String,
     state: State<AppState>,
-) -> Result<AgentVersionsInfo, String> {
+) -> Result<AgentVersionsInfo, StructuredError> {
     let agent_id = agent_id.trim().to_string();
     if agent_id.is_empty() {
-        return Err("Agent is required".to_string());
+        return Err(StructuredError::internal(
+            "Agent is required",
+            "list_agent_versions",
+        ));
     }
 
     if let Ok(cache) = state.agent_versions_cache.lock() {
         if let Some(cached) = cache.get(&agent_id) {
-            let def = builtin_agent_def(&agent_id)?;
+            let def = builtin_agent_def(&agent_id)
+                .map_err(|e| StructuredError::internal(&e, "list_agent_versions"))?;
             return Ok(AgentVersionsInfo {
                 agent_id,
                 package: def.bunx_package.to_string(),
@@ -346,7 +351,8 @@ pub fn list_agent_versions(
         }
     }
 
-    let def = builtin_agent_def(&agent_id)?;
+    let def = builtin_agent_def(&agent_id)
+        .map_err(|e| StructuredError::internal(&e, "list_agent_versions"))?;
     let package = def.bunx_package;
 
     let (tags, versions, source) = match fetch_npm_versions_via_bun(package) {

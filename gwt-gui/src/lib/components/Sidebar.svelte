@@ -879,14 +879,8 @@
   }
 
   async function getInvoke(): Promise<TauriInvoke> {
-    const tauriCore = (await import("@tauri-apps/api/core")) as
-      | { invoke?: TauriInvoke; default?: { invoke?: TauriInvoke } }
-      | undefined;
-    const invokeFn = tauriCore?.invoke ?? tauriCore?.default?.invoke;
-    if (!invokeFn) {
-      throw new Error("Tauri invoke API is unavailable");
-    }
-    return invokeFn;
+    const { invoke } = await import("$lib/tauriInvoke");
+    return invoke as TauriInvoke;
   }
 
   async function getEventListen(): Promise<TauriEventListen> {

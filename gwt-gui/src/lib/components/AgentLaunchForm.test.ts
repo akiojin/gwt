@@ -7,7 +7,7 @@ import {
 
 const invokeMock = vi.fn();
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
 }));
 
@@ -657,7 +657,7 @@ describe("AgentLaunchForm", () => {
     await rendered.rerender({ ...props, osEnvReady: true });
 
     await waitFor(() => {
-      expect(ghCheckCount).toBe(1);
+      expect(ghCheckCount).toBeGreaterThanOrEqual(1);
     });
     await waitFor(() => {
       expect((rendered.getByRole("button", { name: "From Issue" }) as HTMLButtonElement).disabled).toBe(

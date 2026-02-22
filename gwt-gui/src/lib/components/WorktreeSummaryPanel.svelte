@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+  import { invoke as tauriInvoke } from "$lib/tauriInvoke";
   import type {
     BranchInfo,
     BranchLinkedIssueInfo,

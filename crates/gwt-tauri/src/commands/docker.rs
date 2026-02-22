@@ -8,6 +8,7 @@ use gwt_core::docker::{
 };
 use gwt_core::git::Remote;
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::StructuredError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -201,9 +202,10 @@ fn resolve_compose_images_exist(
 pub fn detect_docker_context(
     project_path: String,
     branch: String,
-) -> Result<DockerContext, String> {
+) -> Result<DockerContext, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "detect_docker_context"))?;
 
     let settings = Settings::load(project_root).unwrap_or_default();
     let force_host = settings.docker.force_host;
@@ -216,7 +218,8 @@ pub fn detect_docker_context(
     let worktree_path = if branch_ref.is_empty() {
         None
     } else {
-        resolve_existing_worktree_path(&repo_path, branch_ref)?
+        resolve_existing_worktree_path(&repo_path, branch_ref)
+            .map_err(|e| StructuredError::internal(&e, "detect_docker_context"))?
     };
 
     if force_host {

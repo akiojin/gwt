@@ -4,7 +4,7 @@ import { AGENT_LAUNCH_DEFAULTS_STORAGE_KEY } from "../agentLaunchDefaults";
 
 const invokeMock = vi.fn();
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
 }));
 

@@ -2,13 +2,18 @@
 
 use crate::state::AppState;
 use gwt_core::config::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
+use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use tauri::State;
 use tracing::error;
 
-fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_panic_guard<T>(
+    context: &str,
+    command: &str,
+    f: impl FnOnce() -> Result<T, StructuredError>,
+) -> Result<T, StructuredError> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(result) => result,
         Err(_) => {
@@ -17,7 +22,10 @@ fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> 
                 operation = context,
                 "Unexpected panic while handling settings command"
             );
-            Err(format!("Unexpected error while {}", context))
+            Err(StructuredError::internal(
+                &format!("Unexpected error while {}", context),
+                command,
+            ))
         }
     }
 }
@@ -285,9 +293,10 @@ impl SettingsData {
 pub fn get_settings(
     _window: tauri::Window,
     _state: State<AppState>,
-) -> Result<SettingsData, String> {
-    with_panic_guard("loading settings", || {
-        let settings = Settings::load_global().map_err(|e| e.to_string())?;
+) -> Result<SettingsData, StructuredError> {
+    with_panic_guard("loading settings", "get_settings", || {
+        let settings = Settings::load_global()
+            .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?;
         Ok(SettingsData::from(&settings))
     })
 }
@@ -298,10 +307,14 @@ pub fn save_settings(
     _window: tauri::Window,
     settings: SettingsData,
     _state: State<AppState>,
-) -> Result<(), String> {
-    with_panic_guard("saving settings", || {
-        let core_settings = settings.to_settings()?;
-        core_settings.save_global().map_err(|e| e.to_string())?;
+) -> Result<(), StructuredError> {
+    with_panic_guard("saving settings", "save_settings", || {
+        let core_settings = settings
+            .to_settings()
+            .map_err(|e| StructuredError::internal(&e, "save_settings"))?;
+        core_settings
+            .save_global()
+            .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
 
         Ok(())
     })

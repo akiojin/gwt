@@ -41,6 +41,8 @@ pub const MENU_ID_WINDOW_BRING_ALL_TO_FRONT: &str = "window-bring-all-to-front";
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
 pub const MENU_ID_HELP_CHECK_UPDATES: &str = "help-check-updates";
+pub const MENU_ID_HELP_REPORT_ISSUE: &str = "help-report-issue";
+pub const MENU_ID_HELP_SUGGEST_FEATURE: &str = "help-suggest-feature";
 
 pub const RECENT_PROJECT_PREFIX: &str = "recent-project::";
 pub const WINDOW_FOCUS_MENU_PREFIX: &str = "window-focus::";
@@ -234,6 +236,20 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         None::<&str>,
     )?;
+    let help_report_issue = MenuItem::with_id(
+        app,
+        MENU_ID_HELP_REPORT_ISSUE,
+        "Report Issue...",
+        true,
+        Some("CmdOrCtrl+Shift+R"),
+    )?;
+    let help_suggest_feature = MenuItem::with_id(
+        app,
+        MENU_ID_HELP_SUGGEST_FEATURE,
+        "Suggest Feature...",
+        true,
+        None::<&str>,
+    )?;
     let settings_prefs = MenuItem::with_id(
         app,
         MENU_ID_SETTINGS_PREFERENCES,
@@ -242,6 +258,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         Some("CmdOrCtrl+,"),
     )?;
 
+    // macOS Application menu: About + Preferences + standard items (macOS convention)
     #[cfg(target_os = "macos")]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
@@ -258,12 +275,19 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .quit()
         .build()?;
 
+    // Non-macOS Application menu: About + Check for Updates + Preferences
     #[cfg(not(target_os = "macos"))]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
+        .item(&settings_prefs)
+        .build()?;
+
+    // Help menu: Report Issue, Suggest Feature, separator, About, Check for Updates
+    let help = SubmenuBuilder::new(app, "Help")
+        .item(&help_report_issue)
+        .item(&help_suggest_feature)
+        .separator()
         .item(&help_about)
         .item(&help_check_updates)
-        .separator()
-        .item(&settings_prefs)
         .build()?;
 
     menu.append(&gwt)?;
@@ -272,6 +296,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     menu.append(&git)?;
     menu.append(&tools)?;
     menu.append(&window)?;
+    menu.append(&help)?;
     Ok(menu)
 }
 

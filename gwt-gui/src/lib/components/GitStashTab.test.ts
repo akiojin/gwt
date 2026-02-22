@@ -5,7 +5,7 @@ import type { StashEntry } from "../types";
 
 const invokeMock = vi.fn();
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
 }));
 

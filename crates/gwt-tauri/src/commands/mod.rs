@@ -12,6 +12,7 @@ pub mod project;
 pub mod project_mode;
 pub mod pullrequest;
 pub mod recent_projects;
+pub mod report;
 pub mod sessions;
 pub mod settings;
 pub mod skills;

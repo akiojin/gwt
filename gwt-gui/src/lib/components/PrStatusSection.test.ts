@@ -3,7 +3,7 @@ import { render } from "@testing-library/svelte";
 import { fireEvent } from "@testing-library/svelte";
 import type { PrStatusInfo, ReviewInfo, ReviewComment, WorkflowRunInfo } from "../types";
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: vi.fn(),
 }));
 

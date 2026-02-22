@@ -8,6 +8,7 @@ use gwt_core::git::{
     SpecIssueArtifactComment, SpecIssueArtifactKind, SpecIssueDetail, SpecIssueSections,
     SpecProjectPhase,
 };
+use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -144,16 +145,18 @@ pub fn upsert_spec_issue_cmd(
     title: String,
     sections: SpecIssueSectionsData,
     expected_etag: Option<String>,
-) -> Result<SpecIssueDetailData, String> {
+) -> Result<SpecIssueDetailData, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "upsert_spec_issue_cmd"))?;
     let detail = upsert_spec_issue(
         &repo_path,
         spec_id.trim(),
         title.trim(),
         &sections.into(),
         expected_etag.as_deref(),
-    )?;
+    )
+    .map_err(|e| StructuredError::internal(&e, "upsert_spec_issue_cmd"))?;
     Ok(detail.into())
 }
 
@@ -161,10 +164,12 @@ pub fn upsert_spec_issue_cmd(
 pub fn get_spec_issue_detail_cmd(
     project_path: String,
     issue_number: u64,
-) -> Result<SpecIssueDetailData, String> {
+) -> Result<SpecIssueDetailData, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let detail = get_spec_issue_detail(&repo_path, issue_number)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_spec_issue_detail_cmd"))?;
+    let detail = get_spec_issue_detail(&repo_path, issue_number)
+        .map_err(|e| StructuredError::internal(&e, "get_spec_issue_detail_cmd"))?;
     Ok(detail.into())
 }
 
@@ -172,10 +177,12 @@ pub fn get_spec_issue_detail_cmd(
 pub fn find_spec_issue_by_spec_id_cmd(
     project_path: String,
     spec_id: String,
-) -> Result<Option<SpecIssueDetailData>, String> {
+) -> Result<Option<SpecIssueDetailData>, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let detail = find_spec_issue_by_spec_id(&repo_path, spec_id.trim())?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "find_spec_issue_by_spec_id_cmd"))?;
+    let detail = find_spec_issue_by_spec_id(&repo_path, spec_id.trim())
+        .map_err(|e| StructuredError::internal(&e, "find_spec_issue_by_spec_id_cmd"))?;
     Ok(detail.map(Into::into))
 }
 
@@ -185,7 +192,7 @@ pub fn append_spec_contract_comment_cmd(
     issue_number: u64,
     contract_name: String,
     content: String,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let _ = upsert_spec_issue_artifact_comment_cmd(
         project_path,
         issue_number,
@@ -205,10 +212,12 @@ pub fn upsert_spec_issue_artifact_comment_cmd(
     artifact_name: String,
     content: String,
     expected_etag: Option<String>,
-) -> Result<SpecIssueArtifactCommentData, String> {
+) -> Result<SpecIssueArtifactCommentData, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let kind = parse_artifact_kind(&kind)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "upsert_spec_issue_artifact_comment_cmd"))?;
+    let kind = parse_artifact_kind(&kind)
+        .map_err(|e| StructuredError::internal(&e, "upsert_spec_issue_artifact_comment_cmd"))?;
     let comment = upsert_spec_issue_artifact_comment(
         &repo_path,
         issue_number,
@@ -216,7 +225,8 @@ pub fn upsert_spec_issue_artifact_comment_cmd(
         artifact_name.trim(),
         content.trim(),
         expected_etag.as_deref(),
-    )?;
+    )
+    .map_err(|e| StructuredError::internal(&e, "upsert_spec_issue_artifact_comment_cmd"))?;
     Ok(comment.into())
 }
 
@@ -225,14 +235,19 @@ pub fn list_spec_issue_artifact_comments_cmd(
     project_path: String,
     issue_number: u64,
     kind: Option<String>,
-) -> Result<Vec<SpecIssueArtifactCommentData>, String> {
+) -> Result<Vec<SpecIssueArtifactCommentData>, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let kind = match kind {
-        Some(v) if !v.trim().is_empty() => Some(parse_artifact_kind(&v)?),
-        _ => None,
-    };
-    let comments = list_spec_issue_artifact_comments(&repo_path, issue_number, kind)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_spec_issue_artifact_comments_cmd"))?;
+    let kind =
+        match kind {
+            Some(v) if !v.trim().is_empty() => Some(parse_artifact_kind(&v).map_err(|e| {
+                StructuredError::internal(&e, "list_spec_issue_artifact_comments_cmd")
+            })?),
+            _ => None,
+        };
+    let comments = list_spec_issue_artifact_comments(&repo_path, issue_number, kind)
+        .map_err(|e| StructuredError::internal(&e, "list_spec_issue_artifact_comments_cmd"))?;
     Ok(comments.into_iter().map(Into::into).collect())
 }
 
@@ -243,10 +258,12 @@ pub fn delete_spec_issue_artifact_comment_cmd(
     kind: String,
     artifact_name: String,
     expected_etag: Option<String>,
-) -> Result<bool, String> {
+) -> Result<bool, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let kind = parse_artifact_kind(&kind)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "delete_spec_issue_artifact_comment_cmd"))?;
+    let kind = parse_artifact_kind(&kind)
+        .map_err(|e| StructuredError::internal(&e, "delete_spec_issue_artifact_comment_cmd"))?;
     delete_spec_issue_artifact_comment(
         &repo_path,
         issue_number,
@@ -254,13 +271,19 @@ pub fn delete_spec_issue_artifact_comment_cmd(
         artifact_name.trim(),
         expected_etag.as_deref(),
     )
+    .map_err(|e| StructuredError::internal(&e, "delete_spec_issue_artifact_comment_cmd"))
 }
 
 #[tauri::command]
-pub fn close_spec_issue_cmd(project_path: String, issue_number: u64) -> Result<(), String> {
+pub fn close_spec_issue_cmd(
+    project_path: String,
+    issue_number: u64,
+) -> Result<(), StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "close_spec_issue_cmd"))?;
     close_spec_issue(&repo_path, issue_number)
+        .map_err(|e| StructuredError::internal(&e, "close_spec_issue_cmd"))
 }
 
 #[tauri::command]
@@ -269,11 +292,14 @@ pub fn sync_spec_issue_project_cmd(
     issue_number: u64,
     project_id: String,
     phase: String,
-) -> Result<SyncSpecIssueProjectResult, String> {
+) -> Result<SyncSpecIssueProjectResult, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let phase = parse_phase(&phase)?;
-    let result = sync_issue_to_project(&repo_path, issue_number, project_id.trim(), phase)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "sync_spec_issue_project_cmd"))?;
+    let phase = parse_phase(&phase)
+        .map_err(|e| StructuredError::internal(&e, "sync_spec_issue_project_cmd"))?;
+    let result = sync_issue_to_project(&repo_path, issue_number, project_id.trim(), phase)
+        .map_err(|e| StructuredError::internal(&e, "sync_spec_issue_project_cmd"))?;
     Ok(result.into())
 }
 
