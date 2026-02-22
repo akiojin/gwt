@@ -2,7 +2,7 @@
 
 **仕様ID**: `SPEC-e7b3a1d2`  
 **実施日**: 2026-02-22  
-**対象**: `Cmd+\`` / `Cmd+Shift+\`` の巡回対象から `New Window`（project 未選択）を除外する
+**対象**: Cmd+Backquote / Cmd+Shift+Backquote の巡回対象から `New Window`（project 未選択）を除外する
 
 ## 1. RED（失敗テストを先に追加）
 
@@ -45,4 +45,4 @@
 ## 4. 判定
 
 - RED→GREEN の流れで不具合再現と修正完了を確認
-- `Cmd+\`` 巡回対象は `project` を開いている既存ウィンドウに限定される前提がテストで固定された
+- Cmd+Backquote 巡回対象は `project` を開いている既存ウィンドウに限定される前提がテストで固定された
