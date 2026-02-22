@@ -543,6 +543,65 @@ impl Branch {
         Ok(Branch::new(name, commit))
     }
 
+    /// Set upstream tracking configuration for a branch (SPEC-b3f1a4e2 FR-001)
+    ///
+    /// Runs `git config branch.<name>.remote <remote>` and
+    /// `git config branch.<name>.merge refs/heads/<name>`.
+    /// This is a local config-only operation (no network required).
+    pub fn set_upstream_config(repo_path: &Path, branch_name: &str, remote: &str) -> Result<()> {
+        debug!(
+            category = "git",
+            branch = branch_name,
+            remote,
+            "Setting upstream config"
+        );
+
+        let remote_key = format!("branch.{}.remote", branch_name);
+        let output = crate::process::command("git")
+            .args(["config", &remote_key, remote])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "config".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            return Err(GwtError::GitOperationFailed {
+                operation: "config".to_string(),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        let merge_key = format!("branch.{}.merge", branch_name);
+        let merge_value = format!("refs/heads/{}", branch_name);
+        let output = crate::process::command("git")
+            .args(["config", &merge_key, &merge_value])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "config".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            return Err(GwtError::GitOperationFailed {
+                operation: "config".to_string(),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        info!(
+            category = "git",
+            operation = "set_upstream_config",
+            branch = branch_name,
+            remote,
+            "Upstream config set"
+        );
+
+        Ok(())
+    }
+
     /// Delete a branch
     pub fn delete(repo_path: &Path, name: &str, force: bool) -> Result<()> {
         debug!(category = "git", branch = name, force, "Deleting branch");
@@ -1237,6 +1296,48 @@ mod tests {
             gone_branch.is_gone,
             "Branch should be marked as gone after remote deletion"
         );
+    }
+
+    // SPEC-b3f1a4e2: Test set_upstream_config sets remote and merge
+    #[test]
+    fn test_set_upstream_config_sets_remote_and_merge() {
+        let temp = create_test_repo();
+        let current = Branch::current(temp.path()).unwrap().unwrap();
+        Branch::create(temp.path(), "feature/upstream-test", &current.name).unwrap();
+
+        Branch::set_upstream_config(temp.path(), "feature/upstream-test", "origin").unwrap();
+
+        let remote_output = crate::process::command("git")
+            .args(["config", "branch.feature/upstream-test.remote"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&remote_output.stdout).trim(),
+            "origin"
+        );
+
+        let merge_output = crate::process::command("git")
+            .args(["config", "branch.feature/upstream-test.merge"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&merge_output.stdout).trim(),
+            "refs/heads/feature/upstream-test"
+        );
+    }
+
+    // SPEC-b3f1a4e2: Test set_upstream_config works without remote ref existing
+    #[test]
+    fn test_set_upstream_config_no_remote_ref_needed() {
+        let temp = create_test_repo();
+        let current = Branch::current(temp.path()).unwrap().unwrap();
+        Branch::create(temp.path(), "feature/no-remote-ref", &current.name).unwrap();
+
+        // No remote added — config should still succeed (git config doesn't validate)
+        let result = Branch::set_upstream_config(temp.path(), "feature/no-remote-ref", "origin");
+        assert!(result.is_ok());
     }
 
     #[test]

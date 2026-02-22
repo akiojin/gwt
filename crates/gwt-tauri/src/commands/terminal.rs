@@ -272,6 +272,18 @@ fn create_new_worktree_remote_first(
     let wt = manager
         .create_for_branch(branch_name)
         .map_err(|e| e.to_string())?;
+
+    // SPEC-b3f1a4e2 FR-005: Set upstream tracking config (non-fatal)
+    // Remote-first path always uses "origin".
+    if let Err(e) = gwt_core::git::Branch::set_upstream_config(&wt.path, branch_name, "origin") {
+        tracing::warn!(
+            category = "worktree",
+            branch = branch_name,
+            error = %e,
+            "Failed to set upstream config in remote-first path (non-fatal)"
+        );
+    }
+
     Ok(wt.path)
 }
 
