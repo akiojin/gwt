@@ -726,7 +726,9 @@ describe("SettingsPanel", () => {
       );
     });
 
-    await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
+    const closeBtn = rendered.container.querySelector(".settings-header .close-btn") as HTMLButtonElement;
+    expect(closeBtn).toBeTruthy();
+    await fireEvent.click(closeBtn);
 
     await waitFor(() => {
       expect(

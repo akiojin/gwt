@@ -845,6 +845,9 @@ describe("AgentLaunchForm", () => {
           hasNextPage: false,
         };
       }
+      if (cmd === "classify_issue_branch_prefix") {
+        return { status: "ok", prefix: "feature" };
+      }
       if (cmd === "find_existing_issue_branch") return null;
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
@@ -887,7 +890,10 @@ describe("AgentLaunchForm", () => {
     const issueButton = rendered.getByRole("button", { name: /#99/i });
     await fireEvent.click(issueButton);
 
-    const launchButton = rendered.getByRole("button", { name: "Launch" });
+    const launchButton = rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement;
+    await waitFor(() => {
+      expect(launchButton.disabled).toBe(false);
+    });
     await fireEvent.click(launchButton);
 
     await waitFor(() => {
@@ -1598,7 +1604,10 @@ describe("AgentLaunchForm", () => {
       expect(rendered.getByText("transport down")).toBeTruthy();
     });
 
-    await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
+    const suggestDialog = rendered.getByRole("dialog", { name: "Suggest Branch Name" });
+    const closeBtn = suggestDialog.querySelector(".close-btn") as HTMLButtonElement;
+    expect(closeBtn).toBeTruthy();
+    await fireEvent.click(closeBtn);
     await waitFor(() => {
       expect(rendered.queryByRole("heading", { name: "Suggest Branch Name" })).toBeNull();
     });
