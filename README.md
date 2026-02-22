@@ -2,53 +2,43 @@
 
 [日本語](README.ja.md)
 
-gwt is a desktop app for managing Git worktrees and launching coding agents
-(`Claude Code`, `Codex`, `Gemini`, `OpenCode`) on a project basis.
+gwt is a desktop GUI app for managing Git worktrees and launching coding agents
+(Claude Code, Codex, Gemini, OpenCode).
 
 ## Install
 
-### macOS
-
-Run the installer:
+### macOS (shell installer)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
 ```
 
-Install a specific version:
+Or install a specific version:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
-Downloadable formats in Releases:
+### macOS (local `.pkg` installer)
 
-- `.dmg`, `.pkg`
-
-Build installers locally (one command):
+Build a local package:
 
 ```bash
-pnpm run installer:macos
+cargo tauri build
+./installers/macos/build-pkg.sh
 ```
 
-### Windows
+Install from local package:
 
-Download `.msi` from GitHub Releases and run the installer.
-
-Build installer locally (one command, PowerShell):
-
-```powershell
-pnpm run installer:windows
+```bash
+./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
 ```
 
-### Linux
+Or run both steps at once:
 
-Download one of:
-
-- `.deb`
-- `.AppImage`
-
-Run with your OS standard installer method.
+```bash
+./installers/macos/install-local.sh
+```
 
 ### Uninstall (macOS)
 
@@ -56,63 +46,84 @@ Run with your OS standard installer method.
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
 ```
 
-## First-time usage
+### Downloads
 
-1. Open gwt.
-2. Click **Open Project...** and select a Git repository.
-3. Open or switch branches in the sidebar.
-4. Use the branch actions to:
-   - create/list/clean worktrees
-   - launch an agent
-5. Open **Settings** to set up AI profile settings if you use Agent or summary features.
+GitHub Releases are the source of truth for distribution.
 
-## Automatic updates
+Typical assets:
 
-gwt checks for updates from GitHub Releases.
+- macOS: `.dmg`, `.pkg`
+- Windows: `.msi`
+- Linux: `.AppImage`, `.deb`
 
-- On app startup, it checks updates automatically.
-- If it cannot check at first, it retries a few times automatically.
-- When an update is available, you get a notification.
-- You can also trigger manual check from the menu: **Help → Check for Updates...**.
+## Development
 
-If a compatible installer/payload is available, gwt can apply it directly.
-If automatic apply is not possible, the update dialog tells you to download from Releases manually.
+Prereqs:
 
-## Keyboard shortcuts
+- Rust (stable)
+- Node.js 22
+- pnpm (via Corepack)
+- Tauri system dependencies (per platform)
 
-| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
-|---|---|---|
-| Cmd+N | Ctrl+N | New Window |
-| Cmd+O | Ctrl+O | Open Project |
-| Cmd+C | Ctrl+C | Copy |
-| Cmd+V | Ctrl+V | Paste |
-| Cmd+Shift+C | Ctrl+Shift+C | Copy Screen Text |
-| Cmd+Shift+K | Ctrl+Shift+K | Cleanup Worktrees |
-| Cmd+, | Ctrl+, | Preferences |
-| Cmd+Shift+[ | Ctrl+Shift+[ | Previous Tab |
-| Cmd+Shift+] | Ctrl+Shift+] | Next Tab |
-| Cmd+` | Ctrl+` | Next Window |
-| Cmd+Shift+` | Ctrl+Shift+` | Previous Window |
-| Cmd+M | --- | Minimize (macOS only) |
+Run in dev:
 
-## Environment and requirements
+```bash
+cd gwt-gui
+pnpm install --frozen-lockfile
 
-### Required
+cd ..
+cargo tauri dev
+```
 
-- `git` command available in `PATH`.
+Build:
 
-### Optional (depends on use)
+```bash
+cd gwt-gui
+pnpm install --frozen-lockfile
 
-- AI provider keys in environment variables (or saved in gwt profile settings):
-  - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
-  - `OPENAI_API_KEY`
-  - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
-- `bunx` or `npx` for local agent launch fallback.
+cd ..
+cargo tauri build
+```
 
-### Optional advanced toggles
+### Voice Accuracy Evaluation
 
-- `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
-- `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
+You can measure WER/CER with a local speech dataset.
+
+```bash
+cp tests/voice_eval/manifest.template.json tests/voice_eval/manifest.json
+scripts/voice-eval.sh
+```
+
+See `tests/voice_eval/README.md` for details.
+For a versioned benchmark snapshot, see `docs/voice-eval-benchmarks.md`.
+
+### Voice Input Runtime (Qwen3-ASR)
+
+Voice input uses Qwen3-ASR via a local Python runtime.
+
+- Required: Python 3.11+ available on `PATH` (or set `GWT_VOICE_PYTHON`).
+- Not required manually: `qwen_asr` package installation.
+- On first voice use, gwt auto-creates `~/.gwt/runtime/voice-venv` and installs runtime deps there.
+- The selected Qwen model is then downloaded into Hugging Face cache on demand.
+
+## AI Settings
+
+Agent Mode and features like session summaries require AI settings.
+
+Steps:
+
+- Open `Settings`
+- Select a profile in `Profiles`
+- Enable `AI Settings`
+- Set `Endpoint` and `Model` (API key is optional for local LLMs)
+- Click `Save`
+
+## Repository Layout
+
+- `crates/gwt-core/`: core logic (Git/worktree/config/logs/docker/pty)
+- `crates/gwt-tauri/`: Tauri v2 backend (commands + state)
+- `gwt-gui/`: Svelte 5 frontend (UI + xterm.js)
+- `installers/`: installer definitions (e.g. WiX)
 
 ## License
 

@@ -1,0 +1,53 @@
+name: Voice Accuracy Evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_path:
+        description: "Path to manifest JSON"
+        required: false
+        default: "tests/voice_eval/manifest.json"
+      baseline_path:
+        description: "Path to baseline JSON (optional)"
+        required: false
+        default: "tests/voice_eval/baseline.json"
+      qualities:
+        description: "Comma-separated qualities"
+        required: false
+        default: "fast,balanced,accurate"
+
+jobs:
+  evaluate:
+    name: Evaluate Voice Accuracy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run voice evaluation
+        run: |
+          MANIFEST="${{ github.event.inputs.manifest_path }}"
+          BASELINE="${{ github.event.inputs.baseline_path }}"
+          QUALITIES="${{ github.event.inputs.qualities }}"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Manifest not found: $MANIFEST"
+            exit 1
+          fi
+
+          ARGS=(
+            --manifest "$MANIFEST"
+            --qualities "$QUALITIES"
+            --output tests/voice_eval/latest-report.json
+          )
+
+          if [ -n "$BASELINE" ] && [ -f "$BASELINE" ]; then
+            ARGS+=(--baseline "$BASELINE" --max-wer-delta 0.03 --max-cer-delta 0.03)
+          fi
+
+          cargo run -p gwt-tauri --bin voice_eval -- "${ARGS[@]}"
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: voice-eval-report
+          path: tests/voice_eval/latest-report.json

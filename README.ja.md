@@ -1,38 +1,42 @@
 # gwt
 
-gwt は Git worktree の管理と、ブランチ単位での
-`Claude Code` / `Codex` / `Gemini` / `OpenCode` 起動を行うデスクトップ GUI アプリです。
+gwt は Git worktree 管理とコーディングエージェント起動
+（Claude Code / Codex / Gemini / OpenCode）を行うデスクトップ GUI アプリです。
 
 ## インストール
 
-### macOS
-
-インストーラーを実行します。
+### macOS（シェルインストーラー）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
 ```
 
-特定バージョンを指定してインストール:
+バージョン指定:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
-配布アセット:
+### macOS（ローカル `.pkg` インストーラー）
 
-- macOS: `.dmg`, `.pkg`
+ローカル `.pkg` を作成:
 
-### Windows
+```bash
+cargo tauri build
+./installers/macos/build-pkg.sh
+```
 
-GitHub Releases から `.msi` をダウンロードして実行します。
+ローカル `.pkg` からインストール:
 
-### Linux
+```bash
+./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
+```
 
-以下をダウンロードして通常の方法で実行します。
+または、上記を1コマンドで実行:
 
-- `.deb`
-- `.AppImage`
+```bash
+./installers/macos/install-local.sh
+```
 
 ### アンインストール（macOS）
 
@@ -40,63 +44,84 @@ GitHub Releases から `.msi` をダウンロードして実行します。
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
 ```
 
-## 使い始め方
+### ダウンロード
 
-1. gwt を起動します。
-2. **Open Project...** から Git リポジトリを開きます。
-3. サイドバーで対象ブランチを選択します。
-4. ブランチ操作欄から次を行います。
-   - worktree の作成/一覧/クリーンアップ
-   - エージェント起動
-5. Agent や要約機能を使う場合は、**Settings** で AI プロファイルを設定します。
+配布は GitHub Releases のみです。
 
-## 自動アップデート
+主な成果物:
 
-gwt は GitHub Releases を参照して自動アップデートを確認します。
+- macOS: `.dmg`, `.pkg`
+- Windows: `.msi`
+- Linux: `.AppImage`, `.deb`
 
-- 起動時に自動で更新チェックを行います。
-- 失敗した場合は数回再試行します。
-- 更新が見つかると通知されます。
-- メニューの **Help → Check for Updates...** から手動チェックできます。
+## 開発
 
-更新可能なインストーラー/バイナリが検出できる場合は、アプリ側から更新を適用できます。
-自動適用できない場合は、リリースページから手動ダウンロードが必要と案内されます。
+前提:
 
-## キーボードショートカット
+- Rust（stable）
+- Node.js 22
+- pnpm（Corepack 経由）
+- Tauri の OS 依存パッケージ（プラットフォーム別）
 
-| ショートカット (macOS) | ショートカット (Windows/Linux) | 操作 |
-|---|---|---|
-| Cmd+N | Ctrl+N | 新しいウィンドウ |
-| Cmd+O | Ctrl+O | プロジェクトを開く |
-| Cmd+C | Ctrl+C | コピー |
-| Cmd+V | Ctrl+V | ペースト |
-| Cmd+Shift+C | Ctrl+Shift+C | 画面テキストのコピー |
-| Cmd+Shift+K | Ctrl+Shift+K | Worktree のクリーンアップ |
-| Cmd+, | Ctrl+, | 設定 |
-| Cmd+Shift+[ | Ctrl+Shift+[ | 前のタブ |
-| Cmd+Shift+] | Ctrl+Shift+] | 次のタブ |
-| Cmd+` | Ctrl+` | 次のウィンドウ |
-| Cmd+Shift+` | Ctrl+Shift+` | 前のウィンドウ |
-| Cmd+M | --- | 最小化（macOS のみ） |
+開発起動:
 
-## 必要環境変数と前提
+```bash
+cd gwt-gui
+pnpm install --frozen-lockfile
 
-### 必須
+cd ..
+cargo tauri dev
+```
 
-- `PATH` に `git` があること（Git コマンドが使える状態）
+ビルド:
 
-### 任意
+```bash
+cd gwt-gui
+pnpm install --frozen-lockfile
 
-- AI 利用時の認証情報（または Settings のプロファイル設定でも可）:
-  - `ANTHROPIC_API_KEY` または `ANTHROPIC_AUTH_TOKEN`
-  - `OPENAI_API_KEY`
-  - `GOOGLE_API_KEY` または `GEMINI_API_KEY`
-- `bunx` / `npx`（ローカル起動のフォールバックに利用）
+cd ..
+cargo tauri build
+```
 
-### 任意（高度設定）
+### 音声認識の精度評価
 
-- `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
-- `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
+ローカル音声データセットで WER/CER を計測できます。
+
+```bash
+cp tests/voice_eval/manifest.template.json tests/voice_eval/manifest.json
+scripts/voice-eval.sh
+```
+
+詳細は `tests/voice_eval/README.md` を参照してください。
+バージョン管理するベンチマークスナップショットは `docs/voice-eval-benchmarks.md` を参照してください。
+
+### 音声入力ランタイム（Qwen3-ASR）
+
+音声入力はローカル Python ランタイム経由で Qwen3-ASR を実行します。
+
+- 必須: Python 3.11 以上（`PATH` 上、または `GWT_VOICE_PYTHON` で指定）
+- 手動導入不要: `qwen_asr` パッケージ
+- 初回利用時に gwt が `~/.gwt/runtime/voice-venv` を自動作成し、必要依存を自動インストール
+- その後、選択品質に対応する Qwen モデルを Hugging Face キャッシュへ必要時に取得
+
+## AI 設定
+
+Agent Mode やセッション要約を使うには AI 設定が必要です。
+
+手順:
+
+- `Settings` を開く
+- `Profiles` でプロファイルを選択
+- `AI Settings` を有効化
+- `Endpoint` と `Model` を設定（ローカル LLM の場合は API Key 省略可）
+- `Save` をクリック
+
+## ディレクトリ構成
+
+- `crates/gwt-core/`: コア（Git/worktree/設定/ログ/Docker/PTY）
+- `crates/gwt-tauri/`: Tauri v2 バックエンド（commands + state）
+- `gwt-gui/`: Svelte 5 フロントエンド（UI + xterm.js）
+- `installers/`: インストーラー定義（例: WiX）
 
 ## ライセンス
 

@@ -1,26 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import type {
-    SkillRegistrationStatus,
-    SkillRegistrationScope,
-    ProfilesConfig,
-    Profile,
-    SettingsData,
-    ShellInfo,
-    VoiceInputSettings,
-  } from "../types";
+  import type { ProfilesConfig, Profile, SettingsData, VoiceInputSettings } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
-
-  type SettingsTabId =
-    | "appearance"
-    | "voiceInput"
-    | "githubIntegration"
-    | "profiles"
-    | "terminal";
-  let activeSettingsTab: SettingsTabId = $state("appearance");
-
-  let availableShells: ShellInfo[] = $state([]);
 
   let settings: SettingsData | null = $state(null);
   let profiles: ProfilesConfig | null = $state(null);
@@ -31,6 +13,9 @@
   let errorMessage: string | null = $state(null);
   let newBranch: string = $state("");
   let saveMessage: string = $state("");
+  let voiceCapabilityLoading: boolean = $state(false);
+  let voiceAvailable: boolean = $state(true);
+  let voiceUnavailableReason: string | null = $state(null);
 
   let selectedProfileKey: string = $state("");
   let newProfileName: string = $state("");
@@ -39,69 +24,15 @@
 
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
-  let savedUiFontFamily: string = $state(
-    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif'
-  );
-  let savedTerminalFontFamily: string = $state(
-    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace'
-  );
-  let skillStatus: SkillRegistrationStatus | null = $state(null);
-  let skillStatusLoading: boolean = $state(false);
-  let skillStatusRepairing: boolean = $state(false);
-  let skillStatusMessage: string = $state("");
 
   const DEFAULT_VOICE_INPUT: VoiceInputSettings = {
     enabled: false,
+    engine: "qwen3-asr",
     hotkey: "Mod+Shift+M",
+    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
-    model: "base",
-  };
-  const DEFAULT_UI_FONT_FAMILY =
-    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
-  const DEFAULT_TERMINAL_FONT_FAMILY =
-    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
-  type FontPreset = { label: string; value: string };
-  const UI_FONT_PRESETS: FontPreset[] = [
-    { label: "System UI (Default)", value: DEFAULT_UI_FONT_FAMILY },
-    {
-      label: "Inter",
-      value: '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
-    },
-    {
-      label: "Noto Sans",
-      value: '"Noto Sans", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
-    },
-    {
-      label: "Source Sans 3",
-      value:
-        '"Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
-    },
-  ];
-  const TERMINAL_FONT_PRESETS: FontPreset[] = [
-    { label: "JetBrains Mono (Default)", value: DEFAULT_TERMINAL_FONT_FAMILY },
-    {
-      label: "Cascadia Mono",
-      value: '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
-    },
-    {
-      label: "Fira Code",
-      value: '"Fira Code", "JetBrains Mono", Menlo, Consolas, monospace',
-    },
-    {
-      label: "SF Mono",
-      value: '"SF Mono", Menlo, Monaco, Consolas, monospace',
-    },
-    {
-      label: "Ubuntu Mono",
-      value: '"Ubuntu Mono", "DejaVu Sans Mono", Consolas, monospace',
-    },
-  ];
-  const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
-  const DEFAULT_SKILL_STATUS: SkillRegistrationStatus = {
-    overall: "failed",
-    agents: [],
-    last_checked_at: 0,
-    last_error_message: null,
+    quality: "balanced",
+    model: "Qwen/Qwen3-ASR-1.7B",
   };
 
   type AIModelInfo = {
@@ -110,7 +41,7 @@
   let aiModels: string[] = $state([]);
   let aiModelsLoading: boolean = $state(false);
   let aiModelsError: string | null = $state(null);
-  let aiModelsLoadedKey: string = $state("");
+  let aiModelsLoadedKey: string = "";
   let aiModelsRequestSeq: number = 0;
 
   function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
@@ -121,17 +52,8 @@
   }
 
   let currentProfile = $derived(getCurrentProfile(profiles, selectedProfileKey));
-  let currentAiRequestKey = $derived.by(() => {
-    const profileKey = selectedProfileKey.trim();
-    const ai = currentProfile?.ai;
-    const endpoint = ai?.endpoint?.trim() ?? "";
-    if (!profileKey || !ai || !endpoint) return "";
-    const apiKey = ai?.api_key?.trim() ?? "";
-    return `${profileKey}::${endpoint}::${apiKey}`;
-  });
   let aiModelOptions = $derived.by(() => {
-    const current =
-      aiModelsLoadedKey === currentAiRequestKey ? (currentProfile?.ai?.model?.trim() ?? "") : "";
+    const current = currentProfile?.ai?.model?.trim() ?? "";
     const options = [...aiModels];
     if (current && !options.includes(current)) {
       options.unshift(current);
@@ -139,7 +61,6 @@
     return options;
   });
   let currentModelMissing = $derived.by(() => {
-    if (aiModelsLoadedKey !== currentAiRequestKey) return false;
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
@@ -166,66 +87,82 @@
     if (terminalSize >= 8 && terminalSize <= 24) {
       applyTerminalFontSize(terminalSize);
     }
-    applyUiFontFamily(settings.ui_font_family);
-    applyTerminalFontFamily(settings.terminal_font_family);
   });
 
-  function isAiEnabled(profile: Profile | null): boolean {
-    if (!profile) return false;
-    return !!(profile.ai?.endpoint?.trim());
-  }
+  $effect(() => {
+    if (!settings) return;
+    const quality = (settings.voice_input?.quality ?? "balanced").trim().toLowerCase();
+    const gpuAvailable = detectGpuAvailability();
+    let cancelled = false;
+
+    (async () => {
+      voiceCapabilityLoading = true;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const capability = await invoke<{
+          available: boolean;
+          reason?: string | null;
+        }>("get_voice_capability", {
+          gpuAvailable,
+          quality,
+        });
+        if (cancelled) return;
+        voiceAvailable = !!capability.available;
+        voiceUnavailableReason = capability.reason ?? null;
+      } catch {
+        if (cancelled) return;
+        // In web preview, keep voice fields editable for config compatibility.
+        voiceAvailable = true;
+        voiceUnavailableReason = null;
+      } finally {
+        if (!cancelled) {
+          voiceCapabilityLoading = false;
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  });
 
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
+    const apiKey = ai?.api_key?.trim() ?? "";
 
-    if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
-      if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
-        resetAiModelsState();
-      }
+    if (!profileKey || !ai) {
+      resetAiModelsState();
       return;
     }
     if (!endpoint) {
-      if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
-        resetAiModelsState();
-      }
+      resetAiModelsState();
       return;
     }
 
-    const requestKey = currentAiRequestKey;
-    if (
-      requestKey !== aiModelsLoadedKey &&
-      (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError)
-    ) {
-      resetAiModelsState();
+    const requestKey = `${profileKey}::${endpoint}::${apiKey}`;
+    if (requestKey === aiModelsLoadedKey) {
+      return;
     }
+
+    const timer = window.setTimeout(() => {
+      void fetchAiModels(endpoint, apiKey, requestKey, false);
+    }, 250);
+    return () => window.clearTimeout(timer);
   });
 
   onMount(() => {
-    const rootStyle = getComputedStyle(document.documentElement);
-    const computed = rootStyle.getPropertyValue("--ui-font-base");
+    const computed = getComputedStyle(document.documentElement).getPropertyValue("--ui-font-base");
     const parsedUi = Number.parseInt(computed.trim(), 10);
     savedUiFontSize = Number.isNaN(parsedUi) ? 13 : parsedUi;
     const storedTerminal = (window as any).__gwtTerminalFontSize;
     savedTerminalFontSize = typeof storedTerminal === "number" ? storedTerminal : 13;
-    const computedUiFamily = rootStyle.getPropertyValue("--ui-font-family");
-    savedUiFontFamily = normalizeUiFontFamily(computedUiFamily);
-    const storedTerminalFamily = (window as any).__gwtTerminalFontFamily;
-    if (typeof storedTerminalFamily === "string") {
-      savedTerminalFontFamily = normalizeTerminalFontFamily(storedTerminalFamily);
-    } else {
-      savedTerminalFontFamily = normalizeTerminalFontFamily(
-        rootStyle.getPropertyValue("--terminal-font-family")
-      );
-    }
   });
 
   onDestroy(() => {
     applyUiFontSize(savedUiFontSize);
     applyTerminalFontSize(savedTerminalFontSize);
-    applyUiFontFamily(savedUiFontFamily);
-    applyTerminalFontFamily(savedTerminalFontFamily);
   });
 
   function toErrorMessage(err: unknown): string {
@@ -237,144 +174,66 @@
     return String(err);
   }
 
+  function detectGpuAvailability(): boolean {
+    try {
+      const canvas = document.createElement("canvas");
+      const gl =
+        canvas.getContext("webgl2") ||
+        (canvas.getContext("webgl") as WebGLRenderingContext | null) ||
+        (canvas.getContext("experimental-webgl") as WebGLRenderingContext | null);
+      if (!gl) return false;
+
+      const ext = gl.getExtension("WEBGL_debug_renderer_info") as {
+        UNMASKED_RENDERER_WEBGL: number;
+      } | null;
+      const renderer = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? "") : "";
+      const normalized = renderer.toLowerCase();
+      if (
+        normalized.includes("swiftshader") ||
+        normalized.includes("llvmpipe") ||
+        normalized.includes("software") ||
+        normalized.includes("mesa offscreen")
+      ) {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function normalizeVoiceInputSettings(
     value: Partial<VoiceInputSettings> | null | undefined
   ): VoiceInputSettings {
+    const engine = (value?.engine ?? "").trim().toLowerCase();
     const hotkey = (value?.hotkey ?? "").trim();
+    const pttHotkey = (value?.ptt_hotkey ?? "").trim();
     const language = (value?.language ?? "").trim().toLowerCase();
+    const quality = (value?.quality ?? "").trim().toLowerCase();
     const model = (value?.model ?? "").trim();
+    const normalizedQuality =
+      quality === "fast" || quality === "balanced" || quality === "accurate"
+        ? (quality as VoiceInputSettings["quality"])
+        : DEFAULT_VOICE_INPUT.quality;
+    const defaultModel =
+      normalizedQuality === "fast" ? "Qwen/Qwen3-ASR-0.6B" : "Qwen/Qwen3-ASR-1.7B";
 
     return {
       enabled: !!value?.enabled,
+      engine:
+        engine === "qwen3-asr" || engine === "qwen" || engine === "whisper"
+          ? "qwen3-asr"
+          : DEFAULT_VOICE_INPUT.engine,
       hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT.hotkey,
+      ptt_hotkey:
+        pttHotkey.length > 0 ? pttHotkey : DEFAULT_VOICE_INPUT.ptt_hotkey,
       language:
         language === "ja" || language === "en" || language === "auto"
           ? (language as VoiceInputSettings["language"])
           : DEFAULT_VOICE_INPUT.language,
-      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT.model,
+      quality: normalizedQuality,
+      model: model.length > 0 ? model : defaultModel,
     };
-  }
-
-  function normalizeAppLanguage(
-    value: string | null | undefined
-  ): SettingsData["app_language"] {
-    const language = (value ?? "").trim().toLowerCase();
-    if (language === "ja" || language === "en" || language === "auto") {
-      return language as SettingsData["app_language"];
-    }
-    return DEFAULT_APP_LANGUAGE;
-  }
-
-  function normalizeUiFontFamily(value: string | null | undefined): string {
-    const family = (value ?? "").trim();
-    if (family.length === 0) return DEFAULT_UI_FONT_FAMILY;
-    const match = UI_FONT_PRESETS.find((preset) => preset.value === family);
-    return match ? match.value : family;
-  }
-
-  function normalizeTerminalFontFamily(value: string | null | undefined): string {
-    const family = (value ?? "").trim();
-    if (family.length === 0) return DEFAULT_TERMINAL_FONT_FAMILY;
-    const match = TERMINAL_FONT_PRESETS.find((preset) => preset.value === family);
-    return match ? match.value : family;
-  }
-
-  function normalizeSkillScope(
-    value: string | null | undefined
-  ): SkillRegistrationScope | null {
-    const normalized = (value ?? "").trim().toLowerCase();
-    if (normalized === "user" || normalized === "project" || normalized === "local") {
-      return normalized as SkillRegistrationScope;
-    }
-    return null;
-  }
-
-  function normalizeSkillStatus(
-    value: Partial<SkillRegistrationStatus> | null | undefined
-  ): SkillRegistrationStatus {
-    const agents = Array.isArray(value?.agents)
-      ? value.agents.map((agent) => ({
-          agent_id: agent.agent_id ?? "unknown",
-          label: agent.label ?? "Unknown",
-          skills_path: agent.skills_path ?? null,
-          registered: !!agent.registered,
-          missing_skills: Array.isArray(agent.missing_skills)
-            ? agent.missing_skills.filter((skill) => typeof skill === "string")
-            : [],
-          error_code: agent.error_code ?? null,
-          error_message: agent.error_message ?? null,
-        }))
-      : [];
-
-    return {
-      overall: value?.overall ?? DEFAULT_SKILL_STATUS.overall,
-      agents,
-      last_checked_at:
-        typeof value?.last_checked_at === "number" ? value.last_checked_at : Date.now(),
-      last_error_message: value?.last_error_message ?? null,
-    };
-  }
-
-  function skillStatusClass(status: string): "status-ok" | "status-degraded" | "status-failed" {
-    if (status === "ok") return "status-ok";
-    if (status === "degraded") return "status-degraded";
-    return "status-failed";
-  }
-
-  function skillStatusText(status: string | null | undefined): string {
-    return (status ?? "unknown").toUpperCase();
-  }
-
-  function formatRegistrationCheckedAt(millis: number | null | undefined): string {
-    if (typeof millis !== "number" || millis <= 0) {
-      return "-";
-    }
-    try {
-      return new Date(millis).toLocaleString();
-    } catch {
-      return "-";
-    }
-  }
-
-  async function loadSkillStatus(showRefreshMessage: boolean) {
-    skillStatusLoading = true;
-    if (showRefreshMessage) {
-      skillStatusMessage = "";
-    }
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const status = await invoke<SkillRegistrationStatus>("get_skill_registration_status_cmd");
-      skillStatus = normalizeSkillStatus(status);
-      if (showRefreshMessage) {
-        skillStatusMessage = "Skill status refreshed.";
-      }
-    } catch (err) {
-      skillStatus = skillStatus ?? normalizeSkillStatus(null);
-      const message = toErrorMessage(err);
-      skillStatusMessage = showRefreshMessage
-        ? `Failed to refresh skill status: ${message}`
-        : `Failed to load skill status: ${message}`;
-    } finally {
-      skillStatusLoading = false;
-    }
-  }
-
-  async function repairSkillStatus() {
-    skillStatusRepairing = true;
-    skillStatusMessage = "";
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const status = await invoke<SkillRegistrationStatus>("repair_skill_registration_cmd");
-      skillStatus = normalizeSkillStatus(status);
-      skillStatusMessage =
-        status.overall === "ok"
-          ? "Skill registration repaired."
-          : "Skill registration remains degraded. Check details below.";
-    } catch (err) {
-      skillStatusMessage = `Failed to repair skill registration: ${toErrorMessage(err)}`;
-    } finally {
-      skillStatusRepairing = false;
-    }
   }
 
   async function fetchAiModels(
@@ -390,7 +249,7 @@
     aiModelsError = null;
 
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
+      const { invoke } = await import("@tauri-apps/api/core");
       const models = await invoke<AIModelInfo[]>("list_ai_models", {
         endpoint,
         apiKey,
@@ -407,7 +266,7 @@
     } catch (err) {
       if (requestSeq !== aiModelsRequestSeq) return;
       aiModels = [];
-      aiModelsLoadedKey = requestKey;
+      aiModelsLoadedKey = "";
       aiModelsError = `Failed to load models: ${toErrorMessage(err)}`;
     } finally {
       if (requestSeq === aiModelsRequestSeq) {
@@ -421,7 +280,7 @@
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     const apiKey = ai?.api_key?.trim() ?? "";
-    if (!profileKey || !ai || !endpoint || !isAiEnabled(currentProfile)) {
+    if (!profileKey || !ai || !endpoint) {
       aiModelsError = "Endpoint is required.";
       return;
     }
@@ -435,46 +294,20 @@
     loadingProfiles = true;
 
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
+      const { invoke } = await import("@tauri-apps/api/core");
       const [loadedSettings, loadedProfiles] = await Promise.all([
         invoke<SettingsData>("get_settings"),
         invoke<ProfilesConfig>("get_profiles"),
       ]);
       loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
-      loadedSettings.app_language = normalizeAppLanguage(loadedSettings.app_language);
-      loadedSettings.ui_font_family = normalizeUiFontFamily(loadedSettings.ui_font_family);
-      loadedSettings.terminal_font_family = normalizeTerminalFontFamily(
-        loadedSettings.terminal_font_family
-      );
-      loadedSettings.agent_skill_registration_default_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_default_scope
-      );
-      loadedSettings.agent_skill_registration_codex_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_codex_scope
-      );
-      loadedSettings.agent_skill_registration_claude_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_claude_scope
-      );
-      loadedSettings.agent_skill_registration_gemini_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_gemini_scope
-      );
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
-      savedUiFontFamily = loadedSettings.ui_font_family;
-      savedTerminalFontFamily = loadedSettings.terminal_font_family;
       profiles = loadedProfiles;
 
       const keys = Object.keys(loadedProfiles.profiles ?? {});
       const nextSelected = loadedProfiles.active ?? keys[0] ?? "";
       selectedProfileKey = nextSelected;
-      await loadSkillStatus(false);
-      try {
-        const result = await invoke<ShellInfo[]>("get_available_shells");
-        availableShells = Array.isArray(result) ? result : [];
-      } catch {
-        availableShells = [];
-      }
     } catch (err) {
       console.error("Failed to load settings/profiles:", err);
       errorMessage = `Failed to load settings: ${toErrorMessage(err)}`;
@@ -489,58 +322,20 @@
     saving = true;
     saveMessage = "";
     try {
-      const normalizedDefaultScope = normalizeSkillScope(
-        settings.agent_skill_registration_default_scope
-      );
-      const normalizedCodexScope = normalizeSkillScope(
-        settings.agent_skill_registration_codex_scope
-      );
-      const normalizedClaudeScope = normalizeSkillScope(
-        settings.agent_skill_registration_claude_scope
-      );
-      const normalizedGeminiScope = normalizeSkillScope(
-        settings.agent_skill_registration_gemini_scope
-      );
-      if (
-        !normalizedDefaultScope &&
-        (normalizedCodexScope || normalizedClaudeScope || normalizedGeminiScope)
-      ) {
-        saveMessage = "Choose default skill registration scope before setting agent overrides.";
-        saving = false;
-        return;
-      }
-      settings = {
-        ...settings,
-        ui_font_family: normalizeUiFontFamily(settings.ui_font_family),
-        terminal_font_family: normalizeTerminalFontFamily(settings.terminal_font_family),
-        agent_skill_registration_default_scope: normalizedDefaultScope,
-        agent_skill_registration_codex_scope: normalizedCodexScope,
-        agent_skill_registration_claude_scope: normalizedClaudeScope,
-        agent_skill_registration_gemini_scope: normalizedGeminiScope,
-      };
-
-      const { invoke } = await import("$lib/tauriInvoke");
+      const { invoke } = await import("@tauri-apps/api/core");
       await invoke("save_settings", { settings });
       if (profiles) {
         await invoke("save_profiles", { config: profiles });
       }
-      settings.app_language = normalizeAppLanguage(settings.app_language);
       saveMessage = "Settings saved.";
       savedUiFontSize = settings.ui_font_size ?? 13;
       savedTerminalFontSize = settings.terminal_font_size ?? 13;
-      savedUiFontFamily = normalizeUiFontFamily(settings.ui_font_family);
-      savedTerminalFontFamily = normalizeTerminalFontFamily(
-        settings.terminal_font_family
-      );
       settings.voice_input = normalizeVoiceInputSettings(settings.voice_input);
       window.dispatchEvent(
         new CustomEvent("gwt-settings-updated", {
           detail: {
             uiFontSize: savedUiFontSize,
             terminalFontSize: savedTerminalFontSize,
-            uiFontFamily: savedUiFontFamily,
-            terminalFontFamily: savedTerminalFontFamily,
-            appLanguage: settings.app_language,
             voiceInput: settings.voice_input,
           },
         })
@@ -589,23 +384,9 @@
     document.documentElement.style.setProperty("--ui-font-base", size + "px");
   }
 
-  function applyUiFontFamily(family: string | null | undefined) {
-    document.documentElement.style.setProperty(
-      "--ui-font-family",
-      normalizeUiFontFamily(family)
-    );
-  }
-
   function applyTerminalFontSize(size: number) {
     (window as any).__gwtTerminalFontSize = size;
     window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
-  }
-
-  function applyTerminalFontFamily(family: string | null | undefined) {
-    const normalized = normalizeTerminalFontFamily(family);
-    document.documentElement.style.setProperty("--terminal-font-family", normalized);
-    (window as any).__gwtTerminalFontFamily = normalized;
-    window.dispatchEvent(new CustomEvent("gwt-terminal-font-family", { detail: normalized }));
   }
 
   function adjustFontSize(field: "ui_font_size" | "terminal_font_size", delta: number) {
@@ -618,8 +399,6 @@
   function handleClose() {
     applyUiFontSize(savedUiFontSize);
     applyTerminalFontSize(savedTerminalFontSize);
-    applyUiFontFamily(savedUiFontFamily);
-    applyTerminalFontFamily(savedTerminalFontFamily);
     onClose();
   }
 
@@ -707,23 +486,35 @@
     newEnvValue = "";
   }
 
-  function updateAiField(
-    field: "endpoint" | "api_key" | "model" | "language" | "summary_enabled",
-    value: string | boolean
-  ) {
+  function setAiEnabled(enabled: boolean) {
     if (!profiles) return;
     const p = currentProfile;
     if (!p) return;
     if (!selectedProfileKey) return;
-    const nextAi = {
-      endpoint: "",
-      api_key: "",
-      model: "",
-      language: "en",
-      summary_enabled: true,
-      ...(p.ai ?? {}),
-      [field]: value,
-    } as Profile["ai"];
+    const nextProfile: Profile = enabled
+      ? {
+          ...p,
+          ai: p.ai ?? {
+            endpoint: "https://api.openai.com/v1",
+            api_key: "",
+            model: "",
+            language: "en",
+            summary_enabled: true,
+          },
+        }
+      : { ...p, ai: null };
+    profiles = {
+      ...profiles,
+      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
+    };
+  }
+
+  function updateAiField(field: "endpoint" | "api_key" | "model" | "summary_enabled", value: string | boolean) {
+    if (!profiles) return;
+    const p = currentProfile;
+    if (!p || !p.ai) return;
+    if (!selectedProfileKey) return;
+    const nextAi = { ...p.ai, [field]: value } as Profile["ai"];
     const nextProfile: Profile = { ...p, ai: nextAi };
     profiles = {
       ...profiles,
@@ -738,26 +529,22 @@
     if (!settings) return;
     const current = normalizeVoiceInputSettings(settings.voice_input);
     const next = { ...current, [field]: value } as VoiceInputSettings;
+    if (field === "quality") {
+      const quality = String(value).trim().toLowerCase();
+      next.model =
+        quality === "fast" ? "Qwen/Qwen3-ASR-0.6B" : "Qwen/Qwen3-ASR-1.7B";
+    }
+    if (!next.engine || next.engine.trim().toLowerCase() !== "qwen3-asr") {
+      next.engine = "qwen3-asr";
+    }
     settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
-  }
-
-  function updateSkillScopeField(
-    field:
-      | "agent_skill_registration_default_scope"
-      | "agent_skill_registration_codex_scope"
-      | "agent_skill_registration_claude_scope"
-      | "agent_skill_registration_gemini_scope",
-    value: string
-  ) {
-    if (!settings) return;
-    settings = { ...settings, [field]: normalizeSkillScope(value) };
   }
 </script>
 
 <div class="settings-panel">
   <div class="settings-header">
     <h2>Settings</h2>
-    <button class="close-btn" onclick={handleClose} aria-label="Close">&times;</button>
+    <button class="close-btn" onclick={handleClose}>[x]</button>
   </div>
 
   {#if loadingSettings || loadingProfiles}
@@ -766,607 +553,377 @@
     <div class="loading">{errorMessage ?? "Failed to load settings."}</div>
   {:else}
     <div class="settings-body">
-      <div class="settings-tabs">
-        <button
-          class="settings-tab-btn"
-          class:active={activeSettingsTab === "appearance"}
-          onclick={() => (activeSettingsTab = "appearance")}
-        >Appearance</button>
-        <button
-          class="settings-tab-btn"
-          class:active={activeSettingsTab === "voiceInput"}
-          onclick={() => (activeSettingsTab = "voiceInput")}
-        >Voice Input</button>
-        <button
-          class="settings-tab-btn"
-          class:active={activeSettingsTab === "githubIntegration"}
-          onclick={() => (activeSettingsTab = "githubIntegration")}
-        >GitHub Integration</button>
-        <button
-          class="settings-tab-btn"
-          class:active={activeSettingsTab === "profiles"}
-          onclick={() => (activeSettingsTab = "profiles")}
-        >Profiles</button>
-        {#if availableShells.length > 0}
-          <button
-            class="settings-tab-btn"
-            class:active={activeSettingsTab === "terminal"}
-            onclick={() => (activeSettingsTab = "terminal")}
-          >Terminal</button>
-        {/if}
-      </div>
-
-      <div class="settings-tab-content">
-        {#if activeSettingsTab === "appearance"}
-          <div class="section-content">
-            <div class="field">
-              <!-- svelte-ignore a11y_label_has_associated_control -->
-              <label>Terminal Font Size</label>
-              <div class="font-size-control">
-                <button
-                  class="font-size-btn"
-                  onclick={() => adjustFontSize("terminal_font_size", -1)}
-                  disabled={!settings || (settings.terminal_font_size ?? 13) <= 8}
-                >-</button>
-                <input
-                  type="number"
-                  min="8"
-                  max="24"
-                  step="1"
-                  value={settings.terminal_font_size ?? 13}
-                  oninput={(e) => {
-                    if (!settings) return;
-                    const raw = (e.target as HTMLInputElement).value;
-                    if (raw === "") return;
-                    const parsed = Number(raw);
-                    if (Number.isNaN(parsed)) return;
-                    settings = { ...settings, terminal_font_size: parsed };
-                  }}
-                  onchange={() => {
-                    if (!settings) return;
-                    settings = { ...settings, terminal_font_size: clampFontSize(settings.terminal_font_size ?? 13) };
-                  }}
-                />
-                <button
-                  class="font-size-btn"
-                  onclick={() => adjustFontSize("terminal_font_size", 1)}
-                  disabled={!settings || (settings.terminal_font_size ?? 13) >= 24}
-                >+</button>
-                <span class="font-size-unit">px</span>
-              </div>
-            </div>
-
-            <div class="field">
-              <!-- svelte-ignore a11y_label_has_associated_control -->
-              <label>UI Font Size</label>
-              <div class="font-size-control">
-                <button
-                  class="font-size-btn"
-                  onclick={() => adjustFontSize("ui_font_size", -1)}
-                  disabled={!settings || (settings.ui_font_size ?? 13) <= 8}
-                >-</button>
-                <input
-                  type="number"
-                  min="8"
-                  max="24"
-                  step="1"
-                  value={settings.ui_font_size ?? 13}
-                  oninput={(e) => {
-                    if (!settings) return;
-                    const raw = (e.target as HTMLInputElement).value;
-                    if (raw === "") return;
-                    const parsed = Number(raw);
-                    if (Number.isNaN(parsed)) return;
-                    settings = { ...settings, ui_font_size: parsed };
-                  }}
-                  onchange={() => {
-                    if (!settings) return;
-                    settings = { ...settings, ui_font_size: clampFontSize(settings.ui_font_size ?? 13) };
-                  }}
-                />
-                <button
-                  class="font-size-btn"
-                  onclick={() => adjustFontSize("ui_font_size", 1)}
-                  disabled={!settings || (settings.ui_font_size ?? 13) >= 24}
-                >+</button>
-                <span class="font-size-unit">px</span>
-              </div>
-            </div>
-
-            <div class="field">
-              <label for="terminal-font-family">Terminal Font Family</label>
-              <select
-                id="terminal-font-family"
-                class="select"
-                value={settings.terminal_font_family}
-                onchange={(e) => {
-                  if (!settings) return;
-                  const next = normalizeTerminalFontFamily(
-                    (e.target as HTMLSelectElement).value
-                  );
-                  settings = { ...settings, terminal_font_family: next };
-                  applyTerminalFontFamily(next);
-                }}
-              >
-                {#each TERMINAL_FONT_PRESETS as preset}
-                  <option value={preset.value}>{preset.label}</option>
-                {/each}
-              </select>
-            </div>
-
-            <div class="field">
-              <label for="ui-font-family">UI Font Family</label>
-              <select
-                id="ui-font-family"
-                class="select"
-                value={settings.ui_font_family}
-                onchange={(e) => {
-                  if (!settings) return;
-                  const next = normalizeUiFontFamily(
-                    (e.target as HTMLSelectElement).value
-                  );
-                  settings = { ...settings, ui_font_family: next };
-                  applyUiFontFamily(next);
-                }}
-              >
-                {#each UI_FONT_PRESETS as preset}
-                  <option value={preset.value}>{preset.label}</option>
-                {/each}
-              </select>
-            </div>
-
-            <div class="divider"></div>
-
-            <div class="field">
-              <label for="app-language">Summary Language (global)</label>
-              <select
-                id="app-language"
-                class="select"
-                value={settings.app_language}
-                onchange={(e) => {
-                  if (!settings) return;
-                  settings = {
-                    ...settings,
-                    app_language: normalizeAppLanguage(
-                      (e.target as HTMLSelectElement).value
-                    ),
-                  };
-                }}
-              >
-                <option value="auto">Auto</option>
-                <option value="ja">Japanese</option>
-                <option value="en">English</option>
-              </select>
-              <span class="field-hint">
-                Used as the app-wide language when rebuilding all branch summaries.
-              </span>
-            </div>
-
-            <div class="divider"></div>
-
-            <div class="field">
-              <label for="log-retention">Log Retention (days)</label>
+      <details class="settings-section" open>
+        <summary class="section-title">Appearance</summary>
+        <div class="section-content">
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>Terminal Font Size</label>
+            <div class="font-size-control">
+              <button
+                class="font-size-btn"
+                onclick={() => adjustFontSize("terminal_font_size", -1)}
+                disabled={!settings || (settings.terminal_font_size ?? 13) <= 8}
+              >-</button>
               <input
-                id="log-retention"
                 type="number"
-                min="1"
-                max="365"
-                bind:value={settings.log_retention_days}
+                min="8"
+                max="24"
+                step="1"
+                value={settings.terminal_font_size ?? 13}
+                oninput={(e) => {
+                  if (!settings) return;
+                  const raw = (e.target as HTMLInputElement).value;
+                  if (raw === "") return;
+                  const parsed = Number(raw);
+                  if (Number.isNaN(parsed)) return;
+                  settings = { ...settings, terminal_font_size: parsed };
+                }}
+                onchange={() => {
+                  if (!settings) return;
+                  settings = { ...settings, terminal_font_size: clampFontSize(settings.terminal_font_size ?? 13) };
+                }}
               />
-              <span class="field-hint">
-                Logs older than this will be cleaned up automatically.
-              </span>
-            </div>
-
-            <div class="field">
-              <!-- svelte-ignore a11y_label_has_associated_control -->
-              <label>Protected Branches</label>
-              <div class="branch-tags">
-                {#each settings.protected_branches as branch}
-                  <span class="branch-tag">
-                    {branch}
-                    <button class="tag-remove" onclick={() => removeBranch(branch)}>
-                      x
-                    </button>
-                  </span>
-                {/each}
-              </div>
-              <div class="branch-input-row">
-                <input
-                  type="text"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  autocomplete="off"
-                  spellcheck="false"
-                  bind:value={newBranch}
-                  placeholder="Add branch..."
-                  onkeydown={handleBranchKeydown}
-                />
-                <button class="btn btn-add" onclick={addBranch}>Add</button>
-              </div>
-              <span class="field-hint">
-                Branches that cannot be deleted or force-pushed.
-              </span>
-            </div>
-
-          </div>
-
-        {:else if activeSettingsTab === "voiceInput"}
-          <div class="section-content">
-            <div class="field">
-              <div class="ai-toggle">
-                <input
-                  id="voice-input-enabled"
-                  type="checkbox"
-                  checked={settings.voice_input.enabled}
-                  onchange={(e) =>
-                    updateVoiceInputField(
-                      "enabled",
-                      (e.target as HTMLInputElement).checked
-                    )}
-                />
-                <label for="voice-input-enabled" class="ai-enabled-label">
-                  Enable Voice Input
-                </label>
-              </div>
-              <span class="field-hint">
-                Hotkey toggles start/stop and inserts transcript into the focused input.
-              </span>
-            </div>
-
-            <div class="field">
-              <label for="voice-hotkey">Hotkey</label>
-              <input
-                id="voice-hotkey"
-                type="text"
-                value={settings.voice_input.hotkey}
-                oninput={(e) =>
-                  updateVoiceInputField(
-                    "hotkey",
-                    (e.target as HTMLInputElement).value
-                  )}
-                placeholder="Mod+Shift+M"
-              />
-              <span class="field-hint">Example: Mod+Shift+M</span>
-            </div>
-
-            <div class="field">
-              <label for="voice-language">Language</label>
-              <select
-                id="voice-language"
-                class="select"
-                value={settings.voice_input.language}
-                onchange={(e) =>
-                  updateVoiceInputField(
-                    "language",
-                    (e.target as HTMLSelectElement).value as VoiceInputSettings["language"]
-                  )}
-              >
-                <option value="auto">Auto</option>
-                <option value="ja">Japanese</option>
-                <option value="en">English</option>
-              </select>
-            </div>
-
-            <div class="field">
-              <label for="voice-model">Model</label>
-              <input
-                id="voice-model"
-                type="text"
-                value={settings.voice_input.model}
-                oninput={(e) =>
-                  updateVoiceInputField(
-                    "model",
-                    (e.target as HTMLInputElement).value
-                  )}
-                placeholder="base"
-              />
-              <span class="field-hint">Bundled STT model tier label.</span>
+              <button
+                class="font-size-btn"
+                onclick={() => adjustFontSize("terminal_font_size", 1)}
+                disabled={!settings || (settings.terminal_font_size ?? 13) >= 24}
+              >+</button>
+              <span class="font-size-unit">px</span>
             </div>
           </div>
 
-        {:else if activeSettingsTab === "githubIntegration"}
-          <div class="section-content">
-            <div class="field">
-              <label for="skill-scope-default">Skill Registration Scope (Default)</label>
-              <select
-                id="skill-scope-default"
-                class="select"
-                value={settings.agent_skill_registration_default_scope ?? ""}
-                onchange={(e) =>
-                  updateSkillScopeField(
-                    "agent_skill_registration_default_scope",
-                    (e.target as HTMLSelectElement).value
-                  )}
-              >
-                <option value="">Not selected (prompt on startup)</option>
-                <option value="user">User (~/.xxx)</option>
-                <option value="project">Project (&lt;repo&gt;/.xxx)</option>
-                <option value="local">Local (&lt;repo&gt;/.xxx.local)</option>
-              </select>
-              <span class="field-hint">
-                Controls where managed skills/plugins are auto-registered.
-              </span>
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>UI Font Size</label>
+            <div class="font-size-control">
+              <button
+                class="font-size-btn"
+                onclick={() => adjustFontSize("ui_font_size", -1)}
+                disabled={!settings || (settings.ui_font_size ?? 13) <= 8}
+              >-</button>
+              <input
+                type="number"
+                min="8"
+                max="24"
+                step="1"
+                value={settings.ui_font_size ?? 13}
+                oninput={(e) => {
+                  if (!settings) return;
+                  const raw = (e.target as HTMLInputElement).value;
+                  if (raw === "") return;
+                  const parsed = Number(raw);
+                  if (Number.isNaN(parsed)) return;
+                  settings = { ...settings, ui_font_size: parsed };
+                }}
+                onchange={() => {
+                  if (!settings) return;
+                  settings = { ...settings, ui_font_size: clampFontSize(settings.ui_font_size ?? 13) };
+                }}
+              />
+              <button
+                class="font-size-btn"
+                onclick={() => adjustFontSize("ui_font_size", 1)}
+                disabled={!settings || (settings.ui_font_size ?? 13) >= 24}
+              >+</button>
+              <span class="font-size-unit">px</span>
             </div>
+          </div>
 
-            <div class="field">
-              <!-- svelte-ignore a11y_label_has_associated_control -->
-              <label>Agent Scope Overrides</label>
-              <div class="row">
-                <div class="scope-select">
-                  <label for="skill-scope-codex">Codex</label>
-                  <select
-                    id="skill-scope-codex"
-                    class="select"
-                    value={settings.agent_skill_registration_codex_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_codex_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-                <div class="scope-select">
-                  <label for="skill-scope-claude">Claude Code</label>
-                  <select
-                    id="skill-scope-claude"
-                    class="select"
-                    value={settings.agent_skill_registration_claude_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_claude_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-                <div class="scope-select">
-                  <label for="skill-scope-gemini">Gemini</label>
-                  <select
-                    id="skill-scope-gemini"
-                    class="select"
-                    value={settings.agent_skill_registration_gemini_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_gemini_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-              </div>
-            </div>
+          <div class="divider"></div>
 
-            <div class="divider"></div>
+          <div class="field">
+            <label for="log-retention">Log Retention (days)</label>
+            <input
+              id="log-retention"
+              type="number"
+              min="1"
+              max="365"
+              bind:value={settings.log_retention_days}
+            />
+            <span class="field-hint">
+              Logs older than this will be cleaned up automatically.
+            </span>
+          </div>
 
-            <div class="skill-overview">
-              <span class={`skill-badge ${skillStatusClass(skillStatus?.overall ?? "failed")}`}>
-                Overall: {skillStatusText(skillStatus?.overall)}
-              </span>
-              <span class="field-hint">
-                Last checked: {formatRegistrationCheckedAt(skillStatus?.last_checked_at)}
-              </span>
-            </div>
-
-            <div class="skill-agent-list">
-              {#each skillStatus?.agents ?? [] as agent (agent.agent_id)}
-                <div class="skill-agent-row">
-                  <div class="skill-agent-meta">
-                    <span class="skill-agent-label">{agent.label}</span>
-                    {#if agent.skills_path}
-                      <span class="skill-agent-path mono">{agent.skills_path}</span>
-                    {/if}
-                    {#if agent.missing_skills.length > 0}
-                      <span class="field-hint">
-                        Missing: {agent.missing_skills.join(", ")}
-                      </span>
-                    {/if}
-                    {#if agent.error_message}
-                      <span class="field-hint">{agent.error_message}</span>
-                    {/if}
-                  </div>
-                  <span class={`skill-mini-badge ${agent.registered ? "status-ok" : "status-failed"}`}>
-                    {agent.registered ? "REGISTERED" : "MISSING"}
-                  </span>
-                </div>
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>Protected Branches</label>
+            <div class="branch-tags">
+              {#each settings.protected_branches as branch}
+                <span class="branch-tag">
+                  {branch}
+                  <button class="tag-remove" onclick={() => removeBranch(branch)}>
+                    x
+                  </button>
+                </span>
               {/each}
             </div>
-
-            {#if skillStatus?.last_error_message}
-              <span class="field-hint">{skillStatus.last_error_message}</span>
-            {/if}
-            {#if skillStatusMessage}
-              <span class="field-hint">{skillStatusMessage}</span>
-            {/if}
-
-            <div class="row">
-              <button
-                class="btn btn-ghost"
-                onclick={() => void loadSkillStatus(true)}
-                disabled={skillStatusLoading || skillStatusRepairing}
-              >
-                {skillStatusLoading ? "Refreshing..." : "Refresh Skill Status"}
-              </button>
-              <button
-                class="btn btn-add"
-                onclick={() => void repairSkillStatus()}
-                disabled={skillStatusRepairing}
-              >
-                {skillStatusRepairing ? "Repairing..." : "Repair Skill Registration"}
-              </button>
+            <div class="branch-input-row">
+              <input
+                type="text"
+                autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
+                bind:value={newBranch}
+                placeholder="Add branch..."
+                onkeydown={handleBranchKeydown}
+              />
+              <button class="btn btn-add" onclick={addBranch}>Add</button>
             </div>
+            <span class="field-hint">
+              Branches that cannot be deleted or force-pushed.
+            </span>
+          </div>
+        </div>
+      </details>
+
+      <div class="divider"></div>
+
+      <details class="settings-section" open>
+        <summary class="section-title">Voice Input</summary>
+        <div class="section-content">
+          <div class="field">
+            <div class="ai-toggle">
+              <input
+                id="voice-input-enabled"
+                type="checkbox"
+                checked={settings.voice_input.enabled}
+                disabled={!voiceAvailable || voiceCapabilityLoading}
+                onchange={(e) =>
+                  updateVoiceInputField(
+                    "enabled",
+                    (e.target as HTMLInputElement).checked
+                  )}
+              />
+              <label for="voice-input-enabled" class="ai-enabled-label">
+                Enable Voice Input
+              </label>
+            </div>
+            <span class="field-hint">
+              Hotkey toggles start/stop and inserts transcript into the focused input.
+            </span>
           </div>
 
-        {:else if activeSettingsTab === "terminal"}
-          <div class="section-content">
+          <div class="field">
+            <label for="voice-hotkey">Toggle Hotkey</label>
+            <input
+              id="voice-hotkey"
+              type="text"
+              value={settings.voice_input.hotkey}
+              disabled={!voiceAvailable || voiceCapabilityLoading}
+              oninput={(e) =>
+                updateVoiceInputField(
+                  "hotkey",
+                  (e.target as HTMLInputElement).value
+                )}
+              placeholder="Mod+Shift+M"
+            />
+            <span class="field-hint">Example: Mod+Shift+M</span>
+          </div>
+
+          <div class="field">
+            <label for="voice-ptt-hotkey">Push-to-talk Hotkey</label>
+            <input
+              id="voice-ptt-hotkey"
+              type="text"
+              value={settings.voice_input.ptt_hotkey}
+              disabled={!voiceAvailable || voiceCapabilityLoading}
+              oninput={(e) =>
+                updateVoiceInputField(
+                  "ptt_hotkey",
+                  (e.target as HTMLInputElement).value
+                )}
+              placeholder="Mod+Shift+Space"
+            />
+            <span class="field-hint">Press and hold to capture speech.</span>
+          </div>
+
+          <div class="field">
+            <label for="voice-language">Language</label>
+            <select
+              id="voice-language"
+              class="select"
+              value={settings.voice_input.language}
+              disabled={!voiceAvailable || voiceCapabilityLoading}
+              onchange={(e) =>
+                updateVoiceInputField(
+                  "language",
+                  (e.target as HTMLSelectElement).value as VoiceInputSettings["language"]
+                )}
+            >
+              <option value="auto">Auto</option>
+              <option value="ja">Japanese</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="voice-quality">Quality</label>
+            <select
+              id="voice-quality"
+              class="select"
+              value={settings.voice_input.quality}
+              disabled={!voiceAvailable || voiceCapabilityLoading}
+              onchange={(e) =>
+                updateVoiceInputField(
+                  "quality",
+                  (e.target as HTMLSelectElement).value as VoiceInputSettings["quality"]
+                )}
+            >
+              <option value="fast">Fast (Qwen3-ASR-0.6B)</option>
+              <option value="balanced">Balanced (Qwen3-ASR-1.7B)</option>
+              <option value="accurate">Accurate (Qwen3-ASR-1.7B)</option>
+            </select>
+            <span class="field-hint">Voice runtime and Qwen model are prepared automatically on first use.</span>
+          </div>
+          {#if voiceCapabilityLoading}
             <div class="field">
-              <label for="default-shell">Default Shell</label>
-              <select
-                id="default-shell"
-                class="select"
-                value={settings.default_shell ?? ""}
-                onchange={(e) => {
-                  if (!settings) return;
-                  const value = (e.target as HTMLSelectElement).value;
-                  settings = { ...settings, default_shell: value || null };
-                }}
-              >
-                <option value="">System Default</option>
-                {#each availableShells as shell (shell.id)}
-                  <option value={shell.id}>
-                    {shell.name}{shell.version ? ` (${shell.version})` : ""}
-                  </option>
-                {/each}
-              </select>
+              <span class="field-hint">Checking voice runtime capability...</span>
+            </div>
+          {:else if !voiceAvailable}
+            <div class="field">
               <span class="field-hint">
-                Shell used for new terminal sessions on Windows.
+                Voice input is disabled: {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
               </span>
             </div>
+          {/if}
+        </div>
+      </details>
+
+      <div class="divider"></div>
+
+      <details class="settings-section" open>
+        <summary class="section-title">Profiles</summary>
+        <div class="section-content">
+          <div class="field">
+            <label for="active-profile">Active Profile</label>
+            <select
+              id="active-profile"
+              class="select"
+              value={profiles?.active ?? ""}
+              onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value || null)}
+            >
+              <option value="">(none)</option>
+              {#if profiles}
+                {#each sortedProfileKeys(profiles) as key}
+                  <option value={key}>{key}</option>
+                {/each}
+              {/if}
+            </select>
+            <span class="field-hint">Saved in ~/.gwt/profiles.toml</span>
           </div>
 
-        {:else if activeSettingsTab === "profiles"}
-          <div class="section-content">
-            <div class="field">
-              <label for="active-profile">Active Profile</label>
+          <div class="field">
+            <label for="profile-edit">Edit Profile</label>
+            <div class="row">
               <select
-                id="active-profile"
+                id="profile-edit"
                 class="select"
-                value={profiles?.active ?? ""}
-                onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value || null)}
+                bind:value={selectedProfileKey}
+                disabled={!profiles}
               >
-                <option value="">(none)</option>
                 {#if profiles}
                   {#each sortedProfileKeys(profiles) as key}
                     <option value={key}>{key}</option>
                   {/each}
                 {/if}
               </select>
-              <span class="field-hint">Saved in ~/.gwt/profiles.toml</span>
+              <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
+                Delete
+              </button>
             </div>
+          </div>
 
-            <div class="field">
-              <label for="profile-edit">Edit Profile</label>
-              <div class="row">
-                <select
-                  id="profile-edit"
-                  class="select"
-                  bind:value={selectedProfileKey}
-                  disabled={!profiles}
-                >
-                  {#if profiles}
-                    {#each sortedProfileKeys(profiles) as key}
-                      <option value={key}>{key}</option>
-                    {/each}
-                  {/if}
-                </select>
-                <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
-                  Delete
-                </button>
+          <div class="field">
+            <label for="new-profile">New Profile</label>
+            <div class="row">
+              <input
+                id="new-profile"
+                type="text"
+                autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
+                bind:value={newProfileName}
+                placeholder="e.g. development"
+              />
+              <button class="btn btn-add" onclick={createProfile} disabled={!profiles || !newProfileName.trim()}>
+                Create
+              </button>
+            </div>
+            <span class="field-hint">Name must be lowercase letters, numbers, or hyphens.</span>
+          </div>
+
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>Environment Variables</label>
+            {#if profiles && selectedProfileKey && currentProfile}
+              <div class="env-table">
+                {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
+                  <div class="env-row">
+                    <span class="env-key mono">{key}</span>
+                    <input
+                      class="env-value"
+                      type="text"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
+                      value={currentProfile.env[key]}
+                      oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
+                    />
+                    <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
+                  </div>
+                {/each}
               </div>
-            </div>
 
-            <div class="field">
-              <label for="new-profile">New Profile</label>
-              <div class="row">
+              <div class="env-add-row">
                 <input
-                  id="new-profile"
+                  class="env-key-input"
                   type="text"
                   autocapitalize="off"
                   autocorrect="off"
                   autocomplete="off"
                   spellcheck="false"
-                  bind:value={newProfileName}
-                  placeholder="e.g. development"
+                  bind:value={newEnvKey}
+                  placeholder="KEY"
                 />
-                <button class="btn btn-add" onclick={createProfile} disabled={!profiles || !newProfileName.trim()}>
-                  Create
+                <input
+                  class="env-value-input"
+                  type="text"
+                  autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
+                  bind:value={newEnvValue}
+                  placeholder="value"
+                />
+                <button class="btn btn-add" onclick={addEnvVar} disabled={!newEnvKey.trim()}>
+                  Add
                 </button>
               </div>
-              <span class="field-hint">Name must be lowercase letters, numbers, or hyphens.</span>
-            </div>
+            {:else}
+              <div class="field-hint">Create a profile to edit environment variables.</div>
+            {/if}
+          </div>
 
-            <div class="field">
-              <!-- svelte-ignore a11y_label_has_associated_control -->
-              <label>Environment Variables</label>
-              {#if profiles && selectedProfileKey && currentProfile}
-                <div class="env-table">
-                  {#if Object.keys(currentProfile.env ?? {}).length === 0}
-                    <div class="env-empty">No environment variables</div>
-                  {:else}
-                    {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
-                      <div class="env-row">
-                        <span class="env-key mono">{key}</span>
-                        <input
-                          class="env-value"
-                          type="text"
-                          autocapitalize="off"
-                          autocorrect="off"
-                          autocomplete="off"
-                          spellcheck="false"
-                          value={currentProfile.env[key]}
-                          oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
-                        />
-                        <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
-                      </div>
-                    {/each}
-                  {/if}
-                </div>
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>AI Settings (per profile)</label>
+            {#if profiles && selectedProfileKey && currentProfile}
+              <div class="ai-toggle">
+                <input
+                  id="ai-enabled"
+                  type="checkbox"
+                  checked={!!currentProfile.ai}
+                  onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
+                />
+                <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
+              </div>
 
-                <div class="env-add-row">
-                  <input
-                    class="env-key-input"
-                    type="text"
-                    autocapitalize="off"
-                    autocorrect="off"
-                    autocomplete="off"
-                    spellcheck="false"
-                    bind:value={newEnvKey}
-                    placeholder="KEY"
-                  />
-                  <input
-                    class="env-value-input"
-                    type="text"
-                    autocapitalize="off"
-                    autocorrect="off"
-                    autocomplete="off"
-                    spellcheck="false"
-                    bind:value={newEnvValue}
-                    placeholder="value"
-                  />
-                  <button class="btn btn-add" onclick={addEnvVar} disabled={!newEnvKey.trim()}>
-                    Add
-                  </button>
-                </div>
-              {:else}
-                <div class="field-hint">Create a profile to edit environment variables.</div>
-              {/if}
-            </div>
-
-            <div class="field">
-              <!-- svelte-ignore a11y_label_has_associated_control -->
-              <label>AI Settings (per profile)</label>
-              {#if profiles && selectedProfileKey && currentProfile}
-                {@const currentAi = currentProfile.ai ?? {
-                  endpoint: "",
-                  api_key: "",
-                  model: "",
-                  language: "en",
-                  summary_enabled: true,
-                }}
-                {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
+              {#if currentProfile.ai}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
@@ -1376,19 +933,19 @@
                       autocorrect="off"
                       autocomplete="off"
                       spellcheck="false"
-                      value={currentAi?.endpoint ?? ""}
+                      value={currentProfile.ai.endpoint}
                       oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
                     />
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">API Key</span>
                     <input
-                      type="password"
+                      type="text"
                       autocapitalize="off"
                       autocorrect="off"
                       autocomplete="off"
                       spellcheck="false"
-                      value={currentAi?.api_key ?? ""}
+                      value={currentProfile.ai.api_key}
                       oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                     />
                   </div>
@@ -1397,8 +954,8 @@
                     <div class="row ai-model-row">
                       <select
                         class="select ai-model-select"
-                        value={currentAi?.model ?? ""}
-                        disabled={aiModelsLoading || !currentEndpoint}
+                        value={currentProfile.ai.model}
+                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
                         onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
                       >
                         <option value="">Select model...</option>
@@ -1409,7 +966,7 @@
                       <button
                         class="btn btn-ghost"
                         onclick={refreshAiModels}
-                        disabled={aiModelsLoading || !currentEndpoint}
+                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
                       >
                         {aiModelsLoading ? "Loading..." : "Refresh"}
                       </button>
@@ -1420,30 +977,9 @@
                       <span class="field-hint">
                         Current model is not listed in /v1/models.
                       </span>
-                    {:else if
-                      !aiModelsLoading &&
-                      currentEndpoint &&
-                      aiModelsLoadedKey !== currentAiRequestKey}
-                      <span class="field-hint">Click Refresh to load models from /v1/models.</span>
-                    {:else if
-                      !aiModelsLoading &&
-                      aiModels.length === 0 &&
-                      currentEndpoint &&
-                      aiModelsLoadedKey === currentAiRequestKey}
+                    {:else if !aiModelsLoading && aiModels.length === 0 && currentProfile.ai.endpoint.trim()}
                       <span class="field-hint">No models returned from /v1/models.</span>
                     {/if}
-                  </div>
-                  <div class="ai-field">
-                    <span class="ai-label">Profile Language</span>
-                    <select
-                      class="select"
-                      value={currentAi?.language ?? "en"}
-                      onchange={(e) => updateAiField("language", (e.target as HTMLSelectElement).value)}
-                    >
-                      <option value="en">English</option>
-                      <option value="ja">Japanese</option>
-                      <option value="auto">Auto</option>
-                    </select>
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">Session Summary</span>
@@ -1451,20 +987,20 @@
                       <input
                         id="ai-summary"
                         type="checkbox"
-                        checked={currentAi?.summary_enabled ?? false}
+                        checked={currentProfile.ai.summary_enabled}
                         onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
                       />
                       <label for="ai-summary">Enabled</label>
                     </div>
                   </div>
                 </div>
-              {:else}
-                <div class="field-hint">Create a profile to configure AI settings.</div>
               {/if}
-            </div>
+            {:else}
+              <div class="field-hint">Create a profile to configure AI settings.</div>
+            {/if}
           </div>
-        {/if}
-      </div>
+        </div>
+      </details>
     </div>
 
     <div class="settings-footer">
@@ -1510,15 +1046,13 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 20px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    line-height: 1;
+    font-size: var(--ui-font-lg);
+    font-family: monospace;
+    padding: 2px 4px;
   }
 
   .close-btn:hover {
     color: var(--text-primary);
-    background: var(--bg-hover);
   }
 
   .loading {
@@ -1529,54 +1063,70 @@
 
   .settings-body {
     flex: 1;
+    padding: 24px;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
-  }
-
-  .settings-tabs {
-    display: flex;
-    gap: 2px;
-    border-bottom: 1px solid var(--border-color);
-    padding: 0 24px;
-    flex-shrink: 0;
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  .settings-tab-btn {
-    padding: 10px 16px;
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--text-muted);
-    font-size: var(--ui-font-md);
-    font-family: inherit;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .settings-tab-btn:hover {
-    color: var(--text-secondary);
-  }
-
-  .settings-tab-btn.active {
-    color: var(--text-primary);
-    border-bottom-color: var(--accent);
-  }
-
-  .settings-tab-content {
-    flex: 1;
+    gap: 24px;
     overflow-y: auto;
-    padding: 24px;
   }
 
   .divider {
     height: 1px;
     background: var(--border-color);
     opacity: 0.7;
+  }
+
+  .section-title {
+    font-size: var(--ui-font-md);
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+  }
+
+  .settings-section {
+    border: none;
+  }
+
+  .settings-section > summary.section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    padding: 4px 0;
+  }
+
+  .settings-section > summary.section-title::-webkit-details-marker {
+    display: none;
+  }
+
+  .settings-section > summary.section-title::marker {
+    content: "";
+  }
+
+  .settings-section > summary.section-title:focus-visible {
+    outline: 2px solid var(--border-color);
+    outline-offset: 4px;
+    border-radius: 6px;
+  }
+
+  .settings-section > summary.section-title::after {
+    content: "[+]";
+    font-family: monospace;
+    font-size: var(--ui-font-base);
+    color: var(--text-muted);
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .settings-section[open] > summary.section-title::after {
+    content: "[-]";
+  }
+
+  .settings-section > summary.section-title:hover::after {
+    color: var(--text-primary);
   }
 
   .section-content {
@@ -1632,24 +1182,6 @@
     flex-wrap: wrap;
   }
 
-  .scope-select {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 180px;
-  }
-
-  .scope-select label {
-    font-size: var(--ui-font-sm);
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-  }
-
-  .scope-select .select {
-    max-width: none;
-  }
-
   .env-table {
     display: flex;
     flex-direction: column;
@@ -1658,7 +1190,6 @@
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: 8px;
-    min-height: 96px;
   }
 
   .env-row {
@@ -1666,12 +1197,6 @@
     grid-template-columns: 1fr 2fr auto;
     gap: 8px;
     align-items: center;
-  }
-
-  .env-empty {
-    color: var(--text-muted);
-    font-size: var(--ui-font-sm);
-    padding: 16px 0;
   }
 
   .env-key {
@@ -1692,12 +1217,6 @@
     font-family: monospace;
     outline: none;
     width: 100%;
-  }
-
-  .field input[type="text"].env-value,
-  .field input[type="text"].env-key-input,
-  .field input[type="text"].env-value-input {
-    max-width: none;
   }
 
   .env-add-row {
@@ -1746,7 +1265,6 @@
   }
 
   .ai-field input[type="text"],
-  .ai-field input[type="password"],
   .ai-field select {
     padding: 8px 12px;
     background: var(--bg-secondary);
@@ -1778,75 +1296,6 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     width: fit-content;
-  }
-
-  .skill-overview {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-
-  .skill-badge,
-  .skill-mini-badge {
-    padding: 4px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border-color);
-    font-family: monospace;
-    font-size: var(--ui-font-sm);
-    letter-spacing: 0.2px;
-  }
-
-  .status-ok {
-    border-color: var(--green);
-    color: var(--green);
-  }
-
-  .status-degraded {
-    border-color: var(--yellow);
-    color: var(--yellow);
-  }
-
-  .status-failed {
-    border-color: var(--red);
-    color: var(--red);
-  }
-
-  .skill-agent-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    max-width: 960px;
-  }
-
-  .skill-agent-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--bg-secondary);
-  }
-
-  .skill-agent-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .skill-agent-label {
-    color: var(--text-primary);
-    font-size: var(--ui-font-md);
-    font-weight: 500;
-  }
-
-  .skill-agent-path {
-    color: var(--text-muted);
-    font-size: var(--ui-font-sm);
-    word-break: break-all;
   }
 
   .field input:focus {
@@ -1947,13 +1396,8 @@
     font-size: var(--ui-font-md);
   }
 
-  .btn-add:hover:not(:disabled) {
+  .btn-add:hover {
     background: var(--bg-hover);
-  }
-
-  .btn-add:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   .btn-cancel {
@@ -2075,10 +1519,6 @@
     }
     .ai-grid {
       grid-template-columns: 1fr;
-    }
-    .skill-agent-row {
-      flex-direction: column;
-      align-items: flex-start;
     }
   }
 </style>

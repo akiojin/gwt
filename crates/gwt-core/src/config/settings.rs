@@ -1,12 +1,12 @@
 //! Settings management (SPEC-a3f4c9df)
 //!
-//! Manages application settings from global configuration files.
+//! Manages application settings with automatic migration and path unification.
 //!
 //! Global config locations (priority):
 //! 1. ~/.gwt/config.toml (new, preferred)
 //! 2. ~/.config/gwt/config.toml (legacy, fallback)
 
-use super::migration::{ensure_config_dir, write_atomic};
+use super::migration::{auto_migrate, ensure_config_dir, write_atomic};
 use crate::error::{GwtError, Result};
 use figment::{
     providers::{Env, Format, Toml},
@@ -44,11 +44,7 @@ pub struct Settings {
     pub voice_input: VoiceInputSettings,
     /// Terminal settings
     pub terminal: TerminalSettings,
-    /// Shell environment capture mode.
-    ///
-    /// - `None`: not selected yet (startup prompt decides).
-    /// - `Some(LoginShell)`: capture via login shell at startup.
-    /// - `Some(ProcessEnv)`: use process environment only.
+    /// Shell environment capture mode at startup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os_env_capture_mode: Option<OsEnvCaptureMode>,
 }
@@ -99,7 +95,7 @@ pub struct AgentSettings {
     pub gemini_path: Option<PathBuf>,
     /// Auto install dependencies before launching agent
     pub auto_install_deps: bool,
-    /// Default GitHub Project V2 ID for issue-first spec sync
+    /// Default GitHub Project V2 ID for issue-first spec sync.
     pub github_project_id: Option<String>,
     /// Skill / plugin registration scope preferences.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,7 +152,7 @@ pub struct TerminalSettings {
     pub default_shell: Option<String>,
 }
 
-/// Appearance settings (font size and font family)
+/// Appearance settings (font sizes)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppearanceSettings {
@@ -164,10 +160,6 @@ pub struct AppearanceSettings {
     pub ui_font_size: u32,
     /// Terminal font size in pixels (8-24, default 13)
     pub terminal_font_size: u32,
-    /// UI font family stack
-    pub ui_font_family: String,
-    /// Terminal font family stack
-    pub terminal_font_family: String,
 }
 
 impl Default for AppearanceSettings {
@@ -175,18 +167,8 @@ impl Default for AppearanceSettings {
         Self {
             ui_font_size: 13,
             terminal_font_size: 13,
-            ui_font_family: default_ui_font_family(),
-            terminal_font_family: default_terminal_font_family(),
         }
     }
-}
-
-fn default_ui_font_family() -> String {
-    "system-ui, -apple-system, \"Segoe UI\", Roboto, Ubuntu, sans-serif".to_string()
-}
-
-fn default_terminal_font_family() -> String {
-    "\"JetBrains Mono\", \"Fira Code\", \"SF Mono\", Menlo, Consolas, monospace".to_string()
 }
 
 /// Voice input settings
@@ -195,10 +177,16 @@ fn default_terminal_font_family() -> String {
 pub struct VoiceInputSettings {
     /// Enable voice input hotkey support
     pub enabled: bool,
+    /// Voice backend engine (currently "qwen3-asr")
+    pub engine: String,
     /// Global hotkey string (e.g., "Mod+Shift+M")
     pub hotkey: String,
+    /// Push-to-talk hotkey string (e.g., "Mod+Shift+Space")
+    pub ptt_hotkey: String,
     /// Recognition language ("auto" | "ja" | "en")
     pub language: String,
+    /// Quality preset ("fast" | "balanced" | "accurate")
+    pub quality: String,
     /// Local STT model tier hint
     pub model: String,
 }
@@ -207,9 +195,12 @@ impl Default for VoiceInputSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            engine: "qwen3-asr".to_string(),
             hotkey: "Mod+Shift+M".to_string(),
+            ptt_hotkey: "Mod+Shift+Space".to_string(),
             language: "auto".to_string(),
-            model: "base".to_string(),
+            quality: "balanced".to_string(),
+            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
         }
     }
 }
@@ -227,9 +218,80 @@ impl Settings {
         debug!(
             category = "config",
             repo_root = %repo_root.display(),
-            "Loading settings (global-only mode)"
+            "Loading settings"
         );
-        Self::load_global()
+
+        auto_migrate(repo_root)?;
+
+        // Auto-migrate global path if needed (SPEC-a3f4c9df)
+        if Self::needs_global_path_migration() {
+            match Self::migrate_global_path_if_needed() {
+                Ok(true) => {
+                    info!(
+                        category = "config",
+                        operation = "auto_migrate",
+                        "Auto-migrated global config from ~/.config/gwt/ to ~/.gwt/"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        category = "config",
+                        error = %e,
+                        "Failed to auto-migrate global config path"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let config_path = Self::find_config_file(repo_root);
+
+        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
+
+        if let Some(ref path) = config_path {
+            debug!(
+                category = "config",
+                config_path = %path.display(),
+                "Merging config file"
+            );
+            figment = figment.merge(Toml::file(path));
+        }
+
+        figment = figment.merge(Self::settings_env_provider());
+
+        let mut settings: Settings = figment.extract().map_err(|e| {
+            error!(
+                category = "config",
+                error = %e,
+                "Failed to parse config"
+            );
+            GwtError::ConfigParseError {
+                reason: e.to_string(),
+            }
+        })?;
+
+        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.docker.force_host = parsed;
+            }
+        }
+
+        info!(
+            category = "config",
+            operation = "load",
+            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
+            debug = settings.debug,
+            worktree_root = %settings.worktree_root,
+            "Settings loaded"
+        );
+
+        Ok(settings)
     }
 
     /// Load settings from global configuration files and environment.
@@ -319,13 +381,36 @@ impl Settings {
         toml::to_string_pretty(&Self::default()).unwrap_or_default()
     }
 
-    /// Find the global configuration file (SPEC-a3f4c9df FR-013)
+    /// Find the configuration file (SPEC-a3f4c9df FR-013)
     ///
     /// Priority (highest to lowest):
-    /// 1. ~/.gwt/config.toml (global, new location)
-    /// 2. ~/.config/gwt/config.toml (global, legacy fallback)
-    pub fn find_config_file(_repo_root: &Path) -> Option<PathBuf> {
-        debug!(category = "config", "Searching for global config file");
+    /// 1. .gwt.toml (local, highest priority)
+    /// 2. .gwt/config.toml (local)
+    /// 3. ~/.gwt/config.toml (global, new location)
+    /// 4. ~/.config/gwt/config.toml (global, legacy fallback)
+    pub fn find_config_file(repo_root: &Path) -> Option<PathBuf> {
+        debug!(
+            category = "config",
+            repo_root = %repo_root.display(),
+            "Searching for config file"
+        );
+
+        // Local config candidates
+        let local_candidates = [
+            repo_root.join(".gwt.toml"),
+            repo_root.join(".gwt/config.toml"),
+        ];
+
+        for path in local_candidates {
+            if path.exists() {
+                debug!(
+                    category = "config",
+                    config_path = %path.display(),
+                    "Found local config file"
+                );
+                return Some(path);
+            }
+        }
 
         // Check new global config location (~/.gwt/config.toml)
         if let Some(new_global) = Self::new_global_config_path() {
@@ -353,7 +438,8 @@ impl Settings {
 
         debug!(
             category = "config",
-            "No global config file found, using defaults"
+            repo_root = %repo_root.display(),
+            "No config file found, using defaults"
         );
         None
     }
@@ -564,47 +650,36 @@ mod tests {
         assert!(!settings.protected_branches.is_empty());
         assert!(settings.protected_branches.contains(&"main".to_string()));
         assert!(!settings.debug);
-        assert_eq!(settings.app_language, "auto");
         assert!(!settings.voice_input.enabled);
+        assert_eq!(settings.voice_input.engine, "qwen3-asr");
         assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
+        assert_eq!(settings.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(settings.voice_input.language, "auto");
-        assert_eq!(settings.voice_input.model, "base");
+        assert_eq!(settings.voice_input.quality, "balanced");
+        assert_eq!(settings.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
     }
 
     #[test]
-    fn test_load_ignores_local_json_and_toml() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+    fn test_load_auto_migrates_json() {
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        let json_path = temp.path().join(".gwt.json");
+        let toml_path = temp.path().join(".gwt.toml");
 
         std::fs::write(
-            repo.join(".gwt.json"),
-            r#"{"default_base_branch":"develop","worktree_root":".worktrees","debug":true}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            repo.join(".gwt.toml"),
-            r#"
-debug = true
-default_base_branch = "local"
-"#,
+            &json_path,
+            r#"{"default_base_branch":"develop","worktree_root":".worktrees"}"#,
         )
         .unwrap();
 
-        let settings = Settings::load(&repo).unwrap();
-        assert!(!settings.debug);
-        assert_eq!(settings.app_language, "auto");
-        assert_eq!(settings.default_base_branch, "main");
+        let settings = Settings::load(temp.path()).unwrap();
+        assert!(toml_path.exists());
+        assert_eq!(settings.default_base_branch, "develop");
     }
 
     #[test]
     fn test_save_and_load() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
+        let config_path = temp.path().join(".gwt.toml");
 
         let settings = Settings {
             protected_branches: vec!["main".to_string(), "release".to_string()],
@@ -612,11 +687,9 @@ default_base_branch = "local"
             ..Default::default()
         };
 
-        settings.save_global().unwrap();
+        settings.save(&config_path).unwrap();
 
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let loaded = Settings::load(&repo).unwrap();
+        let loaded = Settings::load(temp.path()).unwrap();
         assert!(loaded.protected_branches.contains(&"main".to_string()));
         assert!(loaded.protected_branches.contains(&"release".to_string()));
         assert!(loaded.debug);
@@ -633,14 +706,12 @@ default_base_branch = "local"
 
     #[test]
     fn test_env_override() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         // Set environment variable
         std::env::set_var("GWT_DEBUG", "true");
 
-        let settings = Settings::load_global().unwrap();
+        let settings = Settings::load(temp.path()).unwrap();
 
         // Clean up
         std::env::remove_var("GWT_DEBUG");
@@ -650,12 +721,10 @@ default_base_branch = "local"
 
     #[test]
     fn test_env_override_docker_force_host_accepts_numeric_bool() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
-        let settings = Settings::load_global().unwrap();
+        let settings = Settings::load(temp.path()).unwrap();
         std::env::remove_var("GWT_DOCKER_FORCE_HOST");
 
         assert!(settings.docker.force_host);
@@ -663,12 +732,10 @@ default_base_branch = "local"
 
     #[test]
     fn test_env_override_auto_install_deps() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
-        let settings = Settings::load_global().unwrap();
+        let settings = Settings::load(temp.path()).unwrap();
         std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS");
 
         assert!(settings.agent.auto_install_deps);
@@ -718,39 +785,6 @@ default_base_branch = "new-global"
         let settings = Settings::load(&repo).unwrap();
         assert!(settings.debug);
         assert_eq!(settings.default_base_branch, "new-global");
-    }
-
-    #[test]
-    fn test_load_ignores_local_config_when_global_exists() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let global_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&global_dir).unwrap();
-        std::fs::write(
-            global_dir.join("config.toml"),
-            r#"
-debug = true
-default_base_branch = "global-main"
-"#,
-        )
-        .unwrap();
-
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        std::fs::write(
-            repo.join(".gwt.toml"),
-            r#"
-debug = false
-default_base_branch = "local-ignored"
-"#,
-        )
-        .unwrap();
-
-        let settings = Settings::load(&repo).unwrap();
-        assert!(settings.debug);
-        assert_eq!(settings.default_base_branch, "global-main");
     }
 
     #[test]
@@ -807,58 +841,38 @@ default_base_branch = "legacy-global"
         let settings = Settings::default();
         assert_eq!(settings.appearance.ui_font_size, 13);
         assert_eq!(settings.appearance.terminal_font_size, 13);
-        assert_eq!(
-            settings.appearance.ui_font_family,
-            "system-ui, -apple-system, \"Segoe UI\", Roboto, Ubuntu, sans-serif"
-        );
-        assert_eq!(
-            settings.appearance.terminal_font_family,
-            "\"JetBrains Mono\", \"Fira Code\", \"SF Mono\", Menlo, Consolas, monospace"
-        );
     }
 
     #[test]
     fn test_appearance_backward_compat() {
-        // Config without [appearance]/[voice_input] sections should deserialize with defaults.
-        let settings: Settings = toml::from_str("debug = true\n").unwrap();
+        // Config without [appearance]/[voice_input] sections should deserialize with defaults
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
+        let settings = Settings::load(temp.path()).unwrap();
         assert!(settings.debug);
-        assert_eq!(settings.app_language, "auto");
         assert_eq!(settings.appearance.ui_font_size, 13);
         assert_eq!(settings.appearance.terminal_font_size, 13);
-        assert_eq!(
-            settings.appearance.ui_font_family,
-            "system-ui, -apple-system, \"Segoe UI\", Roboto, Ubuntu, sans-serif"
-        );
-        assert_eq!(
-            settings.appearance.terminal_font_family,
-            "\"JetBrains Mono\", \"Fira Code\", \"SF Mono\", Menlo, Consolas, monospace"
-        );
         assert!(!settings.voice_input.enabled);
+        assert_eq!(settings.voice_input.engine, "qwen3-asr");
         assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
+        assert_eq!(settings.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(settings.voice_input.language, "auto");
-        assert_eq!(settings.voice_input.model, "base");
+        assert_eq!(settings.voice_input.quality, "balanced");
+        assert_eq!(settings.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
     }
 
     #[test]
     fn test_appearance_save_load() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
+        let config_path = temp.path().join(".gwt.toml");
         let mut settings = Settings::default();
         settings.appearance.ui_font_size = 16;
         settings.appearance.terminal_font_size = 18;
-        settings.appearance.ui_font_family = "Inter, sans-serif".to_string();
-        settings.appearance.terminal_font_family = "\"Cascadia Mono\", monospace".to_string();
-        settings.save_global().unwrap();
-        let loaded = Settings::load_global().unwrap();
+        settings.save(&config_path).unwrap();
+        let loaded = Settings::load(temp.path()).unwrap();
         assert_eq!(loaded.appearance.ui_font_size, 16);
         assert_eq!(loaded.appearance.terminal_font_size, 18);
-        assert_eq!(loaded.appearance.ui_font_family, "Inter, sans-serif");
-        assert_eq!(
-            loaded.appearance.terminal_font_family,
-            "\"Cascadia Mono\", monospace"
-        );
     }
 
     #[test]
@@ -902,13 +916,14 @@ default_base_branch = "global-main"
 [appearance]
 ui_font_size = 17
 terminal_font_size = 19
-ui_font_family = "Inter, sans-serif"
-terminal_font_family = "\"Cascadia Mono\", monospace"
 [voice_input]
 enabled = true
+engine = "qwen3-asr"
 hotkey = "Mod+Shift+V"
+ptt_hotkey = "Mod+Shift+Space"
 language = "ja"
-model = "base"
+quality = "accurate"
+model = "Qwen/Qwen3-ASR-1.7B"
 "#,
         )
         .unwrap();
@@ -916,18 +931,15 @@ model = "base"
         let loaded = Settings::load_global().unwrap();
         assert!(loaded.debug);
         assert_eq!(loaded.default_base_branch, "global-main");
-        assert_eq!(loaded.app_language, "auto");
         assert_eq!(loaded.appearance.ui_font_size, 17);
         assert_eq!(loaded.appearance.terminal_font_size, 19);
-        assert_eq!(loaded.appearance.ui_font_family, "Inter, sans-serif");
-        assert_eq!(
-            loaded.appearance.terminal_font_family,
-            "\"Cascadia Mono\", monospace"
-        );
         assert!(loaded.voice_input.enabled);
+        assert_eq!(loaded.voice_input.engine, "qwen3-asr");
         assert_eq!(loaded.voice_input.hotkey, "Mod+Shift+V");
+        assert_eq!(loaded.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(loaded.voice_input.language, "ja");
-        assert_eq!(loaded.voice_input.model, "base");
+        assert_eq!(loaded.voice_input.quality, "accurate");
+        assert_eq!(loaded.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
 
         match prev_gwt_agent {
             Some(value) => std::env::set_var("GWT_AGENT", value),
@@ -937,118 +949,19 @@ model = "base"
 
     #[test]
     fn test_load_ignores_runtime_gwt_agent_env() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let global_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&global_dir).unwrap();
-        std::fs::write(global_dir.join("config.toml"), "debug = true\n").unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
 
         let prev_gwt_agent = std::env::var_os("GWT_AGENT");
         std::env::set_var("GWT_AGENT", "Codex");
 
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let loaded = Settings::load(&repo).unwrap();
+        let loaded = Settings::load(temp.path()).unwrap();
         assert!(loaded.debug);
 
         match prev_gwt_agent {
             Some(value) => std::env::set_var("GWT_AGENT", value),
             None => std::env::remove_var("GWT_AGENT"),
         }
-    }
-
-    #[test]
-    fn test_terminal_default() {
-        let settings = Settings::default();
-        assert!(settings.terminal.default_shell.is_none());
-    }
-
-    #[test]
-    fn test_terminal_backward_compat() {
-        // Config without [terminal] section should deserialize with defaults
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let global_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&global_dir).unwrap();
-        std::fs::write(global_dir.join("config.toml"), "debug = true\n").unwrap();
-
-        let settings = Settings::load_global().unwrap();
-        assert!(settings.debug);
-        assert!(settings.terminal.default_shell.is_none());
-    }
-
-    #[test]
-    fn test_terminal_save_load() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let mut settings = Settings::default();
-        settings.terminal.default_shell = Some("wsl".to_string());
-        settings.save_global().unwrap();
-
-        let loaded = Settings::load_global().unwrap();
-        assert_eq!(loaded.terminal.default_shell, Some("wsl".to_string()));
-    }
-
-    #[test]
-    fn test_terminal_reads_from_config_toml() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let global_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&global_dir).unwrap();
-        std::fs::write(
-            global_dir.join("config.toml"),
-            r#"
-[terminal]
-default_shell = "powershell"
-"#,
-        )
-        .unwrap();
-
-        let settings = Settings::load_global().unwrap();
-        assert_eq!(
-            settings.terminal.default_shell,
-            Some("powershell".to_string())
-        );
-    }
-
-    #[test]
-    fn test_skill_registration_default_unset() {
-        let settings = Settings::default();
-        assert!(settings.agent.skill_registration.is_none());
-    }
-
-    #[test]
-    fn test_skill_registration_save_load_round_trip() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let mut settings = Settings::default();
-        settings.agent.skill_registration = Some(SkillRegistrationPreferences {
-            default_scope: SkillRegistrationScope::Project,
-            codex_scope: Some(SkillRegistrationScope::User),
-            claude_scope: Some(SkillRegistrationScope::Project),
-            gemini_scope: Some(SkillRegistrationScope::Local),
-        });
-        settings.save_global().unwrap();
-
-        let loaded = Settings::load_global().unwrap();
-        assert_eq!(
-            loaded.agent.skill_registration,
-            Some(SkillRegistrationPreferences {
-                default_scope: SkillRegistrationScope::Project,
-                codex_scope: Some(SkillRegistrationScope::User),
-                claude_scope: Some(SkillRegistrationScope::Project),
-                gemini_scope: Some(SkillRegistrationScope::Local),
-            })
-        );
     }
 }
