@@ -44,6 +44,13 @@ pub struct Settings {
     pub voice_input: VoiceInputSettings,
     /// Terminal settings
     pub terminal: TerminalSettings,
+    /// Shell environment capture mode.
+    ///
+    /// - `None`: not selected yet (startup prompt decides).
+    /// - `Some(LoginShell)`: capture via login shell at startup.
+    /// - `Some(ProcessEnv)`: use process environment only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_env_capture_mode: Option<OsEnvCaptureMode>,
 }
 
 impl Default for Settings {
@@ -65,8 +72,17 @@ impl Default for Settings {
             app_language: "auto".to_string(),
             voice_input: VoiceInputSettings::default(),
             terminal: TerminalSettings::default(),
+            os_env_capture_mode: None,
         }
     }
+}
+
+/// Mode for shell environment capture at startup.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OsEnvCaptureMode {
+    LoginShell,
+    ProcessEnv,
 }
 
 /// Agent settings

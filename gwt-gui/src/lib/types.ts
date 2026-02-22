@@ -175,6 +175,7 @@ export interface SettingsData {
   app_language: "auto" | "ja" | "en" | (string & {});
   voice_input: VoiceInputSettings;
   default_shell?: string | null;
+  os_env_capture_mode?: "login_shell" | "process_env" | null;
 }
 
 export interface VoiceInputSettings {
@@ -425,6 +426,14 @@ export interface CapturedEnvInfo {
   source: string;
   reason: string | null;
   ready: boolean;
+}
+
+export interface OsEnvCaptureStatus {
+  configuredMode?: "login_shell" | "process_env" | null;
+  activeSource: string;
+  reason: string | null;
+  ready: boolean;
+  captureInFlight: boolean;
 }
 
 export type UpdateState =
