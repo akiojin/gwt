@@ -542,10 +542,10 @@ pub fn build_app(
             }
 
             if let tauri::WindowEvent::Focused(true) = event {
-                window
-                    .app_handle()
-                    .state::<AppState>()
-                    .push_window_focus(window.label());
+                let state = window.app_handle().state::<AppState>();
+                if state.project_for_window(window.label()).is_some() {
+                    state.push_window_focus(window.label());
+                }
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 

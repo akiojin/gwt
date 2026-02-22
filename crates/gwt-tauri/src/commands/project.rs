@@ -268,6 +268,7 @@ pub fn open_project(
             project_identity.clone(),
         ) {
             Ok(()) => {
+                state.push_window_focus(&current_window_label);
                 // Record to recent projects history
                 let _ = gwt_core::config::record_recent_project(&project_root_str);
 
@@ -296,6 +297,7 @@ pub fn open_project(
                     .app_handle()
                     .get_webview_window(&existing_window_label)
                 {
+                    state.push_window_focus(&existing_window_label);
                     let _ = existing_window.show();
                     let _ = existing_window.set_focus();
                     let _ = crate::menu::rebuild_menu(window.app_handle());

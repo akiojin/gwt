@@ -231,6 +231,7 @@ impl AppState {
         if let Ok(mut map) = self.window_project_modes.lock() {
             map.remove(window_label);
         }
+        self.remove_window_from_history(window_label);
     }
 
     pub fn clear_window_state(&self, window_label: &str) {
@@ -601,6 +602,30 @@ mod tests {
             WindowAgentTabsState::default()
         );
         assert!(state.window_migrations_snapshot().contains_key("main"));
+    }
+
+    #[test]
+    fn clear_project_for_window_removes_window_from_mru_history() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        state.clear_project_for_window("B");
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["A", "C"]);
+    }
+
+    #[test]
+    fn window_rotation_skips_window_after_project_close() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        state.clear_project_for_window("B");
+        assert_eq!(state.next_window(), Some("C".to_string()));
+        assert_eq!(state.next_window(), Some("A".to_string()));
     }
 
     #[test]
