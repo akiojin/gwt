@@ -124,8 +124,8 @@
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={onclose}>
-    <div class="about-dialog" onclick={(e) => e.stopPropagation()}>
+  <div class="overlay modal-overlay" onclick={onclose}>
+    <div class="about-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
       <div class="tab-bar">
         {#each TABS as tab (tab.id)}
           <button

@@ -96,17 +96,17 @@
 
 {#if open}
   <div
-    class="overlay"
+    class="overlay modal-overlay"
     role="dialog"
     aria-modal="true"
     aria-label="Preparing Launch"
     tabindex="0"
     onkeydown={handleKeydown}
   >
-    <div class="dialog">
+    <div class="dialog modal-dialog-shell">
       <div class="header">
         <h2>Preparing Launch</h2>
-        <button class="close-btn" onclick={onCancel} disabled={status !== "running"}>[x]</button>
+        <button class="close-btn" onclick={onCancel} disabled={status !== "running"} aria-label="Close">&times;</button>
       </div>
 
       <div class="body mono">
@@ -189,19 +189,29 @@
   }
 
   .close-btn {
-    border: 1px solid var(--border-color);
     background: none;
+    border: none;
     color: var(--text-muted);
-    border-radius: 10px;
-    padding: 6px 10px;
+    border-radius: 4px;
+    padding: 4px 8px;
     cursor: pointer;
-    font-size: 12px;
-    font-weight: 700;
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  .close-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .close-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  .close-btn:disabled:hover {
+    color: var(--text-muted);
+    background: none;
   }
 
   .body {

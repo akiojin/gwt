@@ -28,3 +28,12 @@
 - [x] T014 [US7] README.md にキーボードショートカット包括一覧セクション追加 README.md
 - [x] T015 [US7] README.ja.md にキーボードショートカット包括一覧セクション追加 README.ja.md
 - [x] T016 [P] [共通] Window メニュー構造の整合性検証（ナビゲーション → タブ一覧 → Minimize/Zoom → ウィンドウ一覧 → Bring All to Front）
+
+## Phase 5: Cmd+` 巡回対象バグ修正（project 未選択 window 除外）
+
+- [x] T017 [US4,US5] RED: `clear_project_for_window` で MRU から除外されることを検証する失敗テストを追加 crates/gwt-tauri/src/state.rs
+- [x] T018 [US4,US5] RED: project close 後の巡回で除外済み window をスキップする失敗テストを追加 crates/gwt-tauri/src/state.rs
+- [x] T019 [US4,US5] `clear_project_for_window` 実行時に MRU 履歴から対象 window を除去する実装 crates/gwt-tauri/src/state.rs
+- [x] T020 [US4,US5] `open_project` 成功時（Opened/FocusedExisting）に MRU 先頭へ反映する実装 crates/gwt-tauri/src/commands/project.rs
+- [x] T021 [US4,US5] `Focused(true)` の MRU 更新を project あり window のみに制限する実装 crates/gwt-tauri/src/app.rs
+- [x] T022 [P] [US4,US5] GREEN: `cargo test -p gwt-tauri state::tests::` と `cargo test -p gwt-tauri commands::project::tests::` で回帰確認 specs/SPEC-e7b3a1d2/tdd.md

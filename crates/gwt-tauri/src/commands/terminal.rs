@@ -5461,7 +5461,7 @@ pub fn get_os_env_capture_status(state: State<AppState>) -> OsEnvCaptureStatus {
 pub fn set_os_env_capture_mode(
     mode: String,
     state: State<AppState>,
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
 ) -> Result<OsEnvCaptureStatus, StructuredError> {
     let selected_mode = parse_os_env_capture_mode(&mode)
         .map_err(|e| StructuredError::internal(&e, "set_os_env_capture_mode"))?;
@@ -5480,7 +5480,7 @@ pub fn set_os_env_capture_mode(
         OsEnvCaptureMode::LoginShell => {
             #[cfg(not(test))]
             {
-                crate::app::spawn_login_shell_env_capture(app_handle);
+                crate::app::spawn_login_shell_env_capture(_app_handle);
             }
             #[cfg(test)]
             {

@@ -51,18 +51,6 @@ describe("ReportDialog", () => {
     collectSystemInfoMock.mockResolvedValue("macOS 15.2, M4 Pro");
     collectRecentLogsMock.mockResolvedValue("LOG: test entry");
     collectScreenTextMock.mockReturnValue("=== GWT Screen Capture ===");
-
-    // HTMLDialogElement.showModal / close are not implemented in jsdom
-    HTMLDialogElement.prototype.showModal =
-      HTMLDialogElement.prototype.showModal ||
-      function (this: HTMLDialogElement) {
-        this.setAttribute("open", "");
-      };
-    HTMLDialogElement.prototype.close =
-      HTMLDialogElement.prototype.close ||
-      function (this: HTMLDialogElement) {
-        this.removeAttribute("open");
-      };
   });
 
   it("renders Bug Report tab by default when mode is bug", async () => {
@@ -130,7 +118,7 @@ describe("ReportDialog", () => {
     expect(rendered.getByLabelText("Steps to Reproduce")).toBeTruthy();
   });
 
-  it("does not call showModal again when mode changes while dialog is open", async () => {
+  it("keeps dialog visible and switches tab when mode changes while open", async () => {
     invokeMock.mockResolvedValue({
       owner: "akiojin",
       repo: "gwt",
@@ -138,14 +126,13 @@ describe("ReportDialog", () => {
     });
 
     const onclose = vi.fn();
-    const showModalSpy = vi.spyOn(HTMLDialogElement.prototype, "showModal");
     const rendered = await renderReportDialog({
       open: true,
       mode: "bug",
       onclose,
     });
 
-    expect(showModalSpy).toHaveBeenCalledTimes(1);
+    expect(rendered.getByText("Bug Report")).toBeTruthy();
 
     await rendered.rerender({
       open: true,
@@ -154,10 +141,8 @@ describe("ReportDialog", () => {
     });
 
     await waitFor(() => {
-      expect(showModalSpy).toHaveBeenCalledTimes(1);
+      expect(rendered.getByLabelText("Description")).toBeTruthy();
     });
-
-    showModalSpy.mockRestore();
   });
 
   it("shows error details section when prefillError is provided", async () => {
@@ -342,6 +327,50 @@ describe("ReportDialog", () => {
     });
 
     await fireEvent.click(rendered.getByText("Cancel"));
+    expect(onclose).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onclose when clicking backdrop", async () => {
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
+    const onclose = vi.fn();
+
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose,
+    });
+
+    const overlay = rendered.container.querySelector(
+      ".report-overlay",
+    ) as HTMLDivElement;
+    expect(overlay).toBeTruthy();
+    await fireEvent.click(overlay);
+    expect(onclose).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onclose on Escape key", async () => {
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
+    const onclose = vi.fn();
+
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose,
+    });
+
+    const overlay = rendered.container.querySelector(
+      ".report-overlay",
+    ) as HTMLDivElement;
+    expect(overlay).toBeTruthy();
+    await fireEvent.keyDown(overlay, { key: "Escape" });
     expect(onclose).toHaveBeenCalledTimes(1);
   });
 

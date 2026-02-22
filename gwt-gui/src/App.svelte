@@ -2800,8 +2800,8 @@
 {#if showTerminalDiagnostics}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (showTerminalDiagnostics = false)}>
-    <div class="diag-dialog" onclick={(e) => e.stopPropagation()}>
+  <div class="overlay modal-overlay" onclick={() => (showTerminalDiagnostics = false)}>
+    <div class="diag-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
       <h2>Terminal Diagnostics</h2>
 
       {#if terminalDiagnosticsLoading}
@@ -2955,8 +2955,8 @@
   </div>
 {/if}
 {#if skillScopePromptOpen}
-  <div class="overlay">
-    <div class="scope-dialog" role="dialog" aria-modal="true" aria-label="Skill registration scope">
+  <div class="overlay modal-overlay">
+    <div class="scope-dialog modal-dialog-shell" role="dialog" aria-modal="true" aria-label="Skill registration scope">
       <h2>Skill Registration Scope</h2>
       <p class="scope-dialog-text">
         Select where managed skills and plugins are auto-registered. You can change this later in
@@ -3012,8 +3012,8 @@
 {#if showOsEnvDebug}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (showOsEnvDebug = false)}>
-    <div class="env-debug-dialog" onclick={(e) => e.stopPropagation()}>
+  <div class="overlay modal-overlay" onclick={() => (showOsEnvDebug = false)}>
+    <div class="env-debug-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
       <h3>Captured Environment</h3>
       {#if osEnvDebugLoading}
         <p class="env-debug-loading">Loading...</p>
@@ -3055,8 +3055,8 @@
 {#if appError}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (appError = null)}>
-    <div class="error-dialog" onclick={(e) => e.stopPropagation()}>
+  <div class="overlay modal-overlay" onclick={() => (appError = null)}>
+    <div class="error-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
       <h2>Error</h2>
       <p class="error-text">{appError}</p>
       <button class="about-close" onclick={() => (appError = null)}>
@@ -3082,12 +3082,13 @@
       {/if}
       <button
         class="toast-close"
+        aria-label="Close"
         onclick={() => {
           toastMessage = null;
           toastAction = null;
         }}
       >
-        [x]
+        &times;
       </button>
     </div>
   </div>
@@ -3472,8 +3473,15 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 13px;
-    padding: 0;
+    font-size: 20px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
+  }
+
+  .toast-close:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .env-debug-dialog {

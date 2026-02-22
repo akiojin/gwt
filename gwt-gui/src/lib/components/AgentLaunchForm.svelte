@@ -1142,12 +1142,12 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_interactive_supports_focus -->
-<div class="overlay" onclick={onClose} onkeydown={handleKeydown} role="dialog" aria-modal="true" aria-label="Launch Agent">
+<div class="overlay modal-overlay" onclick={onClose} onkeydown={handleKeydown} role="dialog" aria-modal="true" aria-label="Launch Agent">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog" onclick={(e) => e.stopPropagation()}>
+  <div class="dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
     <div class="dialog-header">
       <h2>Launch Agent</h2>
-      <button class="close-btn" onclick={onClose}>[x]</button>
+      <button class="close-btn" onclick={onClose} aria-label="Close">&times;</button>
     </div>
 
     {#if loading}
@@ -1851,7 +1851,7 @@
   {#if suggestOpen}
     <!-- Nested modal: stop propagation to avoid closing the Launch Agent dialog -->
     <div
-      class="overlay suggest-overlay"
+      class="overlay modal-overlay suggest-overlay"
       onclick={(e) => {
         e.stopPropagation();
         if (e.target !== e.currentTarget) return;
@@ -1861,10 +1861,10 @@
       aria-modal="true"
       aria-label="Suggest Branch Name"
     >
-      <div class="dialog suggest-dialog">
+      <div class="dialog modal-dialog-shell suggest-dialog">
         <div class="dialog-header">
           <h2>Suggest Branch Name</h2>
-          <button class="close-btn" type="button" onclick={closeSuggestModal}>[x]</button>
+          <button class="close-btn" type="button" onclick={closeSuggestModal} aria-label="Close">&times;</button>
         </div>
 
         <div class="dialog-body">
@@ -1972,13 +1972,15 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: var(--ui-font-lg);
-    font-family: monospace;
-    padding: 2px 4px;
+    font-size: 20px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
   }
 
   .close-btn:hover {
     color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .loading {

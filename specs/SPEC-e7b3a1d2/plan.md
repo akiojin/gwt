@@ -1,12 +1,13 @@
 # 実装計画: ウィンドウ・タブ切り替えショートカット
 
-**仕様ID**: `SPEC-e7b3a1d2` | **日付**: 2026-02-15 | **仕様書**: `specs/SPEC-e7b3a1d2/spec.md`
+**仕様ID**: `SPEC-e7b3a1d2` | **日付**: 2026-02-15（更新: 2026-02-22） | **仕様書**: `specs/SPEC-e7b3a1d2/spec.md`
 
 ## 目的
 
 - タブ切り替え（Cmd+Shift+\[/\]）とウィンドウ切り替え（Cmd+\`）のキーボードショートカットを追加
 - Window メニューに macOS 標準項目（Minimize/Zoom/Bring All to Front）を追加
 - README に包括的キーボードショートカット一覧を記載
+- Cmd+\` / Cmd+Shift+\` の巡回対象を「project を開いている既存ウィンドウ」に限定し、`New Window`（project 未選択）を除外する
 
 ## 技術コンテキスト
 
@@ -26,10 +27,10 @@
 
 ### Phase 2: ウィンドウ切り替え + MRU 管理
 
-1. **AppState に MRU リスト追加**: `state.rs` に `window_focus_history: Mutex<Vec<String>>` を追加。ウィンドウフォーカス変更時に先頭に push し、ウィンドウ破棄時に除去
-2. **フォーカス変更イベントの検出**: `app.rs` の `on_window_event` で `WindowEvent::Focused(true)` を検出し、MRU リストを更新
+1. **AppState に MRU リスト追加**: `state.rs` に `window_focus_history: Mutex<Vec<String>>` を追加。project を開いているウィンドウのみ履歴に保持し、project close / window destroy 時に除去
+2. **フォーカス変更イベントの検出**: `app.rs` の `on_window_event` で `WindowEvent::Focused(true)` を検出し、project が開いている場合のみ MRU リストを更新
 3. **Window メニューにウィンドウナビゲーション項目追加**: `menu.rs` に "Next Window" / "Previous Window" を追加
-4. **ウィンドウ切り替えロジック**: `app.rs` の `on_menu_event` で MRU リストから次/前のウィンドウを取得し、`window.show()` + `window.set_focus()` を実行。非表示ウィンドウも対象に含める
+4. **ウィンドウ切り替えロジック**: `app.rs` の `on_menu_event` で MRU リストから次/前のウィンドウを取得し、`window.show()` + `window.set_focus()` を実行。project を開いている非表示ウィンドウも対象に含める
 
 ### Phase 3: macOS 標準 Window メニュー項目
 
@@ -41,12 +42,21 @@
 1. **README.md / README.ja.md 更新**: キーボードショートカット一覧セクションを追加。既存ショートカット（Cmd+N, Cmd+O, Cmd+C/V, Cmd+Shift+K, Cmd+,）と今回追加分を網羅
 2. **テスト**: 各フェーズのユニットテストを作成
 
+### Phase 5: Cmd+` 巡回対象の修正（2026-02-22）
+
+1. **project close 時の MRU クリーンアップ**: `state.rs` の `clear_project_for_window()` で対象ラベルを `window_focus_history` から除去
+2. **open project 成功時の MRU 反映**: `commands/project.rs` の `open_project()` で `Opened` / `FocusedExisting` 時に対象ラベルを MRU 先頭へ反映
+3. **フォーカスイベントの対象制限**: `app.rs` の `WindowEvent::Focused(true)` で project 未選択ウィンドウを MRU 更新対象から除外
+4. **回帰テスト追加**: `state.rs` に `clear_project_for_window_removes_window_from_mru_history` と `window_rotation_skips_window_after_project_close` を追加
+
 ## テスト
 
 ### バックエンド
 
 - MRU リストの追加・除去・順序が正しいこと（`state.rs` のユニットテスト）
 - メニュー ID パーサーのテスト追加（既存テストの拡張）
+- `clear_project_for_window()` 後に MRU から除外されること
+- project 未選択ウィンドウを含む状態でも `next_window()` が project ありウィンドウのみを巡回すること
 
 ### フロントエンド
 
