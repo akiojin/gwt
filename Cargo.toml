@@ -91,7 +91,7 @@ nvml-wrapper = "0.12"
 
 # File system watcher (SPEC-b80e7996)
 notify = "7"
-notify-debouncer-mini = "0.5"
+notify-debouncer-mini = "0.7"
 
 [profile.release]
 lto = true
