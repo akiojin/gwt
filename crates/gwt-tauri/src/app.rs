@@ -23,6 +23,30 @@ fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
 }
 
+#[derive(Clone, Copy)]
+enum WindowSwitchDirection {
+    Next,
+    Previous,
+}
+
+fn resolve_window_switch_target(
+    state: &AppState,
+    focused_label: &str,
+    direction: WindowSwitchDirection,
+) -> Option<String> {
+    if state.project_for_window(focused_label).is_some() {
+        return match direction {
+            WindowSwitchDirection::Next => state.next_window(),
+            WindowSwitchDirection::Previous => state.previous_window(),
+        };
+    }
+
+    match direction {
+        WindowSwitchDirection::Next => state.most_recent_window(),
+        WindowSwitchDirection::Previous => state.least_recent_window(),
+    }
+}
+
 fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
 }
@@ -431,7 +455,10 @@ pub fn build_app(
             // Window switching (rotation order)
             if id == crate::menu::MENU_ID_WINDOW_NEXT_WINDOW {
                 let state = app.state::<AppState>();
-                if let Some(target) = state.next_window() {
+                let focused_label = focused_window_label(app);
+                if let Some(target) =
+                    resolve_window_switch_target(&state, &focused_label, WindowSwitchDirection::Next)
+                {
                     if let Some(w) = app.get_webview_window(&target) {
                         let _ = w.show();
                         let _ = w.set_focus();
@@ -441,7 +468,12 @@ pub fn build_app(
             }
             if id == crate::menu::MENU_ID_WINDOW_PREVIOUS_WINDOW {
                 let state = app.state::<AppState>();
-                if let Some(target) = state.previous_window() {
+                let focused_label = focused_window_label(app);
+                if let Some(target) = resolve_window_switch_target(
+                    &state,
+                    &focused_label,
+                    WindowSwitchDirection::Previous,
+                ) {
                     if let Some(w) = app.get_webview_window(&target) {
                         let _ = w.show();
                         let _ = w.set_focus();
@@ -542,10 +574,10 @@ pub fn build_app(
             }
 
             if let tauri::WindowEvent::Focused(true) = event {
-                window
-                    .app_handle()
-                    .state::<AppState>()
-                    .push_window_focus(window.label());
+                let state = window.app_handle().state::<AppState>();
+                if state.project_for_window(window.label()).is_some() {
+                    state.push_window_focus(window.label());
+                }
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
@@ -1087,6 +1119,62 @@ mod tests {
         assert!(
             allows_all_windows,
             "capabilities/default.json must include windows: [\"*\"]"
+        );
+    }
+
+    #[test]
+    fn resolve_window_switch_target_non_project_focus_uses_recent_for_next() {
+        let state = AppState::new();
+        assert_eq!(
+            state.claim_project_for_window_with_identity(
+                "A",
+                "/tmp/repo-a".to_string(),
+                "/tmp/repo-a-id".to_string()
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            state.claim_project_for_window_with_identity(
+                "B",
+                "/tmp/repo-b".to_string(),
+                "/tmp/repo-b-id".to_string()
+            ),
+            Ok(())
+        );
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        // History: [B, A]
+        assert_eq!(
+            resolve_window_switch_target(&state, "new-window", WindowSwitchDirection::Next),
+            Some("B".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_window_switch_target_non_project_focus_uses_oldest_for_previous() {
+        let state = AppState::new();
+        assert_eq!(
+            state.claim_project_for_window_with_identity(
+                "A",
+                "/tmp/repo-a".to_string(),
+                "/tmp/repo-a-id".to_string()
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            state.claim_project_for_window_with_identity(
+                "B",
+                "/tmp/repo-b".to_string(),
+                "/tmp/repo-b-id".to_string()
+            ),
+            Ok(())
+        );
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        // History: [B, A]
+        assert_eq!(
+            resolve_window_switch_target(&state, "new-window", WindowSwitchDirection::Previous),
+            Some("A".to_string())
         );
     }
 }
