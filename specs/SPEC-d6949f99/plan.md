@@ -73,6 +73,18 @@
    - Summary 用は number/state/url/mergeable/base/head/check suites のみ
    - 詳細は `fetch_pr_detail` で継続取得（責務分離）
 
+### Phase 2.6: フロントエンド — Mergeバッジ表示整合（2026-02-22 追補）
+
+**対象ファイル**: `gwt-gui/src/lib/components/PrStatusSection.svelte`
+
+1. `state=MERGED` の表示優先化
+   - `mergeable` 値が `UNKNOWN` でも `Merged` バッジを表示
+   - マージ済み時は `mergeStateStatus` バッジと `Update Branch` ボタンを非表示
+2. 競合表示の重複回避
+   - `mergeable=CONFLICTING` かつ `mergeStateStatus=DIRTY` のときは `Conflicting` のみ表示
+3. `BLOCKED` 状態の意味を単独表示
+   - `mergeStateStatus=BLOCKED` のときは `Blocked` のみ表示し、`Mergeable` を併記しない
+
 ### Phase 3: フロントエンド — Worktreeツリー展開
 
 **対象ファイル**: `gwt-gui/src/lib/`
@@ -137,6 +149,7 @@
 ### フロントエンド（vitest）
 
 - `PrStatusSection` のレンダリング（メタデータ、レビュー、変更サマリー各パターン）
+- `PrStatusSection` のMerge表示整合（`MERGED` 優先、`CONFLICTING+DIRTY` 重複抑制、`BLOCKED` 単独表示）
 - ツリー展開/折りたたみのインタラクション
 - ポーリング開始/停止のライフサイクル
 - グレースフルデグレード（`GhCliStatus.authenticated = false` 時）
