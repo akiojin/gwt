@@ -1,6 +1,318 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.10.2] - 2026-02-22
+
+### Bug Fixes
+
+- **gui:** Improve report dialog height and readability (#1182)
+- **gui:** Unify close button style with report dialog (#1183)
+- Skip New Window in Cmd+` window rotation (#1184)
+- **gui:** Unify modal windows and report issue behavior (#1185)
+- **gui:** Normalize PR merge status badges (#1186)
+- MacOS起動時のOS環境アクセス許可ダイアログ表示を改善 (#1187)
+- Detect remote-only branches in find_branch_for_issue (#1188)
+- Worktree作成時にupstream trackingを自動設定する (#SPEC-b3f1a4e2) (#1189)
+
+## [7.10.1] - 2026-02-22
+
+### Bug Fixes
+
+- **release:** Propagate closing issue keywords to release PR (#1174)
+- AI設定のAPIキー入力にCSSスタイルが適用されない問題を修正
+- リモートブランチ削除を冪等にし422 Reference does not existを成功扱いにする (#1176)
+- **gui:** Improve update-branch refresh and error visibility (#1177)
+- Cmd+` ウィンドウ切り替えが全ウィンドウを巡回するようローテーション方式に変更
+- **e2e:** Align summary smoke flow with PR checks UI (#1179)
+- Optimize graphql pr status polling rate-limit handling (#1180)
+- Resolve report dialog and log collection regressions (#1178)
+
+### Refactor
+
+- レガシー Hook 直接登録コードを削除 (#1175)
+
+## [7.10.0] - 2026-02-21
+
+### Bug Fixes
+
+- **windows:** Detect and display GPUs in About System (#1157)
+- Fallback to manual worktree removal on directory-not-empty (#1160)
+- **docker:** Docker起動時に選択サービスをup対象へ追加 (#1163)
+- Resolve launch-agent prefix race and utf8 truncation panic (#1164)
+- Compose envマージで使用中ポートへの巻き戻りを防止 (#1165)
+- **gui:** Stop AI model fetch during input (#1169)
+- **docker:** Compose起動直後の停止理由を表示 (#1170)
+- Stabilize windows shell selection follow-up and merge develop (#1172)
+- Marketplace.jsonを.claude-plugin/に移動
+- SPEC-a4fb2db2 分析指摘の修正（エラー分類テスト・ドキュメント整合性）
+
+### Features
+
+- **gui:** E1004エラー時に「Use Existing Branch」ボタンを表示 (#1168)
+- **cleanup:** Cleanupにunsafe限定のForce実行を追加 (#1171)
+- GitHub リモート起点の Worktree 作成 (SPEC-a4fb2db2)
+
+## [7.9.0] - 2026-02-20
+
+### Bug Fixes
+
+- **e2e:** Handle startup skill-scope dialog in Playwright smoke tests (#1147) by @akiojin
+- **gui:** Reduce tab activation flicker and switch stutter (#1148) by @akiojin
+- **terminal:** Stabilize windows host claude launch path (#1153)
+- **docker:** Remove HOST_GIT_COMMON_DIR short-syntax bind mount (#1151) (#1152)
+- **gui:** Allow IME process key in chat inputs (#1154)
+
+### Features
+
+- Add settings font family selection for UI and Terminal (#1155)
+- **gui:** Open clicked URLs in external browser (#1156)
+
+### Refactor
+
+- **project-mode:** Remove MCP bridge and migrate to managed skills (#1143) by @akiojin
+
+### Testing
+
+- **e2e:** Handle scope dialog in tab-switch performance spec (#1149)
+
+## [7.8.1] - 2026-02-20
+
+### Bug Fixes
+
+- **e2e:** Handle startup skill-scope dialog in Playwright smoke tests (#1147)
+- **gui:** Reduce tab activation flicker and switch stutter (#1148)
+
+### Refactor
+
+- **project-mode:** Remove MCP bridge and migrate to managed skills (#1143)
+
+## [7.8.0] - 2026-02-20
+
+### Bug Fixes
+
+- **gui:** Broaden trackpad wheel fallback conditions (#1137)
+- **agent-mode:** Fix project team session restore and merge command (#1139)
+- **gui:** Stabilize trackpad wheel fallback for rapid bursts (#1138)
+- **terminal:** Stabilize Windows Host Claude launches by defaulting to `cmd` when shell is auto, and avoid false stream-EOF error promotion while process is still alive
+- **gui:** Agentタブ空白を防止 (#1142)
+
+### Documentation
+
+- Simplify readmes for user-facing usage and updates (#1136)
+
+### Features
+
+- **gui:** Windows シェル選択と New Terminal ボタンを追加 (#1141)
+
+## [7.7.0] - 2026-02-19
+
+### Bug Fixes
+
+- **gui:** Improve trackpad wheel fallback detection (#1095)
+- Create_for_branchのremoteフォールバック誤判定を修正 (#1098)
+- **specs:** SPEC-bare-wt01 を UUID-8 形式 SPEC-013cd65c にリネーム
+- Offload branch/worktree listing to spawn_blocking (#1100)
+- **gui:** Restore startup window sessions with label fallback (#1101)
+- **gui:** Prevent periodic Worktree Loading during agent refresh (#1102)
+- Issue workflow regressions in state, comments, and branch linkage (#1106)
+- **gui:** Stabilize PR/workflow resolution and e2e summary flow (#1107)
+- **gui:** Keep session summary heading visible in narrow sidebar (#1109)
+- **ai:** Enforce worktree purpose in session summaries (#1108)
+- **gui:** Correct env var input width override and Add button disabled style (#1110)
+- **docker:** Align compose detection with launch settings (#1112)
+- 同一プロジェクトの重複オープンをcanonical pathで防止 (#1113)
+- **gui:** Prevent infinite window relaunch during restore (#1115)
+- **gui:** Deduplicate stale window sessions to prevent window multiplication
+- Launch modal cancellation and Escape dismissal regressions (#1118)
+- **gui:** Prevent launch progress race stuck at fetching step (#1120)
+- **gui:** ネイティブメニューのCmd+ショートカットがxterm.jsに横取りされる問題を修正
+- **gui:** Launch progressがfetchステップで停止する問題に対する防御策追加
+- **gui:** Launch_jobsからの削除をイベント送信後に移動しポーリング誤検知を修正
+- **gui:** ポーリングでlaunch結果を直接取得しイベント損失を完全に回復
+- BunxがpackageManager競合でPTY環境でハングする問題をnpx優先で回避
+- **gui:** DetectAgentsをosEnvReady後に実行しグローバルインストール済みエージェントを正しく検出
+- **gui:** メニュー無反応の診断性と初期化エラー処理を強化 (#1122)
+- **sidebar:** Defer heavy panel fetches on branch switch (#1123)
+- 環境キャプチャに-iフラグを追加しzshrc/bashrcのPATH設定を取得
+- Update codex multi_agent flag handling (#1124)
+- **tauri:** Allow event listener for all windows (#1125)
+- **gui:** Restore editable copy and terminal screen capture (#1126)
+- **gui:** Prevent worktree summary whiteout on base switch (#1128)
+- **core:** MacOS Apple Silicon GPUをsystem_profilerで検出 (#1131)
+- **core:** MacOS GPU検出の堅牢性とテスト安定性を改善 (#1132)
+- **core:** MacOS GPU検出の再試行性と防御性を改善 (#1133)
+
+### Documentation
+
+- Choose_fallback_runner のコメントにプライベートレジストリの根本原因を記載
+
+### Features
+
+- **summary:** Rebuild AI summaries on language switch (#1094)
+- **agent:** Add inferred agent status and runtime indicators (#1096)
+- Add issue-first spec bundle CRUD for agent mode (#1099)
+- **gui:** Worktree Summaryを7タブ構成へ再編 (Issue #1097) (#1103)
+- **gui:** Retire Quick Start tab and move Quick Launch to header (#1105)
+- **agent-mode:** Rename Agent Mode tab label to Master Agent (#1104)
+- Harden MCP bridge flow with master tools and single-instance guard (#1111)
+- **gui:** 全テキストを選択・コピー可能にする (#1116)
+- ブランチ一覧のデフォルトソートを更新順に変更（GUI版） (#1119)
+- **version-history:** Add persistent cache and prefetch flow (#1121)
+- **gui:** Launch AgentにClaude Sonnet 4.6 / 1Mコンテキスト対応モデルを追加 (#1127)
+- **gui:** 設定画面のスクロールをタブ切り替えに変更 (#1129)
+- **cleanup:** Add remote cleanup with PR-aware safety flow (#1130)
+
+### Miscellaneous Tasks
+
+- .gitignoreに一時ディレクトリとMCPブリッジlockfileを追加
+
+## [7.6.0] - 2026-02-16
+
+### Bug Fixes
+
+- TerminalタブのXクローズ回帰を修正 (#1068)
+- **gui:** Delegate wheel handling when terminal is focused (#1067)
+- **gui:** Stabilize tab reorder drag and drop in tauri (#1070)
+- 入力中のSidebarポーリング負荷を抑制 (#1071)
+- Keep ai settings when disabled (#1072)
+- Restore worktree list sort, agent indicator, and keyboard navigation (#1074)
+- Resolve diff base refs for remote-only branches (#1075)
+- Make settings global (#1077)
+- Window switching shortcuts (#1087)
+- Stabilize playwright tauri mock (#1088)
+- **gui:** Persist AI Summary cache and throttle refresh (#1089)
+- **ai:** Include language in inflight keys (#1092)
+
+### Features
+
+- **gui:** Reorganize session summary tabs and align specs (#1069)
+- Move CI and PR details to summary panel tabs (#1073)
+- **ai:** AI出力言語を設定可能にする (#1091)
+
+### Testing
+
+- Boost GUI coverage to 90% with worktree UI regressions (#1076)
+- **e2e:** Stabilize tauri-mock and update Worktree sidebar expectations (#1090)
+
+## [7.5.1] - 2026-02-14
+
+### Bug Fixes
+
+- **gui:** SystemMonitor.tsを.svelte.tsにリネームしSvelte 5ルーンを有効化
+- **gui:** Stabilize terminal trackpad fallback when active timing varies (#1064)
+- **gui:** Add pointer fallback for tab drag reorder (#1063)
+- SidebarとSystem Monitorの断続フリーズを抑止 (#1065)
+
+## [7.5.0] - 2026-02-14
+
+### Bug Fixes
+
+- **gui:** Launch Agentのデフォルト設定を前回成功起動値で保持 (#1053)
+- Auto-force branch delete fallback for unmerged cleanup (#1055)
+- **gui:** メニューアクションをフォーカスウィンドウにのみスコープする (#1057)
+- **windows:** Reinforce issue #1029 regression coverage (#1058)
+- GPU情報の返却漏れとstats更新競合を修正 (#1059)
+
+### Features
+
+- Preview PR status in sidebar and worktree summary (#1061)
+
+### Refactor
+
+- **gui:** Hide version info in agent selector (#1060)
+
+## [7.4.0] - 2026-02-14
+
+### Bug Fixes
+
+- **ai:** Improve session summary filtering and chat completion fallback (#1040)
+- **tauri:** Avoid UI freeze during worktree cleanup (#1048)
+- **windows:** Filter docker exec env vars (#1050)
+- Windows起動時のClaude Hook上書き判定を修正 (#1051)
+- **gui:** Prevent blank terminal tabs during startup (#1052)
+
+### Features
+
+- Simple terminal tabs を実装し復元/OSC7の回帰を修正 (#1046)
+
+### Miscellaneous Tasks
+
+- **gitignore:** Ignore generated pnpm workspace file (#1049)
+
+## [7.3.0] - 2026-02-13
+
+### Bug Fixes
+
+- Harden startup update check on app launch (#1041)
+- Show migrating windows in window menu (#1043)
+- Address post-merge update review findings (#1044)
+- **windows:** Host OS起動をPowerShell経由に統一 (#1029) (#1045)
+
+### Features
+
+- **gui:** Enable drag-and-drop tab reordering with persistence (#1042)
+
+## [7.2.1] - 2026-02-13
+
+### Bug Fixes
+
+- **docker:** Avoid compose container_name collisions (#1038)
+
+## [7.2.0] - 2026-02-13
+
+### Bug Fixes
+
+- AI設定が無効/未設定時はVersion Historyの要約を実行しない (#1033)
+- **docker:** Stop forcing /workspace for compose exec (#1036)
+
+### Features
+
+- **agent-mode:** Enforce spec-kit gate and task assignee sidebar (#1035)
+
+## [7.1.2] - 2026-02-13
+
+### Bug Fixes
+
+- **gui:** Restore agent tabs without dropping live sessions (#1023)
+- Bare repo で origin/base 指定時の worktree base 解決を修正 (#1024)
+- **gui:** Strengthen terminal trackpad scroll fallback (#1025)
+- **migration:** Add cp fallback for backup copy on Windows (#1006) (#1026)
+- Docker起動時のWindows混在パスmountエラーを修正 (#1028) (#1030)
+- **windows:** Host OS起動時の空タブを防止 (#1029) (#1031)
+- Compose execで/workspaceを固定しない (#1032)
+
+### Testing
+
+- **gui:** Add Playwright WebView UI E2E baseline (#1001) (#1027)
+
+## [7.1.1] - 2026-02-13
+
+### Bug Fixes
+
+- リリースコマンドのタグ検出・バージョン重複・ステージング問題を修正 by @akiojin
+- **gui:** Wire sidebar launch and quick-start actions (#1020)
+- **gui:** Session Summaryタブの残存表示を削除 (#1019)
+- Color agent tabs by inferred agent (#1021)
+
+## [7.1.0] - 2026-02-13
+
+### Bug Fixes
+
+- Tauri.conf.json のバージョンを 7.1.0 に同期し、リリースコマンドに更新ステップを追加 by @akiojin
+- **windows:** Suppress transient git console windows (#1008) by @akiojin
+- MacOS配布をDMG一本化し、PKG関連を全削除 by @akiojin
+- Cleanup「Select All Safe」が機能しないserde不整合を修正 (#1014)
+- **tauri:** Handle Cmd+Q and Cmd/Ctrl+C V menu actions (#1011)
+- Improve agent mode ime and scroll (#1013)
+- **windows:** Complete no-window process helper migration (#1017)
+- Re-enable app self-update flow with dmg support (#1016)
+
+### Features
+
+- Add MCP server bridge for agent tab communication (#992) by @akiojin
+- **gui:** Make worktree summary panel height resizable (#1010)
+- Add GitHub Issue launch flow and stabilize gh detection (#1012)
+
 
 ## [7.0.0] - 2026-02-13
 

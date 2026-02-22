@@ -1,4 +1,4 @@
-//! Worktree references for agent mode
+//! Worktree references for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

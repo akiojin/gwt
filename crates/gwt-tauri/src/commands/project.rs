@@ -5,9 +5,10 @@ use gwt_core::git::{self, Branch};
 use gwt_core::migration::{
     derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig, MigrationState,
 };
+use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::{fs, io::Read};
 use tauri::Manager;
 use tauri::State;
@@ -20,6 +21,21 @@ pub struct ProjectInfo {
     pub path: String,
     pub repo_name: String,
     pub current_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum OpenProjectAction {
+    Opened,
+    FocusedExisting,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenProjectResult {
+    pub info: ProjectInfo,
+    pub action: OpenProjectAction,
+    pub focused_window_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +101,13 @@ fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
     } else {
         selected.to_path_buf()
     }
+}
+
+fn canonical_project_identity(project_root: &Path) -> String {
+    std::fs::canonicalize(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 pub(crate) fn resolve_repo_path_for_project_root(
@@ -203,19 +226,24 @@ pub fn open_project(
     window: tauri::Window,
     path: String,
     state: State<AppState>,
-) -> Result<ProjectInfo, String> {
+) -> Result<OpenProjectResult, StructuredError> {
     let p = Path::new(&path);
 
     if !p.exists() {
-        return Err(format!("Path does not exist: {}", path));
+        return Err(StructuredError::internal(
+            &format!("Path does not exist: {}", path),
+            "open_project",
+        ));
     }
 
     let project_root = resolve_project_root(p);
-    let repo_path = resolve_repo_path_for_project_root(&project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(&project_root)
+        .map_err(|e| StructuredError::internal(&e, "open_project"))?;
     if git::is_git_repo(&repo_path) && !git::is_bare_repository(&repo_path) {
-        return Err("Migration required: normal repositories are not supported. Please migrate to a bare gwt project.".to_string());
+        return Err(StructuredError::internal("Migration required: normal repositories are not supported. Please migrate to a bare gwt project.", "open_project"));
     }
     let project_root_str = project_root.to_string_lossy().to_string();
+    let project_identity = canonical_project_identity(&project_root);
 
     // Get repo name from the directory name
     let repo_name = project_root
@@ -226,19 +254,70 @@ pub fn open_project(
     // Get current branch
     let current_branch = Branch::current(&repo_path).ok().flatten().map(|b| b.name);
 
-    // Update window-scoped state
-    state.set_project_for_window(window.label(), project_root_str.clone());
-
-    // Record to recent projects history
-    let _ = gwt_core::config::record_recent_project(&project_root_str);
-
-    let _ = crate::menu::rebuild_menu(window.app_handle());
-
-    Ok(ProjectInfo {
-        path: project_root_str,
+    let info = ProjectInfo {
+        path: project_root_str.clone(),
         repo_name,
         current_branch,
-    })
+    };
+
+    let current_window_label = window.label().to_string();
+    for _attempt in 0..2 {
+        match state.claim_project_for_window_with_identity(
+            &current_window_label,
+            project_root_str.clone(),
+            project_identity.clone(),
+        ) {
+            Ok(()) => {
+                state.push_window_focus(&current_window_label);
+                // Record to recent projects history
+                let _ = gwt_core::config::record_recent_project(&project_root_str);
+
+                let _ = crate::menu::rebuild_menu(window.app_handle());
+
+                // Prefetch version history in background (SPEC-c9a2f731 FR-006)
+                {
+                    let app_handle = window.app_handle().clone();
+                    let prefetch_path = project_root_str.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        crate::commands::version_history::prefetch_version_history_inner(
+                            &prefetch_path,
+                            &app_handle,
+                        );
+                    });
+                }
+
+                return Ok(OpenProjectResult {
+                    info,
+                    action: OpenProjectAction::Opened,
+                    focused_window_label: None,
+                });
+            }
+            Err(existing_window_label) => {
+                if let Some(existing_window) = window
+                    .app_handle()
+                    .get_webview_window(&existing_window_label)
+                {
+                    state.push_window_focus(&existing_window_label);
+                    let _ = existing_window.show();
+                    let _ = existing_window.set_focus();
+                    let _ = crate::menu::rebuild_menu(window.app_handle());
+                    return Ok(OpenProjectResult {
+                        info,
+                        action: OpenProjectAction::FocusedExisting,
+                        focused_window_label: Some(existing_window_label),
+                    });
+                }
+
+                // Stale window state can remain if process shutdown skipped cleanup.
+                state.clear_project_for_window(&existing_window_label);
+            }
+        }
+    }
+
+    Err(StructuredError::internal(
+        "Failed to open project due to stale duplicate window state. Please retry.",
+        "open_project",
+    ))
 }
 
 /// Get current project info from state
@@ -265,7 +344,7 @@ pub fn get_project_info(window: tauri::Window, state: State<AppState>) -> Option
 
 /// Close the current window's project (clear window-scoped state)
 #[tauri::command]
-pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<(), String> {
+pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<(), StructuredError> {
     state.clear_project_for_window(window.label());
     let _ = crate::menu::rebuild_menu(window.app_handle());
     Ok(())
@@ -380,25 +459,28 @@ pub fn create_project(
     request: NewProjectRequest,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<ProjectInfo, String> {
+) -> Result<OpenProjectResult, StructuredError> {
     if !is_valid_github_repo_url(&request.repo_url) {
-        return Err("Invalid repository URL".to_string());
+        return Err(StructuredError::internal(
+            "Invalid repository URL",
+            "create_project",
+        ));
     }
 
     let parent = std::path::PathBuf::from(&request.parent_dir);
     if !parent.exists() {
-        return Err(format!(
-            "Parent directory does not exist: {}",
-            request.parent_dir
+        return Err(StructuredError::internal(
+            &format!("Parent directory does not exist: {}", request.parent_dir),
+            "create_project",
         ));
     }
 
     let repo_name = git::extract_repo_name(&request.repo_url);
     let target = parent.join(&repo_name);
     if target.exists() {
-        return Err(format!(
-            "Target directory already exists: {}",
-            target.display()
+        return Err(StructuredError::internal(
+            &format!("Target directory already exists: {}", target.display()),
+            "create_project",
         ));
     }
 
@@ -414,19 +496,23 @@ pub fn create_project(
     args.push(request.repo_url.clone());
     args.push(target.to_string_lossy().to_string());
 
-    let mut child = Command::new("git")
+    let mut child = gwt_core::process::command("git")
         .args(args)
         .current_dir(&parent)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to execute git clone: {}", e))?;
+        .map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to execute git clone: {}", e),
+                "create_project",
+            )
+        })?;
 
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Failed to capture git clone output".to_string())?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        StructuredError::internal("Failed to capture git clone output", "create_project")
+    })?;
 
     let mut buf = [0u8; 4096];
     let mut raw: Vec<u8> = Vec::new();
@@ -466,9 +552,12 @@ pub fn create_project(
     }
     flush_line(&mut line_buf);
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to wait for git clone: {}", e))?;
+    let status = child.wait().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to wait for git clone: {}", e),
+            "create_project",
+        )
+    })?;
 
     if !status.success() {
         // Cleanup incomplete directory (FR-303)
@@ -488,9 +577,15 @@ pub fn create_project(
             .join("\n");
 
         if tail.trim().is_empty() {
-            return Err("git clone failed".to_string());
+            return Err(StructuredError::internal(
+                "git clone failed",
+                "create_project",
+            ));
         }
-        return Err(format!("git clone failed: {}", tail.trim()));
+        return Err(StructuredError::internal(
+            &format!("git clone failed: {}", tail.trim()),
+            "create_project",
+        ));
     }
 
     // Open the project root (FR-304)
@@ -536,22 +631,42 @@ fn encode_migration_state(state: &MigrationState) -> (String, Option<usize>, Opt
 
 /// Start a bare migration job for a normal repository (SPEC-a70a1ece US7).
 #[tauri::command]
-pub fn start_migration_job(path: String, app_handle: AppHandle) -> Result<String, String> {
+pub fn start_migration_job(
+    window: tauri::Window,
+    path: String,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<String, StructuredError> {
     let selected = Path::new(&path);
     if !selected.exists() {
-        return Err(format!("Path does not exist: {}", path));
+        return Err(StructuredError::internal(
+            &format!("Path does not exist: {}", path),
+            "start_migration_job",
+        ));
     }
 
     let source_root = git::get_main_repo_root(selected);
     if !git::is_git_repo(&source_root) {
-        return Err("Not a git repository".to_string());
+        return Err(StructuredError::internal(
+            "Not a git repository",
+            "start_migration_job",
+        ));
     }
     if git::is_bare_repository(&source_root) {
-        return Err("Repository is already bare".to_string());
+        return Err(StructuredError::internal(
+            "Repository is already bare",
+            "start_migration_job",
+        ));
     }
 
     let job_id = Uuid::new_v4().to_string();
+    let window_label = window.label().to_string();
+    let source_root_str = source_root.to_string_lossy().to_string();
+    state.set_window_migration(&window_label, job_id.clone(), source_root_str);
+    let _ = crate::menu::rebuild_menu(window.app_handle());
+
     let job_id_thread = job_id.clone();
+    let window_label_thread = window_label.clone();
     let app = app_handle.clone();
     let source_root_thread = source_root.clone();
 
@@ -591,6 +706,10 @@ pub fn start_migration_job(path: String, app_handle: AppHandle) -> Result<String
             }
         };
 
+        app.state::<AppState>()
+            .clear_window_migration_if_job(&window_label_thread, &job_id_thread);
+        let _ = crate::menu::rebuild_menu(&app);
+
         let finished = MigrationFinishedPayload {
             job_id: job_id_thread.clone(),
             ok,
@@ -605,7 +724,7 @@ pub fn start_migration_job(path: String, app_handle: AppHandle) -> Result<String
 
 /// Quit the app (used by forced migration refusal).
 #[tauri::command]
-pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), String> {
+pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), StructuredError> {
     state.request_quit();
     app_handle.exit(0);
     Ok(())
@@ -695,7 +814,7 @@ mod tests {
         .expect("write project.json");
 
         let bare = root.join("repo.git");
-        let status = Command::new("git")
+        let status = gwt_core::process::command("git")
             .args(["init", "--bare"])
             .arg(&bare)
             .status()
@@ -713,7 +832,7 @@ mod tests {
         let root = temp.path();
 
         let bare = root.join("repo.git");
-        let status = Command::new("git")
+        let status = gwt_core::process::command("git")
             .args(["init", "--bare"])
             .arg(&bare)
             .status()
@@ -723,5 +842,34 @@ mod tests {
         let resolved =
             resolve_repo_path_for_project_root(root).expect("should resolve bare repo path");
         assert_eq!(resolved, bare);
+    }
+
+    #[test]
+    fn test_canonical_project_identity_normalizes_equivalent_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let nested = project_root.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dirs");
+
+        let direct = canonical_project_identity(&project_root);
+        let via_relative = canonical_project_identity(&nested.join(".."));
+        assert_eq!(direct, via_relative);
+    }
+
+    #[test]
+    fn test_open_project_result_serializes_action_and_focus_label() {
+        let result = OpenProjectResult {
+            info: ProjectInfo {
+                path: "/tmp/repo".to_string(),
+                repo_name: "repo".to_string(),
+                current_branch: Some("main".to_string()),
+            },
+            action: OpenProjectAction::FocusedExisting,
+            focused_window_label: Some("project-2".to_string()),
+        };
+
+        let value = serde_json::to_value(result).expect("serialize");
+        assert_eq!(value["action"], "focusedExisting");
+        assert_eq!(value["focusedWindowLabel"], "project-2");
     }
 }

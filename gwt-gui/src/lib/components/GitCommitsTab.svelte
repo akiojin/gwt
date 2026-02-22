@@ -18,6 +18,7 @@
   let loadingMore: boolean = $state(false);
   let error: string | null = $state(null);
   let hasMore: boolean = $state(false);
+  let commitsRequestId = 0;
 
   const PAGE_SIZE = 20;
 
@@ -59,12 +60,16 @@
   }
 
   async function load() {
+    const requestId = commitsRequestId + 1;
+    commitsRequestId = requestId;
+
     loading = true;
+    loadingMore = false;
     error = null;
     commits = [];
     hasMore = false;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<CommitEntry[]>("get_branch_commits", {
         projectPath,
         branch,
@@ -72,20 +77,25 @@
         offset: 0,
         limit: PAGE_SIZE,
       });
+      if (requestId !== commitsRequestId) return;
       commits = result ?? [];
       hasMore = commits.length >= PAGE_SIZE;
     } catch (err) {
+      if (requestId !== commitsRequestId) return;
       error = toErrorMessage(err);
     } finally {
-      loading = false;
+      if (requestId === commitsRequestId) {
+        loading = false;
+      }
     }
   }
 
   async function loadMore() {
     if (loadingMore) return;
+    const requestId = commitsRequestId;
     loadingMore = true;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<CommitEntry[]>("get_branch_commits", {
         projectPath,
         branch,
@@ -93,13 +103,17 @@
         offset: commits.length,
         limit: PAGE_SIZE,
       });
+      if (requestId !== commitsRequestId) return;
       const more = result ?? [];
       commits = [...commits, ...more];
       hasMore = more.length >= PAGE_SIZE;
     } catch (err) {
+      if (requestId !== commitsRequestId) return;
       error = toErrorMessage(err);
     } finally {
-      loadingMore = false;
+      if (requestId === commitsRequestId) {
+        loadingMore = false;
+      }
     }
   }
 

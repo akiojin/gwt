@@ -123,7 +123,7 @@ pub fn build_env_capture_command(shell_type: ShellType, shell_path: &str) -> (St
             "$env | to json".to_owned(),
         ],
         ShellType::Bash | ShellType::Zsh | ShellType::Fish | ShellType::Sh => {
-            vec!["-l".to_owned(), "-c".to_owned(), "env -0".to_owned()]
+            vec!["-li".to_owned(), "-c".to_owned(), "env -0".to_owned()]
         }
     };
     (prog, args)
@@ -141,7 +141,6 @@ pub fn build_env_capture_command(shell_type: ShellType, shell_path: &str) -> (St
 #[cfg(unix)]
 pub async fn capture_login_shell_env() -> OsEnvResult {
     use std::time::Duration;
-    use tokio::process::Command;
 
     let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
     let shell_type = detect_shell_type(&shell_path);
@@ -151,7 +150,7 @@ pub async fn capture_login_shell_env() -> OsEnvResult {
 
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        Command::new(&prog).args(&args).output(),
+        crate::process::tokio_command(&prog).args(&args).output(),
     )
     .await;
 
@@ -203,6 +202,7 @@ pub async fn capture_login_shell_env() -> OsEnvResult {
     }
 }
 
+#[cfg(unix)]
 fn fallback_env(reason: String) -> OsEnvResult {
     OsEnvResult {
         env: std::env::vars().collect(),
@@ -345,21 +345,21 @@ mod tests {
     fn test_build_command_bash() {
         let (prog, args) = build_env_capture_command(ShellType::Bash, "/bin/bash");
         assert_eq!(prog, "/bin/bash");
-        assert_eq!(args, vec!["-l", "-c", "env -0"]);
+        assert_eq!(args, vec!["-li", "-c", "env -0"]);
     }
 
     #[test]
     fn test_build_command_zsh() {
         let (prog, args) = build_env_capture_command(ShellType::Zsh, "/bin/zsh");
         assert_eq!(prog, "/bin/zsh");
-        assert_eq!(args, vec!["-l", "-c", "env -0"]);
+        assert_eq!(args, vec!["-li", "-c", "env -0"]);
     }
 
     #[test]
     fn test_build_command_fish() {
         let (prog, args) = build_env_capture_command(ShellType::Fish, "/usr/bin/fish");
         assert_eq!(prog, "/usr/bin/fish");
-        assert_eq!(args, vec!["-l", "-c", "env -0"]);
+        assert_eq!(args, vec!["-li", "-c", "env -0"]);
     }
 
     #[test]
@@ -373,6 +373,6 @@ mod tests {
     fn test_build_command_sh_fallback() {
         let (prog, args) = build_env_capture_command(ShellType::Sh, "/bin/sh");
         assert_eq!(prog, "/bin/sh");
-        assert_eq!(args, vec!["-l", "-c", "env -0"]);
+        assert_eq!(args, vec!["-li", "-c", "env -0"]);
     }
 }

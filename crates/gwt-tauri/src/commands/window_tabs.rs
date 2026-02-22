@@ -1,4 +1,5 @@
 use crate::state::{AgentTabMenuState, AppState};
+use gwt_core::StructuredError;
 use serde::Deserialize;
 use std::collections::HashSet;
 use tauri::{Manager, State};
@@ -8,6 +9,7 @@ use tauri::{Manager, State};
 pub struct WindowAgentTabEntry {
     pub id: String,
     pub label: String,
+    pub tab_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,12 +48,13 @@ pub fn sync_window_agent_tabs(
     window: tauri::Window,
     state: State<AppState>,
     request: SyncWindowAgentTabsRequest,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let tabs = normalize_tabs(request.tabs);
     let active_tab_id = request.active_tab_id.map(|id| id.trim().to_string());
 
     state.set_window_agent_tabs(window.label(), tabs, active_tab_id);
-    crate::menu::rebuild_menu(window.app_handle()).map_err(|e| e.to_string())
+    crate::menu::rebuild_menu(window.app_handle())
+        .map_err(|e| StructuredError::internal(&e.to_string(), "sync_window_agent_tabs"))
 }
 
 #[cfg(test)]
@@ -64,18 +67,22 @@ mod tests {
             WindowAgentTabEntry {
                 id: "".to_string(),
                 label: "A".to_string(),
+                tab_type: None,
             },
             WindowAgentTabEntry {
                 id: "agent-1".to_string(),
                 label: "One".to_string(),
+                tab_type: None,
             },
             WindowAgentTabEntry {
                 id: "agent-1".to_string(),
                 label: "Duplicate".to_string(),
+                tab_type: None,
             },
             WindowAgentTabEntry {
                 id: " agent-2 ".to_string(),
                 label: " ".to_string(),
+                tab_type: Some("terminal".to_string()),
             },
         ]);
 

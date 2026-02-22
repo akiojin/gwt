@@ -1,10 +1,12 @@
 pub mod error;
 pub mod ipc;
 pub mod manager;
+pub mod osc;
 pub mod pane;
 pub mod pty;
 pub mod runner;
 pub mod scrollback;
+pub mod shell;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -41,4 +43,6 @@ pub struct BuiltinLaunchConfig {
     pub agent_color: AgentColor,
     /// Environment variables to set.
     pub env_vars: HashMap<String, String>,
+    /// Optional shell override (e.g. "powershell", "cmd", "wsl").
+    pub terminal_shell: Option<String>,
 }

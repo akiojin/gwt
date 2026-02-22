@@ -29,6 +29,8 @@ pub struct PaneConfig {
     pub rows: u16,
     pub cols: u16,
     pub env_vars: HashMap<String, String>,
+    /// Optional shell override (e.g. "powershell", "cmd", "wsl").
+    pub terminal_shell: Option<String>,
 }
 
 /// A terminal pane integrating PTY and scrollback.
@@ -59,6 +61,7 @@ impl TerminalPane {
             env_vars,
             rows: config.rows,
             cols: config.cols,
+            terminal_shell: config.terminal_shell,
         };
 
         let pty = PtyHandle::new(pty_config)?;
@@ -132,6 +135,11 @@ impl TerminalPane {
             }
         }
         Ok(&self.status)
+    }
+
+    /// Mark this pane as errored.
+    pub fn mark_error(&mut self, message: impl Into<String>) {
+        self.status = PaneStatus::Error(message.into());
     }
 
     /// Get the pane ID.
@@ -234,6 +242,7 @@ mod tests {
             rows: 24,
             cols: 80,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         }
     }
 
@@ -326,7 +335,22 @@ mod tests {
         assert_eq!(pane.status(), &PaneStatus::Completed(0));
     }
 
-    // 6. Accessor tests
+    // 6. Explicit error state test
+    #[test]
+    fn test_mark_error_sets_error_status() {
+        let config = make_config("/bin/sleep", vec!["60"]);
+        let mut pane = TerminalPane::new(config).expect("Failed to create pane");
+
+        pane.mark_error("pty read failed");
+        assert_eq!(
+            pane.status(),
+            &PaneStatus::Error("pty read failed".to_string())
+        );
+
+        let _ = pane.kill();
+    }
+
+    // 7. Accessor tests
     #[test]
     fn test_accessors() {
         let config = make_config("/bin/sleep", vec!["1"]);
@@ -340,7 +364,7 @@ mod tests {
         assert!(pane.started_at() <= chrono::Utc::now());
     }
 
-    // 7. Kill test
+    // 8. Kill test
     #[test]
     fn test_kill() {
         let config = make_config("/bin/sleep", vec!["60"]);

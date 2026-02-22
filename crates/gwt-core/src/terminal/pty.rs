@@ -18,6 +18,114 @@ pub struct PtyConfig {
     pub env_vars: HashMap<String, String>,
     pub rows: u16,
     pub cols: u16,
+    /// Optional shell override (e.g. "powershell", "cmd", "wsl").
+    pub terminal_shell: Option<String>,
+}
+
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn build_windows_powershell_command_expression(command: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(format!("'{}'", escape_powershell_single_quoted(command)));
+    parts.extend(
+        args.iter()
+            .map(|arg| format!("'{}'", escape_powershell_single_quoted(arg))),
+    );
+    format!("& {}", parts.join(" "))
+}
+
+fn resolve_windows_shell_with<F>(mut command_exists: F) -> String
+where
+    F: FnMut(&str) -> bool,
+{
+    if command_exists("pwsh") || command_exists("pwsh.exe") {
+        "pwsh".to_string()
+    } else {
+        "powershell.exe".to_string()
+    }
+}
+
+fn resolve_windows_shell() -> String {
+    resolve_windows_shell_with(|command| which::which(command).is_ok())
+}
+
+fn escape_cmd_double_quoted(value: &str) -> String {
+    value.replace('"', "\"\"")
+}
+
+fn quote_cmd_token_if_needed(value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || value.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(c, '&' | '|' | '<' | '>' | '(' | ')' | '^' | '%' | '!' | '"')
+        });
+
+    if needs_quotes {
+        format!("\"{}\"", escape_cmd_double_quoted(value))
+    } else {
+        value.to_string()
+    }
+}
+
+fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(quote_cmd_token_if_needed(command));
+    parts.extend(args.iter().map(|arg| quote_cmd_token_if_needed(arg)));
+    parts.join(" ")
+}
+
+fn resolve_spawn_command_for_platform<F>(
+    command: &str,
+    args: &[String],
+    is_windows: bool,
+    mut resolve_windows_shell: F,
+    shell: Option<&str>,
+) -> (String, Vec<String>)
+where
+    F: FnMut() -> String,
+{
+    if is_windows {
+        // If an explicit shell override is provided, use it.
+        if let Some(shell_id) = shell {
+            if shell_id == "cmd" {
+                let expression = build_cmd_command_expression(command, args);
+                return ("cmd.exe".to_string(), vec!["/C".to_string(), expression]);
+            }
+            // "wsl": command and args are already set by the caller (launch_with_wsl_pty_write
+            // or resolve_shell_for_spawn), so pass through without wrapping.
+            if shell_id == "wsl" {
+                return (command.to_string(), args.to_vec());
+            }
+            // "powershell" falls through to the default PowerShell path below.
+        }
+
+        let shell = resolve_windows_shell();
+        let expression = build_windows_powershell_command_expression(command, args);
+        return (
+            shell,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                expression,
+            ],
+        );
+    }
+
+    (command.to_string(), args.to_vec())
+}
+
+fn resolve_spawn_command(
+    command: &str,
+    args: &[String],
+    shell: Option<&str>,
+) -> (String, Vec<String>) {
+    resolve_spawn_command_for_platform(command, args, cfg!(windows), resolve_windows_shell, shell)
 }
 
 /// Handle to a PTY instance with its child process.
@@ -44,8 +152,14 @@ impl PtyHandle {
                 reason: e.to_string(),
             })?;
 
-        let mut cmd = CommandBuilder::new(&config.command);
-        for arg in &config.args {
+        let (spawn_command, spawn_args) = resolve_spawn_command(
+            &config.command,
+            &config.args,
+            config.terminal_shell.as_deref(),
+        );
+
+        let mut cmd = CommandBuilder::new(&spawn_command);
+        for arg in &spawn_args {
             cmd.arg(arg);
         }
         cmd.cwd(&config.working_dir);
@@ -130,6 +244,173 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    #[test]
+    fn escape_powershell_single_quoted_duplicates_single_quotes() {
+        assert_eq!(
+            escape_powershell_single_quoted("C:\\Tools\\it's\\npx.cmd"),
+            "C:\\Tools\\it''s\\npx.cmd"
+        );
+    }
+
+    #[test]
+    fn build_windows_powershell_command_expression_quotes_command_and_args() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let expr = build_windows_powershell_command_expression("C:\\Tools\\npx.cmd", &args);
+        assert_eq!(
+            expr,
+            "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'"
+        );
+    }
+
+    #[test]
+    fn resolve_windows_shell_prefers_pwsh_when_available() {
+        let shell = resolve_windows_shell_with(|name| name == "pwsh");
+        assert_eq!(shell, "pwsh");
+    }
+
+    #[test]
+    fn resolve_windows_shell_falls_back_to_windows_powershell() {
+        let shell = resolve_windows_shell_with(|_| false);
+        assert_eq!(shell, "powershell.exe");
+    }
+
+    #[test]
+    fn resolve_spawn_command_wraps_command_for_windows_platform() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "C:\\Tools\\npx.cmd",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+        );
+
+        assert_eq!(program, "pwsh");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_platform_wraps_non_batch_command() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            true,
+            || "powershell.exe".to_string(),
+            None,
+        );
+        assert_eq!(program, "powershell.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                "& 'codex' '--version'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_non_windows_keeps_original_command() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) =
+            resolve_spawn_command_for_platform("codex", &args, false, || "pwsh".to_string(), None);
+        assert_eq!(program, "codex");
+        assert_eq!(resolved_args, args);
+    }
+
+    #[test]
+    fn resolve_spawn_command_cmd_shell_uses_cmd_exe() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "npx.cmd",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("cmd"),
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "npx.cmd --yes @openai/codex@latest".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_cmd_shell_quotes_spaces_and_metacharacters() {
+        let args = vec![
+            "--cwd".to_string(),
+            "C:\\Users\\Test User\\repo".to_string(),
+            "a&b".to_string(),
+        ];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "C:\\Program Files\\nodejs\\npx.cmd",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("cmd"),
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "\"C:\\Program Files\\nodejs\\npx.cmd\" --cwd \"C:\\Users\\Test User\\repo\" \"a&b\""
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_cmd_command_expression_escapes_embedded_quotes() {
+        let expression =
+            build_cmd_command_expression("tool.cmd", &[r#"arg "quoted" value"#.to_string()]);
+        assert_eq!(expression, r#"tool.cmd "arg ""quoted"" value""#);
+    }
+
+    #[test]
+    fn resolve_spawn_command_powershell_shell_uses_default_powershell() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("powershell"),
+        );
+        assert_eq!(program, "pwsh");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                "& 'codex' '--version'".to_string(),
+            ]
+        );
+    }
+
     /// Helper: read from PTY reader in a separate thread with timeout.
     fn read_with_timeout(
         mut reader: Box<dyn Read + Send>,
@@ -186,6 +467,7 @@ mod tests {
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
+            terminal_shell: None,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -214,6 +496,7 @@ mod tests {
             env_vars,
             rows: 24,
             cols: 80,
+            terminal_shell: None,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -253,6 +536,7 @@ mod tests {
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
+            terminal_shell: None,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -269,6 +553,7 @@ mod tests {
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
+            terminal_shell: None,
         };
 
         let mut handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -295,6 +580,7 @@ mod tests {
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
+            terminal_shell: None,
         };
 
         let result = PtyHandle::new(config);

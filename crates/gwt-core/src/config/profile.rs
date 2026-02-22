@@ -27,6 +27,9 @@ pub struct Profile {
     /// AI settings (optional)
     #[serde(default)]
     pub ai: Option<AISettings>,
+    /// AI settings enabled flag (optional)
+    #[serde(default)]
+    pub ai_enabled: Option<bool>,
 }
 
 impl Profile {
@@ -38,6 +41,7 @@ impl Profile {
             disabled_env: Vec::new(),
             description: String::new(),
             ai: None,
+            ai_enabled: None,
         }
     }
 
@@ -80,6 +84,9 @@ pub struct AISettings {
     /// Model name
     #[serde(default = "default_model")]
     pub model: String,
+    /// Output language ("en" | "ja" | "auto")
+    #[serde(default = "default_ai_language")]
+    pub language: String,
     /// Session summary enabled
     #[serde(default = "default_summary_enabled")]
     pub summary_enabled: bool,
@@ -91,6 +98,7 @@ pub struct ResolvedAISettings {
     pub endpoint: String,
     pub api_key: String,
     pub model: String,
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +123,7 @@ impl AISettings {
             endpoint: self.endpoint.trim().to_string(),
             api_key: self.api_key.trim().to_string(),
             model: self.model.trim().to_string(),
+            language: normalize_ai_language(&self.language),
         }
     }
 
@@ -139,8 +148,20 @@ fn default_model() -> String {
     String::new() // No default - must be selected via wizard
 }
 
+fn default_ai_language() -> String {
+    "en".to_string()
+}
+
 fn default_summary_enabled() -> bool {
     true
+}
+
+fn normalize_ai_language(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "ja" => "ja".to_string(),
+        "auto" => "auto".to_string(),
+        _ => "en".to_string(),
+    }
 }
 
 /// Profiles configuration stored on disk
@@ -346,7 +367,8 @@ impl ProfilesConfig {
     /// Resolve active AI settings and feature flags.
     ///
     /// Rules:
-    /// - If the active profile has `ai` configured (present), it always wins (even when disabled).
+    /// - If the active profile has `ai` configured (present), it always wins and
+    ///   is validated by `AISettings::is_enabled()`.
     /// - Otherwise fall back to `default_ai`.
     pub fn resolve_active_ai_settings(&self) -> ActiveAISettingsResolution {
         if let Some(profile) = self.active_profile() {
@@ -433,6 +455,7 @@ mod tests {
             endpoint: default_endpoint(),
             api_key: String::new(),
             model: model.to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         }
     }
@@ -618,6 +641,7 @@ profiles:
         assert_eq!(resolved.endpoint, "");
         assert_eq!(resolved.model, "");
         assert_eq!(resolved.api_key, "");
+        assert_eq!(resolved.language, "en");
         assert!(!settings.summary_enabled);
     }
 
@@ -630,7 +654,33 @@ profiles:
         assert_eq!(resolved.endpoint, "https://api.openai.com/v1"); // serde default
         assert_eq!(resolved.model, ""); // No default model
         assert_eq!(resolved.api_key, "");
+        assert_eq!(settings.language, "en");
+        assert_eq!(resolved.language, "en");
         assert!(settings.summary_enabled);
+    }
+
+    #[test]
+    fn test_ai_settings_language_normalizes_known_values() {
+        let settings = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "JA".to_string(),
+            summary_enabled: true,
+        };
+        assert_eq!(settings.resolved().language, "ja");
+
+        let settings = AISettings {
+            language: " auto ".to_string(),
+            ..settings
+        };
+        assert_eq!(settings.resolved().language, "auto");
+
+        let settings = AISettings {
+            language: "fr".to_string(),
+            ..settings
+        };
+        assert_eq!(settings.resolved().language, "en");
     }
 
     #[test]
@@ -640,6 +690,7 @@ profiles:
             endpoint: "".to_string(),
             api_key: "".to_string(),
             model: "".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         };
         let resolved = settings.resolved();
@@ -655,6 +706,7 @@ profiles:
             endpoint: "http://localhost:11434/v1".to_string(),
             api_key: "".to_string(),
             model: "llama3.2".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         };
         assert!(settings.is_enabled());
@@ -666,6 +718,7 @@ profiles:
             endpoint: "https://api.example.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         };
         assert!(settings.is_enabled());
@@ -677,6 +730,7 @@ profiles:
             endpoint: "".to_string(),
             api_key: "key".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         };
         assert!(!missing_endpoint.is_enabled());
@@ -685,6 +739,7 @@ profiles:
             endpoint: "https://api.example.com/v1".to_string(),
             api_key: "key".to_string(),
             model: "".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         };
         assert!(!missing_model.is_enabled());
@@ -696,6 +751,7 @@ profiles:
             endpoint: "https://api.example.com/v1".to_string(),
             api_key: "key".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
             summary_enabled: false,
         };
         assert!(!disabled.is_summary_enabled());
@@ -704,6 +760,7 @@ profiles:
             endpoint: "https://api.example.com/v1".to_string(),
             api_key: "key".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         };
         assert!(enabled.is_summary_enabled());
@@ -713,6 +770,15 @@ profiles:
     fn test_profile_ai_enabled_requires_settings() {
         let profile = Profile::new("dev");
         assert!(!profile.ai_enabled());
+    }
+
+    #[test]
+    fn test_profile_ai_disabled_flag_is_ignored() {
+        let mut profile = Profile::new("dev");
+        profile.ai = Some(ai_settings("gpt-5.2"));
+        profile.ai_enabled = Some(false);
+        assert!(profile.ai_enabled());
+        assert!(profile.resolved_ai_settings().is_some());
     }
 
     #[test]
@@ -756,6 +822,28 @@ profiles:
         assert!(!resolved.ai_enabled);
         assert!(!resolved.summary_enabled);
         assert!(resolved.resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_active_ai_settings_ignores_ai_enabled_flag_false() {
+        let mut profiles = HashMap::new();
+        let mut dev = Profile::new("dev");
+        dev.ai = Some(ai_settings("gpt-5.2"));
+        dev.ai_enabled = Some(false);
+        profiles.insert("dev".to_string(), dev);
+
+        let config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: Some(ai_settings("gpt-5.1")),
+            profiles,
+        };
+
+        let resolved = config.resolve_active_ai_settings();
+        assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
+        assert!(resolved.ai_enabled);
+        assert!(resolved.summary_enabled);
+        assert_eq!(resolved.resolved.unwrap().model, "gpt-5.2");
     }
 
     #[test]

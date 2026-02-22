@@ -4,10 +4,13 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, PaneLaunchMeta};
 use chrono::Utc;
 use gwt_core::ai::SessionParser;
-use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
+use gwt_core::config::stats::Stats;
+use gwt_core::config::{
+    AgentConfig, ClaudeAgentProvider, OsEnvCaptureMode, ProfilesConfig, Settings,
+};
 use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
-    DevContainerConfig, DockerFileType, DockerManager,
+    DevContainerConfig, DockerFileType, DockerManager, PortAllocator,
 };
 use gwt_core::git::Remote;
 use gwt_core::terminal::pane::PaneStatus;
@@ -17,15 +20,14 @@ use gwt_core::terminal::runner::{
 use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::StructuredError;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -155,6 +157,10 @@ pub struct LaunchAgentRequest {
     pub resume_session_id: Option<String>,
     /// Optional new branch creation request (creates branch + worktree before launch)
     pub create_branch: Option<CreateBranchRequest>,
+    /// Optional terminal shell override (e.g. "powershell", "cmd", "wsl").
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub terminal_shell: Option<String>,
 }
 
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
@@ -197,10 +203,87 @@ fn create_new_worktree_path(
     branch_name: &str,
     base_branch: Option<&str>,
 ) -> Result<PathBuf, String> {
+    // SPEC-a4fb2db2: Try remote-first flow when gh CLI is available
+    if gwt_core::git::gh_cli::is_gh_available() && gwt_core::git::gh_cli::check_auth() {
+        match create_new_worktree_remote_first(repo_path, branch_name, base_branch) {
+            Ok(path) => return Ok(path),
+            Err(e) => {
+                // 422 (branch already exists) should not fallback — propagate error
+                if e.contains("already exists on remote") {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    category = "worktree",
+                    branch = branch_name,
+                    error = %e,
+                    "Remote-first worktree creation failed, falling back to local"
+                );
+            }
+        }
+    }
+
     let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
     let wt = manager
         .create_new_branch(branch_name, base_branch)
         .map_err(|e| e.to_string())?;
+    Ok(wt.path)
+}
+
+/// SPEC-a4fb2db2: Create a worktree by first creating the branch on GitHub,
+/// then fetching it locally.
+fn create_new_worktree_remote_first(
+    repo_path: &std::path::Path,
+    branch_name: &str,
+    base_branch: Option<&str>,
+) -> Result<PathBuf, String> {
+    // Normalize base branch: strip "origin/" prefix if present
+    let base = base_branch
+        .map(|b| b.strip_prefix("origin/").unwrap_or(b))
+        .unwrap_or("HEAD");
+
+    // Resolve the SHA of the base branch on GitHub
+    let sha = gwt_core::git::resolve_remote_branch_sha(repo_path, base)?;
+
+    // Create the branch on GitHub
+    gwt_core::git::create_remote_branch(repo_path, branch_name, &sha)?;
+
+    // Fetch the newly created branch locally
+    let fetch_output = gwt_core::process::command("git")
+        .args([
+            "fetch",
+            "origin",
+            &format!("{}:{}", branch_name, branch_name),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git fetch: {}", e))?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        return Err(format!(
+            "Failed to fetch branch '{}' from remote (the remote branch was created and may need manual deletion): {}",
+            branch_name,
+            stderr.trim()
+        ));
+    }
+
+    // Create worktree for the fetched branch
+    let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
+    let wt = manager
+        .create_for_branch(branch_name)
+        .map_err(|e| e.to_string())?;
+
+    // SPEC-b3f1a4e2 FR-005: Set upstream tracking config (non-fatal)
+    // Remote-first path always uses "origin".
+    if let Err(e) = gwt_core::git::Branch::set_upstream_config(&wt.path, branch_name, "origin") {
+        tracing::warn!(
+            category = "worktree",
+            branch = branch_name,
+            error = %e,
+            "Failed to set upstream config in remote-first path (non-fatal)"
+        );
+    }
+
     Ok(wt.path)
 }
 
@@ -330,7 +413,7 @@ fn get_command_version_with_timeout(command: &str) -> Option<String> {
     let command = command.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new(command)
+        let out = gwt_core::process::command(&command)
             .arg("--version")
             .output();
         let _ = tx.send(out);
@@ -350,6 +433,106 @@ fn get_command_version_with_timeout(command: &str) -> Option<String> {
         return Some(stderr);
     }
     None
+}
+
+#[derive(Debug, Clone)]
+struct CodexFeatureProbeContext {
+    command: String,
+    args: Vec<String>,
+    tool_version: String,
+}
+
+static CODEX_MULTI_AGENT_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+const CODEX_FEATURES_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn codex_multi_agent_support_cache() -> &'static Mutex<HashMap<String, bool>> {
+    CODEX_MULTI_AGENT_SUPPORT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn codex_multi_agent_support_cache_key(context: &CodexFeatureProbeContext) -> String {
+    let mut key = format!("{}|{}", context.command, context.tool_version);
+    for arg in &context.args {
+        key.push('\u{1f}');
+        key.push_str(arg);
+    }
+    key
+}
+
+fn codex_features_list_contains_feature(raw: &str, feature: &str) -> bool {
+    raw.lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|name| name == feature)
+    })
+}
+
+fn probe_codex_features_list(command: &str, args: &[String], timeout: Duration) -> Option<String> {
+    let command = command.to_string();
+    let args = args.to_vec();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = gwt_core::process::command(&command)
+            .args(args)
+            .arg("features")
+            .arg("list")
+            .output();
+        let _ = tx.send(out);
+    });
+
+    let out = rx.recv_timeout(timeout).ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return None;
+    }
+
+    Some(stdout)
+}
+
+fn codex_supports_multi_agent(context: &CodexFeatureProbeContext) -> bool {
+    let cache_key = codex_multi_agent_support_cache_key(context);
+    if let Ok(cache) = codex_multi_agent_support_cache().lock() {
+        if let Some(value) = cache.get(&cache_key) {
+            return *value;
+        }
+    }
+
+    let supported = match probe_codex_features_list(
+        &context.command,
+        &context.args,
+        CODEX_FEATURES_LIST_TIMEOUT,
+    ) {
+        Some(raw) => codex_features_list_contains_feature(&raw, "multi_agent"),
+        // Preserve default behavior for package-tag launches when probing is unavailable.
+        None => context.tool_version.eq_ignore_ascii_case("latest"),
+    };
+
+    if let Ok(mut cache) = codex_multi_agent_support_cache().lock() {
+        cache.insert(cache_key, supported);
+    }
+
+    supported
+}
+
+fn codex_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".codex").join("config.toml"))
+}
+
+fn codex_config_has_collab_alias(path: &std::path::Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read Codex config ({}): {e}", path.display()))?;
+    let parsed: toml::Value = toml::from_str(&raw)
+        .map_err(|e| format!("Failed to parse Codex config ({}): {e}", path.display()))?;
+    Ok(parsed
+        .get("features")
+        .and_then(|value| value.get("collab"))
+        .is_some())
 }
 
 #[derive(Debug, Clone)]
@@ -507,10 +690,19 @@ fn now_millis() -> i64 {
 
 const DOCKER_WORKDIR: &str = "/workspace";
 
+fn docker_compose_exec_workdir(workspace_folder: Option<&str>) -> String {
+    workspace_folder
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
 fn build_docker_compose_up_args(
     compose_args: &[String],
     build: bool,
     recreate: bool,
+    service: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["compose".to_string()];
     args.extend(compose_args.iter().cloned());
@@ -526,6 +718,9 @@ fn build_docker_compose_up_args(
     if recreate {
         args.push("--force-recreate".to_string());
     }
+    if let Some(service) = service.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push(service.to_string());
+    }
     args
 }
 
@@ -534,6 +729,151 @@ fn build_docker_compose_down_args(compose_args: &[String]) -> Vec<String> {
     args.extend(compose_args.iter().cloned());
     args.push("down".to_string());
     args
+}
+
+fn is_valid_docker_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+const DOCKER_ENV_MERGE_PREFIX_ALLOWLIST: &[&str] = &[
+    "ANTHROPIC_",
+    "OPENAI_",
+    "GEMINI_",
+    "GOOGLE_",
+    "GITHUB_",
+    "GH_",
+    "GIT_",
+    "NPM_",
+    "HF_",
+    "COORDINATOR_",
+    "GWT_",
+    "CLAUDE_",
+    "CODEX_",
+    "OLLAMA_",
+    "OPENROUTER_",
+];
+
+const DOCKER_ENV_MERGE_KEY_ALLOWLIST: &[&str] = &[
+    "TERM",
+    "COLORTERM",
+    "IS_SANDBOX",
+    "HOST_GIT_COMMON_DIR",
+    "HOST_GIT_WORKTREE_DIR",
+];
+
+fn should_merge_profile_env_for_docker(key: &str) -> bool {
+    let k = key.trim();
+    if k.is_empty() || !is_valid_docker_env_key(k) {
+        return false;
+    }
+    DOCKER_ENV_MERGE_KEY_ALLOWLIST.contains(&k)
+        || DOCKER_ENV_MERGE_PREFIX_ALLOWLIST
+            .iter()
+            .any(|prefix| k.starts_with(prefix))
+}
+
+fn merge_profile_env_for_docker(
+    base_env: &mut HashMap<String, String>,
+    merged_profile_env: &HashMap<String, String>,
+) {
+    for (key, value) in merged_profile_env {
+        let k = key.trim();
+        if !should_merge_profile_env_for_docker(k) {
+            continue;
+        }
+        base_env.insert(k.to_string(), value.to_string());
+    }
+}
+
+fn compose_file_paths_from_args(compose_args: &[String]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut idx = 0usize;
+    while idx + 1 < compose_args.len() {
+        if compose_args[idx] == "-f" {
+            let path = compose_args[idx + 1].trim();
+            if !path.is_empty() {
+                paths.push(PathBuf::from(path));
+            }
+            idx += 2;
+            continue;
+        }
+        idx += 1;
+    }
+    paths
+}
+
+fn collect_compose_env_keys(compose_paths: &[PathBuf]) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for compose_path in compose_paths {
+        if let Ok(found) = DockerManager::list_env_keys_from_compose_file(compose_path) {
+            keys.extend(found);
+        }
+    }
+    keys
+}
+
+fn merge_compose_env_for_docker(
+    base_env: &mut HashMap<String, String>,
+    merged_profile_env: &HashMap<String, String>,
+    compose_paths: &[PathBuf],
+) {
+    let keys = collect_compose_env_keys(compose_paths);
+    for key in keys {
+        let k = key.trim();
+        if k.is_empty() || !is_valid_docker_env_key(k) {
+            continue;
+        }
+        if let Some(value) = merged_profile_env.get(k) {
+            if should_keep_existing_compose_port_value(base_env, k, value) {
+                continue;
+            }
+            base_env.insert(k.to_string(), value.to_string());
+        }
+    }
+}
+
+fn should_keep_existing_compose_port_value(
+    base_env: &HashMap<String, String>,
+    key: &str,
+    incoming_value: &str,
+) -> bool {
+    let Some(existing_value) = base_env.get(key) else {
+        return false;
+    };
+
+    if existing_value == incoming_value {
+        return false;
+    }
+
+    let Some(incoming_port) = incoming_value.parse::<u16>().ok() else {
+        return false;
+    };
+    if existing_value.parse::<u16>().is_err() {
+        return false;
+    }
+
+    PortAllocator::is_port_in_use(incoming_port)
+}
+
+fn merge_compose_env_from_process(
+    base_env: &mut HashMap<String, String>,
+    compose_paths: &[PathBuf],
+) {
+    let keys = collect_compose_env_keys(compose_paths);
+    for key in keys {
+        let k = key.trim();
+        if k.is_empty() || !is_valid_docker_env_key(k) {
+            continue;
+        }
+        if let Ok(value) = std::env::var(k) {
+            base_env.insert(k.to_string(), value);
+        }
+    }
 }
 
 fn build_docker_compose_exec_args(
@@ -546,13 +886,18 @@ fn build_docker_compose_exec_args(
 ) -> Vec<String> {
     let mut args = vec!["compose".to_string()];
     args.extend(compose_args.iter().cloned());
-    args.extend(["exec".to_string(), "-w".to_string(), workdir.to_string()]);
+    args.push("exec".to_string());
+    let workdir = workdir.trim();
+    if !workdir.is_empty() {
+        args.push("-w".to_string());
+        args.push(workdir.to_string());
+    }
 
     let mut keys: Vec<&String> = env_vars.keys().collect();
     keys.sort();
     for key in keys {
         let k = key.trim();
-        if k.is_empty() {
+        if k.is_empty() || !is_valid_docker_env_key(k) {
             continue;
         }
         let v = env_vars.get(key).map(|s| s.as_str()).unwrap_or_default();
@@ -587,6 +932,49 @@ fn ensure_docker_compose_ready() -> Result<(), String> {
     }
 }
 
+fn verify_docker_compose_service_start<IsRunning, ServiceLogs, ComposeDown>(
+    service: Option<&str>,
+    mut service_is_running: IsRunning,
+    mut service_logs: ServiceLogs,
+    mut compose_down: ComposeDown,
+) -> Result<(), String>
+where
+    IsRunning: FnMut(&str) -> Result<bool, String>,
+    ServiceLogs: FnMut(&str) -> Option<String>,
+    ComposeDown: FnMut() -> Result<(), String>,
+{
+    let selected_service = service.map(str::trim).unwrap_or_default();
+    if selected_service.is_empty() {
+        return Ok(());
+    }
+
+    match service_is_running(selected_service) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let mut message = format!(
+                "docker compose service '{}' is not running after startup.",
+                selected_service
+            );
+            if let Some(logs) = service_logs(selected_service) {
+                message.push_str("\n\n");
+                message.push_str(&logs);
+            }
+            if let Err(err) = compose_down() {
+                message.push_str("\n\n");
+                message.push_str(
+                    "Failed to run best-effort docker compose down after startup failure: ",
+                );
+                message.push_str(&err);
+            }
+            Err(message)
+        }
+        Err(err) => Err(format!(
+            "docker compose up succeeded, but failed to verify service '{}': {}",
+            selected_service, err
+        )),
+    }
+}
+
 fn docker_compose_up(
     worktree_path: &std::path::Path,
     container_name: &str,
@@ -594,26 +982,53 @@ fn docker_compose_up(
     compose_args: &[String],
     build: bool,
     recreate: bool,
+    service: Option<&str>,
 ) -> Result<(), String> {
     ensure_docker_compose_ready()?;
 
-    let output = Command::new("docker")
-        .args(build_docker_compose_up_args(compose_args, build, recreate))
+    let output = gwt_core::process::command("docker")
+        .args(build_docker_compose_up_args(
+            compose_args,
+            build,
+            recreate,
+            service,
+        ))
         .current_dir(worktree_path)
         .env("COMPOSE_PROJECT_NAME", container_name)
         .envs(env_vars)
         .output()
         .map_err(|e| format!("Failed to run docker compose up: {}", e))?;
 
-    if output.status.success() {
-        return Ok(());
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err("docker compose up failed".to_string());
+        }
+        return Err(stderr);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        return Err("docker compose up failed".to_string());
-    }
-    Err(stderr)
+    verify_docker_compose_service_start(
+        service,
+        |selected_service| {
+            docker_compose_service_is_running(
+                worktree_path,
+                container_name,
+                env_vars,
+                compose_args,
+                selected_service,
+            )
+        },
+        |selected_service| {
+            docker_compose_service_logs(
+                worktree_path,
+                container_name,
+                env_vars,
+                compose_args,
+                selected_service,
+            )
+        },
+        || docker_compose_down(worktree_path, container_name, env_vars, compose_args),
+    )
 }
 
 fn docker_compose_down(
@@ -624,7 +1039,7 @@ fn docker_compose_down(
 ) -> Result<(), String> {
     ensure_docker_compose_ready()?;
 
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(build_docker_compose_down_args(compose_args))
         .current_dir(worktree_path)
         .env("COMPOSE_PROJECT_NAME", container_name)
@@ -641,6 +1056,97 @@ fn docker_compose_down(
         return Err("docker compose down failed".to_string());
     }
     Err(stderr)
+}
+
+fn docker_compose_service_is_running(
+    worktree_path: &std::path::Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+    compose_args: &[String],
+    service: &str,
+) -> Result<bool, String> {
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_args.iter().cloned());
+    args.extend([
+        "ps".to_string(),
+        "--status".to_string(),
+        "running".to_string(),
+        "--services".to_string(),
+    ]);
+
+    let output = gwt_core::process::command("docker")
+        .args(args)
+        .current_dir(worktree_path)
+        .env("COMPOSE_PROJECT_NAME", container_name)
+        .envs(env_vars)
+        .output()
+        .map_err(|e| format!("Failed to run docker compose ps: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "docker compose ps failed".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(compose_services_output_contains(stdout.as_ref(), service))
+}
+
+fn docker_compose_service_logs(
+    worktree_path: &std::path::Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+    compose_args: &[String],
+    service: &str,
+) -> Option<String> {
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_args.iter().cloned());
+    args.extend([
+        "logs".to_string(),
+        "--no-color".to_string(),
+        "--tail".to_string(),
+        "80".to_string(),
+    ]);
+    args.push(service.to_string());
+
+    let output = gwt_core::process::command("docker")
+        .args(args)
+        .current_dir(worktree_path)
+        .env("COMPOSE_PROJECT_NAME", container_name)
+        .envs(env_vars)
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    let mut chunks = Vec::new();
+    if !stdout.is_empty() {
+        chunks.push(stdout);
+    }
+    if !stderr.is_empty() {
+        chunks.push(stderr);
+    }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.join("\n"))
+    }
+}
+
+fn compose_services_output_contains(output: &str, service: &str) -> bool {
+    let target = service.trim();
+    if target.is_empty() {
+        return false;
+    }
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| line == target)
 }
 
 fn ensure_docker_ready() -> Result<(), String> {
@@ -662,7 +1168,7 @@ fn ensure_docker_ready() -> Result<(), String> {
 }
 
 fn docker_image_exists(image: &str) -> bool {
-    Command::new("docker")
+    gwt_core::process::command("docker")
         .args(["image", "inspect", image])
         .output()
         .map(|o| o.status.success())
@@ -670,7 +1176,7 @@ fn docker_image_exists(image: &str) -> bool {
 }
 
 fn docker_image_created_time(image: &str) -> Option<SystemTime> {
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(["image", "inspect", "-f", "{{.Created}}", image])
         .output()
         .ok()?;
@@ -711,7 +1217,7 @@ fn docker_build_image(
     dockerfile_path: &std::path::Path,
     context_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(["build", "-t", image, "-f"])
         .arg(dockerfile_path)
         .arg(context_dir)
@@ -730,11 +1236,198 @@ fn docker_build_image(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerBindMount {
+    source: String,
+    target: String,
+}
+
+fn normalize_mount_path(path: &str) -> String {
+    path.trim().replace('\\', "/")
+}
+
+fn is_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+}
+
+fn docker_mount_target_path(path: &str) -> String {
+    let normalized = normalize_mount_path(path);
+    if !is_windows_drive_path(&normalized) {
+        return normalized;
+    }
+
+    let rest = normalized[2..].trim_start_matches('/');
+    if rest.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", rest)
+    }
+}
+
+fn path_is_same_or_within(base: &str, child: &str) -> bool {
+    let base_norm = normalize_mount_path(base);
+    let child_norm = normalize_mount_path(child);
+    let base_path = std::path::Path::new(base_norm.as_str());
+    let child_path = std::path::Path::new(child_norm.as_str());
+    child_path == base_path || child_path.starts_with(base_path)
+}
+
+fn build_git_bind_mounts(env_vars: &HashMap<String, String>) -> Vec<DockerBindMount> {
+    let common_source = env_vars
+        .get("HOST_GIT_COMMON_DIR")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(normalize_mount_path);
+
+    let Some(common_source) = common_source else {
+        return Vec::new();
+    };
+
+    let common_target = docker_mount_target_path(&common_source);
+    let mut mounts = vec![DockerBindMount {
+        source: common_source.clone(),
+        target: common_target.clone(),
+    }];
+
+    let worktree_source = env_vars
+        .get("HOST_GIT_WORKTREE_DIR")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(normalize_mount_path);
+
+    let Some(worktree_source) = worktree_source else {
+        return mounts;
+    };
+
+    let worktree_target = docker_mount_target_path(&worktree_source);
+    if worktree_target.is_empty() || path_is_same_or_within(&common_target, &worktree_target) {
+        return mounts;
+    }
+
+    mounts.push(DockerBindMount {
+        source: worktree_source,
+        target: worktree_target,
+    });
+    mounts
+}
+
+fn apply_translated_git_env(env_vars: &mut HashMap<String, String>) {
+    let common_source = env_vars
+        .get("HOST_GIT_COMMON_DIR")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(normalize_mount_path);
+    if let Some(common_source) = common_source {
+        let common_target = docker_mount_target_path(&common_source);
+        if common_target != common_source {
+            env_vars.insert("GIT_COMMON_DIR".to_string(), common_target);
+        }
+    }
+
+    let worktree_source = env_vars
+        .get("HOST_GIT_WORKTREE_DIR")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(normalize_mount_path);
+    if let Some(worktree_source) = worktree_source {
+        let worktree_target = docker_mount_target_path(&worktree_source);
+        if worktree_target != worktree_source {
+            env_vars.insert("GIT_DIR".to_string(), worktree_target);
+        }
+    }
+}
+
+fn yaml_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn compose_service_container_name(container_name_prefix: &str, service: &str) -> String {
+    let mut suffix = String::new();
+    for c in service.trim().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            suffix.push(c.to_ascii_lowercase());
+        } else {
+            suffix.push('-');
+        }
+    }
+    while suffix.contains("--") {
+        suffix = suffix.replace("--", "-");
+    }
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        container_name_prefix.to_string()
+    } else {
+        format!("{container_name_prefix}-{suffix}")
+    }
+}
+
+fn render_docker_compose_override(
+    selected_service: &str,
+    services: &[String],
+    container_name_prefix: &str,
+    mounts: &[DockerBindMount],
+) -> String {
+    let mut content = "services:\n".to_string();
+    let selected = selected_service.trim();
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ordered: Vec<String> = Vec::new();
+    for service in services {
+        let name = service.trim();
+        if name.is_empty() || !seen.insert(name.to_string()) {
+            continue;
+        }
+        ordered.push(name.to_string());
+    }
+    if !selected.is_empty() && seen.insert(selected.to_string()) {
+        ordered.push(selected.to_string());
+    }
+
+    for service in ordered {
+        content.push_str(&format!("  {service}:\n"));
+        let resolved_container_name =
+            compose_service_container_name(container_name_prefix, &service);
+        content.push_str(&format!(
+            "    container_name: {}\n",
+            yaml_single_quoted(&resolved_container_name)
+        ));
+
+        if service != selected || mounts.is_empty() {
+            continue;
+        }
+
+        content.push_str("    volumes:\n");
+        for mount in mounts {
+            content.push_str("      - type: bind\n");
+            content.push_str(&format!(
+                "        source: {}\n",
+                yaml_single_quoted(&mount.source)
+            ));
+            content.push_str(&format!(
+                "        target: {}\n",
+                yaml_single_quoted(&mount.target)
+            ));
+        }
+    }
+
+    content
+}
+
 fn write_docker_compose_override(
     project_root: &std::path::Path,
     container_name: &str,
-    service: &str,
-) -> Result<std::path::PathBuf, String> {
+    selected_service: &str,
+    services: &[String],
+    mounts: &[DockerBindMount],
+) -> Result<Option<std::path::PathBuf>, String> {
+    if mounts.is_empty() && services.is_empty() {
+        return Ok(None);
+    }
+
     let gwt_dir = project_root.join(".gwt");
     std::fs::create_dir_all(&gwt_dir)
         .map_err(|e| format!("Failed to create .gwt directory: {e}"))?;
@@ -742,14 +1435,11 @@ fn write_docker_compose_override(
     let filename = format!("docker-compose.gwt.override.{container_name}.yml");
     let path = gwt_dir.join(filename);
 
-    // Use env var interpolation so the override remains stable even if paths change.
-    // These env vars are set by DockerManager::collect_passthrough_env.
-    let content = format!(
-        "services:\n  {service}:\n    volumes:\n      - \"${{HOST_GIT_COMMON_DIR}}:${{HOST_GIT_COMMON_DIR}}\"\n      - \"${{HOST_GIT_WORKTREE_DIR}}:${{HOST_GIT_WORKTREE_DIR}}\"\n"
-    );
+    let content =
+        render_docker_compose_override(selected_service, services, container_name, mounts);
 
     std::fs::write(&path, content).map_err(|e| format!("Failed to write override file: {e}"))?;
-    Ok(path)
+    Ok(Some(path))
 }
 
 fn codex_supports_collaboration_modes(version_for_gates: Option<&str>) -> bool {
@@ -761,6 +1451,7 @@ fn build_agent_args(
     agent_id: &str,
     request: &LaunchAgentRequest,
     version_for_gates: Option<&str>,
+    enable_codex_multi_agent: bool,
 ) -> Result<Vec<String>, String> {
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let skip_permissions = request.skip_permissions.unwrap_or(false);
@@ -802,6 +1493,7 @@ fn build_agent_args(
                 version_for_gates,
                 skip_permissions,
                 collaboration,
+                enable_codex_multi_agent,
             ));
 
             if skip_permissions {
@@ -898,6 +1590,7 @@ fn launch_with_config(
     state: &AppState,
     app_handle: AppHandle,
 ) -> Result<String, String> {
+    let agent_name_for_stream = config.agent_name.clone();
     let pane_id = {
         let mut manager = state
             .pane_manager
@@ -931,10 +1624,342 @@ fn launch_with_config(
 
     let pane_id_clone = pane_id.clone();
     std::thread::spawn(move || {
-        stream_pty_output(reader, pane_id_clone, app_handle);
+        stream_pty_output(reader, pane_id_clone, app_handle, agent_name_for_stream);
     });
 
     Ok(pane_id)
+}
+
+/// Build the shell command string to inject into a WSL interactive PTY.
+///
+/// Prepends `export KEY=VALUE; ...` for env vars, then appends
+/// `cd <wsl_path> && <agent_command> <args...>`.
+fn build_wsl_inject_command(
+    agent_command: &str,
+    agent_args: &[String],
+    env_vars: &HashMap<String, String>,
+    wsl_working_dir: &str,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Export env vars
+    let mut keys: Vec<&String> = env_vars.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = env_vars.get(key).map(|s| s.as_str()).unwrap_or("");
+        // Single-quote the value and escape embedded single quotes.
+        let escaped = value.replace('\'', "'\\''");
+        parts.push(format!("export {key}='{escaped}'"));
+    }
+
+    // cd + exec
+    let mut cmd = format!("cd '{wsl_working_dir}'");
+    cmd.push_str(" && exec ");
+    cmd.push_str(agent_command);
+    for arg in agent_args {
+        let escaped = arg.replace('\'', "'\\''");
+        cmd.push_str(&format!(" '{escaped}'"));
+    }
+    parts.push(cmd);
+
+    parts.join(" && ")
+}
+
+/// Detect a shell prompt in PTY output and inject a command.
+///
+/// Reads from the PTY reader, looking for common shell prompt endings
+/// (`$`, `#`, `>`, `%` followed by a space or at line end).
+/// On detection, writes `command_str` + newline to the PTY input.
+/// Returns `Ok(true)` if prompt was detected and command injected,
+/// `Ok(false)` if timeout expired without detection.
+fn wsl_prompt_detect_and_inject(
+    pane_id: &str,
+    command_str: &str,
+    state: &AppState,
+    app_handle: &AppHandle,
+    timeout: Duration,
+) -> Result<bool, String> {
+    // Take a separate reader for prompt detection.
+    let reader = {
+        let manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+        let pane = manager
+            .panes()
+            .iter()
+            .find(|p| p.pane_id() == pane_id)
+            .ok_or_else(|| "Pane not found".to_string())?;
+        pane.take_reader()
+            .map_err(|e| format!("Failed to take reader: {e}"))?
+    };
+
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let pane_id_stream = pane_id.to_string();
+    let app_for_stream = app_handle.clone();
+
+    // Spawn a reader thread that forwards bytes to both the channel and the frontend.
+    let reader_handle = std::thread::spawn(move || {
+        let state = app_for_stream.state::<AppState>();
+        let mut buf = [0u8; 4096];
+        let mut reader = reader;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = buf[..n].to_vec();
+                    // Record in scrollback
+                    if let Ok(mut manager) = state.pane_manager.lock() {
+                        if let Some(pane) = manager.pane_mut_by_id(&pane_id_stream) {
+                            let _ = pane.process_bytes(&chunk);
+                        }
+                    }
+                    // Forward to frontend
+                    let payload = TerminalOutputPayload {
+                        pane_id: pane_id_stream.clone(),
+                        data: chunk.clone(),
+                    };
+                    let _ = app_for_stream.emit("terminal-output", &payload);
+                    // Send to prompt detector if it is still listening.
+                    let _ = tx.send(chunk);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Monitor received bytes for prompt pattern.
+    let deadline = std::time::Instant::now() + timeout;
+    let mut accumulated = Vec::new();
+    let mut detected = false;
+
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let wait = remaining.min(Duration::from_millis(100));
+        match rx.recv_timeout(wait) {
+            Ok(chunk) => {
+                accumulated.extend_from_slice(&chunk);
+                if detect_shell_prompt(&accumulated) {
+                    detected = true;
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    if detected {
+        // Write command to PTY
+        let cmd_bytes = format!("{command_str}\n");
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            pane.write_input(cmd_bytes.as_bytes())
+                .map_err(|e| format!("Failed to write command to WSL PTY: {e}"))?;
+        }
+    }
+
+    // The reader thread will continue to run; we transition to the normal
+    // stream_pty_output loop in the caller. The reader thread stops when
+    // the PTY closes because read() returns 0 or errors. Since we already
+    // consumed the reader, the caller should NOT start stream_pty_output.
+    // Instead, this reader thread IS the stream thread.
+    //
+    // Detach the reader thread (it will run until EOF).
+    drop(reader_handle);
+
+    Ok(detected)
+}
+
+/// Check whether a byte buffer ends with a common shell prompt pattern.
+///
+/// Looks for `$`, `#`, `>`, or `%` followed by optional whitespace at the
+/// end of the output, after stripping ANSI escape sequences.
+fn detect_shell_prompt(buf: &[u8]) -> bool {
+    // Strip ANSI sequences for detection (simple state machine).
+    let stripped = strip_ansi_bytes(buf);
+    let s = String::from_utf8_lossy(&stripped);
+    let trimmed = s.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let last = trimmed.as_bytes()[trimmed.len() - 1];
+    matches!(last, b'$' | b'#' | b'>' | b'%')
+}
+
+/// Lightweight ANSI escape stripper for prompt detection.
+fn strip_ansi_bytes(buf: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(buf.len());
+    let mut i = 0;
+    while i < buf.len() {
+        if buf[i] == 0x1b {
+            i += 1;
+            if i < buf.len() && buf[i] == b'[' {
+                // CSI sequence: skip until final byte (0x40-0x7E)
+                i += 1;
+                while i < buf.len() && !(0x40..=0x7E).contains(&buf[i]) {
+                    i += 1;
+                }
+                if i < buf.len() {
+                    i += 1; // skip final byte
+                }
+            } else if i < buf.len() && buf[i] == b']' {
+                // OSC sequence: skip until ST (ESC \ or BEL)
+                i += 1;
+                while i < buf.len() {
+                    if buf[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                // Other escape: skip one more byte
+                if i < buf.len() {
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(buf[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Parameters for WSL PTY-write agent launch.
+struct WslPtyWriteParams {
+    repo_path: PathBuf,
+    agent_command: String,
+    agent_args: Vec<String>,
+    working_dir: PathBuf,
+    wsl_working_dir: String,
+    branch_name: String,
+    agent_name: String,
+    agent_color: AgentColor,
+    env_vars: HashMap<String, String>,
+    meta: Option<PaneLaunchMeta>,
+}
+
+/// Launch an agent in WSL using the PTY write approach.
+///
+/// 1. Starts `wsl.exe --cd <wsl_path>` as an interactive PTY.
+/// 2. Monitors output for a shell prompt (3-second timeout).
+/// 3. On prompt detection, injects the agent command via PTY write.
+/// 4. On timeout, kills the pane and re-launches with non-interactive mode.
+fn launch_with_wsl_pty_write(
+    params: WslPtyWriteParams,
+    state: &AppState,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let WslPtyWriteParams {
+        repo_path,
+        agent_command,
+        agent_args,
+        working_dir,
+        wsl_working_dir,
+        branch_name,
+        agent_name,
+        agent_color,
+        env_vars,
+        meta,
+    } = params;
+    // Phase 1: Launch wsl.exe interactively
+    let wsl_config = BuiltinLaunchConfig {
+        command: "wsl.exe".to_string(),
+        args: vec!["--cd".to_string(), wsl_working_dir.clone()],
+        working_dir: working_dir.clone(),
+        branch_name: branch_name.clone(),
+        agent_name: agent_name.clone(),
+        agent_color,
+        env_vars: HashMap::new(), // WSL login shell handles base env
+        terminal_shell: Some("wsl".to_string()),
+    };
+
+    let pane_id = {
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+        manager
+            .launch_agent(&repo_path, wsl_config, 24, 80)
+            .map_err(|e| format!("Failed to launch WSL terminal: {e}"))?
+    };
+
+    if let Some(ref meta) = meta {
+        if let Ok(mut map) = state.pane_launch_meta.lock() {
+            map.insert(pane_id.clone(), meta.clone());
+        }
+    }
+
+    // Phase 2: Detect prompt and inject command
+    let inject_cmd =
+        build_wsl_inject_command(&agent_command, &agent_args, &env_vars, &wsl_working_dir);
+
+    let prompt_detected = wsl_prompt_detect_and_inject(
+        &pane_id,
+        &inject_cmd,
+        state,
+        &app_handle,
+        Duration::from_secs(3),
+    )?;
+
+    if prompt_detected {
+        // The reader thread from wsl_prompt_detect_and_inject is already
+        // streaming output. We're done.
+        return Ok(pane_id);
+    }
+
+    // Phase 3: Fallback - kill interactive pane, re-launch non-interactively
+    tracing::warn!(
+        pane_id = %pane_id,
+        "WSL prompt not detected within timeout, falling back to non-interactive mode"
+    );
+
+    {
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+        if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+            let _ = pane.kill();
+        }
+        manager.remove_pane(&pane_id);
+    }
+
+    // Remove stale meta
+    if let Ok(mut map) = state.pane_launch_meta.lock() {
+        map.remove(&pane_id);
+    }
+
+    // Build non-interactive command: wsl.exe -e bash -lc 'export ...; cd ...; exec agent args...'
+    let fallback_cmd =
+        build_wsl_inject_command(&agent_command, &agent_args, &env_vars, &wsl_working_dir);
+    let fallback_config = BuiltinLaunchConfig {
+        command: "wsl.exe".to_string(),
+        args: vec![
+            "-e".to_string(),
+            "bash".to_string(),
+            "-lc".to_string(),
+            fallback_cmd,
+        ],
+        working_dir,
+        branch_name,
+        agent_name,
+        agent_color,
+        env_vars: HashMap::new(),
+        terminal_shell: Some("wsl".to_string()),
+    };
+
+    launch_with_config(&repo_path, fallback_config, meta, state, app_handle)
 }
 
 /// Launch a new terminal pane with an agent
@@ -945,16 +1970,21 @@ pub fn launch_terminal(
     branch: String,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err("No project opened".to_string());
+            return Err(StructuredError::internal(
+                "No project opened",
+                "launch_terminal",
+            ));
         };
         PathBuf::from(p)
     };
 
-    let repo_path = resolve_repo_path_for_project_root(&project_root)?;
-    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch)?;
+    let repo_path = resolve_repo_path_for_project_root(&project_root)
+        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))?;
+    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch)
+        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))?;
 
     let config = BuiltinLaunchConfig {
         command: agent_name.clone(),
@@ -964,17 +1994,365 @@ pub fn launch_terminal(
         agent_name,
         agent_color: AgentColor::Green,
         env_vars: HashMap::new(),
+        terminal_shell: None,
     };
 
     launch_with_config(&repo_path, config, None, &state, app_handle)
+        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))
+}
+
+fn non_empty_env_var(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_shell_launch_spec(is_windows: bool) -> (String, Vec<String>) {
+    let shell = non_empty_env_var("SHELL")
+        .or_else(|| {
+            if is_windows {
+                non_empty_env_var("COMSPEC")
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            if is_windows {
+                "cmd.exe".to_string()
+            } else {
+                "/bin/sh".to_string()
+            }
+        });
+
+    let lower = shell.to_ascii_lowercase();
+    let requires_plain_launch = lower.ends_with("cmd.exe")
+        || lower.ends_with("powershell.exe")
+        || lower.ends_with("pwsh.exe");
+
+    let args = if requires_plain_launch {
+        Vec::new()
+    } else {
+        vec!["-l".to_string()]
+    };
+
+    (shell, args)
+}
+
+fn normalize_terminal_shell_id(shell_id: Option<&str>) -> Option<String> {
+    let normalized = shell_id
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())?;
+    match normalized.as_str() {
+        "powershell" | "cmd" | "wsl" => Some(normalized),
+        _ => None,
+    }
+}
+
+fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
+    let explicit = shell_id.map(str::trim).filter(|s| !s.is_empty());
+    if explicit.is_some() {
+        return normalize_terminal_shell_id(explicit);
+    }
+
+    Settings::load_global().ok().and_then(|settings| {
+        normalize_terminal_shell_id(settings.terminal.default_shell.as_deref())
+    })
+}
+
+/// Resolve shell command and arguments for `spawn_shell`.
+///
+/// When an explicit shell id is given (e.g. `"powershell"`, `"cmd"`, `"wsl"`),
+/// it is used directly on Windows.  Otherwise falls back to the default
+/// `resolve_shell_launch_spec` logic.
+fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    {
+        use gwt_core::terminal::shell::WindowsShell;
+        if let Some(id) = shell_id {
+            match id {
+                "powershell" => {
+                    let cmd = if which("pwsh").is_ok() {
+                        "pwsh".to_string()
+                    } else {
+                        "powershell".to_string()
+                    };
+                    return (cmd, Vec::new());
+                }
+                "cmd" => return ("cmd.exe".to_string(), Vec::new()),
+                "wsl" => return ("wsl".to_string(), Vec::new()),
+                _ => {} // fall through to default
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = shell_id; // suppress unused warning
+    }
+    resolve_shell_launch_spec(cfg!(windows))
+}
+
+/// Spawn a plain shell terminal (not an agent).
+///
+/// When `shell` is `Some("powershell" | "cmd" | "wsl")` on Windows, that
+/// shell is used. When `shell` is omitted, Windows first consults
+/// `terminal.default_shell` in settings, then falls back to auto-resolution.
+/// On non-Windows platforms the parameter is silently ignored.
+#[tauri::command]
+pub fn spawn_shell(
+    working_dir: Option<String>,
+    shell: Option<String>,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<String, StructuredError> {
+    let shell_id = resolve_shell_id_for_spawn(shell.as_deref());
+    let (shell_cmd, shell_args) = resolve_shell_for_spawn(shell_id.as_deref());
+
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
+
+    let resolved_dir = working_dir
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| home.clone());
+
+    // WSL on Windows: convert working dir and pass --cd flag
+    let (final_cmd, final_args, terminal_shell_tag) =
+        if cfg!(target_os = "windows") && shell_id.as_deref() == Some("wsl") {
+            let wsl_path =
+                gwt_core::terminal::shell::windows_to_wsl_path(&resolved_dir.to_string_lossy())
+                    .map_err(|e| {
+                        StructuredError::internal(
+                            &format!("WSL path conversion failed: {e}"),
+                            "spawn_shell",
+                        )
+                    })?;
+            (
+                "wsl.exe".to_string(),
+                vec!["--cd".to_string(), wsl_path],
+                Some("wsl".to_string()),
+            )
+        } else {
+            (shell_cmd, shell_args, None)
+        };
+
+    let config = BuiltinLaunchConfig {
+        command: final_cmd,
+        args: final_args,
+        working_dir: resolved_dir,
+        branch_name: "terminal".to_string(),
+        agent_name: "terminal".to_string(),
+        agent_color: AgentColor::White,
+        env_vars: HashMap::new(),
+        terminal_shell: terminal_shell_tag,
+    };
+
+    let pane_id = {
+        let mut manager = state.pane_manager.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to lock pane manager: {}", e),
+                "spawn_shell",
+            )
+        })?;
+        manager.spawn_shell(config, 24, 80).map_err(|e| {
+            StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
+        })?
+    };
+
+    let reader = {
+        let manager = state.pane_manager.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to lock pane manager: {}", e),
+                "spawn_shell",
+            )
+        })?;
+        let pane = manager
+            .panes()
+            .iter()
+            .find(|p| p.pane_id() == pane_id)
+            .ok_or_else(|| {
+                StructuredError::internal("Pane not found after creation", "spawn_shell")
+            })?;
+        pane.take_reader().map_err(|e| {
+            StructuredError::internal(&format!("Failed to take reader: {}", e), "spawn_shell")
+        })?
+    };
+
+    let pane_id_clone = pane_id.clone();
+    std::thread::spawn(move || {
+        stream_pty_output(reader, pane_id_clone, app_handle, "terminal".to_string());
+    });
+
+    Ok(pane_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use gwt_core::terminal::runner::FallbackRunner;
+    use std::cell::Cell;
+    use std::ffi::OsString;
     use std::path::Path;
     use std::time::Duration;
+    use tempfile::TempDir;
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_prefers_shell_env_with_login_arg() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::set("SHELL", "/usr/bin/zsh");
+        let _comspec = ScopedEnvVar::set("COMSPEC", "C:\\Windows\\System32\\cmd.exe");
+
+        let (shell, args) = resolve_shell_launch_spec(false);
+        assert_eq!(shell, "/usr/bin/zsh");
+        assert_eq!(args, vec!["-l".to_string()]);
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_windows_falls_back_to_comspec_without_login_arg() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::remove("SHELL");
+        let _comspec = ScopedEnvVar::set("COMSPEC", "C:\\Windows\\System32\\cmd.exe");
+
+        let (shell, args) = resolve_shell_launch_spec(true);
+        assert_eq!(shell, "C:\\Windows\\System32\\cmd.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_windows_defaults_to_cmd_when_env_missing() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::remove("SHELL");
+        let _comspec = ScopedEnvVar::remove("COMSPEC");
+
+        let (shell, args) = resolve_shell_launch_spec(true);
+        assert_eq!(shell, "cmd.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_disables_login_arg_for_pwsh() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::set("SHELL", "/opt/homebrew/bin/pwsh.exe");
+        let _comspec = ScopedEnvVar::remove("COMSPEC");
+
+        let (shell, args) = resolve_shell_launch_spec(false);
+        assert_eq!(shell, "/opt/homebrew/bin/pwsh.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_id_for_spawn_uses_settings_default_when_shell_not_provided() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            home.path().join(".gwt").join("config.toml"),
+            "[terminal]\ndefault_shell = \"wsl\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(resolve_shell_id_for_spawn(None), Some("wsl".to_string()));
+    }
+
+    #[test]
+    fn resolve_shell_id_for_spawn_prefers_explicit_shell_over_settings() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            home.path().join(".gwt").join("config.toml"),
+            "[terminal]\ndefault_shell = \"wsl\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_shell_id_for_spawn(Some("powershell")),
+            Some("powershell".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_shell_id_for_spawn_ignores_invalid_explicit_shell() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            home.path().join(".gwt").join("config.toml"),
+            "[terminal]\ndefault_shell = \"wsl\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(resolve_shell_id_for_spawn(Some("fish")), None);
+    }
+
+    #[test]
+    fn consume_osc7_cwd_updates_buffers_fragmented_sequences() {
+        let mut pending = Vec::new();
+        let mut last_cwd = String::new();
+
+        let first = b"out\x1b]7;file://host/tmp/frag";
+        let second = b"mented\x07tail";
+
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, first, &mut last_cwd),
+            None
+        );
+        assert_eq!(last_cwd, "");
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, second, &mut last_cwd),
+            Some("/tmp/fragmented".to_string())
+        );
+        assert_eq!(last_cwd, "/tmp/fragmented");
+    }
+
+    #[test]
+    fn consume_osc7_cwd_updates_returns_latest_unique_cwd() {
+        let mut pending = Vec::new();
+        let mut last_cwd = String::new();
+
+        let chunk = b"\x1b]7;file://host/tmp/a\x07mid\x1b]7;file://host/tmp/b\x07";
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, chunk, &mut last_cwd),
+            Some("/tmp/b".to_string())
+        );
+        assert_eq!(last_cwd, "/tmp/b");
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, b"\x1b]7;file://host/tmp/b\x07", &mut last_cwd),
+            None
+        );
+    }
 
     #[test]
     fn is_node_modules_bin_matches_common_paths() {
@@ -990,18 +2368,18 @@ mod tests {
     }
 
     #[test]
-    fn choose_fallback_runner_prefers_bunx_when_not_local() {
+    fn choose_fallback_runner_prefers_npx_when_both_available() {
         assert_eq!(
             choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), true),
-            Some(FallbackRunner::Bunx)
+            Some(FallbackRunner::Npx)
         );
     }
 
     #[test]
-    fn choose_fallback_runner_uses_npx_when_bunx_is_local_node_modules() {
+    fn choose_fallback_runner_uses_bunx_when_npx_unavailable() {
         assert_eq!(
-            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), true),
-            Some(FallbackRunner::Npx)
+            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), false),
+            Some(FallbackRunner::Bunx)
         );
     }
 
@@ -1124,7 +2502,9 @@ mod tests {
 
     #[test]
     fn send_keys_to_pane_errors_when_pane_not_running() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -1142,6 +2522,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -1181,7 +2562,9 @@ mod tests {
 
     #[test]
     fn send_keys_broadcast_counts_running_panes() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -1199,6 +2582,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create running pane");
 
@@ -1214,6 +2598,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create done pane");
 
@@ -1248,7 +2633,9 @@ mod tests {
 
     #[test]
     fn capture_scrollback_tail_returns_plain_text() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -1266,6 +2653,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -1281,6 +2669,97 @@ mod tests {
             .expect("capture should succeed");
         assert!(captured.contains("hi red"));
         assert!(!captured.contains("\x1b"));
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn mark_pane_stream_error_sets_error_status_and_records_message() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-stream-error-test";
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+                terminal_shell: None,
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+        }
+
+        let bytes = mark_pane_stream_error_and_write_message(&state, pane_id, "mock read failure");
+        let output = String::from_utf8_lossy(&bytes);
+        assert_eq!(output, "\r\n[PTY stream error: mock read failure]\r\n");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
+            assert_eq!(
+                pane.status(),
+                &PaneStatus::Error("PTY stream error: mock read failure".to_string())
+            );
+        }
+
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+            .expect("capture should succeed");
+        assert!(captured.contains("[PTY stream error: mock read failure]"));
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn append_close_hint_to_pane_scrollback_records_hint() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-stream-close-hint-test";
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+                terminal_shell: None,
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+        }
+
+        let bytes = append_close_hint_to_pane_scrollback(&state, pane_id);
+        let output = String::from_utf8_lossy(&bytes);
+        assert_eq!(output, "\r\nPress Enter to close this tab.\r\n");
+
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+            .expect("capture should succeed");
+        assert!(captured.contains("Press Enter to close this tab."));
 
         let mut mgr = state.pane_manager.lock().unwrap();
         let _ = mgr.kill_all();
@@ -1306,6 +2785,7 @@ mod tests {
             docker_keep: None,
             resume_session_id: None,
             create_branch: None,
+            terminal_shell: None,
         }
     }
 
@@ -1313,7 +2793,7 @@ mod tests {
     fn build_agent_args_codex_continue_defaults_to_resume_last() {
         let mut req = make_request("codex");
         req.mode = Some(SessionMode::Continue);
-        let args = build_agent_args("codex", &req, Some("0.92.0")).unwrap();
+        let args = build_agent_args("codex", &req, Some("0.92.0"), false).unwrap();
         assert_eq!(args[0], "resume");
         assert_eq!(args[1], "--last");
         assert!(args.iter().any(|a| a.starts_with("--model=")));
@@ -1322,10 +2802,69 @@ mod tests {
     #[test]
     fn build_agent_args_codex_collaboration_modes_always_enabled() {
         let req = make_request("codex");
-        let args = build_agent_args("codex", &req, Some("latest")).unwrap();
+        let args = build_agent_args("codex", &req, Some("latest"), false).unwrap();
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--enable" && w[1] == "collaboration_modes"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_multi_agent_enabled() {
+        let req = make_request("codex");
+        let args = build_agent_args("codex", &req, Some("latest"), true).unwrap();
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--enable" && w[1] == "multi_agent"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_multi_agent_disabled() {
+        let req = make_request("codex");
+        let args = build_agent_args("codex", &req, Some("latest"), false).unwrap();
+        assert!(!args
+            .windows(2)
+            .any(|w| w[0] == "--enable" && w[1] == "multi_agent"));
+    }
+
+    #[test]
+    fn codex_features_list_contains_feature_parses_first_column() {
+        let raw = r#"
+multi_agent                      experimental       true
+collaboration_modes              stable             true
+"#;
+        assert!(codex_features_list_contains_feature(raw, "multi_agent"));
+        assert!(!codex_features_list_contains_feature(raw, "collab"));
+    }
+
+    #[test]
+    fn codex_config_has_collab_alias_detects_legacy_key() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[features]
+collab = true
+multi_agent = true
+"#,
+        )
+        .unwrap();
+        assert!(codex_config_has_collab_alias(&path).unwrap());
+    }
+
+    #[test]
+    fn codex_config_has_collab_alias_ignores_missing_key() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[features]
+multi_agent = true
+"#,
+        )
+        .unwrap();
+        assert!(!codex_config_has_collab_alias(&path).unwrap());
     }
 
     #[test]
@@ -1333,10 +2872,10 @@ mod tests {
         let mut req = make_request("codex");
         req.skip_permissions = Some(true);
 
-        let legacy = build_agent_args("codex", &req, Some("0.79.9")).unwrap();
+        let legacy = build_agent_args("codex", &req, Some("0.79.9"), false).unwrap();
         assert!(legacy.iter().any(|a| a == "--yolo"));
 
-        let modern = build_agent_args("codex", &req, Some("0.80.0")).unwrap();
+        let modern = build_agent_args("codex", &req, Some("0.80.0"), false).unwrap();
         assert!(modern
             .iter()
             .any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
@@ -1347,7 +2886,7 @@ mod tests {
         let mut req = make_request("claude");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("claude", &req, None).unwrap();
+        let args = build_agent_args("claude", &req, None, false).unwrap();
         assert_eq!(args[0], "--resume");
         assert_eq!(args[1], "sess-123");
     }
@@ -1356,7 +2895,7 @@ mod tests {
     fn build_agent_args_claude_resume_without_id_opens_picker() {
         let mut req = make_request("claude");
         req.mode = Some(SessionMode::Resume);
-        let args = build_agent_args("claude", &req, None).unwrap();
+        let args = build_agent_args("claude", &req, None, false).unwrap();
         assert_eq!(args[0], "--resume");
         assert_eq!(args.len(), 1);
     }
@@ -1366,7 +2905,7 @@ mod tests {
         let mut req = make_request("gemini");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("gemini", &req, None).unwrap();
+        let args = build_agent_args("gemini", &req, None, false).unwrap();
         assert_eq!(args, vec!["-r".to_string(), "sess-123".to_string()]);
     }
 
@@ -1375,7 +2914,7 @@ mod tests {
         let mut req = make_request("opencode");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("opencode", &req, None).unwrap();
+        let args = build_agent_args("opencode", &req, None, false).unwrap();
         assert_eq!(args, vec!["-s".to_string(), "sess-123".to_string()]);
     }
 
@@ -1383,14 +2922,14 @@ mod tests {
     fn build_agent_args_opencode_resume_requires_session_id() {
         let mut req = make_request("opencode");
         req.mode = Some(SessionMode::Resume);
-        let err = build_agent_args("opencode", &req, None).unwrap_err();
+        let err = build_agent_args("opencode", &req, None, false).unwrap_err();
         assert!(err.to_lowercase().contains("session id"));
     }
 
     #[test]
     fn build_docker_compose_up_args_build_and_recreate_flags() {
         assert_eq!(
-            build_docker_compose_up_args(&[], false, false),
+            build_docker_compose_up_args(&[], false, false, None),
             vec![
                 "compose".to_string(),
                 "up".to_string(),
@@ -1399,12 +2938,131 @@ mod tests {
             ]
         );
 
-        let build = build_docker_compose_up_args(&[], true, false);
+        let build = build_docker_compose_up_args(&[], true, false, None);
         assert!(build.contains(&"--build".to_string()));
         assert!(!build.contains(&"--no-build".to_string()));
 
-        let recreate = build_docker_compose_up_args(&[], false, true);
+        let recreate = build_docker_compose_up_args(&[], false, true, None);
         assert!(recreate.contains(&"--force-recreate".to_string()));
+
+        let with_service = build_docker_compose_up_args(&[], false, false, Some("dev"));
+        assert_eq!(with_service.last(), Some(&"dev".to_string()));
+
+        let with_blank_service = build_docker_compose_up_args(&[], false, false, Some("  "));
+        assert_eq!(
+            with_blank_service,
+            vec![
+                "compose".to_string(),
+                "up".to_string(),
+                "-d".to_string(),
+                "--no-build".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_services_output_contains_matches_trimmed_exact_line() {
+        let output = " app \nworker\n";
+        assert!(compose_services_output_contains(output, "app"));
+        assert!(compose_services_output_contains(output, "worker"));
+    }
+
+    #[test]
+    fn compose_services_output_contains_does_not_match_partial_names() {
+        let output = "application\nworker-1\n";
+        assert!(!compose_services_output_contains(output, "app"));
+        assert!(!compose_services_output_contains(output, "worker"));
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_skips_when_service_is_missing() {
+        let running_called = Cell::new(false);
+        let logs_called = Cell::new(false);
+        let down_called = Cell::new(false);
+
+        let result = verify_docker_compose_service_start(
+            None,
+            |_| {
+                running_called.set(true);
+                Ok(true)
+            },
+            |_| {
+                logs_called.set(true);
+                None
+            },
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!running_called.get());
+        assert!(!logs_called.get());
+        assert!(!down_called.get());
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_returns_ok_when_service_is_running() {
+        let down_called = Cell::new(false);
+
+        let result = verify_docker_compose_service_start(
+            Some(" app "),
+            |service| {
+                assert_eq!(service, "app");
+                Ok(true)
+            },
+            |_| Some("should not be called".to_string()),
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!down_called.get());
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_runs_best_effort_down_on_failure() {
+        let down_called = Cell::new(false);
+
+        let err = verify_docker_compose_service_start(
+            Some("app"),
+            |_| Ok(false),
+            |_| Some("service logs".to_string()),
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(down_called.get());
+        assert!(err.contains("docker compose service 'app' is not running after startup."));
+        assert!(err.contains("service logs"));
+        assert!(!err.contains("Failed to run best-effort docker compose down"));
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_appends_down_error_on_cleanup_failure() {
+        let down_called = Cell::new(false);
+
+        let err = verify_docker_compose_service_start(
+            Some("app"),
+            |_| Ok(false),
+            |_| None,
+            || {
+                down_called.set(true);
+                Err("cleanup failed".to_string())
+            },
+        )
+        .unwrap_err();
+
+        assert!(down_called.get());
+        assert!(err.contains("docker compose service 'app' is not running after startup."));
+        assert!(err.contains("Failed to run best-effort docker compose down"));
+        assert!(err.contains("cleanup failed"));
     }
 
     #[test]
@@ -1426,6 +3084,197 @@ mod tests {
         assert!(pos_service < pos_cmd);
 
         assert!(args.ends_with(&inner_args));
+    }
+
+    #[test]
+    fn build_docker_compose_exec_args_omits_workdir_when_empty() {
+        let env = HashMap::new();
+        let args = build_docker_compose_exec_args(&[], "app", "", &env, "npx", &[]);
+
+        assert!(!args.contains(&"-w".to_string()));
+    }
+
+    #[test]
+    fn build_docker_compose_exec_args_skips_invalid_env_names() {
+        let mut env = HashMap::new();
+        env.insert("=::".to_string(), "bad".to_string());
+        env.insert("VALID_KEY".to_string(), "ok".to_string());
+
+        let args = build_docker_compose_exec_args(&[], "app", "", &env, "npx", &[]);
+        assert!(args.contains(&"VALID_KEY=ok".to_string()));
+        assert!(!args.iter().any(|a| a.contains("=::")));
+    }
+
+    #[test]
+    fn merge_profile_env_for_docker_filters_non_passthrough_keys() {
+        let mut base = HashMap::new();
+        base.insert("GITHUB_TOKEN".to_string(), "old".to_string());
+
+        let mut merged = HashMap::new();
+        merged.insert("GITHUB_TOKEN".to_string(), "new".to_string());
+        merged.insert("GH_TOKEN".to_string(), "gh".to_string());
+        merged.insert("TERM".to_string(), "xterm-256color".to_string());
+        merged.insert("Path".to_string(), "C:\\Windows\\System32".to_string());
+        merged.insert("RANDOM_KEY".to_string(), "ignored".to_string());
+        merged.insert("=C:".to_string(), "C:\\tmp".to_string());
+
+        merge_profile_env_for_docker(&mut base, &merged);
+
+        assert_eq!(base.get("GITHUB_TOKEN"), Some(&"new".to_string()));
+        assert_eq!(base.get("GH_TOKEN"), Some(&"gh".to_string()));
+        assert_eq!(base.get("TERM"), Some(&"xterm-256color".to_string()));
+        assert!(!base.contains_key("Path"));
+        assert!(!base.contains_key("RANDOM_KEY"));
+        assert!(!base.contains_key("=C:"));
+    }
+
+    #[test]
+    fn compose_file_paths_from_args_extracts_only_compose_files() {
+        let args = vec![
+            "-f".to_string(),
+            "/tmp/compose.base.yml".to_string(),
+            "--project-name".to_string(),
+            "test".to_string(),
+            "-f".to_string(),
+            "/tmp/compose.override.yml".to_string(),
+        ];
+
+        let paths = compose_file_paths_from_args(&args);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], PathBuf::from("/tmp/compose.base.yml"));
+        assert_eq!(paths[1], PathBuf::from("/tmp/compose.override.yml"));
+    }
+
+    #[test]
+    fn merge_compose_env_for_docker_includes_non_allowlisted_compose_keys() {
+        let temp = TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    environment:
+      - CUSTOM_ENV
+      - GITHUB_TOKEN
+"#,
+        )
+        .unwrap();
+
+        let mut base = HashMap::new();
+        let mut merged = HashMap::new();
+        merged.insert("CUSTOM_ENV".to_string(), "custom".to_string());
+        merged.insert("GITHUB_TOKEN".to_string(), "ghs_xxx".to_string());
+
+        merge_compose_env_for_docker(&mut base, &merged, &[compose_path]);
+
+        assert_eq!(base.get("CUSTOM_ENV"), Some(&"custom".to_string()));
+        assert_eq!(base.get("GITHUB_TOKEN"), Some(&"ghs_xxx".to_string()));
+    }
+
+    #[test]
+    fn merge_compose_env_for_docker_keeps_existing_allocated_port_when_incoming_is_occupied() {
+        use std::net::TcpListener;
+
+        let temp = TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    ports:
+      - "${KNOWLEDGE_DB_PORT:-5432}:5432"
+"#,
+        )
+        .unwrap();
+
+        let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        let mut base = HashMap::new();
+        base.insert("KNOWLEDGE_DB_PORT".to_string(), "15432".to_string());
+
+        let mut merged = HashMap::new();
+        merged.insert("KNOWLEDGE_DB_PORT".to_string(), occupied_port.to_string());
+
+        merge_compose_env_for_docker(&mut base, &merged, &[compose_path]);
+
+        assert_eq!(base.get("KNOWLEDGE_DB_PORT"), Some(&"15432".to_string()));
+    }
+
+    #[test]
+    fn docker_compose_exec_workdir_is_empty_without_workspace_folder() {
+        assert_eq!(docker_compose_exec_workdir(None), "");
+    }
+
+    #[test]
+    fn docker_compose_exec_workdir_uses_workspace_folder_when_present() {
+        assert_eq!(
+            docker_compose_exec_workdir(Some("/workspace")),
+            "/workspace"
+        );
+        assert_eq!(docker_compose_exec_workdir(Some("  /app  ")), "/app");
+    }
+
+    #[test]
+    fn docker_mount_target_path_converts_windows_drive_style() {
+        assert_eq!(
+            docker_mount_target_path("D:/Repository/GE/GrimoireEngine.git"),
+            "/Repository/GE/GrimoireEngine.git"
+        );
+        assert_eq!(
+            docker_mount_target_path("d:\\Repository\\GE\\GrimoireEngine.git"),
+            "/Repository/GE/GrimoireEngine.git"
+        );
+        assert_eq!(
+            docker_mount_target_path("/Repository/GE/GrimoireEngine.git"),
+            "/Repository/GE/GrimoireEngine.git"
+        );
+    }
+
+    #[test]
+    fn build_git_bind_mounts_skips_nested_worktree_mount_even_with_mixed_paths() {
+        let mut env = HashMap::new();
+        env.insert(
+            "HOST_GIT_COMMON_DIR".to_string(),
+            "/Repository/GE/GrimoireEngine.git".to_string(),
+        );
+        env.insert(
+            "HOST_GIT_WORKTREE_DIR".to_string(),
+            "D:/Repository/GE/GrimoireEngine.git/worktrees/feature-refactor".to_string(),
+        );
+
+        let mounts = build_git_bind_mounts(&env);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].source, "/Repository/GE/GrimoireEngine.git");
+        assert_eq!(mounts[0].target, "/Repository/GE/GrimoireEngine.git");
+    }
+
+    #[test]
+    fn render_docker_compose_override_uses_long_syntax_bind_mounts() {
+        let mounts = vec![DockerBindMount {
+            source: "D:/Repository/GE/GrimoireEngine.git".to_string(),
+            target: "/Repository/GE/GrimoireEngine.git".to_string(),
+        }];
+
+        let services = vec!["app".to_string(), "unity-mcp-server".to_string()];
+        let yaml = render_docker_compose_override("app", &services, "gwt-develop", &mounts);
+        assert!(yaml.contains("container_name: 'gwt-develop-app'"));
+        assert!(yaml.contains("container_name: 'gwt-develop-unity-mcp-server'"));
+        assert!(yaml.contains("type: bind"));
+        assert!(yaml.contains("source: 'D:/Repository/GE/GrimoireEngine.git'"));
+        assert!(yaml.contains("target: '/Repository/GE/GrimoireEngine.git'"));
+        assert!(!yaml.contains("${HOST_GIT_WORKTREE_DIR}:${HOST_GIT_WORKTREE_DIR}"));
+    }
+
+    #[test]
+    fn render_docker_compose_override_adds_container_names_without_mounts() {
+        let services = vec!["unity-mcp-server".to_string()];
+        let yaml = render_docker_compose_override("unity-mcp-server", &services, "gwt-dev", &[]);
+        assert!(yaml.contains("services:\n  unity-mcp-server:\n"));
+        assert!(yaml.contains("container_name: 'gwt-dev-unity-mcp-server'"));
+        assert!(!yaml.contains("volumes:"));
     }
 
     #[test]
@@ -1473,7 +3322,9 @@ mod tests {
 
     #[test]
     fn test_merge_os_base_only() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -1515,6 +3366,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -1576,6 +3428,127 @@ mod tests {
             "Codex launch env must not include CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
         );
     }
+
+    // --- WSL prompt detection tests (T031) ---
+
+    #[test]
+    fn detect_shell_prompt_dollar() {
+        assert!(detect_shell_prompt(b"user@host:~$ "));
+    }
+
+    #[test]
+    fn detect_shell_prompt_dollar_eol() {
+        assert!(detect_shell_prompt(b"user@host:~$"));
+    }
+
+    #[test]
+    fn detect_shell_prompt_hash() {
+        assert!(detect_shell_prompt(b"root@host:~# "));
+    }
+
+    #[test]
+    fn detect_shell_prompt_hash_eol() {
+        assert!(detect_shell_prompt(b"root@host:~#"));
+    }
+
+    #[test]
+    fn detect_shell_prompt_angle() {
+        assert!(detect_shell_prompt(b"PS C:\\Users> "));
+    }
+
+    #[test]
+    fn detect_shell_prompt_percent() {
+        assert!(detect_shell_prompt(b"user@host ~ %"));
+    }
+
+    #[test]
+    fn detect_shell_prompt_empty() {
+        assert!(!detect_shell_prompt(b""));
+    }
+
+    #[test]
+    fn detect_shell_prompt_no_prompt() {
+        assert!(!detect_shell_prompt(b"Welcome to Ubuntu 22.04 LTS\n"));
+    }
+
+    #[test]
+    fn detect_shell_prompt_with_ansi() {
+        // Prompt with ANSI color codes: \e[32muser@host\e[0m:~$
+        let buf = b"\x1b[32muser@host\x1b[0m:~$";
+        assert!(detect_shell_prompt(buf));
+    }
+
+    // --- ANSI strip tests ---
+
+    #[test]
+    fn strip_ansi_bytes_plain() {
+        let input = b"hello world";
+        assert_eq!(strip_ansi_bytes(input), b"hello world");
+    }
+
+    #[test]
+    fn strip_ansi_bytes_csi() {
+        let input = b"\x1b[32mgreen\x1b[0m";
+        assert_eq!(strip_ansi_bytes(input), b"green");
+    }
+
+    #[test]
+    fn strip_ansi_bytes_osc_bel() {
+        // OSC 7 terminated by BEL
+        let input = b"\x1b]7;file:///home/user\x07prompt$";
+        assert_eq!(strip_ansi_bytes(input), b"prompt$");
+    }
+
+    #[test]
+    fn strip_ansi_bytes_osc_st() {
+        // OSC terminated by ST (ESC \)
+        let input = b"\x1b]0;title\x1b\\prompt$";
+        assert_eq!(strip_ansi_bytes(input), b"prompt$");
+    }
+
+    // --- build_wsl_inject_command tests (T033) ---
+
+    #[test]
+    fn build_wsl_inject_command_no_env() {
+        let cmd = build_wsl_inject_command(
+            "claude",
+            &["--dangerously-skip-permissions".to_string()],
+            &HashMap::new(),
+            "/mnt/c/Users/foo",
+        );
+        assert_eq!(
+            cmd,
+            "cd '/mnt/c/Users/foo' && exec claude '--dangerously-skip-permissions'"
+        );
+    }
+
+    #[test]
+    fn build_wsl_inject_command_with_env() {
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let cmd = build_wsl_inject_command("claude", &[], &env, "/mnt/c/repo");
+        assert_eq!(cmd, "export FOO='bar' && cd '/mnt/c/repo' && exec claude");
+    }
+
+    #[test]
+    fn build_wsl_inject_command_env_with_quotes() {
+        let mut env = HashMap::new();
+        env.insert("MSG".to_string(), "it's a test".to_string());
+        let cmd = build_wsl_inject_command("echo", &[], &env, "/mnt/c");
+        assert_eq!(
+            cmd,
+            "export MSG='it'\\''s a test' && cd '/mnt/c' && exec echo"
+        );
+    }
+
+    #[test]
+    fn build_wsl_inject_command_multiple_env_sorted() {
+        let mut env = HashMap::new();
+        env.insert("ZZZ".to_string(), "last".to_string());
+        env.insert("AAA".to_string(), "first".to_string());
+        let cmd = build_wsl_inject_command("agent", &[], &env, "/mnt/c");
+        assert!(cmd.starts_with("export AAA='first' && export ZZZ='last'"));
+    }
 }
 
 fn is_launch_cancelled(cancelled: Option<&AtomicBool>) -> bool {
@@ -1599,7 +3572,7 @@ fn report_launch_progress(
     let _ = app_handle.emit("launch-progress", &payload);
 }
 
-fn launch_agent_for_project_root(
+pub(crate) fn launch_agent_for_project_root(
     project_root: PathBuf,
     request: LaunchAgentRequest,
     state: &AppState,
@@ -1607,31 +3580,51 @@ fn launch_agent_for_project_root(
     job_id: Option<&str>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<String, String> {
+    tracing::debug!(job_id = ?job_id, "launch step: fetch");
     report_launch_progress(job_id, &app_handle, "fetch", None);
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: validate");
     report_launch_progress(job_id, &app_handle, "validate", None);
     let agent_id = request.agent_id.trim();
     if agent_id.is_empty() {
         return Err("Agent is required".to_string());
     }
+    if agent_id == "codex" {
+        if let Some(path) = codex_config_path() {
+            match codex_config_has_collab_alias(&path) {
+                Ok(true) => {
+                    let detail = "Deprecated Codex feature key `collab` detected. Use `[features].multi_agent` in ~/.codex/config.toml.";
+                    tracing::warn!(path = %path.display(), "{detail}");
+                    report_launch_progress(job_id, &app_handle, "validate", Some(detail));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "Failed to inspect Codex config for deprecated keys");
+                }
+            }
+        }
+    }
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: paths");
     report_launch_progress(job_id, &app_handle, "paths", None);
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: conflicts");
     report_launch_progress(job_id, &app_handle, "conflicts", None);
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: create");
     report_launch_progress(job_id, &app_handle, "create", None);
 
     let (working_dir, branch_name, worktree_created) =
@@ -1674,23 +3667,49 @@ fn launch_agent_for_project_root(
         let _ = app_handle.emit("worktrees-changed", &payload);
     }
 
+    // Record stats (agent launch + optional worktree creation) non-blocking.
+    {
+        let stat_agent_id = agent_id.to_string();
+        let stat_model = request.model.as_deref().unwrap_or("").to_string();
+        let stat_repo = repo_path.to_string_lossy().to_string();
+        let stat_wt_created = worktree_created;
+        std::thread::spawn(move || {
+            let result = Stats::update(|stats| {
+                stats.increment_agent_launch(&stat_agent_id, &stat_model, &stat_repo);
+                if stat_wt_created {
+                    stats.increment_worktree_created(&stat_repo);
+                }
+            });
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "Failed to record stats");
+            }
+        });
+    }
+
+    tracing::debug!(job_id = ?job_id, "launch step: deps (waiting for environment)");
     report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
-    // Wait for the startup OS env capture to finish so agent launches are deterministic.
+    // Wait briefly for startup OS env capture; if it is still running, continue with the
+    // latest available snapshot (usually process env) instead of blocking launches.
     if !state.wait_os_env_ready(Duration::from_secs(2)) {
-        return Err("Environment is still loading. Please try again.".to_string());
+        tracing::warn!(
+            category = "os_env",
+            "OS environment capture still in progress; launching with current snapshot"
+        );
     }
-    let Some(os_env) = state.os_env.get().cloned() else {
-        return Err("Environment is still loading. Please try again.".to_string());
-    };
+    let mut os_env = state.os_env_snapshot();
+    if os_env.is_empty() {
+        os_env = std::env::vars().collect();
+    }
 
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: deps (resolved)");
     report_launch_progress(job_id, &app_handle, "deps", None);
     let mut env_vars = merge_profile_env(&os_env, request.profile.as_deref());
     // Useful for debugging and for agents that want to introspect gwt context.
@@ -1851,21 +3870,29 @@ fn launch_agent_for_project_root(
                     DockerFileType::Compose(compose_path.clone()),
                 );
 
-                let mut env = manager.collect_passthrough_env();
-                // Merge profile/env overrides so compose interpolation and container env inherit them.
-                for (k, v) in &env_vars {
-                    env.insert(k.to_string(), v.to_string());
-                }
-                env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
+                let mut compose_args =
+                    vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
+                let compose_paths = compose_file_paths_from_args(&compose_args);
 
-                let override_path =
-                    write_docker_compose_override(&project_root, &container_name, &service)?;
-                let compose_args = vec![
-                    "-f".to_string(),
-                    compose_path.to_string_lossy().to_string(),
-                    "-f".to_string(),
-                    override_path.to_string_lossy().to_string(),
-                ];
+                let mut env = manager.collect_passthrough_env();
+                // Merge only docker-relevant profile/env keys to avoid oversized command lines
+                // and invalid Windows pseudo env keys (e.g. "=C:").
+                merge_profile_env_for_docker(&mut env, &env_vars);
+                merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
+                env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
+                apply_translated_git_env(&mut env);
+
+                let mounts = build_git_bind_mounts(&env);
+                if let Some(override_path) = write_docker_compose_override(
+                    &project_root,
+                    &container_name,
+                    &service,
+                    &services,
+                    &mounts,
+                )? {
+                    compose_args.push("-f".to_string());
+                    compose_args.push(override_path.to_string_lossy().to_string());
+                }
 
                 docker_compose_up(
                     &working_dir,
@@ -1874,6 +3901,7 @@ fn launch_agent_for_project_root(
                     &compose_args,
                     docker_build,
                     docker_recreate,
+                    Some(service.as_str()),
                 )?;
 
                 docker_container_name = Some(container_name);
@@ -1881,7 +3909,7 @@ fn launch_agent_for_project_root(
                 docker_env = Some(env);
                 docker_mode = DockerExecMode::Compose {
                     service,
-                    workdir: DOCKER_WORKDIR.to_string(),
+                    workdir: docker_compose_exec_workdir(None),
                     compose_args,
                 };
             }
@@ -1897,6 +3925,7 @@ fn launch_agent_for_project_root(
                     if compose_args.is_empty() {
                         return Err("Devcontainer is configured for compose but no compose files were found".to_string());
                     }
+                    let compose_paths = compose_file_paths_from_args(&compose_args);
 
                     // Best-effort compose service selection: prefer request, then devcontainer.json, then first service.
                     let mut services: Vec<String> = Vec::new();
@@ -1940,15 +3969,22 @@ fn launch_agent_for_project_root(
                     );
 
                     let mut env = manager.collect_passthrough_env();
-                    for (k, v) in &env_vars {
-                        env.insert(k.to_string(), v.to_string());
-                    }
+                    merge_profile_env_for_docker(&mut env, &env_vars);
+                    merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
                     env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
+                    apply_translated_git_env(&mut env);
 
-                    let override_path =
-                        write_docker_compose_override(&project_root, &container_name, &service)?;
-                    compose_args.push("-f".to_string());
-                    compose_args.push(override_path.to_string_lossy().to_string());
+                    let mounts = build_git_bind_mounts(&env);
+                    if let Some(override_path) = write_docker_compose_override(
+                        &project_root,
+                        &container_name,
+                        &service,
+                        &services,
+                        &mounts,
+                    )? {
+                        compose_args.push("-f".to_string());
+                        compose_args.push(override_path.to_string_lossy().to_string());
+                    }
 
                     docker_compose_up(
                         &working_dir,
@@ -1957,21 +3993,15 @@ fn launch_agent_for_project_root(
                         &compose_args,
                         docker_build,
                         docker_recreate,
+                        Some(service.as_str()),
                     )?;
 
                     docker_container_name = Some(container_name);
                     docker_compose_args = Some(compose_args.clone());
                     docker_env = Some(env);
-                    let workdir = cfg
-                        .workspace_folder
-                        .as_deref()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| DOCKER_WORKDIR.to_string());
-
                     docker_mode = DockerExecMode::Compose {
                         service,
-                        workdir,
+                        workdir: docker_compose_exec_workdir(cfg.workspace_folder.as_deref()),
                         compose_args,
                     };
                 } else if let Some(image) = cfg
@@ -2048,8 +4078,24 @@ fn launch_agent_for_project_root(
         .as_deref()
         .or(Some(resolved.tool_version.as_str()));
 
+    let enable_codex_multi_agent = if agent_id == "codex" {
+        let context = CodexFeatureProbeContext {
+            command: resolved.command.clone(),
+            args: resolved.args.clone(),
+            tool_version: resolved.tool_version.clone(),
+        };
+        codex_supports_multi_agent(&context)
+    } else {
+        false
+    };
+
     let mut args = resolved.args.clone();
-    args.extend(build_agent_args(agent_id, &request, version_for_gates)?);
+    args.extend(build_agent_args(
+        agent_id,
+        &request,
+        version_for_gates,
+        enable_codex_multi_agent,
+    )?);
 
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let mode_str = match mode {
@@ -2123,6 +4169,8 @@ fn launch_agent_for_project_root(
             },
             docker_build: if use_docker { Some(docker_build) } else { None },
             docker_keep: if use_docker { Some(docker_keep) } else { None },
+            docker_container_name: docker_container_name.clone(),
+            docker_compose_args: docker_compose_args.clone(),
             timestamp: started_at_millis,
         };
 
@@ -2205,6 +4253,7 @@ fn launch_agent_for_project_root(
                 agent_name: resolved.label.to_string(),
                 agent_color: agent_color_for(agent_id),
                 env_vars: docker_env.clone(),
+                terminal_shell: None,
             }
         }
         DockerExecMode::DockerRun {
@@ -2219,9 +4268,9 @@ fn launch_agent_for_project_root(
 
             let manager = DockerManager::new(&working_dir, &branch_name, docker_file_type);
             let mut container_env = manager.collect_passthrough_env();
-            for (k, v) in &env_vars {
-                container_env.insert(k.to_string(), v.to_string());
-            }
+            merge_profile_env_for_docker(&mut container_env, &env_vars);
+            apply_translated_git_env(&mut container_env);
+            let git_mounts = build_git_bind_mounts(&container_env);
 
             // Mount the selected worktree and required git dirs, then run the agent in the container.
             let mount_target = workdir.clone();
@@ -2236,27 +4285,16 @@ fn launch_agent_for_project_root(
                 format!("{}:{}", working_dir.to_string_lossy(), mount_target),
             ];
 
-            if let (Some(common_dir), Some(worktree_gitdir)) = (
-                container_env
-                    .get("HOST_GIT_COMMON_DIR")
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty()),
-                container_env
-                    .get("HOST_GIT_WORKTREE_DIR")
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty()),
-            ) {
+            for mount in &git_mounts {
                 run_args.push("-v".to_string());
-                run_args.push(format!("{common_dir}:{common_dir}"));
-                run_args.push("-v".to_string());
-                run_args.push(format!("{worktree_gitdir}:{worktree_gitdir}"));
+                run_args.push(format!("{}:{}", mount.source, mount.target));
             }
 
             let mut keys: Vec<&String> = container_env.keys().collect();
             keys.sort();
             for key in keys {
                 let k = key.trim();
-                if k.is_empty() {
+                if k.is_empty() || !is_valid_docker_env_key(k) {
                     continue;
                 }
                 let v = container_env
@@ -2279,17 +4317,58 @@ fn launch_agent_for_project_root(
                 agent_name: resolved.label.to_string(),
                 agent_color: agent_color_for(agent_id),
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             }
         }
-        DockerExecMode::None => BuiltinLaunchConfig {
-            command: resolved.command,
-            args,
-            working_dir,
-            branch_name,
-            agent_name: resolved.label.to_string(),
-            agent_color: agent_color_for(agent_id),
-            env_vars,
-        },
+        DockerExecMode::None => {
+            let terminal_shell = request
+                .terminal_shell
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            // WSL agent launch uses the PTY-write approach (FR-007).
+            if terminal_shell.as_deref() == Some("wsl") {
+                if is_launch_cancelled(cancelled) {
+                    return Err("Cancelled".to_string());
+                }
+                let wsl_path =
+                    gwt_core::terminal::shell::windows_to_wsl_path(&working_dir.to_string_lossy())
+                        .map_err(|e| format!("WSL path conversion failed: {e}"))?;
+
+                // WSL PTY-write launches must receive the same merged env as host launches.
+                let wsl_env_vars = env_vars.clone();
+
+                return launch_with_wsl_pty_write(
+                    WslPtyWriteParams {
+                        repo_path: repo_path.clone(),
+                        agent_command: resolved.command.clone(),
+                        agent_args: args.clone(),
+                        working_dir,
+                        wsl_working_dir: wsl_path,
+                        branch_name,
+                        agent_name: resolved.label.to_string(),
+                        agent_color: agent_color_for(agent_id),
+                        env_vars: wsl_env_vars,
+                        meta: Some(meta),
+                    },
+                    state,
+                    app_handle,
+                );
+            }
+
+            BuiltinLaunchConfig {
+                command: resolved.command,
+                args,
+                working_dir,
+                branch_name,
+                agent_name: resolved.label.to_string(),
+                agent_color: agent_color_for(agent_id),
+                env_vars,
+                terminal_shell,
+            }
+        }
     };
 
     if is_launch_cancelled(cancelled) {
@@ -2306,14 +4385,18 @@ pub fn launch_agent(
     request: LaunchAgentRequest,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err("No project opened".to_string());
+            return Err(StructuredError::internal(
+                "No project opened",
+                "launch_agent",
+            ));
         };
         PathBuf::from(p)
     };
     launch_agent_for_project_root(project_root, request, &state, app_handle, None, None)
+        .map_err(|e| StructuredError::internal(&e, "launch_agent"))
 }
 
 /// Start an async launch job with progress events (SPEC-3b0ed29b US15).
@@ -2323,10 +4406,13 @@ pub fn start_launch_job(
     request: LaunchAgentRequest,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err("No project opened".to_string());
+            return Err(StructuredError::internal(
+                "No project opened",
+                "start_launch_job",
+            ));
         };
         p
     };
@@ -2340,42 +4426,79 @@ pub fn start_launch_job(
     let app = app_handle.clone();
     let job_id_thread = job_id.clone();
     std::thread::spawn(move || {
-        let state = app.state::<AppState>();
-        let result = launch_agent_for_project_root(
-            PathBuf::from(project_root),
-            request,
-            &state,
-            app.clone(),
-            Some(job_id_thread.as_str()),
-            Some(cancel_flag.as_ref()),
-        );
+        tracing::debug!(job_id = %job_id_thread, "launch thread started");
 
-        if let Ok(mut jobs) = state.launch_jobs.lock() {
-            jobs.remove(&job_id_thread);
-        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let state = app.state::<AppState>();
+            launch_agent_for_project_root(
+                PathBuf::from(project_root),
+                request,
+                &state,
+                app.clone(),
+                Some(job_id_thread.as_str()),
+                Some(cancel_flag.as_ref()),
+            )
+        }));
 
-        let finished = match result {
-            Ok(pane_id) => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "ok".to_string(),
-                pane_id: Some(pane_id),
-                error: None,
-            },
-            Err(err) if err.trim() == "Cancelled" => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "cancelled".to_string(),
-                pane_id: None,
-                error: None,
-            },
-            Err(err) => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "error".to_string(),
-                pane_id: None,
-                error: Some(err),
-            },
+        let finished = match &result {
+            Ok(Ok(pane_id)) => {
+                tracing::debug!(job_id = %job_id_thread, pane_id = %pane_id, "launch succeeded");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "ok".to_string(),
+                    pane_id: Some(pane_id.clone()),
+                    error: None,
+                }
+            }
+            Ok(Err(err)) if err.trim() == "Cancelled" => {
+                tracing::debug!(job_id = %job_id_thread, "launch cancelled");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "cancelled".to_string(),
+                    pane_id: None,
+                    error: None,
+                }
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(job_id = %job_id_thread, error = %err, "launch failed");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "error".to_string(),
+                    pane_id: None,
+                    error: Some(err.clone()),
+                }
+            }
+            Err(_panic) => {
+                tracing::error!(job_id = %job_id_thread, "launch thread panicked");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "error".to_string(),
+                    pane_id: None,
+                    error: Some("Internal error: launch thread panicked".to_string()),
+                }
+            }
         };
 
+        tracing::debug!(job_id = %job_id_thread, status = %finished.status, "emitting launch-finished");
+
+        // Store the result for polling retrieval before emitting.  This
+        // guarantees the frontend can always recover the result even when
+        // Tauri events are silently lost.
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut results) = state.launch_results.lock() {
+                results.insert(job_id_thread.clone(), finished.clone());
+            }
+        }
+
         let _ = app.emit("launch-finished", &finished);
+
+        // Remove the running-job entry last so that polling sees the job
+        // as "running" until both the result store and event are done.
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut jobs) = state.launch_jobs.lock() {
+                jobs.remove(&job_id_thread);
+            }
+        }
     });
 
     Ok(job_id)
@@ -2383,7 +4506,7 @@ pub fn start_launch_job(
 
 /// Cancel a running launch job (best-effort).
 #[tauri::command]
-pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), String> {
+pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), StructuredError> {
     let id = job_id.trim();
     if id.is_empty() {
         return Ok(());
@@ -2397,10 +4520,177 @@ pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), S
     Ok(())
 }
 
+/// Frontend polling result for a launch job.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchJobPollResult {
+    /// `true` while the job thread is still running.
+    pub running: bool,
+    /// Populated once the job has finished (success, error, or panic).
+    /// The frontend should apply this exactly as it would a
+    /// `launch-finished` event.
+    pub finished: Option<LaunchFinishedPayload>,
+}
+
+/// Poll the state of a launch job.  Returns the final result when
+/// available so the frontend can recover even if Tauri events are lost.
+#[tauri::command]
+pub fn poll_launch_job(job_id: String, state: State<AppState>) -> LaunchJobPollResult {
+    let id = job_id.trim();
+    if id.is_empty() {
+        return LaunchJobPollResult {
+            running: false,
+            finished: None,
+        };
+    }
+
+    // Still running?
+    let running = state
+        .launch_jobs
+        .lock()
+        .map(|jobs| jobs.contains_key(id))
+        .unwrap_or(false);
+    if running {
+        return LaunchJobPollResult {
+            running: true,
+            finished: None,
+        };
+    }
+
+    // Finished – try to retrieve (and consume) the stored result.
+    let finished = state
+        .launch_results
+        .lock()
+        .ok()
+        .and_then(|mut results| results.remove(id));
+
+    LaunchJobPollResult {
+        running: false,
+        finished,
+    }
+}
+
+/// Terminal cwd changed event payload sent to the frontend
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalCwdChangedPayload {
+    pub pane_id: String,
+    pub cwd: String,
+}
+
+const OSC7_MARKER: &[u8] = b"\x1b]7;";
+const OSC7_BUFFER_LIMIT: usize = 64 * 1024;
+
+fn trim_osc7_buffer(buffer: &mut Vec<u8>) {
+    if buffer.len() <= OSC7_BUFFER_LIMIT {
+        return;
+    }
+
+    if let Some(marker_pos) = buffer
+        .windows(OSC7_MARKER.len())
+        .rposition(|window| window == OSC7_MARKER)
+    {
+        if marker_pos > 0 {
+            buffer.drain(..marker_pos);
+        }
+    } else {
+        buffer.clear();
+    }
+}
+
+fn retain_possible_osc7_fragment(buffer: &mut Vec<u8>) {
+    if let Some(marker_pos) = buffer
+        .windows(OSC7_MARKER.len())
+        .rposition(|window| window == OSC7_MARKER)
+    {
+        if marker_pos > 0 {
+            buffer.drain(..marker_pos);
+        }
+        return;
+    }
+
+    // Keep only the possible marker prefix tail (e.g., trailing ESC]).
+    let keep = OSC7_MARKER.len().saturating_sub(1);
+    if buffer.len() > keep {
+        let drain_len = buffer.len() - keep;
+        buffer.drain(..drain_len);
+    }
+}
+
+fn consume_osc7_cwd_updates(
+    pending: &mut Vec<u8>,
+    chunk: &[u8],
+    last_cwd: &mut String,
+) -> Option<String> {
+    pending.extend_from_slice(chunk);
+    trim_osc7_buffer(pending);
+
+    let mut latest_changed: Option<String> = None;
+    loop {
+        let Some((cwd, consumed)) =
+            gwt_core::terminal::osc::extract_osc7_cwd_with_consumed(pending)
+        else {
+            retain_possible_osc7_fragment(pending);
+            break;
+        };
+
+        if consumed == 0 || consumed > pending.len() {
+            break;
+        }
+
+        if cwd != *last_cwd {
+            *last_cwd = cwd.clone();
+            latest_changed = Some(cwd);
+        }
+
+        pending.drain(..consumed);
+    }
+
+    latest_changed
+}
+
+fn mark_pane_stream_error_and_write_message(
+    state: &AppState,
+    pane_id: &str,
+    details: &str,
+) -> Vec<u8> {
+    let status_message = format!("PTY stream error: {details}");
+    let output_message = format!("\r\n[{status_message}]\r\n");
+    let bytes = output_message.into_bytes();
+
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            pane.mark_error(status_message);
+            let _ = pane.process_bytes(&bytes);
+        }
+    }
+
+    bytes
+}
+
+fn append_close_hint_to_pane_scrollback(state: &AppState, pane_id: &str) -> Vec<u8> {
+    let bytes = b"\r\nPress Enter to close this tab.\r\n".to_vec();
+
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            let _ = pane.process_bytes(&bytes);
+        }
+    }
+
+    bytes
+}
+
 /// Stream PTY output to the frontend via Tauri events
-fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_handle: AppHandle) {
+fn stream_pty_output(
+    mut reader: Box<dyn Read + Send>,
+    pane_id: String,
+    app_handle: AppHandle,
+    agent_name: String,
+) {
     let state = app_handle.state::<AppState>();
     let mut buf = [0u8; 4096];
+    let mut stream_error: Option<String> = None;
+    let mut last_cwd = String::new();
+    let mut osc7_pending = Vec::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
@@ -2412,6 +4702,19 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                     }
                 }
 
+                // Detect OSC 7 cwd changes for terminal tabs
+                if agent_name == "terminal" {
+                    if let Some(cwd) =
+                        consume_osc7_cwd_updates(&mut osc7_pending, &buf[..n], &mut last_cwd)
+                    {
+                        let payload = TerminalCwdChangedPayload {
+                            pane_id: pane_id.clone(),
+                            cwd,
+                        };
+                        let _ = app_handle.emit("terminal-cwd-changed", &payload);
+                    }
+                }
+
                 let payload = TerminalOutputPayload {
                     pane_id: pane_id.clone(),
                     data: buf[..n].to_vec(),
@@ -2420,14 +4723,30 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                 // the frontend isn't ready (tab switch, hot reload, etc.).
                 let _ = app_handle.emit("terminal-output", &payload);
             }
-            Err(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                stream_error = Some(err.to_string());
+                break;
+            }
         }
+    }
+
+    if let Some(details) = stream_error.as_deref() {
+        let bytes = mark_pane_stream_error_and_write_message(&state, &pane_id, details);
+
+        let payload = TerminalOutputPayload {
+            pane_id: pane_id.clone(),
+            data: bytes,
+        };
+        let _ = app_handle.emit("terminal-output", &payload);
     }
 
     // Update pane status after the PTY stream ends.
     let (exit_code, ended) = if let Ok(mut manager) = state.pane_manager.lock() {
         if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
-            let _ = pane.check_status();
+            if stream_error.is_none() {
+                let _ = pane.check_status();
+            }
             let exit_code = match pane.status() {
                 PaneStatus::Completed(code) => Some(*code),
                 _ => None,
@@ -2448,6 +4767,9 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
         .ok()
         .and_then(|mut map| map.remove(&pane_id));
     if let Some(meta) = meta {
+        let docker_container_name = meta.docker_container_name.clone();
+        let docker_compose_args = meta.docker_compose_args.clone();
+
         if let Some(session_id) =
             detect_session_id(&meta.agent_id, &meta.worktree_path, meta.started_at_millis)
         {
@@ -2476,6 +4798,8 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                 docker_recreate: meta.docker_recreate,
                 docker_build: meta.docker_build,
                 docker_keep: meta.docker_keep,
+                docker_container_name,
+                docker_compose_args,
                 timestamp: now_millis(),
             };
 
@@ -2539,12 +4863,18 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                             }
                         };
 
-                        let manager = DockerManager::new(
-                            &worktree_path,
-                            "",
-                            DockerFileType::Compose(worktree_path.join("docker-compose.yml")),
-                        );
+                        let compose_paths = compose_file_paths_from_args(&args);
+                        let docker_file_type = compose_paths
+                            .first()
+                            .cloned()
+                            .map(DockerFileType::Compose)
+                            .unwrap_or_else(|| {
+                                DockerFileType::Compose(worktree_path.join("docker-compose.yml"))
+                            });
+
+                        let manager = DockerManager::new(&worktree_path, "", docker_file_type);
                         let mut env = manager.collect_passthrough_env();
+                        merge_compose_env_from_process(&mut env, &compose_paths);
                         env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                         docker_compose_down(&worktree_path, &container_name, &env, &args)
                     })();
@@ -2587,18 +4917,11 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
     }
 
     if ended {
-        let msg = "\r\nPress Enter to close this tab.\r\n";
-        let bytes = msg.as_bytes();
-
-        if let Ok(mut manager) = state.pane_manager.lock() {
-            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
-                let _ = pane.process_bytes(bytes);
-            }
-        }
+        let bytes = append_close_hint_to_pane_scrollback(&state, &pane_id);
 
         let payload = TerminalOutputPayload {
             pane_id: pane_id.clone(),
-            data: bytes.to_vec(),
+            data: bytes,
         };
         let _ = app_handle.emit("terminal-output", &payload);
     }
@@ -2653,26 +4976,32 @@ pub fn write_terminal(
     data: Vec<u8>,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let close_requested = is_enter_only(&data);
 
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "write_terminal",
+        )
+    })?;
 
     let should_close = {
-        let pane = manager
-            .pane_mut_by_id(&pane_id)
-            .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+        let pane = manager.pane_mut_by_id(&pane_id).ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "write_terminal")
+        })?;
 
         // Ensure we don't treat a completed pane as running due to stale status.
         let _ = pane.check_status();
 
         match pane.status() {
             PaneStatus::Running => {
-                pane.write_input(&data)
-                    .map_err(|e| format!("Failed to write to terminal: {}", e))?;
+                pane.write_input(&data).map_err(|e| {
+                    StructuredError::internal(
+                        &format!("Failed to write to terminal: {}", e),
+                        "write_terminal",
+                    )
+                })?;
                 return Ok(());
             }
             PaneStatus::Completed(_) | PaneStatus::Error(_) => close_requested,
@@ -2687,7 +5016,9 @@ pub fn write_terminal(
         .panes()
         .iter()
         .position(|p| p.pane_id() == pane_id)
-        .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+        .ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "write_terminal")
+        })?;
 
     manager.close_pane(index);
     let _ = app_handle.emit(
@@ -2773,14 +5104,16 @@ pub fn send_keys_to_pane(
     pane_id: String,
     text: String,
     state: State<AppState>,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     send_keys_to_pane_from_state(&state, &pane_id, &text)
+        .map_err(|e| StructuredError::internal(&e, "send_keys_to_pane"))
 }
 
 /// Broadcast text to all running terminal panes. Returns number of panes sent.
 #[tauri::command]
-pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize, String> {
+pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize, StructuredError> {
     send_keys_broadcast_from_state(&state, &text)
+        .map_err(|e| StructuredError::internal(&e, "send_keys_broadcast"))
 }
 
 /// Resize a terminal pane
@@ -2790,16 +5123,22 @@ pub fn resize_terminal(
     rows: u16,
     cols: u16,
     state: State<AppState>,
-) -> Result<(), String> {
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
-    let pane = manager
-        .pane_mut_by_id(&pane_id)
-        .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
-    pane.resize(rows, cols)
-        .map_err(|e| format!("Failed to resize terminal: {}", e))
+) -> Result<(), StructuredError> {
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "resize_terminal",
+        )
+    })?;
+    let pane = manager.pane_mut_by_id(&pane_id).ok_or_else(|| {
+        StructuredError::internal(&format!("Pane not found: {}", pane_id), "resize_terminal")
+    })?;
+    pane.resize(rows, cols).map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to resize terminal: {}", e),
+            "resize_terminal",
+        )
+    })
 }
 
 /// Close a terminal pane
@@ -2808,17 +5147,21 @@ pub fn close_terminal(
     pane_id: String,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<(), String> {
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+) -> Result<(), StructuredError> {
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "close_terminal",
+        )
+    })?;
 
     let index = manager
         .panes()
         .iter()
         .position(|p| p.pane_id() == pane_id)
-        .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+        .ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "close_terminal")
+        })?;
 
     manager.close_pane(index);
     let _ = app_handle.emit(
@@ -3000,8 +5343,9 @@ fn probe_terminal_ansi_from_state(
 pub fn probe_terminal_ansi(
     state: State<AppState>,
     pane_id: String,
-) -> Result<TerminalAnsiProbe, String> {
+) -> Result<TerminalAnsiProbe, StructuredError> {
     probe_terminal_ansi_from_state(&state, &pane_id)
+        .map_err(|e| StructuredError::internal(&e, "probe_terminal_ansi"))
 }
 
 /// Capture the scrollback tail for a pane as plain text (ANSI stripped).
@@ -3010,9 +5354,10 @@ pub fn capture_scrollback_tail(
     state: State<AppState>,
     pane_id: String,
     max_bytes: Option<usize>,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let max_bytes = max_bytes.unwrap_or(DEFAULT_SCROLLBACK_TAIL_BYTES);
     capture_scrollback_tail_from_state(&state, &pane_id, max_bytes)
+        .map_err(|e| StructuredError::internal(&e, "capture_scrollback_tail"))
 }
 
 // ---------------------------------------------------------------------------
@@ -3035,45 +5380,164 @@ pub struct CapturedEnvInfo {
     pub ready: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OsEnvCaptureStatus {
+    pub configured_mode: Option<String>,
+    pub active_source: String,
+    pub reason: Option<String>,
+    pub ready: bool,
+    pub capture_inflight: bool,
+}
+
+fn os_env_source_to_string(
+    source: Option<gwt_core::config::os_env::EnvSource>,
+) -> (String, Option<String>) {
+    match source {
+        Some(gwt_core::config::os_env::EnvSource::LoginShell) => ("login_shell".to_string(), None),
+        Some(gwt_core::config::os_env::EnvSource::ProcessEnv) => ("process_env".to_string(), None),
+        Some(gwt_core::config::os_env::EnvSource::StdEnvFallback { reason }) => {
+            ("std_env_fallback".to_string(), Some(reason))
+        }
+        None => ("unknown".to_string(), None),
+    }
+}
+
+fn os_env_capture_mode_to_string(mode: OsEnvCaptureMode) -> String {
+    match mode {
+        OsEnvCaptureMode::LoginShell => "login_shell".to_string(),
+        OsEnvCaptureMode::ProcessEnv => "process_env".to_string(),
+    }
+}
+
+fn parse_os_env_capture_mode(mode: &str) -> Result<OsEnvCaptureMode, String> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "login_shell" => Ok(OsEnvCaptureMode::LoginShell),
+        "process_env" => Ok(OsEnvCaptureMode::ProcessEnv),
+        _ => Err("mode must be one of: login_shell, process_env".to_string()),
+    }
+}
+
+fn build_os_env_capture_status(
+    state: &AppState,
+    configured_mode: Option<OsEnvCaptureMode>,
+) -> OsEnvCaptureStatus {
+    let (active_source, reason) = os_env_source_to_string(state.os_env_source_snapshot());
+    OsEnvCaptureStatus {
+        configured_mode: configured_mode.map(os_env_capture_mode_to_string),
+        active_source,
+        reason,
+        ready: state.is_os_env_ready(),
+        capture_inflight: state.is_os_env_capture_inflight(),
+    }
+}
+
 #[tauri::command]
 pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
-    let (entries, source_str, reason) = match state.os_env.get() {
-        Some(env) => {
-            let mut entries: Vec<CapturedEnvEntry> = env
-                .iter()
-                .map(|(k, v)| CapturedEnvEntry {
-                    key: k.clone(),
-                    value: v.clone(),
-                })
-                .collect();
-            entries.sort_by(|a, b| a.key.cmp(&b.key));
-
-            let (source_str, reason) = match state.os_env_source.get() {
-                Some(gwt_core::config::os_env::EnvSource::LoginShell) => {
-                    ("login_shell".to_string(), None)
-                }
-                Some(gwt_core::config::os_env::EnvSource::ProcessEnv) => {
-                    ("process_env".to_string(), None)
-                }
-                Some(gwt_core::config::os_env::EnvSource::StdEnvFallback { reason }) => {
-                    ("std_env_fallback".to_string(), Some(reason.clone()))
-                }
-                None => ("unknown".to_string(), None),
-            };
-            (entries, source_str, reason)
-        }
-        None => (vec![], "not_ready".to_string(), None),
-    };
+    let mut entries: Vec<CapturedEnvEntry> = state
+        .os_env_snapshot()
+        .iter()
+        .map(|(k, v)| CapturedEnvEntry {
+            key: k.clone(),
+            value: v.clone(),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+    let (source, reason) = os_env_source_to_string(state.os_env_source_snapshot());
 
     CapturedEnvInfo {
-        ready: state.os_env.initialized(),
+        ready: state.is_os_env_ready(),
         entries,
-        source: source_str,
+        source,
         reason,
     }
 }
 
 #[tauri::command]
+pub fn get_os_env_capture_status(state: State<AppState>) -> OsEnvCaptureStatus {
+    let configured_mode = match Settings::load_global() {
+        Ok(settings) => settings.os_env_capture_mode,
+        Err(err) => {
+            tracing::warn!(
+                category = "os_env",
+                error = %err,
+                "Failed to load settings while reading os env capture status"
+            );
+            None
+        }
+    };
+    build_os_env_capture_status(&state, configured_mode)
+}
+
+#[tauri::command]
+pub fn set_os_env_capture_mode(
+    mode: String,
+    state: State<AppState>,
+    _app_handle: AppHandle,
+) -> Result<OsEnvCaptureStatus, StructuredError> {
+    let selected_mode = parse_os_env_capture_mode(&mode)
+        .map_err(|e| StructuredError::internal(&e, "set_os_env_capture_mode"))?;
+
+    let mut settings = Settings::load_global()
+        .map_err(|e| StructuredError::from_gwt_error(&e, "set_os_env_capture_mode"))?;
+    settings.os_env_capture_mode = Some(selected_mode);
+    settings
+        .save_global()
+        .map_err(|e| StructuredError::from_gwt_error(&e, "set_os_env_capture_mode"))?;
+
+    match selected_mode {
+        OsEnvCaptureMode::ProcessEnv => {
+            state.set_os_env_process_env_snapshot();
+        }
+        OsEnvCaptureMode::LoginShell => {
+            #[cfg(not(test))]
+            {
+                crate::app::spawn_login_shell_env_capture(_app_handle);
+            }
+            #[cfg(test)]
+            {
+                state.set_os_env_process_env_snapshot();
+            }
+        }
+    }
+
+    Ok(build_os_env_capture_status(&state, Some(selected_mode)))
+}
+
+#[tauri::command]
 pub fn is_os_env_ready(state: State<AppState>) -> bool {
     state.is_os_env_ready()
+}
+
+/// Shell information returned to the frontend.
+#[derive(Debug, Serialize, Clone)]
+pub struct ShellInfo {
+    pub id: String,
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// Return the list of available Windows shells.
+///
+/// On non-Windows platforms this always returns an empty list.
+#[tauri::command]
+pub async fn get_available_shells() -> Result<Vec<ShellInfo>, StructuredError> {
+    #[cfg(target_os = "windows")]
+    {
+        use gwt_core::terminal::shell::WindowsShell;
+        let shells: Vec<ShellInfo> = WindowsShell::ALL
+            .iter()
+            .filter(|s| s.is_available())
+            .map(|s| ShellInfo {
+                id: s.id().to_string(),
+                name: s.display_name().to_string(),
+                version: s.detect_version(),
+            })
+            .collect();
+        Ok(shells)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(Vec::new())
+    }
 }

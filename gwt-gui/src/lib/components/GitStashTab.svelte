@@ -28,7 +28,7 @@
     loading = true;
     error = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       entries = await invoke<StashEntry[]>("get_stash_list", { projectPath, branch });
     } catch (err) {
       error = toErrorMessage(err);

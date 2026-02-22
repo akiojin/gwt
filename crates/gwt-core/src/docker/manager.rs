@@ -7,7 +7,6 @@ use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
@@ -96,6 +95,180 @@ fn extract_services_from_compose(content: &str) -> Vec<String> {
     results
 }
 
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn parse_compose_env_expression(expr: &str) -> Option<String> {
+    let inner = expr.trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    let mut end = inner.len();
+    for delim in [":-", "-", ":?", "?", ":+", "+"] {
+        if let Some(idx) = inner.find(delim) {
+            end = end.min(idx);
+        }
+    }
+
+    let name = inner[..end].trim();
+    if is_valid_env_var_name(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_env_refs_from_string(value: &str, keys: &mut HashSet<String>) {
+    let bytes = value.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+
+        if i + 1 >= bytes.len() {
+            break;
+        }
+
+        if bytes[i + 1] == b'$' {
+            // Escaped literal '$'
+            i += 2;
+            continue;
+        }
+
+        if bytes[i + 1] == b'{' {
+            let start = i + 2;
+            let Some(end_rel) = value[start..].find('}') else {
+                break;
+            };
+            let end = start + end_rel;
+            if let Some(name) = parse_compose_env_expression(&value[start..end]) {
+                keys.insert(name);
+            }
+            i = end + 1;
+            continue;
+        }
+
+        // Bare form: $VAR_NAME
+        let start = i + 1;
+        let first = bytes[start];
+        if !(first == b'_' || (first as char).is_ascii_alphabetic()) {
+            i += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < bytes.len() {
+            let c = bytes[end];
+            if c == b'_' || (c as char).is_ascii_alphanumeric() {
+                end += 1;
+                continue;
+            }
+            break;
+        }
+        let name = &value[start..end];
+        if is_valid_env_var_name(name) {
+            keys.insert(name.to_string());
+        }
+        i = end;
+    }
+}
+
+fn extract_env_keys_from_environment_block(value: &Value, keys: &mut HashSet<String>) {
+    match value {
+        Value::Mapping(map) => {
+            for (k, v) in map {
+                if let Some(name) = k.as_str().filter(|s| is_valid_env_var_name(s)) {
+                    keys.insert(name.to_string());
+                }
+                if let Value::String(s) = v {
+                    extract_env_refs_from_string(s, keys);
+                }
+            }
+        }
+        Value::Sequence(items) => {
+            for item in items {
+                match item {
+                    Value::String(s) => {
+                        if let Some((name, rhs)) = s.split_once('=') {
+                            let trimmed = name.trim();
+                            if is_valid_env_var_name(trimmed) {
+                                keys.insert(trimmed.to_string());
+                            }
+                            extract_env_refs_from_string(rhs, keys);
+                        } else {
+                            let trimmed = s.trim();
+                            if is_valid_env_var_name(trimmed) {
+                                keys.insert(trimmed.to_string());
+                            } else {
+                                extract_env_refs_from_string(s, keys);
+                            }
+                        }
+                    }
+                    Value::Mapping(map) => {
+                        for (k, v) in map {
+                            if let Some(name) = k.as_str().filter(|s| is_valid_env_var_name(s)) {
+                                keys.insert(name.to_string());
+                            }
+                            if let Value::String(s) = v {
+                                extract_env_refs_from_string(s, keys);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_compose_env_keys(value: &Value, keys: &mut HashSet<String>) {
+    match value {
+        Value::Mapping(map) => {
+            for (k, v) in map {
+                if let Some(kstr) = k.as_str() {
+                    if kstr == "environment" {
+                        extract_env_keys_from_environment_block(v, keys);
+                    } else {
+                        extract_env_refs_from_string(kstr, keys);
+                        collect_compose_env_keys(v, keys);
+                    }
+                } else {
+                    collect_compose_env_keys(v, keys);
+                }
+            }
+        }
+        Value::Sequence(items) => {
+            for item in items {
+                collect_compose_env_keys(item, keys);
+            }
+        }
+        Value::String(s) => extract_env_refs_from_string(s, keys),
+        _ => {}
+    }
+}
+
+fn extract_env_keys_from_compose(content: &str) -> Vec<String> {
+    let Ok(value) = serde_yaml::from_str::<Value>(content) else {
+        return Vec::new();
+    };
+
+    let mut keys = HashSet::new();
+    collect_compose_env_keys(&value, &mut keys);
+
+    let mut results: Vec<String> = keys.into_iter().collect();
+    results.sort();
+    results
+}
+
 fn parse_docker_ps_ports(output: &str) -> HashSet<u16> {
     let mut ports = HashSet::new();
     for line in output.lines() {
@@ -130,7 +303,7 @@ fn parse_docker_ps_ports(output: &str) -> HashSet<u16> {
 }
 
 fn docker_ports_in_use() -> HashSet<u16> {
-    let output = Command::new("docker")
+    let output = crate::process::command("docker")
         .args(["ps", "--format", "{{.Ports}}"])
         .output();
     match output {
@@ -156,7 +329,7 @@ fn parse_port_env_default(value: &str) -> Option<(String, u16)> {
 }
 
 fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
-    if let Ok(output) = std::process::Command::new("git")
+    if let Ok(output) = crate::process::command("git")
         .args([
             "-C",
             &worktree_path.to_string_lossy(),
@@ -215,7 +388,7 @@ fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
 }
 
 fn detect_git_dir(worktree_path: &Path) -> Option<PathBuf> {
-    if let Ok(output) = std::process::Command::new("git")
+    if let Ok(output) = crate::process::command("git")
         .args([
             "-C",
             &worktree_path.to_string_lossy(),
@@ -256,6 +429,32 @@ fn resolve_compose_status(running_output: &str, all_output: &str) -> ContainerSt
         return ContainerStatus::Stopped;
     }
     ContainerStatus::NotFound
+}
+
+fn build_docker_compose_exec_args(
+    service: &str,
+    command: &str,
+    command_args: &[String],
+    env_vars: &HashMap<String, String>,
+    use_no_tty: bool,
+) -> Vec<String> {
+    let mut args = vec!["compose".to_string(), "exec".to_string()];
+    if use_no_tty {
+        args.push("-T".to_string());
+    }
+
+    let mut keys: Vec<&String> = env_vars.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = env_vars.get(key).map(|s| s.as_str()).unwrap_or_default();
+        args.push("-e".to_string());
+        args.push(format!("{key}={value}"));
+    }
+
+    args.push(service.to_string());
+    args.push(command.to_string());
+    args.extend(command_args.iter().cloned());
+    args
 }
 
 /// Environment variable prefixes to pass through to containers
@@ -462,7 +661,7 @@ impl DockerManager {
     /// Check if the container is currently running
     pub fn is_running(&self) -> bool {
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -494,14 +693,14 @@ impl DockerManager {
     /// Get the status of the container
     pub fn get_status(&self) -> ContainerStatus {
         let env_vars = self.collect_passthrough_env();
-        let running_output = Command::new("docker")
+        let running_output = crate::process::command("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .envs(&env_vars)
             .output();
 
-        let all_output = Command::new("docker")
+        let all_output = crate::process::command("docker")
             .args(["compose", "ps", "-a", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -555,7 +754,7 @@ impl DockerManager {
 
         // Run docker compose up -d
         let env_vars = self.collect_passthrough_env();
-        let mut command = Command::new("docker");
+        let mut command = crate::process::command("docker");
         command
             .args(["compose", "up", "-d", "--build"])
             .current_dir(&self.worktree_path)
@@ -613,7 +812,7 @@ impl DockerManager {
         );
 
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "down"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -647,7 +846,7 @@ impl DockerManager {
     /// Get the container ID (short form)
     fn get_container_id(&self) -> Option<String> {
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -670,7 +869,7 @@ impl DockerManager {
     /// List services defined in the compose file
     fn list_services_internal(&self) -> Option<Vec<String>> {
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "config", "--services"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -709,6 +908,22 @@ impl DockerManager {
             ))
         })?;
         Ok(extract_services_from_compose(&content))
+    }
+
+    /// Extract environment variable keys referenced by a compose file.
+    ///
+    /// This includes:
+    /// - `services.*.environment` keys (mapping / list forms)
+    /// - Interpolated variables (`${VAR}`, `${VAR:-default}`, `$VAR`) found in string values
+    pub fn list_env_keys_from_compose_file(compose_path: &Path) -> Result<Vec<String>> {
+        let content = fs::read_to_string(compose_path).map_err(|e| {
+            GwtError::Docker(format!(
+                "Failed to read docker compose file {}: {}",
+                compose_path.display(),
+                e
+            ))
+        })?;
+        Ok(extract_env_keys_from_compose(&content))
     }
 
     /// Extract `${NAME:-PORT}` defaults from compose `ports:` entries.
@@ -850,6 +1065,40 @@ impl DockerManager {
         Ok(allocated)
     }
 
+    /// Check if Docker images exist for this compose project.
+    ///
+    /// Runs `docker compose images -q` and returns `true` if any output is produced.
+    pub fn images_exist(&self) -> bool {
+        let env_vars = self.collect_passthrough_env();
+        let output = crate::process::command("docker")
+            .args(["compose", "images", "-q"])
+            .current_dir(&self.worktree_path)
+            .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
+            .output();
+
+        match output {
+            Ok(out) => {
+                let exists = out.status.success() && !out.stdout.is_empty();
+                debug!(
+                    category = "docker",
+                    container = %self.container_name,
+                    images_exist = exists,
+                    "Checked docker compose images"
+                );
+                exists
+            }
+            Err(e) => {
+                debug!(
+                    category = "docker",
+                    error = %e,
+                    "Failed to check docker compose images"
+                );
+                false
+            }
+        }
+    }
+
     /// Check if the Docker image needs to be rebuilt
     ///
     /// Compares Dockerfile modification time with last build time.
@@ -891,7 +1140,7 @@ impl DockerManager {
 
     fn container_created_time(&self) -> Option<SystemTime> {
         let container_id = self.get_container_id()?;
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["inspect", "-f", "{{.Created}}", &container_id])
             .output()
             .ok()?;
@@ -917,7 +1166,7 @@ impl DockerManager {
         );
 
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "build"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -976,38 +1225,18 @@ impl DockerManager {
         // Collect environment variables to pass through
         let env_vars = self.collect_passthrough_env();
 
-        // Build the exec command
-        let mut cmd = Command::new("docker");
-        cmd.args(["compose", "exec"]);
-
-        // Add -T flag for non-interactive mode (when running programmatically)
-        // This prevents TTY allocation issues when not running from a terminal
+        // Add -T flag for non-interactive mode (when running programmatically).
+        // This prevents TTY allocation issues when not running from a terminal.
         #[cfg(unix)]
-        {
-            // Check if stdin is a TTY using libc
-            let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } != 0;
-            if !is_tty {
-                cmd.arg("-T");
-            }
-        }
+        let use_no_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } == 0;
         #[cfg(not(unix))]
-        {
-            // On non-Unix platforms, default to non-TTY mode
-            cmd.arg("-T");
-        }
+        let use_no_tty = true;
 
-        // Add working directory
-        cmd.args(["-w", "/workspace"]);
-
-        // Add environment variables
-        for (key, value) in &env_vars {
-            cmd.args(["-e", &format!("{}={}", key, value)]);
-        }
-
-        // Add service name and command
-        cmd.arg(service);
-        cmd.arg(command);
-        cmd.args(args);
+        // Build the exec command without forcing -w to preserve service defaults.
+        let mut cmd = crate::process::command("docker");
+        cmd.args(build_docker_compose_exec_args(
+            service, command, args, &env_vars, use_no_tty,
+        ));
 
         cmd.current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -1104,6 +1333,34 @@ mod tests {
         assert!(ports.contains(&3000));
         assert!(ports.contains(&3001));
         assert!(ports.contains(&3002));
+    }
+
+    #[test]
+    fn test_build_docker_compose_exec_args_omits_workdir_flag() {
+        let mut env = HashMap::new();
+        env.insert("B".to_string(), "2".to_string());
+        env.insert("A".to_string(), "1".to_string());
+        let command_args = vec!["--version".to_string()];
+
+        let args = build_docker_compose_exec_args("app", "node", &command_args, &env, true);
+
+        assert!(!args.contains(&"-w".to_string()));
+        assert!(args.contains(&"-T".to_string()));
+
+        let pos_a = args.iter().position(|s| s == "A=1").unwrap();
+        let pos_b = args.iter().position(|s| s == "B=2").unwrap();
+        assert!(pos_a < pos_b);
+
+        let pos_service = args.iter().position(|s| s == "app").unwrap();
+        let pos_command = args.iter().position(|s| s == "node").unwrap();
+        assert!(pos_service < pos_command);
+        assert!(args.ends_with(&command_args));
+    }
+
+    #[test]
+    fn test_build_docker_compose_exec_args_skips_no_tty_flag_when_interactive() {
+        let args = build_docker_compose_exec_args("app", "bash", &[], &HashMap::new(), false);
+        assert!(!args.contains(&"-T".to_string()));
     }
 
     #[test]
@@ -1275,6 +1532,57 @@ services:
 
         let services = extract_services_from_compose(content);
         assert_eq!(services, vec!["app".to_string(), "db".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_env_keys_from_compose_includes_environment_and_interpolation() {
+        let content = r#"
+services:
+  app:
+    image: "${APP_IMAGE:-ghcr.io/example/app:latest}"
+    environment:
+      - API_KEY
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - "${HOST_CACHE_DIR}/app:/cache"
+  worker:
+    environment:
+      CONFIG_PATH: "${CONFIG_PATH}"
+      STATIC_VALUE: "enabled"
+    command: "$WORKER_ENTRYPOINT --port=${WORKER_PORT:-8080}"
+"#;
+
+        let keys = extract_env_keys_from_compose(content);
+        assert!(keys.contains(&"API_KEY".to_string()));
+        assert!(keys.contains(&"APP_IMAGE".to_string()));
+        assert!(keys.contains(&"CONFIG_PATH".to_string()));
+        assert!(keys.contains(&"HOST_CACHE_DIR".to_string()));
+        assert!(keys.contains(&"LOG_LEVEL".to_string()));
+        assert!(keys.contains(&"WORKER_ENTRYPOINT".to_string()));
+        assert!(keys.contains(&"WORKER_PORT".to_string()));
+    }
+
+    #[test]
+    fn test_list_env_keys_from_compose_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    environment:
+      - FOO
+  worker:
+    environment:
+      BAR: "${BAR:-baz}"
+"#,
+        )
+        .unwrap();
+
+        let keys = DockerManager::list_env_keys_from_compose_file(&compose_path).unwrap();
+        assert!(keys.contains(&"FOO".to_string()));
+        assert!(keys.contains(&"BAR".to_string()));
     }
 
     #[test]

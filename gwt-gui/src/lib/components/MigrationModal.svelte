@@ -131,7 +131,7 @@
     jobId = "";
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const id = await invoke<string>("start_migration_job", { path: sourceRoot });
       jobId = id;
     } catch (e) {
@@ -142,7 +142,7 @@
 
   async function quitApp() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("quit_app");
     } catch {
       // Ignore: not available outside Tauri runtime.
@@ -152,8 +152,8 @@
 </script>
 
 {#if open}
-  <div class="overlay" role="dialog" aria-modal="true" aria-label="Migration Required">
-    <div class="dialog">
+  <div class="overlay modal-overlay" role="dialog" aria-modal="true" aria-label="Migration Required">
+    <div class="dialog modal-dialog-shell">
       <div class="header">
         <h2>Migration Required</h2>
       </div>

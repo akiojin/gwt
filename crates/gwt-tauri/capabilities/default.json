@@ -1,12 +1,14 @@
 {
   "identifier": "default",
   "description": "Default capability for gwt",
-  "windows": ["main", "project-*"],
+  "windows": ["*"],
   "permissions": [
     "core:default",
+    "core:event:default",
     "core:window:allow-set-title",
     "dialog:default",
     "dialog:allow-open",
+    "shell:allow-open",
     "store:default"
   ]
 }

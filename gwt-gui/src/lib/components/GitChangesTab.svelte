@@ -20,6 +20,7 @@
   let files: FileChange[] = $state([]);
   let filesLoading: boolean = $state(true);
   let filesError: string | null = $state(null);
+  let filesRequestId = 0;
 
   // Diff expand state
   let expandedPaths: Set<string> = $state(new Set());
@@ -30,6 +31,7 @@
   let workingTree: WorkingTreeEntry[] = $state([]);
   let workingTreeLoading: boolean = $state(true);
   let workingTreeError: string | null = $state(null);
+  let workingTreeRequestId = 0;
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -112,42 +114,56 @@
   let tree = $derived(buildTree(files));
 
   async function loadFiles() {
+    const requestId = filesRequestId + 1;
+    filesRequestId = requestId;
+
     filesLoading = true;
     filesError = null;
     expandedPaths = new Set();
     diffs = new Map();
     diffLoading = new Set();
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<FileChange[]>("get_branch_diff_files", {
         projectPath,
         branch,
         baseBranch,
       });
+      if (requestId !== filesRequestId) return;
       files = result ?? [];
     } catch (err) {
+      if (requestId !== filesRequestId) return;
       filesError = toErrorMessage(err);
       files = [];
     } finally {
-      filesLoading = false;
+      if (requestId === filesRequestId) {
+        filesLoading = false;
+      }
     }
   }
 
   async function loadWorkingTree() {
+    const requestId = workingTreeRequestId + 1;
+    workingTreeRequestId = requestId;
+
     workingTreeLoading = true;
     workingTreeError = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<WorkingTreeEntry[]>("get_working_tree_status", {
         projectPath,
         branch,
       });
+      if (requestId !== workingTreeRequestId) return;
       workingTree = result ?? [];
     } catch (err) {
+      if (requestId !== workingTreeRequestId) return;
       workingTreeError = toErrorMessage(err);
       workingTree = [];
     } finally {
-      workingTreeLoading = false;
+      if (requestId === workingTreeRequestId) {
+        workingTreeLoading = false;
+      }
     }
   }
 
@@ -167,7 +183,7 @@
 
     diffLoading = new Set([...diffLoading, filePath]);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const diff = await invoke<FileDiff>("get_file_diff", {
         projectPath,
         branch,

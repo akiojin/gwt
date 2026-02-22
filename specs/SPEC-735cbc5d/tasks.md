@@ -1,4 +1,4 @@
-# タスク: GitView in Session Summary
+# タスク: GitView in Worktree Summary Panel
 
 **入力**: `/specs/SPEC-735cbc5d/` からの設計ドキュメント
 **前提条件**: spec.md（必須）
@@ -183,7 +183,7 @@
   - stash 一覧（`stash@{N}: メッセージ (X files)`）
   - 0 件時: タブ自体を非表示（GitSection 側で制御）
 
-### Session Summary 統合
+### Worktree Summary 統合
 
 - [ ] **T506** [共通] T501〜T505 の後に `MainArea.svelte` に GitSection を統合:
   - Quick Start セクションの下に配置
@@ -192,7 +192,7 @@
 ### データ取得ロジック
 
 - [ ] **T507** [共通] T506 の後にタブ表示時の自動取得ロジックを実装:
-  - Summary タブ表示時に `get_git_change_summary` を呼び出し
+  - Worktree Summary パネル表示時に `get_git_change_summary` を呼び出し
   - 各タブ切り替え時に対応データを遅延取得
 - [ ] **T508** [共通] T507 の後にリフレッシュボタンの再取得ロジックを実装:
   - 全データをクリアして再取得
@@ -231,6 +231,18 @@
 ### コミット
 
 - [ ] **T705** [デプロイ] すべての変更をコミット＆プッシュ
+
+## フェーズ 9: Base 切り替え白画面不具合修正（2026-02-18 追補）
+
+**目的**: `main -> develop` 切り替え時に Worktree Summary 全体が消える不具合を防止する
+
+- [x] **T801** [US6] [テスト] `GitSection.test.ts` に基準ブランチ切り替え時の再取得・stale 応答無視の RED テストを追加
+- [x] **T802** [US6] [テスト] `GitChangesTab.test.ts` に base 変更時の stale 応答無視テストを追加
+- [x] **T803** [US6] [テスト] `GitCommitsTab.test.ts` に base 変更時の stale 応答無視テストを追加
+- [x] **T804** [US6] [実装] `GitSection.svelte` に request-id ガード、候補値バリデーション、フォールバックを追加
+- [x] **T805** [US6] [実装] `GitChangesTab.svelte` に request-id ガードを追加し、古い応答を破棄
+- [x] **T806** [US6] [実装] `GitCommitsTab.svelte` に request-id ガードを追加し、古い応答を破棄
+- [x] **T807** [US6] [検証] `pnpm -C gwt-gui test src/lib/components/GitSection.test.ts src/lib/components/GitChangesTab.test.ts src/lib/components/GitCommitsTab.test.ts` を実行し GREEN を確認
 
 ## タスク凡例
 

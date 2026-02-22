@@ -11,7 +11,80 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Severity level of an error, used to determine whether to show a report toast
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ErrorSeverity {
+    /// User input validation errors (e.g., branch name duplicate) — no toast
+    Info,
+    /// Recoverable but noteworthy — no toast
+    Warning,
+    /// Unexpected error — show report toast
+    Error,
+    /// Fatal error affecting app operation — show report toast
+    Critical,
+}
+
+impl std::fmt::Display for ErrorSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Info => write!(f, "info"),
+            Self::Warning => write!(f, "warning"),
+            Self::Error => write!(f, "error"),
+            Self::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+/// Structured error returned from Tauri commands to the frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuredError {
+    pub severity: ErrorSeverity,
+    pub code: String,
+    pub message: String,
+    pub command: String,
+    pub category: String,
+    pub suggestions: Vec<String>,
+    pub timestamp: String,
+}
+
+impl StructuredError {
+    /// Create a StructuredError from a GwtError and the command name that failed
+    pub fn from_gwt_error(error: &GwtError, command: &str) -> Self {
+        Self {
+            severity: error.severity(),
+            code: error.code().to_string(),
+            message: error.to_string(),
+            command: command.to_string(),
+            category: error.category().to_string(),
+            suggestions: error.suggestions(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Create a StructuredError for an internal/untyped error (plain String)
+    pub fn internal(message: &str, command: &str) -> Self {
+        Self {
+            severity: ErrorSeverity::Error,
+            code: "E9002".to_string(),
+            message: format!("[E9002] Internal error: {message}"),
+            command: command.to_string(),
+            category: ErrorCategory::Internal.to_string(),
+            suggestions: Vec::new(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+impl std::fmt::Display for StructuredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
 
 const ERROR_MESSAGES_TOML: &str = include_str!("errors.toml");
 
@@ -257,6 +330,7 @@ impl GwtError {
                 crate::terminal::TerminalError::ScrollbackError { .. } => "E7004",
                 crate::terminal::TerminalError::IpcError { .. } => "E7005",
                 crate::terminal::TerminalError::PaneLimitReached { .. } => "E7006",
+                crate::terminal::TerminalError::WslPathConversion { .. } => "E7007",
             },
             // E9xxx
             Self::Io(_) => "E9001",
@@ -294,6 +368,68 @@ impl GwtError {
             }
         }
         Vec::new()
+    }
+
+    /// Get the severity level of this error
+    pub fn severity(&self) -> ErrorSeverity {
+        match self {
+            // Info: user input / validation errors — expected failures
+            Self::RepositoryNotFound { .. }
+            | Self::NotAGitRepository { .. }
+            | Self::BranchNotFound { .. }
+            | Self::BranchAlreadyExists { .. }
+            | Self::RemoteNotFound { .. }
+            | Self::UncommittedChanges
+            | Self::UnpushedCommits
+            | Self::BranchDiverged { .. }
+            | Self::WorktreeAlreadyExists { .. }
+            | Self::ProtectedBranch { .. }
+            | Self::WorktreePathInvalid { .. }
+            | Self::ConfigInvalidValue { .. }
+            | Self::ProfileNotFound { .. }
+            | Self::SessionNotFound { .. }
+            | Self::AgentNotFound { .. }
+            | Self::AgentConfigInvalid { .. }
+            | Self::DockerContainerNotFound { .. }
+            | Self::WorktreePathConflict { .. } => ErrorSeverity::Info,
+
+            // Warning: recoverable but noteworthy
+            Self::WorktreeLocked { .. }
+            | Self::OrphanedWorktree { .. }
+            | Self::PullNotFastForward { .. }
+            | Self::DockerPortConflict { .. }
+            | Self::DockerTimeout => ErrorSeverity::Warning,
+
+            // Error: unexpected failures
+            Self::FetchFailed { .. }
+            | Self::GitCommandFailed { .. }
+            | Self::GitNotFound
+            | Self::GitOperationFailed { .. }
+            | Self::BranchCreateFailed { .. }
+            | Self::BranchDeleteFailed { .. }
+            | Self::WorktreeNotFound { .. }
+            | Self::WorktreeCreateFailed { .. }
+            | Self::WorktreeRemoveFailed { .. }
+            | Self::ConfigNotFound { .. }
+            | Self::ConfigParseError { .. }
+            | Self::ConfigWriteError { .. }
+            | Self::MigrationFailed { .. }
+            | Self::AgentLaunchFailed { .. }
+            | Self::AgentTerminated { .. }
+            | Self::ServerBindFailed { .. }
+            | Self::WebSocketFailed { .. }
+            | Self::ApiRequestFailed { .. }
+            | Self::PtySpawnFailed { .. }
+            | Self::Docker(_)
+            | Self::DockerDaemonNotRunning
+            | Self::DockerBuildFailed { .. }
+            | Self::DockerStartFailed { .. }
+            | Self::Terminal(_)
+            | Self::Io(_) => ErrorSeverity::Error,
+
+            // Critical: data corruption risk
+            Self::Internal(_) => ErrorSeverity::Critical,
+        }
     }
 
     /// Get the error category
@@ -384,5 +520,107 @@ mod tests {
             .category(),
             ErrorCategory::Config
         );
+    }
+
+    // ---- StructuredError / ErrorSeverity tests ----
+
+    #[test]
+    fn test_severity_info_for_user_errors() {
+        assert_eq!(
+            GwtError::BranchAlreadyExists {
+                name: "main".into()
+            }
+            .severity(),
+            ErrorSeverity::Info
+        );
+        assert_eq!(
+            GwtError::ProtectedBranch {
+                branch: "main".into()
+            }
+            .severity(),
+            ErrorSeverity::Info
+        );
+        assert_eq!(
+            GwtError::ProfileNotFound { name: "x".into() }.severity(),
+            ErrorSeverity::Info
+        );
+    }
+
+    #[test]
+    fn test_severity_warning_for_recoverable() {
+        assert_eq!(
+            GwtError::WorktreeLocked {
+                path: PathBuf::new()
+            }
+            .severity(),
+            ErrorSeverity::Warning
+        );
+        assert_eq!(GwtError::DockerTimeout.severity(), ErrorSeverity::Warning);
+    }
+
+    #[test]
+    fn test_severity_error_for_unexpected() {
+        assert_eq!(
+            GwtError::GitCommandFailed {
+                command: "status".into(),
+                reason: "failed".into()
+            }
+            .severity(),
+            ErrorSeverity::Error
+        );
+        assert_eq!(GwtError::GitNotFound.severity(), ErrorSeverity::Error);
+        assert_eq!(
+            GwtError::Io(std::io::Error::other("test")).severity(),
+            ErrorSeverity::Error
+        );
+    }
+
+    #[test]
+    fn test_severity_critical_for_internal() {
+        assert_eq!(
+            GwtError::Internal("oops".into()).severity(),
+            ErrorSeverity::Critical
+        );
+    }
+
+    #[test]
+    fn test_structured_error_from_gwt_error() {
+        let err = GwtError::BranchNotFound {
+            name: "feature/test".into(),
+        };
+        let se = StructuredError::from_gwt_error(&err, "list_worktrees");
+        assert_eq!(se.severity, ErrorSeverity::Info);
+        assert_eq!(se.code, "E1003");
+        assert!(se.message.contains("feature/test"));
+        assert_eq!(se.command, "list_worktrees");
+        assert_eq!(se.category, "Git");
+        assert!(!se.timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_structured_error_internal_helper() {
+        let se = StructuredError::internal("something broke", "do_thing");
+        assert_eq!(se.severity, ErrorSeverity::Error);
+        assert_eq!(se.code, "E9002");
+        assert_eq!(se.command, "do_thing");
+        assert!(se.message.contains("something broke"));
+    }
+
+    #[test]
+    fn test_structured_error_serde_roundtrip() {
+        let se = StructuredError::internal("test", "cmd");
+        let json = serde_json::to_string(&se).expect("serialize");
+        let de: StructuredError = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(de.code, se.code);
+        assert_eq!(de.command, se.command);
+        assert_eq!(de.severity, se.severity);
+    }
+
+    #[test]
+    fn test_error_severity_display() {
+        assert_eq!(ErrorSeverity::Info.to_string(), "info");
+        assert_eq!(ErrorSeverity::Warning.to_string(), "warning");
+        assert_eq!(ErrorSeverity::Error.to_string(), "error");
+        assert_eq!(ErrorSeverity::Critical.to_string(), "critical");
     }
 }

@@ -20,15 +20,23 @@ pub fn is_node_modules_bin(path: &Path) -> bool {
 
 /// Chooses which runner to use when launching npm packages.
 ///
-/// - Prefer `bunx` when it exists and is not a project-local shim.
-/// - Otherwise, use `npx` when available.
+/// - Prefer `npx` when available — it reads registry settings from
+///   `~/.npmrc` (typically the public npm registry), whereas `bunx`
+///   reads from `~/.bunfig.toml` which may point to a private registry
+///   that does not mirror public packages and can hang indefinitely.
+///   `npx` also avoids lockfile conflicts with project-level
+///   `packageManager` fields.
+/// - Fall back to `bunx` when `npx` is not installed but a global `bunx`
+///   is available.
 pub fn choose_fallback_runner(
     bunx_path: Option<&Path>,
     npx_available: bool,
 ) -> Option<FallbackRunner> {
+    if npx_available {
+        return Some(FallbackRunner::Npx);
+    }
     match bunx_path {
         Some(path) if !is_node_modules_bin(path) => Some(FallbackRunner::Bunx),
-        _ if npx_available => Some(FallbackRunner::Npx),
         _ => None,
     }
 }
@@ -197,18 +205,18 @@ mod tests {
     }
 
     #[test]
-    fn choose_fallback_runner_prefers_bunx_when_not_local() {
+    fn choose_fallback_runner_prefers_npx_when_both_available() {
         assert_eq!(
             choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), true),
-            Some(FallbackRunner::Bunx)
+            Some(FallbackRunner::Npx)
         );
     }
 
     #[test]
-    fn choose_fallback_runner_uses_npx_when_bunx_is_local_node_modules() {
+    fn choose_fallback_runner_uses_bunx_when_npx_unavailable() {
         assert_eq!(
-            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), true),
-            Some(FallbackRunner::Npx)
+            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), false),
+            Some(FallbackRunner::Bunx)
         );
     }
 

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isCtrlCShortcut, isPasteShortcut, type ShortcutKeyEvent } from "./shortcuts";
+import {
+  isCopyShortcut,
+  isCtrlCShortcut,
+  isPasteShortcut,
+  type ShortcutKeyEvent,
+} from "./shortcuts";
 
 function evt(input: Partial<ShortcutKeyEvent>): ShortcutKeyEvent {
   return {
@@ -13,11 +18,21 @@ function evt(input: Partial<ShortcutKeyEvent>): ShortcutKeyEvent {
 }
 
 describe("terminal shortcuts", () => {
-  it("detects ctrl+c only when modifier set matches", () => {
+  it("detects copy for ctrl+c", () => {
+    expect(isCopyShortcut(evt({ key: "c", ctrlKey: true }))).toBe(true);
+    expect(isCopyShortcut(evt({ key: "C", ctrlKey: true }))).toBe(true);
+    expect(isCopyShortcut(evt({ key: "c", ctrlKey: true, shiftKey: true }))).toBe(false);
+  });
+
+  it("detects copy for cmd+c", () => {
+    expect(isCopyShortcut(evt({ key: "c", metaKey: true }))).toBe(true);
+    expect(isCopyShortcut(evt({ key: "C", metaKey: true }))).toBe(true);
+    expect(isCopyShortcut(evt({ key: "c", ctrlKey: true, metaKey: true }))).toBe(false);
+  });
+
+  it("preserves legacy ctrl/cmd copy helper", () => {
     expect(isCtrlCShortcut(evt({ key: "c", ctrlKey: true }))).toBe(true);
-    expect(isCtrlCShortcut(evt({ key: "C", ctrlKey: true }))).toBe(true);
-    expect(isCtrlCShortcut(evt({ key: "c", ctrlKey: true, shiftKey: true }))).toBe(false);
-    expect(isCtrlCShortcut(evt({ key: "c", metaKey: true }))).toBe(false);
+    expect(isCtrlCShortcut(evt({ key: "c", metaKey: true }))).toBe(true);
   });
 
   it("detects paste for cmd+v", () => {
@@ -32,4 +47,3 @@ describe("terminal shortcuts", () => {
     expect(isPasteShortcut(evt({ key: "v", ctrlKey: true }))).toBe(false);
   });
 });
-

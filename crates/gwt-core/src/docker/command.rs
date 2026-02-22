@@ -2,12 +2,11 @@
 //!
 //! Provides functions to check Docker availability and daemon status.
 
-use std::process::Command;
 use tracing::debug;
 
 /// Check if the `docker` command is available in PATH
 pub fn docker_available() -> bool {
-    let result = Command::new("docker").arg("--version").output();
+    let result = crate::process::command("docker").arg("--version").output();
 
     match result {
         Ok(output) => {
@@ -33,7 +32,9 @@ pub fn docker_available() -> bool {
 /// Check if `docker compose` is available
 pub fn compose_available() -> bool {
     // Try docker compose (v2)
-    let result = Command::new("docker").args(["compose", "version"]).output();
+    let result = crate::process::command("docker")
+        .args(["compose", "version"])
+        .output();
 
     match result {
         Ok(output) => {
@@ -58,7 +59,7 @@ pub fn compose_available() -> bool {
 
 /// Check if the Docker daemon is running
 pub fn daemon_running() -> bool {
-    let result = Command::new("docker").arg("info").output();
+    let result = crate::process::command("docker").arg("info").output();
 
     match result {
         Ok(output) => {
@@ -99,7 +100,9 @@ pub fn try_start_daemon() -> crate::Result<()> {
             category = "docker",
             "Attempting to start Docker Desktop on macOS"
         );
-        let result = Command::new("open").args(["-a", "Docker"]).output();
+        let result = crate::process::command("open")
+            .args(["-a", "Docker"])
+            .output();
 
         match result {
             Ok(output) if output.status.success() => {
@@ -121,7 +124,9 @@ pub fn try_start_daemon() -> crate::Result<()> {
             "Attempting to start Docker daemon on Linux"
         );
         // Try systemctl first
-        let result = Command::new("systemctl").args(["start", "docker"]).output();
+        let result = crate::process::command("systemctl")
+            .args(["start", "docker"])
+            .output();
 
         if let Ok(output) = result {
             if output.status.success() {
@@ -131,7 +136,9 @@ pub fn try_start_daemon() -> crate::Result<()> {
         }
 
         // Try service command as fallback
-        let result = Command::new("service").args(["docker", "start"]).output();
+        let result = crate::process::command("service")
+            .args(["docker", "start"])
+            .output();
 
         if let Ok(output) = result {
             if output.status.success() {

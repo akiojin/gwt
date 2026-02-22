@@ -2,7 +2,6 @@
 
 use crate::error::{GwtError, Result};
 use std::path::Path;
-use std::process::Command;
 use tracing::{debug, error, info};
 
 /// Represents a Git remote
@@ -35,7 +34,7 @@ impl Remote {
             "Listing remotes"
         );
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["remote", "-v"])
             .current_dir(repo_path)
             .output()
@@ -113,7 +112,7 @@ impl Remote {
             args.push("--prune");
         }
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(&args)
             .current_dir(repo_path)
             .output()
@@ -160,7 +159,7 @@ impl Remote {
             args.push("--prune");
         }
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(&args)
             .current_dir(repo_path)
             .output()
@@ -209,7 +208,7 @@ impl Remote {
         args.push(name);
         args.push(branch);
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(&args)
             .current_dir(repo_path)
             .output()
@@ -260,7 +259,7 @@ impl Remote {
             "Adding remote"
         );
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["remote", "add", name, url])
             .current_dir(repo_path)
             .output()
@@ -303,7 +302,7 @@ impl Remote {
             "Removing remote"
         );
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["remote", "remove", name])
             .current_dir(repo_path)
             .output()
@@ -337,7 +336,7 @@ impl Remote {
 
     /// Update remote tracking references
     pub fn update_refs(repo_path: &Path) -> Result<()> {
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["remote", "update", "--prune"])
             .current_dir(repo_path)
             .output()
@@ -358,7 +357,7 @@ impl Remote {
 
     /// Check network connectivity to remote
     pub fn is_reachable(repo_path: &Path, name: &str) -> bool {
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["ls-remote", "--exit-code", name])
             .current_dir(repo_path)
             .output();
@@ -367,6 +366,21 @@ impl Remote {
             Ok(o) => o.status.success(),
             Err(_) => false,
         }
+    }
+
+    /// Get default remote name (SPEC-b3f1a4e2 FR-002)
+    ///
+    /// Returns "origin" if it exists, otherwise the first remote name,
+    /// or `None` if no remotes are configured.
+    pub fn default_name(repo_path: &Path) -> Result<Option<String>> {
+        let remotes = Self::list(repo_path)?;
+        if remotes.is_empty() {
+            return Ok(None);
+        }
+        if remotes.iter().any(|r| r.name == "origin") {
+            return Ok(Some("origin".to_string()));
+        }
+        Ok(Some(remotes[0].name.clone()))
     }
 
     /// Get default remote (usually "origin")
@@ -389,17 +403,17 @@ mod tests {
 
     fn create_test_repo() -> TempDir {
         let temp = TempDir::new().unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["init"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(temp.path())
             .output()
@@ -432,6 +446,41 @@ mod tests {
         assert!(!Remote::exists(temp.path(), "origin").unwrap());
     }
 
+    // SPEC-b3f1a4e2: Test default_name prefers "origin"
+    #[test]
+    fn test_default_name_prefers_origin() {
+        let temp = create_test_repo();
+        Remote::add(
+            temp.path(),
+            "upstream",
+            "https://github.com/test/upstream.git",
+        )
+        .unwrap();
+        Remote::add(temp.path(), "origin", "https://github.com/test/test.git").unwrap();
+
+        let name = Remote::default_name(temp.path()).unwrap();
+        assert_eq!(name, Some("origin".to_string()));
+    }
+
+    // SPEC-b3f1a4e2: Test default_name falls back to first remote
+    #[test]
+    fn test_default_name_falls_back_to_first() {
+        let temp = create_test_repo();
+        Remote::add(temp.path(), "my-remote", "https://github.com/test/test.git").unwrap();
+
+        let name = Remote::default_name(temp.path()).unwrap();
+        assert_eq!(name, Some("my-remote".to_string()));
+    }
+
+    // SPEC-b3f1a4e2: Test default_name returns None when no remotes
+    #[test]
+    fn test_default_name_returns_none_when_no_remotes() {
+        let temp = create_test_repo();
+
+        let name = Remote::default_name(temp.path()).unwrap();
+        assert_eq!(name, None);
+    }
+
     #[test]
     fn test_default_remote() {
         let temp = create_test_repo();
@@ -446,19 +495,19 @@ mod tests {
         let temp = create_test_repo();
 
         std::fs::write(temp.path().join("README.md"), "# Test").unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["add", "."])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["commit", "-m", "Initial commit"])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
         let remote_dir = TempDir::new().unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(remote_dir.path())
             .output()
@@ -478,7 +527,7 @@ mod tests {
 
         Remote::push(temp.path(), "origin", &branch, true).unwrap();
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args([
                 "--git-dir",
                 remote_dir.path().to_str().unwrap(),
