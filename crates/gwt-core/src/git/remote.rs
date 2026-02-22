@@ -368,6 +368,21 @@ impl Remote {
         }
     }
 
+    /// Get default remote name (SPEC-b3f1a4e2 FR-002)
+    ///
+    /// Returns "origin" if it exists, otherwise the first remote name,
+    /// or `None` if no remotes are configured.
+    pub fn default_name(repo_path: &Path) -> Result<Option<String>> {
+        let remotes = Self::list(repo_path)?;
+        if remotes.is_empty() {
+            return Ok(None);
+        }
+        if remotes.iter().any(|r| r.name == "origin") {
+            return Ok(Some("origin".to_string()));
+        }
+        Ok(Some(remotes[0].name.clone()))
+    }
+
     /// Get default remote (usually "origin")
     pub fn default(repo_path: &Path) -> Result<Option<Remote>> {
         // Try origin first
@@ -429,6 +444,41 @@ mod tests {
         assert!(Remote::exists(temp.path(), "origin").unwrap());
         Remote::remove(temp.path(), "origin").unwrap();
         assert!(!Remote::exists(temp.path(), "origin").unwrap());
+    }
+
+    // SPEC-b3f1a4e2: Test default_name prefers "origin"
+    #[test]
+    fn test_default_name_prefers_origin() {
+        let temp = create_test_repo();
+        Remote::add(
+            temp.path(),
+            "upstream",
+            "https://github.com/test/upstream.git",
+        )
+        .unwrap();
+        Remote::add(temp.path(), "origin", "https://github.com/test/test.git").unwrap();
+
+        let name = Remote::default_name(temp.path()).unwrap();
+        assert_eq!(name, Some("origin".to_string()));
+    }
+
+    // SPEC-b3f1a4e2: Test default_name falls back to first remote
+    #[test]
+    fn test_default_name_falls_back_to_first() {
+        let temp = create_test_repo();
+        Remote::add(temp.path(), "my-remote", "https://github.com/test/test.git").unwrap();
+
+        let name = Remote::default_name(temp.path()).unwrap();
+        assert_eq!(name, Some("my-remote".to_string()));
+    }
+
+    // SPEC-b3f1a4e2: Test default_name returns None when no remotes
+    #[test]
+    fn test_default_name_returns_none_when_no_remotes() {
+        let temp = create_test_repo();
+
+        let name = Remote::default_name(temp.path()).unwrap();
+        assert_eq!(name, None);
     }
 
     #[test]
