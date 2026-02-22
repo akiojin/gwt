@@ -1,8 +1,10 @@
 # TDDノート: Session Summary + PR Status Preview（GUI）
 
 **仕様ID**: `SPEC-d6949f99`
-**更新日**: 2026-02-14
+**更新日**: 2026-02-22
 **対象**:
+- `gwt-gui/src/lib/components/PrStatusSection.svelte`
+- `gwt-gui/src/lib/components/PrStatusSection.test.ts`
 - `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
 - `gwt-gui/src/lib/components/GitSection.svelte`
 - `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
@@ -45,9 +47,26 @@
 - **Red**: Allモードで全件を単一ソートするとRemoteとLocalが混在し、優先順が崩れる。
 - **Green**: `Sidebar.test.ts` で Allモード時、Local側→Remote側でソートされることを検証。
 
+### T7: MERGEDなのにUnknown表示される
+
+- **Red**: `state=MERGED` かつ `mergeable=UNKNOWN` で `Unknown` バッジが表示される。
+- **Green**: `PrStatusSection.test.ts` に `MERGED` 優先ケースを追加し、`Merged` バッジ表示へ修正。
+
+### T8: CONFLICTING + DIRTYで二重表示される
+
+- **Red**: `Conflicting` と `Conflicts` が同時表示され、同義情報が重複する。
+- **Green**: `mergeable=CONFLICTING` かつ `mergeStateStatus=DIRTY` のとき、`Conflicts` バッジを抑制して `Conflicting` のみ表示。
+
+### T9: BLOCKEDなのにMergeableが併記される
+
+- **Red**: `mergeStateStatus=BLOCKED` でも `Mergeable` バッジが併記され、可否が矛盾して見える。
+- **Green**: `BLOCKED` 時は `Blocked` のみ表示し、`Mergeable` バッジを非表示化。
+
 ## 実行ログ（要約）
 
 - `pnpm --dir gwt-gui test -- src/lib/components/WorktreeSummaryPanel.test.ts` : pass
+- `pnpm --dir gwt-gui test src/lib/components/PrStatusSection.test.ts` : pass
+- `pnpm --dir gwt-gui test src/lib/components/WorktreeSummaryPanel.test.ts` : pass
 - `pnpm --dir gwt-gui check` : pass（既存 warning 1件のみ）
 
 ## 残課題
