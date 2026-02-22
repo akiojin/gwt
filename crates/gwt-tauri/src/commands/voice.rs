@@ -410,7 +410,7 @@ fn ensure_managed_voice_runtime_sync() -> Result<VoiceRuntimeSetupResult, String
 
     let _ = run_qwen_runner_with_python(&managed_python, "probe", None, None, None)?;
     clear_runtime_probe_cache();
-    let _ = probe_qwen_runtime_cached()?;
+    probe_qwen_runtime_cached()?;
 
     Ok(VoiceRuntimeSetupResult {
         ready: true,
