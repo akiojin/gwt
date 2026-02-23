@@ -3340,6 +3340,12 @@ services:
 
     #[test]
     fn test_merge_empty_os_env() {
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
         let os_env = HashMap::new();
         let result = merge_profile_env(&os_env, None);
         assert!(result.is_empty());
