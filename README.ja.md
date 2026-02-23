@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 
 配布アセット:
 
-- macOS: `.dmg`
+- `.dmg`
 
 ローカルでインストーラーをビルド（1コマンド）:
 
