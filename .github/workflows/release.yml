@@ -134,6 +134,10 @@ jobs:
           CMAKE_TOOLCHAIN_FILE: ${{ matrix.platform == 'macos' && format('{0}/cmake/ci-disable-native.cmake', github.workspace) || '' }}
           # ARM Macs require macOS 11.0+; ggml uses std::filesystem (10.15+).
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos' && '11.0' || '' }}
+          # Also pass as cmake define (whisper-rs-sys forwards CMAKE_* env vars).
+          # cmake appends -mmacosx-version-min AFTER CMAKE_C_FLAGS, so the last
+          # flag (from this define) wins over the 10.13 injected by cmake-rs/cc.
+          CMAKE_OSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos' && '11.0' || '' }}
       - name: Build Windows installer (.msi)
         if: matrix.platform == 'windows'
         id: package_windows
