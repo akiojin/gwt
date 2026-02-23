@@ -2160,6 +2160,11 @@
           showAgentLaunch = true;
         }
         break;
+      case "new-terminal":
+        if (projectPath) {
+          await handleNewTerminal();
+        }
+        break;
       case "cleanup-worktrees":
         if (projectPath) {
           cleanupPreselectedBranch = null;
