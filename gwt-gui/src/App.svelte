@@ -303,7 +303,9 @@
         const unlistenFn = await listen<{ pane_id: string }>(
           "terminal-closed",
           (event) => {
-            removeTabLocal(`agent-${event.payload.pane_id}`);
+            const paneId = event.payload.pane_id;
+            removeTabLocal(`agent-${paneId}`);
+            removeTabLocal(`terminal-${paneId}`);
           }
         );
 
