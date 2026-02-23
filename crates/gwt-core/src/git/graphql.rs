@@ -58,6 +58,13 @@ fn read_pipe_to_string<T: Read>(mut pipe: T) -> String {
     buf
 }
 
+fn spawn_pipe_reader<T>(pipe: Option<T>) -> thread::JoinHandle<String>
+where
+    T: Read + Send + 'static,
+{
+    thread::spawn(move || pipe.map(read_pipe_to_string).unwrap_or_default())
+}
+
 fn run_gh_command_output_with_timeout(
     repo_path: &Path,
     args: &[String],
@@ -72,29 +79,35 @@ fn run_gh_command_output_with_timeout(
         .spawn()
         .map_err(|e| format!("Failed to execute {}: {}", command_label, e))?;
 
+    let stdout_handle = spawn_pipe_reader(child.stdout.take());
+    let stderr_handle = spawn_pipe_reader(child.stderr.take());
+
     let status = match wait_with_timeout(&mut child, timeout) {
         Some(status) => status,
         None => {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = stdout_handle.join();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            let detail = stderr.trim();
+            if detail.is_empty() {
+                return Err(format!(
+                    "{} timed out after {}s",
+                    command_label,
+                    timeout.as_secs()
+                ));
+            }
             return Err(format!(
-                "{} timed out after {}s",
+                "{} timed out after {}s: {}",
                 command_label,
-                timeout.as_secs()
+                timeout.as_secs(),
+                detail
             ));
         }
     };
 
-    let stdout = child
-        .stdout
-        .take()
-        .map(read_pipe_to_string)
-        .unwrap_or_default();
-    let stderr = child
-        .stderr
-        .take()
-        .map(read_pipe_to_string)
-        .unwrap_or_default();
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
 
     if !status.success() {
         let detail = stderr.trim();

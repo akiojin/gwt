@@ -520,6 +520,50 @@ describe("TerminalView", () => {
     }
   });
 
+  it("does not steal focus from an active modal on visibility restore", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-visibility-modal",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    term.focus.mockClear();
+
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    const input = document.createElement("input");
+    overlay.appendChild(input);
+    document.body.appendChild(overlay);
+    input.focus();
+
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      expect(document.activeElement).toBe(input);
+
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      expect(term.focus).not.toHaveBeenCalled();
+    } finally {
+      if (hiddenDescriptor) {
+        Object.defineProperty(document, "hidden", hiddenDescriptor);
+      } else {
+        Reflect.deleteProperty(document, "hidden");
+      }
+      overlay.remove();
+    }
+  });
+
   it("scrolls terminal viewport when wheel is used", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-2",

@@ -467,6 +467,7 @@
     };
     const handleVisibilityChange = () => {
       if (document.hidden) return;
+      if (hasFocusedModalOutsideTerminal(rootEl)) return;
       focusTerminalIfNeeded(rootEl);
     };
 

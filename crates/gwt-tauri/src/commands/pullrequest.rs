@@ -222,6 +222,13 @@ fn read_pipe_to_string<T: Read>(mut pipe: T) -> String {
     buf
 }
 
+fn spawn_pipe_reader<T>(pipe: Option<T>) -> thread::JoinHandle<String>
+where
+    T: Read + Send + 'static,
+{
+    thread::spawn(move || pipe.map(read_pipe_to_string).unwrap_or_default())
+}
+
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
     let trimmed = branch.trim();
     let Some((first, rest)) = trimmed.split_once('/') else {
@@ -556,28 +563,33 @@ fn update_pr_branch_impl(project_path: String, pr_number: u64) -> Result<String,
         .spawn()
         .map_err(|e| format!("Failed to execute gh api: {}", e))?;
 
+    let stdout_handle = spawn_pipe_reader(child.stdout.take());
+    let stderr_handle = spawn_pipe_reader(child.stderr.take());
+
     let status = match wait_with_timeout(&mut child, PR_UPDATE_BRANCH_TIMEOUT) {
         Some(status) => status,
         None => {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = stdout_handle.join();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            let detail = stderr.trim();
+            if detail.is_empty() {
+                return Err(format!(
+                    "Failed to update PR branch: gh api timed out after {}s",
+                    PR_UPDATE_BRANCH_TIMEOUT.as_secs()
+                ));
+            }
             return Err(format!(
-                "Failed to update PR branch: gh api timed out after {}s",
-                PR_UPDATE_BRANCH_TIMEOUT.as_secs()
+                "Failed to update PR branch: gh api timed out after {}s: {}",
+                PR_UPDATE_BRANCH_TIMEOUT.as_secs(),
+                detail
             ));
         }
     };
 
-    let _stdout = child
-        .stdout
-        .take()
-        .map(read_pipe_to_string)
-        .unwrap_or_default();
-    let stderr = child
-        .stderr
-        .take()
-        .map(read_pipe_to_string)
-        .unwrap_or_default();
+    let _stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
 
     if !status.success() {
         let detail = stderr.trim();

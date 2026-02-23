@@ -53,6 +53,17 @@ export type BuildRestoredProjectTabsResult = {
   activeTerminalPaneIdToRespawn: string | null;
 };
 
+// Backward-compatible shape consumed by legacy App.svelte restore/persist flow.
+export type StoredProjectAgentTabs = {
+  tabs: Array<{ paneId: string; label: string }>;
+  activePaneId: string | null;
+};
+
+export type BuildRestoredAgentTabsResult = {
+  tabs: Tab[];
+  activeTabId: string | null;
+};
+
 export const AGENT_TAB_RESTORE_MAX_RETRIES = 8;
 
 export function shouldRetryAgentTabRestore(
@@ -477,4 +488,86 @@ export function buildRestoredProjectTabs(
     terminalTabsToRespawn,
     activeTerminalPaneIdToRespawn,
   };
+}
+
+export function loadStoredProjectAgentTabs(
+  projectPath: string,
+  storage?: Storage | null,
+): StoredProjectAgentTabs | null {
+  const stored = loadStoredProjectTabs(projectPath, storage);
+  if (!stored) return null;
+
+  const tabs = stored.tabs
+    .filter((tab): tab is StoredAgentTab => tab.type === "agent")
+    .map((tab) => ({ paneId: tab.paneId, label: tab.label }));
+
+  const activePaneId =
+    stored.activeTabId && stored.activeTabId.startsWith("agent-")
+      ? stored.activeTabId.slice("agent-".length)
+      : null;
+
+  return { tabs, activePaneId };
+}
+
+export function persistStoredProjectAgentTabs(
+  projectPath: string,
+  state: StoredProjectAgentTabs,
+  storage?: Storage | null,
+) {
+  const agentTabs: StoredProjectTab[] = state.tabs
+    .map((tab) => {
+      const paneId = normalizeString(tab.paneId);
+      if (!paneId) return null;
+      return {
+        type: "agent" as const,
+        paneId,
+        label: tab.label ?? "",
+      };
+    })
+    .filter((tab): tab is StoredAgentTab => tab !== null);
+
+  const existing = loadStoredProjectTabs(projectPath, storage);
+  const preservedTabs = (existing?.tabs ?? []).filter((tab) => tab.type !== "agent");
+
+  const activePaneId = normalizeString(state.activePaneId ?? "");
+  const existingActiveTabId = existing?.activeTabId ?? null;
+  const activeTabId = activePaneId
+    ? `agent-${activePaneId}`
+    : existingActiveTabId?.startsWith("agent-")
+      ? null
+      : existingActiveTabId;
+
+  persistStoredProjectTabs(
+    projectPath,
+    {
+      tabs: [...preservedTabs, ...agentTabs],
+      activeTabId,
+    },
+    storage,
+  );
+}
+
+export function buildRestoredAgentTabs(
+  stored: StoredProjectAgentTabs,
+  terminals: TerminalInfo[],
+): BuildRestoredAgentTabsResult {
+  const restored = buildRestoredProjectTabs(
+    {
+      tabs: stored.tabs.map((tab) => ({
+        type: "agent" as const,
+        paneId: tab.paneId,
+        label: tab.label,
+      })),
+      activeTabId: stored.activePaneId ? `agent-${stored.activePaneId}` : null,
+    },
+    terminals,
+  );
+
+  const tabs = restored.tabs.filter((tab) => tab.type === "agent");
+  const activeTabId =
+    restored.activeTabId && restored.activeTabId.startsWith("agent-")
+      ? restored.activeTabId
+      : null;
+
+  return { tabs, activeTabId };
 }

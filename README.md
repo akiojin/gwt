@@ -109,6 +109,27 @@ If automatic apply is not possible, the update dialog tells you to download from
   - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
 - `bunx` or `npx` for local agent launch fallback.
 
+### Voice Accuracy Evaluation
+
+You can measure WER/CER with a local speech dataset.
+
+```bash
+cp tests/voice_eval/manifest.template.json tests/voice_eval/manifest.json
+scripts/voice-eval.sh
+```
+
+See `tests/voice_eval/README.md` for details.
+For a versioned benchmark snapshot, see `docs/voice-eval-benchmarks.md`.
+
+### Voice Input Runtime (Qwen3-ASR)
+
+Voice input uses Qwen3-ASR via a local Python runtime.
+
+- Required: Python 3.11+ available on `PATH` (or set `GWT_VOICE_PYTHON`).
+- Not required manually: `qwen_asr` package installation.
+- On first voice use, gwt auto-creates `~/.gwt/runtime/voice-venv` and installs runtime deps there.
+- The selected Qwen model is then downloaded into Hugging Face cache on demand.
+
 ### Optional advanced toggles
 
 - `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)

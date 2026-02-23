@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { AgentInfo } from "../types";
-  import { renderBar, usageColorClass, formatMemory } from "./statusBarHelpers";
 
   let {
     projectPath,
@@ -9,12 +8,11 @@
     osEnvReady = true,
     voiceInputEnabled = false,
     voiceInputListening = false,
+    voiceInputPreparing = false,
     voiceInputSupported = true,
+    voiceInputAvailable = false,
+    voiceInputAvailabilityReason = null,
     voiceInputError = null,
-    cpuUsage = 0,
-    memUsed = 0,
-    memTotal = 0,
-    onopenAboutSystem,
   }: {
     projectPath: string;
     currentBranch?: string;
@@ -22,12 +20,11 @@
     osEnvReady?: boolean;
     voiceInputEnabled?: boolean;
     voiceInputListening?: boolean;
+    voiceInputPreparing?: boolean;
     voiceInputSupported?: boolean;
+    voiceInputAvailable?: boolean;
+    voiceInputAvailabilityReason?: string | null;
     voiceInputError?: string | null;
-    cpuUsage?: number;
-    memUsed?: number;
-    memTotal?: number;
-    onopenAboutSystem?: () => void;
   } = $props();
 
   let agents: AgentInfo[] = $state([]);
@@ -58,27 +55,28 @@
 
   function voiceStatusClass(): string {
     if (!voiceInputSupported) return "bad";
+    if (!voiceInputAvailable) return "bad";
     if (!voiceInputEnabled) return "muted";
     if (voiceInputError) return "warn";
+    if (voiceInputPreparing) return "warn";
     if (voiceInputListening) return "ok";
     return "warn";
   }
 
   function voiceStatusText(): string {
-    if (!voiceInputSupported) return "Voice: unsupported";
+    if (!voiceInputSupported) return "Voice: backend unavailable";
+    if (!voiceInputAvailable) return "Voice: unavailable";
     if (!voiceInputEnabled) return "Voice: off";
     if (voiceInputError) return "Voice: error";
+    if (voiceInputPreparing) return "Voice: preparing";
     if (voiceInputListening) return "Voice: listening";
     return "Voice: idle";
   }
 
-  let cpuPct = $derived(Math.round(cpuUsage));
-  let memPct = $derived(memTotal > 0 ? Math.round((memUsed / memTotal) * 100) : 0);
-
   async function detectAgents() {
     agentsLoading = true;
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
+      const { invoke } = await import("@tauri-apps/api/core");
       agents = await invoke<AgentInfo[]>("detect_agents");
     } catch {
       agents = [];
@@ -112,7 +110,10 @@
   {#if !osEnvReady}
     <span class="status-loading">Loading environment...</span>
   {/if}
-  <span class={`status-item voice ${voiceStatusClass()}`} title={voiceInputError ?? ""}>
+  <span
+    class={`status-item voice ${voiceStatusClass()}`}
+    title={voiceInputError ?? voiceInputAvailabilityReason ?? ""}
+  >
     {voiceStatusText()}
   </span>
   <span class="status-item agents">
@@ -129,12 +130,6 @@
     {/if}
   </span>
   <span class="spacer"></span>
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <span class="status-item system-info" onclick={() => onopenAboutSystem?.()}>
-    <span class={`sys-label ${usageColorClass(cpuPct)}`}>CPU {renderBar(cpuPct)} {cpuPct}%</span>
-    <span class={`sys-label ${usageColorClass(memPct)}`}>MEM {renderBar(memPct)} {formatMemory(memUsed)}/{formatMemory(memTotal)}G</span>
-  </span>
   <span class="status-item path">{projectPath}</span>
 </footer>
 
@@ -214,31 +209,6 @@
   .status-loading {
     color: var(--text-muted);
     font-style: italic;
-  }
-
-  .system-info {
-    display: flex;
-    gap: 12px;
-    font-family: monospace;
-    font-size: 10px;
-    white-space: pre;
-    cursor: pointer;
-  }
-
-  .system-info:hover {
-    opacity: 0.85;
-  }
-
-  .sys-label.ok {
-    color: var(--green);
-  }
-
-  .sys-label.warn {
-    color: var(--yellow);
-  }
-
-  .sys-label.bad {
-    color: var(--red);
   }
 
   .path {
