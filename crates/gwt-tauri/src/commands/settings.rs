@@ -139,11 +139,7 @@ impl SettingsData {
         Ok(())
     }
 
-    /// Convert back to gwt_core Settings by creating a default and updating fields.
-    ///
-    /// Uses serde round-trip since the sub-types (AgentSettings, DockerSettings)
-    /// are not re-exported from gwt_core::config.
-    #[allow(clippy::field_reassign_with_default)]
+    #[cfg(test)]
     fn to_settings(&self) -> Result<Settings, String> {
         let mut s = Settings::default();
         self.apply_to_settings(&mut s)?;
@@ -320,6 +316,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_apply_to_settings_preserves_unmanaged_fields() {
         let mut existing = Settings::default();
         existing.app_language = "ja".to_string();
