@@ -6,6 +6,7 @@ import {
   PROJECT_AGENT_TABS_STORAGE_KEY,
   loadStoredProjectTabs,
   persistStoredProjectTabs,
+  persistStoredProjectAgentTabs,
   buildRestoredProjectTabs,
 } from "./agentTabsPersistence";
 
@@ -177,6 +178,40 @@ describe("agentTabsPersistence", () => {
           activeTabId: "terminal-t1",
         },
       },
+    });
+  });
+
+  it("persistStoredProjectAgentTabs preserves non-agent tabs in existing entry", () => {
+    persistStoredProjectTabs(
+      "/repo",
+      {
+        tabs: [
+          { type: "projectMode", id: "projectMode", label: "Project Mode" },
+          { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
+          { type: "agent", paneId: "old", label: "old-agent" },
+        ],
+        activeTabId: "terminal-t1",
+      },
+      store,
+    );
+
+    persistStoredProjectAgentTabs(
+      "/repo",
+      {
+        tabs: [{ paneId: "new", label: "new-agent" }],
+        activePaneId: null,
+      },
+      store,
+    );
+
+    const loaded = loadStoredProjectTabs("/repo", store);
+    expect(loaded).toEqual({
+      tabs: [
+        { type: "projectMode", id: "projectMode", label: "Project Mode" },
+        { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
+        { type: "agent", paneId: "new", label: "new-agent" },
+      ],
+      activeTabId: "terminal-t1",
     });
   });
 

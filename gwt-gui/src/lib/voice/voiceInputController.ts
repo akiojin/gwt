@@ -61,6 +61,7 @@ type TauriInvokeFn = <T>(command: string, payload?: unknown) => Promise<T>;
 
 const DEFAULT_TOGGLE_HOTKEY = "Mod+Shift+M";
 const DEFAULT_PTT_HOTKEY = "Mod+Shift+Space";
+const MAX_CAPTURE_DURATION_SECONDS = 30;
 
 function parseHotkey(rawHotkey: string): HotkeyDefinition {
   const tokens = rawHotkey
@@ -132,6 +133,10 @@ function eventMatchesHotkey(event: KeyboardEvent, hotkey: HotkeyDefinition): boo
   );
 }
 
+function eventMatchesHotkeyTrigger(event: KeyboardEvent, hotkey: HotkeyDefinition): boolean {
+  return normalizeKeyName(event.key) === hotkey.key;
+}
+
 function languageForQwen(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (normalized === "ja") return "ja";
@@ -152,7 +157,10 @@ function detectGpuAvailability(): boolean {
     const ext = gl.getExtension("WEBGL_debug_renderer_info") as {
       UNMASKED_RENDERER_WEBGL: number;
     } | null;
-    const renderer = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? "") : "";
+    const renderer = ext
+      ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? "")
+      : String(gl.getParameter(gl.RENDERER) ?? "");
+    if (!renderer) return false;
     const normalized = renderer.toLowerCase();
 
     if (
@@ -307,6 +315,9 @@ export class VoiceInputController {
   private processorNode: ScriptProcessorNode | null = null;
   private sampleRate = 44_100;
   private chunks: Float32Array[] = [];
+  private capturedSampleCount = 0;
+  private maxCaptureSamples = 0;
+  private captureTruncated = false;
 
   constructor(options: VoiceInputControllerOptions) {
     this.options = options;
@@ -403,7 +414,7 @@ export class VoiceInputController {
 
     const settings = this.options.getSettings();
     const pttHotkey = normalizeHotkey(settings.ptt_hotkey, DEFAULT_PTT_HOTKEY);
-    if (!eventMatchesHotkey(event, pttHotkey)) return;
+    if (!eventMatchesHotkeyTrigger(event, pttHotkey)) return;
 
     event.preventDefault();
     event.stopPropagation();
@@ -528,10 +539,21 @@ export class VoiceInputController {
 
       const transcript = (result?.transcript ?? "").trim();
       if (!transcript) {
+        if (capture.truncated) {
+          this.setError(
+            `Voice capture reached the ${MAX_CAPTURE_DURATION_SECONDS}s limit with no transcribed text.`
+          );
+        }
         return;
       }
       await this.insertTranscript(transcript);
-      this.setError(null);
+      if (!this.state.error) {
+        this.setError(
+          capture.truncated
+            ? `Voice capture was limited to ${MAX_CAPTURE_DURATION_SECONDS}s.`
+            : null
+        );
+      }
     } catch (err) {
       this.setError(`Voice transcription failed: ${String(err)}`);
     } finally {
@@ -546,6 +568,8 @@ export class VoiceInputController {
     }
 
     this.chunks = [];
+    this.capturedSampleCount = 0;
+    this.captureTruncated = false;
 
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -569,10 +593,29 @@ export class VoiceInputController {
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
     this.sampleRate = audioContext.sampleRate;
+    this.maxCaptureSamples = Math.max(
+      1,
+      Math.round(this.sampleRate * MAX_CAPTURE_DURATION_SECONDS)
+    );
 
     processor.onaudioprocess = (event) => {
+      if (this.captureTruncated) return;
       const input = event.inputBuffer.getChannelData(0);
-      this.chunks.push(new Float32Array(input));
+      const remaining = this.maxCaptureSamples - this.capturedSampleCount;
+      if (remaining <= 0) {
+        this.captureTruncated = true;
+        return;
+      }
+      const length = Math.min(input.length, remaining);
+      if (length <= 0) {
+        this.captureTruncated = true;
+        return;
+      }
+      this.chunks.push(new Float32Array(input.subarray(0, length)));
+      this.capturedSampleCount += length;
+      if (length < input.length || this.capturedSampleCount >= this.maxCaptureSamples) {
+        this.captureTruncated = true;
+      }
     };
 
     source.connect(processor);
@@ -584,7 +627,7 @@ export class VoiceInputController {
     this.processorNode = processor;
   }
 
-  private async endCapture(): Promise<{ samples: number[]; sampleRate: number } | null> {
+  private async endCapture(): Promise<{ samples: number[]; sampleRate: number; truncated: boolean } | null> {
     const processor = this.processorNode;
     const source = this.sourceNode;
     const audioContext = this.audioContext;
@@ -632,6 +675,9 @@ export class VoiceInputController {
 
     if (this.chunks.length === 0) {
       this.chunks = [];
+      this.capturedSampleCount = 0;
+      this.maxCaptureSamples = 0;
+      this.captureTruncated = false;
       return null;
     }
 
@@ -643,10 +689,15 @@ export class VoiceInputController {
       offset += chunk.length;
     }
 
+    const truncated = this.captureTruncated;
     this.chunks = [];
+    this.capturedSampleCount = 0;
+    this.maxCaptureSamples = 0;
+    this.captureTruncated = false;
     return {
       samples: Array.from(merged),
       sampleRate: this.sampleRate,
+      truncated,
     };
   }
 

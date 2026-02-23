@@ -1072,7 +1072,10 @@
     const preserved = tabs.filter((t) => t.type !== "agent");
     tabs = [...preserved, ...restoredTabs];
 
-    const allowOverrideActive = activeTabId === "projectMode";
+    const allowOverrideActive =
+      activeTabId === "projectMode" ||
+      activeTabId === "summary" ||
+      activeTabId === "agentMode";
     if (allowOverrideActive && restored.activeTabId) {
       activeTabId = restored.activeTabId;
     }

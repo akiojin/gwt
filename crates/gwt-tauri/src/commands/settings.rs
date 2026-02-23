@@ -112,13 +112,8 @@ impl From<&Settings> for SettingsData {
 }
 
 impl SettingsData {
-    /// Convert back to gwt_core Settings by creating a default and updating fields.
-    ///
-    /// Uses serde round-trip since the sub-types (AgentSettings, DockerSettings)
-    /// are not re-exported from gwt_core::config.
-    #[allow(clippy::field_reassign_with_default)]
-    fn to_settings(&self) -> Result<Settings, String> {
-        let mut s = Settings::default();
+    /// Apply frontend-editable fields onto an existing Settings struct.
+    fn apply_to_settings(&self, s: &mut Settings) -> Result<(), String> {
         s.protected_branches = self.protected_branches.clone();
         s.default_base_branch = self.default_base_branch.clone();
         s.worktree_root = self.worktree_root.clone();
@@ -141,6 +136,17 @@ impl SettingsData {
         s.voice_input.language = voice.language;
         s.voice_input.quality = voice.quality;
         s.voice_input.model = voice.model;
+        Ok(())
+    }
+
+    /// Convert back to gwt_core Settings by creating a default and updating fields.
+    ///
+    /// Uses serde round-trip since the sub-types (AgentSettings, DockerSettings)
+    /// are not re-exported from gwt_core::config.
+    #[allow(clippy::field_reassign_with_default)]
+    fn to_settings(&self) -> Result<Settings, String> {
+        let mut s = Settings::default();
+        self.apply_to_settings(&mut s)?;
         Ok(s)
     }
 }
@@ -163,12 +169,19 @@ fn qwen_model_for_quality(quality: &str) -> &'static str {
     }
 }
 
+fn is_named_hotkey_key(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "space" | "escape" | "enter" | "tab" | "backspace" | "delete"
+    )
+}
+
 fn normalize_hotkey(hotkey: &str, field: &str) -> Result<String, String> {
     let trimmed = hotkey.trim();
     if trimmed.is_empty() {
         return Err(format!("{field} must not be empty"));
     }
-    if !trimmed.contains('+') && trimmed.chars().count() != 1 {
+    if !trimmed.contains('+') && trimmed.chars().count() != 1 && !is_named_hotkey_key(trimmed) {
         return Err(format!("{field} must include modifiers or a single key"));
     }
     Ok(trimmed.to_string())
@@ -244,9 +257,14 @@ pub fn save_settings(
     state: State<AppState>,
 ) -> Result<(), String> {
     with_panic_guard("saving settings", || {
-        let core_settings = settings.to_settings()?;
+        let project_path = state.project_for_window(window.label());
+        let mut core_settings = match project_path.as_ref() {
+            Some(p) => Settings::load(Path::new(p)).map_err(|e| e.to_string())?,
+            None => Settings::load_global().map_err(|e| e.to_string())?,
+        };
+        settings.apply_to_settings(&mut core_settings)?;
 
-        match state.project_for_window(window.label()) {
+        match project_path {
             Some(p) => {
                 let config_path = Path::new(&p).join(".gwt.toml");
                 core_settings
@@ -302,6 +320,28 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_to_settings_preserves_unmanaged_fields() {
+        let mut existing = Settings::default();
+        existing.app_language = "ja".to_string();
+        existing.terminal.default_shell = Some("zsh".to_string());
+        existing.agent.github_project_id = Some("12345".to_string());
+
+        let mut data = SettingsData::from(&existing);
+        data.ui_font_size = 18;
+        data.voice_input.quality = "fast".to_string();
+        data.voice_input.model = String::new();
+
+        data.apply_to_settings(&mut existing).unwrap();
+
+        assert_eq!(existing.app_language, "ja");
+        assert_eq!(existing.terminal.default_shell.as_deref(), Some("zsh"));
+        assert_eq!(existing.agent.github_project_id.as_deref(), Some("12345"));
+        assert_eq!(existing.appearance.ui_font_size, 18);
+        assert_eq!(existing.voice_input.quality, "fast");
+        assert_eq!(existing.voice_input.model, "Qwen/Qwen3-ASR-0.6B");
+    }
+
+    #[test]
     fn test_voice_hotkeys_must_not_conflict() {
         let mut data = SettingsData::from(&Settings::default());
         data.voice_input.enabled = true;
@@ -309,6 +349,15 @@ mod tests {
         data.voice_input.ptt_hotkey = "Mod+Shift+M".to_string();
         let err = data.to_settings().unwrap_err();
         assert!(err.contains("must differ"));
+    }
+
+    #[test]
+    fn test_voice_hotkey_accepts_named_single_key() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.voice_input.hotkey = "Space".to_string();
+        data.voice_input.ptt_hotkey = "Mod+Shift+Space".to_string();
+        let normalized = data.to_settings().unwrap();
+        assert_eq!(normalized.voice_input.hotkey, "Space");
     }
 
     #[test]

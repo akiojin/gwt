@@ -38,6 +38,7 @@ jobs:
           else
             echo "Skipping voice accuracy regression: tests/voice_eval/manifest.json not found."
           fi
+        timeout-minutes: 10
 
   build:
     name: Build

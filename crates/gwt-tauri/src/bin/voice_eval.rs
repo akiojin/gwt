@@ -434,11 +434,18 @@ fn download_model_to(path: &Path, file_name: &str) -> Result<(), String> {
 
     let mut file = File::create(&tmp_path)
         .map_err(|e| format!("Failed to create temporary model file: {e}"))?;
-    response
-        .copy_to(&mut file)
-        .map_err(|e| format!("Failed while downloading model bytes: {e}"))?;
-    file.flush()
-        .map_err(|e| format!("Failed to flush downloaded model bytes: {e}"))?;
+    let write_result: Result<(), String> = (|| {
+        response
+            .copy_to(&mut file)
+            .map_err(|e| format!("Failed while downloading model bytes: {e}"))?;
+        file.flush()
+            .map_err(|e| format!("Failed to flush downloaded model bytes: {e}"))?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
 
     fs::rename(&tmp_path, path).map_err(|e| format!("Failed to finalize model file: {e}"))?;
     Ok(())
@@ -620,7 +627,7 @@ fn transcribe_with_context(
     let mut state = context
         .create_state()
         .map_err(|e| format!("Failed to create whisper state: {e}"))?;
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 });
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     let threads = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(2)
