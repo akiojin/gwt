@@ -126,8 +126,10 @@ jobs:
         run: cargo tauri build
         env:
           # Disable CPU-native optimizations for whisper.cpp/ggml to avoid
-          # ARM i8mm intrinsic errors on macOS CI runners
-          CMAKE_ARGS: ${{ matrix.platform == 'macos' && '-DGGML_NATIVE=OFF' || '' }}
+          # ARM i8mm intrinsic errors on macOS CI runners.
+          # whisper-rs-sys passes WHISPER_* env vars as cmake defines;
+          # WHISPER_NATIVE is an alias for GGML_NATIVE in whisper.cpp.
+          WHISPER_NATIVE: ${{ matrix.platform == 'macos' && 'OFF' || 'ON' }}
       - name: Build Windows installer (.msi)
         if: matrix.platform == 'windows'
         id: package_windows
