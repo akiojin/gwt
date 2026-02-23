@@ -339,7 +339,7 @@ fn cleanup_root_files(
         debug!(path = %path.display(), "Removing root file/directory");
 
         if path.is_dir() {
-            std::fs::remove_dir_all(&path).map_err(|e| MigrationError::IoError {
+            let _ = remove_dir_all_for_cleanup(&path).map_err(|e| MigrationError::IoError {
                 path: path.clone(),
                 reason: format!("Failed to remove directory: {}", e),
             })?;
@@ -352,6 +352,33 @@ fn cleanup_root_files(
     }
 
     Ok(())
+}
+
+fn remove_dir_all_for_cleanup(path: &Path) -> std::io::Result<bool> {
+    remove_dir_all_for_cleanup_with(path, |target| std::fs::remove_dir_all(target))
+}
+
+fn remove_dir_all_for_cleanup_with<F>(path: &Path, remove_dir_all: F) -> std::io::Result<bool>
+where
+    F: Fn(&Path) -> std::io::Result<()>,
+{
+    match remove_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(err) if is_directory_not_empty_error(&err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "Skipping directory cleanup because it is still non-empty"
+            );
+            Ok(false)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn is_directory_not_empty_error(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::DirectoryNotEmpty
+        || matches!(err.raw_os_error(), Some(39 | 66))
 }
 
 /// Cleanup old .worktrees/ directory (SPEC-a70a1ece T903, FR-204)
@@ -1037,5 +1064,31 @@ mod tests {
         );
         let result = list_worktrees_to_migrate(&config).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn cleanup_dir_returns_false_for_directory_not_empty() {
+        let path = std::path::Path::new("/tmp/dummy");
+        let result =
+            remove_dir_all_for_cleanup_with(path, |_| Err(std::io::Error::from_raw_os_error(66)))
+                .unwrap();
+
+        assert!(!result);
+    }
+
+    #[test]
+    fn cleanup_dir_returns_error_for_permission_denied() {
+        let path = std::path::Path::new("/tmp/dummy");
+        let result = remove_dir_all_for_cleanup_with(path, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detects_directory_not_empty_error() {
+        let err = std::io::Error::from_raw_os_error(66);
+        assert!(is_directory_not_empty_error(&err));
     }
 }
