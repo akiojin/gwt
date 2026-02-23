@@ -23,9 +23,21 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 
 - macOS: `.dmg`, `.pkg`
 
+ローカルでインストーラーをビルド（1コマンド）:
+
+```bash
+pnpm run installer:macos
+```
+
 ### Windows
 
 GitHub Releases から `.msi` をダウンロードして実行します。
+
+ローカルでインストーラーをビルド（1コマンド、PowerShell）:
+
+```powershell
+pnpm run installer:windows
+```
 
 ### Linux
 

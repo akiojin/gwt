@@ -1,5 +1,6 @@
 //! Voice input commands backed by Qwen3-ASR (Python runtime).
 
+use gwt_core::process::command_os;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -248,7 +249,7 @@ fn run_qwen_runner_with_python(
 ) -> Result<QwenRunnerResponse, String> {
     let script = ensure_qwen_runner_script()?;
 
-    let mut cmd = Command::new(python);
+    let mut cmd = command_os(python);
     cmd.arg(&script).arg("--action").arg(action);
 
     if let Some(model_id) = model_id {
@@ -380,13 +381,13 @@ fn ensure_managed_voice_runtime_sync() -> Result<VoiceRuntimeSetupResult, String
 
     if !managed_python.is_file() {
         let bootstrap_python = find_bootstrap_python_binary()?;
-        let mut cmd = Command::new(bootstrap_python);
+        let mut cmd = command_os(&bootstrap_python);
         cmd.arg("-m").arg("venv").arg(&venv_dir);
         run_command_with_output(cmd, "Failed to create voice runtime virtual environment")?;
         installed = true;
     }
 
-    let mut pip_upgrade = Command::new(&managed_python);
+    let mut pip_upgrade = command_os(&managed_python);
     pip_upgrade
         .arg("-m")
         .arg("pip")
@@ -398,7 +399,7 @@ fn ensure_managed_voice_runtime_sync() -> Result<VoiceRuntimeSetupResult, String
 
     let probe_result = run_qwen_runner_with_python(&managed_python, "probe", None, None, None);
     if probe_result.is_err() {
-        let mut install = Command::new(&managed_python);
+        let mut install = command_os(&managed_python);
         install.arg("-m").arg("pip").arg("install").arg("--upgrade");
         for dep in VOICE_RUNTIME_PIP_DEPS {
             install.arg(dep);
@@ -410,7 +411,7 @@ fn ensure_managed_voice_runtime_sync() -> Result<VoiceRuntimeSetupResult, String
 
     let _ = run_qwen_runner_with_python(&managed_python, "probe", None, None, None)?;
     clear_runtime_probe_cache();
-    let _ = probe_qwen_runtime_cached()?;
+    probe_qwen_runtime_cached()?;
 
     Ok(VoiceRuntimeSetupResult {
         ready: true,

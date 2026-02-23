@@ -7,7 +7,7 @@ use gwt_core::config::{
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::State;
 use tracing::error;
 
@@ -236,13 +236,8 @@ impl From<&Settings> for SettingsData {
 }
 
 impl SettingsData {
-    /// Convert back to gwt_core Settings by creating a default and updating fields.
-    ///
-    /// Uses serde round-trip since the sub-types (AgentSettings, DockerSettings)
-    /// are not re-exported from gwt_core::config.
-    #[allow(clippy::field_reassign_with_default)]
-    fn to_settings(&self) -> Result<Settings, String> {
-        let mut s = Settings::default();
+    /// Apply frontend-editable fields onto an existing Settings struct.
+    fn apply_to_settings(&self, s: &mut Settings) -> Result<(), String> {
         s.protected_branches = self.protected_branches.clone();
         s.default_base_branch = self.default_base_branch.clone();
         s.worktree_root = self.worktree_root.clone();
@@ -313,6 +308,14 @@ impl SettingsData {
             .filter(|v| !v.is_empty());
         s.os_env_capture_mode =
             parse_os_env_capture_mode_field(self.os_env_capture_mode.as_deref())?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::field_reassign_with_default)]
+    fn to_settings(&self) -> Result<Settings, String> {
+        let mut s = Settings::default();
+        self.apply_to_settings(&mut s)?;
         Ok(s)
     }
 }
@@ -394,12 +397,17 @@ fn normalize_voice_input(value: &VoiceInputSettingsData) -> Result<NormalizedVoi
 /// Get current settings
 #[tauri::command]
 pub fn get_settings(
-    _window: tauri::Window,
-    _state: State<AppState>,
+    window: tauri::Window,
+    state: State<AppState>,
 ) -> Result<SettingsData, StructuredError> {
     with_panic_guard("loading settings", "get_settings", || {
-        let settings = Settings::load_global()
-            .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?;
+        let settings = if let Some(project_path) = state.project_for_window(window.label()) {
+            Settings::load(Path::new(&project_path))
+                .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?
+        } else {
+            Settings::load_global()
+                .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?
+        };
         Ok(SettingsData::from(&settings))
     })
 }
@@ -407,17 +415,36 @@ pub fn get_settings(
 /// Save settings
 #[tauri::command]
 pub fn save_settings(
-    _window: tauri::Window,
+    window: tauri::Window,
     settings: SettingsData,
-    _state: State<AppState>,
+    state: State<AppState>,
 ) -> Result<(), StructuredError> {
     with_panic_guard("saving settings", "save_settings", || {
-        let core_settings = settings
-            .to_settings()
+        let project_path = state.project_for_window(window.label());
+        let mut core_settings = match project_path.as_ref() {
+            Some(path) => Settings::load(Path::new(path))
+                .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?,
+            None => Settings::load_global()
+                .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?,
+        };
+
+        settings
+            .apply_to_settings(&mut core_settings)
             .map_err(|e| StructuredError::internal(&e, "save_settings"))?;
-        core_settings
-            .save_global()
-            .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
+
+        match project_path {
+            Some(path) => {
+                let config_path = Path::new(&path).join(".gwt.toml");
+                core_settings
+                    .save(&config_path)
+                    .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
+            }
+            None => {
+                core_settings
+                    .save_global()
+                    .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
+            }
+        }
 
         Ok(())
     })
