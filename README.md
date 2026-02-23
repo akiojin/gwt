@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 
 Downloadable formats in Releases:
 
-- `.dmg`, `.pkg`
+- `.dmg`
 
 Build installers locally (one command):
 

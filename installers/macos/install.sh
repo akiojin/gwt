@@ -122,6 +122,19 @@ if [[ "$OS" != "Darwin" ]]; then
   exit 1
 fi
 
+case "$ARCH" in
+  arm64|aarch64)
+    DMG_ARCH="aarch64"
+    ;;
+  x86_64)
+    DMG_ARCH="x86_64"
+    ;;
+  *)
+    err "Unsupported architecture: $ARCH"
+    exit 1
+    ;;
+esac
+
 # --- resolve installer source ----------------------------------------------
 
 APP_PATH=""
@@ -148,7 +161,7 @@ else
 
   # Strip leading 'v' if present
   VERSION="${VERSION#v}"
-  DMG_NAME="${APP_NAME}_${VERSION}_${ARCH}.dmg"
+  DMG_NAME="${APP_NAME}_${VERSION}_${DMG_ARCH}.dmg"
   DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${DMG_NAME}"
 
   # --- download ------------------------------------------------------------
