@@ -514,7 +514,7 @@ export function persistStoredProjectAgentTabs(
   state: StoredProjectAgentTabs,
   storage?: Storage | null,
 ) {
-  const tabs: StoredProjectTab[] = state.tabs
+  const agentTabs: StoredProjectTab[] = state.tabs
     .map((tab) => {
       const paneId = normalizeString(tab.paneId);
       if (!paneId) return null;
@@ -526,13 +526,21 @@ export function persistStoredProjectAgentTabs(
     })
     .filter((tab): tab is StoredAgentTab => tab !== null);
 
+  const existing = loadStoredProjectTabs(projectPath, storage);
+  const preservedTabs = (existing?.tabs ?? []).filter((tab) => tab.type !== "agent");
+
   const activePaneId = normalizeString(state.activePaneId ?? "");
-  const activeTabId = activePaneId ? `agent-${activePaneId}` : null;
+  const existingActiveTabId = existing?.activeTabId ?? null;
+  const activeTabId = activePaneId
+    ? `agent-${activePaneId}`
+    : existingActiveTabId?.startsWith("agent-")
+      ? null
+      : existingActiveTabId;
 
   persistStoredProjectTabs(
     projectPath,
     {
-      tabs,
+      tabs: [...preservedTabs, ...agentTabs],
       activeTabId,
     },
     storage,

@@ -154,10 +154,9 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state([
-    { id: "summary", label: "Session Summary", type: "summary" },
-    { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+    { id: "projectMode", label: "Project Mode", type: "projectMode" },
   ]);
-  let activeTabId: string = $state("summary");
+  let activeTabId: string = $state("projectMode");
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -304,7 +303,9 @@
         const unlistenFn = await listen<{ pane_id: string }>(
           "terminal-closed",
           (event) => {
-            removeTabLocal(`agent-${event.payload.pane_id}`);
+            const paneId = event.payload.pane_id;
+            removeTabLocal(`agent-${paneId}`);
+            removeTabLocal(`terminal-${paneId}`);
           }
         );
 
@@ -543,26 +544,21 @@
     persistSidebarWidth(next);
   }
 
-  function ensureAgentModeTab() {
-    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
+  function ensureProjectModeTab() {
+    const existing = tabs.find(
+      (t) => t.type === "projectMode" || t.id === "projectMode",
+    );
     if (existing) return;
 
-    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
-    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
-    if (summaryIndex >= 0) {
-      const nextTabs = [...tabs];
-      nextTabs.splice(summaryIndex + 1, 0, tab);
-      tabs = nextTabs;
-    } else {
-      tabs = [...tabs, tab];
-    }
+    const tab: Tab = { id: "projectMode", label: "Project Mode", type: "projectMode" };
+    tabs = [tab, ...tabs];
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
     if (sidebarMode === next) return;
     if (next === "projectMode") {
-      ensureAgentModeTab();
-      activeTabId = "agentMode";
+      ensureProjectModeTab();
+      activeTabId = "projectMode";
     }
     sidebarMode = next;
     persistSidebarMode(next);
@@ -614,6 +610,38 @@
   function worktreeTabLabel(branch: string): string {
     const b = branch.trim();
     return b ? normalizeBranchName(b) : "Worktree";
+  }
+
+  function terminalTabLabel(
+    pathLike: string | null | undefined,
+    fallback = "Terminal",
+  ): string {
+    const value = (pathLike ?? "").trim();
+    if (!value) return fallback;
+    const parts = value.split(/[\\/]+/).filter(Boolean);
+    if (parts.length === 0) return fallback;
+    return parts[parts.length - 1] || fallback;
+  }
+
+  async function handleNewTerminal() {
+    if (!projectPath) return;
+    try {
+      const workingDir = projectPath;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const paneId = await invoke<string>("spawn_shell", { workingDir });
+      const label = terminalTabLabel(workingDir);
+      const newTab: Tab = {
+        id: `terminal-${paneId}`,
+        label,
+        type: "terminal",
+        paneId,
+        cwd: workingDir || undefined,
+      };
+      tabs = [...tabs, newTab];
+      activeTabId = newTab.id;
+    } catch (err) {
+      console.error("Failed to spawn new terminal:", err);
+    }
   }
 
   function applyLaunchProgressPayload(payload: LaunchProgressPayload) {
@@ -907,11 +935,8 @@
           }
 
           projectPath = null;
-          tabs = [
-            { id: "summary", label: "Session Summary", type: "summary" },
-            { id: "agentMode", label: "Agent Mode", type: "agentMode" },
-          ];
-          activeTabId = "summary";
+          tabs = [{ id: "projectMode", label: "Project Mode", type: "projectMode" }];
+          activeTabId = "projectMode";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -922,6 +947,11 @@
       case "launch-agent":
         if (projectPath) {
           showAgentLaunch = true;
+        }
+        break;
+      case "new-terminal":
+        if (projectPath) {
+          await handleNewTerminal();
         }
         break;
       case "cleanup-worktrees":
@@ -1045,7 +1075,9 @@
     tabs = [...preserved, ...restoredTabs];
 
     const allowOverrideActive =
-      activeTabId === "summary" || activeTabId === "agentMode";
+      activeTabId === "projectMode" ||
+      activeTabId === "summary" ||
+      activeTabId === "agentMode";
     if (allowOverrideActive && restored.activeTabId) {
       activeTabId = restored.activeTabId;
     }
@@ -1252,6 +1284,9 @@
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
+          onLaunchAgent={requestAgentLaunch}
+          onQuickLaunch={handleAgentLaunch}
+          onNewTerminal={handleNewTerminal}
         />
       {/if}
       <MainArea

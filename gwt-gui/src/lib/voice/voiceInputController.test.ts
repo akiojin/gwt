@@ -156,6 +156,34 @@ describe("VoiceInputController", () => {
     controller.dispose();
   });
 
+  it("releases push-to-talk when trigger key is released after modifiers", async () => {
+    const controller = new VoiceInputController({
+      getSettings: () => settings,
+      getFallbackTerminalPaneId: () => null,
+    });
+
+    const stopListeningMock = vi.fn(async () => {});
+    (controller as any).stopListening = stopListeningMock;
+    (controller as any).pttPressed = true;
+    (controller as any).activeMode = "ptt";
+    (controller as any).state.listening = true;
+
+    document.dispatchEvent(
+      new KeyboardEvent("keyup", {
+        key: " ",
+        metaKey: true,
+        shiftKey: false,
+      })
+    );
+
+    await vi.waitFor(() => {
+      expect(stopListeningMock).toHaveBeenCalledWith(false);
+    });
+    expect((controller as any).pttPressed).toBe(false);
+
+    controller.dispose();
+  });
+
   it("keeps input unchanged when transcript is empty", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_voice_capability") {
