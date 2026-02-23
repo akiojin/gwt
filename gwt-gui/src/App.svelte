@@ -2797,13 +2797,6 @@
       voiceInputAvailable={voiceInputAvailable}
       voiceInputAvailabilityReason={voiceInputAvailabilityReason}
       voiceInputError={voiceInputError}
-      cpuUsage={systemMonitor.cpuUsage}
-      memUsed={systemMonitor.memUsed}
-      memTotal={systemMonitor.memTotal}
-      onopenAboutSystem={() => {
-        aboutInitialTab = "system";
-        showAbout = true;
-      }}
     />
   </div>
 {/if}

@@ -34,9 +34,12 @@ const settingsFixture: SettingsData = {
   app_language: "auto",
   voice_input: {
     enabled: false,
+    engine: "qwen3-asr",
     hotkey: "Mod+Shift+M",
+    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
-    model: "base",
+    quality: "balanced",
+    model: "Qwen/Qwen3-ASR-1.7B",
   },
 };
 
