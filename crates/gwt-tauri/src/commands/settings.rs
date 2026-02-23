@@ -1,14 +1,19 @@
 //! Settings management commands
 
 use crate::state::AppState;
-use gwt_core::config::Settings;
+use gwt_core::config::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
+use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use tauri::State;
 use tracing::error;
 
-fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_panic_guard<T>(
+    context: &str,
+    command: &str,
+    f: impl FnOnce() -> Result<T, StructuredError>,
+) -> Result<T, StructuredError> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(result) => result,
         Err(_) => {
@@ -17,8 +22,44 @@ fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> 
                 operation = context,
                 "Unexpected panic while handling settings command"
             );
-            Err(format!("Unexpected error while {}", context))
+            Err(StructuredError::internal(
+                &format!("Unexpected error while {}", context),
+                command,
+            ))
         }
+    }
+}
+
+fn normalize_app_language(value: Option<&str>) -> String {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+fn parse_scope_field(
+    value: Option<&str>,
+    field_name: &str,
+) -> Result<Option<SkillRegistrationScope>, String> {
+    let normalized = value.unwrap_or("").trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    match normalized.as_str() {
+        "user" => Ok(Some(SkillRegistrationScope::User)),
+        "project" => Ok(Some(SkillRegistrationScope::Project)),
+        "local" => Ok(Some(SkillRegistrationScope::Local)),
+        _ => Err(format!("{field_name} must be one of: user, project, local")),
+    }
+}
+
+fn scope_to_string(scope: SkillRegistrationScope) -> String {
+    match scope {
+        SkillRegistrationScope::User => "user".to_string(),
+        SkillRegistrationScope::Project => "project".to_string(),
+        SkillRegistrationScope::Local => "local".to_string(),
     }
 }
 
@@ -62,11 +103,40 @@ pub struct SettingsData {
     pub agent_codex_path: Option<String>,
     pub agent_gemini_path: Option<String>,
     pub agent_auto_install_deps: bool,
+    pub agent_github_project_id: Option<String>,
+    #[serde(default)]
+    pub agent_skill_registration_default_scope: Option<String>,
+    #[serde(default)]
+    pub agent_skill_registration_codex_scope: Option<String>,
+    #[serde(default)]
+    pub agent_skill_registration_claude_scope: Option<String>,
+    #[serde(default)]
+    pub agent_skill_registration_gemini_scope: Option<String>,
     pub docker_force_host: bool,
     pub ui_font_size: u32,
     pub terminal_font_size: u32,
+    #[serde(default = "default_ui_font_family")]
+    pub ui_font_family: String,
+    #[serde(default = "default_terminal_font_family")]
+    pub terminal_font_family: String,
+    #[serde(default = "default_app_language")]
+    pub app_language: String,
     #[serde(default)]
     pub voice_input: VoiceInputSettingsData,
+    #[serde(default)]
+    pub default_shell: Option<String>,
+}
+
+fn default_app_language() -> String {
+    "auto".to_string()
+}
+
+fn default_ui_font_family() -> String {
+    "system-ui, -apple-system, \"Segoe UI\", Roboto, Ubuntu, sans-serif".to_string()
+}
+
+fn default_terminal_font_family() -> String {
+    "\"JetBrains Mono\", \"Fira Code\", \"SF Mono\", Menlo, Consolas, monospace".to_string()
 }
 
 impl From<&Settings> for SettingsData {
@@ -95,9 +165,35 @@ impl From<&Settings> for SettingsData {
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
             agent_auto_install_deps: s.agent.auto_install_deps,
+            agent_github_project_id: s.agent.github_project_id.clone(),
+            agent_skill_registration_default_scope: s
+                .agent
+                .skill_registration
+                .as_ref()
+                .map(|prefs| scope_to_string(prefs.default_scope)),
+            agent_skill_registration_codex_scope: s
+                .agent
+                .skill_registration
+                .as_ref()
+                .and_then(|prefs| prefs.codex_scope.map(scope_to_string)),
+            agent_skill_registration_claude_scope: s
+                .agent
+                .skill_registration
+                .as_ref()
+                .and_then(|prefs| prefs.claude_scope.map(scope_to_string)),
+            agent_skill_registration_gemini_scope: s
+                .agent
+                .skill_registration
+                .as_ref()
+                .and_then(|prefs| prefs.gemini_scope.map(scope_to_string)),
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
+            // Keep these fields for frontend backward compatibility.
+            // gwt-core no longer persists font family settings.
+            ui_font_family: default_ui_font_family(),
+            terminal_font_family: default_terminal_font_family(),
+            app_language: normalize_app_language(Some(&s.app_language)),
             voice_input: VoiceInputSettingsData {
                 enabled: s.voice_input.enabled,
                 engine: s.voice_input.engine.clone(),
@@ -107,6 +203,7 @@ impl From<&Settings> for SettingsData {
                 quality: s.voice_input.quality.clone(),
                 model: s.voice_input.model.clone(),
             },
+            default_shell: s.terminal.default_shell.clone(),
         }
     }
 }
@@ -125,9 +222,50 @@ impl SettingsData {
         s.agent.codex_path = self.agent_codex_path.as_ref().map(PathBuf::from);
         s.agent.gemini_path = self.agent_gemini_path.as_ref().map(PathBuf::from);
         s.agent.auto_install_deps = self.agent_auto_install_deps;
+        s.agent.github_project_id = self
+            .agent_github_project_id
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        let default_scope = parse_scope_field(
+            self.agent_skill_registration_default_scope.as_deref(),
+            "agent_skill_registration_default_scope",
+        )?;
+        let codex_scope = parse_scope_field(
+            self.agent_skill_registration_codex_scope.as_deref(),
+            "agent_skill_registration_codex_scope",
+        )?;
+        let claude_scope = parse_scope_field(
+            self.agent_skill_registration_claude_scope.as_deref(),
+            "agent_skill_registration_claude_scope",
+        )?;
+        let gemini_scope = parse_scope_field(
+            self.agent_skill_registration_gemini_scope.as_deref(),
+            "agent_skill_registration_gemini_scope",
+        )?;
+
+        if default_scope.is_none()
+            && (codex_scope.is_some() || claude_scope.is_some() || gemini_scope.is_some())
+        {
+            return Err(
+                "agent_skill_registration_default_scope is required when agent overrides are set"
+                    .to_string(),
+            );
+        }
+
+        s.agent.skill_registration =
+            default_scope.map(|default_scope| SkillRegistrationPreferences {
+                default_scope,
+                codex_scope,
+                claude_scope,
+                gemini_scope,
+            });
+
         s.docker.force_host = self.docker_force_host;
         s.appearance.ui_font_size = self.ui_font_size;
         s.appearance.terminal_font_size = self.terminal_font_size;
+        s.app_language = normalize_app_language(Some(self.app_language.as_str()));
         let voice = normalize_voice_input(&self.voice_input)?;
         s.voice_input.enabled = self.voice_input.enabled;
         s.voice_input.engine = voice.engine;
@@ -136,10 +274,16 @@ impl SettingsData {
         s.voice_input.language = voice.language;
         s.voice_input.quality = voice.quality;
         s.voice_input.model = voice.model;
+        s.terminal.default_shell = self
+            .default_shell
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         Ok(())
     }
 
     #[cfg(test)]
+    #[allow(clippy::field_reassign_with_default)]
     fn to_settings(&self) -> Result<Settings, String> {
         let mut s = Settings::default();
         self.apply_to_settings(&mut s)?;
@@ -230,17 +374,18 @@ fn normalize_voice_input(value: &VoiceInputSettingsData) -> Result<NormalizedVoi
 
 /// Get current settings
 #[tauri::command]
-pub fn get_settings(window: tauri::Window, state: State<AppState>) -> Result<SettingsData, String> {
-    with_panic_guard("loading settings", || {
-        let repo_root = match state.project_for_window(window.label()) {
-            Some(p) => PathBuf::from(p),
-            None => {
-                let settings = Settings::load_global().map_err(|e| e.to_string())?;
-                return Ok(SettingsData::from(&settings));
-            }
+pub fn get_settings(
+    window: tauri::Window,
+    state: State<AppState>,
+) -> Result<SettingsData, StructuredError> {
+    with_panic_guard("loading settings", "get_settings", || {
+        let settings = if let Some(project_path) = state.project_for_window(window.label()) {
+            Settings::load(Path::new(&project_path))
+                .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?
+        } else {
+            Settings::load_global()
+                .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?
         };
-
-        let settings = Settings::load(&repo_root).map_err(|e| e.to_string())?;
         Ok(SettingsData::from(&settings))
     })
 }
@@ -251,25 +396,31 @@ pub fn save_settings(
     window: tauri::Window,
     settings: SettingsData,
     state: State<AppState>,
-) -> Result<(), String> {
-    with_panic_guard("saving settings", || {
+) -> Result<(), StructuredError> {
+    with_panic_guard("saving settings", "save_settings", || {
         let project_path = state.project_for_window(window.label());
         let mut core_settings = match project_path.as_ref() {
-            Some(p) => Settings::load(Path::new(p)).map_err(|e| e.to_string())?,
-            None => Settings::load_global().map_err(|e| e.to_string())?,
+            Some(path) => Settings::load(Path::new(path))
+                .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?,
+            None => Settings::load_global()
+                .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?,
         };
-        settings.apply_to_settings(&mut core_settings)?;
+
+        settings
+            .apply_to_settings(&mut core_settings)
+            .map_err(|e| StructuredError::internal(&e, "save_settings"))?;
 
         match project_path {
-            Some(p) => {
-                let config_path = Path::new(&p).join(".gwt.toml");
+            Some(path) => {
+                let config_path = Path::new(&path).join(".gwt.toml");
                 core_settings
                     .save(&config_path)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
             }
             None => {
-                // Save to global config if no project is opened
-                core_settings.save_global().map_err(|e| e.to_string())?;
+                core_settings
+                    .save_global()
+                    .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
             }
         }
 
@@ -286,6 +437,7 @@ mod tests {
         let mut core = Settings::default();
         core.appearance.ui_font_size = 16;
         core.appearance.terminal_font_size = 20;
+        core.app_language = "ja".to_string();
         core.voice_input.enabled = true;
         core.voice_input.engine = "qwen3-asr".to_string();
         core.voice_input.hotkey = "Mod+Shift+V".to_string();
@@ -293,9 +445,13 @@ mod tests {
         core.voice_input.language = "ja".to_string();
         core.voice_input.quality = "accurate".to_string();
         core.voice_input.model = "Qwen/Qwen3-ASR-1.7B".to_string();
+        core.terminal.default_shell = Some("powershell".to_string());
         let data = SettingsData::from(&core);
         assert_eq!(data.ui_font_size, 16);
         assert_eq!(data.terminal_font_size, 20);
+        assert_eq!(data.ui_font_family, default_ui_font_family());
+        assert_eq!(data.terminal_font_family, default_terminal_font_family());
+        assert_eq!(data.app_language, "ja");
         assert!(data.voice_input.enabled);
         assert_eq!(data.voice_input.engine, "qwen3-asr");
         assert_eq!(data.voice_input.hotkey, "Mod+Shift+V");
@@ -303,9 +459,12 @@ mod tests {
         assert_eq!(data.voice_input.language, "ja");
         assert_eq!(data.voice_input.quality, "accurate");
         assert_eq!(data.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
+        assert_eq!(data.default_shell, Some("powershell".to_string()));
+        assert_eq!(data.agent_skill_registration_default_scope, None);
         let back = data.to_settings().unwrap();
         assert_eq!(back.appearance.ui_font_size, 16);
         assert_eq!(back.appearance.terminal_font_size, 20);
+        assert_eq!(back.app_language, "ja");
         assert!(back.voice_input.enabled);
         assert_eq!(back.voice_input.engine, "qwen3-asr");
         assert_eq!(back.voice_input.hotkey, "Mod+Shift+V");
@@ -313,6 +472,91 @@ mod tests {
         assert_eq!(back.voice_input.language, "ja");
         assert_eq!(back.voice_input.quality, "accurate");
         assert_eq!(back.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
+        assert_eq!(back.terminal.default_shell, Some("powershell".to_string()));
+    }
+
+    #[test]
+    fn test_settings_data_default_shell_none() {
+        let core = Settings::default();
+        let data = SettingsData::from(&core);
+        assert!(data.default_shell.is_none());
+        let back = data.to_settings().unwrap();
+        assert!(back.terminal.default_shell.is_none());
+    }
+
+    #[test]
+    fn test_settings_data_default_shell_trims_whitespace() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.default_shell = Some("  wsl  ".to_string());
+        let back = data.to_settings().unwrap();
+        assert_eq!(back.terminal.default_shell, Some("wsl".to_string()));
+    }
+
+    #[test]
+    fn test_settings_data_default_shell_empty_becomes_none() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.default_shell = Some("   ".to_string());
+        let back = data.to_settings().unwrap();
+        assert!(back.terminal.default_shell.is_none());
+    }
+
+    #[test]
+    fn test_settings_data_font_family_empty_uses_default() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.ui_font_family = "   ".to_string();
+        data.terminal_font_family = "".to_string();
+        let back = data.to_settings().unwrap();
+        let normalized = SettingsData::from(&back);
+        assert_eq!(normalized.ui_font_family, default_ui_font_family());
+        assert_eq!(
+            normalized.terminal_font_family,
+            default_terminal_font_family()
+        );
+    }
+
+    #[test]
+    fn test_settings_data_skill_registration_round_trip() {
+        let mut core = Settings::default();
+        core.agent.skill_registration = Some(SkillRegistrationPreferences {
+            default_scope: SkillRegistrationScope::Project,
+            codex_scope: Some(SkillRegistrationScope::User),
+            claude_scope: Some(SkillRegistrationScope::Project),
+            gemini_scope: Some(SkillRegistrationScope::Local),
+        });
+
+        let data = SettingsData::from(&core);
+        assert_eq!(
+            data.agent_skill_registration_default_scope.as_deref(),
+            Some("project")
+        );
+        assert_eq!(
+            data.agent_skill_registration_codex_scope.as_deref(),
+            Some("user")
+        );
+        assert_eq!(
+            data.agent_skill_registration_claude_scope.as_deref(),
+            Some("project")
+        );
+        assert_eq!(
+            data.agent_skill_registration_gemini_scope.as_deref(),
+            Some("local")
+        );
+
+        let back = data.to_settings().unwrap();
+        assert_eq!(back.agent.skill_registration, core.agent.skill_registration);
+    }
+
+    #[test]
+    fn test_settings_data_skill_registration_override_requires_default_scope() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.agent_skill_registration_default_scope = None;
+        data.agent_skill_registration_codex_scope = Some("user".to_string());
+
+        let err = data.to_settings().unwrap_err();
+        assert!(
+            err.contains("agent_skill_registration_default_scope is required"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! - TTL-based local cache to avoid repeated API calls
 //! - User-approved apply flow:
 //!   - Portable payload (tar.gz/zip) => extract and replace the running executable, then restart
-//!   - Installer payload (.dmg/.pkg/.msi) => run installer with privileges/UAC, then restart
+//!   - Installer payload (.dmg/.msi) => run installer with privileges/UAC, then restart
 //! - Internal helper modes (`__internal`) to safely apply updates after the parent process exits
 
 use chrono::{DateTime, Utc};
@@ -99,7 +99,6 @@ struct GitHubAsset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallerKind {
     MacDmg,
-    MacPkg,
     WindowsMsi,
 }
 
@@ -361,13 +360,6 @@ impl UpdateManager {
             return Ok(PreparedPayload::PortableBinary { path: binary_path });
         }
 
-        if dest_str.ends_with(".pkg") {
-            return Ok(PreparedPayload::Installer {
-                path: dest,
-                kind: InstallerKind::MacPkg,
-            });
-        }
-
         if dest_str.ends_with(".dmg") {
             return Ok(PreparedPayload::Installer {
                 path: dest,
@@ -452,7 +444,6 @@ impl UpdateManager {
             .arg("--installer-kind")
             .arg(match installer_kind {
                 InstallerKind::MacDmg => "mac_dmg",
-                InstallerKind::MacPkg => "mac_pkg",
                 InstallerKind::WindowsMsi => "windows_msi",
             })
             .arg("--args-file")
@@ -600,16 +591,6 @@ pub fn internal_run_installer(
                     return Err("mac_dmg installer can only run on macOS".to_string());
                 }
             }
-            InstallerKind::MacPkg => {
-                #[cfg(target_os = "macos")]
-                {
-                    run_macos_pkg_installer_with_privileges(installer)?;
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    return Err("mac_pkg installer can only run on macOS".to_string());
-                }
-            }
             InstallerKind::WindowsMsi => {
                 #[cfg(target_os = "windows")]
                 {
@@ -701,7 +682,6 @@ fn asset_name_from_url(url: &str) -> Option<String> {
 fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Option<String> {
     match platform.os.as_str() {
         "macos" => {
-            // New release flow: prefer DMG for macOS.
             if let Some(asset) = assets.iter().find(|a| {
                 let lower = a.name.to_ascii_lowercase();
                 lower.ends_with(".dmg") && asset_matches_arch(&lower, &platform.arch)
@@ -709,24 +689,9 @@ fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Opti
                 return Some(asset.browser_download_url.clone());
             }
 
-            // Legacy release flow fallback: signed PKG with old naming.
-            if let Some(artifact) = platform.artifact() {
-                let legacy_pkg_name = format!("gwt-{artifact}.pkg");
-                if let Some(asset) = assets.iter().find(|a| a.name == legacy_pkg_name) {
-                    return Some(asset.browser_download_url.clone());
-                }
-            }
-
-            if let Some(asset) = assets
-                .iter()
-                .find(|a| a.name.to_ascii_lowercase().ends_with(".dmg"))
-            {
-                return Some(asset.browser_download_url.clone());
-            }
-
             assets
                 .iter()
-                .find(|a| a.name.to_ascii_lowercase().ends_with(".pkg"))
+                .find(|a| a.name.to_ascii_lowercase().ends_with(".dmg"))
                 .map(|a| a.browser_download_url.clone())
         }
         "windows" => {
@@ -778,7 +743,6 @@ fn installer_kind_for_url(platform: &Platform, installer_url: &str) -> Option<In
     let lower = installer_url.to_ascii_lowercase();
     match platform.os.as_str() {
         "macos" if lower.ends_with(".dmg") => Some(InstallerKind::MacDmg),
-        "macos" if lower.ends_with(".pkg") => Some(InstallerKind::MacPkg),
         "windows" if lower.ends_with(".msi") => Some(InstallerKind::WindowsMsi),
         _ => None,
     }
@@ -1040,16 +1004,6 @@ fn find_first_app_bundle(root: &Path) -> Result<Option<PathBuf>, String> {
         }
     }
     Ok(None)
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_pkg_installer_with_privileges(installer: &Path) -> Result<(), String> {
-    let installer_path = installer.to_string_lossy().to_string();
-    let shell_cmd = format!(
-        "/usr/sbin/installer -pkg {} -target /",
-        sh_single_quote(&installer_path)
-    );
-    run_shell_with_admin_privileges(&shell_cmd)
 }
 
 #[cfg(target_os = "macos")]

@@ -180,11 +180,11 @@ export interface SettingsData {
 
 export interface VoiceInputSettings {
   enabled: boolean;
-  engine?: "qwen3-asr" | "qwen" | "whisper" | (string & {});
+  engine: "qwen3-asr" | (string & {});
   hotkey: string;
-  ptt_hotkey?: string;
+  ptt_hotkey: string;
   language: "auto" | "ja" | "en" | (string & {});
-  quality?: "fast" | "balanced" | "accurate" | (string & {});
+  quality: "fast" | "balanced" | "accurate" | (string & {});
   model: string;
 }
 
@@ -240,7 +240,6 @@ export interface Tab {
     | "agent"
     | "settings"
     | "versionHistory"
-    | "agentMode"
     | "projectMode"
     | "terminal"
     | "issueSpec"
@@ -430,14 +429,6 @@ export interface CapturedEnvInfo {
   source: string;
   reason: string | null;
   ready: boolean;
-}
-
-export interface OsEnvCaptureStatus {
-  configuredMode?: "login_shell" | "process_env" | null;
-  activeSource: string;
-  reason: string | null;
-  ready: boolean;
-  captureInFlight: boolean;
 }
 
 export type UpdateState =

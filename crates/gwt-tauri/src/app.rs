@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use gwt_core::config::os_env;
 
 #[cfg(not(test))]
-use gwt_core::config::{skill_registration, OsEnvCaptureMode, Settings};
+use gwt_core::config::{skill_registration, Settings};
 #[cfg(not(test))]
 use tokio::io::AsyncReadExt;
 
@@ -354,45 +354,27 @@ pub fn build_app(
                 _tray.set_icon_as_template(true)?;
 
                 // Startup shell environment behavior.
+                // On Unix, capture from login shell to get PATH extensions (nvm, pyenv, etc.).
+                // On Windows, use process environment directly.
                 {
-                    let state = _app.state::<AppState>();
-                    let mode = match Settings::load_global() {
-                        Ok(settings) => settings.os_env_capture_mode,
-                        Err(err) => {
-                            warn!(
-                                category = "os_env",
-                                error = %err,
-                                "Failed to load settings for os env mode; using process environment"
-                            );
-                            None
-                        }
-                    };
-
-                    match mode {
-                        Some(OsEnvCaptureMode::LoginShell) => {
-                            info!(
-                                category = "os_env",
-                                mode = "login_shell",
-                                "Startup shell environment capture mode enabled"
-                            );
-                            spawn_login_shell_env_capture(_app.handle().clone());
-                        }
-                        Some(OsEnvCaptureMode::ProcessEnv) => {
-                            state.set_os_env_process_env_snapshot();
-                            info!(
-                                category = "os_env",
-                                mode = "process_env",
-                                "Using process environment only"
-                            );
-                        }
-                        None => {
-                            state.set_os_env_process_env_snapshot();
-                            info!(
-                                category = "os_env",
-                                mode = "unset",
-                                "Shell environment capture mode not selected; waiting for user choice"
-                            );
-                        }
+                    #[cfg(unix)]
+                    {
+                        info!(
+                            category = "os_env",
+                            mode = "login_shell",
+                            "Capturing environment from login shell"
+                        );
+                        spawn_login_shell_env_capture(_app.handle().clone());
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let state = _app.state::<AppState>();
+                        state.set_os_env_process_env_snapshot();
+                        info!(
+                            category = "os_env",
+                            mode = "process_env",
+                            "Using process environment"
+                        );
                     }
                 }
 
@@ -730,8 +712,6 @@ pub fn build_app(
             crate::commands::update::check_app_update,
             crate::commands::update::apply_app_update,
             crate::commands::terminal::get_captured_environment,
-            crate::commands::terminal::get_os_env_capture_status,
-            crate::commands::terminal::set_os_env_capture_mode,
             crate::commands::terminal::is_os_env_ready,
             crate::commands::terminal::get_available_shells,
             crate::commands::git_view::get_git_change_summary,

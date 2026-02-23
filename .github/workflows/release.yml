@@ -124,16 +124,6 @@ jobs:
         run: cargo install tauri-cli --version "^2"
       - name: Build Tauri
         run: cargo tauri build
-      - name: Build macOS installer (.pkg)
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${RELEASE_VERSION}" ]]; then
-            echo "::error::Release version is not available."
-            exit 1
-          fi
-          bash installers/macos/build-installer.sh --skip-build --version "${RELEASE_VERSION}"
       - name: Build Windows installer (.msi)
         if: matrix.platform == 'windows'
         id: package_windows
@@ -178,12 +168,6 @@ jobs:
         with:
           name: gwt-macos
           path: target/release/bundle/dmg/*.dmg
-      - name: Upload macOS installer (.pkg)
-        if: matrix.platform == 'macos'
-        uses: actions/upload-artifact@v6
-        with:
-          name: gwt-macos-pkg
-          path: target/release/bundle/pkg/*.pkg
       - name: Upload artifacts (Windows)
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@v6

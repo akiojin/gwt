@@ -88,6 +88,8 @@
 
   // PR Polling — inline to avoid .svelte.ts import issues in tests
   const PR_POLL_INTERVAL_MS = 30_000;
+  const PR_POLL_BACKOFF_MAX_MS = 120_000;
+  const PR_POLL_VISIBILITY_REFRESH_MIN_GAP_MS = 5_000;
   let pollingStatuses: Record<string, PrStatusLite | null> = $state({});
   let pollingGhCliStatus: GhCliStatus | null = $state(null);
   let prPollingBootstrappedPath: string | null = null;
@@ -108,14 +110,59 @@
     if (!path) {
       return;
     }
+    if (mode !== "branch") {
+      return;
+    }
 
     let destroyed = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let pollIntervalMs = PR_POLL_INTERVAL_MS;
+    let consecutiveFailures = 0;
+    let lastRefreshAt = 0;
+
+    function clearTimer() {
+      if (timer === null) return;
+      clearTimeout(timer);
+      timer = null;
+    }
+
+    function updatePollingInterval(failed: boolean) {
+      if (!failed) {
+        consecutiveFailures = 0;
+        pollIntervalMs = PR_POLL_INTERVAL_MS;
+        return;
+      }
+      consecutiveFailures = Math.min(consecutiveFailures + 1, 2);
+      pollIntervalMs = Math.min(
+        PR_POLL_INTERVAL_MS * 2 ** consecutiveFailures,
+        PR_POLL_BACKOFF_MAX_MS,
+      );
+    }
+
+    function scheduleNextRefresh() {
+      if (destroyed) return;
+      if (timer !== null) return;
+      if (branchCount === 0) return;
+      timer = setTimeout(() => {
+        timer = null;
+        if (destroyed) return;
+        if (isTextEntryFocused()) {
+          scheduleNextRefresh();
+          return;
+        }
+        void refresh();
+      }, pollIntervalMs);
+    }
 
     async function refresh(markBootstrap = false) {
       if (destroyed) return;
-      if (prPollingInFlightPaths.has(path)) return;
+      if (prPollingInFlightPaths.has(path)) {
+        scheduleNextRefresh();
+        return;
+      }
+      lastRefreshAt = Date.now();
       prPollingInFlightPaths.add(path);
+      let failed = false;
       try {
         const branchKeyByName = new Map<string, string>();
         const queryBranches: string[] = [];
@@ -152,39 +199,35 @@
         }
       } catch {
         // Polling failure is silent — keep stale data
+        failed = true;
       } finally {
         prPollingInFlightPaths.delete(path);
+        updatePollingInterval(failed);
+        scheduleNextRefresh();
       }
     }
 
     function start() {
       if (destroyed) return;
-      stop();
+      clearTimer();
       if (branchCount === 0) return;
       if (prPollingBootstrappedPath !== path) {
         void refresh(true);
+        return;
       }
-      timer = setInterval(() => {
-        if (isTextEntryFocused()) return;
-        void refresh();
-      }, PR_POLL_INTERVAL_MS);
-    }
-
-    function stop() {
-      if (timer !== null) {
-        clearInterval(timer);
-        timer = null;
-      }
+      scheduleNextRefresh();
     }
 
     function onVisibility() {
       if (document.hidden) {
-        stop();
+        clearTimer();
       } else {
         start();
-        if (!isTextEntryFocused()) {
-          void refresh(false);
-        }
+        if (prPollingBootstrappedPath !== path) return;
+        if (isTextEntryFocused()) return;
+        if (Date.now() - lastRefreshAt < PR_POLL_VISIBILITY_REFRESH_MIN_GAP_MS) return;
+        clearTimer();
+        void refresh(false);
       }
     }
 
@@ -193,7 +236,7 @@
 
     return () => {
       destroyed = true;
-      stop();
+      clearTimer();
       document.removeEventListener("visibilitychange", onVisibility);
     };
   });
