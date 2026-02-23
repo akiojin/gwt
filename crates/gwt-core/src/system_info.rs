@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use serde::Deserialize;
 #[cfg(target_os = "windows")]
-use wmi::{COMLibrary, WMIConnection};
+use wmi::WMIConnection;
 
 /// Static GPU information (model name, total VRAM).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,10 +275,7 @@ struct Win32VideoController {
 
 #[cfg(target_os = "windows")]
 fn detect_windows_gpus() -> Vec<GpuStaticInfo> {
-    let Ok(com_library) = COMLibrary::new() else {
-        return Vec::new();
-    };
-    let Ok(wmi) = WMIConnection::new(com_library) else {
+    let Ok(wmi) = WMIConnection::new() else {
         return Vec::new();
     };
 
