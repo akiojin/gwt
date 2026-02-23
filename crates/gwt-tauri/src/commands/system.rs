@@ -4,7 +4,11 @@ use crate::state::AppState;
 use gwt_core::config::stats::Stats;
 use gwt_core::system_info::{GpuDynamicInfo, GpuStaticInfo};
 use serde::Serialize;
-use tauri::State;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Manager};
+use tracing::warn;
+
+const GET_SYSTEM_INFO_WARN_THRESHOLD: Duration = Duration::from_millis(300);
 
 // --- T030: SystemInfoResponse / GpuInfo ---
 
@@ -111,8 +115,7 @@ pub struct StatsResponse {
 
 // --- T033: get_system_info command ---
 
-#[tauri::command]
-pub fn get_system_info(state: State<'_, AppState>) -> SystemInfoResponse {
+fn get_system_info_impl(state: &AppState) -> SystemInfoResponse {
     let mut monitor = state.system_monitor.lock().unwrap();
     monitor.refresh();
     let cpu = monitor.cpu_usage();
@@ -124,6 +127,31 @@ pub fn get_system_info(state: State<'_, AppState>) -> SystemInfoResponse {
         memory_total_bytes: mem_total,
         gpus,
     }
+}
+
+#[tauri::command]
+pub async fn get_system_info(app_handle: AppHandle) -> SystemInfoResponse {
+    let started = Instant::now();
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        get_system_info_impl(&state)
+    })
+    .await
+    .unwrap_or_else(|_| SystemInfoResponse {
+        cpu_usage_percent: 0.0,
+        memory_used_bytes: 0,
+        memory_total_bytes: 0,
+        gpus: Vec::new(),
+    });
+    let elapsed = started.elapsed();
+    if elapsed > GET_SYSTEM_INFO_WARN_THRESHOLD {
+        warn!(
+            category = "system",
+            elapsed_ms = elapsed.as_millis(),
+            "get_system_info took longer than expected"
+        );
+    }
+    info
 }
 
 // --- T034: get_stats command ---

@@ -4,7 +4,11 @@
 //! and parse responses into `PrStatusInfo` structs.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
+use std::process::{Child, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::gh_cli::gh_command;
 use super::issue::resolve_repo_slug;
@@ -25,6 +29,82 @@ pub struct PrStatusFetchResult {
     /// Branch name (headRefName) -> PR status info.
     pub by_head_branch: HashMap<String, PrStatusInfo>,
     pub rate_limit: GraphqlRateLimitInfo,
+}
+
+const GH_PR_STATUS_TIMEOUT: Duration = Duration::from_secs(4);
+const GH_PR_STATUS_ALIAS_TIMEOUT: Duration = Duration::from_secs(4);
+const GH_PR_DETAIL_TIMEOUT: Duration = Duration::from_secs(6);
+const GH_RUN_VIEW_LOG_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn read_pipe_to_string<T: Read>(mut pipe: T) -> String {
+    let mut buf = String::new();
+    let _ = pipe.read_to_string(&mut buf);
+    buf
+}
+
+fn run_gh_command_output_with_timeout(
+    repo_path: &Path,
+    args: &[String],
+    timeout: Duration,
+    command_label: &str,
+) -> Result<String, String> {
+    let mut child = gh_command()
+        .args(args)
+        .current_dir(repo_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to execute {}: {}", command_label, e))?;
+
+    let status = match wait_with_timeout(&mut child, timeout) {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{} timed out after {}s",
+                command_label,
+                timeout.as_secs()
+            ));
+        }
+    };
+
+    let stdout = child
+        .stdout
+        .take()
+        .map(read_pipe_to_string)
+        .unwrap_or_default();
+    let stderr = child
+        .stderr
+        .take()
+        .map(read_pipe_to_string)
+        .unwrap_or_default();
+
+    if !status.success() {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Err(format!("{} failed", command_label));
+        }
+        return Err(format!("{} failed: {}", command_label, detail));
+    }
+
+    Ok(stdout)
 }
 
 fn graphql_string_literal(value: &str) -> String {
@@ -687,18 +767,17 @@ pub fn fetch_pr_statuses_with_meta(
     // with many open PRs while still issuing a single lightweight query.
     let query_size = 100;
     let query = build_open_pr_status_query(owner, repo, query_size);
-    let output = gh_command()
-        .args(["api", "graphql", "-f", &format!("query={}", query)])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh api graphql: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh api graphql failed: {}", stderr.trim()));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_gh_command_output_with_timeout(
+        repo_path,
+        &[
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={}", query),
+        ],
+        GH_PR_STATUS_TIMEOUT,
+        "gh api graphql",
+    )?;
     let mut parsed = parse_open_pr_status_response(&stdout)?;
 
     // Fallback for repositories with very large open-PR counts:
@@ -748,18 +827,17 @@ fn fetch_pr_statuses_alias(
     branch_names: &[String],
 ) -> Result<Vec<(String, Option<PrStatusInfo>)>, String> {
     let query = build_pr_status_query(owner, repo, branch_names);
-    let output = gh_command()
-        .args(["api", "graphql", "-f", &format!("query={}", query)])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh api graphql: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh api graphql failed: {}", stderr.trim()));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_gh_command_output_with_timeout(
+        repo_path,
+        &[
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={}", query),
+        ],
+        GH_PR_STATUS_ALIAS_TIMEOUT,
+        "gh api graphql",
+    )?;
     parse_pr_status_response(&stdout, branch_names)
 }
 
@@ -774,35 +852,34 @@ pub fn fetch_pr_detail(repo_path: &Path, pr_number: u64) -> Result<PrStatusInfo,
     let (owner, repo) = (parts[0], parts[1]);
 
     let query = build_pr_detail_query(owner, repo, pr_number);
-    let output = gh_command()
-        .args(["api", "graphql", "-f", &format!("query={}", query)])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh api graphql: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh api graphql failed: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_gh_command_output_with_timeout(
+        repo_path,
+        &[
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={}", query),
+        ],
+        GH_PR_DETAIL_TIMEOUT,
+        "gh api graphql",
+    )?;
     parse_pr_detail_response(&stdout)
 }
 
 /// Fetch CI workflow run log via `gh run view --job <check_run_id> --log` (T011).
 pub fn gh_run_view_log(repo_path: &Path, check_run_id: u64) -> Result<String, String> {
-    let output = gh_command()
-        .args(["run", "view", "--job", &check_run_id.to_string(), "--log"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh run view: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh run view failed: {}", stderr));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    run_gh_command_output_with_timeout(
+        repo_path,
+        &[
+            "run".to_string(),
+            "view".to_string(),
+            "--job".to_string(),
+            check_run_id.to_string(),
+            "--log".to_string(),
+        ],
+        GH_RUN_VIEW_LOG_TIMEOUT,
+        "gh run view",
+    )
 }
 
 #[cfg(test)]

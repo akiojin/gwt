@@ -10,9 +10,13 @@ use gwt_core::git::{
 use gwt_core::StructuredError;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 /// gh CLI availability and authentication status
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +124,8 @@ struct LatestBranchPrCacheEntry {
 const LATEST_BRANCH_PR_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_STATUS_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_STATUS_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(60);
+const PR_UPDATE_BRANCH_TIMEOUT: Duration = Duration::from_secs(8);
+const FETCH_PR_STATUS_WARN_THRESHOLD: Duration = Duration::from_millis(1000);
 
 #[derive(Debug, Clone, Default)]
 struct RepoPrStatusCacheEntry {
@@ -192,6 +198,28 @@ fn rate_limit_cooldown_until(reset_at: Option<&str>) -> Instant {
     reset_at
         .and_then(parse_reset_at_to_instant)
         .unwrap_or_else(|| Instant::now() + PR_STATUS_RATE_LIMIT_BACKOFF)
+}
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn read_pipe_to_string<T: Read>(mut pipe: T) -> String {
+    let mut buf = String::new();
+    let _ = pipe.read_to_string(&mut buf);
+    buf
 }
 
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
@@ -286,8 +314,7 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
 /// Fetch PR statuses for all given branches via GraphQL (T009)
 ///
 /// Also returns gh CLI availability/authentication status.
-#[tauri::command]
-pub fn fetch_pr_status(
+fn fetch_pr_status_impl(
     project_path: String,
     branches: Vec<String>,
 ) -> Result<PrStatusResponse, StructuredError> {
@@ -390,9 +417,31 @@ pub fn fetch_pr_status(
     })
 }
 
-/// Fetch detailed PR information for a single PR (T010)
 #[tauri::command]
-pub fn fetch_pr_detail(
+pub async fn fetch_pr_status(
+    project_path: String,
+    branches: Vec<String>,
+) -> Result<PrStatusResponse, StructuredError> {
+    let started = Instant::now();
+    let result =
+        tauri::async_runtime::spawn_blocking(move || fetch_pr_status_impl(project_path, branches))
+            .await
+            .map_err(|e| {
+                StructuredError::internal(&format!("Task join failed: {e}"), "fetch_pr_status")
+            })?;
+    let elapsed = started.elapsed();
+    if elapsed > FETCH_PR_STATUS_WARN_THRESHOLD {
+        warn!(
+            category = "pullrequest",
+            elapsed_ms = elapsed.as_millis(),
+            "fetch_pr_status took longer than expected"
+        );
+    }
+    result
+}
+
+/// Fetch detailed PR information for a single PR (T010)
+fn fetch_pr_detail_impl(
     project_path: String,
     pr_number: u64,
 ) -> Result<PrDetailResponse, StructuredError> {
@@ -405,9 +454,20 @@ pub fn fetch_pr_detail(
     Ok(to_pr_detail_response(&info))
 }
 
-/// Fetch latest branch PR: open PR first, otherwise latest closed/merged.
 #[tauri::command]
-pub fn fetch_latest_branch_pr(
+pub async fn fetch_pr_detail(
+    project_path: String,
+    pr_number: u64,
+) -> Result<PrDetailResponse, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || fetch_pr_detail_impl(project_path, pr_number))
+        .await
+        .map_err(|e| {
+            StructuredError::internal(&format!("Task join failed: {e}"), "fetch_pr_detail")
+        })?
+}
+
+/// Fetch latest branch PR: open PR first, otherwise latest closed/merged.
+fn fetch_latest_branch_pr_impl(
     project_path: String,
     branch: String,
 ) -> Result<Option<BranchPrReference>, StructuredError> {
@@ -437,9 +497,20 @@ pub fn fetch_latest_branch_pr(
     Ok(result)
 }
 
-/// Fetch CI run log for a specific check run/job ID (T011)
 #[tauri::command]
-pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, StructuredError> {
+pub async fn fetch_latest_branch_pr(
+    project_path: String,
+    branch: String,
+) -> Result<Option<BranchPrReference>, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || fetch_latest_branch_pr_impl(project_path, branch))
+        .await
+        .map_err(|e| {
+            StructuredError::internal(&format!("Task join failed: {e}"), "fetch_latest_branch_pr")
+        })?
+}
+
+/// Fetch CI run log for a specific check run/job ID (T011)
+fn fetch_ci_log_impl(project_path: String, run_id: u64) -> Result<String, StructuredError> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "fetch_ci_log"))?;
@@ -449,9 +520,15 @@ pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, Structu
     Ok(output)
 }
 
-/// Update a PR branch with the latest base branch changes (SPEC-de3290fc T008)
 #[tauri::command]
-pub fn update_pr_branch(project_path: String, pr_number: u64) -> Result<String, String> {
+pub async fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || fetch_ci_log_impl(project_path, run_id))
+        .await
+        .map_err(|e| StructuredError::internal(&format!("Task join failed: {e}"), "fetch_ci_log"))?
+}
+
+/// Update a PR branch with the latest base branch changes (SPEC-de3290fc T008)
+fn update_pr_branch_impl(project_path: String, pr_number: u64) -> Result<String, String> {
     use gwt_core::git::gh_cli::gh_command;
     use gwt_core::git::resolve_repo_slug;
 
@@ -466,7 +543,7 @@ pub fn update_pr_branch(project_path: String, pr_number: u64) -> Result<String, 
     }
     let (owner, repo) = (parts[0], parts[1]);
 
-    let output = gh_command()
+    let mut child = gh_command()
         .args([
             "api",
             "-X",
@@ -474,15 +551,50 @@ pub fn update_pr_branch(project_path: String, pr_number: u64) -> Result<String, 
             &format!("/repos/{owner}/{repo}/pulls/{pr_number}/update-branch"),
         ])
         .current_dir(&repo_path)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to execute gh api: {}", e))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to update PR branch: {}", stderr));
+    let status = match wait_with_timeout(&mut child, PR_UPDATE_BRANCH_TIMEOUT) {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "Failed to update PR branch: gh api timed out after {}s",
+                PR_UPDATE_BRANCH_TIMEOUT.as_secs()
+            ));
+        }
+    };
+
+    let _stdout = child
+        .stdout
+        .take()
+        .map(read_pipe_to_string)
+        .unwrap_or_default();
+    let stderr = child
+        .stderr
+        .take()
+        .map(read_pipe_to_string)
+        .unwrap_or_default();
+
+    if !status.success() {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Err("Failed to update PR branch".to_string());
+        }
+        return Err(format!("Failed to update PR branch: {detail}"));
     }
 
     Ok("Branch updated successfully".to_string())
+}
+
+#[tauri::command]
+pub async fn update_pr_branch(project_path: String, pr_number: u64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || update_pr_branch_impl(project_path, pr_number))
+        .await
+        .map_err(|e| format!("Task join failed: {e}"))?
 }
 
 #[cfg(test)]
