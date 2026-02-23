@@ -64,15 +64,41 @@ def run_prepare(model_id: str) -> dict:
     }
 
 
+def extract_transcript(result: object) -> str:
+    if result is None:
+        return ""
+
+    if isinstance(result, str):
+        return result.strip()
+
+    if isinstance(result, dict):
+        value = result.get("text") or result.get("transcript") or ""
+        return str(value).strip()
+
+    if isinstance(result, list):
+        for item in result:
+            text = extract_transcript(item)
+            if text:
+                return text
+        return ""
+
+    text_attr = getattr(result, "text", None)
+    if text_attr is not None:
+        return str(text_attr).strip()
+
+    transcript_attr = getattr(result, "transcript", None)
+    if transcript_attr is not None:
+        return str(transcript_attr).strip()
+
+    return ""
+
+
 def run_transcribe(model_id: str, audio_path: str, language: str) -> dict:
     model = load_model(model_id)
     language_name = map_language(language)
     result = model.transcribe(audio_path, language=language_name)
 
-    transcript = ""
-    if isinstance(result, list) and len(result) > 0:
-        first = result[0]
-        transcript = str(getattr(first, "text", "")).strip()
+    transcript = extract_transcript(result)
 
     return {
         "ok": True,

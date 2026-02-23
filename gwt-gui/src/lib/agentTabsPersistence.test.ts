@@ -6,6 +6,7 @@ import {
   PROJECT_AGENT_TABS_STORAGE_KEY,
   loadStoredProjectTabs,
   persistStoredProjectTabs,
+  persistStoredProjectAgentTabs,
   buildRestoredProjectTabs,
 } from "./agentTabsPersistence";
 
@@ -180,6 +181,40 @@ describe("agentTabsPersistence", () => {
     });
   });
 
+  it("persistStoredProjectAgentTabs preserves non-agent tabs in existing entry", () => {
+    persistStoredProjectTabs(
+      "/repo",
+      {
+        tabs: [
+          { type: "projectMode", id: "projectMode", label: "Project Mode" },
+          { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
+          { type: "agent", paneId: "old", label: "old-agent" },
+        ],
+        activeTabId: "terminal-t1",
+      },
+      store,
+    );
+
+    persistStoredProjectAgentTabs(
+      "/repo",
+      {
+        tabs: [{ paneId: "new", label: "new-agent" }],
+        activePaneId: null,
+      },
+      store,
+    );
+
+    const loaded = loadStoredProjectTabs("/repo", store);
+    expect(loaded).toEqual({
+      tabs: [
+        { type: "projectMode", id: "projectMode", label: "Project Mode" },
+        { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
+        { type: "agent", paneId: "new", label: "new-agent" },
+      ],
+      activeTabId: "terminal-t1",
+    });
+  });
+
   it("buildRestoredProjectTabs restores in stored order and filters missing panes", () => {
     const restored = buildRestoredProjectTabs(
       {
@@ -324,12 +359,5 @@ describe("agentTabsPersistence", () => {
     expect(
       shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1),
     ).toBe(false);
-  });
-
-  it("shouldRetryAgentTabRestore handles transient empty matches", () => {
-    expect(shouldRetryAgentTabRestore(2, 0, 0)).toBe(true);
-    expect(shouldRetryAgentTabRestore(2, 1, 0)).toBe(false);
-    expect(shouldRetryAgentTabRestore(0, 0, 0)).toBe(false);
-    expect(shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1)).toBe(false);
   });
 });

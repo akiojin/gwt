@@ -610,47 +610,51 @@ fn transcribe_sync(input: VoiceTranscriptionRequest) -> Result<VoiceTranscriptio
 }
 
 #[tauri::command]
-pub fn get_voice_capability(
+pub async fn get_voice_capability(
     gpu_available: bool,
     quality: String,
 ) -> Result<VoiceCapability, String> {
-    with_panic_guard("checking voice capability", || {
-        let quality = normalize_quality(&quality);
-        let model_name = qwen_model_id_for_quality(&quality).to_string();
-        let model_path = model_cache_dir(&model_name)?;
-        let model_ready = model_ready_in_cache(&model_name);
+    tokio::task::spawn_blocking(move || {
+        with_panic_guard("checking voice capability", || {
+            let quality = normalize_quality(&quality);
+            let model_name = qwen_model_id_for_quality(&quality).to_string();
+            let model_path = model_cache_dir(&model_name)?;
+            let model_ready = model_ready_in_cache(&model_name);
 
-        let runtime_result = if gpu_available {
-            probe_qwen_runtime_cached().err()
-        } else {
-            None
-        };
+            let runtime_result = if gpu_available {
+                probe_qwen_runtime_cached().err()
+            } else {
+                None
+            };
 
-        let (available, reason) = if !gpu_available {
-            (
-                false,
-                Some("Voice input requires GPU acceleration in this build".to_string()),
-            )
-        } else if let Some(runtime_error) = runtime_result {
-            (
-                false,
-                Some(format!("Voice runtime is unavailable: {runtime_error}")),
-            )
-        } else {
-            (true, None)
-        };
+            let (available, reason) = if !gpu_available {
+                (
+                    false,
+                    Some("Voice input requires GPU acceleration in this build".to_string()),
+                )
+            } else if let Some(runtime_error) = runtime_result {
+                (
+                    false,
+                    Some(format!("Voice runtime is unavailable: {runtime_error}")),
+                )
+            } else {
+                (true, None)
+            };
 
-        Ok(VoiceCapability {
-            available,
-            reason,
-            gpu_required: true,
-            gpu_available,
-            quality,
-            model_name,
-            model_ready,
-            model_path: model_path.to_string_lossy().to_string(),
+            Ok(VoiceCapability {
+                available,
+                reason,
+                gpu_required: true,
+                gpu_available,
+                quality,
+                model_name,
+                model_ready,
+                model_path: model_path.to_string_lossy().to_string(),
+            })
         })
     })
+    .await
+    .map_err(|e| format!("Voice capability task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -751,7 +755,10 @@ mod tests {
 
     #[test]
     fn capability_reports_unavailable_without_gpu() {
-        let capability = get_voice_capability(false, "balanced".to_string()).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let capability = runtime
+            .block_on(get_voice_capability(false, "balanced".to_string()))
+            .unwrap();
         assert!(!capability.available);
         assert!(capability.reason.is_some());
     }
