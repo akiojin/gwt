@@ -281,6 +281,14 @@ impl SettingsData {
             .filter(|v| !v.is_empty());
         Ok(())
     }
+
+    #[cfg(test)]
+    #[allow(clippy::field_reassign_with_default)]
+    fn to_settings(&self) -> Result<Settings, String> {
+        let mut s = Settings::default();
+        self.apply_to_settings(&mut s)?;
+        Ok(s)
+    }
 }
 
 #[derive(Debug, Clone)]
