@@ -207,7 +207,6 @@ fn maybe_run_internal_mode() -> bool {
             };
 
             let kind = match installer_kind.as_str() {
-                "mac_pkg" => gwt_core::update::InstallerKind::MacPkg,
                 "mac_dmg" => gwt_core::update::InstallerKind::MacDmg,
                 "windows_msi" => gwt_core::update::InstallerKind::WindowsMsi,
                 other => {

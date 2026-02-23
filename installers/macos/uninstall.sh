@@ -9,7 +9,6 @@ set -euo pipefail
 
 APP_NAME="gwt"
 APP_PATH="/Applications/${APP_NAME}.app"
-PKG_ID="com.akiojin.gwt"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -37,14 +36,6 @@ if [[ -d "$APP_PATH" ]]; then
   ok "Removed ${APP_PATH}"
 else
   warn "${APP_PATH} not found"
-fi
-
-# --- forget package receipt ------------------------------------------------
-
-if pkgutil --pkgs 2>/dev/null | grep -q "^${PKG_ID}$"; then
-  info "Removing package receipt..."
-  sudo pkgutil --forget "$PKG_ID"
-  ok "Removed package receipt: ${PKG_ID}"
 fi
 
 # --- done ------------------------------------------------------------------

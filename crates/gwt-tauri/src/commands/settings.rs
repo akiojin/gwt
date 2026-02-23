@@ -1,9 +1,7 @@
 //! Settings management commands
 
 use crate::state::AppState;
-use gwt_core::config::{
-    OsEnvCaptureMode, Settings, SkillRegistrationPreferences, SkillRegistrationScope,
-};
+use gwt_core::config::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -62,28 +60,6 @@ fn scope_to_string(scope: SkillRegistrationScope) -> String {
         SkillRegistrationScope::User => "user".to_string(),
         SkillRegistrationScope::Project => "project".to_string(),
         SkillRegistrationScope::Local => "local".to_string(),
-    }
-}
-
-fn parse_os_env_capture_mode_field(
-    value: Option<&str>,
-) -> Result<Option<OsEnvCaptureMode>, String> {
-    let normalized = value.unwrap_or("").trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return Ok(None);
-    }
-
-    match normalized.as_str() {
-        "login_shell" => Ok(Some(OsEnvCaptureMode::LoginShell)),
-        "process_env" => Ok(Some(OsEnvCaptureMode::ProcessEnv)),
-        _ => Err("os_env_capture_mode must be one of: login_shell, process_env".to_string()),
-    }
-}
-
-fn os_env_capture_mode_to_string(mode: OsEnvCaptureMode) -> String {
-    match mode {
-        OsEnvCaptureMode::LoginShell => "login_shell".to_string(),
-        OsEnvCaptureMode::ProcessEnv => "process_env".to_string(),
     }
 }
 
@@ -149,8 +125,6 @@ pub struct SettingsData {
     pub voice_input: VoiceInputSettingsData,
     #[serde(default)]
     pub default_shell: Option<String>,
-    #[serde(default)]
-    pub os_env_capture_mode: Option<String>,
 }
 
 fn default_app_language() -> String {
@@ -230,7 +204,6 @@ impl From<&Settings> for SettingsData {
                 model: s.voice_input.model.clone(),
             },
             default_shell: s.terminal.default_shell.clone(),
-            os_env_capture_mode: s.os_env_capture_mode.map(os_env_capture_mode_to_string),
         }
     }
 }
@@ -306,8 +279,6 @@ impl SettingsData {
             .as_ref()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        s.os_env_capture_mode =
-            parse_os_env_capture_mode_field(self.os_env_capture_mode.as_deref())?;
         Ok(())
     }
 
@@ -468,7 +439,6 @@ mod tests {
         core.voice_input.quality = "accurate".to_string();
         core.voice_input.model = "Qwen/Qwen3-ASR-1.7B".to_string();
         core.terminal.default_shell = Some("powershell".to_string());
-        core.os_env_capture_mode = Some(OsEnvCaptureMode::LoginShell);
         let data = SettingsData::from(&core);
         assert_eq!(data.ui_font_size, 16);
         assert_eq!(data.terminal_font_size, 20);
@@ -483,7 +453,6 @@ mod tests {
         assert_eq!(data.voice_input.quality, "accurate");
         assert_eq!(data.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
         assert_eq!(data.default_shell, Some("powershell".to_string()));
-        assert_eq!(data.os_env_capture_mode.as_deref(), Some("login_shell"));
         assert_eq!(data.agent_skill_registration_default_scope, None);
         let back = data.to_settings().unwrap();
         assert_eq!(back.appearance.ui_font_size, 16);
@@ -497,7 +466,6 @@ mod tests {
         assert_eq!(back.voice_input.quality, "accurate");
         assert_eq!(back.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
         assert_eq!(back.terminal.default_shell, Some("powershell".to_string()));
-        assert_eq!(back.os_env_capture_mode, Some(OsEnvCaptureMode::LoginShell));
     }
 
     #[test]
@@ -523,18 +491,6 @@ mod tests {
         data.default_shell = Some("   ".to_string());
         let back = data.to_settings().unwrap();
         assert!(back.terminal.default_shell.is_none());
-    }
-
-    #[test]
-    fn test_settings_data_os_env_capture_mode_rejects_invalid_value() {
-        let mut data = SettingsData::from(&Settings::default());
-        data.os_env_capture_mode = Some("invalid".to_string());
-
-        let err = data.to_settings().unwrap_err();
-        assert!(
-            err.contains("os_env_capture_mode must be one of"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]

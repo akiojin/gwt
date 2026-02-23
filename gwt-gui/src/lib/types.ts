@@ -431,14 +431,6 @@ export interface CapturedEnvInfo {
   ready: boolean;
 }
 
-export interface OsEnvCaptureStatus {
-  configuredMode?: "login_shell" | "process_env" | null;
-  activeSource: string;
-  reason: string | null;
-  ready: boolean;
-  captureInFlight: boolean;
-}
-
 export type UpdateState =
   | {
       state: "up_to_date";
