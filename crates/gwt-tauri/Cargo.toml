@@ -32,6 +32,8 @@ sha2.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
 fs2.workspace = true
+whisper-rs = { version = "0.15.1", default-features = false }
+hound = "3.5"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

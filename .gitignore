@@ -67,3 +67,15 @@ temp/
 
 # MCP bridge lockfile (generated, not shared)
 gwt-mcp-bridge/pnpm-lock.yaml
+
+# Voice evaluation local assets
+tests/voice_eval/manifest.json
+tests/voice_eval/baseline.json
+tests/voice_eval/latest-report.json
+tests/voice_eval/model-comparison.json
+tests/voice_eval/samples/*.wav
+tests/voice_eval/samples/*.m4a
+
+# Local Python virtual environments
+.venv/
+.venv-*/

@@ -31,6 +31,9 @@
   let errorMessage: string | null = $state(null);
   let newBranch: string = $state("");
   let saveMessage: string = $state("");
+  let voiceCapabilityLoading: boolean = $state(false);
+  let voiceAvailable: boolean = $state(true);
+  let voiceUnavailableReason: string | null = $state(null);
 
   let selectedProfileKey: string = $state("");
   let newProfileName: string = $state("");
@@ -52,9 +55,12 @@
 
   const DEFAULT_VOICE_INPUT: VoiceInputSettings = {
     enabled: false,
+    engine: "qwen3-asr",
     hotkey: "Mod+Shift+M",
+    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
-    model: "base",
+    quality: "balanced",
+    model: "Qwen/Qwen3-ASR-1.7B",
   };
   const DEFAULT_UI_FONT_FAMILY =
     'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
@@ -176,6 +182,43 @@
   }
 
   $effect(() => {
+    if (!settings) return;
+    const quality = (settings.voice_input?.quality ?? "balanced").trim().toLowerCase();
+    const gpuAvailable = detectGpuAvailability();
+    let cancelled = false;
+
+    (async () => {
+      voiceCapabilityLoading = true;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const capability = await invoke<{
+          available: boolean;
+          reason?: string | null;
+        }>("get_voice_capability", {
+          gpuAvailable,
+          quality,
+        });
+        if (cancelled) return;
+        voiceAvailable = !!capability.available;
+        voiceUnavailableReason = capability.reason ?? null;
+      } catch {
+        if (cancelled) return;
+        // In web preview, keep voice fields editable for config compatibility.
+        voiceAvailable = true;
+        voiceUnavailableReason = null;
+      } finally {
+        if (!cancelled) {
+          voiceCapabilityLoading = false;
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
@@ -237,21 +280,65 @@
     return String(err);
   }
 
+  function detectGpuAvailability(): boolean {
+    try {
+      const canvas = document.createElement("canvas");
+      const gl =
+        canvas.getContext("webgl2") ||
+        (canvas.getContext("webgl") as WebGLRenderingContext | null) ||
+        (canvas.getContext("experimental-webgl") as WebGLRenderingContext | null);
+      if (!gl) return false;
+
+      const ext = gl.getExtension("WEBGL_debug_renderer_info") as {
+        UNMASKED_RENDERER_WEBGL: number;
+      } | null;
+      const renderer = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? "") : "";
+      const normalized = renderer.toLowerCase();
+      if (
+        normalized.includes("swiftshader") ||
+        normalized.includes("llvmpipe") ||
+        normalized.includes("software") ||
+        normalized.includes("mesa offscreen")
+      ) {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function normalizeVoiceInputSettings(
     value: Partial<VoiceInputSettings> | null | undefined
   ): VoiceInputSettings {
+    const engine = (value?.engine ?? "").trim().toLowerCase();
     const hotkey = (value?.hotkey ?? "").trim();
+    const pttHotkey = (value?.ptt_hotkey ?? "").trim();
     const language = (value?.language ?? "").trim().toLowerCase();
+    const quality = (value?.quality ?? "").trim().toLowerCase();
     const model = (value?.model ?? "").trim();
+    const normalizedQuality =
+      quality === "fast" || quality === "balanced" || quality === "accurate"
+        ? (quality as VoiceInputSettings["quality"])
+        : DEFAULT_VOICE_INPUT.quality;
+    const defaultModel =
+      normalizedQuality === "fast" ? "Qwen/Qwen3-ASR-0.6B" : "Qwen/Qwen3-ASR-1.7B";
 
     return {
       enabled: !!value?.enabled,
+      engine:
+        engine === "qwen3-asr" || engine === "qwen" || engine === "whisper"
+          ? "qwen3-asr"
+          : DEFAULT_VOICE_INPUT.engine,
       hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT.hotkey,
+      ptt_hotkey:
+        pttHotkey.length > 0 ? pttHotkey : DEFAULT_VOICE_INPUT.ptt_hotkey,
       language:
         language === "ja" || language === "en" || language === "auto"
           ? (language as VoiceInputSettings["language"])
           : DEFAULT_VOICE_INPUT.language,
-      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT.model,
+      quality: normalizedQuality,
+      model: model.length > 0 ? model : defaultModel,
     };
   }
 
@@ -738,6 +825,14 @@
     if (!settings) return;
     const current = normalizeVoiceInputSettings(settings.voice_input);
     const next = { ...current, [field]: value } as VoiceInputSettings;
+    if (field === "quality") {
+      const quality = String(value).trim().toLowerCase();
+      next.model =
+        quality === "fast" ? "Qwen/Qwen3-ASR-0.6B" : "Qwen/Qwen3-ASR-1.7B";
+    }
+    if (!next.engine || next.engine.trim().toLowerCase() !== "qwen3-asr") {
+      next.engine = "qwen3-asr";
+    }
     settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
   }
 
@@ -999,6 +1094,7 @@
                   id="voice-input-enabled"
                   type="checkbox"
                   checked={settings.voice_input.enabled}
+                  disabled={!voiceAvailable || voiceCapabilityLoading}
                   onchange={(e) =>
                     updateVoiceInputField(
                       "enabled",
@@ -1015,11 +1111,12 @@
             </div>
 
             <div class="field">
-              <label for="voice-hotkey">Hotkey</label>
+              <label for="voice-hotkey">Toggle Hotkey</label>
               <input
                 id="voice-hotkey"
                 type="text"
                 value={settings.voice_input.hotkey}
+                disabled={!voiceAvailable || voiceCapabilityLoading}
                 oninput={(e) =>
                   updateVoiceInputField(
                     "hotkey",
@@ -1031,11 +1128,29 @@
             </div>
 
             <div class="field">
+              <label for="voice-ptt-hotkey">Push-to-talk Hotkey</label>
+              <input
+                id="voice-ptt-hotkey"
+                type="text"
+                value={settings.voice_input.ptt_hotkey}
+                disabled={!voiceAvailable || voiceCapabilityLoading}
+                oninput={(e) =>
+                  updateVoiceInputField(
+                    "ptt_hotkey",
+                    (e.target as HTMLInputElement).value
+                  )}
+                placeholder="Mod+Shift+Space"
+              />
+              <span class="field-hint">Press and hold to capture speech.</span>
+            </div>
+
+            <div class="field">
               <label for="voice-language">Language</label>
               <select
                 id="voice-language"
                 class="select"
                 value={settings.voice_input.language}
+                disabled={!voiceAvailable || voiceCapabilityLoading}
                 onchange={(e) =>
                   updateVoiceInputField(
                     "language",
@@ -1049,22 +1164,50 @@
             </div>
 
             <div class="field">
-              <label for="voice-model">Model</label>
+              <label for="voice-quality">Quality</label>
+              <select
+                id="voice-quality"
+                class="select"
+                value={settings.voice_input.quality}
+                disabled={!voiceAvailable || voiceCapabilityLoading}
+                onchange={(e) =>
+                  updateVoiceInputField(
+                    "quality",
+                    (e.target as HTMLSelectElement).value as VoiceInputSettings["quality"]
+                  )}
+              >
+                <option value="fast">Fast (Qwen3-ASR-0.6B)</option>
+                <option value="balanced">Balanced (Qwen3-ASR-1.7B)</option>
+                <option value="accurate">Accurate (Qwen3-ASR-1.7B)</option>
+              </select>
+              <span class="field-hint">
+                Voice runtime and Qwen model are prepared automatically on first use.
+              </span>
+            </div>
+
+            <div class="field">
+              <label for="voice-model">Model (Auto-mapped)</label>
               <input
                 id="voice-model"
                 type="text"
                 value={settings.voice_input.model}
-                oninput={(e) =>
-                  updateVoiceInputField(
-                    "model",
-                    (e.target as HTMLInputElement).value
-                  )}
-                placeholder="base"
+                readonly
+                disabled
               />
-              <span class="field-hint">Bundled STT model tier label.</span>
             </div>
-          </div>
 
+            {#if voiceCapabilityLoading}
+              <div class="field">
+                <span class="field-hint">Checking voice runtime capability...</span>
+              </div>
+            {:else if !voiceAvailable}
+              <div class="field">
+                <span class="field-hint">
+                  Voice input is disabled: {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
+                </span>
+              </div>
+            {/if}
+          </div>
         {:else if activeSettingsTab === "githubIntegration"}
           <div class="section-content">
             <div class="field">

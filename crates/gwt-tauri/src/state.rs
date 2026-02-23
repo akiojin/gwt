@@ -214,6 +214,8 @@ impl AppState {
         self.os_env_capture_inflight.store(false, Ordering::SeqCst);
     }
 
+    /// Used on Windows to set OS environment from process env.
+    #[allow(dead_code)]
     pub fn set_os_env_process_env_snapshot(&self) {
         self.set_os_env_snapshot(std::env::vars().collect(), EnvSource::ProcessEnv);
     }
@@ -227,10 +229,6 @@ impl AppState {
 
     pub fn os_env_source_snapshot(&self) -> Option<EnvSource> {
         self.os_env_source.read().ok().map(|source| source.clone())
-    }
-
-    pub fn is_os_env_capture_inflight(&self) -> bool {
-        self.os_env_capture_inflight.load(Ordering::SeqCst)
     }
 
     /// Atomically claim a project identity for a window and persist its project path.

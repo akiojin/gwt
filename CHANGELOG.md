@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.11.0] - 2026-02-23
+
+### Bug Fixes
+
+- **gui:** Stabilize terminal input recovery on tab switching (#1199)
+- Restore project mode hooks and e2e stability (#1202)
+- Stabilize voice input mode with Qwen3-ASR settings/runtime (#1203)
+- Always use login shell env capture on Unix, remove os_env_capture_mode setting
+- Harden migration cleanup and restore macOS installer flow (#1205)
+- **gui:** Reduce periodic freezes by offloading polling and gh calls (#1204)
+- Restore voice hotkey parsing and terminal menu action (#1207)
+
+### Documentation
+
+- Normalize Japanese README macOS asset label (#1206)
+
+### Features
+
+- Add Qwen3-ASR voice runtime and evaluation pipeline (#1200)
+
+### Miscellaneous Tasks
+
+- **deps-dev:** Bump @commitlint/cli from 20.4.1 to 20.4.2 (#1191)
+- **deps-dev:** Bump @commitlint/config-conventional (#1192)
+
+### Refactor
+
+- Remove .pkg installer support, use .dmg only for macOS
+
 ## [7.10.2] - 2026-02-22
 
 ### Bug Fixes

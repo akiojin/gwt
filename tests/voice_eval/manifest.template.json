@@ -1,0 +1,55 @@
+{
+  "default_language": "ja",
+  "samples": [
+    {
+      "id": "ja-001",
+      "audio_path": "samples/001.wav",
+      "reference": "おはようございます。今日の進捗を共有します。"
+    },
+    {
+      "id": "ja-002",
+      "audio_path": "samples/002.wav",
+      "reference": "新しいブランチを作成して、テストを先に追加します。"
+    },
+    {
+      "id": "ja-003",
+      "audio_path": "samples/003.wav",
+      "reference": "エラーの再現手順を確認してから修正に入ります。"
+    },
+    {
+      "id": "ja-004",
+      "audio_path": "samples/004.wav",
+      "reference": "ターミナルのログを保存して、原因を切り分けます。"
+    },
+    {
+      "id": "ja-005",
+      "audio_path": "samples/005.wav",
+      "reference": "プルリクエストには変更理由と影響範囲を明記します。"
+    },
+    {
+      "id": "ja-006",
+      "audio_path": "samples/006.wav",
+      "reference": "この仕様は後方互換性を維持しなければなりません。"
+    },
+    {
+      "id": "ja-007",
+      "audio_path": "samples/007.wav",
+      "reference": "ゼロダウンタイムでデプロイできるか検証しましょう。"
+    },
+    {
+      "id": "ja-008",
+      "audio_path": "samples/008.wav",
+      "reference": "明日のミーティングは午前九時に開始します。"
+    },
+    {
+      "id": "ja-009",
+      "audio_path": "samples/009.wav",
+      "reference": "ユーザーが迷わないように文言を短くします。"
+    },
+    {
+      "id": "ja-010",
+      "audio_path": "samples/010.wav",
+      "reference": "機能追加の前に要件とテストを更新してください。"
+    }
+  ]
+}

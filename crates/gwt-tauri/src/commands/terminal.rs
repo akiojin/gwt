@@ -5,9 +5,7 @@ use crate::state::{AppState, PaneLaunchMeta};
 use chrono::Utc;
 use gwt_core::ai::SessionParser;
 use gwt_core::config::stats::Stats;
-use gwt_core::config::{
-    AgentConfig, ClaudeAgentProvider, OsEnvCaptureMode, ProfilesConfig, Settings,
-};
+use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
     DevContainerConfig, DockerFileType, DockerManager, PortAllocator,
@@ -3340,6 +3338,12 @@ services:
 
     #[test]
     fn test_merge_empty_os_env() {
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
         let os_env = HashMap::new();
         let result = merge_profile_env(&os_env, None);
         assert!(result.is_empty());
@@ -5380,16 +5384,6 @@ pub struct CapturedEnvInfo {
     pub ready: bool,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OsEnvCaptureStatus {
-    pub configured_mode: Option<String>,
-    pub active_source: String,
-    pub reason: Option<String>,
-    pub ready: bool,
-    pub capture_inflight: bool,
-}
-
 fn os_env_source_to_string(
     source: Option<gwt_core::config::os_env::EnvSource>,
 ) -> (String, Option<String>) {
@@ -5400,35 +5394,6 @@ fn os_env_source_to_string(
             ("std_env_fallback".to_string(), Some(reason))
         }
         None => ("unknown".to_string(), None),
-    }
-}
-
-fn os_env_capture_mode_to_string(mode: OsEnvCaptureMode) -> String {
-    match mode {
-        OsEnvCaptureMode::LoginShell => "login_shell".to_string(),
-        OsEnvCaptureMode::ProcessEnv => "process_env".to_string(),
-    }
-}
-
-fn parse_os_env_capture_mode(mode: &str) -> Result<OsEnvCaptureMode, String> {
-    match mode.trim().to_ascii_lowercase().as_str() {
-        "login_shell" => Ok(OsEnvCaptureMode::LoginShell),
-        "process_env" => Ok(OsEnvCaptureMode::ProcessEnv),
-        _ => Err("mode must be one of: login_shell, process_env".to_string()),
-    }
-}
-
-fn build_os_env_capture_status(
-    state: &AppState,
-    configured_mode: Option<OsEnvCaptureMode>,
-) -> OsEnvCaptureStatus {
-    let (active_source, reason) = os_env_source_to_string(state.os_env_source_snapshot());
-    OsEnvCaptureStatus {
-        configured_mode: configured_mode.map(os_env_capture_mode_to_string),
-        active_source,
-        reason,
-        ready: state.is_os_env_ready(),
-        capture_inflight: state.is_os_env_capture_inflight(),
     }
 }
 
@@ -5451,57 +5416,6 @@ pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
         source,
         reason,
     }
-}
-
-#[tauri::command]
-pub fn get_os_env_capture_status(state: State<AppState>) -> OsEnvCaptureStatus {
-    let configured_mode = match Settings::load_global() {
-        Ok(settings) => settings.os_env_capture_mode,
-        Err(err) => {
-            tracing::warn!(
-                category = "os_env",
-                error = %err,
-                "Failed to load settings while reading os env capture status"
-            );
-            None
-        }
-    };
-    build_os_env_capture_status(&state, configured_mode)
-}
-
-#[tauri::command]
-pub fn set_os_env_capture_mode(
-    mode: String,
-    state: State<AppState>,
-    _app_handle: AppHandle,
-) -> Result<OsEnvCaptureStatus, StructuredError> {
-    let selected_mode = parse_os_env_capture_mode(&mode)
-        .map_err(|e| StructuredError::internal(&e, "set_os_env_capture_mode"))?;
-
-    let mut settings = Settings::load_global()
-        .map_err(|e| StructuredError::from_gwt_error(&e, "set_os_env_capture_mode"))?;
-    settings.os_env_capture_mode = Some(selected_mode);
-    settings
-        .save_global()
-        .map_err(|e| StructuredError::from_gwt_error(&e, "set_os_env_capture_mode"))?;
-
-    match selected_mode {
-        OsEnvCaptureMode::ProcessEnv => {
-            state.set_os_env_process_env_snapshot();
-        }
-        OsEnvCaptureMode::LoginShell => {
-            #[cfg(not(test))]
-            {
-                crate::app::spawn_login_shell_env_capture(_app_handle);
-            }
-            #[cfg(test)]
-            {
-                state.set_os_env_process_env_snapshot();
-            }
-        }
-    }
-
-    Ok(build_os_env_capture_status(&state, Some(selected_mode)))
 }
 
 #[tauri::command]

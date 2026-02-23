@@ -13,7 +13,6 @@
     WorktreeInfo,
     TerminalAnsiProbe,
     CapturedEnvInfo,
-    OsEnvCaptureStatus,
     SettingsData,
     SkillRegistrationScope,
     UpdateState,
@@ -103,9 +102,12 @@
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
     enabled: false,
+    engine: "qwen3-asr",
     hotkey: "Mod+Shift+M",
+    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
-    model: "base",
+    quality: "balanced",
+    model: "Qwen/Qwen3-ASR-1.7B",
   };
   const DEFAULT_UI_FONT_FAMILY =
     'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
@@ -248,19 +250,17 @@
   let terminalDiagnosticsError: string | null = $state(null);
 
   let osEnvReady = $state(false);
-  type OsEnvCaptureModeChoice = "login_shell" | "process_env";
   let startupOsEnvCaptureChecked = false;
   let startupOsEnvCaptureResolved = $state(false);
-  let osEnvCapturePromptOpen = $state(false);
-  let osEnvCaptureSelection = $state<OsEnvCaptureModeChoice>("process_env");
-  let osEnvCapturePromptBusy = $state(false);
-  let osEnvCapturePromptError = $state<string | null>(null);
   let voiceInputSettings: VoiceInputSettings = $state(
     DEFAULT_VOICE_INPUT_SETTINGS,
   );
   let appLanguage: SettingsData["app_language"] = $state("auto");
   let voiceInputListening = $state(false);
+  let voiceInputPreparing = $state(false);
   let voiceInputSupported = $state(true);
+  let voiceInputAvailable = $state(false);
+  let voiceInputAvailabilityReason: string | null = $state(null);
   let voiceInputError: string | null = $state(null);
   let voiceController: VoiceInputController | null = null;
 
@@ -636,7 +636,7 @@
   $effect(() => {
     if (startupOsEnvCaptureChecked) return;
     startupOsEnvCaptureChecked = true;
-    void checkOsEnvCapturePromptOnStartup();
+    void checkOsEnvCaptureOnStartup();
   });
 
   $effect(() => {
@@ -993,18 +993,34 @@
   function normalizeVoiceInputSettings(
     value: Partial<VoiceInputSettings> | null | undefined,
   ): VoiceInputSettings {
+    const engine = (value?.engine ?? "").trim().toLowerCase();
     const hotkey = (value?.hotkey ?? "").trim();
+    const pttHotkey = (value?.ptt_hotkey ?? "").trim();
     const language = (value?.language ?? "").trim().toLowerCase();
+    const quality = (value?.quality ?? "").trim().toLowerCase();
     const model = (value?.model ?? "").trim();
+    const normalizedQuality =
+      quality === "fast" || quality === "balanced" || quality === "accurate"
+        ? (quality as VoiceInputSettings["quality"])
+        : DEFAULT_VOICE_INPUT_SETTINGS.quality;
+    const defaultModel =
+      normalizedQuality === "fast" ? "Qwen/Qwen3-ASR-0.6B" : "Qwen/Qwen3-ASR-1.7B";
 
     return {
       enabled: !!value?.enabled,
+      engine:
+        engine === "qwen3-asr" || engine === "qwen" || engine === "whisper"
+          ? "qwen3-asr"
+          : DEFAULT_VOICE_INPUT_SETTINGS.engine,
       hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT_SETTINGS.hotkey,
+      ptt_hotkey:
+        pttHotkey.length > 0 ? pttHotkey : DEFAULT_VOICE_INPUT_SETTINGS.ptt_hotkey,
       language:
         language === "ja" || language === "en" || language === "auto"
           ? (language as VoiceInputSettings["language"])
           : DEFAULT_VOICE_INPUT_SETTINGS.language,
-      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT_SETTINGS.model,
+      quality: normalizedQuality,
+      model: model.length > 0 ? model : defaultModel,
     };
   }
 
@@ -1038,16 +1054,6 @@
       normalized === "local"
     ) {
       return normalized as SkillRegistrationScope;
-    }
-    return null;
-  }
-
-  function normalizeOsEnvCaptureMode(
-    value: string | null | undefined,
-  ): OsEnvCaptureModeChoice | null {
-    const normalized = (value ?? "").trim().toLowerCase();
-    if (normalized === "login_shell" || normalized === "process_env") {
-      return normalized as OsEnvCaptureModeChoice;
     }
     return null;
   }
@@ -1098,7 +1104,9 @@
     appLanguage = normalizeAppLanguage(value);
   }
 
-  async function checkOsEnvCapturePromptOnStartup() {
+  async function checkOsEnvCaptureOnStartup() {
+    // OS env capture is now automatic (login_shell on Unix, process_env on Windows).
+    // No prompt needed - just mark as resolved and check readiness.
     if (!isTauriRuntimeAvailable()) {
       startupOsEnvCaptureResolved = true;
       return;
@@ -1106,59 +1114,12 @@
 
     try {
       const { invoke } = await import("$lib/tauriInvoke");
-      const status = await invoke<OsEnvCaptureStatus>("get_os_env_capture_status");
-      const mode = normalizeOsEnvCaptureMode(status.configuredMode);
-      osEnvReady = !!status.ready;
-
-      if (mode) {
-        osEnvCapturePromptOpen = false;
-        startupOsEnvCaptureResolved = true;
-        return;
-      }
-
-      osEnvCaptureSelection = "process_env";
-      osEnvCapturePromptError = null;
-      osEnvCapturePromptOpen = true;
-    } catch (err) {
-      osEnvCapturePromptOpen = false;
-      osEnvCapturePromptError = null;
+      osEnvReady = await invoke<boolean>("is_os_env_ready");
       startupOsEnvCaptureResolved = true;
-      console.error("Failed to check startup os env capture mode:", err);
-    }
-  }
-
-  async function applyStartupOsEnvCaptureSelection() {
-    if (osEnvCapturePromptBusy) return;
-    osEnvCapturePromptBusy = true;
-    osEnvCapturePromptError = null;
-
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const status = await invoke<OsEnvCaptureStatus>("set_os_env_capture_mode", {
-        mode: osEnvCaptureSelection,
-      });
-      osEnvReady = !!status.ready;
-      osEnvCapturePromptOpen = false;
-      startupOsEnvCaptureResolved = true;
-
-      if (status.captureInFlight) {
-        showToast("Loading login shell environment in background...", 7000);
-      }
     } catch (err) {
-      osEnvCapturePromptError = toErrorMessage(err);
-    } finally {
-      osEnvCapturePromptBusy = false;
+      startupOsEnvCaptureResolved = true;
+      console.error("Failed to check os env capture status:", err);
     }
-  }
-
-  function continueStartupWithProcessEnvFallback() {
-    // Fallback path when persisting startup mode fails (e.g. config permission/corruption):
-    // continue app startup with the already-available process environment snapshot.
-    osEnvCaptureSelection = "process_env";
-    osEnvReady = true;
-    startupOsEnvCaptureResolved = true;
-    osEnvCapturePromptOpen = false;
-    showToast("Startup mode could not be saved. Continuing with process environment.", 9000);
   }
 
   async function checkSkillScopePromptOnStartup() {
@@ -2199,6 +2160,11 @@
           showAgentLaunch = true;
         }
         break;
+      case "new-terminal":
+        if (projectPath) {
+          await handleNewTerminal();
+        }
+        break;
       case "cleanup-worktrees":
         if (projectPath) {
           cleanupPreselectedBranch = null;
@@ -2577,7 +2543,10 @@
       getFallbackTerminalPaneId: readVoiceFallbackTerminalPaneId,
       onStateChange: (state: VoiceControllerState) => {
         voiceInputListening = state.listening;
+        voiceInputPreparing = state.preparing;
         voiceInputSupported = state.supported;
+        voiceInputAvailable = state.available;
+        voiceInputAvailabilityReason = state.availabilityReason;
         voiceInputError = state.error;
       },
     });
@@ -2590,8 +2559,11 @@
         voiceController = null;
       }
       voiceInputListening = false;
+      voiceInputPreparing = false;
       voiceInputError = null;
       voiceInputSupported = true;
+      voiceInputAvailable = false;
+      voiceInputAvailabilityReason = null;
     };
   });
 
@@ -2763,16 +2735,12 @@
       {terminalCount}
       {osEnvReady}
       voiceInputEnabled={voiceInputSettings.enabled}
-      {voiceInputListening}
-      {voiceInputSupported}
-      {voiceInputError}
-      cpuUsage={systemMonitor.cpuUsage}
-      memUsed={systemMonitor.memUsed}
-      memTotal={systemMonitor.memTotal}
-      onopenAboutSystem={() => {
-        aboutInitialTab = "system";
-        showAbout = true;
-      }}
+      voiceInputListening={voiceInputListening}
+      voiceInputPreparing={voiceInputPreparing}
+      voiceInputSupported={voiceInputSupported}
+      voiceInputAvailable={voiceInputAvailable}
+      voiceInputAvailabilityReason={voiceInputAvailabilityReason}
+      voiceInputError={voiceInputError}
     />
   </div>
 {/if}
@@ -2920,59 +2888,6 @@
   onClose={handleLaunchModalClose}
   onUseExisting={handleUseExistingBranch}
 />
-{#if osEnvCapturePromptOpen}
-  <div class="overlay">
-    <div class="os-env-dialog" role="dialog" aria-modal="true" aria-label="Startup shell environment mode">
-      <h2>Terminal Environment Setup</h2>
-      <p class="os-env-dialog-text">
-        Choose how gwt should prepare terminal environment variables at startup.
-      </p>
-      <div class="os-env-choice-grid">
-        <button
-          class={`os-env-choice ${osEnvCaptureSelection === "process_env" ? "active" : ""}`}
-          onclick={() => (osEnvCaptureSelection = "process_env")}
-          disabled={osEnvCapturePromptBusy}
-        >
-          <strong>Use Process Environment (Recommended)</strong>
-          <span>
-            Starts immediately and avoids extra macOS permission prompts.
-          </span>
-        </button>
-        <button
-          class={`os-env-choice ${osEnvCaptureSelection === "login_shell" ? "active" : ""}`}
-          onclick={() => (osEnvCaptureSelection = "login_shell")}
-          disabled={osEnvCapturePromptBusy}
-        >
-          <strong>Capture Login Shell Environment</strong>
-          <span>
-            Imports login shell variables (PATH etc.) but may trigger macOS access dialogs.
-          </span>
-        </button>
-      </div>
-      {#if osEnvCapturePromptError}
-        <p class="os-env-dialog-error">{osEnvCapturePromptError}</p>
-      {/if}
-      <div class="os-env-dialog-actions">
-        {#if osEnvCapturePromptError}
-          <button
-            class="about-close"
-            onclick={continueStartupWithProcessEnvFallback}
-            disabled={osEnvCapturePromptBusy}
-          >
-            Continue with Process Env
-          </button>
-        {/if}
-        <button
-          class="about-close"
-          onclick={() => void applyStartupOsEnvCaptureSelection()}
-          disabled={osEnvCapturePromptBusy}
-        >
-          {osEnvCapturePromptBusy ? "Applying..." : "Save and Continue"}
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
 {#if skillScopePromptOpen}
   <div class="overlay modal-overlay">
     <div class="scope-dialog modal-dialog-shell" role="dialog" aria-modal="true" aria-label="Skill registration scope">
@@ -3252,87 +3167,6 @@
     font-size: var(--ui-font-md);
   }
 
-  .os-env-dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 24px 26px;
-    max-width: 720px;
-    width: min(720px, 92vw);
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .os-env-dialog h2 {
-    font-size: var(--ui-font-xl);
-    font-weight: 800;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
-  .os-env-dialog-text {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: var(--ui-font-md);
-    line-height: 1.5;
-  }
-
-  .os-env-choice-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
-  }
-
-  .os-env-choice {
-    text-align: left;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    color: var(--text-secondary);
-    padding: 12px;
-    cursor: pointer;
-    font-family: inherit;
-    font-size: var(--ui-font-md);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .os-env-choice strong {
-    color: var(--text-primary);
-    font-size: var(--ui-font-md);
-  }
-
-  .os-env-choice span {
-    font-size: var(--ui-font-sm);
-    color: var(--text-muted);
-    line-height: 1.35;
-  }
-
-  .os-env-choice:hover:not(:disabled),
-  .os-env-choice.active {
-    border-color: var(--accent);
-    background: var(--bg-surface);
-  }
-
-  .os-env-choice:disabled {
-    opacity: 0.7;
-    cursor: default;
-  }
-
-  .os-env-dialog-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .os-env-dialog-error {
-    margin: 0;
-    color: rgb(255, 160, 160);
-    font-size: var(--ui-font-sm);
-  }
-
   .scope-dialog {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
@@ -3416,10 +3250,6 @@
   }
 
   @media (max-width: 860px) {
-    .os-env-choice-grid {
-      grid-template-columns: 1fr;
-    }
-
     .scope-choice-grid {
       grid-template-columns: 1fr;
     }

@@ -34,9 +34,12 @@ const settingsFixture: SettingsData = {
   app_language: "auto",
   voice_input: {
     enabled: false,
+    engine: "qwen3-asr",
     hotkey: "Mod+Shift+M",
+    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
-    model: "base",
+    quality: "balanced",
+    model: "Qwen/Qwen3-ASR-1.7B",
   },
 };
 
@@ -975,13 +978,19 @@ describe("SettingsPanel", () => {
     const invalidVoiceSettings = structuredClone(settingsFixture);
     invalidVoiceSettings.voice_input = {
       enabled: true,
+      engine: "whisper",
       hotkey: "",
+      ptt_hotkey: "",
       language: "xx" as "auto",
+      quality: "bad" as "balanced",
       model: "",
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(invalidVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_voice_capability") {
+        return { available: true, reason: null };
+      }
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -998,17 +1007,22 @@ describe("SettingsPanel", () => {
 
     const voiceEnabled = rendered.container.querySelector("#voice-input-enabled") as HTMLInputElement;
     const voiceHotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement;
+    const voicePttHotkey = rendered.container.querySelector("#voice-ptt-hotkey") as HTMLInputElement;
     const voiceLanguage = rendered.container.querySelector("#voice-language") as HTMLSelectElement;
+    const voiceQuality = rendered.container.querySelector("#voice-quality") as HTMLSelectElement;
     const voiceModel = rendered.container.querySelector("#voice-model") as HTMLInputElement;
 
     expect(voiceEnabled.checked).toBe(true);
     expect(voiceHotkey.value).toBe("Mod+Shift+M");
+    expect(voicePttHotkey.value).toBe("Mod+Shift+Space");
     expect(voiceLanguage.value).toBe("auto");
-    expect(voiceModel.value).toBe("base");
+    expect(voiceQuality.value).toBe("balanced");
+    expect(voiceModel.value).toBe("Qwen/Qwen3-ASR-1.7B");
 
     await fireEvent.input(voiceHotkey, { target: { value: "  Ctrl+M  " } });
+    await fireEvent.input(voicePttHotkey, { target: { value: "Ctrl+Shift+Space" } });
     await fireEvent.change(voiceLanguage, { target: { value: "ja" } });
-    await fireEvent.input(voiceModel, { target: { value: "small" } });
+    await fireEvent.change(voiceQuality, { target: { value: "fast" } });
     await fireEvent.click(voiceEnabled);
 
     await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
@@ -1017,9 +1031,12 @@ describe("SettingsPanel", () => {
         settings: expect.objectContaining({
           voice_input: expect.objectContaining({
             enabled: false,
+            engine: "qwen3-asr",
             hotkey: "Ctrl+M",
+            ptt_hotkey: "Ctrl+Shift+Space",
             language: "ja",
-            model: "small",
+            quality: "fast",
+            model: "Qwen/Qwen3-ASR-0.6B",
           }),
         }),
       });

@@ -64,6 +64,17 @@
     return !!el && rootEl.contains(el);
   }
 
+  function hasFocusedModalOutsideTerminal(rootEl: HTMLElement): boolean {
+    const activeEl = document.activeElement;
+    if (!(activeEl instanceof HTMLElement)) return false;
+    if (rootEl.contains(activeEl)) return false;
+
+    const modalHost = activeEl.closest(
+      '[role="dialog"][aria-modal="true"], dialog[open], .modal-overlay',
+    );
+    return modalHost instanceof HTMLElement;
+  }
+
   function focusTerminalIfNeeded(rootEl: HTMLElement, immediate = false) {
     if (!active) return;
     if (!terminal) return;
@@ -112,6 +123,7 @@
       window.setTimeout(focusIfNeeded, 60),
       window.setTimeout(focusIfNeeded, 200),
       window.setTimeout(focusIfNeeded, 500),
+      window.setTimeout(focusIfNeeded, 1200),
     ];
 
     return () => {
@@ -446,7 +458,23 @@
       event.preventDefault();
       event.stopImmediatePropagation();
     };
+    const handleRootPointerDown = () => {
+      focusTerminalIfNeeded(rootEl, true);
+    };
+    const handleWindowFocus = () => {
+      if (hasFocusedModalOutsideTerminal(rootEl)) return;
+      focusTerminalIfNeeded(rootEl, true);
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      if (hasFocusedModalOutsideTerminal(rootEl)) return;
+      focusTerminalIfNeeded(rootEl);
+    };
+
+    rootEl.addEventListener("pointerdown", handleRootPointerDown, { capture: true });
     rootEl.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
@@ -618,7 +646,10 @@
         unlisten();
       }
       rootEl.removeEventListener("paste", handlePaste);
+      rootEl.removeEventListener("pointerdown", handleRootPointerDown, true);
       rootEl.removeEventListener("wheel", handleWheel, true);
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       window.removeEventListener("gwt-terminal-font-family", handleFontFamilyChange);
