@@ -84,6 +84,7 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux
