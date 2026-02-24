@@ -38,7 +38,7 @@ git rev-parse --abbrev-ref HEAD
 ### 2. リモート同期
 
 ```bash
-git fetch origin main develop
+git fetch origin main develop --tags
 git pull origin develop
 ```
 
