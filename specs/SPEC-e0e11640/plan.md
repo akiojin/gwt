@@ -11,7 +11,7 @@
 - **バックエンド**: Rust 2021 + Tauri v2（`crates/gwt-tauri/`）
 - **CI/配布**: GitHub Actions release workflow（`.github/workflows/release.yml`）
 - **テスト**: `codesign`, `spctl`, `xcrun notarytool`, `xcrun stapler`
-- **前提**: Apple Developer ID 証明書と Notary API Key を GitHub Secrets に登録済み
+- **前提**: Apple Developer ID 証明書と Apple ID ベースの Notary 認証情報を GitHub Secrets に登録済み
 
 ## 実装方針
 

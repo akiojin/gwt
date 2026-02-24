@@ -62,7 +62,8 @@ macOS ユーザーとして、リリース版の gwt をインストール後に
 ## 制約と仮定
 
 - 署名/公証に必要な Apple Developer ID 証明書と Notary API Key が GitHub Secrets に登録済みであることを前提とする。
-- 署名の詳細値（Identity 名・Team ID）は Secrets で与える。
+- 署名は `APPLE_CERT_APP_BASE64` / `APPLE_CERTIFICATE_PASSWORD` の証明書で行い、identity はキーチェーンから自動選択する。
+- 公証は `APPLE_ID` / `APPLE_ID_PASSWORD` / `APPLE_TEAM_ID` を利用する。
 
 ## 成功基準 *(必須)*
 
