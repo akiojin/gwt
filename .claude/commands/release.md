@@ -38,7 +38,7 @@ git rev-parse --abbrev-ref HEAD
 ### 2. リモート同期
 
 ```bash
-git fetch origin main develop
+git fetch origin main develop --tags
 git pull origin develop
 ```
 
@@ -144,38 +144,65 @@ else
 fi
 ```
 
-次に、リリース範囲内のマージ済みPR本文とコミット本文から、closing keyword を使っている Issue 番号を抽出：
+#### 8.1 リリース範囲内の PR 番号を収集
+
+squash マージとマージコミットの両方から PR 番号を抽出：
 
 ```bash
-MERGED_PRS=$(git log --merges --pretty=%s "$RANGE" \
+# squash マージ: コミットメッセージ末尾の (#N) から PR 番号を抽出
+SQUASH_PRS=$(git log --pretty=%s "$RANGE" --no-merges \
+  | grep -Eo '\(#[0-9]+\)$' \
+  | grep -Eo '[0-9]+' \
+  | sort -u)
+
+# マージコミット: "Merge pull request #N" から PR 番号を抽出
+MERGE_PRS=$(git log --merges --pretty=%s "$RANGE" \
   | sed -n 's/^Merge pull request #\([0-9]\+\).*$/\1/p' \
   | sort -u)
 
-ISSUE_NUMBERS=""
-for PR_NUMBER in $MERGED_PRS; do
+# 結合・重複排除
+ALL_PRS=$(printf '%s\n%s\n' "$SQUASH_PRS" "$MERGE_PRS" | awk 'NF' | sort -nu)
+```
+
+#### 8.2 各 PR の本文から Closing Issue 番号を抽出
+
+**重要**: コミットメッセージからは抽出しないこと。コミットタイトルの `(#N)` は PR 番号であり Issue 番号ではない。
+
+```bash
+CANDIDATE_ISSUES=""
+for PR_NUMBER in $ALL_PRS; do
   PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || true)
   if [ -n "$PR_BODY" ]; then
     FOUND=$(printf '%s\n' "$PR_BODY" \
-      | grep -Ei '(close[sd]?|fix(e[sd])?|resolve[sd]?)' \
+      | grep -Eio '(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#[0-9]+' \
       | grep -Eo '#[0-9]+' \
       | tr -d '#' || true)
     if [ -n "$FOUND" ]; then
-      ISSUE_NUMBERS="${ISSUE_NUMBERS}\n${FOUND}"
+      CANDIDATE_ISSUES="${CANDIDATE_ISSUES}\n${FOUND}"
     fi
   fi
 done
 
-COMMIT_FOUND=$(git log --format=%B "$RANGE" \
-  | grep -Ei '(close[sd]?|fix(e[sd])?|resolve[sd]?)' \
-  | grep -Eo '#[0-9]+' \
-  | tr -d '#' || true)
-
-ISSUE_NUMBERS=$(printf '%b\n%s\n' "$ISSUE_NUMBERS" "$COMMIT_FOUND" \
-  | awk 'NF' \
-  | sort -nu)
+CANDIDATE_ISSUES=$(printf '%b\n' "$CANDIDATE_ISSUES" | awk 'NF' | sort -nu)
 ```
 
-`ISSUE_NUMBERS` が空でなければ、PR本文の `## Closing Issues` セクションに **1行ずつ** 以下を追加：
+#### 8.3 Issue であることを検証（PR 番号を除外）
+
+収集した番号には PR 番号が含まれる可能性があるため、GitHub API で Issue であることを確認する。`pull_request` フィールドが存在すれば PR なので除外：
+
+```bash
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+ISSUE_NUMBERS=""
+for NUM in $CANDIDATE_ISSUES; do
+  IS_PR=$(gh api "repos/$REPO/issues/$NUM" --jq '.pull_request // empty' 2>/dev/null || true)
+  if [ -z "$IS_PR" ]; then
+    ISSUE_NUMBERS="${ISSUE_NUMBERS} ${NUM}"
+  fi
+done
+ISSUE_NUMBERS=$(echo "$ISSUE_NUMBERS" | tr ' ' '\n' | awk 'NF' | sort -nu)
+```
+
+`ISSUE_NUMBERS` が空でなければ、PR 本文の `## Closing Issues` セクションに **1行ずつ** 以下を追加：
 
 ```text
 Closes #123

@@ -181,11 +181,23 @@ fn resolve_worktree_path(
     let normalized = strip_known_remote_prefix(branch_ref, &remotes);
 
     if let Ok(Some(wt)) = manager.get_by_branch_basic(normalized) {
+        if !wt.path.exists() {
+            return Err(format!(
+                "Worktree path does not exist: {}",
+                wt.path.display()
+            ));
+        }
         return Ok((wt.path, false));
     }
     // Rare: worktree registered with the raw remote-like name.
     if normalized != branch_ref {
         if let Ok(Some(wt)) = manager.get_by_branch_basic(branch_ref) {
+            if !wt.path.exists() {
+                return Err(format!(
+                    "Worktree path does not exist: {}",
+                    wt.path.display()
+                ));
+            }
             return Ok((wt.path, false));
         }
     }
@@ -1880,6 +1892,7 @@ fn launch_with_wsl_pty_write(
         agent_color,
         env_vars: HashMap::new(), // WSL login shell handles base env
         terminal_shell: Some("wsl".to_string()),
+        interactive: true,
     };
 
     let pane_id = {
@@ -1955,6 +1968,7 @@ fn launch_with_wsl_pty_write(
         agent_color,
         env_vars: HashMap::new(),
         terminal_shell: Some("wsl".to_string()),
+        interactive: false,
     };
 
     launch_with_config(&repo_path, fallback_config, meta, state, app_handle)
@@ -1993,6 +2007,7 @@ pub fn launch_terminal(
         agent_color: AgentColor::Green,
         env_vars: HashMap::new(),
         terminal_shell: None,
+        interactive: false,
     };
 
     launch_with_config(&repo_path, config, None, &state, app_handle)
@@ -2144,6 +2159,7 @@ pub fn spawn_shell(
         agent_color: AgentColor::White,
         env_vars: HashMap::new(),
         terminal_shell: terminal_shell_tag,
+        interactive: true,
     };
 
     let pane_id = {
@@ -2521,6 +2537,7 @@ mod tests {
                 cols: 80,
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             })
             .expect("failed to create test pane");
 
@@ -2581,6 +2598,7 @@ mod tests {
                 cols: 80,
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             })
             .expect("failed to create running pane");
 
@@ -2597,6 +2615,7 @@ mod tests {
                 cols: 80,
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             })
             .expect("failed to create done pane");
 
@@ -2652,6 +2671,7 @@ mod tests {
                 cols: 80,
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             })
             .expect("failed to create test pane");
 
@@ -2693,6 +2713,7 @@ mod tests {
                 cols: 80,
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             })
             .expect("failed to create test pane");
 
@@ -2743,6 +2764,7 @@ mod tests {
                 cols: 80,
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             })
             .expect("failed to create test pane");
 
@@ -3371,6 +3393,7 @@ services:
                 cols: 80,
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             })
             .expect("failed to create test pane");
 
@@ -4258,6 +4281,7 @@ pub(crate) fn launch_agent_for_project_root(
                 agent_color: agent_color_for(agent_id),
                 env_vars: docker_env.clone(),
                 terminal_shell: None,
+                interactive: false,
             }
         }
         DockerExecMode::DockerRun {
@@ -4322,6 +4346,7 @@ pub(crate) fn launch_agent_for_project_root(
                 agent_color: agent_color_for(agent_id),
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             }
         }
         DockerExecMode::None => {
@@ -4371,6 +4396,7 @@ pub(crate) fn launch_agent_for_project_root(
                 agent_color: agent_color_for(agent_id),
                 env_vars,
                 terminal_shell,
+                interactive: false,
             }
         }
     };
@@ -4732,6 +4758,14 @@ fn stream_pty_output(
                 stream_error = Some(err.to_string());
                 break;
             }
+        }
+    }
+
+    // Flush scrollback after the read loop ends to ensure data is persisted
+    // even when the process exits quickly.
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+            let _ = pane.flush_scrollback();
         }
     }
 

@@ -165,6 +165,7 @@ impl PaneManager {
             cols,
             env_vars: config.env_vars,
             terminal_shell: config.terminal_shell,
+            interactive: config.interactive,
         };
         let pane = TerminalPane::new(pane_config)?;
         self.add_pane(pane)?;
@@ -202,6 +203,7 @@ impl PaneManager {
             cols,
             env_vars: config.env_vars,
             terminal_shell: config.terminal_shell,
+            interactive: config.interactive,
         };
         let pane = TerminalPane::new(pane_config)?;
         self.add_pane(pane)?;
@@ -348,6 +350,7 @@ mod tests {
             cols: 80,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         })
         .expect("failed to create test pane")
     }
@@ -605,6 +608,7 @@ mod tests {
             agent_color: AgentColor::Cyan,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         };
         let pane_id = mgr.launch_agent(&repo_root, config, 24, 80).unwrap();
         assert!(!pane_id.is_empty());
@@ -629,6 +633,7 @@ mod tests {
                 agent_color: AgentColor::Green,
                 env_vars: HashMap::new(),
                 terminal_shell: None,
+                interactive: false,
             };
             mgr.launch_agent(&repo_root, config, 24, 80).unwrap();
         }
@@ -669,6 +674,7 @@ mod tests {
             agent_color: AgentColor::Green,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         };
         let pane_id1 = mgr.launch_agent(&repo_root, config1, 24, 80).unwrap();
 
@@ -681,6 +687,7 @@ mod tests {
             agent_color: AgentColor::Blue,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         };
         let pane_id2 = mgr.launch_agent(&repo_root, config2, 24, 80).unwrap();
 
@@ -767,6 +774,7 @@ mod tests {
             agent_color: AgentColor::Green,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         };
         mgr.launch_agent(&repo_root, config1, 24, 80).unwrap();
 
@@ -779,6 +787,7 @@ mod tests {
             agent_color: AgentColor::Blue,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         };
         mgr.launch_agent(&repo_root, config2, 24, 80).unwrap();
 
@@ -834,6 +843,7 @@ mod tests {
             agent_color: AgentColor::White,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         };
         let pane_id = mgr.spawn_shell(config, 24, 80).unwrap();
         assert!(!pane_id.is_empty());
@@ -860,6 +870,7 @@ mod tests {
             agent_color: AgentColor::White,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         };
         let pane_id = mgr.spawn_shell(config, 24, 80).unwrap();
         assert_eq!(mgr.pane_count(), 2);

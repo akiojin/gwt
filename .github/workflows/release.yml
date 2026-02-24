@@ -123,21 +123,19 @@ jobs:
         run: cd gwt-gui && pnpm install --frozen-lockfile
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
-      - name: Build Tauri
+      - name: Build Tauri (Linux/Windows)
+        if: matrix.platform != 'macos'
         run: cargo tauri build -- --bin gwt-tauri
+      - name: Build macOS installer (build + sign + notarize)
+        if: matrix.platform == 'macos'
+        shell: bash
         env:
-          # Disable CPU-native optimizations for whisper.cpp/ggml to avoid
-          # ARM i8mm intrinsic errors on macOS CI runners (Xcode 16.4 Apple Clang
-          # defines __ARM_FEATURE_MATMUL_INT8 with -mcpu=native+noi8mm).
-          # whisper-rs-sys passes CMAKE_* env vars as cmake defines, so we use
-          # CMAKE_TOOLCHAIN_FILE to inject GGML_NATIVE=OFF before ggml's option().
-          CMAKE_TOOLCHAIN_FILE: ${{ matrix.platform == 'macos' && format('{0}/cmake/ci-disable-native.cmake', github.workspace) || '' }}
-          # ARM Macs require macOS 11.0+; ggml uses std::filesystem (10.15+).
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos' && '11.0' || '' }}
-          # Also pass as cmake define (whisper-rs-sys forwards CMAKE_* env vars).
-          # cmake appends -mmacosx-version-min AFTER CMAKE_C_FLAGS, so the last
-          # flag (from this define) wins over the 10.13 injected by cmake-rs/cc.
-          CMAKE_OSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos' && '11.0' || '' }}
+          APPLE_CERT_APP_BASE64: ${{ secrets.APPLE_CERT_APP_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: ./installers/macos/build-installer.sh --sign --notarize
       - name: Build Windows installer (.msi)
         if: matrix.platform == 'windows'
         id: package_windows

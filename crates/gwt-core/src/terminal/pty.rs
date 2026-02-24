@@ -20,6 +20,9 @@ pub struct PtyConfig {
     pub cols: u16,
     /// Optional shell override (e.g. "powershell", "cmd", "wsl").
     pub terminal_shell: Option<String>,
+    /// Whether this is an interactive session (e.g. spawn_shell).
+    /// When true on Windows, the command is not wrapped with PowerShell.
+    pub interactive: bool,
 }
 
 fn escape_powershell_single_quoted(value: &str) -> String {
@@ -82,6 +85,7 @@ fn resolve_spawn_command_for_platform<F>(
     is_windows: bool,
     mut resolve_windows_shell: F,
     shell: Option<&str>,
+    interactive: bool,
 ) -> (String, Vec<String>)
 where
     F: FnMut() -> String,
@@ -99,6 +103,12 @@ where
                 return (command.to_string(), args.to_vec());
             }
             // "powershell" falls through to the default PowerShell path below.
+        }
+
+        // Interactive sessions (e.g. spawn_shell) must not be wrapped with
+        // PowerShell -NonInteractive, as that breaks ConPTY I/O.
+        if interactive {
+            return (command.to_string(), args.to_vec());
         }
 
         let shell = resolve_windows_shell();
@@ -124,8 +134,16 @@ fn resolve_spawn_command(
     command: &str,
     args: &[String],
     shell: Option<&str>,
+    interactive: bool,
 ) -> (String, Vec<String>) {
-    resolve_spawn_command_for_platform(command, args, cfg!(windows), resolve_windows_shell, shell)
+    resolve_spawn_command_for_platform(
+        command,
+        args,
+        cfg!(windows),
+        resolve_windows_shell,
+        shell,
+        interactive,
+    )
 }
 
 /// Handle to a PTY instance with its child process.
@@ -137,6 +155,15 @@ pub struct PtyHandle {
 impl PtyHandle {
     /// Create a new PTY, spawn the given command, and return a handle.
     pub fn new(config: PtyConfig) -> Result<Self, TerminalError> {
+        if !config.working_dir.exists() {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: format!(
+                    "Working directory does not exist: {}",
+                    config.working_dir.display()
+                ),
+            });
+        }
+
         let pty_system = native_pty_system();
 
         let size = PtySize {
@@ -156,6 +183,7 @@ impl PtyHandle {
             &config.command,
             &config.args,
             config.terminal_shell.as_deref(),
+            config.interactive,
         );
 
         let mut cmd = CommandBuilder::new(&spawn_command);
@@ -283,6 +311,7 @@ mod tests {
             true,
             || "pwsh".to_string(),
             None,
+            false,
         );
 
         assert_eq!(program, "pwsh");
@@ -309,6 +338,7 @@ mod tests {
             true,
             || "powershell.exe".to_string(),
             None,
+            false,
         );
         assert_eq!(program, "powershell.exe");
         assert_eq!(
@@ -328,8 +358,14 @@ mod tests {
     #[test]
     fn resolve_spawn_command_non_windows_keeps_original_command() {
         let args = vec!["--version".to_string()];
-        let (program, resolved_args) =
-            resolve_spawn_command_for_platform("codex", &args, false, || "pwsh".to_string(), None);
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            false,
+            || "pwsh".to_string(),
+            None,
+            false,
+        );
         assert_eq!(program, "codex");
         assert_eq!(resolved_args, args);
     }
@@ -343,6 +379,7 @@ mod tests {
             true,
             || "pwsh".to_string(),
             Some("cmd"),
+            false,
         );
         assert_eq!(program, "cmd.exe");
         assert_eq!(
@@ -367,6 +404,7 @@ mod tests {
             true,
             || "pwsh".to_string(),
             Some("cmd"),
+            false,
         );
         assert_eq!(program, "cmd.exe");
         assert_eq!(
@@ -395,6 +433,7 @@ mod tests {
             true,
             || "pwsh".to_string(),
             Some("powershell"),
+            false,
         );
         assert_eq!(program, "pwsh");
         assert_eq!(
@@ -468,6 +507,7 @@ mod tests {
             rows: 24,
             cols: 80,
             terminal_shell: None,
+            interactive: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -497,6 +537,7 @@ mod tests {
             rows: 24,
             cols: 80,
             terminal_shell: None,
+            interactive: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -537,6 +578,7 @@ mod tests {
             rows: 24,
             cols: 80,
             terminal_shell: None,
+            interactive: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -554,6 +596,7 @@ mod tests {
             rows: 24,
             cols: 80,
             terminal_shell: None,
+            interactive: false,
         };
 
         let mut handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -581,6 +624,7 @@ mod tests {
             rows: 24,
             cols: 80,
             terminal_shell: None,
+            interactive: false,
         };
 
         let result = PtyHandle::new(config);
@@ -593,6 +637,65 @@ mod tests {
             assert!(
                 !reason.is_empty(),
                 "Error reason should not be empty: {reason}"
+            );
+        } else {
+            panic!("Expected TerminalError::PtyCreationFailed");
+        }
+    }
+
+    #[test]
+    fn resolve_spawn_command_interactive_windows_passes_through() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "pwsh",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            true,
+        );
+        assert_eq!(program, "pwsh");
+        assert_eq!(resolved_args, vec!["--version".to_string()]);
+    }
+
+    #[test]
+    fn resolve_spawn_command_interactive_non_windows_unchanged() {
+        let args = vec!["-l".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "/bin/zsh",
+            &args,
+            false,
+            || "pwsh".to_string(),
+            None,
+            true,
+        );
+        assert_eq!(program, "/bin/zsh");
+        assert_eq!(resolved_args, vec!["-l".to_string()]);
+    }
+
+    #[test]
+    fn test_pty_creation_fails_with_nonexistent_working_dir() {
+        let config = PtyConfig {
+            command: "/bin/echo".to_string(),
+            args: vec!["hello".to_string()],
+            working_dir: PathBuf::from("/nonexistent/path/that/does/not/exist"),
+            env_vars: HashMap::new(),
+            rows: 24,
+            cols: 80,
+            terminal_shell: None,
+            interactive: false,
+        };
+
+        let result = PtyHandle::new(config);
+        assert!(
+            result.is_err(),
+            "Creating PTY with nonexistent working dir should fail"
+        );
+
+        if let Err(TerminalError::PtyCreationFailed { reason }) = result {
+            assert!(
+                reason.contains("Working directory does not exist"),
+                "Error should mention working directory: {reason}"
             );
         } else {
             panic!("Expected TerminalError::PtyCreationFailed");

@@ -31,6 +31,8 @@ pub struct PaneConfig {
     pub env_vars: HashMap<String, String>,
     /// Optional shell override (e.g. "powershell", "cmd", "wsl").
     pub terminal_shell: Option<String>,
+    /// Whether this is an interactive session (e.g. spawn_shell).
+    pub interactive: bool,
 }
 
 /// A terminal pane integrating PTY and scrollback.
@@ -62,6 +64,7 @@ impl TerminalPane {
             rows: config.rows,
             cols: config.cols,
             terminal_shell: config.terminal_shell,
+            interactive: config.interactive,
         };
 
         let pty = PtyHandle::new(pty_config)?;
@@ -243,6 +246,7 @@ mod tests {
             cols: 80,
             env_vars: HashMap::new(),
             terminal_shell: None,
+            interactive: false,
         }
     }
 
