@@ -17,7 +17,9 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-25251fb9](SPEC-25251fb9/spec.md) | バグ修正: ターミナル行数増加時のトラックパッドスクロール不能 | 2026-02-24 |
 | [SPEC-434cef4e](SPEC-434cef4e/spec.md) | バグ修正仕様: v7.11.0 起動不能（Issue #1219） | 2026-02-24 |
+| [SPEC-e0e11640](SPEC-e0e11640/spec.md) | バグ修正仕様: macOS リリースの署名/公証を必須化して Gatekeeper エラーを防止 | 2026-02-24 |
 | [SPEC-c2d9e741](SPEC-c2d9e741/spec.md) | 機能仕様: マイグレーション時の `Directory not empty` を非致命化 | 2026-02-23 |
 | [SPEC-748cead5](SPEC-748cead5/spec.md) | 機能仕様: macOS で断続的にターミナル入力不能になる事象の抑止 | 2026-02-22 |
 | [SPEC-b3f1a4e2](SPEC-b3f1a4e2/spec.md) | 機能仕様: Worktree 作成時に upstream tracking を自動設定 | 2026-02-22 |
