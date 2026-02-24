@@ -180,9 +180,30 @@ if [[ -n "$SIGN" ]]; then
   ok "Code signing verified"
 
   # 3c. Rebuild DMG with signed app
+  #     cargo tauri build --bundles dmg re-creates the .app bundle, which strips
+  #     the codesign. Use hdiutil directly to preserve the signed .app in the DMG.
   info "Rebuilding DMG with signed app..."
-  (cd "$REPO_ROOT" && cargo tauri build --bundles dmg -- --bin gwt-tauri)
-  ok "DMG rebuilt"
+
+  # Find the existing DMG to determine the output filename
+  EXISTING_DMG="$(find "$DMG_DIR" -maxdepth 1 -type f -name '*.dmg' | head -n 1)"
+  if [[ -z "$EXISTING_DMG" ]]; then
+    err "No existing DMG found in ${DMG_DIR} to replace"
+    exit 1
+  fi
+  DMG_FILENAME="$(basename "$EXISTING_DMG")"
+
+  # Remove old DMG and create a new one from the signed .app
+  rm -f "$EXISTING_DMG"
+  STAGING_DIR="$(mktemp -d)"
+  cp -R "$APP_PATH" "${STAGING_DIR}/${APP_NAME}.app"
+  hdiutil create \
+    -volname "$APP_NAME" \
+    -srcfolder "$STAGING_DIR" \
+    -ov \
+    -format UDZO \
+    "${DMG_DIR}/${DMG_FILENAME}"
+  rm -rf "$STAGING_DIR"
+  ok "DMG rebuilt (${DMG_FILENAME})"
 fi
 
 # --- 4. Notarization -------------------------------------------------------
