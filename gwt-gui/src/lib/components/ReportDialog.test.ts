@@ -190,7 +190,7 @@ describe("ReportDialog", () => {
     });
   });
 
-  it("submits bug report via create_github_issue", async () => {
+  it("submits bug report via create_github_issue and calls onsuccess", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "detect_report_target") {
         return { owner: "akiojin", repo: "gwt", display: "akiojin/gwt" };
@@ -201,10 +201,12 @@ describe("ReportDialog", () => {
       return {};
     });
 
+    const onsuccess = vi.fn();
     const rendered = await renderReportDialog({
       open: true,
       mode: "bug",
       onclose: vi.fn(),
+      onsuccess,
     });
 
     const titleInput = rendered.getByLabelText("Title") as HTMLInputElement;
@@ -213,9 +215,11 @@ describe("ReportDialog", () => {
     await fireEvent.click(rendered.getByText("Submit"));
 
     await waitFor(() => {
-      expect(
-        rendered.getByText("Issue #42 created successfully."),
-      ).toBeTruthy();
+      expect(onsuccess).toHaveBeenCalledTimes(1);
+      expect(onsuccess).toHaveBeenCalledWith({
+        url: "https://github.com/akiojin/gwt/issues/42",
+        number: 42,
+      });
     });
 
     expect(invokeMock).toHaveBeenCalledWith(
@@ -444,7 +448,7 @@ describe("ReportDialog", () => {
     });
   });
 
-  it("submits feature request with enhancement label", async () => {
+  it("submits feature request with enhancement label and calls onsuccess", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "detect_report_target") {
         return { owner: "akiojin", repo: "gwt", display: "akiojin/gwt" };
@@ -455,10 +459,12 @@ describe("ReportDialog", () => {
       return {};
     });
 
+    const onsuccess = vi.fn();
     const rendered = await renderReportDialog({
       open: true,
       mode: "feature",
       onclose: vi.fn(),
+      onsuccess,
     });
 
     const titleInput = rendered.getByLabelText("Title") as HTMLInputElement;
@@ -466,9 +472,11 @@ describe("ReportDialog", () => {
     await fireEvent.click(rendered.getByText("Submit"));
 
     await waitFor(() => {
-      expect(
-        rendered.getByText("Issue #99 created successfully."),
-      ).toBeTruthy();
+      expect(onsuccess).toHaveBeenCalledTimes(1);
+      expect(onsuccess).toHaveBeenCalledWith({
+        url: "https://github.com/akiojin/gwt/issues/99",
+        number: 99,
+      });
     });
 
     expect(invokeMock).toHaveBeenCalledWith(
