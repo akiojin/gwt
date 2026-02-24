@@ -573,6 +573,7 @@ mod tests {
             cols: 80,
             env_vars: Default::default(),
             terminal_shell: None,
+            interactive: false,
         })
         .expect("failed to create test pane");
 
