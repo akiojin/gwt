@@ -3036,6 +3036,10 @@
   screenCaptureBranch={currentBranch}
   screenCaptureActiveTab={tabs.find((t) => t.id === activeTabId)?.label ?? activeTabId}
   onclose={() => { reportDialogOpen = false; }}
+  onsuccess={(result) => {
+    reportDialogOpen = false;
+    showToast(`Issue #${result.number} created successfully.`, 8000);
+  }}
 />
 
 <style>
