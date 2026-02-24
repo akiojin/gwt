@@ -12,7 +12,7 @@ const SESSION_SYSTEM_PROMPT_EN: &str = "You are a helpful assistant summarizing 
 const SESSION_SYSTEM_PROMPT_JA: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nRespond in Japanese.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## 目的\n<1文: Worktree/ブランチで達成する成果（Why） + 重要な制約 + 明示された除外>\n\n## 要約\n<1-2文: 現在ステータス（明確な状態語を使う）+ 最新のユーザー指示。ブロックされているなら明記>\n\n## ハイライト\n- <元の依頼: ...>\n- <最新指示: ...>\n- <決定事項/制約: ...>\n- <除外/やらないこと: ...>\n- <ステータス: ...>\n- <進捗: ...>\n- <直近の意味のある行動（1-3件）: ...>\n- <ユーザーに必要な入力（質問として）: ...>\n- <キーワード（3つ）: ...>\n\n重要な項目があれば箇条書きを追加してよいが、簡潔にすること。\n進捗がない場合は、その旨と理由を書くこと。\nユーザー入力待ちの場合は、必要な質問をそのまま書くこと。\n推測しない。不明な点は不明と明記すること。\n各箇条書きは短いラベル + \":\" で始め、ラベルも日本語にすること。\n見出しと本文はすべて日本語にすること。\nJSONやコードフェンス、余計なテキストを出力しないこと。\n\n目的の記述ルール:\n- 目的にはWorktree/ブランチの達成成果（Why）を書く。\n- PR/MR作成、PR本文テンプレート記入、merge/push、ステータス確認は手段（How）として扱い、目的にしない。\n\n以下の運用的なやり取りは、方向性が変わる内容を除き無視すること:\n- PR/MR作成、ブランチ操作、テスト/ビルド/CI、短いステータス更新\n- 要約はユーザー意図、決定事項、制約、結果、ブロッカー、未完了作業に集中する\n- ブロッキングや設計判断を含まない1行の相槌は無視する\n会話の中身を優先し、コマンド履歴に引っ張られないこと。";
 
 const MAX_MESSAGE_CHARS: usize = 220;
-const MAX_PROMPT_CHARS: usize = 8000;
+const MAX_PROMPT_CHARS: usize = 16000;
 const MAX_PURPOSE_TEXT_CHARS: usize = 180;
 
 const PURPOSE_KEYWORDS: &[&str] = &[
@@ -673,20 +673,188 @@ fn should_preserve_short_status_message(text: &str) -> bool {
         .any(|keyword| lowered.contains(keyword))
 }
 
+/// Filters noise from terminal scrollback text before AI summarization.
+///
+/// Applies the following line-level filters:
+/// - Removes AI thinking indicator lines (e.g. "Musing...", "Thinking...")
+/// - Removes progress bar / spinner lines
+/// - Collapses 3+ consecutive identical non-blank lines into 1 + `[repeated N times]`
+/// - Collapses 2+ consecutive blank lines into 1
+/// - Compresses 10+ consecutive build-output lines (Compiling, Downloading, etc.)
+fn filter_scrollback_noise(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    // First pass: remove single-line noise
+    let filtered: Vec<&str> = lines
+        .into_iter()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !is_ai_thinking_indicator(trimmed) && !is_progress_spinner_line(trimmed)
+        })
+        .collect();
+
+    // Second pass: deduplicate consecutive identical non-blank lines
+    let mut deduped: Vec<String> = Vec::with_capacity(filtered.len());
+    let mut i = 0;
+    while i < filtered.len() {
+        let current = filtered[i];
+        // Skip blank lines here; pass 3 collapses them silently.
+        if current.trim().is_empty() {
+            deduped.push(current.to_string());
+            i += 1;
+            continue;
+        }
+        let mut count = 1usize;
+        while i + count < filtered.len() && filtered[i + count] == current {
+            count += 1;
+        }
+        deduped.push(current.to_string());
+        if count >= 3 {
+            deduped.push(format!("[repeated {} times]", count));
+        } else {
+            for _ in 1..count {
+                deduped.push(current.to_string());
+            }
+        }
+        i += count;
+    }
+
+    // Third pass: collapse consecutive blank lines (3+ → 1)
+    let mut collapsed: Vec<String> = Vec::with_capacity(deduped.len());
+    let mut blank_run = 0usize;
+    for line in &deduped {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                collapsed.push(line.clone());
+            }
+        } else {
+            blank_run = 0;
+            collapsed.push(line.clone());
+        }
+    }
+
+    // Fourth pass: compress build output runs (10+ lines → first + [...N lines...] + last)
+    let mut result: Vec<String> = Vec::with_capacity(collapsed.len());
+    let mut j = 0;
+    while j < collapsed.len() {
+        if is_build_output_line(collapsed[j].trim()) {
+            let run_start = j;
+            while j < collapsed.len() && is_build_output_line(collapsed[j].trim()) {
+                j += 1;
+            }
+            let run_len = j - run_start;
+            if run_len >= 10 {
+                result.push(collapsed[run_start].clone());
+                result.push(format!("[...{} lines...]", run_len - 2));
+                result.push(collapsed[j - 1].clone());
+            } else {
+                for item in collapsed.iter().take(j).skip(run_start) {
+                    result.push(item.clone());
+                }
+            }
+        } else {
+            result.push(collapsed[j].clone());
+            j += 1;
+        }
+    }
+
+    result.join("\n")
+}
+
+fn is_ai_thinking_indicator(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Short single-line status with trailing ellipsis
+    if trimmed.chars().count() > 40 {
+        return false;
+    }
+    let lowered = trimmed.to_lowercase();
+    const INDICATORS: &[&str] = &[
+        "musing",
+        "thinking",
+        "reasoning",
+        "pondering",
+        "analyzing",
+        "considering",
+        "processing",
+        "generating",
+        "searching",
+        "planning",
+        "reflecting",
+        "evaluating",
+    ];
+    INDICATORS.iter().any(|ind| {
+        lowered.starts_with(ind)
+            && (lowered.ends_with("...") || lowered.ends_with('…') || lowered == *ind)
+    })
+}
+
+fn is_progress_spinner_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Common spinner characters
+    const SPINNERS: &[char] = &[
+        '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '|', '/', '-', '\\',
+    ];
+    if trimmed.chars().count() <= 3 && trimmed.chars().all(|c| SPINNERS.contains(&c) || c == ' ') {
+        return true;
+    }
+    // Progress bar patterns like [=====>    ] 50%  or  ██████░░░░
+    if (trimmed.contains('[')
+        && trimmed.contains(']')
+        && (trimmed.contains('=') || trimmed.contains('#')))
+        && trimmed.chars().count() < 80
+        && (trimmed.contains('%')
+            || trimmed.matches('=').count() + trimmed.matches('#').count() > 5)
+    {
+        return true;
+    }
+    false
+}
+
+fn is_build_output_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    const BUILD_PREFIXES: &[&str] = &[
+        "Compiling ",
+        "Downloading ",
+        "Downloaded ",
+        "Fetching ",
+        "Installing ",
+        "Resolving ",
+        "Updating ",
+        "Building ",
+        "Linking ",
+        "Finished ",
+        "warning: unused",
+    ];
+    BUILD_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
 /// Summarizes a terminal scrollback as plain text, bypassing session parsers.
 ///
 /// The scrollback text should already have ANSI sequences stripped.
-/// Large texts are sampled (first 40% + last 60%) to fit within MAX_PROMPT_CHARS.
+/// Large texts are sampled (head 30% + middle 30% + tail 40%) to fit within MAX_PROMPT_CHARS.
 pub fn summarize_scrollback(
     client: &AIClient,
     scrollback_text: &str,
     branch_name: &str,
     language: &str,
 ) -> Result<SessionSummary, AIError> {
-    let fallback_language = fallback_purpose_language_for_text(language, scrollback_text);
+    let filtered = filter_scrollback_noise(scrollback_text);
+    let fallback_language = fallback_purpose_language_for_text(language, &filtered);
     let derived_purpose =
-        derive_worktree_purpose_from_scrollback(scrollback_text, branch_name, fallback_language);
-    let sampled = sample_scrollback_text(scrollback_text);
+        derive_worktree_purpose_from_scrollback(&filtered, branch_name, fallback_language);
+    let sampled = sample_scrollback_text(&filtered);
     let mut user_prompt = format!(
         "Branch: {branch_name}\nDerived worktree purpose ({}): {}\nPurpose guidance: \
 In the Purpose section, describe the worktree objective (why). \
@@ -744,18 +912,29 @@ Treat PR/MR creation, template filling, merge/push, and status checks as means (
 
 /// Samples scrollback text to fit within MAX_PROMPT_CHARS.
 ///
-/// If the text fits, returns it as-is. Otherwise, takes the first 40%
-/// and last 60% of the allowed characters, with a separator in between.
+/// If the text fits, returns it as-is. Otherwise, takes:
+/// - head 30% (initial prompts / requests)
+/// - middle 30% (decision-making / direction changes)
+/// - tail 40% (latest state)
+///   with `\n...[truncated]...\n` separators between sections.
 fn sample_scrollback_text(text: &str) -> String {
     let char_count = text.chars().count();
     if char_count <= MAX_PROMPT_CHARS {
         return text.to_string();
     }
-    let head_chars = MAX_PROMPT_CHARS * 2 / 5; // 40%
     let separator = "\n...[truncated]...\n";
-    let tail_chars = MAX_PROMPT_CHARS - head_chars - separator.len();
+    let sep_len = separator.chars().count();
+    let budget = MAX_PROMPT_CHARS - sep_len * 2; // two separators
+    let head_chars = budget * 3 / 10; // 30%
+    let middle_chars = budget * 3 / 10; // 30%
+    let tail_chars = budget - head_chars - middle_chars; // 40%
 
     let head: String = text.chars().take(head_chars).collect();
+
+    // Middle: start from the center of the original text
+    let mid_start = (char_count - middle_chars) / 2;
+    let middle: String = text.chars().skip(mid_start).take(middle_chars).collect();
+
     let tail: String = text
         .chars()
         .rev()
@@ -764,7 +943,7 @@ fn sample_scrollback_text(text: &str) -> String {
         .into_iter()
         .rev()
         .collect();
-    format!("{head}{separator}{tail}")
+    format!("{head}{separator}{middle}{separator}{tail}")
 }
 
 pub fn summarize_session(
@@ -1877,7 +2056,8 @@ mod tests {
         let text = "x".repeat(MAX_PROMPT_CHARS * 2);
         let result = sample_scrollback_text(&text);
         assert!(result.chars().count() <= MAX_PROMPT_CHARS);
-        assert!(result.contains("...[truncated]..."));
+        // Should have two truncation separators (head/middle/tail)
+        assert_eq!(result.matches("...[truncated]...").count(), 2);
         assert!(result.starts_with('x'));
         assert!(result.ends_with('x'));
     }
@@ -1887,5 +2067,106 @@ mod tests {
         let text = "y".repeat(MAX_PROMPT_CHARS);
         let result = sample_scrollback_text(&text);
         assert_eq!(result, text);
+    }
+
+    // --- filter_scrollback_noise tests ---
+
+    #[test]
+    fn test_filter_scrollback_noise_removes_musing_lines() {
+        let input = "user request here\nMusing...\nActual response";
+        let result = filter_scrollback_noise(input);
+        assert!(!result.contains("Musing"));
+        assert!(result.contains("user request here"));
+        assert!(result.contains("Actual response"));
+    }
+
+    #[test]
+    fn test_filter_scrollback_noise_removes_thinking_lines() {
+        let input = "start\nThinking...\nThinking…\nend";
+        let result = filter_scrollback_noise(input);
+        assert!(!result.contains("Thinking"));
+        assert!(result.contains("start"));
+        assert!(result.contains("end"));
+    }
+
+    #[test]
+    fn test_filter_scrollback_noise_preserves_substantive_lines() {
+        let input = "Implement the authentication module\nAdd error handling for edge cases";
+        let result = filter_scrollback_noise(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_filter_scrollback_noise_deduplicates_repeated_lines() {
+        let mut lines = vec!["header"];
+        lines.extend(std::iter::repeat_n("same line", 5));
+        lines.push("footer");
+        let input = lines.join("\n");
+        let result = filter_scrollback_noise(&input);
+        assert!(result.contains("same line"));
+        assert!(result.contains("[repeated 5 times]"));
+        assert!(result.contains("header"));
+        assert!(result.contains("footer"));
+        // Should only have one occurrence of the actual line
+        assert_eq!(result.matches("same line").count(), 1);
+    }
+
+    #[test]
+    fn test_filter_scrollback_noise_collapses_blank_runs() {
+        let input = "line1\n\n\n\n\nline2";
+        let result = filter_scrollback_noise(input);
+        // Should have at most 1 blank line between line1 and line2
+        let blank_count = result.lines().filter(|l| l.trim().is_empty()).count();
+        assert!(blank_count <= 1);
+        assert!(result.contains("line1"));
+        assert!(result.contains("line2"));
+    }
+
+    #[test]
+    fn test_filter_scrollback_noise_compresses_build_output() {
+        let mut lines = vec!["start".to_string()];
+        for i in 0..15 {
+            lines.push(format!("Compiling crate_{i} v0.1.0"));
+        }
+        lines.push("end".to_string());
+        let input = lines.join("\n");
+        let result = filter_scrollback_noise(&input);
+        assert!(result.contains("Compiling crate_0"));
+        assert!(result.contains("Compiling crate_14"));
+        assert!(result.contains("[...13 lines...]"));
+        assert!(!result.contains("Compiling crate_7"));
+    }
+
+    #[test]
+    fn test_filter_scrollback_noise_empty_input() {
+        assert_eq!(filter_scrollback_noise(""), "");
+    }
+
+    #[test]
+    fn test_filter_scrollback_noise_preserves_error_messages() {
+        let input =
+            "Musing...\nerror[E0308]: mismatched types\nThinking...\nwarning: unused variable";
+        let result = filter_scrollback_noise(input);
+        assert!(result.contains("error[E0308]: mismatched types"));
+        assert!(!result.contains("Musing"));
+        assert!(!result.contains("Thinking"));
+    }
+
+    #[test]
+    fn test_sample_scrollback_three_sections_contain_middle() {
+        // Build a text: AAA...BBB...CCC... each section large enough to trigger sampling
+        let section_size = MAX_PROMPT_CHARS; // each section is MAX_PROMPT_CHARS chars
+        let a_section = "a".repeat(section_size);
+        let b_section = "b".repeat(section_size);
+        let c_section = "c".repeat(section_size);
+        let text = format!("{a_section}{b_section}{c_section}");
+
+        let result = sample_scrollback_text(&text);
+        assert!(result.chars().count() <= MAX_PROMPT_CHARS);
+        assert_eq!(result.matches("...[truncated]...").count(), 2);
+        // Must contain head (a), middle (b), and tail (c)
+        assert!(result.contains('a'));
+        assert!(result.contains('b'));
+        assert!(result.contains('c'));
     }
 }

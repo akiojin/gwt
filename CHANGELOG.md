@@ -1,6 +1,28 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.12.0] - 2026-02-24
+
+### Bug Fixes
+
+- **ci:** Disable GGML native CPU optimizations for macOS release build by @PyGuy2
+- **ci:** Use WHISPER_NATIVE=OFF for macOS release build by @PyGuy2
+- **ci:** Use cmake toolchain file to disable GGML_NATIVE on macOS by @PyGuy2
+- Update wmi 0.18 API usage and add fail-fast: false to release builds by @PyGuy2
+- **ci:** Set MACOSX_DEPLOYMENT_TARGET=11.0 for macOS release build by @PyGuy2
+- **ci:** Set CMAKE_OSX_DEPLOYMENT_TARGET to 11.0 for macOS builds by @PyGuy2
+- **gui:** Use scrollLines API to prevent trackpad scroll desync (#1209) (#1217)
+- Force tauri bundle to use gwt main binary (#1222)
+
+### Features
+
+- **ai:** Optimize scrollback summary quality with noise filter and improved sampling (#1216)
+- **gui:** Auto-close ReportDialog on successful submit and show toast (#1221)
+
+### Miscellaneous Tasks
+
+- **plugin:** Remove explicit hooks path and add matcher fields
+
 ## [7.11.0] - 2026-02-23
 
 ### Bug Fixes
