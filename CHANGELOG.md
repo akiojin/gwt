@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.12.3] - 2026-02-24
+
+### Bug Fixes
+
+- Improve release command closing issue collection logic by @PyGuy2
+- Windows で全コマンドが PowerShell ラッピングされターミナルが空白になる問題を修正 (#1224) by @akiojin
+- **ci:** Require macos codesign and notarization (#1225) by @akiojin
+- リリースコマンドのリモート同期でタグを取得するよう修正 by @PyGuy2
+- **ci:** Use hdiutil to rebuild DMG preserving codesign by @PyGuy2
+- **ci:** Sign DMG and fix Gatekeeper assessment check
+
+### Miscellaneous Tasks
+
+- **ci:** Unify macOS installer build between CI and local by @PyGuy2
+
 ## [7.12.2] - 2026-02-24
 
 ### Bug Fixes

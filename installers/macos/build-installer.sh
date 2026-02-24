@@ -203,7 +203,11 @@ if [[ -n "$SIGN" ]]; then
     -format UDZO \
     "${DMG_DIR}/${DMG_FILENAME}"
   rm -rf "$STAGING_DIR"
-  ok "DMG rebuilt (${DMG_FILENAME})"
+
+  # Sign the DMG itself (required for Gatekeeper)
+  info "Signing DMG..."
+  codesign --force --sign "$IDENTITY" "${DMG_DIR}/${DMG_FILENAME}"
+  ok "DMG rebuilt and signed (${DMG_FILENAME})"
 fi
 
 # --- 4. Notarization -------------------------------------------------------
@@ -235,8 +239,7 @@ if [[ -n "$NOTARIZE" ]]; then
   xcrun stapler staple "$DMG_PATH"
 
   info "Verifying Gatekeeper assessment..."
-  spctl --assess --verbose=4 "$DMG_PATH"
-  spctl --assess --verbose=4 "$APP_PATH"
+  spctl --assess --type execute --verbose=4 "$APP_PATH"
   ok "Notarization complete"
 fi
 
