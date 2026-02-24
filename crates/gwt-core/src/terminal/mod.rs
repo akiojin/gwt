@@ -45,4 +45,7 @@ pub struct BuiltinLaunchConfig {
     pub env_vars: HashMap<String, String>,
     /// Optional shell override (e.g. "powershell", "cmd", "wsl").
     pub terminal_shell: Option<String>,
+    /// Whether this launch is interactive (e.g. spawn_shell).
+    /// When true on Windows, the command is not wrapped with PowerShell.
+    pub interactive: bool,
 }
