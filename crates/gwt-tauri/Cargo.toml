@@ -7,6 +7,15 @@ repository.workspace = true
 authors.workspace = true
 description = "Tauri v2 GUI backend for Git Worktree Manager"
 publish = false
+default-run = "gwt-tauri"
+
+[[bin]]
+name = "gwt-tauri"
+path = "src/main.rs"
+
+[[bin]]
+name = "voice_eval"
+path = "src/bin/voice_eval.rs"
 
 [dependencies]
 gwt-core = { workspace = true, features = ["nvidia-gpu"] }
