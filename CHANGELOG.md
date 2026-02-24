@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.12.1] - 2026-02-24
+
+### Bug Fixes
+
+- Improve release command closing issue collection logic
+- Windows で全コマンドが PowerShell ラッピングされターミナルが空白になる問題を修正 (#1224)
+- **ci:** Require macos codesign and notarization (#1225)
+
+### Miscellaneous Tasks
+
+- **ci:** Unify macOS installer build between CI and local
+
 ## [7.12.0] - 2026-02-24
 
 ### Bug Fixes
