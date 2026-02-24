@@ -29,20 +29,6 @@
   let resizeInFlight = false;
   let queuedResize: { rows: number; cols: number } | null = null;
 
-  const MOUSE_WHEEL_STEP_VALUES = new Set([120, 240]);
-  const TRACKPAD_WHEEL_DELTA_THRESHOLD = 240;
-  const MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS = 220;
-  const MOUSE_WHEEL_STEP_REPEAT_COUNT = 4;
-  const MOUSE_WHEEL_STEP_MOUSE_GAP_MS = 45;
-  // Mouse wheels are usually very regular and dense; treat only tight, consistent
-  // runs as mouse input. Slower, jittery integer bursts stay on trackpad path.
-
-  type WheelSample = {
-    at: number;
-    absDeltaY: number;
-    sign: number;
-  };
-
   type WheelScrollState = {
     axis: "vertical" | "horizontal" | null;
     remainder: number;
@@ -239,97 +225,13 @@
     }
   }
 
-  function isTrackpadLikeWheel(
-    event: WheelEvent,
-    mouseWheelStepHistory: WheelSample[],
-  ): boolean {
-    if (event.deltaMode === 1 || event.deltaMode === 2) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    if (event.deltaMode !== 0) return false;
-    const absDeltaY = Math.abs(event.deltaY);
-    const absDeltaX = Math.abs(event.deltaX);
-
-    const sourceCapabilities =
-      (event as WheelEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } })
-        .sourceCapabilities;
-
-    if (sourceCapabilities?.firesTouchEvents === true) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    // Trackpads frequently emit horizontal movement in addition to vertical scroll.
-    if (absDeltaX > 0) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    if (absDeltaY === 0) return false;
-
-    if (!Number.isInteger(absDeltaY)) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    if (absDeltaY > TRACKPAD_WHEEL_DELTA_THRESHOLD) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    const isPotentialMouseStep = MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
-    if (!isPotentialMouseStep) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    const now =
-      event.timeStamp > 0
-        ? event.timeStamp
-        : typeof performance === "undefined"
-          ? Date.now()
-          : performance.now();
-    const sign = Math.sign(event.deltaY);
-
-    while (
-      mouseWheelStepHistory.length > 0 &&
-      now - mouseWheelStepHistory[0].at > MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS
-    ) {
-      mouseWheelStepHistory.shift();
-    }
-
-    mouseWheelStepHistory.push({
-      at: now,
-      absDeltaY,
-      sign,
-    });
-
-    const recentHistory = mouseWheelStepHistory.slice(-MOUSE_WHEEL_STEP_REPEAT_COUNT);
-    if (recentHistory.length < MOUSE_WHEEL_STEP_REPEAT_COUNT) {
-      return true;
-    }
-
-    const looksLikeMouseWheelRun = recentHistory.every(
-      (sample, index) => {
-        if (sample.absDeltaY !== absDeltaY) return false;
-        if (sample.sign !== sign) return false;
-        if (index === 0) return true;
-        return sample.at - recentHistory[index - 1].at >= MOUSE_WHEEL_STEP_MOUSE_GAP_MS;
-      },
-    );
-
-    return !looksLikeMouseWheelRun;
-  }
-
   function pickWheelAxis(event: WheelEvent): WheelAxis {
     const absDeltaY = Math.abs(event.deltaY);
     const absDeltaX = Math.abs(event.deltaX);
     return absDeltaY >= absDeltaX ? "vertical" : "horizontal";
   }
 
-  function pickWheelDelta(
+  function pickWheelLines(
     event: WheelEvent,
     viewport: HTMLElement,
     wheelScrollState: WheelScrollState,
@@ -350,23 +252,26 @@
       wheelScrollState.remainder = 0;
     }
 
-    let delta = axis === "vertical" ? event.deltaY : event.deltaX;
+    const rawDelta = axis === "vertical" ? event.deltaY : event.deltaX;
 
+    let linesDelta: number;
     if (event.deltaMode === 1) {
-      delta *= lineStep;
+      linesDelta = rawDelta;
     } else if (event.deltaMode === 2) {
-      delta *= viewport.clientHeight;
+      const pageLines = viewport.clientHeight / lineStep;
+      linesDelta = rawDelta * pageLines;
+    } else {
+      linesDelta = rawDelta / lineStep;
     }
 
-    const raw = delta + wheelScrollState.remainder;
-    const roundedDelta = Math.trunc(raw);
-    if (roundedDelta === 0) {
+    const raw = linesDelta + wheelScrollState.remainder;
+    const lines = Math.trunc(raw);
+    if (lines === 0) {
       wheelScrollState.remainder = raw;
       return 0;
     }
-
-    wheelScrollState.remainder = raw - roundedDelta;
-    return roundedDelta;
+    wheelScrollState.remainder = raw - lines;
+    return lines;
   }
 
   function scrollViewportByWheel(
@@ -374,16 +279,15 @@
     event: WheelEvent,
     wheelScrollState: WheelScrollState,
   ): boolean {
+    if (!terminal) return false;
     const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
     if (!viewport) return false;
-    const delta = pickWheelDelta(event, viewport, wheelScrollState);
-    if (delta === 0) return false;
+    const lines = pickWheelLines(event, viewport, wheelScrollState);
+    if (lines === 0) return false;
 
-    const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    const nextScrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
-    const didScroll = nextScrollTop !== viewport.scrollTop;
-    viewport.scrollTop = nextScrollTop;
-    return didScroll;
+    const beforeY = terminal.buffer.active.viewportY;
+    terminal.scrollLines(lines);
+    return terminal.buffer.active.viewportY !== beforeY;
   }
 
   onMount(() => {
@@ -394,7 +298,6 @@
     let restoringScrollback = true;
     const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
-    const mouseWheelStepHistory: WheelSample[] = [];
     const wheelScrollState: WheelScrollState = {
       axis: null,
       remainder: 0,
@@ -446,14 +349,15 @@
       if (event.deltaY === 0 && event.deltaX === 0) return;
       if (!terminal) return;
 
-      const wasFocused = isTerminalFocused(rootEl);
+      // In alternate buffer (vim, tmux, etc.), let xterm handle natively
+      // so wheel events reach the application as mouse events.
+      if (terminal.buffer.active.type === "alternate") return;
+
+      if (!rootEl.querySelector(".xterm-viewport")) return;
+
       focusTerminalIfNeeded(rootEl, true);
 
-      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event, mouseWheelStepHistory);
-      if (!shouldFallback) return;
-
-      const didScroll = scrollViewportByWheel(rootEl, event, wheelScrollState);
-      if (!didScroll) return;
+      scrollViewportByWheel(rootEl, event, wheelScrollState);
 
       event.preventDefault();
       event.stopImmediatePropagation();
