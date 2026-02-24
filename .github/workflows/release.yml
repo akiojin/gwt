@@ -124,7 +124,7 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
       - name: Build Tauri
-        run: cargo tauri build
+        run: cargo tauri build -- --bin gwt-tauri
         env:
           # Disable CPU-native optimizations for whisper.cpp/ggml to avoid
           # ARM i8mm intrinsic errors on macOS CI runners (Xcode 16.4 Apple Clang
