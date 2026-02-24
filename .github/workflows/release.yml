@@ -210,6 +210,14 @@ PY
           fi
           codesign --force --options runtime --sign "$IDENTITY" --deep "$APP_PATH"
           codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+      - name: Rebuild macOS DMG after signing
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: cargo tauri build --bundles dmg -- --bin gwt-tauri
+        env:
+          CMAKE_TOOLCHAIN_FILE: ${{ format('{0}/cmake/ci-disable-native.cmake', github.workspace) }}
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
       - name: Notarize and staple DMG
         if: matrix.platform == 'macos'
         shell: bash
