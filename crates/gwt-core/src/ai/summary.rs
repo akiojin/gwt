@@ -678,8 +678,8 @@ fn should_preserve_short_status_message(text: &str) -> bool {
 /// Applies the following line-level filters:
 /// - Removes AI thinking indicator lines (e.g. "Musing...", "Thinking...")
 /// - Removes progress bar / spinner lines
-/// - Collapses 3+ consecutive identical lines into 1 + `[repeated N times]`
-/// - Collapses 3+ consecutive blank lines into 1
+/// - Collapses 3+ consecutive identical non-blank lines into 1 + `[repeated N times]`
+/// - Collapses 2+ consecutive blank lines into 1
 /// - Compresses 10+ consecutive build-output lines (Compiling, Downloading, etc.)
 fn filter_scrollback_noise(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -696,11 +696,17 @@ fn filter_scrollback_noise(text: &str) -> String {
         })
         .collect();
 
-    // Second pass: deduplicate consecutive identical lines
+    // Second pass: deduplicate consecutive identical non-blank lines
     let mut deduped: Vec<String> = Vec::with_capacity(filtered.len());
     let mut i = 0;
     while i < filtered.len() {
         let current = filtered[i];
+        // Skip blank lines here; pass 3 collapses them silently.
+        if current.trim().is_empty() {
+            deduped.push(current.to_string());
+            i += 1;
+            continue;
+        }
         let mut count = 1usize;
         while i + count < filtered.len() && filtered[i + count] == current {
             count += 1;
@@ -783,9 +789,10 @@ fn is_ai_thinking_indicator(line: &str) -> bool {
         "reflecting",
         "evaluating",
     ];
-    INDICATORS
-        .iter()
-        .any(|ind| lowered.starts_with(ind) && (lowered.ends_with("...") || lowered.ends_with('…') || lowered == *ind))
+    INDICATORS.iter().any(|ind| {
+        lowered.starts_with(ind)
+            && (lowered.ends_with("...") || lowered.ends_with('…') || lowered == *ind)
+    })
 }
 
 fn is_progress_spinner_line(line: &str) -> bool {
@@ -794,14 +801,19 @@ fn is_progress_spinner_line(line: &str) -> bool {
         return false;
     }
     // Common spinner characters
-    const SPINNERS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '|', '/', '-', '\\'];
+    const SPINNERS: &[char] = &[
+        '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '|', '/', '-', '\\',
+    ];
     if trimmed.chars().count() <= 3 && trimmed.chars().all(|c| SPINNERS.contains(&c) || c == ' ') {
         return true;
     }
     // Progress bar patterns like [=====>    ] 50%  or  ██████░░░░
-    if (trimmed.contains('[') && trimmed.contains(']') && (trimmed.contains('=') || trimmed.contains('#')))
+    if (trimmed.contains('[')
+        && trimmed.contains(']')
+        && (trimmed.contains('=') || trimmed.contains('#')))
         && trimmed.chars().count() < 80
-        && (trimmed.contains('%') || trimmed.matches('=').count() + trimmed.matches('#').count() > 5)
+        && (trimmed.contains('%')
+            || trimmed.matches('=').count() + trimmed.matches('#').count() > 5)
     {
         return true;
     }
@@ -2132,7 +2144,8 @@ mod tests {
 
     #[test]
     fn test_filter_scrollback_noise_preserves_error_messages() {
-        let input = "Musing...\nerror[E0308]: mismatched types\nThinking...\nwarning: unused variable";
+        let input =
+            "Musing...\nerror[E0308]: mismatched types\nThinking...\nwarning: unused variable";
         let result = filter_scrollback_noise(input);
         assert!(result.contains("error[E0308]: mismatched types"));
         assert!(!result.contains("Musing"));
