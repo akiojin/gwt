@@ -31,6 +31,7 @@
     screenCaptureBranch = "",
     screenCaptureActiveTab = "",
     onclose,
+    onsuccess,
   }: {
     open: boolean;
     mode: "bug" | "feature";
@@ -39,6 +40,7 @@
     screenCaptureBranch?: string;
     screenCaptureActiveTab?: string;
     onclose: () => void;
+    onsuccess: (result: { url: string; number: number }) => void;
   } = $props();
 
   let activeTab = $state<"bug" | "feature">("bug");
@@ -257,9 +259,7 @@
         body,
         labels,
       });
-      submitSuccess = true;
-      submitIssueUrl = result.url;
-      submitMessage = `Issue #${result.number} created successfully.`;
+      onsuccess({ url: result.url, number: result.number });
     } catch {
       submitError = true;
       submitMessage = "Failed to create issue via GitHub CLI. You can copy the report or open it in your browser instead.";
