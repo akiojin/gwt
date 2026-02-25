@@ -265,6 +265,8 @@ export async function installTauriMock(
           case "detect_agents":
             // Keep StatusBar reactive graph stable in web-preview E2E.
             return [];
+          case "get_voice_capability":
+            return { available: false, reason: "GPU acceleration is not available" };
           case "get_settings":
             return {
               ui_font_size: 13,
