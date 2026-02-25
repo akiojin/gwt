@@ -2,6 +2,7 @@
 //!
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use super::gh_cli::{gh_command, is_gh_available};
@@ -579,12 +580,29 @@ pub fn find_branch_for_issue(
     }
 
     let stdout = String::from_utf8_lossy(&remote_output.stdout);
-    let remote_branch = stdout
+    let mut checked = HashSet::new();
+
+    for remote_branch in stdout
         .lines()
         .map(|line| line.trim())
-        .find(|branch| branch.contains(&pattern));
+        .filter(|branch| branch.contains(&pattern))
+    {
+        let Some((remote_name, branch_name)) = split_remote_tracking_branch(remote_branch) else {
+            continue;
+        };
 
-    Ok(remote_branch.map(|b| strip_remote_prefix(b).to_string()))
+        // Avoid duplicate lookups when remote output contains repeated refs.
+        let key = format!("{remote_name}/{branch_name}");
+        if !checked.insert(key) {
+            continue;
+        }
+
+        if remote_branch_exists_on_remote(repo_path, remote_name, branch_name)? {
+            return Ok(Some(strip_remote_prefix(remote_branch).to_string()));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Strip remote prefix from a remote branch name.
@@ -594,6 +612,38 @@ fn strip_remote_prefix(remote_branch: &str) -> &str {
         .split_once('/')
         .map(|(_, rest)| rest)
         .unwrap_or(remote_branch)
+}
+
+fn split_remote_tracking_branch(remote_branch: &str) -> Option<(&str, &str)> {
+    let (remote_name, branch_name) = remote_branch.split_once('/')?;
+    if remote_name.is_empty() || branch_name.is_empty() || branch_name.contains(" -> ") {
+        return None;
+    }
+    Some((remote_name, branch_name))
+}
+
+fn remote_branch_exists_on_remote(
+    repo_path: &Path,
+    remote_name: &str,
+    branch_name: &str,
+) -> Result<bool, String> {
+    let output = crate::process::command("git")
+        .args(["ls-remote", "--heads", remote_name, branch_name])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git ls-remote: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git ls-remote failed for remote '{}' and branch '{}': {}",
+            remote_name,
+            branch_name,
+            stderr.trim()
+        ));
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 /// Generate full branch name from type and issue
@@ -655,6 +705,76 @@ pub fn create_linked_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn run_git(repo_path: &Path, args: &[&str]) {
+        let output = crate::process::command("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(repo_path: &Path, args: &[&str]) -> String {
+        let output = crate::process::command("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn create_test_repo() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init"]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(temp.path().join("README.md"), "initial").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        temp
+    }
+
+    fn current_branch_name(repo_path: &Path) -> String {
+        git_stdout(repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+    }
+
+    fn create_repo_with_origin() -> (TempDir, TempDir) {
+        let repo = create_test_repo();
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare"]);
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        let base = current_branch_name(repo.path());
+        run_git(repo.path(), &["push", "-u", "origin", &base]);
+        (repo, origin)
+    }
+
+    fn create_remote_issue_branch_without_local_copy(repo_path: &Path, branch_name: &str) {
+        let base = current_branch_name(repo_path);
+        run_git(repo_path, &["checkout", "-b", branch_name, &base]);
+        std::fs::write(repo_path.join("issue.txt"), branch_name).unwrap();
+        run_git(repo_path, &["add", "."]);
+        run_git(repo_path, &["commit", "-m", "issue branch"]);
+        run_git(repo_path, &["push", "-u", "origin", branch_name]);
+        run_git(repo_path, &["checkout", &base]);
+        run_git(repo_path, &["branch", "-D", branch_name]);
+    }
 
     // ==========================================================
     // FR-007: Display format tests
@@ -1333,10 +1453,68 @@ mod tests {
         assert_eq!(strip_remote_prefix("issue-42"), "issue-42");
     }
 
+    #[test]
+    fn test_split_remote_tracking_branch_parses_valid_ref() {
+        let parsed = split_remote_tracking_branch("origin/feature/issue-42");
+        assert_eq!(parsed, Some(("origin", "feature/issue-42")));
+    }
+
+    #[test]
+    fn test_split_remote_tracking_branch_rejects_symbolic_ref() {
+        let parsed = split_remote_tracking_branch("origin/HEAD -> origin/main");
+        assert!(parsed.is_none());
+    }
+
     // ==========================================================
     // SPEC-rb01a2f3: find_branch_for_issue remote search
     // ==========================================================
 
-    // Note: find_branch_for_issue with remote search requires a git repo,
-    // tested via integration tests (same as local branch search, see line 958)
+    #[test]
+    fn test_find_branch_for_issue_finds_local_branch() {
+        let repo = create_test_repo();
+        let base = current_branch_name(repo.path());
+        run_git(
+            repo.path(),
+            &["checkout", "-b", "feature/issue-1029", &base],
+        );
+
+        let found = find_branch_for_issue(repo.path(), 1029).unwrap();
+        assert_eq!(found.as_deref(), Some("feature/issue-1029"));
+    }
+
+    #[test]
+    fn test_find_branch_for_issue_confirms_remote_branch_with_ls_remote() {
+        let (repo, _origin) = create_repo_with_origin();
+        create_remote_issue_branch_without_local_copy(repo.path(), "bugfix/issue-1029");
+        run_git(repo.path(), &["fetch", "origin"]);
+
+        let remote_tracking = git_stdout(repo.path(), &["branch", "-r", "--list", "*issue-1029*"]);
+        assert!(
+            remote_tracking.contains("origin/bugfix/issue-1029"),
+            "expected remote-tracking ref to exist in test setup"
+        );
+
+        let found = find_branch_for_issue(repo.path(), 1029).unwrap();
+        assert_eq!(found.as_deref(), Some("bugfix/issue-1029"));
+    }
+
+    #[test]
+    fn test_find_branch_for_issue_ignores_stale_remote_tracking_ref() {
+        let (repo, origin) = create_repo_with_origin();
+        create_remote_issue_branch_without_local_copy(repo.path(), "bugfix/issue-1029");
+        run_git(repo.path(), &["fetch", "origin"]);
+
+        let remote_tracking_before =
+            git_stdout(repo.path(), &["branch", "-r", "--list", "*issue-1029*"]);
+        assert!(
+            remote_tracking_before.contains("origin/bugfix/issue-1029"),
+            "expected remote-tracking ref to exist before remote deletion"
+        );
+
+        // Delete directly on remote to leave stale remote-tracking ref in the local clone.
+        run_git(origin.path(), &["branch", "-D", "bugfix/issue-1029"]);
+
+        let found = find_branch_for_issue(repo.path(), 1029).unwrap();
+        assert_eq!(found, None);
+    }
 }
