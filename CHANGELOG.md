@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.12.6] - 2026-02-25
+
+### Bug Fixes
+
+- **core:** Resolve race condition between release publish and asset upload (#1239)
+- ボイス入力設定フィールドがdisabledで操作不能な問題を修正 (#1240)
+
 ## [7.12.5] - 2026-02-25
 
 ### Bug Fixes

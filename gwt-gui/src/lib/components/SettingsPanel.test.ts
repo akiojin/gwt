@@ -14,6 +14,12 @@ vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
 }));
 
+const tauriCoreInvokeMock = vi.fn();
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: tauriCoreInvokeMock,
+}));
+
 const settingsFixture: SettingsData = {
   protected_branches: ["main", "develop"],
   default_base_branch: "main",
@@ -123,6 +129,13 @@ describe("SettingsPanel", () => {
   beforeEach(() => {
     cleanup();
     invokeMock.mockReset();
+    tauriCoreInvokeMock.mockReset();
+    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_voice_capability") {
+        return { available: true, reason: null };
+      }
+      return null;
+    });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
@@ -1159,6 +1172,126 @@ describe("SettingsPanel", () => {
     expect(options).toContain("PowerShell (7.4.1)");
     expect(options).toContain("Command Prompt");
     expect(options).toContain("WSL (Ubuntu) (2.0)");
+  });
+
+  it("keeps voice input fields enabled when voice capability is unavailable", async () => {
+    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_voice_capability") {
+        return { available: false, reason: "GPU acceleration is not available" };
+      }
+      return null;
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Voice Input");
+
+    await waitFor(() => {
+      const voiceEnabled = rendered.container.querySelector("#voice-input-enabled") as HTMLInputElement;
+      expect(voiceEnabled).toBeTruthy();
+      expect(voiceEnabled.disabled).toBe(false);
+    });
+
+    const voiceHotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement;
+    const voicePttHotkey = rendered.container.querySelector("#voice-ptt-hotkey") as HTMLInputElement;
+    const voiceLanguage = rendered.container.querySelector("#voice-language") as HTMLSelectElement;
+    const voiceQuality = rendered.container.querySelector("#voice-quality") as HTMLSelectElement;
+
+    expect(voiceHotkey.disabled).toBe(false);
+    expect(voicePttHotkey.disabled).toBe(false);
+    expect(voiceLanguage.disabled).toBe(false);
+    expect(voiceQuality.disabled).toBe(false);
+  });
+
+  it("saves voice settings when capability is unavailable", async () => {
+    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_voice_capability") {
+        return { available: false, reason: "GPU acceleration is not available" };
+      }
+      return null;
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Voice Input");
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector("#voice-input-enabled")).toBeTruthy();
+      expect((rendered.container.querySelector("#voice-input-enabled") as HTMLInputElement).disabled).toBe(false);
+    });
+
+    const voiceHotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement;
+    await fireEvent.input(voiceHotkey, { target: { value: "Ctrl+Shift+V" } });
+
+    const voiceLanguage = rendered.container.querySelector("#voice-language") as HTMLSelectElement;
+    await fireEvent.change(voiceLanguage, { target: { value: "ja" } });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_settings", {
+        settings: expect.objectContaining({
+          voice_input: expect.objectContaining({
+            hotkey: "Ctrl+Shift+V",
+            language: "ja",
+          }),
+        }),
+      });
+    });
+  });
+
+  it("shows unavailable reason banner when voice capability is unavailable", async () => {
+    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_voice_capability") {
+        return { available: false, reason: "GPU acceleration is not available" };
+      }
+      return null;
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Voice Input");
+
+    await waitFor(() => {
+      expect(rendered.getByText(/GPU acceleration is not available/)).toBeTruthy();
+      expect(rendered.getByText(/Settings can still be configured/)).toBeTruthy();
+    });
   });
 
   it("saves selected shell via Terminal tab", async () => {
