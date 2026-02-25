@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.12.5] - 2026-02-25
+
+### Bug Fixes
+
+- Windows Host OS起動でpowershell明示時の回帰を修正 (#1236)
+
 ## [7.12.4] - 2026-02-25
 
 ### Bug Fixes

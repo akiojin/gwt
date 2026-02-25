@@ -2007,7 +2007,7 @@ pub fn launch_terminal(
         agent_color: AgentColor::Green,
         env_vars: HashMap::new(),
         terminal_shell: None,
-        interactive: false,
+        interactive: true,
     };
 
     launch_with_config(&repo_path, config, None, &state, app_handle)
@@ -4396,7 +4396,7 @@ pub(crate) fn launch_agent_for_project_root(
                 agent_color: agent_color_for(agent_id),
                 env_vars,
                 terminal_shell,
-                interactive: false,
+                interactive: true,
             }
         }
     };
