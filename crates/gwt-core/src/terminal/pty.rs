@@ -91,6 +91,8 @@ where
     F: FnMut() -> String,
 {
     if is_windows {
+        let force_powershell_wrap = matches!(shell, Some("powershell"));
+
         // If an explicit shell override is provided, use it.
         if let Some(shell_id) = shell {
             if shell_id == "cmd" {
@@ -107,7 +109,8 @@ where
 
         // Interactive sessions (e.g. spawn_shell) must not be wrapped with
         // PowerShell -NonInteractive, as that breaks ConPTY I/O.
-        if interactive {
+        // Exception: explicit `powershell` selection should keep the wrapper path.
+        if interactive && !force_powershell_wrap {
             return (command.to_string(), args.to_vec());
         }
 
@@ -450,6 +453,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_spawn_command_powershell_shell_interactive_keeps_wrapper() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("powershell"),
+            true,
+        );
+        assert_eq!(program, "pwsh");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                "& 'codex' '--version'".to_string(),
+            ]
+        );
+    }
+
     /// Helper: read from PTY reader in a separate thread with timeout.
     fn read_with_timeout(
         mut reader: Box<dyn Read + Send>,
@@ -671,6 +700,48 @@ mod tests {
         );
         assert_eq!(program, "/bin/zsh");
         assert_eq!(resolved_args, vec!["-l".to_string()]);
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_agent_host_os_interactive() {
+        let args = vec!["--dangerously-skip-permissions".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "claude",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            true,
+        );
+        assert_eq!(program, "claude");
+        assert_eq!(
+            resolved_args,
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_agent_bunx_interactive() {
+        let args = vec![
+            "--yes".to_string(),
+            "@anthropic/claude-code@latest".to_string(),
+        ];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "C:\\Users\\user\\.bun\\bin\\bunx.cmd",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            true,
+        );
+        assert_eq!(program, "C:\\Users\\user\\.bun\\bin\\bunx.cmd");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic/claude-code@latest".to_string()
+            ]
+        );
     }
 
     #[test]

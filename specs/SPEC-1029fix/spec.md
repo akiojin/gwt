@@ -2,7 +2,7 @@
 
 **仕様ID**: `SPEC-1029fix`
 **作成日**: 2026-02-24
-**更新日**: 2026-02-24
+**更新日**: 2026-02-25
 **ステータス**: 承認済み
 **カテゴリ**: Terminal / PTY
 **依存仕様**: なし
@@ -45,6 +45,15 @@
 
 1. **前提条件** PTY ストリーム終了直後、**操作** capture_scrollback_tail を呼ぶ、**期待結果** データが空でない
 
+### ユーザーストーリー 4 - Windows で Host OS エージェント起動 (優先度: P0)
+
+ユーザーとして、Windows 上で Host OS ランタイム（DockerExecMode::None）のエージェントを起動したとき、ターミナルが正常に表示されてほしい。
+
+**受け入れシナリオ**:
+
+1. **前提条件** Windows 環境 + DockerExecMode::None、**操作** エージェント起動（claude 等）、**期待結果** PowerShell ラッピングなしでコマンドが直接起動する
+2. **前提条件** Windows 環境 + DockerExecMode::None + bunx 経由、**操作** エージェント起動、**期待結果** PowerShell ラッピングなしで bunx コマンドが直接起動する
+
 ## エッジケース
 
 - 非 Windows 環境では interactive フラグが動作に影響しないこと
@@ -58,6 +67,7 @@
 - **FR-002**: PtyHandle::new で working_dir の存在を検証し、存在しない場合 PtyCreationFailed を返す
 - **FR-003**: resolve_worktree_path で取得したパスの存在を検証する
 - **FR-004**: stream_pty_output のリードループ終了後に flush_scrollback を呼ぶ
+- **FR-005**: Host OS エージェント起動（DockerExecMode::None）は interactive: true を設定し、Windows での PowerShell ラッピングをスキップする
 
 ### 非機能要件
 
