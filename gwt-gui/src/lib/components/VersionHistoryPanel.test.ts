@@ -97,7 +97,7 @@ describe("VersionHistoryPanel", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("list_project_versions", {
         projectPath: "/tmp/project",
-        limit: 10,
+        limit: 0,
       });
     });
 

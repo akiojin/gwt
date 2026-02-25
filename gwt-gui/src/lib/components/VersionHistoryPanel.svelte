@@ -53,7 +53,7 @@
       const { invoke } = await import("$lib/tauriInvoke");
       const out = await invoke<ProjectVersions>("list_project_versions", {
         projectPath,
-        limit: 10,
+        limit: 0,
       });
       if (projectPath !== key) return;
       versions = out.items ?? [];

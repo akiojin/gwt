@@ -116,11 +116,16 @@ pub fn list_project_versions(
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "list_project_versions"))?;
 
-    let limit = limit.max(1);
-    let tag_limit = limit.saturating_sub(1);
+    // `limit=0` means "no limit". For positive values, `limit` includes
+    // the "Unreleased (HEAD)" row, so tag rows are `limit - 1`.
+    let tag_limit = if limit == 0 {
+        None
+    } else {
+        Some(limit.saturating_sub(1))
+    };
 
     // Fetch an extra tag so each displayed tag can have a "previous" range bound.
-    let tags = list_version_tags(&repo_path, Some(tag_limit.saturating_add(1)))
+    let tags = list_version_tags(&repo_path, tag_limit.map(|n| n.saturating_add(1)))
         .map_err(|e| StructuredError::internal(&e, "list_project_versions"))?;
 
     let mut items = Vec::new();
@@ -139,7 +144,8 @@ pub fn list_project_versions(
         });
     }
 
-    for (idx, tag) in tags.iter().take(tag_limit).enumerate() {
+    let display_tag_count = tag_limit.unwrap_or(tags.len());
+    for (idx, tag) in tags.iter().take(display_tag_count).enumerate() {
         let prev = tags.get(idx + 1).cloned();
         let commit_count = rev_list_count(&repo_path, prev.as_deref(), tag.as_str())
             .map_err(|e| StructuredError::internal(&e, "list_project_versions"))?;
@@ -1189,6 +1195,31 @@ mod tests {
         assert_eq!(out.items[0].range_to, "HEAD");
         assert!(out.items.iter().any(|i| i.id == "v1.0.1"));
         assert!(out.items.iter().any(|i| i.id == "v1.0.0"));
+    }
+
+    #[test]
+    fn list_project_versions_limit_zero_returns_all_tags() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+
+        for patch in 0..12 {
+            let msg = format!("feat: commit {}", patch);
+            let file = format!("{}.txt", patch);
+            commit_file(repo.path(), &file, &patch.to_string(), &msg);
+            let tag_name = format!("v1.0.{}", patch);
+            tag(repo.path(), &tag_name);
+        }
+        commit_file(repo.path(), "head.txt", "head", "chore: head");
+
+        let out = list_project_versions(repo.path().to_string_lossy().to_string(), 0).unwrap();
+        assert_eq!(out.items.len(), 13);
+        assert_eq!(out.items[0].id, "unreleased");
+        assert_eq!(out.items[0].range_from.as_deref(), Some("v1.0.11"));
+        assert_eq!(out.items.last().map(|v| v.id.as_str()), Some("v1.0.0"));
     }
 
     #[test]
