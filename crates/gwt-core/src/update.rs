@@ -230,7 +230,8 @@ impl UpdateManager {
 
         if !force {
             if let Some(cache) = &cache {
-                let effective_ttl = if Self::cache_has_pending_assets(cache, &self.current_version) {
+                let effective_ttl = if Self::cache_has_pending_assets(cache, &self.current_version)
+                {
                     PENDING_ASSET_TTL
                 } else {
                     self.ttl
