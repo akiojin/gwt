@@ -674,6 +674,48 @@ mod tests {
     }
 
     #[test]
+    fn resolve_spawn_command_windows_agent_host_os_interactive() {
+        let args = vec!["--dangerously-skip-permissions".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "claude",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            true,
+        );
+        assert_eq!(program, "claude");
+        assert_eq!(
+            resolved_args,
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_agent_bunx_interactive() {
+        let args = vec![
+            "--yes".to_string(),
+            "@anthropic/claude-code@latest".to_string(),
+        ];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "C:\\Users\\user\\.bun\\bin\\bunx.cmd",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            true,
+        );
+        assert_eq!(program, "C:\\Users\\user\\.bun\\bin\\bunx.cmd");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic/claude-code@latest".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn test_pty_creation_fails_with_nonexistent_working_dir() {
         let config = PtyConfig {
             command: "/bin/echo".to_string(),
