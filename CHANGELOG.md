@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.12.4] - 2026-02-25
+
+### Bug Fixes
+
+- Avoid stale remote-tracking refs in issue branch detection (#1233)
+- Show latest 10 tags in Version History (#1232)
+
 ## [7.12.3] - 2026-02-24
 
 ### Bug Fixes
