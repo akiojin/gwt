@@ -14,7 +14,7 @@
   // Ensure we register the backend update listener before kicking off generation.
   let mounted: boolean = $state(false);
 
-  let expanded: Record<string, boolean> = $state({ unreleased: true });
+  let expanded: Record<string, boolean> = $state({});
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -46,20 +46,26 @@
     error = null;
     versions = [];
     results = {};
-    expanded = { unreleased: true };
+    expanded = {};
 
     const key = projectPath;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const out = await invoke<ProjectVersions>("list_project_versions", {
         projectPath,
-        limit: 10,
+        // list_project_versions includes "Unreleased (HEAD)", so request 11 and
+        // render the latest 10 version tags after filtering unreleased out.
+        limit: 11,
       });
       if (projectPath !== key) return;
-      versions = out.items ?? [];
+      const tagVersions = (out.items ?? [])
+        .filter((item) => item.id !== "unreleased")
+        .slice(0, 10);
+      versions = tagVersions;
+      expanded = tagVersions[0] ? { [tagVersions[0].id]: true } : {};
 
       // Fire all version history requests in parallel.
-      for (const item of versions) {
+      for (const item of tagVersions) {
         invoke<VersionHistoryResult>("get_project_version_history", {
           projectPath,
           versionId: item.id,
@@ -145,7 +151,7 @@
   {/if}
 
   {#if !loading && versions.length === 0 && !error}
-    <div class="vh-empty">No version tags found. Showing Unreleased only.</div>
+    <div class="vh-empty">No version tags found.</div>
   {/if}
 
   <div class="vh-list">
