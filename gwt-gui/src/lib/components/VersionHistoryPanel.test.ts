@@ -7,6 +7,13 @@ type VersionHistoryUpdatedPayload = {
   versionId: string;
   result: Record<string, any>;
 };
+type VersionListItem = {
+  id: string;
+  label: string;
+  range_from: string | null;
+  range_to: string;
+  commit_count: number;
+};
 const eventListeners = new Map<string, Set<(event: { payload: VersionHistoryUpdatedPayload }) => void>>();
 const listenMock = vi.fn(
   async (
@@ -46,7 +53,7 @@ async function renderPanel(props: any) {
   return render(Panel, { props });
 }
 
-function makeTagVersion(id: string, commitCount = 1) {
+function makeTagVersion(id: string, commitCount = 1): VersionListItem {
   return {
     id,
     label: id,
@@ -311,7 +318,7 @@ describe("VersionHistoryPanel", () => {
   it("requests history only for latest 10 tags", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: any) => {
       if (cmd === "list_project_versions") {
-        const items = [
+        const items: VersionListItem[] = [
           {
             id: "unreleased",
             label: "Unreleased (HEAD)",
