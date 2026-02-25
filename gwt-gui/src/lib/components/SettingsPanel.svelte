@@ -1094,7 +1094,7 @@
                   id="voice-input-enabled"
                   type="checkbox"
                   checked={settings.voice_input.enabled}
-                  disabled={!voiceAvailable || voiceCapabilityLoading}
+                  disabled={voiceCapabilityLoading}
                   onchange={(e) =>
                     updateVoiceInputField(
                       "enabled",
@@ -1116,7 +1116,7 @@
                 id="voice-hotkey"
                 type="text"
                 value={settings.voice_input.hotkey}
-                disabled={!voiceAvailable || voiceCapabilityLoading}
+                disabled={voiceCapabilityLoading}
                 oninput={(e) =>
                   updateVoiceInputField(
                     "hotkey",
@@ -1133,7 +1133,7 @@
                 id="voice-ptt-hotkey"
                 type="text"
                 value={settings.voice_input.ptt_hotkey}
-                disabled={!voiceAvailable || voiceCapabilityLoading}
+                disabled={voiceCapabilityLoading}
                 oninput={(e) =>
                   updateVoiceInputField(
                     "ptt_hotkey",
@@ -1150,7 +1150,7 @@
                 id="voice-language"
                 class="select"
                 value={settings.voice_input.language}
-                disabled={!voiceAvailable || voiceCapabilityLoading}
+                disabled={voiceCapabilityLoading}
                 onchange={(e) =>
                   updateVoiceInputField(
                     "language",
@@ -1169,7 +1169,7 @@
                 id="voice-quality"
                 class="select"
                 value={settings.voice_input.quality}
-                disabled={!voiceAvailable || voiceCapabilityLoading}
+                disabled={voiceCapabilityLoading}
                 onchange={(e) =>
                   updateVoiceInputField(
                     "quality",
@@ -1202,8 +1202,11 @@
               </div>
             {:else if !voiceAvailable}
               <div class="field">
+                <span class="field-hint" style="color: var(--warning-color, #e6a700);">
+                  Voice input runtime unavailable: {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
+                </span>
                 <span class="field-hint">
-                  Voice input is disabled: {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
+                  Settings can still be configured and will take effect once the runtime is available.
                 </span>
               </div>
             {/if}
