@@ -230,7 +230,7 @@ impl UpdateManager {
 
         if !force {
             if let Some(cache) = &cache {
-                let effective_ttl = if Self::cache_has_pending_assets(cache) {
+                let effective_ttl = if Self::cache_has_pending_assets(cache, &self.current_version) {
                     PENDING_ASSET_TTL
                 } else {
                     self.ttl
@@ -557,16 +557,16 @@ impl UpdateManager {
         }
     }
 
-    fn cache_has_pending_assets(cache: &UpdateCacheFile) -> bool {
-        let has_version = cache
+    fn cache_has_pending_assets(cache: &UpdateCacheFile, current_version: &Version) -> bool {
+        let is_newer = cache
             .latest_version
             .as_deref()
             .and_then(|v| Version::parse(v).ok())
-            .is_some();
+            .is_some_and(|v| v > *current_version);
         let has_any_asset = cache.portable_asset_url.is_some()
             || cache.installer_asset_url.is_some()
             || cache.asset_url.is_some();
-        has_version && !has_any_asset
+        is_newer && !has_any_asset
     }
 }
 
@@ -1310,7 +1310,8 @@ mod tests {
     }
 
     #[test]
-    fn cache_has_pending_assets_true_when_version_but_no_assets() {
+    fn cache_has_pending_assets_true_when_newer_version_but_no_assets() {
+        let current = Version::new(1, 0, 0);
         let cache = UpdateCacheFile {
             checked_at: Utc::now(),
             latest_version: Some("2.0.0".to_string()),
@@ -1319,11 +1320,12 @@ mod tests {
             installer_asset_url: None,
             asset_url: None,
         };
-        assert!(UpdateManager::cache_has_pending_assets(&cache));
+        assert!(UpdateManager::cache_has_pending_assets(&cache, &current));
     }
 
     #[test]
     fn cache_has_pending_assets_false_when_portable_asset_present() {
+        let current = Version::new(1, 0, 0);
         let cache = UpdateCacheFile {
             checked_at: Utc::now(),
             latest_version: Some("2.0.0".to_string()),
@@ -1332,11 +1334,12 @@ mod tests {
             installer_asset_url: None,
             asset_url: None,
         };
-        assert!(!UpdateManager::cache_has_pending_assets(&cache));
+        assert!(!UpdateManager::cache_has_pending_assets(&cache, &current));
     }
 
     #[test]
     fn cache_has_pending_assets_false_when_installer_asset_present() {
+        let current = Version::new(1, 0, 0);
         let cache = UpdateCacheFile {
             checked_at: Utc::now(),
             latest_version: Some("2.0.0".to_string()),
@@ -1345,11 +1348,12 @@ mod tests {
             installer_asset_url: Some("https://example.com/gwt.dmg".to_string()),
             asset_url: None,
         };
-        assert!(!UpdateManager::cache_has_pending_assets(&cache));
+        assert!(!UpdateManager::cache_has_pending_assets(&cache, &current));
     }
 
     #[test]
     fn cache_has_pending_assets_false_when_legacy_asset_present() {
+        let current = Version::new(1, 0, 0);
         let cache = UpdateCacheFile {
             checked_at: Utc::now(),
             latest_version: Some("2.0.0".to_string()),
@@ -1358,11 +1362,12 @@ mod tests {
             installer_asset_url: None,
             asset_url: Some("https://example.com/gwt.tar.gz".to_string()),
         };
-        assert!(!UpdateManager::cache_has_pending_assets(&cache));
+        assert!(!UpdateManager::cache_has_pending_assets(&cache, &current));
     }
 
     #[test]
     fn cache_has_pending_assets_false_when_no_version() {
+        let current = Version::new(1, 0, 0);
         let cache = UpdateCacheFile {
             checked_at: Utc::now(),
             latest_version: None,
@@ -1371,7 +1376,35 @@ mod tests {
             installer_asset_url: None,
             asset_url: None,
         };
-        assert!(!UpdateManager::cache_has_pending_assets(&cache));
+        assert!(!UpdateManager::cache_has_pending_assets(&cache, &current));
+    }
+
+    #[test]
+    fn cache_has_pending_assets_false_when_same_version_no_assets() {
+        let current = Version::new(2, 0, 0);
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: Some("2.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        assert!(!UpdateManager::cache_has_pending_assets(&cache, &current));
+    }
+
+    #[test]
+    fn cache_has_pending_assets_false_when_older_version_no_assets() {
+        let current = Version::new(3, 0, 0);
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: Some("2.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        assert!(!UpdateManager::cache_has_pending_assets(&cache, &current));
     }
 
     #[test]
