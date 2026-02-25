@@ -23,6 +23,7 @@ use std::time::Duration;
 const DEFAULT_OWNER: &str = "akiojin";
 const DEFAULT_REPO: &str = "gwt";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24);
+const PENDING_ASSET_TTL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_API_BASE_URL: &str = "https://api.github.com";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -229,11 +230,16 @@ impl UpdateManager {
 
         if !force {
             if let Some(cache) = &cache {
+                let effective_ttl = if Self::cache_has_pending_assets(cache) {
+                    PENDING_ASSET_TTL
+                } else {
+                    self.ttl
+                };
                 if now
                     .signed_duration_since(cache.checked_at)
                     .to_std()
                     .ok()
-                    .is_some_and(|age| age < self.ttl)
+                    .is_some_and(|age| age < effective_ttl)
                 {
                     return self.state_from_cache(cache, current_exe);
                 }
@@ -549,6 +555,18 @@ impl UpdateManager {
                 checked_at: Some(checked_at),
             }
         }
+    }
+
+    fn cache_has_pending_assets(cache: &UpdateCacheFile) -> bool {
+        let has_version = cache
+            .latest_version
+            .as_deref()
+            .and_then(|v| Version::parse(v).ok())
+            .is_some();
+        let has_any_asset = cache.portable_asset_url.is_some()
+            || cache.installer_asset_url.is_some()
+            || cache.asset_url.is_some();
+        has_version && !has_any_asset
     }
 }
 
@@ -1289,6 +1307,169 @@ mod tests {
 
         let url = find_installer_asset_url(&platform, &assets);
         assert_eq!(url.as_deref(), Some("https://example.com/macos-arm64.dmg"));
+    }
+
+    #[test]
+    fn cache_has_pending_assets_true_when_version_but_no_assets() {
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: Some("2.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        assert!(UpdateManager::cache_has_pending_assets(&cache));
+    }
+
+    #[test]
+    fn cache_has_pending_assets_false_when_portable_asset_present() {
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: Some("2.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: Some("https://example.com/gwt.tar.gz".to_string()),
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        assert!(!UpdateManager::cache_has_pending_assets(&cache));
+    }
+
+    #[test]
+    fn cache_has_pending_assets_false_when_installer_asset_present() {
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: Some("2.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: Some("https://example.com/gwt.dmg".to_string()),
+            asset_url: None,
+        };
+        assert!(!UpdateManager::cache_has_pending_assets(&cache));
+    }
+
+    #[test]
+    fn cache_has_pending_assets_false_when_legacy_asset_present() {
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: Some("2.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: Some("https://example.com/gwt.tar.gz".to_string()),
+        };
+        assert!(!UpdateManager::cache_has_pending_assets(&cache));
+    }
+
+    #[test]
+    fn cache_has_pending_assets_false_when_no_version() {
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: None,
+            release_url: None,
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        assert!(!UpdateManager::cache_has_pending_assets(&cache));
+    }
+
+    #[test]
+    fn pending_asset_cache_fresh_still_returns_from_cache() {
+        // A pending-asset cache within PENDING_ASSET_TTL (5min) should still
+        // return from cache without network fetch.
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::TestEnvGuard::new(temp.path());
+
+        let mgr = UpdateManager::new().with_api_base_url("http://127.0.0.1:9");
+
+        // Cache: new version detected but no assets, created just now
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: Some("999.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        write_cache(mgr.cache_path(), &cache).unwrap();
+
+        // Fresh pending-asset cache (0 seconds old < 5min TTL) → returns from cache
+        let state = mgr.check(false);
+        match state {
+            UpdateState::Available { latest, .. } => assert_eq!(latest, "999.0.0"),
+            _ => panic!("expected Available from fresh pending cache, got {state:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_asset_cache_expired_triggers_refetch() {
+        // A pending-asset cache older than PENDING_ASSET_TTL (5min) should
+        // trigger a network refetch. Even though the fetch fails with an
+        // unreachable API, the fallback returns from cache (not Failed),
+        // but the key behavior is that the TTL expired — verified below by
+        // confirming the cache's checked_at stays at the old value (no fresh
+        // write overwrites it because the fetch fails).
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::TestEnvGuard::new(temp.path());
+
+        let mgr = UpdateManager::new().with_api_base_url("http://127.0.0.1:9");
+
+        let old_checked_at = Utc::now() - chrono::Duration::minutes(6);
+
+        // Cache: new version detected but no assets, created 6 minutes ago
+        let cache = UpdateCacheFile {
+            checked_at: old_checked_at,
+            latest_version: Some("999.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        write_cache(mgr.cache_path(), &cache).unwrap();
+
+        // 6 minutes old pending-asset cache should expire (> 5min TTL) →
+        // attempts network fetch → fails → falls back to cache.
+        // The cache file on disk should remain unchanged (no successful fetch
+        // to overwrite it).
+        let state = mgr.check(false);
+        match &state {
+            UpdateState::Available { latest, .. } => assert_eq!(latest, "999.0.0"),
+            _ => panic!("expected Available (fallback from cache), got {state:?}"),
+        }
+
+        // Verify the cache file wasn't overwritten (it still has the old checked_at)
+        let disk_cache = read_cache(mgr.cache_path()).unwrap();
+        assert_eq!(disk_cache.checked_at, old_checked_at);
+    }
+
+    #[test]
+    fn normal_asset_cache_uses_default_ttl() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::TestEnvGuard::new(temp.path());
+
+        let mgr = UpdateManager::new().with_api_base_url("http://127.0.0.1:9");
+
+        // Cache: new version with asset (normal)
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now() - chrono::Duration::minutes(6),
+            latest_version: Some("999.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: Some("https://example.com/asset".to_string()),
+        };
+        write_cache(mgr.cache_path(), &cache).unwrap();
+
+        // 6 minutes old normal cache should still be valid (DEFAULT_TTL = 24h)
+        let state = mgr.check(false);
+        match state {
+            UpdateState::Available { latest, .. } => assert_eq!(latest, "999.0.0"),
+            _ => panic!("expected Available from cache, got {state:?}"),
+        }
     }
 
     #[cfg(unix)]

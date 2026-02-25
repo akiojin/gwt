@@ -75,7 +75,7 @@ jobs:
           gh release create "$TAG_NAME" \
             --title "$TAG_NAME" \
             --notes "$NOTES" \
-            --draft=false
+            --draft
 
   build-tauri:
     name: Build Tauri (${{ matrix.platform }})
@@ -205,3 +205,8 @@ jobs:
         with:
           tag_name: ${{ needs.create-tag.outputs.tag_name }}
           files: artifacts/**/*
+      - name: Publish release (remove draft status)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ needs.create-tag.outputs.tag_name }}" --draft=false
