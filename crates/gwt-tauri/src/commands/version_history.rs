@@ -8,6 +8,7 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, VersionHistoryCacheEntry};
 use gwt_core::ai::{format_error_for_display, AIClient, AIError, ChatMessage};
 use gwt_core::config::ProfilesConfig;
+use gwt_core::git::Remote;
 use gwt_core::StructuredError;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -119,6 +120,10 @@ pub fn list_project_versions(
 
     let limit = limit.max(1);
     let tag_limit = limit.saturating_sub(1);
+
+    // Best-effort tag refresh to avoid stale local tag lists.
+    // Failures (offline/no remote/etc.) are intentionally ignored.
+    refresh_version_tags_from_default_remote(&repo_path);
 
     // Fetch an extra tag so each displayed tag can have a "previous" range bound.
     let tags = list_version_tags(&repo_path, Some(tag_limit.saturating_add(1)))
@@ -906,6 +911,25 @@ fn resolve_range_for_version(
     Ok((version_id.to_string(), prev, version_id.to_string()))
 }
 
+fn refresh_version_tags_from_default_remote(repo_path: &Path) {
+    let remote_name = match Remote::default_name(repo_path) {
+        Ok(Some(name)) => name,
+        _ => return,
+    };
+
+    let _ = gwt_core::process::command("git")
+        .args([
+            "fetch",
+            remote_name.as_str(),
+            "--tags",
+            "--prune",
+            "--no-recurse-submodules",
+        ])
+        .current_dir(repo_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output();
+}
+
 fn list_version_tags(repo_path: &Path, max: Option<usize>) -> Result<Vec<String>, String> {
     let args = vec!["tag".to_string(), "--list".to_string(), "v*".to_string()];
     let out = git_output(repo_path, &args)?;
@@ -1186,6 +1210,20 @@ mod tests {
         assert!(out.status.success());
     }
 
+    fn run_git(path: &Path, args: &[&str]) {
+        let out = gwt_core::process::command("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn parse_and_sort_version_tags_orders_semver_descending() {
         let raw = "v7.9.0\nv7.12.6\nv7.10.0\nv7.12.5\n";
@@ -1237,6 +1275,54 @@ mod tests {
         assert_eq!(out.items[1].id, "v1.0.1");
         assert_eq!(out.items[2].id, "v1.0.0");
         assert!(out.items.iter().any(|i| i.id == "v1.0.1"));
+        assert!(out.items.iter().any(|i| i.id == "v1.0.0"));
+    }
+
+    #[test]
+    fn list_project_versions_refreshes_tags_from_default_remote() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare"]);
+
+        let seed = TempDir::new().unwrap();
+        init_git_repo(seed.path());
+        commit_file(seed.path(), "a.txt", "1", "feat: first");
+        run_git(seed.path(), &["branch", "-M", "main"]);
+        tag(seed.path(), "v1.0.0");
+        run_git(
+            seed.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        run_git(seed.path(), &["push", "-u", "origin", "main"]);
+        run_git(seed.path(), &["push", "origin", "--tags"]);
+
+        let local = TempDir::new().unwrap();
+        let out = gwt_core::process::command("git")
+            .args([
+                "clone",
+                origin.path().to_str().unwrap(),
+                local.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        commit_file(seed.path(), "b.txt", "2", "fix: second");
+        tag(seed.path(), "v1.1.0");
+        run_git(seed.path(), &["push", "origin", "main"]);
+        run_git(seed.path(), &["push", "origin", "--tags"]);
+
+        let local_before = list_version_tags(local.path(), None).unwrap();
+        assert!(
+            !local_before.iter().any(|t| t == "v1.1.0"),
+            "clone should be stale before tag refresh"
+        );
+
+        let out = list_project_versions(local.path().to_string_lossy().to_string(), 10).unwrap();
+        assert_eq!(out.items[1].id, "v1.1.0");
         assert!(out.items.iter().any(|i| i.id == "v1.0.0"));
     }
 
