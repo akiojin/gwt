@@ -71,6 +71,26 @@ pub struct ReviewComment {
     pub created_at: String,
 }
 
+/// PR list item for the PR Dashboard (SPEC-prlist)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrListItem {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub head_ref_name: String,
+    pub base_ref_name: String,
+    pub author: serde_json::Value,
+    pub labels: Vec<serde_json::Value>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub url: String,
+    pub body: String,
+    pub review_requests: Vec<serde_json::Value>,
+    pub assignees: Vec<serde_json::Value>,
+}
+
 /// Pull Request information
 #[derive(Debug, Clone)]
 pub struct PullRequest {

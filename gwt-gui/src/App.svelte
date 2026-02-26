@@ -1814,6 +1814,23 @@
     activeTabId = tab.id;
   }
 
+  function openPullRequestsTab() {
+    const existing = tabs.find(
+      (t) => t.type === "prs" || t.id === "prs",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+    const tab: Tab = {
+      id: "prs",
+      label: "Pull Requests",
+      type: "prs",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
   function handleIssueCountChange(count: number) {
     tabs = tabs.map((t) =>
       t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
@@ -2179,6 +2196,9 @@
         break;
       case "git-issues":
         openIssuesTab();
+        break;
+      case "git-pull-requests":
+        openPullRequestsTab();
         break;
       case "check-updates":
         {
