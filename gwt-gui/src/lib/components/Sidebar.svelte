@@ -92,6 +92,7 @@
   const PR_POLL_VISIBILITY_REFRESH_MIN_GAP_MS = 5_000;
   let pollingStatuses: Record<string, PrStatusLite | null> = $state({});
   let pollingGhCliStatus: GhCliStatus | null = $state(null);
+  let pollingRepoKey: string | null = $state(null);
   let prPollingBootstrappedPath: string | null = null;
   let prPollingActivePath: string | null = null;
   const prPollingInFlightPaths = new Set<string>();
@@ -105,6 +106,7 @@
       prPollingBootstrappedPath = null;
       pollingStatuses = {};
       pollingGhCliStatus = null;
+      pollingRepoKey = null;
     }
 
     if (!path) {
@@ -177,6 +179,7 @@
 
         if (queryBranches.length === 0) {
           pollingStatuses = {};
+          pollingRepoKey = null;
           return;
         }
         if (markBootstrap) {
@@ -186,6 +189,7 @@
         const result = await invoke<{
           statuses: Record<string, PrStatusLite | null>;
           ghStatus: GhCliStatus;
+          repoKey?: string | null;
         }>("fetch_pr_status", { projectPath: path, branches: queryBranches });
         if (!destroyed) {
           const statuses = result.statuses ?? {};
@@ -196,6 +200,7 @@
           }
           pollingStatuses = mappedStatuses;
           pollingGhCliStatus = result.ghStatus ?? null;
+          pollingRepoKey = result.repoKey ?? null;
         }
       } catch {
         // Polling failure is silent — keep stale data
@@ -238,6 +243,52 @@
       destroyed = true;
       clearTimer();
       document.removeEventListener("visibilitychange", onVisibility);
+    };
+  });
+
+  // Listen to pr-status-updated events from Rust backend (T008)
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const listen = await getEventListen();
+        const unlistenFn = await listen<{
+          repoKey: string;
+          branch: string;
+          status: PrStatusLite;
+        }>("pr-status-updated", (event) => {
+          const { repoKey, branch: eventBranch, status } = event.payload;
+          if (!pollingRepoKey || repoKey !== pollingRepoKey) return;
+          if (status.retrying) return;
+          // Find matching entry in pollingStatuses by headBranch
+          const next = { ...pollingStatuses };
+          let updated = false;
+          for (const key of Object.keys(next)) {
+            const existing = next[key];
+            if (existing && existing.headBranch === eventBranch) {
+              next[key] = status;
+              updated = true;
+            }
+          }
+          if (updated) {
+            pollingStatuses = next;
+          }
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* Tauri not available */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
     };
   });
 
@@ -1394,6 +1445,15 @@
                   {divergenceIndicator(branch)}
                 </span>
               {/if}
+              {#if activePrStatuses[branch.name]}
+                {@const prSt = activePrStatuses[branch.name]!}
+                <span
+                  class="pr-badge {prSt.state === 'MERGED' ? 'merged' : prSt.state === 'CLOSED' ? 'closed' : prSt.mergeable === 'MERGEABLE' ? 'open' : prSt.mergeable === 'CONFLICTING' ? 'conflicting' : 'unknown'}{prSt.retrying ? ' pulse' : ''}"
+                  title="PR #{prSt.number}"
+                >
+                  #{prSt.number}
+                </span>
+              {/if}
             </button>
           {/each}
         {/if}
@@ -1989,5 +2049,47 @@
     background: none;
   }
 
-  /* PR Status tree */
+  /* PR Status badge in branch list */
+  .pr-badge {
+    font-size: var(--ui-font-xs);
+    font-family: monospace;
+    padding: 1px 6px;
+    border-radius: 999px;
+    flex-shrink: 0;
+    border: 1px solid var(--border-color);
+  }
+
+  .pr-badge.open {
+    color: var(--green);
+    border-color: rgba(63, 185, 80, 0.35);
+  }
+
+  .pr-badge.merged {
+    color: var(--magenta, #a371f7);
+    border-color: rgba(163, 113, 247, 0.35);
+  }
+
+  .pr-badge.closed {
+    color: var(--red);
+    border-color: rgba(248, 81, 73, 0.35);
+  }
+
+  .pr-badge.conflicting {
+    color: var(--red);
+    border-color: rgba(248, 81, 73, 0.35);
+  }
+
+  .pr-badge.unknown {
+    color: var(--text-muted);
+    border-color: rgba(128, 128, 128, 0.35);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .pulse {
+    animation: pulse 1.5s ease-in-out infinite;
+  }
 </style>

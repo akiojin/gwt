@@ -657,4 +657,56 @@ describe("PrStatusSection", () => {
       expect(btn).toBeNull();
     });
   });
+
+  // --- T007: retrying prop – pulse animation & merge button control ---
+
+  describe("retrying prop", () => {
+    it("applies .pulse class to mergeable-badge when retrying=true", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr, onMerge, retrying: true });
+
+      const badge = container.querySelector(".mergeable-badge");
+      expect(badge).toBeTruthy();
+      expect(badge?.classList.contains("pulse")).toBe(true);
+    });
+
+    it("disables merge button when retrying=true", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr, onMerge, retrying: true });
+
+      const btn = container.querySelector(".mergeable-badge-btn") as HTMLButtonElement;
+      expect(btn).toBeTruthy();
+      expect(btn.disabled).toBe(true);
+    });
+
+    it("shows 'Checking merge status...' text when retrying=true", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr, onMerge, retrying: true });
+
+      const btn = container.querySelector(".mergeable-badge-btn");
+      expect(btn?.textContent).toContain("Checking merge status...");
+    });
+
+    it("does not apply .pulse class when retrying=false (default)", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr, onMerge });
+
+      const badge = container.querySelector(".mergeable-badge");
+      expect(badge).toBeTruthy();
+      expect(badge?.classList.contains("pulse")).toBe(false);
+    });
+
+    it("applies .pulse class to span badge when retrying=true and not merge-clickable", async () => {
+      const pr = makePrDetail({ state: "OPEN", mergeable: "UNKNOWN" });
+      const { container } = await renderSection({ prDetail: pr, retrying: true });
+
+      const badge = container.querySelector(".mergeable-badge");
+      expect(badge).toBeTruthy();
+      expect(badge?.classList.contains("pulse")).toBe(true);
+    });
+  });
 });

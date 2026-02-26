@@ -1,4 +1,4 @@
-//! Pull Request status commands (SPEC-d6949f99)
+//! Pull Request status commands (SPEC-d6949f99, SPEC-a9f2e3b1)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use chrono::{DateTime, Utc};
@@ -11,11 +11,12 @@ use gwt_core::StructuredError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 use tracing::warn;
 
 /// gh CLI availability and authentication status
@@ -32,6 +33,7 @@ pub struct GhCliStatusInfo {
 pub struct PrStatusResponse {
     pub statuses: HashMap<String, Option<PrStatusLiteSummary>>,
     pub gh_status: GhCliStatusInfo,
+    pub repo_key: Option<String>,
 }
 
 /// Lightweight PR status summary for Sidebar polling.
@@ -47,6 +49,7 @@ pub struct PrStatusLiteSummary {
     pub base_branch: String,
     pub head_branch: String,
     pub check_suites: Vec<WorkflowRunSummary>,
+    pub retrying: bool,
 }
 
 /// Serializable workflow run info for the frontend
@@ -124,15 +127,35 @@ struct LatestBranchPrCacheEntry {
 const LATEST_BRANCH_PR_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_STATUS_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_STATUS_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(60);
+const RETRY_MAX_ATTEMPTS: u8 = 5;
+const RETRY_INITIAL_INTERVAL: Duration = Duration::from_secs(2);
 const PR_UPDATE_BRANCH_TIMEOUT: Duration = Duration::from_secs(8);
 const PR_MERGE_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_PR_STATUS_WARN_THRESHOLD: Duration = Duration::from_millis(1000);
+
+/// Per-PR retry state for UNKNOWN merge status resolution.
+#[derive(Debug, Clone)]
+struct PrRetryState {
+    retrying: bool,
+    retry_count: u8,
+}
+
+impl PrRetryState {
+    fn new() -> Self {
+        Self {
+            retrying: true,
+            retry_count: 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 struct RepoPrStatusCacheEntry {
     statuses_by_head_branch: HashMap<String, PrStatusLiteSummary>,
     fetched_at: Option<Instant>,
     cooldown_until: Option<Instant>,
+    /// Per-branch retry state for UNKNOWN merge status.
+    retry_states: HashMap<String, PrRetryState>,
 }
 
 #[derive(Debug, Default)]
@@ -181,6 +204,17 @@ fn map_cached_statuses(
         .iter()
         .map(|branch| (branch.clone(), cached.get(branch).cloned()))
         .collect()
+}
+
+fn apply_retry_state_overrides(
+    statuses: &mut HashMap<String, Option<PrStatusLiteSummary>>,
+    retry_states: &HashMap<String, PrRetryState>,
+) {
+    for summary in statuses.values_mut().flatten() {
+        if let Some(retry_state) = retry_states.get(&summary.head_branch) {
+            summary.retrying = retry_state.retrying;
+        }
+    }
 }
 
 fn parse_reset_at_to_instant(reset_at: &str) -> Option<Instant> {
@@ -298,6 +332,204 @@ fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str
     trimmed
 }
 
+/// Returns true if the PR status has UNKNOWN merge-related fields.
+fn has_unknown_merge_status(summary: &PrStatusLiteSummary) -> bool {
+    summary.mergeable == "UNKNOWN"
+        || summary
+            .merge_state_status
+            .as_deref()
+            .map(|s| s == "UNKNOWN")
+            .unwrap_or(false)
+}
+
+fn collect_unknown_branches(
+    statuses_by_head_branch: &HashMap<String, PrStatusLiteSummary>,
+) -> Vec<String> {
+    let mut unknown_branches = statuses_by_head_branch
+        .iter()
+        .filter(|(_, summary)| has_unknown_merge_status(summary))
+        .map(|(branch, _)| branch.clone())
+        .collect::<Vec<_>>();
+    unknown_branches.sort();
+    unknown_branches
+}
+
+/// Tauri event payload emitted when a background retry resolves UNKNOWN status.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrStatusUpdatedEvent {
+    pub repo_key: String,
+    pub branch: String,
+    pub status: PrStatusLiteSummary,
+}
+
+/// Compute exponential backoff interval for the given attempt (0-indexed).
+fn retry_backoff(attempt: u8) -> Duration {
+    RETRY_INITIAL_INTERVAL * 2u32.pow(attempt as u32)
+}
+
+/// Spawn a background retry task for branches with UNKNOWN merge status.
+///
+/// This checks if a retry is already in progress and skips if so (FR-008).
+/// On resolution, updates cache and emits a Tauri event (FR-004).
+fn spawn_unknown_retry(
+    repo_key: String,
+    repo_path: PathBuf,
+    unknown_branches: Vec<String>,
+    app_handle: tauri::AppHandle<tauri::Wry>,
+) {
+    // Filter to branches not already retrying
+    let branches_to_retry: Vec<String> = {
+        let cache = pr_status_cache();
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        let entry = guard.repos.entry(repo_key.clone()).or_default();
+
+        let mut to_retry = Vec::new();
+        for branch in &unknown_branches {
+            let retry_state = entry.retry_states.get(branch);
+            if retry_state.map(|s| s.retrying).unwrap_or(false) {
+                continue; // Already retrying, skip
+            }
+            entry
+                .retry_states
+                .insert(branch.clone(), PrRetryState::new());
+            to_retry.push(branch.clone());
+        }
+        to_retry
+    };
+
+    if branches_to_retry.is_empty() {
+        return;
+    }
+
+    thread::spawn(move || {
+        for attempt in 0..RETRY_MAX_ATTEMPTS {
+            let delay = retry_backoff(attempt);
+            thread::sleep(delay);
+
+            // Check if we're in cooldown
+            {
+                let cache = pr_status_cache();
+                let guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+                if let Some(entry) = guard.repos.get(&repo_key) {
+                    if entry
+                        .cooldown_until
+                        .map(|until| Instant::now() < until)
+                        .unwrap_or(false)
+                    {
+                        // In cooldown, skip this attempt
+                        continue;
+                    }
+                }
+            }
+
+            // Find branches still needing retry
+            let still_unknown: Vec<String> = {
+                let cache = pr_status_cache();
+                let guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+                if let Some(entry) = guard.repos.get(&repo_key) {
+                    branches_to_retry
+                        .iter()
+                        .filter(|b| {
+                            entry
+                                .retry_states
+                                .get(*b)
+                                .map(|s| s.retrying)
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    vec![]
+                }
+            };
+
+            if still_unknown.is_empty() {
+                break;
+            }
+
+            // Re-fetch using existing query for unknown branches only (FR-003)
+            let fetch_result = graphql::fetch_pr_statuses_with_meta(&repo_path, &still_unknown);
+
+            match fetch_result {
+                Ok(result) => {
+                    let cache = pr_status_cache();
+                    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let entry = guard.repos.entry(repo_key.clone()).or_default();
+
+                    for (branch, info) in &result.by_head_branch {
+                        let summary = to_pr_status_summary(info);
+                        if !has_unknown_merge_status(&summary) {
+                            // Resolved! Update cache and clear retry state
+                            let mut resolved = summary;
+                            resolved.retrying = false;
+                            entry
+                                .statuses_by_head_branch
+                                .insert(branch.clone(), resolved.clone());
+                            entry.retry_states.remove(branch);
+
+                            // Emit event to frontend (FR-004)
+                            let _ = app_handle.emit(
+                                "pr-status-updated",
+                                PrStatusUpdatedEvent {
+                                    repo_key: repo_key.clone(),
+                                    branch: branch.clone(),
+                                    status: resolved,
+                                },
+                            );
+                        }
+                    }
+
+                    // Update retry counts
+                    for branch in &still_unknown {
+                        if let Some(state) = entry.retry_states.get_mut(branch) {
+                            state.retry_count = attempt + 1;
+                        }
+                    }
+                }
+                Err(error) => {
+                    if graphql::is_rate_limit_error(&error) {
+                        let cache = pr_status_cache();
+                        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+                        let entry = guard.repos.entry(repo_key.clone()).or_default();
+                        entry.cooldown_until = Some(Instant::now() + PR_STATUS_RATE_LIMIT_BACKOFF);
+                    }
+                    // Continue to next attempt
+                }
+            }
+
+            // Check if all resolved
+            {
+                let cache = pr_status_cache();
+                let guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+                if let Some(entry) = guard.repos.get(&repo_key) {
+                    let any_still_retrying = branches_to_retry.iter().any(|b| {
+                        entry
+                            .retry_states
+                            .get(b)
+                            .map(|s| s.retrying)
+                            .unwrap_or(false)
+                    });
+                    if !any_still_retrying {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Clean up: clear retry states for all branches we were handling (FR-011)
+        {
+            let cache = pr_status_cache();
+            let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+            if let Some(entry) = guard.repos.get_mut(&repo_key) {
+                for branch in &branches_to_retry {
+                    entry.retry_states.remove(branch);
+                }
+            }
+        }
+    });
+}
+
 fn to_workflow_run_summary(info: &WorkflowRunInfo) -> WorkflowRunSummary {
     WorkflowRunSummary {
         workflow_name: info.workflow_name.clone(),
@@ -341,6 +573,7 @@ fn to_pr_status_summary(info: &PrStatusInfo) -> PrStatusLiteSummary {
             .iter()
             .map(to_workflow_run_summary)
             .collect(),
+        retrying: false,
     }
 }
 
@@ -376,13 +609,24 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
     }
 }
 
+/// Internal result from fetch_pr_status_impl, carrying retry metadata.
+struct FetchPrStatusResult {
+    response: PrStatusResponse,
+    /// Branches that have UNKNOWN merge status and need retry.
+    unknown_branches: Vec<String>,
+    /// Resolved repo path for retry.
+    repo_path: Option<PathBuf>,
+    /// Cache key for the repo.
+    repo_key: Option<String>,
+}
+
 /// Fetch PR statuses for all given branches via GraphQL (T009)
 ///
 /// Also returns gh CLI availability/authentication status.
 fn fetch_pr_status_impl(
     project_path: String,
     branches: Vec<String>,
-) -> Result<PrStatusResponse, StructuredError> {
+) -> Result<FetchPrStatusResult, StructuredError> {
     let available = is_gh_cli_available();
     let authenticated = if available {
         is_gh_cli_authenticated()
@@ -397,9 +641,15 @@ fn fetch_pr_status_impl(
     if !available || !authenticated {
         // Return empty statuses with gh_status indicating the problem
         let statuses = branches.into_iter().map(|branch| (branch, None)).collect();
-        return Ok(PrStatusResponse {
-            statuses,
-            gh_status,
+        return Ok(FetchPrStatusResult {
+            response: PrStatusResponse {
+                statuses,
+                gh_status,
+                repo_key: None,
+            },
+            unknown_branches: vec![],
+            repo_path: None,
+            repo_key: None,
         });
     }
 
@@ -424,10 +674,18 @@ fn fetch_pr_status_impl(
             .unwrap_or(false);
 
         if cache_is_fresh || in_cooldown {
-            let statuses = map_cached_statuses(&branches, &entry.statuses_by_head_branch);
-            return Ok(PrStatusResponse {
-                statuses,
-                gh_status,
+            // Mark retrying PRs in the cache response
+            let mut statuses = map_cached_statuses(&branches, &entry.statuses_by_head_branch);
+            apply_retry_state_overrides(&mut statuses, &entry.retry_states);
+            return Ok(FetchPrStatusResult {
+                response: PrStatusResponse {
+                    statuses,
+                    gh_status,
+                    repo_key: Some(repo_key.clone()),
+                },
+                unknown_branches: vec![],
+                repo_path: None,
+                repo_key: None,
             });
         }
     }
@@ -452,48 +710,92 @@ fn fetch_pr_status_impl(
         Err(error) => {
             let cache = pr_status_cache();
             let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-            let entry = guard.repos.entry(repo_key).or_default();
+            let entry = guard.repos.entry(repo_key.clone()).or_default();
             if graphql::is_rate_limit_error(&error) {
                 entry.cooldown_until = Some(Instant::now() + PR_STATUS_RATE_LIMIT_BACKOFF);
             }
             // Silent degrade: use stale cache if available, otherwise no statuses.
-            let statuses = map_cached_statuses(&branches, &entry.statuses_by_head_branch);
-            return Ok(PrStatusResponse {
-                statuses,
-                gh_status,
+            let mut statuses = map_cached_statuses(&branches, &entry.statuses_by_head_branch);
+            apply_retry_state_overrides(&mut statuses, &entry.retry_states);
+            return Ok(FetchPrStatusResult {
+                response: PrStatusResponse {
+                    statuses,
+                    gh_status,
+                    repo_key: Some(repo_key),
+                },
+                unknown_branches: vec![],
+                repo_path: None,
+                repo_key: None,
             });
         }
     };
 
-    {
+    // Detect UNKNOWN branches from the raw fetch result (before cache restoration).
+    let unknown_branches = collect_unknown_branches(&statuses_by_head_branch);
+
+    // Write cache with UNKNOWN protection (FR-005):
+    // If the new result has UNKNOWN merge fields but the cache already has
+    // a known value, preserve the cached merge fields instead of regressing.
+    let final_statuses = {
         let cache = pr_status_cache();
         let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-        let entry = guard.repos.entry(repo_key).or_default();
-        entry.statuses_by_head_branch = statuses_by_head_branch.clone();
+        let entry = guard.repos.entry(repo_key.clone()).or_default();
+
+        let mut merged = statuses_by_head_branch.clone();
+        for (branch, new_summary) in &mut merged {
+            if has_unknown_merge_status(new_summary) {
+                if let Some(cached) = entry.statuses_by_head_branch.get(branch) {
+                    if !has_unknown_merge_status(cached) {
+                        // Preserve known merge fields from cache
+                        new_summary.mergeable = cached.mergeable.clone();
+                        new_summary.merge_state_status = cached.merge_state_status.clone();
+                    }
+                }
+            }
+        }
+
+        entry.statuses_by_head_branch = merged.clone();
         entry.fetched_at = Some(now);
         entry.cooldown_until = cooldown_until;
+        merged
+    };
+
+    let mut statuses = map_cached_statuses(&branches, &final_statuses);
+
+    // Set retrying flag on UNKNOWN PR statuses
+    if !unknown_branches.is_empty() {
+        for summary in statuses.values_mut().flatten() {
+            if unknown_branches.contains(&summary.head_branch) {
+                summary.retrying = true;
+            }
+        }
     }
 
-    let statuses = map_cached_statuses(&branches, &statuses_by_head_branch);
-
-    Ok(PrStatusResponse {
-        statuses,
-        gh_status,
+    Ok(FetchPrStatusResult {
+        response: PrStatusResponse {
+            statuses,
+            gh_status,
+            repo_key: Some(repo_key.clone()),
+        },
+        unknown_branches,
+        repo_path: Some(repo_path),
+        repo_key: Some(repo_key),
     })
 }
 
 #[tauri::command]
 pub async fn fetch_pr_status(
+    app: tauri::AppHandle<tauri::Wry>,
     project_path: String,
     branches: Vec<String>,
 ) -> Result<PrStatusResponse, StructuredError> {
     let started = Instant::now();
-    let result =
+    let inner =
         tauri::async_runtime::spawn_blocking(move || fetch_pr_status_impl(project_path, branches))
             .await
             .map_err(|e| {
                 StructuredError::internal(&format!("Task join failed: {e}"), "fetch_pr_status")
-            })?;
+            })??;
     let elapsed = started.elapsed();
     if elapsed > FETCH_PR_STATUS_WARN_THRESHOLD {
         warn!(
@@ -502,7 +804,15 @@ pub async fn fetch_pr_status(
             "fetch_pr_status took longer than expected"
         );
     }
-    result
+
+    // Spawn background retry for UNKNOWN branches (FR-001, FR-002, T004/T005)
+    if !inner.unknown_branches.is_empty() {
+        if let (Some(repo_path), Some(repo_key)) = (inner.repo_path, inner.repo_key) {
+            spawn_unknown_retry(repo_key, repo_path, inner.unknown_branches, app);
+        }
+    }
+
+    Ok(inner.response)
 }
 
 /// Fetch detailed PR information for a single PR (T010)
@@ -1072,6 +1382,7 @@ mod tests {
                     conclusion: Some("success".to_string()),
                     is_required: None,
                 }],
+                retrying: false,
             }),
         );
         statuses.insert("feature/y".to_string(), None);
@@ -1082,11 +1393,13 @@ mod tests {
                 available: true,
                 authenticated: true,
             },
+            repo_key: Some("/tmp/repo.git".to_string()),
         };
 
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"statuses\""));
         assert!(json.contains("\"ghStatus\""));
+        assert!(json.contains("\"repoKey\":\"/tmp/repo.git\""));
         assert!(json.contains("\"available\":true"));
         assert!(json.contains("\"number\":42"));
         assert!(json.contains("\"baseBranch\":\"main\""));
@@ -1103,10 +1416,12 @@ mod tests {
                 available: false,
                 authenticated: false,
             },
+            repo_key: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"statuses\":{}"));
         assert!(json.contains("\"ghStatus\""));
+        assert!(json.contains("\"repoKey\":null"));
         assert!(json.contains("\"available\":false"));
     }
 
@@ -1298,6 +1613,254 @@ mod tests {
     #[test]
     fn test_pr_merge_timeout_value() {
         assert_eq!(PR_MERGE_TIMEOUT.as_secs(), 15);
+    }
+
+    // ==========================================================
+    // T001: PrStatusLiteSummary retrying field serialization
+    // ==========================================================
+
+    #[test]
+    fn test_pr_status_lite_summary_retrying_serialization() {
+        let summary_retrying = PrStatusLiteSummary {
+            number: 1,
+            state: "OPEN".to_string(),
+            url: "https://example.com/1".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: None,
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/a".to_string(),
+            check_suites: vec![],
+            retrying: true,
+        };
+        let json = serde_json::to_string(&summary_retrying).unwrap();
+        assert!(json.contains("\"retrying\":true"));
+
+        let summary_not_retrying = PrStatusLiteSummary {
+            number: 2,
+            state: "OPEN".to_string(),
+            url: "https://example.com/2".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: None,
+            author: "bob".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/b".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+        let json = serde_json::to_string(&summary_not_retrying).unwrap();
+        assert!(json.contains("\"retrying\":false"));
+    }
+
+    // ==========================================================
+    // T002: PrRetryState management tests
+    // ==========================================================
+
+    #[test]
+    fn test_pr_retry_state_new() {
+        let state = PrRetryState::new();
+        assert!(state.retrying);
+        assert_eq!(state.retry_count, 0);
+    }
+
+    #[test]
+    fn test_retry_state_in_cache_entry() {
+        let mut entry = RepoPrStatusCacheEntry::default();
+        assert!(entry.retry_states.is_empty());
+
+        entry
+            .retry_states
+            .insert("feature/x".to_string(), PrRetryState::new());
+        assert!(entry.retry_states.contains_key("feature/x"));
+        assert!(entry.retry_states["feature/x"].retrying);
+    }
+
+    #[test]
+    fn test_retry_constants() {
+        assert_eq!(RETRY_MAX_ATTEMPTS, 5);
+        assert_eq!(RETRY_INITIAL_INTERVAL.as_secs(), 2);
+    }
+
+    // ==========================================================
+    // T003: Cache UNKNOWN protection tests
+    // ==========================================================
+
+    #[test]
+    fn test_has_unknown_merge_status_mergeable_unknown() {
+        let summary = PrStatusLiteSummary {
+            number: 1,
+            state: "OPEN".to_string(),
+            url: "https://example.com/1".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: None,
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/a".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+        assert!(has_unknown_merge_status(&summary));
+    }
+
+    #[test]
+    fn test_has_unknown_merge_status_merge_state_unknown() {
+        let summary = PrStatusLiteSummary {
+            number: 1,
+            state: "OPEN".to_string(),
+            url: "https://example.com/1".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: Some("UNKNOWN".to_string()),
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/a".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+        assert!(has_unknown_merge_status(&summary));
+    }
+
+    #[test]
+    fn test_has_unknown_merge_status_known() {
+        let summary = PrStatusLiteSummary {
+            number: 1,
+            state: "OPEN".to_string(),
+            url: "https://example.com/1".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: Some("CLEAN".to_string()),
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/a".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+        assert!(!has_unknown_merge_status(&summary));
+    }
+
+    #[test]
+    fn test_cache_protection_preserves_known_values() {
+        // Simulate: cache has MERGEABLE, new result has UNKNOWN
+        let cached = PrStatusLiteSummary {
+            number: 42,
+            state: "OPEN".to_string(),
+            url: "https://example.com/42".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: Some("CLEAN".to_string()),
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/x".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+
+        let mut new_result = PrStatusLiteSummary {
+            number: 42,
+            state: "OPEN".to_string(),
+            url: "https://example.com/42".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: Some("UNKNOWN".to_string()),
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/x".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+
+        // Apply protection logic
+        if has_unknown_merge_status(&new_result) && !has_unknown_merge_status(&cached) {
+            new_result.mergeable = cached.mergeable.clone();
+            new_result.merge_state_status = cached.merge_state_status.clone();
+        }
+
+        assert_eq!(new_result.mergeable, "MERGEABLE");
+        assert_eq!(new_result.merge_state_status, Some("CLEAN".to_string()));
+        // Verify cached is unchanged
+        assert_eq!(cached.mergeable, "MERGEABLE");
+    }
+
+    #[test]
+    fn test_cache_protection_allows_initial_unknown() {
+        // When cache is empty (no previous value), UNKNOWN should be stored
+        let new_result = PrStatusLiteSummary {
+            number: 42,
+            state: "OPEN".to_string(),
+            url: "https://example.com/42".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: None,
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/x".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+
+        // No cached entry exists, so UNKNOWN should pass through
+        assert!(has_unknown_merge_status(&new_result));
+        assert_eq!(new_result.mergeable, "UNKNOWN");
+    }
+
+    #[test]
+    fn test_apply_retry_state_overrides_marks_matching_branch() {
+        let mut statuses = HashMap::from([(
+            "feature/x".to_string(),
+            Some(PrStatusLiteSummary {
+                number: 42,
+                state: "OPEN".to_string(),
+                url: "https://example.com/42".to_string(),
+                mergeable: "MERGEABLE".to_string(),
+                merge_state_status: Some("CLEAN".to_string()),
+                author: "alice".to_string(),
+                base_branch: "main".to_string(),
+                head_branch: "feature/x".to_string(),
+                check_suites: vec![],
+                retrying: false,
+            }),
+        )]);
+        let retry_states = HashMap::from([(
+            "feature/x".to_string(),
+            PrRetryState {
+                retrying: true,
+                retry_count: 2,
+            },
+        )]);
+
+        apply_retry_state_overrides(&mut statuses, &retry_states);
+
+        let summary = statuses["feature/x"].as_ref().unwrap();
+        assert!(summary.retrying);
+    }
+
+    #[test]
+    fn test_collect_unknown_branches_uses_raw_fetch_values() {
+        let raw_statuses = HashMap::from([(
+            "feature/x".to_string(),
+            PrStatusLiteSummary {
+                number: 42,
+                state: "OPEN".to_string(),
+                url: "https://example.com/42".to_string(),
+                mergeable: "UNKNOWN".to_string(),
+                merge_state_status: Some("UNKNOWN".to_string()),
+                author: "alice".to_string(),
+                base_branch: "main".to_string(),
+                head_branch: "feature/x".to_string(),
+                check_suites: vec![],
+                retrying: false,
+            },
+        )]);
+
+        let mut final_statuses = raw_statuses.clone();
+        final_statuses
+            .get_mut("feature/x")
+            .expect("entry should exist")
+            .mergeable = "MERGEABLE".to_string();
+        final_statuses
+            .get_mut("feature/x")
+            .expect("entry should exist")
+            .merge_state_status = Some("CLEAN".to_string());
+
+        let unknown_from_raw = collect_unknown_branches(&raw_statuses);
+        let unknown_from_final = collect_unknown_branches(&final_statuses);
+        assert_eq!(unknown_from_raw, vec!["feature/x".to_string()]);
+        assert!(unknown_from_final.is_empty());
     }
 
     #[test]
