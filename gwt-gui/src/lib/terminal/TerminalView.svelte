@@ -464,7 +464,29 @@
     // frontend_ready is false, so no data loss).
     // Step 2: Signal readiness via terminal_ready and write initial data.
     (async () => {
+      const pendingLiveOutput: Uint8Array[] = [];
+      let liveOutputReady = false;
+      const flushPendingLiveOutput = () => {
+        if (cancelled) {
+          pendingLiveOutput.length = 0;
+          liveOutputReady = true;
+          return;
+        }
+
+        while (pendingLiveOutput.length > 0) {
+          const chunk = pendingLiveOutput.shift();
+          if (!chunk) continue;
+          term.write(chunk);
+        }
+        liveOutputReady = true;
+      };
+
       const unlistenFn = await setupEventListener(term, (bytes) => {
+        if (cancelled) return;
+        if (!liveOutputReady) {
+          pendingLiveOutput.push(bytes);
+          return;
+        }
         term.write(bytes);
       });
       if (cancelled) {
@@ -487,6 +509,8 @@
         }
       } catch {
         // Ignore: not available outside Tauri runtime.
+      } finally {
+        flushPendingLiveOutput();
       }
     })();
 

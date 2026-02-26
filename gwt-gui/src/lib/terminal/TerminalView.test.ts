@@ -346,7 +346,7 @@ describe("TerminalView", () => {
     expect(after).toBe(before);
   });
 
-  it("writes terminal_ready data as Uint8Array and forwards live output directly", async () => {
+  it("writes terminal_ready data before buffered live output", async () => {
     let resolveReady: ((value: number[]) => void) | null = null;
     invokeMock.mockImplementation((command: string) => {
       callOrder.push(`invoke:${command}`);
@@ -368,7 +368,7 @@ describe("TerminalView", () => {
 
     const term = terminalInstances[0];
 
-    // Live output arrives directly (no buffering) because backend gates emission
+    // Live output arriving before terminal_ready is buffered.
     terminalOutputHandler!({
       payload: {
         pane_id: "pane-1",
@@ -376,24 +376,37 @@ describe("TerminalView", () => {
       },
     });
 
-    // Live output is written immediately (no buffering in the new flow)
-    await waitFor(() => {
-      expect(term.write).toHaveBeenCalledTimes(1);
-    });
-    const liveChunk = term.write.mock.calls[0][0];
-    expect(liveChunk).toBeInstanceOf(Uint8Array);
-    expect(new TextDecoder().decode(liveChunk)).toBe("LIVE\n");
+    await Promise.resolve();
+    expect(term.write).not.toHaveBeenCalled();
 
-    // Now resolve terminal_ready with initial data
+    // Resolve terminal_ready with initial data first, then flush buffered output.
     resolveReady!(Array.from(new TextEncoder().encode("history\n")));
 
     await waitFor(() => {
       expect(term.write).toHaveBeenCalledTimes(2);
     });
 
-    const readyChunk = term.write.mock.calls[1][0];
+    const readyChunk = term.write.mock.calls[0][0];
     expect(readyChunk).toBeInstanceOf(Uint8Array);
     expect(new TextDecoder().decode(readyChunk)).toBe("history\n");
+
+    const liveChunk = term.write.mock.calls[1][0];
+    expect(liveChunk).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(liveChunk)).toBe("LIVE\n");
+
+    // After terminal_ready, live output is written directly.
+    terminalOutputHandler!({
+      payload: {
+        pane_id: "pane-1",
+        data: Array.from(new TextEncoder().encode("AFTER\n")),
+      },
+    });
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledTimes(3);
+    });
+    const afterChunk = term.write.mock.calls[2][0];
+    expect(afterChunk).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(afterChunk)).toBe("AFTER\n");
   });
 
   it("handles gwt-terminal-edit-action copy/paste events", async () => {
