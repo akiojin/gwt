@@ -92,8 +92,24 @@ fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
+fn strip_wrapping_quotes_recursive(value: &str) -> String {
+    let mut current = value.trim();
+    while current.len() >= 2 {
+        let bytes = current.as_bytes();
+        let first = bytes[0];
+        let last = bytes[current.len() - 1];
+        let wrapped = (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'');
+        if !wrapped {
+            break;
+        }
+        current = current[1..current.len() - 1].trim();
+    }
+    current.to_string()
+}
+
 fn has_windows_batch_extension(command: &str) -> bool {
-    Path::new(command)
+    let normalized = strip_wrapping_quotes_recursive(command);
+    Path::new(&normalized)
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
@@ -104,15 +120,17 @@ fn is_windows_batch_command_for_platform<F>(command: &str, mut resolve_command_p
 where
     F: FnMut(&str) -> Option<PathBuf>,
 {
-    if has_windows_batch_extension(command) {
+    let normalized_command = strip_wrapping_quotes_recursive(command);
+
+    if has_windows_batch_extension(&normalized_command) {
         return true;
     }
 
-    if command.contains('\\') || command.contains('/') {
+    if normalized_command.contains('\\') || normalized_command.contains('/') {
         return false;
     }
 
-    resolve_command_path(command)
+    resolve_command_path(&normalized_command)
         .map(|resolved| has_windows_batch_extension(resolved.to_string_lossy().as_ref()))
         .unwrap_or(false)
 }
@@ -150,13 +168,15 @@ where
     G: FnMut(&str) -> Option<PathBuf>,
 {
     if is_windows {
+        let normalized_command = strip_wrapping_quotes_recursive(command);
+
         if let Some(shell_id) = shell {
             match shell_id {
                 "cmd" => {
                     let expression = if windows_force_utf8 {
-                        build_cmd_utf8_command_expression(command, args)
+                        build_cmd_utf8_command_expression(&normalized_command, args)
                     } else {
-                        build_cmd_command_expression(command, args)
+                        build_cmd_command_expression(&normalized_command, args)
                     };
                     let cmd_args = if windows_force_utf8 {
                         vec![
@@ -172,11 +192,11 @@ where
                 }
                 // "wsl": command and args are already set by the caller (launch_with_wsl_pty_write
                 // or resolve_shell_for_spawn), so pass through without wrapping.
-                "wsl" => return (command.to_string(), args.to_vec()),
+                "wsl" => return (normalized_command.clone(), args.to_vec()),
                 "powershell" => {
                     let shell = resolve_windows_shell();
                     let expression = build_windows_powershell_command_expression(
-                        command,
+                        &normalized_command,
                         args,
                         windows_force_utf8,
                     );
@@ -188,11 +208,11 @@ where
 
         // Auto shell + batch command (`*.cmd`/`*.bat`) must run via `cmd.exe /C`
         // to keep Windows interactive PTY behavior stable across agents.
-        if is_windows_batch_command_for_platform(command, &mut resolve_command_path) {
+        if is_windows_batch_command_for_platform(&normalized_command, &mut resolve_command_path) {
             let expression = if windows_force_utf8 {
-                build_cmd_utf8_command_expression(command, args)
+                build_cmd_utf8_command_expression(&normalized_command, args)
             } else {
-                build_cmd_command_expression(command, args)
+                build_cmd_command_expression(&normalized_command, args)
             };
             let cmd_args = if windows_force_utf8 {
                 vec![
@@ -210,11 +230,11 @@ where
         // Interactive sessions (e.g. spawn_shell) must not be wrapped with
         // PowerShell -NonInteractive, as that breaks ConPTY I/O.
         if interactive && !windows_force_utf8 {
-            return (command.to_string(), args.to_vec());
+            return (normalized_command, args.to_vec());
         }
 
         if windows_force_utf8 {
-            let expression = build_cmd_utf8_command_expression(command, args);
+            let expression = build_cmd_utf8_command_expression(&normalized_command, args);
             return (
                 "cmd.exe".to_string(),
                 vec![
@@ -227,7 +247,8 @@ where
         }
 
         let shell = resolve_windows_shell();
-        let expression = build_windows_powershell_command_expression(command, args, false);
+        let expression =
+            build_windows_powershell_command_expression(&normalized_command, args, false);
         return (shell, build_powershell_wrapped_args(expression));
     }
 
@@ -690,9 +711,29 @@ mod tests {
     }
 
     #[test]
+    fn strip_wrapping_quotes_recursive_unwraps_nested_quotes() {
+        assert_eq!(
+            strip_wrapping_quotes_recursive("'\"C:\\Program Files\\nodejs\\npx.cmd\"'"),
+            "C:\\Program Files\\nodejs\\npx.cmd"
+        );
+        assert_eq!(
+            strip_wrapping_quotes_recursive("\"C:\\Tools\\npx.cmd\""),
+            "C:\\Tools\\npx.cmd"
+        );
+    }
+
+    #[test]
     fn is_windows_batch_command_for_platform_detects_cmd_extension() {
         assert!(is_windows_batch_command_for_platform(
             "C:\\Users\\user\\AppData\\Roaming\\npm\\npx.CMD",
+            |_| None
+        ));
+    }
+
+    #[test]
+    fn is_windows_batch_command_for_platform_detects_wrapped_cmd_extension() {
+        assert!(is_windows_batch_command_for_platform(
+            "'\"C:\\Program Files\\nodejs\\npx.cmd\"'",
             |_| None
         ));
     }
@@ -713,6 +754,28 @@ mod tests {
             "C:\\Tools\\pwsh.exe",
             |_| None
         ));
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_normalizes_wrapped_batch_path() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "'\"C:\\Program Files\\nodejs\\npx.cmd\"'",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "\"C:\\Program Files\\nodejs\\npx.cmd\" --yes @openai/codex@latest".to_string(),
+            ]
+        );
     }
 
     #[test]

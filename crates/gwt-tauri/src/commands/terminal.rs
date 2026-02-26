@@ -10,7 +10,7 @@ use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
     DevContainerConfig, DockerFileType, DockerManager, PortAllocator,
 };
-use gwt_core::git::Remote;
+use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::runner::{
     build_fallback_launch, choose_fallback_runner, resolve_command_path,
@@ -155,6 +155,8 @@ pub struct LaunchAgentRequest {
     pub resume_session_id: Option<String>,
     /// Optional new branch creation request (creates branch + worktree before launch)
     pub create_branch: Option<CreateBranchRequest>,
+    /// Optional issue number used for issue-linked branch creation.
+    pub issue_number: Option<u64>,
     /// AI branch description for automatic branch name generation (AI Suggest mode)
     pub ai_branch_description: Option<String>,
     /// Optional terminal shell override (e.g. "powershell", "cmd", "wsl").
@@ -239,6 +241,45 @@ fn create_new_worktree_path(
         .create_new_branch(branch_name, base_branch)
         .map_err(|e| e.to_string())?;
     Ok(wt.path)
+}
+
+fn rollback_new_issue_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<(), String> {
+    let mut warnings = Vec::new();
+
+    match WorktreeManager::new(repo_path) {
+        Ok(manager) => {
+            if let Err(err) = manager.cleanup_branch(branch_name, true, true) {
+                warnings.push(format!("local cleanup warning: {err}"));
+            }
+        }
+        Err(err) => warnings.push(format!("failed to initialize worktree manager: {err}")),
+    }
+
+    let remote_output = gwt_core::process::command("git")
+        .args(["push", "origin", "--delete", branch_name])
+        .current_dir(repo_path)
+        .output();
+
+    match remote_output {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let lower = stderr.to_ascii_lowercase();
+            let missing_ref = lower.contains("remote ref does not exist")
+                || lower.contains("unable to delete")
+                || lower.contains("not found");
+            if !missing_ref {
+                warnings.push(format!("remote cleanup warning: {}", stderr.trim()));
+            }
+        }
+        Err(err) => warnings.push(format!("failed to execute remote cleanup: {err}")),
+    }
+
+    if warnings.is_empty() {
+        Ok(())
+    } else {
+        Err(warnings.join(" | "))
+    }
 }
 
 /// SPEC-a4fb2db2: Create a worktree by first creating the branch on GitHub,
@@ -2824,9 +2865,27 @@ mod tests {
             docker_keep: None,
             resume_session_id: None,
             create_branch: None,
+            issue_number: None,
             ai_branch_description: None,
             terminal_shell: None,
         }
+    }
+
+    #[test]
+    fn make_request_sets_issue_number_none_by_default() {
+        let req = make_request("codex");
+        assert_eq!(req.issue_number, None);
+    }
+
+    #[test]
+    fn launch_request_deserialize_with_issue_number() {
+        let raw = serde_json::json!({
+            "agentId": "codex",
+            "branch": "feature/issue-42",
+            "issueNumber": 42
+        });
+        let req: LaunchAgentRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(req.issue_number, Some(42));
     }
 
     #[test]
@@ -3675,364 +3734,304 @@ pub(crate) fn launch_agent_for_project_root(
     tracing::debug!(job_id = ?job_id, "launch step: create");
     report_launch_progress(job_id, &app_handle, "create", None);
 
-    let (working_dir, branch_name, worktree_created) =
-        if let Some(create) = request.create_branch.as_ref() {
-            // Determine branch name: AI generation or direct input
-            let new_branch = if let Some(ai_desc) = request.ai_branch_description.as_deref() {
-                let ai_desc = ai_desc.trim();
-                if ai_desc.is_empty() {
-                    return Err("AI branch description is required".to_string());
-                }
-                // AI branch name generation
-                report_launch_progress(
-                    job_id,
-                    &app_handle,
-                    "create",
-                    Some("Generating branch name..."),
-                );
+    let mut created_issue_branch_for_cleanup: Option<String> = None;
 
-                let profiles = ProfilesConfig::load()
-                    .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?;
-                let ai = profiles.resolve_active_ai_settings();
-                let settings = ai.resolved.ok_or_else(|| {
-                    "[E2001] AI branch name generation failed: AI is not configured".to_string()
-                })?;
-                let client = gwt_core::ai::AIClient::new(settings)
-                    .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?;
-                gwt_core::ai::suggest_branch_name(&client, ai_desc)
-                    .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?
-            } else {
-                let name = create.name.trim();
-                if name.is_empty() {
-                    return Err("New branch name is required".to_string());
-                }
-                name.to_string()
-            };
+    let (working_dir, branch_name, worktree_created) = if let Some(create) =
+        request.create_branch.as_ref()
+    {
+        // Determine branch name: AI generation or direct input
+        let new_branch = if let Some(ai_desc) = request.ai_branch_description.as_deref() {
+            let ai_desc = ai_desc.trim();
+            if ai_desc.is_empty() {
+                return Err("AI branch description is required".to_string());
+            }
+            // AI branch name generation
+            report_launch_progress(
+                job_id,
+                &app_handle,
+                "create",
+                Some("Generating branch name..."),
+            );
 
-            let base = create
-                .base
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
+            let profiles = ProfilesConfig::load()
+                .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?;
+            let ai = profiles.resolve_active_ai_settings();
+            let settings = ai.resolved.ok_or_else(|| {
+                "[E2001] AI branch name generation failed: AI is not configured".to_string()
+            })?;
+            let client = gwt_core::ai::AIClient::new(settings)
+                .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?;
+            gwt_core::ai::suggest_branch_name(&client, ai_desc)
+                .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?
+        } else {
+            let name = create.name.trim();
+            if name.is_empty() {
+                return Err("New branch name is required".to_string());
+            }
+            name.to_string()
+        };
 
-            if is_launch_cancelled(cancelled) {
-                return Err("Cancelled".to_string());
+        let base = create
+            .base
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
+        }
+
+        if let Some(issue_number) = request.issue_number {
+            let remotes = Remote::list(&repo_path).unwrap_or_default();
+            let issue_base = base.map(|b| strip_known_remote_prefix(b, &remotes).to_string());
+            let link_status = create_or_verify_linked_branch(
+                &repo_path,
+                issue_number,
+                &new_branch,
+                issue_base.as_deref(),
+            )?;
+
+            if matches!(link_status, IssueLinkedBranchStatus::Created) {
+                created_issue_branch_for_cleanup = Some(new_branch.clone());
             }
 
+            let (path, created) = match resolve_worktree_path(&repo_path, &new_branch) {
+                Ok(result) => result,
+                Err(err) => {
+                    if let Some(branch) = created_issue_branch_for_cleanup.as_deref() {
+                        if let Err(cleanup_err) = rollback_new_issue_branch(&repo_path, branch) {
+                            tracing::warn!(
+                                branch = branch,
+                                error = %cleanup_err,
+                                "Issue launch rollback failed after worktree resolution error"
+                            );
+                        }
+                    }
+                    return Err(err);
+                }
+            };
+
+            (path, new_branch, created)
+        } else {
             (
                 create_new_worktree_path(&repo_path, &new_branch, base)?,
                 new_branch,
                 true,
             )
-        } else {
-            let branch_ref = request.branch.trim();
-            if branch_ref.is_empty() {
-                return Err("Branch is required".to_string());
-            }
-            let remotes = Remote::list(&repo_path).unwrap_or_default();
-            let name = strip_known_remote_prefix(branch_ref, &remotes).to_string();
-            let (path, created) = resolve_worktree_path(&repo_path, branch_ref)?;
-            (path, name, created)
-        };
+        }
+    } else {
+        let branch_ref = request.branch.trim();
+        if branch_ref.is_empty() {
+            return Err("Branch is required".to_string());
+        }
+        let remotes = Remote::list(&repo_path).unwrap_or_default();
+        let name = strip_known_remote_prefix(branch_ref, &remotes).to_string();
+        let (path, created) = resolve_worktree_path(&repo_path, branch_ref)?;
+        (path, name, created)
+    };
 
-    if is_launch_cancelled(cancelled) {
-        return Err("Cancelled".to_string());
-    }
+    let launch_result: Result<String, String> = (|| {
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
+        }
 
-    if worktree_created {
-        let payload = WorktreesChangedPayload {
-            project_path: project_root.to_string_lossy().to_string(),
-            branch: branch_name.clone(),
-        };
-        let _ = app_handle.emit("worktrees-changed", &payload);
-    }
+        if worktree_created {
+            let payload = WorktreesChangedPayload {
+                project_path: project_root.to_string_lossy().to_string(),
+                branch: branch_name.clone(),
+            };
+            let _ = app_handle.emit("worktrees-changed", &payload);
+        }
 
-    // Record stats (agent launch + optional worktree creation) non-blocking.
-    {
-        let stat_agent_id = agent_id.to_string();
-        let stat_model = request.model.as_deref().unwrap_or("").to_string();
-        let stat_repo = repo_path.to_string_lossy().to_string();
-        let stat_wt_created = worktree_created;
-        std::thread::spawn(move || {
-            let result = Stats::update(|stats| {
-                stats.increment_agent_launch(&stat_agent_id, &stat_model, &stat_repo);
-                if stat_wt_created {
-                    stats.increment_worktree_created(&stat_repo);
+        // Record stats (agent launch + optional worktree creation) non-blocking.
+        {
+            let stat_agent_id = agent_id.to_string();
+            let stat_model = request.model.as_deref().unwrap_or("").to_string();
+            let stat_repo = repo_path.to_string_lossy().to_string();
+            let stat_wt_created = worktree_created;
+            std::thread::spawn(move || {
+                let result = Stats::update(|stats| {
+                    stats.increment_agent_launch(&stat_agent_id, &stat_model, &stat_repo);
+                    if stat_wt_created {
+                        stats.increment_worktree_created(&stat_repo);
+                    }
+                });
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "Failed to record stats");
                 }
             });
-            if let Err(e) = result {
-                tracing::warn!(error = %e, "Failed to record stats");
-            }
-        });
-    }
+        }
 
-    tracing::debug!(job_id = ?job_id, "launch step: deps (waiting for environment)");
-    report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));
-    if is_launch_cancelled(cancelled) {
-        return Err("Cancelled".to_string());
-    }
+        tracing::debug!(job_id = ?job_id, "launch step: deps (waiting for environment)");
+        report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
+        }
 
-    // Wait briefly for startup OS env capture; if it is still running, continue with the
-    // latest available snapshot (usually process env) instead of blocking launches.
-    if !state.wait_os_env_ready(Duration::from_secs(2)) {
-        tracing::warn!(
-            category = "os_env",
-            "OS environment capture still in progress; launching with current snapshot"
+        // Wait briefly for startup OS env capture; if it is still running, continue with the
+        // latest available snapshot (usually process env) instead of blocking launches.
+        if !state.wait_os_env_ready(Duration::from_secs(2)) {
+            tracing::warn!(
+                category = "os_env",
+                "OS environment capture still in progress; launching with current snapshot"
+            );
+        }
+        let mut os_env = state.os_env_snapshot();
+        if os_env.is_empty() {
+            os_env = std::env::vars().collect();
+        }
+
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
+        }
+
+        tracing::debug!(job_id = ?job_id, "launch step: deps (resolved)");
+        report_launch_progress(job_id, &app_handle, "deps", None);
+        let mut env_vars = merge_profile_env(&os_env, request.profile.as_deref());
+        // Useful for debugging and for agents that want to introspect gwt context.
+        env_vars.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            project_root.to_string_lossy().to_string(),
         );
-    }
-    let mut os_env = state.os_env_snapshot();
-    if os_env.is_empty() {
-        os_env = std::env::vars().collect();
-    }
 
-    if is_launch_cancelled(cancelled) {
-        return Err("Cancelled".to_string());
-    }
+        // Agent-specific env (global; not per-profile). Request overrides are still highest precedence.
+        let mut wants_claude_glm = false;
+        if agent_id == "claude" {
+            if let Ok(cfg) = AgentConfig::load() {
+                wants_claude_glm = cfg.claude.provider == ClaudeAgentProvider::Glm;
+                if wants_claude_glm {
+                    let base_url = cfg.claude.glm.base_url.trim();
+                    let token = cfg.claude.glm.auth_token.trim();
+                    let timeout = cfg.claude.glm.api_timeout_ms.trim();
+                    let opus = cfg.claude.glm.default_opus_model.trim();
+                    let sonnet = cfg.claude.glm.default_sonnet_model.trim();
+                    let haiku = cfg.claude.glm.default_haiku_model.trim();
 
-    tracing::debug!(job_id = ?job_id, "launch step: deps (resolved)");
-    report_launch_progress(job_id, &app_handle, "deps", None);
-    let mut env_vars = merge_profile_env(&os_env, request.profile.as_deref());
-    // Useful for debugging and for agents that want to introspect gwt context.
-    env_vars.insert(
-        "GWT_PROJECT_ROOT".to_string(),
-        project_root.to_string_lossy().to_string(),
-    );
-
-    // Agent-specific env (global; not per-profile). Request overrides are still highest precedence.
-    let mut wants_claude_glm = false;
-    if agent_id == "claude" {
-        if let Ok(cfg) = AgentConfig::load() {
-            wants_claude_glm = cfg.claude.provider == ClaudeAgentProvider::Glm;
-            if wants_claude_glm {
-                let base_url = cfg.claude.glm.base_url.trim();
-                let token = cfg.claude.glm.auth_token.trim();
-                let timeout = cfg.claude.glm.api_timeout_ms.trim();
-                let opus = cfg.claude.glm.default_opus_model.trim();
-                let sonnet = cfg.claude.glm.default_sonnet_model.trim();
-                let haiku = cfg.claude.glm.default_haiku_model.trim();
-
-                if !base_url.is_empty() {
-                    env_vars.insert("ANTHROPIC_BASE_URL".to_string(), base_url.to_string());
-                }
-                if !token.is_empty() {
-                    env_vars.insert("ANTHROPIC_AUTH_TOKEN".to_string(), token.to_string());
-                }
-                if !timeout.is_empty() {
-                    env_vars.insert("API_TIMEOUT_MS".to_string(), timeout.to_string());
-                }
-                if !opus.is_empty() {
-                    env_vars.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), opus.to_string());
-                }
-                if !sonnet.is_empty() {
-                    env_vars.insert(
-                        "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-                        sonnet.to_string(),
-                    );
-                }
-                if !haiku.is_empty() {
-                    env_vars.insert(
-                        "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                        haiku.to_string(),
-                    );
+                    if !base_url.is_empty() {
+                        env_vars.insert("ANTHROPIC_BASE_URL".to_string(), base_url.to_string());
+                    }
+                    if !token.is_empty() {
+                        env_vars.insert("ANTHROPIC_AUTH_TOKEN".to_string(), token.to_string());
+                    }
+                    if !timeout.is_empty() {
+                        env_vars.insert("API_TIMEOUT_MS".to_string(), timeout.to_string());
+                    }
+                    if !opus.is_empty() {
+                        env_vars
+                            .insert("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), opus.to_string());
+                    }
+                    if !sonnet.is_empty() {
+                        env_vars.insert(
+                            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                            sonnet.to_string(),
+                        );
+                    }
+                    if !haiku.is_empty() {
+                        env_vars.insert(
+                            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                            haiku.to_string(),
+                        );
+                    }
                 }
             }
         }
-    }
 
-    // Request-specific overrides are highest precedence.
-    if let Some(overrides) = request.env_overrides.as_ref() {
-        for (k, v) in overrides {
-            env_vars.insert(k.to_string(), v.to_string());
-        }
-    }
-
-    if wants_claude_glm {
-        // If we are configured for GLM, require at least Base URL + Token by the end of merging.
-        let base_url = env_vars
-            .get("ANTHROPIC_BASE_URL")
-            .map(|s| s.trim())
-            .unwrap_or("");
-        let token = env_vars
-            .get("ANTHROPIC_AUTH_TOKEN")
-            .map(|s| s.trim())
-            .unwrap_or("");
-        if base_url.is_empty() || token.is_empty() {
-            return Err("GLM (z.ai) provider is selected but required env vars are missing. Configure Base URL and API Token in Launch Agent > Provider.".to_string());
-        }
-    }
-
-    let skip_permissions = request.skip_permissions.unwrap_or(false);
-    if agent_id == "claude" && skip_permissions && std::env::consts::OS != "windows" {
-        // SPEC-3b0ed29b: Skip-permissions on non-Windows sets IS_SANDBOX=1 to avoid
-        // accidental confirmation prompts in sandboxed environments.
-        env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
-    }
-
-    // SPEC-3b0ed29b FR-106: Always enable Agent Teams for Claude Code launches.
-    if agent_id == "claude" {
-        env_vars
-            .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
-            .or_insert_with(|| "1".to_string());
-    }
-
-    // Ensure TERM/COLORTERM propagate into Docker exec environments as well.
-    // (PTY sets these for the host process, but docker exec only receives vars passed via -e.)
-    ensure_terminal_env_defaults(&mut env_vars);
-
-    let settings = Settings::load(&project_root).unwrap_or_default();
-    let force_host_settings = settings.docker.force_host;
-    let force_host_request = request.docker_force_host.unwrap_or(false);
-    let docker_force_host = force_host_settings || force_host_request;
-
-    let docker_build = request.docker_build.unwrap_or(false);
-    let docker_recreate = request.docker_recreate.unwrap_or(false);
-    let docker_keep = request.docker_keep.unwrap_or(false);
-
-    let mut docker_service = request
-        .docker_service
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-
-    let mut docker_container_name: Option<String> = None;
-    let mut docker_compose_args: Option<Vec<String>> = None;
-    let mut docker_env: Option<HashMap<String, String>> = None;
-
-    #[derive(Debug, Clone)]
-    struct DockerBuildSpec {
-        dockerfile_path: PathBuf,
-        context_dir: PathBuf,
-    }
-
-    enum DockerExecMode {
-        None,
-        Compose {
-            service: String,
-            workdir: String,
-            compose_args: Vec<String>,
-        },
-        DockerRun {
-            image: String,
-            workdir: String,
-            build: Option<DockerBuildSpec>,
-        },
-    }
-
-    let mut docker_mode = DockerExecMode::None;
-
-    if !docker_force_host {
-        match detect_docker_files(&working_dir) {
-            Some(DockerFileType::Compose(compose_path)) => {
-                // Best-effort compose service selection.
-                let services = DockerManager::list_services_from_compose_file(&compose_path)
-                    .map_err(|e| e.to_string())?;
-                if services.is_empty() {
-                    return Err("No services found in docker compose file".to_string());
-                }
-
-                if let Some(selected) = docker_service.as_deref() {
-                    if !services.iter().any(|s| s == selected) {
-                        return Err(format!("Docker service not found: {}", selected));
-                    }
-                } else {
-                    docker_service = Some(services[0].clone());
-                }
-
-                let service = docker_service
-                    .clone()
-                    .ok_or_else(|| "Docker service is required".to_string())?;
-
-                let container_name = DockerManager::generate_container_name(&branch_name);
-                let manager = DockerManager::new(
-                    &working_dir,
-                    &branch_name,
-                    DockerFileType::Compose(compose_path.clone()),
-                );
-
-                let mut compose_args =
-                    vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
-                let compose_paths = compose_file_paths_from_args(&compose_args);
-
-                let mut env = manager.collect_passthrough_env();
-                // Merge only docker-relevant profile/env keys to avoid oversized command lines
-                // and invalid Windows pseudo env keys (e.g. "=C:").
-                merge_profile_env_for_docker(&mut env, &env_vars);
-                merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
-                env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
-                apply_translated_git_env(&mut env);
-
-                let mounts = build_git_bind_mounts(&env);
-                if let Some(override_path) = write_docker_compose_override(
-                    &project_root,
-                    &container_name,
-                    &service,
-                    &services,
-                    &mounts,
-                )? {
-                    compose_args.push("-f".to_string());
-                    compose_args.push(override_path.to_string_lossy().to_string());
-                }
-
-                docker_compose_up(
-                    &working_dir,
-                    &container_name,
-                    &env,
-                    &compose_args,
-                    docker_build,
-                    docker_recreate,
-                    Some(service.as_str()),
-                )?;
-
-                docker_container_name = Some(container_name);
-                docker_compose_args = Some(compose_args.clone());
-                docker_env = Some(env);
-                docker_mode = DockerExecMode::Compose {
-                    service,
-                    workdir: docker_compose_exec_workdir(None),
-                    compose_args,
-                };
+        // Request-specific overrides are highest precedence.
+        if let Some(overrides) = request.env_overrides.as_ref() {
+            for (k, v) in overrides {
+                env_vars.insert(k.to_string(), v.to_string());
             }
-            Some(DockerFileType::DevContainer(devcontainer_path)) => {
-                let cfg =
-                    DevContainerConfig::load(&devcontainer_path).map_err(|e| e.to_string())?;
-                let devcontainer_dir = devcontainer_path
-                    .parent()
-                    .ok_or_else(|| "Invalid devcontainer path".to_string())?;
+        }
 
-                if cfg.uses_compose() {
-                    let mut compose_args = cfg.to_compose_args(devcontainer_dir);
-                    if compose_args.is_empty() {
-                        return Err("Devcontainer is configured for compose but no compose files were found".to_string());
-                    }
-                    let compose_paths = compose_file_paths_from_args(&compose_args);
+        if wants_claude_glm {
+            // If we are configured for GLM, require at least Base URL + Token by the end of merging.
+            let base_url = env_vars
+                .get("ANTHROPIC_BASE_URL")
+                .map(|s| s.trim())
+                .unwrap_or("");
+            let token = env_vars
+                .get("ANTHROPIC_AUTH_TOKEN")
+                .map(|s| s.trim())
+                .unwrap_or("");
+            if base_url.is_empty() || token.is_empty() {
+                return Err("GLM (z.ai) provider is selected but required env vars are missing. Configure Base URL and API Token in Launch Agent > Provider.".to_string());
+            }
+        }
 
-                    // Best-effort compose service selection: prefer request, then devcontainer.json, then first service.
-                    let mut services: Vec<String> = Vec::new();
-                    let mut i = 0usize;
-                    while i + 1 < compose_args.len() {
-                        if compose_args[i] == "-f" {
-                            let path = PathBuf::from(&compose_args[i + 1]);
-                            let mut s = DockerManager::list_services_from_compose_file(&path)
-                                .unwrap_or_default();
-                            services.append(&mut s);
-                        }
-                        i += 1;
-                    }
-                    services.sort();
-                    services.dedup();
+        let skip_permissions = request.skip_permissions.unwrap_or(false);
+        if agent_id == "claude" && skip_permissions && std::env::consts::OS != "windows" {
+            // SPEC-3b0ed29b: Skip-permissions on non-Windows sets IS_SANDBOX=1 to avoid
+            // accidental confirmation prompts in sandboxed environments.
+            env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
+        }
+
+        // SPEC-3b0ed29b FR-106: Always enable Agent Teams for Claude Code launches.
+        if agent_id == "claude" {
+            env_vars
+                .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+
+        // Ensure TERM/COLORTERM propagate into Docker exec environments as well.
+        // (PTY sets these for the host process, but docker exec only receives vars passed via -e.)
+        ensure_terminal_env_defaults(&mut env_vars);
+
+        let settings = Settings::load(&project_root).unwrap_or_default();
+        let force_host_settings = settings.docker.force_host;
+        let force_host_request = request.docker_force_host.unwrap_or(false);
+        let docker_force_host = force_host_settings || force_host_request;
+
+        let docker_build = request.docker_build.unwrap_or(false);
+        let docker_recreate = request.docker_recreate.unwrap_or(false);
+        let docker_keep = request.docker_keep.unwrap_or(false);
+
+        let mut docker_service = request
+            .docker_service
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let mut docker_container_name: Option<String> = None;
+        let mut docker_compose_args: Option<Vec<String>> = None;
+        let mut docker_env: Option<HashMap<String, String>> = None;
+
+        #[derive(Debug, Clone)]
+        struct DockerBuildSpec {
+            dockerfile_path: PathBuf,
+            context_dir: PathBuf,
+        }
+
+        enum DockerExecMode {
+            None,
+            Compose {
+                service: String,
+                workdir: String,
+                compose_args: Vec<String>,
+            },
+            DockerRun {
+                image: String,
+                workdir: String,
+                build: Option<DockerBuildSpec>,
+            },
+        }
+
+        let mut docker_mode = DockerExecMode::None;
+
+        if !docker_force_host {
+            match detect_docker_files(&working_dir) {
+                Some(DockerFileType::Compose(compose_path)) => {
+                    // Best-effort compose service selection.
+                    let services = DockerManager::list_services_from_compose_file(&compose_path)
+                        .map_err(|e| e.to_string())?;
                     if services.is_empty() {
-                        return Err("No services found in devcontainer compose files".to_string());
+                        return Err("No services found in docker compose file".to_string());
                     }
 
-                    let preferred_service = docker_service
-                        .clone()
-                        .or_else(|| cfg.get_service().map(|s| s.to_string()));
-                    if let Some(selected) = preferred_service.as_deref() {
+                    if let Some(selected) = docker_service.as_deref() {
                         if !services.iter().any(|s| s == selected) {
                             return Err(format!("Docker service not found: {}", selected));
                         }
-                        docker_service = Some(selected.to_string());
                     } else {
                         docker_service = Some(services[0].clone());
                     }
@@ -4045,10 +4044,16 @@ pub(crate) fn launch_agent_for_project_root(
                     let manager = DockerManager::new(
                         &working_dir,
                         &branch_name,
-                        DockerFileType::DevContainer(devcontainer_path.clone()),
+                        DockerFileType::Compose(compose_path.clone()),
                     );
 
+                    let mut compose_args =
+                        vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
+                    let compose_paths = compose_file_paths_from_args(&compose_args);
+
                     let mut env = manager.collect_passthrough_env();
+                    // Merge only docker-relevant profile/env keys to avoid oversized command lines
+                    // and invalid Windows pseudo env keys (e.g. "=C:").
                     merge_profile_env_for_docker(&mut env, &env_vars);
                     merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
                     env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
@@ -4081,167 +4086,315 @@ pub(crate) fn launch_agent_for_project_root(
                     docker_env = Some(env);
                     docker_mode = DockerExecMode::Compose {
                         service,
-                        workdir: docker_compose_exec_workdir(cfg.workspace_folder.as_deref()),
+                        workdir: docker_compose_exec_workdir(None),
                         compose_args,
                     };
-                } else if let Some(image) = cfg
-                    .image
-                    .as_deref()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                {
-                    // Image-based devcontainer: run the provided image (no build).
-                    docker_mode = DockerExecMode::DockerRun {
-                        image: image.to_string(),
-                        workdir: cfg
-                            .workspace_folder
-                            .as_deref()
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| DOCKER_WORKDIR.to_string()),
-                        build: None,
-                    };
-                } else if let Some(dockerfile_rel) = cfg.get_dockerfile() {
-                    let dockerfile_path = devcontainer_dir.join(dockerfile_rel);
-                    let context_dir = cfg
-                        .build
-                        .as_ref()
-                        .and_then(|b| b.context.as_deref())
+                }
+                Some(DockerFileType::DevContainer(devcontainer_path)) => {
+                    let cfg =
+                        DevContainerConfig::load(&devcontainer_path).map_err(|e| e.to_string())?;
+                    let devcontainer_dir = devcontainer_path
+                        .parent()
+                        .ok_or_else(|| "Invalid devcontainer path".to_string())?;
+
+                    if cfg.uses_compose() {
+                        let mut compose_args = cfg.to_compose_args(devcontainer_dir);
+                        if compose_args.is_empty() {
+                            return Err("Devcontainer is configured for compose but no compose files were found".to_string());
+                        }
+                        let compose_paths = compose_file_paths_from_args(&compose_args);
+
+                        // Best-effort compose service selection: prefer request, then devcontainer.json, then first service.
+                        let mut services: Vec<String> = Vec::new();
+                        let mut i = 0usize;
+                        while i + 1 < compose_args.len() {
+                            if compose_args[i] == "-f" {
+                                let path = PathBuf::from(&compose_args[i + 1]);
+                                let mut s = DockerManager::list_services_from_compose_file(&path)
+                                    .unwrap_or_default();
+                                services.append(&mut s);
+                            }
+                            i += 1;
+                        }
+                        services.sort();
+                        services.dedup();
+                        if services.is_empty() {
+                            return Err(
+                                "No services found in devcontainer compose files".to_string()
+                            );
+                        }
+
+                        let preferred_service = docker_service
+                            .clone()
+                            .or_else(|| cfg.get_service().map(|s| s.to_string()));
+                        if let Some(selected) = preferred_service.as_deref() {
+                            if !services.iter().any(|s| s == selected) {
+                                return Err(format!("Docker service not found: {}", selected));
+                            }
+                            docker_service = Some(selected.to_string());
+                        } else {
+                            docker_service = Some(services[0].clone());
+                        }
+
+                        let service = docker_service
+                            .clone()
+                            .ok_or_else(|| "Docker service is required".to_string())?;
+
+                        let container_name = DockerManager::generate_container_name(&branch_name);
+                        let manager = DockerManager::new(
+                            &working_dir,
+                            &branch_name,
+                            DockerFileType::DevContainer(devcontainer_path.clone()),
+                        );
+
+                        let mut env = manager.collect_passthrough_env();
+                        merge_profile_env_for_docker(&mut env, &env_vars);
+                        merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
+                        env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
+                        apply_translated_git_env(&mut env);
+
+                        let mounts = build_git_bind_mounts(&env);
+                        if let Some(override_path) = write_docker_compose_override(
+                            &project_root,
+                            &container_name,
+                            &service,
+                            &services,
+                            &mounts,
+                        )? {
+                            compose_args.push("-f".to_string());
+                            compose_args.push(override_path.to_string_lossy().to_string());
+                        }
+
+                        docker_compose_up(
+                            &working_dir,
+                            &container_name,
+                            &env,
+                            &compose_args,
+                            docker_build,
+                            docker_recreate,
+                            Some(service.as_str()),
+                        )?;
+
+                        docker_container_name = Some(container_name);
+                        docker_compose_args = Some(compose_args.clone());
+                        docker_env = Some(env);
+                        docker_mode = DockerExecMode::Compose {
+                            service,
+                            workdir: docker_compose_exec_workdir(cfg.workspace_folder.as_deref()),
+                            compose_args,
+                        };
+                    } else if let Some(image) = cfg
+                        .image
+                        .as_deref()
                         .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
-                        .map(|s| devcontainer_dir.join(s))
-                        .unwrap_or_else(|| working_dir.clone());
+                    {
+                        // Image-based devcontainer: run the provided image (no build).
+                        docker_mode = DockerExecMode::DockerRun {
+                            image: image.to_string(),
+                            workdir: cfg
+                                .workspace_folder
+                                .as_deref()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| DOCKER_WORKDIR.to_string()),
+                            build: None,
+                        };
+                    } else if let Some(dockerfile_rel) = cfg.get_dockerfile() {
+                        let dockerfile_path = devcontainer_dir.join(dockerfile_rel);
+                        let context_dir = cfg
+                            .build
+                            .as_ref()
+                            .and_then(|b| b.context.as_deref())
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| devcontainer_dir.join(s))
+                            .unwrap_or_else(|| working_dir.clone());
 
+                        docker_mode = DockerExecMode::DockerRun {
+                            image: DockerManager::generate_container_name(&branch_name),
+                            workdir: cfg
+                                .workspace_folder
+                                .as_deref()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| DOCKER_WORKDIR.to_string()),
+                            build: Some(DockerBuildSpec {
+                                dockerfile_path,
+                                context_dir,
+                            }),
+                        };
+                    }
+                }
+                Some(DockerFileType::Dockerfile(dockerfile_path)) => {
                     docker_mode = DockerExecMode::DockerRun {
                         image: DockerManager::generate_container_name(&branch_name),
-                        workdir: cfg
-                            .workspace_folder
-                            .as_deref()
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| DOCKER_WORKDIR.to_string()),
+                        workdir: DOCKER_WORKDIR.to_string(),
                         build: Some(DockerBuildSpec {
                             dockerfile_path,
-                            context_dir,
+                            context_dir: working_dir.clone(),
                         }),
                     };
                 }
+                _ => {}
             }
-            Some(DockerFileType::Dockerfile(dockerfile_path)) => {
-                docker_mode = DockerExecMode::DockerRun {
-                    image: DockerManager::generate_container_name(&branch_name),
-                    workdir: DOCKER_WORKDIR.to_string(),
-                    build: Some(DockerBuildSpec {
-                        dockerfile_path,
-                        context_dir: working_dir.clone(),
-                    }),
-                };
-            }
-            _ => {}
         }
-    }
 
-    if is_launch_cancelled(cancelled) {
-        return Err("Cancelled".to_string());
-    }
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
+        }
 
-    let use_docker = !matches!(docker_mode, DockerExecMode::None);
+        let use_docker = !matches!(docker_mode, DockerExecMode::None);
 
-    let resolved = if use_docker {
-        resolve_agent_launch_command_for_container(agent_id, request.agent_version.as_deref())?
-    } else {
-        resolve_agent_launch_command(agent_id, request.agent_version.as_deref())?
-    };
-
-    let version_for_gates = resolved
-        .version_for_gates
-        .as_deref()
-        .or(Some(resolved.tool_version.as_str()));
-
-    let enable_codex_multi_agent = if agent_id == "codex" {
-        let context = CodexFeatureProbeContext {
-            command: resolved.command.clone(),
-            args: resolved.args.clone(),
-            tool_version: resolved.tool_version.clone(),
-        };
-        codex_supports_multi_agent(&context)
-    } else {
-        false
-    };
-
-    let mut args = resolved.args.clone();
-    args.extend(build_agent_args(
-        agent_id,
-        &request,
-        version_for_gates,
-        enable_codex_multi_agent,
-    )?);
-
-    let mode = request.mode.unwrap_or(SessionMode::Normal);
-    let mode_str = match mode {
-        SessionMode::Normal => "normal",
-        SessionMode::Continue => "continue",
-        SessionMode::Resume => "resume",
-    }
-    .to_string();
-
-    let collaboration_modes = if agent_id == "codex" {
-        codex_supports_collaboration_modes(version_for_gates)
-    } else {
-        false
-    };
-
-    let model = request
-        .model
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let reasoning_level = request
-        .reasoning_level
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-
-    let started_at_millis = now_millis();
-
-    // Best-effort session history entry (do not block launch on IO errors).
-    {
-        let docker_force_host_entry = if force_host_request {
-            Some(true)
-        } else if use_docker {
-            Some(false)
+        let resolved = if use_docker {
+            resolve_agent_launch_command_for_container(agent_id, request.agent_version.as_deref())?
         } else {
-            None
+            resolve_agent_launch_command(agent_id, request.agent_version.as_deref())?
         };
-        let docker_service_entry = if matches!(docker_mode, DockerExecMode::Compose { .. }) {
-            docker_service.clone()
+
+        let version_for_gates = resolved
+            .version_for_gates
+            .as_deref()
+            .or(Some(resolved.tool_version.as_str()));
+
+        let enable_codex_multi_agent = if agent_id == "codex" {
+            let context = CodexFeatureProbeContext {
+                command: resolved.command.clone(),
+                args: resolved.args.clone(),
+                tool_version: resolved.tool_version.clone(),
+            };
+            codex_supports_multi_agent(&context)
         } else {
-            None
+            false
         };
-        let entry = gwt_core::config::ToolSessionEntry {
+
+        let mut args = resolved.args.clone();
+        args.extend(build_agent_args(
+            agent_id,
+            &request,
+            version_for_gates,
+            enable_codex_multi_agent,
+        )?);
+
+        let mode = request.mode.unwrap_or(SessionMode::Normal);
+        let mode_str = match mode {
+            SessionMode::Normal => "normal",
+            SessionMode::Continue => "continue",
+            SessionMode::Resume => "resume",
+        }
+        .to_string();
+
+        let collaboration_modes = if agent_id == "codex" {
+            codex_supports_collaboration_modes(version_for_gates)
+        } else {
+            false
+        };
+
+        let model = request
+            .model
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let reasoning_level = request
+            .reasoning_level
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let started_at_millis = now_millis();
+
+        // Best-effort session history entry (do not block launch on IO errors).
+        {
+            let docker_force_host_entry = if force_host_request {
+                Some(true)
+            } else if use_docker {
+                Some(false)
+            } else {
+                None
+            };
+            let docker_service_entry = if matches!(docker_mode, DockerExecMode::Compose { .. }) {
+                docker_service.clone()
+            } else {
+                None
+            };
+            let entry = gwt_core::config::ToolSessionEntry {
+                branch: branch_name.clone(),
+                worktree_path: Some(working_dir.to_string_lossy().to_string()),
+                tool_id: tool_id_for(agent_id),
+                tool_label: resolved.label.to_string(),
+                session_id: None,
+                mode: Some(mode_str.clone()),
+                model: model.clone(),
+                reasoning_level: if agent_id == "codex" {
+                    reasoning_level.clone()
+                } else {
+                    None
+                },
+                skip_permissions: Some(skip_permissions),
+                tool_version: Some(resolved.tool_version.clone()),
+                collaboration_modes: if agent_id == "codex" {
+                    Some(collaboration_modes)
+                } else {
+                    None
+                },
+                docker_service: docker_service_entry,
+                docker_force_host: docker_force_host_entry,
+                docker_recreate: if use_docker {
+                    Some(docker_recreate)
+                } else {
+                    None
+                },
+                docker_build: if use_docker { Some(docker_build) } else { None },
+                docker_keep: if use_docker { Some(docker_keep) } else { None },
+                docker_container_name: docker_container_name.clone(),
+                docker_compose_args: docker_compose_args.clone(),
+                timestamp: started_at_millis,
+            };
+
+            if let Err(err) = gwt_core::config::save_session_entry(&repo_path, entry) {
+                tracing::warn!(error = %err, "Failed to save session entry (launch): continuing");
+            }
+        }
+
+        // For Dockerfile-based launches, build the image best-effort before starting the PTY.
+        if let DockerExecMode::DockerRun {
+            image,
+            build: Some(build),
+            ..
+        } = &docker_mode
+        {
+            ensure_docker_ready()?;
+            if docker_should_build_image(&build.dockerfile_path, image, docker_build) {
+                docker_build_image(image, &build.dockerfile_path, &build.context_dir)?;
+            }
+        }
+
+        let meta = PaneLaunchMeta {
+            agent_id: agent_id.to_string(),
             branch: branch_name.clone(),
-            worktree_path: Some(working_dir.to_string_lossy().to_string()),
-            tool_id: tool_id_for(agent_id),
+            repo_path: repo_path.clone(),
+            worktree_path: working_dir.clone(),
             tool_label: resolved.label.to_string(),
-            session_id: None,
-            mode: Some(mode_str.clone()),
+            tool_version: resolved.tool_version.clone(),
+            mode: mode_str.clone(),
             model: model.clone(),
-            reasoning_level: if agent_id == "codex" {
-                reasoning_level.clone()
+            reasoning_level: reasoning_level.clone(),
+            skip_permissions,
+            collaboration_modes,
+            docker_service: if matches!(docker_mode, DockerExecMode::Compose { .. }) {
+                docker_service.clone()
             } else {
                 None
             },
-            skip_permissions: Some(skip_permissions),
-            tool_version: Some(resolved.tool_version.clone()),
-            collaboration_modes: if agent_id == "codex" {
-                Some(collaboration_modes)
+            docker_force_host: if force_host_request {
+                Some(true)
+            } else if use_docker {
+                Some(false)
             } else {
                 None
             },
-            docker_service: docker_service_entry,
-            docker_force_host: docker_force_host_entry,
             docker_recreate: if use_docker {
                 Some(docker_recreate)
             } else {
@@ -4251,217 +4404,182 @@ pub(crate) fn launch_agent_for_project_root(
             docker_keep: if use_docker { Some(docker_keep) } else { None },
             docker_container_name: docker_container_name.clone(),
             docker_compose_args: docker_compose_args.clone(),
-            timestamp: started_at_millis,
+            started_at_millis,
         };
 
-        if let Err(err) = gwt_core::config::save_session_entry(&repo_path, entry) {
-            tracing::warn!(error = %err, "Failed to save session entry (launch): continuing");
-        }
-    }
-
-    // For Dockerfile-based launches, build the image best-effort before starting the PTY.
-    if let DockerExecMode::DockerRun {
-        image,
-        build: Some(build),
-        ..
-    } = &docker_mode
-    {
-        ensure_docker_ready()?;
-        if docker_should_build_image(&build.dockerfile_path, image, docker_build) {
-            docker_build_image(image, &build.dockerfile_path, &build.context_dir)?;
-        }
-    }
-
-    let meta = PaneLaunchMeta {
-        agent_id: agent_id.to_string(),
-        branch: branch_name.clone(),
-        repo_path: repo_path.clone(),
-        worktree_path: working_dir.clone(),
-        tool_label: resolved.label.to_string(),
-        tool_version: resolved.tool_version.clone(),
-        mode: mode_str.clone(),
-        model: model.clone(),
-        reasoning_level: reasoning_level.clone(),
-        skip_permissions,
-        collaboration_modes,
-        docker_service: if matches!(docker_mode, DockerExecMode::Compose { .. }) {
-            docker_service.clone()
-        } else {
-            None
-        },
-        docker_force_host: if force_host_request {
-            Some(true)
-        } else if use_docker {
-            Some(false)
-        } else {
-            None
-        },
-        docker_recreate: if use_docker {
-            Some(docker_recreate)
-        } else {
-            None
-        },
-        docker_build: if use_docker { Some(docker_build) } else { None },
-        docker_keep: if use_docker { Some(docker_keep) } else { None },
-        docker_container_name: docker_container_name.clone(),
-        docker_compose_args: docker_compose_args.clone(),
-        started_at_millis,
-    };
-
-    let config = match docker_mode {
-        DockerExecMode::Compose {
-            service,
-            workdir,
-            compose_args,
-        } => {
-            let docker_env = docker_env
-                .as_ref()
-                .ok_or_else(|| "Docker env is missing".to_string())?;
-            let docker_args = build_docker_compose_exec_args(
-                &compose_args,
-                &service,
-                &workdir,
-                docker_env,
-                &resolved.command,
-                &args,
-            );
-            BuiltinLaunchConfig {
-                command: "docker".to_string(),
-                args: docker_args,
-                working_dir,
-                branch_name,
-                agent_name: resolved.label.to_string(),
-                agent_color: agent_color_for(agent_id),
-                env_vars: docker_env.clone(),
-                terminal_shell: None,
-                interactive: false,
-                windows_force_utf8: false,
-            }
-        }
-        DockerExecMode::DockerRun {
-            image,
-            workdir,
-            build,
-        } => {
-            let docker_file_type = build
-                .as_ref()
-                .map(|b| DockerFileType::Dockerfile(b.dockerfile_path.clone()))
-                .unwrap_or_else(|| DockerFileType::Dockerfile(working_dir.join("Dockerfile")));
-
-            let manager = DockerManager::new(&working_dir, &branch_name, docker_file_type);
-            let mut container_env = manager.collect_passthrough_env();
-            merge_profile_env_for_docker(&mut container_env, &env_vars);
-            apply_translated_git_env(&mut container_env);
-            let git_mounts = build_git_bind_mounts(&container_env);
-
-            // Mount the selected worktree and required git dirs, then run the agent in the container.
-            let mount_target = workdir.clone();
-            let mut run_args: Vec<String> = vec![
-                "run".to_string(),
-                "--rm".to_string(),
-                "-i".to_string(),
-                "-t".to_string(),
-                "-w".to_string(),
+        let config = match docker_mode {
+            DockerExecMode::Compose {
+                service,
                 workdir,
-                "-v".to_string(),
-                format!("{}:{}", working_dir.to_string_lossy(), mount_target),
-            ];
-
-            for mount in &git_mounts {
-                run_args.push("-v".to_string());
-                run_args.push(format!("{}:{}", mount.source, mount.target));
-            }
-
-            let mut keys: Vec<&String> = container_env.keys().collect();
-            keys.sort();
-            for key in keys {
-                let k = key.trim();
-                if k.is_empty() || !is_valid_docker_env_key(k) {
-                    continue;
-                }
-                let v = container_env
-                    .get(key)
-                    .map(|s| s.as_str())
-                    .unwrap_or_default();
-                run_args.push("-e".to_string());
-                run_args.push(format!("{k}={v}"));
-            }
-
-            run_args.push(image);
-            run_args.push(resolved.command);
-            run_args.extend(args.iter().cloned());
-
-            BuiltinLaunchConfig {
-                command: "docker".to_string(),
-                args: run_args,
-                working_dir,
-                branch_name,
-                agent_name: resolved.label.to_string(),
-                agent_color: agent_color_for(agent_id),
-                env_vars: HashMap::new(),
-                terminal_shell: None,
-                interactive: false,
-                windows_force_utf8: false,
-            }
-        }
-        DockerExecMode::None => {
-            let terminal_shell = request
-                .terminal_shell
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
-
-            // WSL agent launch uses the PTY-write approach (FR-007).
-            if terminal_shell.as_deref() == Some("wsl") {
-                if is_launch_cancelled(cancelled) {
-                    return Err("Cancelled".to_string());
-                }
-                let wsl_path =
-                    gwt_core::terminal::shell::windows_to_wsl_path(&working_dir.to_string_lossy())
-                        .map_err(|e| format!("WSL path conversion failed: {e}"))?;
-
-                // WSL PTY-write launches must receive the same merged env as host launches.
-                let wsl_env_vars = env_vars.clone();
-
-                return launch_with_wsl_pty_write(
-                    WslPtyWriteParams {
-                        repo_path: repo_path.clone(),
-                        agent_command: resolved.command.clone(),
-                        agent_args: args.clone(),
-                        working_dir,
-                        wsl_working_dir: wsl_path,
-                        branch_name,
-                        agent_name: resolved.label.to_string(),
-                        agent_color: agent_color_for(agent_id),
-                        env_vars: wsl_env_vars,
-                        meta: Some(meta),
-                    },
-                    state,
-                    app_handle,
+                compose_args,
+            } => {
+                let docker_env = docker_env
+                    .as_ref()
+                    .ok_or_else(|| "Docker env is missing".to_string())?;
+                let docker_args = build_docker_compose_exec_args(
+                    &compose_args,
+                    &service,
+                    &workdir,
+                    docker_env,
+                    &resolved.command,
+                    &args,
                 );
+                BuiltinLaunchConfig {
+                    command: "docker".to_string(),
+                    args: docker_args,
+                    working_dir,
+                    branch_name,
+                    agent_name: resolved.label.to_string(),
+                    agent_color: agent_color_for(agent_id),
+                    env_vars: docker_env.clone(),
+                    terminal_shell: None,
+                    interactive: false,
+                    windows_force_utf8: false,
+                }
             }
+            DockerExecMode::DockerRun {
+                image,
+                workdir,
+                build,
+            } => {
+                let docker_file_type = build
+                    .as_ref()
+                    .map(|b| DockerFileType::Dockerfile(b.dockerfile_path.clone()))
+                    .unwrap_or_else(|| DockerFileType::Dockerfile(working_dir.join("Dockerfile")));
 
-            BuiltinLaunchConfig {
-                command: resolved.command,
-                args,
-                working_dir,
-                branch_name,
-                agent_name: resolved.label.to_string(),
-                agent_color: agent_color_for(agent_id),
-                env_vars,
-                terminal_shell,
-                interactive: true,
-                windows_force_utf8: cfg!(target_os = "windows"),
+                let manager = DockerManager::new(&working_dir, &branch_name, docker_file_type);
+                let mut container_env = manager.collect_passthrough_env();
+                merge_profile_env_for_docker(&mut container_env, &env_vars);
+                apply_translated_git_env(&mut container_env);
+                let git_mounts = build_git_bind_mounts(&container_env);
+
+                // Mount the selected worktree and required git dirs, then run the agent in the container.
+                let mount_target = workdir.clone();
+                let mut run_args: Vec<String> = vec![
+                    "run".to_string(),
+                    "--rm".to_string(),
+                    "-i".to_string(),
+                    "-t".to_string(),
+                    "-w".to_string(),
+                    workdir,
+                    "-v".to_string(),
+                    format!("{}:{}", working_dir.to_string_lossy(), mount_target),
+                ];
+
+                for mount in &git_mounts {
+                    run_args.push("-v".to_string());
+                    run_args.push(format!("{}:{}", mount.source, mount.target));
+                }
+
+                let mut keys: Vec<&String> = container_env.keys().collect();
+                keys.sort();
+                for key in keys {
+                    let k = key.trim();
+                    if k.is_empty() || !is_valid_docker_env_key(k) {
+                        continue;
+                    }
+                    let v = container_env
+                        .get(key)
+                        .map(|s| s.as_str())
+                        .unwrap_or_default();
+                    run_args.push("-e".to_string());
+                    run_args.push(format!("{k}={v}"));
+                }
+
+                run_args.push(image);
+                run_args.push(resolved.command);
+                run_args.extend(args.iter().cloned());
+
+                BuiltinLaunchConfig {
+                    command: "docker".to_string(),
+                    args: run_args,
+                    working_dir,
+                    branch_name,
+                    agent_name: resolved.label.to_string(),
+                    agent_color: agent_color_for(agent_id),
+                    env_vars: HashMap::new(),
+                    terminal_shell: None,
+                    interactive: false,
+                    windows_force_utf8: false,
+                }
             }
+            DockerExecMode::None => {
+                let terminal_shell = request
+                    .terminal_shell
+                    .as_deref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+
+                // WSL agent launch uses the PTY-write approach (FR-007).
+                if terminal_shell.as_deref() == Some("wsl") {
+                    if is_launch_cancelled(cancelled) {
+                        return Err("Cancelled".to_string());
+                    }
+                    let wsl_path = gwt_core::terminal::shell::windows_to_wsl_path(
+                        &working_dir.to_string_lossy(),
+                    )
+                    .map_err(|e| format!("WSL path conversion failed: {e}"))?;
+
+                    // WSL PTY-write launches must receive the same merged env as host launches.
+                    let wsl_env_vars = env_vars.clone();
+
+                    return launch_with_wsl_pty_write(
+                        WslPtyWriteParams {
+                            repo_path: repo_path.clone(),
+                            agent_command: resolved.command.clone(),
+                            agent_args: args.clone(),
+                            working_dir,
+                            wsl_working_dir: wsl_path,
+                            branch_name,
+                            agent_name: resolved.label.to_string(),
+                            agent_color: agent_color_for(agent_id),
+                            env_vars: wsl_env_vars,
+                            meta: Some(meta),
+                        },
+                        state,
+                        app_handle,
+                    );
+                }
+
+                BuiltinLaunchConfig {
+                    command: resolved.command,
+                    args,
+                    working_dir,
+                    branch_name,
+                    agent_name: resolved.label.to_string(),
+                    agent_color: agent_color_for(agent_id),
+                    env_vars,
+                    terminal_shell,
+                    interactive: true,
+                    windows_force_utf8: cfg!(target_os = "windows"),
+                }
+            }
+        };
+
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
         }
-    };
 
-    if is_launch_cancelled(cancelled) {
-        return Err("Cancelled".to_string());
+        launch_with_config(&repo_path, config, Some(meta), state, app_handle)
+    })();
+
+    match launch_result {
+        Ok(pane_id) => Ok(pane_id),
+        Err(err) => {
+            if let Some(branch) = created_issue_branch_for_cleanup.as_deref() {
+                if let Err(cleanup_err) = rollback_new_issue_branch(&repo_path, branch) {
+                    tracing::warn!(
+                        branch = branch,
+                        error = %cleanup_err,
+                        launch_error = %err,
+                        "Issue launch rollback failed"
+                    );
+                }
+            }
+            Err(err)
+        }
     }
-
-    launch_with_config(&repo_path, config, Some(meta), state, app_handle)
 }
 
 /// Launch an agent with gwt semantics (worktree + profiles)

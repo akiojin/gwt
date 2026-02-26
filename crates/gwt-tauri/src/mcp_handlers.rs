@@ -479,6 +479,8 @@ pub fn handle_launch_agent(id: Value, params: &Value, ctx: &WsContext) -> JsonRp
         docker_keep: None,
         resume_session_id: None,
         create_branch: None,
+        issue_number: None,
+        ai_branch_description: None,
         terminal_shell: None,
     };
 
