@@ -41,11 +41,16 @@ function countInvokeCalls(name: string): number {
   return invokeMock.mock.calls.filter((c) => c[0] === name).length;
 }
 
-function getToastText(rendered: ReturnType<typeof render>): string | null {
+type ToastQuery = {
+  queryByTestId: (testId: string) => HTMLElement | null;
+  getByTestId: (testId: string) => HTMLElement;
+};
+
+function getToastText(rendered: ToastQuery): string | null {
   return rendered.queryByTestId("quit-confirm-toast")?.textContent?.trim() ?? null;
 }
 
-function expectToastVisible(rendered: ReturnType<typeof render>) {
+function expectToastVisible(rendered: ToastQuery) {
   expect(rendered.getByTestId("quit-confirm-toast")).toBeTruthy();
 }
 
