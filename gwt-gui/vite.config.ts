@@ -25,5 +25,13 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     exclude: [...configDefaults.exclude, "e2e/**"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov", "html"],
+      reportsDirectory: "./coverage",
+      include: ["src/**/*.{ts,svelte}"],
+      exclude: ["src/**/*.test.ts", "src/**/*.spec.ts", "src/lib/types.ts"],
+      thresholds: { lines: 90, functions: 90, branches: 85, statements: 90 },
+    },
   },
 });

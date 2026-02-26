@@ -1,0 +1,16 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 90%
+        threshold: 2%
+    patch:
+      default:
+        target: 90%
+  flags:
+    rust:
+      paths: [crates/]
+      carryforward: true
+    frontend:
+      paths: [gwt-gui/src/]
+      carryforward: true
