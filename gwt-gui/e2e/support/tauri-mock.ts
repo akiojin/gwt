@@ -393,6 +393,11 @@ export async function installTauriMock(
           }
           case "spawn_shell":
             return spawnShell(args.workingDir);
+          case "terminal_ready": {
+            const paneId = typeof args.paneId === "string" ? args.paneId : "";
+            const scrollback = panes.get(paneId)?.scrollback ?? "";
+            return Array.from(new TextEncoder().encode(scrollback));
+          }
           case "capture_scrollback_tail": {
             const paneId = typeof args.paneId === "string" ? args.paneId : "";
             return panes.get(paneId)?.scrollback ?? "";

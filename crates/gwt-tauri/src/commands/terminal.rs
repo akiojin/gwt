@@ -1718,18 +1718,25 @@ fn wsl_prompt_detect_and_inject(
                 Ok(0) => break,
                 Ok(n) => {
                     let chunk = buf[..n].to_vec();
-                    // Record in scrollback
-                    if let Ok(mut manager) = state.pane_manager.lock() {
+                    // Record in scrollback and check frontend readiness under single lock.
+                    let is_ready = if let Ok(mut manager) = state.pane_manager.lock() {
                         if let Some(pane) = manager.pane_mut_by_id(&pane_id_stream) {
                             let _ = pane.process_bytes(&chunk);
+                            pane.is_frontend_ready()
+                        } else {
+                            false
                         }
-                    }
-                    // Forward to frontend
-                    let payload = TerminalOutputPayload {
-                        pane_id: pane_id_stream.clone(),
-                        data: chunk.clone(),
+                    } else {
+                        false
                     };
-                    let _ = app_for_stream.emit("terminal-output", &payload);
+                    // Only forward to frontend when it has signalled readiness.
+                    if is_ready {
+                        let payload = TerminalOutputPayload {
+                            pane_id: pane_id_stream.clone(),
+                            data: chunk.clone(),
+                        };
+                        let _ = app_for_stream.emit("terminal-output", &payload);
+                    }
                     // Send to prompt detector if it is still listening.
                     let _ = tx.send(chunk);
                 }
@@ -4725,14 +4732,20 @@ fn stream_pty_output(
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
-                // Keep the scrollback file up-to-date even if the UI is not listening.
-                if let Ok(mut manager) = state.pane_manager.lock() {
+                // Keep the scrollback file up-to-date and check frontend readiness
+                // under a single lock acquisition.
+                let is_ready = if let Ok(mut manager) = state.pane_manager.lock() {
                     if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
                         let _ = pane.process_bytes(&buf[..n]);
+                        pane.is_frontend_ready()
+                    } else {
+                        false
                     }
-                }
+                } else {
+                    false
+                };
 
-                // Detect OSC 7 cwd changes for terminal tabs
+                // Detect OSC 7 cwd changes for terminal tabs (always, regardless of ready state)
                 if agent_name == "terminal" {
                     if let Some(cwd) =
                         consume_osc7_cwd_updates(&mut osc7_pending, &buf[..n], &mut last_cwd)
@@ -4745,13 +4758,16 @@ fn stream_pty_output(
                     }
                 }
 
-                let payload = TerminalOutputPayload {
-                    pane_id: pane_id.clone(),
-                    data: buf[..n].to_vec(),
-                };
-                // UI output is best-effort. Never stop consuming the PTY stream just because
-                // the frontend isn't ready (tab switch, hot reload, etc.).
-                let _ = app_handle.emit("terminal-output", &payload);
+                // Only emit to frontend when it has signalled readiness via terminal_ready.
+                // Before that, data is safely stored in the scrollback and will be
+                // retrieved by the frontend when it calls terminal_ready.
+                if is_ready {
+                    let payload = TerminalOutputPayload {
+                        pane_id: pane_id.clone(),
+                        data: buf[..n].to_vec(),
+                    };
+                    let _ = app_handle.emit("terminal-output", &payload);
+                }
             }
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => {
@@ -5396,6 +5412,34 @@ pub fn capture_scrollback_tail(
     let max_bytes = max_bytes.unwrap_or(DEFAULT_SCROLLBACK_TAIL_BYTES);
     capture_scrollback_tail_from_state(&state, &pane_id, max_bytes)
         .map_err(|e| StructuredError::internal(&e, "capture_scrollback_tail"))
+}
+
+/// Signal that the frontend listener is ready and retrieve initial scrollback
+/// as raw bytes (ANSI sequences preserved).  After this call, `stream_pty_output`
+/// will start emitting `terminal-output` events for the pane.
+#[tauri::command]
+pub fn terminal_ready(
+    state: State<AppState>,
+    pane_id: String,
+    max_bytes: Option<usize>,
+) -> Result<Vec<u8>, StructuredError> {
+    let max = max_bytes
+        .unwrap_or(DEFAULT_SCROLLBACK_TAIL_BYTES)
+        .min(MAX_SCROLLBACK_TAIL_BYTES);
+    let mut mgr = state
+        .pane_manager
+        .lock()
+        .map_err(|e| StructuredError::internal(&e.to_string(), "terminal_ready"))?;
+    let pane = mgr
+        .pane_mut_by_id(&pane_id)
+        .ok_or_else(|| StructuredError::internal("pane not found", "terminal_ready"))?;
+    // flush → read → set_ready all under the same lock, so no data gap
+    // with the stream_pty_output thread.
+    let bytes = pane
+        .read_scrollback_tail_raw(max)
+        .map_err(|e| StructuredError::internal(&e.to_string(), "terminal_ready"))?;
+    pane.set_frontend_ready(true);
+    Ok(bytes)
 }
 
 // ---------------------------------------------------------------------------
