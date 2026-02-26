@@ -60,7 +60,7 @@ pub fn suggest_branch_name(description: String) -> Result<BranchSuggestResult, S
 /// Check whether AI configuration is available without invoking model inference.
 #[tauri::command]
 pub fn is_ai_configured() -> Result<bool, StructuredError> {
-    let profiles =
-        ProfilesConfig::load().map_err(|e| StructuredError::from_gwt_error(&e, "is_ai_configured"))?;
+    let profiles = ProfilesConfig::load()
+        .map_err(|e| StructuredError::from_gwt_error(&e, "is_ai_configured"))?;
     Ok(profiles.resolve_active_ai_settings().resolved.is_some())
 }
