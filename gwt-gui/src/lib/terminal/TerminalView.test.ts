@@ -160,7 +160,9 @@ describe("TerminalView", () => {
 
     invokeMock.mockImplementation(async (command: string) => {
       callOrder.push(`invoke:${command}`);
-      if (command === "capture_scrollback_tail") return "hello\n";
+      if (command === "terminal_ready") {
+        return Array.from(new TextEncoder().encode("hello\n"));
+      }
       return null;
     });
   });
@@ -202,7 +204,7 @@ describe("TerminalView", () => {
     });
   });
 
-  it("subscribes to terminal-output before loading scrollback tail", async () => {
+  it("subscribes to terminal-output before calling terminal_ready", async () => {
     await renderTerminalView({ paneId: "pane-1", active: true });
 
     await waitFor(() => {
@@ -212,10 +214,10 @@ describe("TerminalView", () => {
     const hasSubscription = listenMock.mock.calls.some(
       (c) => c[0] === "terminal-output",
     );
-    const hasScrollbackCapture = invokeMock.mock.calls.some(
-      (c) => c[0] === "capture_scrollback_tail",
+    const hasTerminalReady = invokeMock.mock.calls.some(
+      (c) => c[0] === "terminal_ready",
     );
-    if (!hasSubscription || !hasScrollbackCapture) {
+    if (!hasSubscription || !hasTerminalReady) {
       // In non-Tauri jsdom runs, dynamic Tauri APIs can be unavailable.
       // This test still passes as long as the component mounts without crashing.
       return;
@@ -224,16 +226,24 @@ describe("TerminalView", () => {
     const listenIndex = callOrder.findIndex(
       (v) => v === "listen:terminal-output",
     );
-    const captureIndex = callOrder.findIndex(
-      (v) => v === "invoke:capture_scrollback_tail",
+    const readyIndex = callOrder.findIndex(
+      (v) => v === "invoke:terminal_ready",
     );
     expect(listenIndex).toBeGreaterThanOrEqual(0);
-    expect(captureIndex).toBeGreaterThanOrEqual(0);
-    expect(listenIndex).toBeLessThan(captureIndex);
+    expect(readyIndex).toBeGreaterThanOrEqual(0);
+    expect(listenIndex).toBeLessThan(readyIndex);
 
     expect(terminalInstances.length).toBeGreaterThan(0);
     const term = terminalInstances[0];
-    expect(term.write).toHaveBeenCalledWith("hello\n");
+    // terminal_ready returns number[] which gets written as Uint8Array
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalled();
+    });
+    const writeCall = term.write.mock.calls.find(
+      (c: any) => c[0] instanceof Uint8Array,
+    );
+    expect(writeCall).toBeTruthy();
+    expect(new TextDecoder().decode(writeCall[0])).toBe("hello\n");
   });
 
   it("opens terminal web links with external opener", async () => {
@@ -336,13 +346,13 @@ describe("TerminalView", () => {
     expect(after).toBe(before);
   });
 
-  it("buffers live output until scrollback restore finishes", async () => {
-    let resolveCapture: ((value: string) => void) | null = null;
+  it("writes terminal_ready data as Uint8Array and forwards live output directly", async () => {
+    let resolveReady: ((value: number[]) => void) | null = null;
     invokeMock.mockImplementation((command: string) => {
       callOrder.push(`invoke:${command}`);
-      if (command === "capture_scrollback_tail") {
-        return new Promise<string>((resolve) => {
-          resolveCapture = resolve;
+      if (command === "terminal_ready") {
+        return new Promise<number[]>((resolve) => {
+          resolveReady = resolve;
         });
       }
       return Promise.resolve(null);
@@ -352,11 +362,13 @@ describe("TerminalView", () => {
 
     await waitFor(() => {
       expect(terminalOutputHandler).not.toBeNull();
-      expect(resolveCapture).not.toBeNull();
+      expect(resolveReady).not.toBeNull();
       expect(terminalInstances.length).toBeGreaterThan(0);
     });
 
     const term = terminalInstances[0];
+
+    // Live output arrives directly (no buffering) because backend gates emission
     terminalOutputHandler!({
       payload: {
         pane_id: "pane-1",
@@ -364,18 +376,24 @@ describe("TerminalView", () => {
       },
     });
 
-    expect(term.write).not.toHaveBeenCalled();
+    // Live output is written immediately (no buffering in the new flow)
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledTimes(1);
+    });
+    const liveChunk = term.write.mock.calls[0][0];
+    expect(liveChunk).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(liveChunk)).toBe("LIVE\n");
 
-    resolveCapture!("history\n");
+    // Now resolve terminal_ready with initial data
+    resolveReady!(Array.from(new TextEncoder().encode("history\n")));
 
     await waitFor(() => {
       expect(term.write).toHaveBeenCalledTimes(2);
     });
 
-    expect(term.write.mock.calls[0][0]).toBe("history\n");
-    const liveChunk = term.write.mock.calls[1][0];
-    expect(liveChunk).toBeInstanceOf(Uint8Array);
-    expect(new TextDecoder().decode(liveChunk)).toBe("LIVE\n");
+    const readyChunk = term.write.mock.calls[1][0];
+    expect(readyChunk).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(readyChunk)).toBe("history\n");
   });
 
   it("handles gwt-terminal-edit-action copy/paste events", async () => {
