@@ -1,11 +1,11 @@
 //! Branch naming assistant (AI).
 //!
-//! This module generates and parses branch name suggestions with fixed prefixes.
+//! This module generates and parses a single branch name suggestion with a fixed prefix.
 
 use super::client::{AIClient, AIError, ChatMessage};
 use serde::Deserialize;
 
-pub const BRANCH_SUGGEST_SYSTEM_PROMPT: &str = "You are a git branch naming assistant. Generate exactly 3 branch name suggestions based on the user's description.\n\nRules:\n- Each suggestion must include exactly one of these prefixes: feature/, bugfix/, hotfix/, release/\n- Use lowercase\n- Use hyphens for separators\n- Keep names concise (<= 50 characters including prefix)\n\nRespond with JSON only in this format: {\"suggestions\": [\"prefix/name-1\", \"prefix/name-2\", \"prefix/name-3\"]}";
+pub const BRANCH_SUGGEST_SYSTEM_PROMPT: &str = "You are a git branch naming assistant. Generate exactly 1 branch name suggestion based on the user's description.\n\nRules:\n- The suggestion must include exactly one of these prefixes: feature/, bugfix/, hotfix/, release/\n- Use lowercase\n- Use hyphens for separators\n- Keep names concise (<= 50 characters including prefix)\n\nRespond with JSON only in this format: {\"suggestion\": \"prefix/name\"}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BranchType {
@@ -46,14 +46,14 @@ impl BranchType {
 }
 
 #[derive(Debug, Deserialize)]
-struct BranchSuggestionsResponse {
-    suggestions: Vec<String>,
+struct BranchSuggestionResponse {
+    suggestion: String,
 }
 
-/// Parse AI response text into sanitized branch name suggestions.
+/// Parse AI response text into a sanitized branch name suggestion.
 ///
-/// Expected JSON: {"suggestions": ["feature/foo", "bugfix/bar", "feature/baz"]}
-pub fn parse_branch_suggestions(response: &str) -> Result<Vec<String>, AIError> {
+/// Expected JSON: `{"suggestion": "prefix/name"}`
+pub fn parse_branch_suggestion(response: &str) -> Result<String, AIError> {
     // Be resilient to pre/post text and extract the first JSON object.
     let start = response
         .find('{')
@@ -68,41 +68,31 @@ pub fn parse_branch_suggestions(response: &str) -> Result<Vec<String>, AIError> 
     }
     let json = &response[start..=end];
 
-    let parsed: BranchSuggestionsResponse = serde_json::from_str(json)
-        .map_err(|e| AIError::ParseError(format!("Invalid suggestions JSON: {e}")))?;
+    let parsed: BranchSuggestionResponse = serde_json::from_str(json)
+        .map_err(|e| AIError::ParseError(format!("Invalid suggestion JSON: {e}")))?;
 
-    if parsed.suggestions.len() != 3 {
-        return Err(AIError::ParseError(
-            "Expected exactly 3 suggestions".to_string(),
-        ));
+    let trimmed = parsed.suggestion.trim();
+    let Some((t, rest)) = BranchType::from_prefix(trimmed) else {
+        return Err(AIError::ParseError(format!(
+            "Suggestion missing/invalid prefix: {trimmed}"
+        )));
+    };
+
+    // Sanitize suffix only; keep prefix.
+    let sanitized = crate::agent::worktree::sanitize_branch_name(rest);
+    if sanitized.is_empty() {
+        return Err(AIError::ParseError(format!(
+            "Suggestion suffix is empty after sanitization: {trimmed}"
+        )));
     }
 
-    let mut out = Vec::with_capacity(3);
-    for raw in parsed.suggestions {
-        let trimmed = raw.trim();
-        let Some((t, rest)) = BranchType::from_prefix(trimmed) else {
-            return Err(AIError::ParseError(format!(
-                "Suggestion missing/invalid prefix: {trimmed}"
-            )));
-        };
-
-        // Sanitize suffix only; keep prefix.
-        let sanitized = crate::agent::worktree::sanitize_branch_name(rest);
-        if sanitized.is_empty() {
-            return Err(AIError::ParseError(format!(
-                "Suggestion suffix is empty after sanitization: {trimmed}"
-            )));
-        }
-        out.push(format!("{}{}", t.prefix(), sanitized));
-    }
-
-    Ok(out)
+    Ok(format!("{}{}", t.prefix(), sanitized))
 }
 
-/// Generate 3 branch name suggestions for a human description.
+/// Generate a single branch name suggestion for a human description.
 ///
 /// Note: This performs a network request via `AIClient`.
-pub fn suggest_branch_names(client: &AIClient, description: &str) -> Result<Vec<String>, AIError> {
+pub fn suggest_branch_name(client: &AIClient, description: &str) -> Result<String, AIError> {
     let description = description.trim();
     if description.is_empty() {
         return Err(AIError::ConfigError("Description is empty".to_string()));
@@ -120,7 +110,7 @@ pub fn suggest_branch_names(client: &AIClient, description: &str) -> Result<Vec<
     ];
 
     let response = client.create_response(messages)?;
-    parse_branch_suggestions(&response)
+    parse_branch_suggestion(&response)
 }
 
 #[cfg(test)]
@@ -128,40 +118,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_branch_suggestions_success_sanitizes_suffix_only() {
-        let response =
-            r#"{"suggestions": ["feature/Add Login", "bugfix/fix-crash!", "release/v1.2.3"]}"#;
-        let out = parse_branch_suggestions(response).unwrap();
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0], "feature/add-login");
-        assert_eq!(out[1], "bugfix/fix-crash");
-        assert_eq!(out[2], "release/v1-2-3");
+    fn parse_branch_suggestion_success_sanitizes_suffix() {
+        let response = r#"{"suggestion": "feature/Add Login"}"#;
+        let out = parse_branch_suggestion(response).unwrap();
+        assert_eq!(out, "feature/add-login");
     }
 
     #[test]
-    fn parse_branch_suggestions_requires_json_object() {
-        let err = parse_branch_suggestions("not-json").unwrap_err();
+    fn parse_branch_suggestion_requires_json_object() {
+        let err = parse_branch_suggestion("not-json").unwrap_err();
         assert!(matches!(err, AIError::ParseError(_)));
     }
 
     #[test]
-    fn parse_branch_suggestions_requires_exactly_three() {
-        let err = parse_branch_suggestions(r#"{"suggestions":["feature/a"]}"#).unwrap_err();
+    fn parse_branch_suggestion_fails_on_invalid_prefix() {
+        let err = parse_branch_suggestion(r#"{"suggestion": "foo/bar"}"#).unwrap_err();
         assert!(matches!(err, AIError::ParseError(_)));
     }
 
     #[test]
-    fn parse_branch_suggestions_fails_on_invalid_prefix() {
-        let err = parse_branch_suggestions(r#"{"suggestions":["foo/bar","feature/a","bugfix/b"]}"#)
-            .unwrap_err();
-        assert!(matches!(err, AIError::ParseError(_)));
-    }
-
-    #[test]
-    fn parse_branch_suggestions_fails_when_sanitized_suffix_empty() {
-        let err =
-            parse_branch_suggestions(r#"{"suggestions":["feature/!!!","bugfix/ok","hotfix/ok2"]}"#)
-                .unwrap_err();
+    fn parse_branch_suggestion_fails_when_sanitized_suffix_empty() {
+        let err = parse_branch_suggestion(r#"{"suggestion": "feature/!!!"}"#).unwrap_err();
         assert!(matches!(err, AIError::ParseError(_)));
     }
 }
