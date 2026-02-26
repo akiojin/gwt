@@ -333,13 +333,37 @@ fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str
 }
 
 /// Returns true if the PR status has UNKNOWN merge-related fields.
-fn has_unknown_merge_status(summary: &PrStatusLiteSummary) -> bool {
+fn has_unknown_mergeable(summary: &PrStatusLiteSummary) -> bool {
     summary.mergeable == "UNKNOWN"
-        || summary
-            .merge_state_status
-            .as_deref()
-            .map(|s| s == "UNKNOWN")
-            .unwrap_or(false)
+}
+
+fn has_unknown_merge_state_status(summary: &PrStatusLiteSummary) -> bool {
+    matches!(summary.merge_state_status.as_deref(), Some("UNKNOWN"))
+}
+
+fn has_known_merge_state_status(summary: &PrStatusLiteSummary) -> bool {
+    summary
+        .merge_state_status
+        .as_deref()
+        .map(|s| s != "UNKNOWN")
+        .unwrap_or(false)
+}
+
+fn has_unknown_merge_status(summary: &PrStatusLiteSummary) -> bool {
+    has_unknown_mergeable(summary) || has_unknown_merge_state_status(summary)
+}
+
+/// Restore only UNKNOWN merge fields from cache while preserving newly-known fields.
+fn restore_unknown_merge_fields_from_cache(
+    new_summary: &mut PrStatusLiteSummary,
+    cached: &PrStatusLiteSummary,
+) {
+    if has_unknown_mergeable(new_summary) && !has_unknown_mergeable(cached) {
+        new_summary.mergeable = cached.mergeable.clone();
+    }
+    if has_unknown_merge_state_status(new_summary) && has_known_merge_state_status(cached) {
+        new_summary.merge_state_status = cached.merge_state_status.clone();
+    }
 }
 
 fn collect_unknown_branches(
@@ -743,14 +767,8 @@ fn fetch_pr_status_impl(
 
         let mut merged = statuses_by_head_branch.clone();
         for (branch, new_summary) in &mut merged {
-            if has_unknown_merge_status(new_summary) {
-                if let Some(cached) = entry.statuses_by_head_branch.get(branch) {
-                    if !has_unknown_merge_status(cached) {
-                        // Preserve known merge fields from cache
-                        new_summary.mergeable = cached.mergeable.clone();
-                        new_summary.merge_state_status = cached.merge_state_status.clone();
-                    }
-                }
+            if let Some(cached) = entry.statuses_by_head_branch.get(branch) {
+                restore_unknown_merge_fields_from_cache(new_summary, cached);
             }
         }
 
@@ -1766,15 +1784,49 @@ mod tests {
         };
 
         // Apply protection logic
-        if has_unknown_merge_status(&new_result) && !has_unknown_merge_status(&cached) {
-            new_result.mergeable = cached.mergeable.clone();
-            new_result.merge_state_status = cached.merge_state_status.clone();
-        }
+        restore_unknown_merge_fields_from_cache(&mut new_result, &cached);
 
         assert_eq!(new_result.mergeable, "MERGEABLE");
         assert_eq!(new_result.merge_state_status, Some("CLEAN".to_string()));
         // Verify cached is unchanged
         assert_eq!(cached.mergeable, "MERGEABLE");
+    }
+
+    #[test]
+    fn test_cache_protection_only_restores_unknown_fields() {
+        // Simulate: new result has known mergeable but UNKNOWN merge_state_status.
+        let cached = PrStatusLiteSummary {
+            number: 42,
+            state: "OPEN".to_string(),
+            url: "https://example.com/42".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: Some("CLEAN".to_string()),
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/x".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+
+        let mut new_result = PrStatusLiteSummary {
+            number: 42,
+            state: "OPEN".to_string(),
+            url: "https://example.com/42".to_string(),
+            mergeable: "CONFLICTING".to_string(),
+            merge_state_status: Some("UNKNOWN".to_string()),
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/x".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+
+        restore_unknown_merge_fields_from_cache(&mut new_result, &cached);
+
+        // Known field from latest response must be preserved.
+        assert_eq!(new_result.mergeable, "CONFLICTING");
+        // Only UNKNOWN field should be restored from cache.
+        assert_eq!(new_result.merge_state_status, Some("CLEAN".to_string()));
     }
 
     #[test]
