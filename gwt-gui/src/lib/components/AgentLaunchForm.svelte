@@ -3,7 +3,6 @@
     AgentConfig,
     AgentInfo,
     BranchInfo,
-    BranchSuggestResult,
     ClassifyResult,
     DockerContext,
     FetchIssuesResponse,
@@ -134,7 +133,6 @@
   let branchNamingMode: BranchNamingMode = $state("ai-suggest" as BranchNamingMode);
   let aiDescription: string = $state("");
   let aiConfigured: boolean = $state(true);
-  let aiFallbackError: string | null = $state(null);
 
   // From Issue state (SPEC-c6ba640a)
   type NewBranchTab = "manual" | "fromIssue";
@@ -1091,38 +1089,19 @@
         errorMessage = "Selected issue is no longer available. Please select another issue.";
         return;
       }
-      // AI Suggest mode: resolve suggested branch name before launch request.
+      // AI Suggest mode: defer branch generation to launch job (Prepare Launch).
       const isAiSuggestMode = newBranchTab === "manual" && branchNamingMode === "ai-suggest";
-      const aiFallbackMessage = "AI branch name generation failed. Please enter the branch name manually.";
 
       if (isAiSuggestMode) {
         const desc = aiDescription.trim();
         const base = baseBranch.trim();
         if (!desc || !base) return;
 
-        let suggestion: BranchSuggestResult;
-        try {
-          const { invoke } = await import("$lib/tauriInvoke");
-          suggestion = await invoke<BranchSuggestResult>("suggest_branch_name", {
-            description: desc,
-          });
-        } catch {
-          branchNamingMode = "direct";
-          aiFallbackError = aiFallbackMessage;
-          return;
-        }
-
-        if (suggestion.status !== "ok" || !suggestion.suggestion.trim()) {
-          branchNamingMode = "direct";
-          aiFallbackError = aiFallbackMessage;
-          return;
-        }
-
-        const fullName = suggestion.suggestion.trim();
-        request.branch = fullName;
         await onLaunch({
           ...request,
-          createBranch: { name: fullName, base },
+          branch: "",
+          aiBranchDescription: desc,
+          createBranch: { name: "", base },
         });
       } else {
         if (!newBranchPrefix) return;
@@ -1143,13 +1122,7 @@
       persistLaunchDefaultsAfterSuccess();
       onClose();
     } catch (err) {
-      const errMsg = toErrorMessage(err);
-      if (errMsg.includes("[E2001]") || errMsg.toLowerCase().includes("ai branch name generation failed")) {
-        branchNamingMode = "direct";
-        aiFallbackError = "AI branch name generation failed. Please enter the branch name manually.";
-        return;
-      }
-      errorMessage = `Failed to launch agent: ${errMsg}`;
+      errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
     } finally {
       launching = false;
     }
@@ -1291,7 +1264,7 @@
                   class="mode-btn"
                   class:active={branchNamingMode === "ai-suggest"}
                   disabled={!aiConfigured}
-                  onclick={() => { branchNamingMode = "ai-suggest"; aiFallbackError = null; }}
+                  onclick={() => { branchNamingMode = "ai-suggest"; }}
                   title={!aiConfigured ? "AI is not configured" : ""}
                 >
                   AI Suggest
@@ -1299,18 +1272,12 @@
                 <button
                   class="mode-btn"
                   class:active={branchNamingMode === "direct"}
-                  onclick={() => { branchNamingMode = "direct"; aiFallbackError = null; }}
+                  onclick={() => { branchNamingMode = "direct"; }}
                 >
                   Direct
                 </button>
               </div>
             </div>
-
-            {#if aiFallbackError}
-              <div class="field">
-                <div class="error">{aiFallbackError}</div>
-              </div>
-            {/if}
 
             {#if branchNamingMode === "ai-suggest"}
               <div class="field">

@@ -80,3 +80,15 @@
 - [x] T051 [P] [共通] cargo fmt パス確認 `cargo fmt --check`
 - [x] T052 [P] [共通] svelte-check パス確認 `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
 - [x] T053 [共通] 全テスト最終確認: cargo test + cd gwt-gui && pnpm test
+
+## Phase 8: Follow-up Fix — Prepare Launch trigger (2026-02-26)
+
+- [x] T054 [US1] テスト更新: AI Suggest時に `suggest_branch_name` をフォーム側で事前呼び出ししないことを検証（RED確認） `gwt-gui/src/lib/components/AgentLaunchForm.test.ts`
+- [x] T055 [US1] 実装: `handleLaunch()` の事前 `suggest_branch_name` 呼び出しを削除し、`aiBranchDescription` + `createBranch.name=""` で launch job に委譲 `gwt-gui/src/lib/components/AgentLaunchForm.svelte`
+- [x] T056 [US1] 実装: フォーム内 `[E2001]` フォールバック（Direct自動切替 + バナー）を削除し、Prepare Launchモーダルのエラー表示に一本化 `gwt-gui/src/lib/components/AgentLaunchForm.svelte`
+- [x] T057 [US1] 検証: `cd gwt-gui && pnpm test src/lib/components/AgentLaunchForm.test.ts -t "submits AI description to launch request without pre-calling suggest_branch_name"` → GREEN
+- [x] T058 [US1] 検証: `cd gwt-gui && pnpm test src/lib/components/AgentLaunchForm.test.ts` → GREEN
+- [x] T059 [共通] 仕様同期: US4/FR-007/SC-002 を「Prepare Launchモーダルで失敗表示」に更新 `specs/SPEC-9cd50c7c/spec.md`, `specs/SPEC-9cd50c7c/plan.md`, `specs/SPEC-9cd50c7c/tasks.md`
+- [x] T060 [US1] 回帰修正: `[E1004] Branch already exists` エラー時にブランチ名を復元して `Use Existing Branch` 再実行で利用できるようにする `gwt-gui/src/App.svelte`
+- [x] T061 [US1] 回帰修正: AI Suggest成功時に `list_terminals` の `branch_name` でタブラベルを補完し、agent tabのブランチ紐付けを維持する `gwt-gui/src/App.svelte`
+- [x] T062 [共通] 検証: `cd gwt-gui && pnpm test src/lib/components/LaunchProgressModal.test.ts` と `cd gwt-gui && pnpm exec svelte-check --tsconfig ./tsconfig.json` を実行
