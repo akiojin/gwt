@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
+use std::path::Path;
+
 use super::pty::{PtyConfig, PtyHandle};
 use super::scrollback::ScrollbackFile;
 use super::AgentColor;
@@ -46,6 +48,8 @@ pub struct TerminalPane {
     agent_color: AgentColor,
     status: PaneStatus,
     started_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the frontend has called `terminal_ready` and is listening.
+    frontend_ready: bool,
 }
 
 impl TerminalPane {
@@ -81,6 +85,7 @@ impl TerminalPane {
             agent_color: config.agent_color,
             status: PaneStatus::Running,
             started_at: chrono::Utc::now(),
+            frontend_ready: false,
         })
     }
 
@@ -173,6 +178,27 @@ impl TerminalPane {
     /// Get the start time.
     pub fn started_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.started_at
+    }
+
+    /// Whether the frontend has signalled readiness via `terminal_ready`.
+    pub fn is_frontend_ready(&self) -> bool {
+        self.frontend_ready
+    }
+
+    /// Set the frontend readiness flag.
+    pub fn set_frontend_ready(&mut self, ready: bool) {
+        self.frontend_ready = ready;
+    }
+
+    /// Flush scrollback then read the tail as raw bytes (ANSI preserved).
+    pub fn read_scrollback_tail_raw(&mut self, max_bytes: usize) -> Result<Vec<u8>, TerminalError> {
+        self.scrollback.flush()?;
+        let path = ScrollbackFile::scrollback_path_for_pane(&self.pane_id)?;
+        Self::read_tail_bytes_at_path(&path, max_bytes)
+    }
+
+    fn read_tail_bytes_at_path(path: &Path, max_bytes: usize) -> Result<Vec<u8>, TerminalError> {
+        ScrollbackFile::read_tail_bytes_at(path, max_bytes)
     }
 
     /// Kill the child process.
@@ -366,6 +392,51 @@ mod tests {
         assert_eq!(pane.agent_color(), AgentColor::Green);
         assert_eq!(pane.status(), &PaneStatus::Running);
         assert!(pane.started_at() <= chrono::Utc::now());
+    }
+
+    // 9. frontend_ready defaults to false
+    #[test]
+    fn test_frontend_ready_default_false() {
+        let config = make_config("/bin/sleep", vec!["1"]);
+        let pane = TerminalPane::new(config).expect("Failed to create pane");
+        assert!(!pane.is_frontend_ready());
+    }
+
+    // 10. set_frontend_ready / is_frontend_ready
+    #[test]
+    fn test_set_frontend_ready() {
+        let config = make_config("/bin/sleep", vec!["1"]);
+        let mut pane = TerminalPane::new(config).expect("Failed to create pane");
+        assert!(!pane.is_frontend_ready());
+        pane.set_frontend_ready(true);
+        assert!(pane.is_frontend_ready());
+        pane.set_frontend_ready(false);
+        assert!(!pane.is_frontend_ready());
+    }
+
+    // 11. read_scrollback_tail_raw returns raw bytes with ANSI preserved
+    #[test]
+    fn test_read_scrollback_tail_raw() {
+        let config = make_config("/bin/echo", vec!["hello"]);
+        let mut pane = TerminalPane::new(config).expect("Failed to create pane");
+
+        // Write some bytes with ANSI sequences
+        let ansi_data = b"hi \x1b[31mred\x1b[0m\n";
+        pane.process_bytes(ansi_data)
+            .expect("Failed to process bytes");
+
+        let raw = pane
+            .read_scrollback_tail_raw(1024)
+            .expect("Failed to read scrollback tail raw");
+
+        // ANSI sequences must be preserved
+        assert!(
+            raw.contains(&0x1b),
+            "Expected ANSI escape byte in raw output"
+        );
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(raw_str.contains("\x1b[31m"), "Expected ANSI color code");
+        assert!(raw_str.contains("hi "), "Expected plain text");
     }
 
     // 8. Kill test

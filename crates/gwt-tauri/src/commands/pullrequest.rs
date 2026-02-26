@@ -4,8 +4,8 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use chrono::{DateTime, Utc};
 use gwt_core::git::graphql;
 use gwt_core::git::{
-    is_gh_cli_authenticated, is_gh_cli_available, PrCache, PrStatusInfo, Remote, ReviewComment,
-    ReviewInfo, WorkflowRunInfo,
+    is_gh_cli_authenticated, is_gh_cli_available, PrCache, PrListItem, PrStatusInfo, Remote,
+    ReviewComment, ReviewInfo, WorkflowRunInfo,
 };
 use gwt_core::StructuredError;
 use serde::Serialize;
@@ -685,6 +685,278 @@ pub async fn merge_pull_request(project_path: String, pr_number: u64) -> Result<
         .map_err(|e| format!("Task join failed: {e}"))?
 }
 
+// ==========================================================
+// PR Dashboard commands (SPEC-prlist)
+// ==========================================================
+
+/// Response for fetch_pr_list
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchPrListResponse {
+    pub items: Vec<PrListItem>,
+    pub gh_status: GhCliStatusInfo,
+}
+
+/// Response for fetch_github_user
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubUserResponse {
+    pub login: String,
+    pub gh_status: GhCliStatusInfo,
+}
+
+const GITHUB_USER_CACHE_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone)]
+struct GitHubUserCacheEntry {
+    login: String,
+    fetched_at: Instant,
+}
+
+fn github_user_cache() -> &'static Mutex<HashMap<String, GitHubUserCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitHubUserCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn extract_remote_host(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.starts_with("file://") {
+        return None;
+    }
+
+    if let Some((_, rest)) = trimmed.split_once("://") {
+        let rest = rest.rsplit_once('@').map(|(_, host)| host).unwrap_or(rest);
+        let host_end = rest
+            .find('/')
+            .or_else(|| rest.find(':'))
+            .unwrap_or(rest.len());
+        let host = rest.get(..host_end)?.trim();
+        if host.is_empty() {
+            return None;
+        }
+        return Some(host.to_ascii_lowercase());
+    }
+
+    let after_at = trimmed
+        .split_once('@')
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host_end = after_at
+        .find(':')
+        .or_else(|| after_at.find('/'))
+        .unwrap_or(after_at.len());
+    let host = after_at.get(..host_end)?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn github_user_cache_key(repo_path: &Path) -> String {
+    let host = Remote::default(repo_path)
+        .ok()
+        .flatten()
+        .and_then(|remote| {
+            extract_remote_host(&remote.fetch_url).or_else(|| extract_remote_host(&remote.push_url))
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{host}::{}", repo_path.to_string_lossy())
+}
+
+fn fetch_pr_list_impl(
+    project_path: String,
+    state: String,
+    limit: u32,
+) -> Result<FetchPrListResponse, StructuredError> {
+    let available = is_gh_cli_available();
+    let authenticated = if available {
+        is_gh_cli_authenticated()
+    } else {
+        false
+    };
+    let gh_status = GhCliStatusInfo {
+        available,
+        authenticated,
+    };
+
+    if !available || !authenticated {
+        return Ok(FetchPrListResponse {
+            items: vec![],
+            gh_status,
+        });
+    }
+
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_pr_list"))?;
+
+    let raw_items = gwt_core::git::gh_cli::fetch_pr_list(&repo_path, &state, limit)
+        .map_err(|e| StructuredError::internal(&e, "fetch_pr_list"))?;
+
+    let items: Vec<PrListItem> = raw_items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+
+    Ok(FetchPrListResponse { items, gh_status })
+}
+
+#[tauri::command]
+pub async fn fetch_pr_list(
+    project_path: String,
+    state: String,
+    limit: u32,
+) -> Result<FetchPrListResponse, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || fetch_pr_list_impl(project_path, state, limit))
+        .await
+        .map_err(|e| {
+            StructuredError::internal(&format!("Task join failed: {e}"), "fetch_pr_list")
+        })?
+}
+
+fn fetch_github_user_impl(project_path: String) -> Result<GitHubUserResponse, StructuredError> {
+    let available = is_gh_cli_available();
+    let authenticated = if available {
+        is_gh_cli_authenticated()
+    } else {
+        false
+    };
+    let gh_status = GhCliStatusInfo {
+        available,
+        authenticated,
+    };
+
+    if !available || !authenticated {
+        return Err(StructuredError::internal(
+            "gh CLI is not available or not authenticated",
+            "fetch_github_user",
+        ));
+    }
+
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_github_user"))?;
+    let cache_key = github_user_cache_key(&repo_path);
+
+    // Check cache
+    {
+        let cache = github_user_cache();
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(entry) = guard.get(&cache_key) {
+            if entry.fetched_at.elapsed() < GITHUB_USER_CACHE_TTL {
+                return Ok(GitHubUserResponse {
+                    login: entry.login.clone(),
+                    gh_status,
+                });
+            }
+            guard.remove(&cache_key);
+        }
+    }
+
+    let login = gwt_core::git::gh_cli::fetch_authenticated_user(&repo_path)
+        .map_err(|e| StructuredError::internal(&e, "fetch_github_user"))?;
+
+    // Update cache
+    {
+        let cache = github_user_cache();
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.insert(
+            cache_key,
+            GitHubUserCacheEntry {
+                login: login.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+
+    Ok(GitHubUserResponse { login, gh_status })
+}
+
+#[tauri::command]
+pub async fn fetch_github_user(
+    project_path: String,
+) -> Result<GitHubUserResponse, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || fetch_github_user_impl(project_path))
+        .await
+        .map_err(|e| {
+            StructuredError::internal(&format!("Task join failed: {e}"), "fetch_github_user")
+        })?
+}
+
+fn merge_pr_impl(
+    project_path: String,
+    pr_number: u64,
+    method: String,
+    delete_branch: bool,
+    commit_msg: Option<String>,
+) -> Result<String, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    gwt_core::git::gh_cli::merge_pr(
+        &repo_path,
+        pr_number,
+        &method,
+        delete_branch,
+        commit_msg.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub async fn merge_pr(
+    project_path: String,
+    pr_number: u64,
+    method: String,
+    delete_branch: bool,
+    commit_msg: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        merge_pr_impl(project_path, pr_number, method, delete_branch, commit_msg)
+    })
+    .await
+    .map_err(|e| format!("Task join failed: {e}"))?
+}
+
+fn review_pr_impl(
+    project_path: String,
+    pr_number: u64,
+    action: String,
+    body: Option<String>,
+) -> Result<String, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    gwt_core::git::gh_cli::review_pr(&repo_path, pr_number, &action, body.as_deref())
+}
+
+#[tauri::command]
+pub async fn review_pr(
+    project_path: String,
+    pr_number: u64,
+    action: String,
+    body: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        review_pr_impl(project_path, pr_number, action, body)
+    })
+    .await
+    .map_err(|e| format!("Task join failed: {e}"))?
+}
+
+fn mark_pr_ready_impl(project_path: String, pr_number: u64) -> Result<String, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    gwt_core::git::gh_cli::mark_pr_ready(&repo_path, pr_number)
+}
+
+#[tauri::command]
+pub async fn mark_pr_ready(project_path: String, pr_number: u64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || mark_pr_ready_impl(project_path, pr_number))
+        .await
+        .map_err(|e| format!("Task join failed: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,6 +1215,24 @@ mod tests {
             strip_known_remote_prefix("fork/feature/x", &remotes),
             "fork/feature/x"
         );
+    }
+
+    #[test]
+    fn test_extract_remote_host_https_and_ssh() {
+        assert_eq!(
+            extract_remote_host("https://github.com/example/repo.git"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_remote_host("git@github.enterprise.local:example/repo.git"),
+            Some("github.enterprise.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_remote_host_invalid_and_file_scheme() {
+        assert_eq!(extract_remote_host(""), None);
+        assert_eq!(extract_remote_host("file:///tmp/repo.git"), None);
     }
 
     #[test]
