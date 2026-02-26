@@ -1043,6 +1043,22 @@
   let updatingBranch = $state(false);
   let merging = $state(false);
   let showMergeConfirm = $state(false);
+  let mergeConfirmContextKey: string | null = $state(null);
+
+  function currentPrContextKey(): string | null {
+    const branch = currentBranchName();
+    const prNum = resolvedPrNumber;
+    if (!branch || !prNum) return null;
+    return `${branch}#${prNum}`;
+  }
+
+  $effect(() => {
+    if (!showMergeConfirm) return;
+    const nextContextKey = currentPrContextKey();
+    if (activeTab !== "pr" || !nextContextKey || nextContextKey !== mergeConfirmContextKey) {
+      closeMergeConfirm();
+    }
+  });
 
   function handleOpenCiLog(run: WorkflowRunInfo): void {
     if (onOpenCiLog) {
@@ -1083,11 +1099,13 @@
   }
 
   function handleMerge(): void {
+    mergeConfirmContextKey = currentPrContextKey();
     showMergeConfirm = true;
   }
 
   function closeMergeConfirm(): void {
     showMergeConfirm = false;
+    mergeConfirmContextKey = null;
   }
 
   async function pollPrDetailAfterMerge(

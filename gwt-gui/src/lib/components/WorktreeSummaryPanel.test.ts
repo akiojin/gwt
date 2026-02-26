@@ -583,6 +583,51 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
+  it("closes merge confirm modal when PR context changes", async () => {
+    invokeMock.mockImplementation(
+      async (cmd: string, args?: { branch?: string }) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr") {
+          if (args?.branch === "feature/markdown-ui") return latestPrFixture;
+          return null;
+        }
+        if (cmd === "fetch_pr_detail") return prDetailFixture;
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      }
+    );
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Mergeable" })).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Mergeable" }));
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Merge" })).toBeTruthy();
+    });
+
+    await rendered.rerender({
+      projectPath: "/tmp/project",
+      selectedBranch: { ...branchFixture, name: "feature/next-task" },
+    });
+
+    await waitFor(() => {
+      expect(rendered.queryByRole("button", { name: "Merge" })).toBeNull();
+    });
+  });
+
   it("shows update-branch failure in PR tab", async () => {
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
