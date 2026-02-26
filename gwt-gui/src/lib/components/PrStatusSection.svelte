@@ -12,6 +12,7 @@
     updatingBranch = false,
     onMerge,
     merging = false,
+    retrying = false,
   }: {
     prDetail?: PrStatusInfo | null;
     loading?: boolean;
@@ -22,6 +23,7 @@
     updatingBranch?: boolean;
     onMerge?: () => void;
     merging?: boolean;
+    retrying?: boolean;
   } = $props();
 
   let checksExpanded = $state(false);
@@ -181,14 +183,14 @@
           {#if shouldShowMergeableBadge(prDetail.state, prDetail.mergeStateStatus)}
             {#if isMergeClickable(prDetail.state, prDetail.mergeable) && onMerge}
               <button
-                class="mergeable-badge-btn mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}"
-                disabled={merging}
+                class="mergeable-badge-btn mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}{retrying ? ' pulse' : ''}"
+                disabled={merging || retrying}
                 onclick={() => onMerge?.()}
               >
-                {merging ? "Merging..." : mergeableLabel(prDetail.state, prDetail.mergeable)}
+                {merging ? "Merging..." : retrying ? "Checking merge status..." : mergeableLabel(prDetail.state, prDetail.mergeable)}
               </button>
             {:else}
-              <span class="mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}">
+              <span class="mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}{retrying ? ' pulse' : ''}">
                 {mergeableLabel(prDetail.state, prDetail.mergeable)}
               </span>
             {/if}
@@ -682,5 +684,14 @@
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
     line-height: 1.4;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .pulse {
+    animation: pulse 1.5s ease-in-out infinite;
   }
 </style>
