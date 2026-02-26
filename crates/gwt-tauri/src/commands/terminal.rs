@@ -155,6 +155,8 @@ pub struct LaunchAgentRequest {
     pub resume_session_id: Option<String>,
     /// Optional new branch creation request (creates branch + worktree before launch)
     pub create_branch: Option<CreateBranchRequest>,
+    /// AI branch description for automatic branch name generation (AI Suggest mode)
+    pub ai_branch_description: Option<String>,
     /// Optional terminal shell override (e.g. "powershell", "cmd", "wsl").
     #[serde(default)]
     #[allow(dead_code)]
@@ -1900,6 +1902,7 @@ fn launch_with_wsl_pty_write(
         env_vars: HashMap::new(), // WSL login shell handles base env
         terminal_shell: Some("wsl".to_string()),
         interactive: true,
+        windows_force_utf8: false,
     };
 
     let pane_id = {
@@ -1976,6 +1979,7 @@ fn launch_with_wsl_pty_write(
         env_vars: HashMap::new(),
         terminal_shell: Some("wsl".to_string()),
         interactive: false,
+        windows_force_utf8: false,
     };
 
     launch_with_config(&repo_path, fallback_config, meta, state, app_handle)
@@ -2015,6 +2019,7 @@ pub fn launch_terminal(
         env_vars: HashMap::new(),
         terminal_shell: None,
         interactive: true,
+        windows_force_utf8: cfg!(target_os = "windows"),
     };
 
     launch_with_config(&repo_path, config, None, &state, app_handle)
@@ -2167,6 +2172,7 @@ pub fn spawn_shell(
         env_vars: HashMap::new(),
         terminal_shell: terminal_shell_tag,
         interactive: true,
+        windows_force_utf8: false,
     };
 
     let pane_id = {
@@ -2545,6 +2551,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -2606,6 +2613,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create running pane");
 
@@ -2623,6 +2631,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create done pane");
 
@@ -2679,6 +2688,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -2721,6 +2731,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -2772,6 +2783,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -2812,6 +2824,7 @@ mod tests {
             docker_keep: None,
             resume_session_id: None,
             create_branch: None,
+            ai_branch_description: None,
             terminal_shell: None,
         }
     }
@@ -3401,6 +3414,7 @@ services:
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -3663,19 +3677,51 @@ pub(crate) fn launch_agent_for_project_root(
 
     let (working_dir, branch_name, worktree_created) =
         if let Some(create) = request.create_branch.as_ref() {
-            let new_branch = create.name.trim();
-            if new_branch.is_empty() {
-                return Err("New branch name is required".to_string());
-            }
+            // Determine branch name: AI generation or direct input
+            let new_branch = if let Some(ai_desc) = request.ai_branch_description.as_deref() {
+                let ai_desc = ai_desc.trim();
+                if ai_desc.is_empty() {
+                    return Err("AI branch description is required".to_string());
+                }
+                // AI branch name generation
+                report_launch_progress(
+                    job_id,
+                    &app_handle,
+                    "create",
+                    Some("Generating branch name..."),
+                );
+
+                let profiles = ProfilesConfig::load()
+                    .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?;
+                let ai = profiles.resolve_active_ai_settings();
+                let settings = ai.resolved.ok_or_else(|| {
+                    "[E2001] AI branch name generation failed: AI is not configured".to_string()
+                })?;
+                let client = gwt_core::ai::AIClient::new(settings)
+                    .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?;
+                gwt_core::ai::suggest_branch_name(&client, ai_desc)
+                    .map_err(|e| format!("[E2001] AI branch name generation failed: {e}"))?
+            } else {
+                let name = create.name.trim();
+                if name.is_empty() {
+                    return Err("New branch name is required".to_string());
+                }
+                name.to_string()
+            };
+
             let base = create
                 .base
                 .as_deref()
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty());
 
+            if is_launch_cancelled(cancelled) {
+                return Err("Cancelled".to_string());
+            }
+
             (
-                create_new_worktree_path(&repo_path, new_branch, base)?,
-                new_branch.to_string(),
+                create_new_worktree_path(&repo_path, &new_branch, base)?,
+                new_branch,
                 true,
             )
         } else {
@@ -4289,6 +4335,7 @@ pub(crate) fn launch_agent_for_project_root(
                 env_vars: docker_env.clone(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             }
         }
         DockerExecMode::DockerRun {
@@ -4354,6 +4401,7 @@ pub(crate) fn launch_agent_for_project_root(
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             }
         }
         DockerExecMode::None => {
@@ -4404,6 +4452,7 @@ pub(crate) fn launch_agent_for_project_root(
                 env_vars,
                 terminal_shell,
                 interactive: true,
+                windows_force_utf8: cfg!(target_os = "windows"),
             }
         }
     };

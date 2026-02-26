@@ -67,3 +67,9 @@
   - タブ1つの場合は何もしない
   - Summary パネルの包含
   - D&D 並べ替え後の順序追従
+
+### Phase 6: 閉じたウィンドウの MRU 除外（2026-02-26）
+
+1. **CloseRequested ハンドラで MRU 履歴から除外**: `app.rs` の `CloseRequested` イベントで `window.hide()` 後に `state.remove_window_from_history(window.label())` を呼び出す
+2. **仕様更新**: FR-010 / US4-3 / SC-005 / エッジケースを「非表示ウィンドウは巡回対象外」に変更
+3. **回帰テスト追加**: `state.rs` に `window_hidden_removed_from_cycling` 等4件のテストを追加

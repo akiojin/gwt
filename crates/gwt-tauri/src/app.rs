@@ -4,6 +4,7 @@ use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::Manager;
 use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
 use tracing::{info, warn};
@@ -16,7 +17,7 @@ use gwt_core::config::{skill_registration, Settings};
 #[cfg(not(test))]
 use tokio::io::AsyncReadExt;
 
-#[cfg(any(not(test), target_os = "macos"))]
+#[cfg(not(test))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
@@ -122,7 +123,7 @@ pub(crate) fn spawn_login_shell_env_capture(app_handle: tauri::AppHandle<tauri::
     });
 }
 
-#[cfg(any(not(test), target_os = "macos"))]
+#[cfg(not(test))]
 fn has_running_agents(state: &AppState) -> bool {
     let Ok(mut manager) = state.pane_manager.lock() else {
         return false;
@@ -138,7 +139,7 @@ fn has_running_agents(state: &AppState) -> bool {
     false
 }
 
-#[cfg(any(not(test), target_os = "macos"))]
+#[cfg(not(test))]
 fn try_begin_exit_confirm(state: &AppState) -> bool {
     state
         .exit_confirm_inflight
@@ -146,7 +147,7 @@ fn try_begin_exit_confirm(state: &AppState) -> bool {
         .is_ok()
 }
 
-#[cfg(any(not(test), target_os = "macos"))]
+#[cfg(not(test))]
 fn end_exit_confirm(state: &AppState) {
     state.exit_confirm_inflight.store(false, Ordering::SeqCst);
 }
@@ -157,6 +158,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_GIT_PULL_REQUESTS => Some("git-pull-requests"),
         crate::menu::MENU_ID_GIT_ISSUES => Some("git-issues"),
         crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
         crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
@@ -601,6 +603,7 @@ pub fn build_app(
                 let _ = window.emit("window-will-hide", ());
                 api.prevent_close();
                 let _ = window.hide();
+                state.remove_window_from_history(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
@@ -661,12 +664,14 @@ pub fn build_app(
             crate::commands::project::get_project_info,
             crate::commands::project::is_git_repo,
             crate::commands::project::quit_app,
+            crate::commands::project::cancel_quit_confirm,
             crate::commands::docker::detect_docker_context,
             crate::commands::sessions::get_branch_quick_start,
             crate::commands::sessions::get_agent_sidebar_view,
             crate::commands::sessions::get_branch_session_summary,
             crate::commands::sessions::rebuild_all_branch_session_summaries,
-            crate::commands::branch_suggest::suggest_branch_names,
+            crate::commands::branch_suggest::suggest_branch_name,
+            crate::commands::branch_suggest::is_ai_configured,
             crate::commands::terminal::launch_terminal,
             crate::commands::terminal::spawn_shell,
             crate::commands::terminal::launch_agent,
@@ -758,6 +763,12 @@ pub fn build_app(
             crate::commands::report::create_github_issue,
             crate::commands::report::capture_screen_text,
             crate::commands::pullrequest::update_pr_branch,
+            crate::commands::pullrequest::merge_pull_request,
+            crate::commands::pullrequest::fetch_pr_list,
+            crate::commands::pullrequest::fetch_github_user,
+            crate::commands::pullrequest::merge_pr,
+            crate::commands::pullrequest::review_pr,
+            crate::commands::pullrequest::mark_pr_ready,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
         ])
@@ -957,73 +968,34 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
                 event = "ExitRequested",
                 "Exit requested"
             );
-            // SPEC-dfb1611a FR-314: only the tray "Quit" is allowed to exit.
-            let is_quitting = app_handle
-                .state::<AppState>()
-                .is_quitting
-                .load(Ordering::SeqCst);
+            let state = app_handle.state::<AppState>();
+            let is_quitting = state.is_quitting.load(Ordering::SeqCst);
 
             if should_prevent_exit_request(is_quitting) {
-                api.prevent_exit();
-
-                // macOS: Cmd+Q is treated as explicit window close, not process exit.
-                #[cfg(target_os = "macos")]
-                {
-                    let state = app_handle.state::<AppState>();
-                    let window = best_window(app_handle);
-                    let Some(window) = window else {
-                        info!(
-                            category = "tauri",
-                            event = "ExitPrevented",
-                            "Exit prevented; no windows exist"
-                        );
-                        return;
-                    };
-
-                    let window_label = window.label().to_string();
-                    if has_running_agents(&state) {
-                        if !try_begin_exit_confirm(&state) {
-                            return;
-                        }
-
-                        let app_handle = app_handle.clone();
-                        let window_label = window_label.clone();
-                        app_handle
-                            .dialog()
-                            .message("Agents are still running. Quit gwt anyway?")
-                            .kind(MessageDialogKind::Warning)
-                            .buttons(MessageDialogButtons::OkCancelCustom(
-                                "Quit".to_string(),
-                                "Cancel".to_string(),
-                            ))
-                            .show(move |ok| {
-                                let state = app_handle.state::<AppState>();
-                                end_exit_confirm(&state);
-                                if !ok {
-                                    return;
-                                }
-
-                                if let Some(window) = app_handle.get_webview_window(&window_label) {
-                                    let _ = window.hide();
-                                }
-                            });
-                        return;
-                    }
-
-                    let _ = window.hide();
+                // Check if this is the 2nd Cmd+Q within the timeout window
+                const QUIT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+                if state.is_quit_confirm_active(QUIT_CONFIRM_TIMEOUT) {
+                    // 2nd press within timeout → quit
+                    state.cancel_quit_confirm();
+                    state.request_quit();
+                    app_handle.exit(0);
+                    return;
                 }
 
-                // Other OSes: keep current behavior (exit request hides to tray).
-                #[cfg(not(target_os = "macos"))]
-                {
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        info!(
-                            category = "tauri",
-                            event = "ExitPrevented",
-                            "Exit prevented; hiding main window"
-                        );
-                        let _ = window.hide();
-                    }
+                // 1st press → show toast
+                api.prevent_exit();
+                state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT);
+
+                if let Some(window) = best_window(app_handle) {
+                    // Show window if hidden (FR-007)
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    // Emit event to frontmost window only (FR-009)
+                    let _ = window.emit_to(
+                        EventTarget::webview_window(window.label()),
+                        "quit-confirm-show",
+                        (),
+                    );
                 }
             }
         }

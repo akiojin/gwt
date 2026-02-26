@@ -63,6 +63,7 @@ describe("agentLaunchDefaults", () => {
         dockerRecreate: true,
         dockerKeep: false,
         selectedShell: "cmd",
+        branchNamingMode: "direct",
       },
       store,
     );
@@ -84,6 +85,7 @@ describe("agentLaunchDefaults", () => {
       dockerRecreate: true,
       dockerKeep: false,
       selectedShell: "cmd",
+      branchNamingMode: "direct",
     });
   });
 
@@ -142,6 +144,7 @@ describe("agentLaunchDefaults", () => {
       dockerRecreate: true,
       dockerKeep: false,
       selectedShell: "",
+      branchNamingMode: "ai-suggest",
     });
   });
 });

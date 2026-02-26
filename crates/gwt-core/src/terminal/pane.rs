@@ -35,6 +35,8 @@ pub struct PaneConfig {
     pub terminal_shell: Option<String>,
     /// Whether this is an interactive session (e.g. spawn_shell).
     pub interactive: bool,
+    /// Whether to force UTF-8 terminal initialization on Windows launch.
+    pub windows_force_utf8: bool,
 }
 
 /// A terminal pane integrating PTY and scrollback.
@@ -69,6 +71,7 @@ impl TerminalPane {
             cols: config.cols,
             terminal_shell: config.terminal_shell,
             interactive: config.interactive,
+            windows_force_utf8: config.windows_force_utf8,
         };
 
         let pty = PtyHandle::new(pty_config)?;
@@ -273,6 +276,7 @@ mod tests {
             env_vars: HashMap::new(),
             terminal_shell: None,
             interactive: false,
+            windows_force_utf8: false,
         }
     }
 

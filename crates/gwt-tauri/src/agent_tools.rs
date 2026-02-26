@@ -574,6 +574,7 @@ mod tests {
             env_vars: Default::default(),
             terminal_shell: None,
             interactive: false,
+            windows_force_utf8: false,
         })
         .expect("failed to create test pane");
 

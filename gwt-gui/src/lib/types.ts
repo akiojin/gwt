@@ -243,7 +243,8 @@ export interface Tab {
     | "projectMode"
     | "terminal"
     | "issueSpec"
-    | "issues";
+    | "issues"
+    | "prs";
   paneId?: string;
   cwd?: string;
   issueNumber?: number;
@@ -317,7 +318,7 @@ export interface SessionSummaryResult {
 
 export interface BranchSuggestResult {
   status: "ok" | "ai-not-configured" | "error";
-  suggestions: string[];
+  suggestion: string;
   error?: string | null;
 }
 
@@ -565,6 +566,7 @@ export interface LaunchAgentRequest {
   dockerKeep?: boolean;
   issueNumber?: number;
   terminalShell?: string;
+  aiBranchDescription?: string;
 }
 
 // PR Status types (SPEC-d6949f99)
@@ -589,6 +591,8 @@ export interface PrStatusInfo {
   additions: number;
   deletions: number;
   mergeStateStatus?: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
+  /** True while backend retry is in progress for UNKNOWN merge status. */
+  retrying?: boolean;
 }
 
 export interface PrStatusLite {
@@ -599,6 +603,8 @@ export interface PrStatusLite {
   baseBranch: string;
   headBranch: string;
   checkSuites: WorkflowRunInfo[];
+  /** True while backend retry is in progress for UNKNOWN merge status. */
+  retrying?: boolean;
 }
 
 export interface BranchPrReference {
@@ -646,6 +652,8 @@ export interface ReviewComment {
 export interface PrStatusResponse {
   statuses: Record<string, PrStatusLite | null>;
   ghStatus: GhCliStatus;
+  /** Repository identity key used to match `pr-status-updated` events. */
+  repoKey?: string | null;
 }
 
 // === Project Mode 3-Layer Type Definitions ===
@@ -713,4 +721,33 @@ export interface DeveloperState {
   paneId: string;
   status: "starting" | "running" | "completed" | "error";
   worktree: { branchName: string; path: string };
+}
+
+// PR List types (SPEC-prlist)
+
+export interface PrListItem {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  isDraft: boolean;
+  headRefName: string;
+  baseRefName: string;
+  author: { login: string };
+  labels: Array<{ name: string; color: string }>;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+  body: string;
+  reviewRequests: Array<{ login: string }>;
+  assignees: Array<{ login: string }>;
+}
+
+export interface FetchPrListResponse {
+  items: PrListItem[];
+  ghStatus: GhCliStatus;
+}
+
+export interface GitHubUserResponse {
+  login: string;
+  ghStatus: GhCliStatus;
 }

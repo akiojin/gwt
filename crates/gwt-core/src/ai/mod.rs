@@ -10,7 +10,7 @@ pub mod session_parser;
 pub mod summary;
 
 pub use branch_suggest::{
-    parse_branch_suggestions, suggest_branch_names, BRANCH_SUGGEST_SYSTEM_PROMPT,
+    parse_branch_suggestion, suggest_branch_name, BRANCH_SUGGEST_SYSTEM_PROMPT,
 };
 pub use client::{
     format_error_for_display, AIClient, AIError, AIResponse, ChatMessage, ModelInfo, ToolCall,
