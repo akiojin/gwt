@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize};
 
@@ -79,16 +79,43 @@ fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
-fn resolve_spawn_command_for_platform<F>(
+fn has_windows_batch_extension(command: &str) -> bool {
+    Path::new(command)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+        .unwrap_or(false)
+}
+
+fn is_windows_batch_command_for_platform<F>(command: &str, mut resolve_command_path: F) -> bool
+where
+    F: FnMut(&str) -> Option<PathBuf>,
+{
+    if has_windows_batch_extension(command) {
+        return true;
+    }
+
+    if command.contains('\\') || command.contains('/') {
+        return false;
+    }
+
+    resolve_command_path(command)
+        .map(|resolved| has_windows_batch_extension(resolved.to_string_lossy().as_ref()))
+        .unwrap_or(false)
+}
+
+fn resolve_spawn_command_for_platform_with<F, G>(
     command: &str,
     args: &[String],
     is_windows: bool,
     mut resolve_windows_shell: F,
+    mut resolve_command_path: G,
     shell: Option<&str>,
     interactive: bool,
 ) -> (String, Vec<String>)
 where
     F: FnMut() -> String,
+    G: FnMut(&str) -> Option<PathBuf>,
 {
     if is_windows {
         let force_powershell_wrap = matches!(shell, Some("powershell"));
@@ -105,6 +132,15 @@ where
                 return (command.to_string(), args.to_vec());
             }
             // "powershell" falls through to the default PowerShell path below.
+        }
+
+        // Auto shell + batch command (`*.cmd`/`*.bat`) must run via `cmd.exe /C`
+        // to keep Windows interactive PTY behavior stable across agents.
+        if !force_powershell_wrap
+            && is_windows_batch_command_for_platform(command, &mut resolve_command_path)
+        {
+            let expression = build_cmd_command_expression(command, args);
+            return ("cmd.exe".to_string(), vec!["/C".to_string(), expression]);
         }
 
         // Interactive sessions (e.g. spawn_shell) must not be wrapped with
@@ -131,6 +167,34 @@ where
     }
 
     (command.to_string(), args.to_vec())
+}
+
+fn resolve_spawn_command_for_platform<F>(
+    command: &str,
+    args: &[String],
+    is_windows: bool,
+    resolve_windows_shell: F,
+    shell: Option<&str>,
+    interactive: bool,
+) -> (String, Vec<String>)
+where
+    F: FnMut() -> String,
+{
+    resolve_spawn_command_for_platform_with(
+        command,
+        args,
+        is_windows,
+        resolve_windows_shell,
+        |name| {
+            if cfg!(test) {
+                None
+            } else {
+                which::which(name).ok()
+            }
+        },
+        shell,
+        interactive,
+    )
 }
 
 fn resolve_spawn_command(
@@ -187,6 +251,32 @@ impl PtyHandle {
             &config.args,
             config.terminal_shell.as_deref(),
             config.interactive,
+        );
+        let launch_mode = if cfg!(windows) {
+            if spawn_command.eq_ignore_ascii_case("cmd.exe")
+                && spawn_args
+                    .first()
+                    .is_some_and(|arg| arg.eq_ignore_ascii_case("/c"))
+            {
+                "cmd-wrapper"
+            } else if spawn_args.iter().any(|arg| arg == "-Command") {
+                "powershell-wrapper"
+            } else {
+                "pass-through"
+            }
+        } else {
+            "native"
+        };
+
+        tracing::debug!(
+            command = %config.command,
+            args = ?config.args,
+            resolved_command = %spawn_command,
+            resolved_args = ?spawn_args,
+            interactive = config.interactive,
+            terminal_shell = ?config.terminal_shell,
+            launch_mode,
+            "Resolved PTY spawn command"
         );
 
         let mut cmd = CommandBuilder::new(&spawn_command);
@@ -317,17 +407,12 @@ mod tests {
             false,
         );
 
-        assert_eq!(program, "pwsh");
+        assert_eq!(program, "cmd.exe");
         assert_eq!(
             resolved_args,
             vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-ExecutionPolicy".to_string(),
-                "Bypass".to_string(),
-                "-Command".to_string(),
-                "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'".to_string(),
+                "/C".to_string(),
+                "C:\\Tools\\npx.cmd --yes @openai/codex@latest".to_string(),
             ]
         );
     }
@@ -425,6 +510,32 @@ mod tests {
         let expression =
             build_cmd_command_expression("tool.cmd", &[r#"arg "quoted" value"#.to_string()]);
         assert_eq!(expression, r#"tool.cmd "arg ""quoted"" value""#);
+    }
+
+    #[test]
+    fn is_windows_batch_command_for_platform_detects_cmd_extension() {
+        assert!(is_windows_batch_command_for_platform(
+            "C:\\Users\\user\\AppData\\Roaming\\npm\\npx.CMD",
+            |_| None
+        ));
+    }
+
+    #[test]
+    fn is_windows_batch_command_for_platform_detects_resolved_cmd_for_bare_command() {
+        assert!(is_windows_batch_command_for_platform("claude", |name| {
+            assert_eq!(name, "claude");
+            Some(PathBuf::from(
+                "C:\\Users\\user\\AppData\\Roaming\\npm\\claude.cmd",
+            ))
+        }));
+    }
+
+    #[test]
+    fn is_windows_batch_command_for_platform_rejects_non_batch_extension() {
+        assert!(!is_windows_batch_command_for_platform(
+            "C:\\Tools\\pwsh.exe",
+            |_| None
+        ));
     }
 
     #[test]
@@ -721,6 +832,36 @@ mod tests {
     }
 
     #[test]
+    fn resolve_spawn_command_windows_agent_host_os_interactive_resolved_cmd_uses_cmd_exe() {
+        let args = vec!["--dangerously-skip-permissions".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform_with(
+            "claude",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            |name| {
+                if name == "claude" {
+                    Some(PathBuf::from(
+                        "C:\\Users\\user\\AppData\\Roaming\\npm\\claude.cmd",
+                    ))
+                } else {
+                    None
+                }
+            },
+            None,
+            true,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "claude --dangerously-skip-permissions".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn resolve_spawn_command_windows_agent_bunx_interactive() {
         let args = vec![
             "--yes".to_string(),
@@ -734,12 +875,13 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(program, "C:\\Users\\user\\.bun\\bin\\bunx.cmd");
+        assert_eq!(program, "cmd.exe");
         assert_eq!(
             resolved_args,
             vec![
-                "--yes".to_string(),
-                "@anthropic/claude-code@latest".to_string()
+                "/C".to_string(),
+                "C:\\Users\\user\\.bun\\bin\\bunx.cmd --yes @anthropic/claude-code@latest"
+                    .to_string(),
             ]
         );
     }
