@@ -85,7 +85,8 @@ If automatic apply is not possible, the update dialog tells you to download from
 | Cmd+N | Ctrl+N | New Window |
 | Cmd+O | Ctrl+O | Open Project |
 | Cmd+C | Ctrl+C | Copy |
-| Cmd+V | Ctrl+V | Paste |
+| Cmd+V | Ctrl+V | Paste (text fields / native menu fallback) |
+| Cmd+V (terminal pane) | Ctrl+Shift+V (terminal pane) | Paste text into terminal pane |
 | Cmd+Shift+C | Ctrl+Shift+C | Copy Screen Text |
 | Cmd+Shift+K | Ctrl+Shift+K | Cleanup Worktrees |
 | Cmd+, | Ctrl+, | Preferences |
@@ -94,6 +95,12 @@ If automatic apply is not possible, the update dialog tells you to download from
 | Cmd+` | Ctrl+` | Next Window |
 | Cmd+Shift+` | Ctrl+Shift+` | Previous Window |
 | Cmd+M | --- | Minimize (macOS only) |
+
+### Terminal pane note (Windows/Linux)
+
+- In terminal-based tabs (`Agent` / `Terminal`), text paste is `Ctrl+Shift+V`.
+- `Ctrl+V` is intentionally passed through to the terminal application (for example, Codex image paste).
+- This behavior is terminal-level and is shared across PowerShell, WSL, and Cmd.
 
 ## Environment and requirements
 

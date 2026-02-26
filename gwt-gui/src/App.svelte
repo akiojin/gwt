@@ -79,6 +79,11 @@
   } from "./lib/openExternalUrl";
   import { errorBus, type StructuredError } from "./lib/errorBus";
   import { toastBus } from "./lib/toastBus";
+  import {
+    AGENT_PASTE_HINT_DISMISSED_KEY,
+    platformName,
+    shouldShowAgentPasteHint,
+  } from "./lib/terminal/pasteGuidance";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -166,6 +171,26 @@
     }
   }
 
+  function loadAgentPasteHintDismissed(): boolean {
+    if (typeof window === "undefined") return false;
+    try {
+      return (
+        window.localStorage.getItem(AGENT_PASTE_HINT_DISMISSED_KEY) === "1"
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function persistAgentPasteHintDismissed(): void {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(AGENT_PASTE_HINT_DISMISSED_KEY, "1");
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
   let projectPath: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let sidebarWidthPx: number = $state(loadSidebarWidth());
@@ -220,6 +245,8 @@
 
   let tabs: Tab[] = $state(defaultAppTabs());
   let activeTabId: string = $state("projectMode");
+  let agentPasteHintDismissed = loadAgentPasteHintDismissed();
+  let agentPasteHintShownInSession = false;
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -2344,6 +2371,40 @@
     void tabs;
     void activeTabId;
     void syncWindowAgentTabs();
+  });
+
+  $effect(() => {
+    void tabs;
+    void activeTabId;
+
+    if (typeof navigator === "undefined") return;
+    const activeTab = tabs.find((tab) => tab.id === activeTabId);
+    const currentPlatform = platformName(
+      navigator as Navigator & {
+        userAgentData?: { platform?: string | null } | null;
+      },
+    );
+
+    if (
+      !shouldShowAgentPasteHint({
+        activeTabType: activeTab?.type,
+        platform: currentPlatform,
+        dismissed: agentPasteHintDismissed,
+        shownInSession: agentPasteHintShownInSession,
+      })
+    ) {
+      return;
+    }
+
+    showToast(
+      "Agent tab paste: Ctrl+Shift+V for text on Windows/Linux. Ctrl+V is passed through to the agent (for example, Codex image paste).",
+      10000,
+    );
+    agentPasteHintShownInSession = true;
+    if (!agentPasteHintDismissed) {
+      agentPasteHintDismissed = true;
+      persistAgentPasteHintDismissed();
+    }
   });
 
   async function restoreProjectAgentTabs(
