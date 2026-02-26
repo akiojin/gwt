@@ -23,20 +23,33 @@ pub struct PtyConfig {
     /// Whether this is an interactive session (e.g. spawn_shell).
     /// When true on Windows, the command is not wrapped with PowerShell.
     pub interactive: bool,
+    /// Whether to force UTF-8 terminal initialization on Windows launch.
+    pub windows_force_utf8: bool,
 }
 
 fn escape_powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-fn build_windows_powershell_command_expression(command: &str, args: &[String]) -> String {
+fn build_windows_powershell_command_expression(
+    command: &str,
+    args: &[String],
+    windows_force_utf8: bool,
+) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
     parts.push(format!("'{}'", escape_powershell_single_quoted(command)));
     parts.extend(
         args.iter()
             .map(|arg| format!("'{}'", escape_powershell_single_quoted(arg))),
     );
-    format!("& {}", parts.join(" "))
+    let invoke = format!("& {}", parts.join(" "));
+    if windows_force_utf8 {
+        format!(
+            "$enc = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = $enc; [Console]::OutputEncoding = $enc; $OutputEncoding = $enc; chcp.com 65001 > $null; {invoke}"
+        )
+    } else {
+        invoke
+    }
 }
 
 fn resolve_windows_shell_with<F>(mut command_exists: F) -> String
@@ -104,6 +117,23 @@ where
         .unwrap_or(false)
 }
 
+fn build_cmd_utf8_command_expression(command: &str, args: &[String]) -> String {
+    let expression = build_cmd_command_expression(command, args);
+    format!("chcp 65001 > nul && {expression}")
+}
+
+fn build_powershell_wrapped_args(expression: String) -> Vec<String> {
+    vec![
+        "-NoLogo".to_string(),
+        "-NoProfile".to_string(),
+        "-NonInteractive".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-Command".to_string(),
+        expression,
+    ]
+}
+
 fn resolve_spawn_command_for_platform_with<F, G>(
     command: &str,
     args: &[String],
@@ -112,58 +142,92 @@ fn resolve_spawn_command_for_platform_with<F, G>(
     mut resolve_command_path: G,
     shell: Option<&str>,
     interactive: bool,
+    windows_force_utf8: bool,
 ) -> (String, Vec<String>)
 where
     F: FnMut() -> String,
     G: FnMut(&str) -> Option<PathBuf>,
 {
     if is_windows {
-        let force_powershell_wrap = matches!(shell, Some("powershell"));
-
-        // If an explicit shell override is provided, use it.
         if let Some(shell_id) = shell {
-            if shell_id == "cmd" {
-                let expression = build_cmd_command_expression(command, args);
-                return ("cmd.exe".to_string(), vec!["/C".to_string(), expression]);
+            match shell_id {
+                "cmd" => {
+                    let expression = if windows_force_utf8 {
+                        build_cmd_utf8_command_expression(command, args)
+                    } else {
+                        build_cmd_command_expression(command, args)
+                    };
+                    let cmd_args = if windows_force_utf8 {
+                        vec![
+                            "/D".to_string(),
+                            "/S".to_string(),
+                            "/C".to_string(),
+                            expression,
+                        ]
+                    } else {
+                        vec!["/C".to_string(), expression]
+                    };
+                    return ("cmd.exe".to_string(), cmd_args);
+                }
+                // "wsl": command and args are already set by the caller (launch_with_wsl_pty_write
+                // or resolve_shell_for_spawn), so pass through without wrapping.
+                "wsl" => return (command.to_string(), args.to_vec()),
+                "powershell" => {
+                    let shell = resolve_windows_shell();
+                    let expression = build_windows_powershell_command_expression(
+                        command,
+                        args,
+                        windows_force_utf8,
+                    );
+                    return (shell, build_powershell_wrapped_args(expression));
+                }
+                _ => {}
             }
-            // "wsl": command and args are already set by the caller (launch_with_wsl_pty_write
-            // or resolve_shell_for_spawn), so pass through without wrapping.
-            if shell_id == "wsl" {
-                return (command.to_string(), args.to_vec());
-            }
-            // "powershell" falls through to the default PowerShell path below.
         }
 
         // Auto shell + batch command (`*.cmd`/`*.bat`) must run via `cmd.exe /C`
         // to keep Windows interactive PTY behavior stable across agents.
-        if !force_powershell_wrap
-            && is_windows_batch_command_for_platform(command, &mut resolve_command_path)
-        {
-            let expression = build_cmd_command_expression(command, args);
-            return ("cmd.exe".to_string(), vec!["/C".to_string(), expression]);
+        if is_windows_batch_command_for_platform(command, &mut resolve_command_path) {
+            let expression = if windows_force_utf8 {
+                build_cmd_utf8_command_expression(command, args)
+            } else {
+                build_cmd_command_expression(command, args)
+            };
+            let cmd_args = if windows_force_utf8 {
+                vec![
+                    "/D".to_string(),
+                    "/S".to_string(),
+                    "/C".to_string(),
+                    expression,
+                ]
+            } else {
+                vec!["/C".to_string(), expression]
+            };
+            return ("cmd.exe".to_string(), cmd_args);
         }
 
         // Interactive sessions (e.g. spawn_shell) must not be wrapped with
         // PowerShell -NonInteractive, as that breaks ConPTY I/O.
-        // Exception: explicit `powershell` selection should keep the wrapper path.
-        if interactive && !force_powershell_wrap {
+        if interactive && !windows_force_utf8 {
             return (command.to_string(), args.to_vec());
         }
 
+        if windows_force_utf8 {
+            let expression = build_cmd_utf8_command_expression(command, args);
+            return (
+                "cmd.exe".to_string(),
+                vec![
+                    "/D".to_string(),
+                    "/S".to_string(),
+                    "/C".to_string(),
+                    expression,
+                ],
+            );
+        }
+
         let shell = resolve_windows_shell();
-        let expression = build_windows_powershell_command_expression(command, args);
-        return (
-            shell,
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-ExecutionPolicy".to_string(),
-                "Bypass".to_string(),
-                "-Command".to_string(),
-                expression,
-            ],
-        );
+        let expression = build_windows_powershell_command_expression(command, args, false);
+        return (shell, build_powershell_wrapped_args(expression));
     }
 
     (command.to_string(), args.to_vec())
@@ -176,6 +240,7 @@ fn resolve_spawn_command_for_platform<F>(
     resolve_windows_shell: F,
     shell: Option<&str>,
     interactive: bool,
+    windows_force_utf8: bool,
 ) -> (String, Vec<String>)
 where
     F: FnMut() -> String,
@@ -194,6 +259,7 @@ where
         },
         shell,
         interactive,
+        windows_force_utf8,
     )
 }
 
@@ -202,6 +268,7 @@ fn resolve_spawn_command(
     args: &[String],
     shell: Option<&str>,
     interactive: bool,
+    windows_force_utf8: bool,
 ) -> (String, Vec<String>) {
     resolve_spawn_command_for_platform(
         command,
@@ -210,6 +277,7 @@ fn resolve_spawn_command(
         resolve_windows_shell,
         shell,
         interactive,
+        windows_force_utf8,
     )
 }
 
@@ -251,6 +319,7 @@ impl PtyHandle {
             &config.args,
             config.terminal_shell.as_deref(),
             config.interactive,
+            config.windows_force_utf8,
         );
         let launch_mode = if cfg!(windows) {
             if spawn_command.eq_ignore_ascii_case("cmd.exe")
@@ -376,11 +445,20 @@ mod tests {
     #[test]
     fn build_windows_powershell_command_expression_quotes_command_and_args() {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
-        let expr = build_windows_powershell_command_expression("C:\\Tools\\npx.cmd", &args);
+        let expr = build_windows_powershell_command_expression("C:\\Tools\\npx.cmd", &args, false);
         assert_eq!(
             expr,
             "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'"
         );
+    }
+
+    #[test]
+    fn build_windows_powershell_command_expression_utf8_wraps_preamble() {
+        let args = vec!["--version".to_string()];
+        let expr = build_windows_powershell_command_expression("codex", &args, true);
+        assert!(expr.contains("[System.Text.UTF8Encoding]::new($false)"));
+        assert!(expr.contains("chcp.com 65001 > $null"));
+        assert!(expr.ends_with("& 'codex' '--version'"));
     }
 
     #[test]
@@ -405,6 +483,7 @@ mod tests {
             || "pwsh".to_string(),
             None,
             false,
+            false,
         );
 
         assert_eq!(program, "cmd.exe");
@@ -426,6 +505,7 @@ mod tests {
             true,
             || "powershell.exe".to_string(),
             None,
+            false,
             false,
         );
         assert_eq!(program, "powershell.exe");
@@ -453,6 +533,7 @@ mod tests {
             || "pwsh".to_string(),
             None,
             false,
+            false,
         );
         assert_eq!(program, "codex");
         assert_eq!(resolved_args, args);
@@ -467,6 +548,7 @@ mod tests {
             true,
             || "pwsh".to_string(),
             Some("cmd"),
+            false,
             false,
         );
         assert_eq!(program, "cmd.exe");
@@ -493,6 +575,7 @@ mod tests {
             || "pwsh".to_string(),
             Some("cmd"),
             false,
+            false,
         );
         assert_eq!(program, "cmd.exe");
         assert_eq!(
@@ -503,6 +586,99 @@ mod tests {
                     .to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_force_utf8_wraps_with_cmd() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            true,
+            true,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                "chcp 65001 > nul && codex --version".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_force_utf8_cmd_shell_uses_cmd_wrapper() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("cmd"),
+            false,
+            true,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                "chcp 65001 > nul && codex --version".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_force_utf8_powershell_shell_keeps_powershell_wrapper() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("powershell"),
+            false,
+            true,
+        );
+        assert_eq!(program, "pwsh");
+        assert_eq!(
+            &resolved_args[0..6],
+            &[
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+            ]
+        );
+        assert!(resolved_args[6].contains("[System.Text.UTF8Encoding]::new($false)"));
+        assert!(resolved_args[6].contains("chcp.com 65001 > $null"));
+        assert!(resolved_args[6].contains("& 'codex' '--version'"));
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_force_utf8_wsl_passthrough() {
+        let args = vec!["-e".to_string(), "echo hello".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "wsl.exe",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("wsl"),
+            true,
+            true,
+        );
+        assert_eq!(program, "wsl.exe");
+        assert_eq!(resolved_args, args);
     }
 
     #[test]
@@ -548,6 +724,7 @@ mod tests {
             || "pwsh".to_string(),
             Some("powershell"),
             false,
+            false,
         );
         assert_eq!(program, "pwsh");
         assert_eq!(
@@ -574,6 +751,7 @@ mod tests {
             || "pwsh".to_string(),
             Some("powershell"),
             true,
+            false,
         );
         assert_eq!(program, "pwsh");
         assert_eq!(
@@ -648,6 +826,7 @@ mod tests {
             cols: 80,
             terminal_shell: None,
             interactive: false,
+            windows_force_utf8: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -678,6 +857,7 @@ mod tests {
             cols: 80,
             terminal_shell: None,
             interactive: false,
+            windows_force_utf8: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -719,6 +899,7 @@ mod tests {
             cols: 80,
             terminal_shell: None,
             interactive: false,
+            windows_force_utf8: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -737,6 +918,7 @@ mod tests {
             cols: 80,
             terminal_shell: None,
             interactive: false,
+            windows_force_utf8: false,
         };
 
         let mut handle = PtyHandle::new(config).expect("Failed to create PTY");
@@ -765,6 +947,7 @@ mod tests {
             cols: 80,
             terminal_shell: None,
             interactive: false,
+            windows_force_utf8: false,
         };
 
         let result = PtyHandle::new(config);
@@ -793,6 +976,7 @@ mod tests {
             || "pwsh".to_string(),
             None,
             true,
+            false,
         );
         assert_eq!(program, "pwsh");
         assert_eq!(resolved_args, vec!["--version".to_string()]);
@@ -808,6 +992,7 @@ mod tests {
             || "pwsh".to_string(),
             None,
             true,
+            false,
         );
         assert_eq!(program, "/bin/zsh");
         assert_eq!(resolved_args, vec!["-l".to_string()]);
@@ -823,6 +1008,7 @@ mod tests {
             || "pwsh".to_string(),
             None,
             true,
+            false,
         );
         assert_eq!(program, "claude");
         assert_eq!(
@@ -850,6 +1036,7 @@ mod tests {
             },
             None,
             true,
+            false,
         );
         assert_eq!(program, "cmd.exe");
         assert_eq!(
@@ -874,6 +1061,7 @@ mod tests {
             || "pwsh".to_string(),
             None,
             true,
+            false,
         );
         assert_eq!(program, "cmd.exe");
         assert_eq!(
@@ -897,6 +1085,7 @@ mod tests {
             cols: 80,
             terminal_shell: None,
             interactive: false,
+            windows_force_utf8: false,
         };
 
         let result = PtyHandle::new(config);
