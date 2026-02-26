@@ -1341,4 +1341,81 @@ mod tests {
         let result = find_bare_repo_in_dir(temp.path());
         assert!(result.is_none());
     }
+
+    // --- HeaderContext::format_display ---
+
+    #[test]
+    fn header_context_format_bare() {
+        let ctx = HeaderContext {
+            working_dir: PathBuf::from("/repo"),
+            branch_name: None,
+            repo_type: RepoType::Bare,
+            bare_name: None,
+        };
+        assert_eq!(ctx.format_display(), "/repo [bare]");
+    }
+
+    #[test]
+    fn header_context_format_normal_with_branch() {
+        let ctx = HeaderContext {
+            working_dir: PathBuf::from("/repo"),
+            branch_name: Some("main".to_string()),
+            repo_type: RepoType::Normal,
+            bare_name: None,
+        };
+        assert_eq!(ctx.format_display(), "/repo [main]");
+    }
+
+    #[test]
+    fn header_context_format_normal_no_branch() {
+        let ctx = HeaderContext {
+            working_dir: PathBuf::from("/repo"),
+            branch_name: None,
+            repo_type: RepoType::Normal,
+            bare_name: None,
+        };
+        assert_eq!(ctx.format_display(), "/repo []");
+    }
+
+    #[test]
+    fn header_context_format_worktree_with_bare_name() {
+        let ctx = HeaderContext {
+            working_dir: PathBuf::from("/worktrees/feature-x"),
+            branch_name: Some("feature-x".to_string()),
+            repo_type: RepoType::Worktree,
+            bare_name: Some("repo.git".to_string()),
+        };
+        assert_eq!(
+            ctx.format_display(),
+            "/worktrees/feature-x [feature-x] (repo.git)"
+        );
+    }
+
+    #[test]
+    fn header_context_format_worktree_no_bare_name() {
+        let ctx = HeaderContext {
+            working_dir: PathBuf::from("/worktrees/feature-x"),
+            branch_name: Some("feature-x".to_string()),
+            repo_type: RepoType::Worktree,
+            bare_name: None,
+        };
+        assert_eq!(ctx.format_display(), "/worktrees/feature-x [feature-x]");
+    }
+
+    // --- RepoType equality ---
+
+    #[test]
+    fn repo_type_equality() {
+        assert_eq!(RepoType::Normal, RepoType::Normal);
+        assert_ne!(RepoType::Normal, RepoType::Bare);
+        assert_ne!(RepoType::Bare, RepoType::Worktree);
+        assert_ne!(RepoType::Empty, RepoType::NonRepo);
+    }
+
+    // --- is_empty_dir edge cases ---
+
+    #[test]
+    fn is_empty_dir_nonexistent() {
+        assert!(!is_empty_dir(std::path::Path::new("/nonexistent/path/12345")));
+    }
 }

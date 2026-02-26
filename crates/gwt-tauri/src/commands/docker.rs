@@ -197,6 +197,206 @@ fn resolve_compose_images_exist(
         .unwrap_or(false)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- strip_known_remote_prefix ---
+
+    #[test]
+    fn strip_prefix_removes_known_remote() {
+        let remotes = vec![Remote {
+            name: "origin".to_string(),
+            fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+        }];
+        assert_eq!(
+            strip_known_remote_prefix("origin/feature/x", &remotes),
+            "feature/x"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_preserves_unknown_remote() {
+        let remotes = vec![Remote {
+            name: "origin".to_string(),
+            fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+        }];
+        assert_eq!(
+            strip_known_remote_prefix("upstream/feature/x", &remotes),
+            "upstream/feature/x"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_returns_as_is_for_no_slash() {
+        let remotes = vec![Remote {
+            name: "origin".to_string(),
+            fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+        }];
+        assert_eq!(strip_known_remote_prefix("main", &remotes), "main");
+    }
+
+    #[test]
+    fn strip_prefix_empty_remotes() {
+        let remotes: Vec<Remote> = vec![];
+        assert_eq!(
+            strip_known_remote_prefix("origin/main", &remotes),
+            "origin/main"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_multiple_remotes() {
+        let remotes = vec![
+            Remote {
+                name: "origin".to_string(),
+                fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+            },
+            Remote {
+                name: "upstream".to_string(),
+                fetch_url: "https://example.com/upstream".to_string(),
+            push_url: "https://example.com/upstream".to_string(),
+            },
+        ];
+        assert_eq!(
+            strip_known_remote_prefix("upstream/develop", &remotes),
+            "develop"
+        );
+    }
+
+    // --- compose_file_paths_from_args ---
+
+    #[test]
+    fn compose_file_paths_extracts_single_f_flag() {
+        let args = vec!["-f".to_string(), "docker-compose.yml".to_string()];
+        let paths = compose_file_paths_from_args(&args);
+        assert_eq!(paths, vec![PathBuf::from("docker-compose.yml")]);
+    }
+
+    #[test]
+    fn compose_file_paths_extracts_multiple_f_flags() {
+        let args = vec![
+            "-f".to_string(),
+            "compose.yml".to_string(),
+            "-f".to_string(),
+            "compose.override.yml".to_string(),
+        ];
+        let paths = compose_file_paths_from_args(&args);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("compose.yml"),
+                PathBuf::from("compose.override.yml"),
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_file_paths_ignores_non_f_args() {
+        let args = vec![
+            "--project-name".to_string(),
+            "myproject".to_string(),
+            "-f".to_string(),
+            "compose.yml".to_string(),
+        ];
+        let paths = compose_file_paths_from_args(&args);
+        assert_eq!(paths, vec![PathBuf::from("compose.yml")]);
+    }
+
+    #[test]
+    fn compose_file_paths_empty_args() {
+        let args: Vec<String> = vec![];
+        let paths = compose_file_paths_from_args(&args);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn compose_file_paths_trailing_f_without_value() {
+        let args = vec!["-f".to_string()];
+        let paths = compose_file_paths_from_args(&args);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn compose_file_paths_skips_empty_path() {
+        let args = vec!["-f".to_string(), "  ".to_string()];
+        let paths = compose_file_paths_from_args(&args);
+        assert!(paths.is_empty());
+    }
+
+    // --- is_valid_env_key ---
+
+    #[test]
+    fn valid_env_key_simple() {
+        assert!(is_valid_env_key("HOME"));
+        assert!(is_valid_env_key("PATH"));
+        assert!(is_valid_env_key("MY_VAR_123"));
+    }
+
+    #[test]
+    fn valid_env_key_starts_with_underscore() {
+        assert!(is_valid_env_key("_PRIVATE"));
+        assert!(is_valid_env_key("_"));
+    }
+
+    #[test]
+    fn invalid_env_key_empty() {
+        assert!(!is_valid_env_key(""));
+    }
+
+    #[test]
+    fn invalid_env_key_starts_with_number() {
+        assert!(!is_valid_env_key("1VAR"));
+        assert!(!is_valid_env_key("0_ZERO"));
+    }
+
+    #[test]
+    fn invalid_env_key_contains_special_chars() {
+        assert!(!is_valid_env_key("MY-VAR"));
+        assert!(!is_valid_env_key("MY.VAR"));
+        assert!(!is_valid_env_key("MY VAR"));
+        assert!(!is_valid_env_key("VAR=VALUE"));
+    }
+
+    #[test]
+    fn valid_env_key_lowercase() {
+        assert!(is_valid_env_key("lowercase_var"));
+        assert!(is_valid_env_key("mixedCase"));
+    }
+
+    // --- build_compose_command_args ---
+
+    #[test]
+    fn build_compose_args_with_no_compose_args() {
+        let args = build_compose_command_args(&[], &["up", "-d"]);
+        assert_eq!(args, vec!["compose", "up", "-d"]);
+    }
+
+    #[test]
+    fn build_compose_args_with_compose_and_suffix() {
+        let compose_args = vec!["-f".to_string(), "compose.yml".to_string()];
+        let args = build_compose_command_args(&compose_args, &["ps", "-q"]);
+        assert_eq!(args, vec!["compose", "-f", "compose.yml", "ps", "-q"]);
+    }
+
+    #[test]
+    fn build_compose_args_empty_suffix() {
+        let compose_args = vec!["-f".to_string(), "c.yml".to_string()];
+        let args = build_compose_command_args(&compose_args, &[]);
+        assert_eq!(args, vec!["compose", "-f", "c.yml"]);
+    }
+
+    #[test]
+    fn build_compose_args_all_empty() {
+        let args = build_compose_command_args(&[], &[]);
+        assert_eq!(args, vec!["compose"]);
+    }
+}
+
 /// Detect docker compose context for a branch (best-effort, read-only).
 #[tauri::command]
 pub fn detect_docker_context(

@@ -71,6 +71,108 @@ fn resolve_git_view_exec_path(repo_path: &Path, branch_ref: &str) -> Result<Path
     Ok(repo_path.to_path_buf())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- strip_known_remote_prefix ---
+
+    #[test]
+    fn strip_prefix_removes_origin() {
+        let remotes = vec![Remote {
+            name: "origin".to_string(),
+            fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+        }];
+        assert_eq!(
+            strip_known_remote_prefix("origin/feature/x", &remotes),
+            "feature/x"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_preserves_unknown_prefix() {
+        let remotes = vec![Remote {
+            name: "origin".to_string(),
+            fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+        }];
+        assert_eq!(
+            strip_known_remote_prefix("fork/feature/x", &remotes),
+            "fork/feature/x"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_no_slash_returns_same() {
+        let remotes = vec![Remote {
+            name: "origin".to_string(),
+            fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+        }];
+        assert_eq!(strip_known_remote_prefix("main", &remotes), "main");
+    }
+
+    #[test]
+    fn strip_prefix_empty_remotes_preserves_all() {
+        let remotes: Vec<Remote> = vec![];
+        assert_eq!(
+            strip_known_remote_prefix("origin/main", &remotes),
+            "origin/main"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_upstream_remote() {
+        let remotes = vec![
+            Remote {
+                name: "origin".to_string(),
+                fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+            },
+            Remote {
+                name: "upstream".to_string(),
+                fetch_url: "https://example.com/upstream".to_string(),
+            push_url: "https://example.com/upstream".to_string(),
+            },
+        ];
+        assert_eq!(
+            strip_known_remote_prefix("upstream/main", &remotes),
+            "main"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_nested_slashes() {
+        let remotes = vec![Remote {
+            name: "origin".to_string(),
+            fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+        }];
+        // "origin/feature/deep/nested" -> splits on first / -> rest = "feature/deep/nested"
+        assert_eq!(
+            strip_known_remote_prefix("origin/feature/deep/nested", &remotes),
+            "feature/deep/nested"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_empty_branch() {
+        let remotes = vec![Remote {
+            name: "origin".to_string(),
+            fetch_url: "https://example.com/repo".to_string(),
+            push_url: "https://example.com/repo".to_string(),
+        }];
+        assert_eq!(strip_known_remote_prefix("", &remotes), "");
+    }
+
+    #[test]
+    fn strip_prefix_branch_with_only_slash() {
+        let remotes: Vec<Remote> = vec![];
+        assert_eq!(strip_known_remote_prefix("a/b", &remotes), "a/b");
+    }
+}
+
 #[tauri::command]
 pub fn get_git_change_summary(
     project_path: String,
