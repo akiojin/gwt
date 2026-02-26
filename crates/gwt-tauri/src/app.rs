@@ -603,6 +603,7 @@ pub fn build_app(
                 let _ = window.emit("window-will-hide", ());
                 api.prevent_close();
                 let _ = window.hide();
+                state.remove_window_from_history(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 

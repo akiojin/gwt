@@ -37,3 +37,10 @@
 - [x] T020 [US4,US5] `open_project` 成功時（Opened/FocusedExisting）に MRU 先頭へ反映する実装 crates/gwt-tauri/src/commands/project.rs
 - [x] T021 [US4,US5] `Focused(true)` の MRU 更新を project あり window のみに制限する実装 crates/gwt-tauri/src/app.rs
 - [x] T022 [P] [US4,US5] GREEN: `cargo test -p gwt-tauri state::tests::` と `cargo test -p gwt-tauri commands::project::tests::` で回帰確認 specs/SPEC-e7b3a1d2/tdd.md
+
+## Phase 6: 閉じたウィンドウの MRU 除外バグ修正
+
+- [x] T023 [US4] RED: 非表示ウィンドウが巡回対象外であることを検証するテスト4件追加 crates/gwt-tauri/src/state.rs
+- [x] T024 [US4] GREEN: CloseRequested ハンドラに `remove_window_from_history()` 追加（1行） crates/gwt-tauri/src/app.rs
+- [x] T025 [US4] 仕様更新: FR-010, US4-3, SC-005, エッジケースを「非表示ウィンドウは巡回対象外」に変更 specs/SPEC-e7b3a1d2/spec.md
+- [x] T026 [P] GREEN: `cargo test -p gwt-tauri` と `cargo clippy` で回帰確認 specs/SPEC-e7b3a1d2/tdd.md

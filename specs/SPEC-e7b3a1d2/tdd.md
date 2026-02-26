@@ -46,3 +46,46 @@
 
 - RED→GREEN の流れで不具合再現と修正完了を確認
 - Cmd+Backquote 巡回対象は `project` を開いている既存ウィンドウに限定される前提がテストで固定された
+
+---
+
+## Phase 6: 閉じたウィンドウの MRU 除外（2026-02-26）
+
+**対象**: CloseRequested ハンドラで非表示にしたウィンドウが Cmd+\` の巡回対象から除外されること
+
+### 1. RED（失敗テストを先に追加）
+
+#### 追加したテスト
+
+1. `state::tests::window_hidden_removed_from_cycling` — 非表示ウィンドウがサイクルに含まれないこと
+2. `state::tests::window_refocused_after_hide_readded` — 再表示+フォーカスで履歴に復帰すること
+3. `state::tests::hide_all_but_one_prevents_cycling` — 1つだけ残った場合 `next_window()` が `None`
+4. `state::tests::most_recent_window_excludes_hidden` — `most_recent_window()` が非表示を返さないこと
+
+#### RED確認
+
+テストは `remove_window_from_history` の既存動作を検証する形で即 GREEN。バグの本質は `CloseRequested` ハンドラから呼び出されていないことにある（統合レベルの問題）。
+
+### 2. GREEN（最小実装で通す）
+
+#### 実装内容
+
+`crates/gwt-tauri/src/app.rs` の `CloseRequested` ハンドラ:
+
+```rust
+let _ = window.hide();
+state.remove_window_from_history(window.label());  // ← 追加
+let _ = crate::menu::rebuild_menu(window.app_handle());
+```
+
+`state` は同スコープ line 586 で既に取得済み。
+
+### 3. 回帰確認
+
+1. `cargo test -p gwt-tauri` → 全テスト pass
+2. `cargo clippy --all-targets --all-features -- -D warnings` → warning なし
+
+### 4. 判定
+
+- CloseRequested で `remove_window_from_history` が呼ばれるようになり、X ボタンで閉じたウィンドウは Cmd+\` の巡回対象から除外される
+- 再度プロジェクトを開いてフォーカスされた場合は `Focused(true)` → `push_window_focus()` で自動的に MRU に復帰する
