@@ -129,12 +129,12 @@
   let baseBranchOptionsLoading: boolean = $state(false);
   let baseBranchOptionsError: string | null = $state(null);
 
-  // AI Branch Suggest modal (parity)
-  let suggestOpen: boolean = $state(false);
-  let suggestDescription: string = $state("");
-  let suggestLoading: boolean = $state(false);
-  let suggestError: string | null = $state(null);
-  let suggestSuggestions: string[] = $state([]);
+  // AI Branch Naming Mode (SPEC-9cd50c7c)
+  type BranchNamingMode = "direct" | "ai-suggest";
+  let branchNamingMode: BranchNamingMode = $state("ai-suggest" as BranchNamingMode);
+  let aiDescription: string = $state("");
+  let aiConfigured: boolean = $state(true);
+  let aiFallbackError: string | null = $state(null);
 
   // From Issue state (SPEC-c6ba640a)
   type NewBranchTab = "manual" | "fromIssue";
@@ -331,6 +331,7 @@
     dockerRecreate = defaults.dockerRecreate;
     dockerKeep = defaults.dockerKeep;
     selectedShell = defaults.selectedShell;
+    branchNamingMode = defaults.branchNamingMode === "direct" ? "direct" : "ai-suggest";
     pendingRuntimePreference = runtimeTarget;
     pendingDockerServicePreference = dockerService;
   }
@@ -364,6 +365,7 @@
       dockerRecreate,
       dockerKeep,
       selectedShell,
+      branchNamingMode,
     });
   }
 
@@ -383,6 +385,24 @@
         availableShells = await invoke<ShellInfo[]>("get_available_shells");
       } catch {
         availableShells = [];
+      }
+    })();
+  });
+
+  // Check AI configuration (SPEC-9cd50c7c T043-T044)
+  $effect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("$lib/tauriInvoke");
+        const result = await invoke<BranchSuggestResult>("suggest_branch_name", { description: "test" });
+        if (result.status === "ai-not-configured") {
+          aiConfigured = false;
+          if (branchNamingMode === "ai-suggest") {
+            branchNamingMode = "direct";
+          }
+        }
+      } catch {
+        // AI config check failed - assume configured
       }
     })();
   });
@@ -567,10 +587,8 @@
   function setNewBranchFromFullName(fullName: string): boolean {
     const parsed = splitBranchNamePrefix(fullName);
     if (!parsed) {
-      suggestError = "Invalid suggestion prefix.";
       return false;
     }
-    suggestError = null;
     newBranchPrefix = parsed.prefix;
     newBranchSuffix = parsed.suffix;
     return true;
@@ -792,55 +810,6 @@
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
     if (atBottom && issuesHasNextPage && !issuesLoading && !issueRateLimited) {
       void loadIssues(issuesPage + 1);
-    }
-  }
-
-  function openSuggestModal() {
-    suggestError = null;
-    suggestSuggestions = [];
-    suggestLoading = false;
-    suggestOpen = true;
-  }
-
-  function closeSuggestModal() {
-    suggestOpen = false;
-  }
-
-  async function generateBranchSuggestions() {
-    suggestError = null;
-    suggestSuggestions = [];
-    const description = suggestDescription.trim();
-    if (!description) {
-      suggestError = "Description is required.";
-      return;
-    }
-
-    suggestLoading = true;
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const result = await invoke<BranchSuggestResult>("suggest_branch_names", {
-        description,
-      });
-
-      if (result.status === "ok") {
-        const suggestions = (result.suggestions ?? [])
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
-        if (suggestions.length !== 3) {
-          suggestSuggestions = [];
-          suggestError = "Failed to generate suggestions.";
-          return;
-        }
-        suggestSuggestions = suggestions;
-      } else if (result.status === "ai-not-configured") {
-        suggestError = "AI suggestions are unavailable.";
-      } else {
-        suggestError = result.error || "Failed to generate suggestions.";
-      }
-    } catch (err) {
-      suggestError = toErrorMessage(err);
-    } finally {
-      suggestLoading = false;
     }
   }
 
@@ -1105,24 +1074,44 @@
         errorMessage = "Selected issue is no longer available. Please select another issue.";
         return;
       }
-      if (!newBranchPrefix) return;
-      const fullName = issueForLaunch
-        ? issueBranchName
-        : newBranchFullName.trim();
-      if (!baseBranch.trim() || !fullName) return;
-      request.branch = fullName;
-      await onLaunch({
-        ...request,
-        createBranch: { name: fullName, base: baseBranch.trim() },
-        issueNumber: issueForLaunch
-          ? issueForLaunch.number
-          : undefined,
-      });
+      // AI Suggest mode: send description, use empty name placeholder
+      const isAiSuggestMode = newBranchTab === "manual" && branchNamingMode === "ai-suggest";
+
+      if (isAiSuggestMode) {
+        const desc = aiDescription.trim();
+        if (!desc || !baseBranch.trim()) return;
+        request.branch = "ai-pending";
+        await onLaunch({
+          ...request,
+          createBranch: { name: "ai-pending", base: baseBranch.trim() },
+          aiBranchDescription: desc,
+        });
+      } else {
+        if (!newBranchPrefix) return;
+        const fullName = issueForLaunch
+          ? issueBranchName
+          : newBranchFullName.trim();
+        if (!baseBranch.trim() || !fullName) return;
+        request.branch = fullName;
+        await onLaunch({
+          ...request,
+          createBranch: { name: fullName, base: baseBranch.trim() },
+          issueNumber: issueForLaunch
+            ? issueForLaunch.number
+            : undefined,
+        });
+      }
 
       persistLaunchDefaultsAfterSuccess();
       onClose();
     } catch (err) {
-      errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
+      const errMsg = toErrorMessage(err);
+      if (errMsg.includes("[E2001]")) {
+        branchNamingMode = "direct";
+        aiFallbackError = "AI branch name generation failed. Please enter the branch name manually.";
+        return;
+      }
+      errorMessage = `Failed to launch agent: ${errMsg}`;
     } finally {
       launching = false;
     }
@@ -1130,10 +1119,6 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
-      if (suggestOpen) {
-        closeSuggestModal();
-        return;
-      }
       onClose();
     }
   }
@@ -1263,33 +1248,73 @@
 
           {#if newBranchTab === "manual"}
             <div class="field">
-              <label for="new-branch-suffix-input">New Branch Name</label>
-              <div class="branch-name-row">
-                <select id="new-branch-prefix-select" bind:value={newBranchPrefix}>
-                  {#each BRANCH_PREFIXES as p (p)}
-                    <option value={p}>{p}</option>
-                  {/each}
-                </select>
+              <div class="mode-toggle branch-naming-toggle" role="group" aria-label="Branch naming mode">
+                <button
+                  class="mode-btn"
+                  class:active={branchNamingMode === "ai-suggest"}
+                  disabled={!aiConfigured}
+                  onclick={() => { branchNamingMode = "ai-suggest"; aiFallbackError = null; }}
+                  title={!aiConfigured ? "AI is not configured" : ""}
+                >
+                  AI Suggest
+                </button>
+                <button
+                  class="mode-btn"
+                  class:active={branchNamingMode === "direct"}
+                  onclick={() => { branchNamingMode = "direct"; aiFallbackError = null; }}
+                >
+                  Direct
+                </button>
+              </div>
+            </div>
+
+            {#if aiFallbackError}
+              <div class="field">
+                <div class="error">{aiFallbackError}</div>
+              </div>
+            {/if}
+
+            {#if branchNamingMode === "ai-suggest"}
+              <div class="field">
+                <label for="ai-description-input">Description</label>
                 <input
-                  id="new-branch-suffix-input"
+                  id="ai-description-input"
                   type="text"
                   autocapitalize="off"
                   autocorrect="off"
                   autocomplete="off"
                   spellcheck="false"
-                  value={newBranchSuffix}
-                  oninput={(e) =>
-                    handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
-                  placeholder="e.g., my-change"
+                  bind:value={aiDescription}
+                  placeholder="e.g. Add user authentication feature"
                 />
-                <button class="suggest-btn" type="button" onclick={openSuggestModal}>
-                  Suggest...
-                </button>
               </div>
-              <span class="field-hint">
-                Full name: {newBranchFullName.trim() ? newBranchFullName : "(empty)"}
-              </span>
-            </div>
+            {:else}
+              <div class="field">
+                <label for="new-branch-suffix-input">New Branch Name</label>
+                <div class="branch-name-row">
+                  <select id="new-branch-prefix-select" bind:value={newBranchPrefix}>
+                    {#each BRANCH_PREFIXES as p (p)}
+                      <option value={p}>{p}</option>
+                    {/each}
+                  </select>
+                  <input
+                    id="new-branch-suffix-input"
+                    type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                    value={newBranchSuffix}
+                    oninput={(e) =>
+                      handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
+                    placeholder="e.g., my-change"
+                  />
+                </div>
+                <span class="field-hint">
+                  Full name: {newBranchFullName.trim() ? newBranchFullName : "(empty)"}
+                </span>
+              </div>
+            {/if}
           {:else}
             <div class="field">
               <label for="issue-search-input">Search Issues</label>
@@ -1835,10 +1860,11 @@
             (branchMode === "existing"
               ? !existingBranch.trim()
               : !baseBranch.trim() ||
-                newBranchPrefix === "" ||
                 (newBranchTab === "fromIssue"
                   ? !canLaunchFromIssue(selectedIssue)
-                  : !newBranchFullName.trim()))
+                  : branchNamingMode === "ai-suggest"
+                    ? !aiDescription.trim()
+                    : newBranchPrefix === "" || !newBranchFullName.trim()))
           }
           onclick={handleLaunch}
         >
@@ -1847,83 +1873,6 @@
       </div>
     {/if}
   </div>
-
-  {#if suggestOpen}
-    <!-- Nested modal: stop propagation to avoid closing the Launch Agent dialog -->
-    <div
-      class="overlay modal-overlay suggest-overlay"
-      onclick={(e) => {
-        e.stopPropagation();
-        if (e.target !== e.currentTarget) return;
-        closeSuggestModal();
-      }}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Suggest Branch Name"
-    >
-      <div class="dialog modal-dialog-shell suggest-dialog">
-        <div class="dialog-header">
-          <h2>Suggest Branch Name</h2>
-          <button class="close-btn" type="button" onclick={closeSuggestModal} aria-label="Close">&times;</button>
-        </div>
-
-        <div class="dialog-body">
-          {#if suggestError}
-            <div class="error">{suggestError}</div>
-          {/if}
-
-          <div class="field">
-            <label for="suggest-desc-input">Description</label>
-            <textarea
-              id="suggest-desc-input"
-              autocapitalize="off"
-              autocorrect="off"
-              autocomplete="off"
-              spellcheck="false"
-              rows="3"
-              bind:value={suggestDescription}
-              placeholder="What is this branch for?"
-            ></textarea>
-          </div>
-
-          {#if suggestSuggestions.length > 0}
-            <div class="field">
-              <span class="field-label">Suggestions</span>
-              <div class="suggestion-list">
-                {#each suggestSuggestions as s (s)}
-                  <button
-                    class="suggestion-item"
-                    type="button"
-                    onclick={() => {
-                      if (setNewBranchFromFullName(s)) {
-                        closeSuggestModal();
-                      }
-                    }}
-                  >
-                    <span class="mono">{s}</span>
-                  </button>
-                {/each}
-              </div>
-            </div>
-          {/if}
-        </div>
-
-        <div class="dialog-footer">
-          <button class="btn btn-cancel" type="button" onclick={closeSuggestModal}>
-            Close
-          </button>
-          <button
-            class="btn btn-launch"
-            type="button"
-            disabled={suggestLoading}
-            onclick={generateBranchSuggestions}
-          >
-            {suggestLoading ? "Generating..." : "Generate"}
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -2229,6 +2178,10 @@
   .mode-toggle {
     display: flex;
     gap: 6px;
+  }
+
+  .branch-naming-toggle {
+    margin-bottom: 0;
   }
 
   .mode-btn {
