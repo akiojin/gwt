@@ -1,9 +1,7 @@
 //! AI branch name suggestion command (GUI Launch Agent)
-//!
-//! Mirrors the branch naming assistant behavior (SPEC-1ad9c07d) and exposes it to the GUI.
 
 use gwt_core::ai::{
-    format_error_for_display, suggest_branch_names as core_suggest_branch_names, AIClient,
+    format_error_for_display, suggest_branch_name as core_suggest_branch_name, AIClient,
 };
 use gwt_core::config::ProfilesConfig;
 use gwt_core::StructuredError;
@@ -14,46 +12,46 @@ use serde::Serialize;
 pub struct BranchSuggestResult {
     /// "ok" | "ai-not-configured" | "error"
     pub status: String,
-    /// Suggestions are full branch names with prefix (e.g., "feature/foo").
-    pub suggestions: Vec<String>,
+    /// Full branch name with prefix (e.g., "feature/foo").
+    pub suggestion: String,
     pub error: Option<String>,
 }
 
-/// Suggest 3 branch names for "New Branch Name".
+/// Suggest 1 branch name for "New Branch Name".
 ///
 /// This never writes config/history files.
 #[tauri::command]
-pub fn suggest_branch_names(description: String) -> Result<BranchSuggestResult, StructuredError> {
+pub fn suggest_branch_name(description: String) -> Result<BranchSuggestResult, StructuredError> {
     let description = description.trim().to_string();
     if description.is_empty() {
         return Err(StructuredError::internal(
             "Description is required",
-            "suggest_branch_names",
+            "suggest_branch_name",
         ));
     }
 
     let profiles = ProfilesConfig::load()
-        .map_err(|e| StructuredError::from_gwt_error(&e, "suggest_branch_names"))?;
+        .map_err(|e| StructuredError::from_gwt_error(&e, "suggest_branch_name"))?;
     let ai = profiles.resolve_active_ai_settings();
     let Some(settings) = ai.resolved else {
         return Ok(BranchSuggestResult {
             status: "ai-not-configured".to_string(),
-            suggestions: Vec::new(),
+            suggestion: String::new(),
             error: None,
         });
     };
 
     let client = AIClient::new(settings)
-        .map_err(|e| StructuredError::internal(&e.to_string(), "suggest_branch_names"))?;
-    match core_suggest_branch_names(&client, &description) {
-        Ok(suggestions) => Ok(BranchSuggestResult {
+        .map_err(|e| StructuredError::internal(&e.to_string(), "suggest_branch_name"))?;
+    match core_suggest_branch_name(&client, &description) {
+        Ok(suggestion) => Ok(BranchSuggestResult {
             status: "ok".to_string(),
-            suggestions,
+            suggestion,
             error: None,
         }),
         Err(err) => Ok(BranchSuggestResult {
             status: "error".to_string(),
-            suggestions: Vec::new(),
+            suggestion: String::new(),
             error: Some(format_error_for_display(&err)),
         }),
     }

@@ -1988,9 +1988,6 @@
     color: rgb(255, 160, 160);
   }
 
-  .mono {
-    font-family: monospace;
-  }
 
   .field input,
   .field textarea,
@@ -2085,62 +2082,6 @@
   @keyframes spin {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
-  }
-
-  .suggest-btn {
-    flex: 0 0 auto;
-    padding: 8px 10px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    color: var(--text-primary);
-    font-size: var(--ui-font-md);
-    font-weight: 600;
-    cursor: pointer;
-    font-family: inherit;
-    transition: border-color 0.15s, background 0.15s;
-  }
-
-  .suggest-btn:hover {
-    border-color: var(--accent);
-    background: var(--bg-surface);
-  }
-
-  .suggest-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .suggest-overlay {
-    z-index: 1100;
-  }
-
-  .suggest-dialog {
-    width: 520px;
-    max-width: 92vw;
-  }
-
-  .suggestion-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .suggestion-item {
-    padding: 10px 12px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    cursor: pointer;
-    text-align: left;
-    color: var(--text-primary);
-    font-family: inherit;
-    transition: border-color 0.15s, background 0.15s;
-  }
-
-  .suggestion-item:hover {
-    border-color: var(--accent);
-    background: var(--bg-surface);
   }
 
   .check-row {
