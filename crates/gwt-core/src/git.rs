@@ -41,7 +41,8 @@ pub use issue_spec::{
     SpecIssueDetail, SpecIssueSections, SpecProjectPhase,
 };
 pub use pullrequest::{
-    PrCache, PrStatusCache, PrStatusInfo, PullRequest, ReviewComment, ReviewInfo, WorkflowRunInfo,
+    PrCache, PrListItem, PrStatusCache, PrStatusInfo, PullRequest, ReviewComment, ReviewInfo,
+    WorkflowRunInfo,
 };
 pub use remote::Remote;
 pub use repository::{
