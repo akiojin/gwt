@@ -134,6 +134,7 @@ fn build_powershell_wrapped_args(expression: String) -> Vec<String> {
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_spawn_command_for_platform_with<F, G>(
     command: &str,
     args: &[String],
