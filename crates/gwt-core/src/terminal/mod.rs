@@ -48,4 +48,6 @@ pub struct BuiltinLaunchConfig {
     /// Whether this launch is interactive (e.g. spawn_shell).
     /// When true on Windows, the command is not wrapped with PowerShell.
     pub interactive: bool,
+    /// Whether to force UTF-8 terminal initialization on Windows launch.
+    pub windows_force_utf8: bool,
 }
