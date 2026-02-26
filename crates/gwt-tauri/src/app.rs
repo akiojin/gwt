@@ -683,6 +683,7 @@ pub fn build_app(
             crate::commands::terminal::list_terminals,
             crate::commands::terminal::probe_terminal_ansi,
             crate::commands::terminal::capture_scrollback_tail,
+            crate::commands::terminal::terminal_ready,
             crate::commands::project_mode::get_project_mode_state_cmd,
             crate::commands::project_mode::send_project_mode_message,
             crate::commands::project_mode::send_project_mode_message_cmd,
