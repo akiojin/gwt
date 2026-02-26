@@ -40,7 +40,7 @@ After:
 
 ### 新規: エラーコード
 
-- `[E2001]`: AIブランチ名生成失敗（launch_terminal内で使用）
+- `[E2001]`: AIブランチ名生成失敗（`launch_agent_for_project_root` 内で使用）
 
 ## フロントエンド（TypeScript）
 

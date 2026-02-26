@@ -715,6 +715,89 @@ describe("AgentLaunchForm", () => {
     });
   });
 
+  it("does not auto-load issue list when opened with prefillIssue", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true };
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      if (cmd === "fetch_github_issues") {
+        throw new Error("fetch_github_issues should not be called in prefill flow");
+      }
+      if (cmd === "find_existing_issue_branch") {
+        throw new Error("find_existing_issue_branch should not be called in prefill flow");
+      }
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      prefillIssue: {
+        number: 1249,
+        title: "Launch Agent freezes",
+        body: "Repro from issue tab",
+        state: "open",
+        updatedAt: "2026-02-26T00:00:00Z",
+        htmlUrl: "https://github.com/example/repo/issues/1249",
+        labels: [{ name: "bug", color: "d73a4a" }],
+        assignees: [],
+        commentsCount: 0,
+      },
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Auto-generated from issue #1249")).toBeTruthy();
+    });
+
+    const issueFetchCalls = invokeMock.mock.calls.filter((c: any[]) => c[0] === "fetch_github_issues");
+    const issueBranchCalls = invokeMock.mock.calls.filter(
+      (c: any[]) => c[0] === "find_existing_issue_branch"
+    );
+    expect(issueFetchCalls).toHaveLength(0);
+    expect(issueBranchCalls).toHaveLength(0);
+  });
+
   it("keeps Launch disabled in fromIssue mode until a prefix is selected", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
@@ -760,7 +843,9 @@ describe("AgentLaunchForm", () => {
           force_host: false,
         };
       }
-      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
       return [];
     });
 
@@ -2369,7 +2454,7 @@ describe("AgentLaunchForm", () => {
       if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
-      if (cmd === "suggest_branch_name") return { status: "ai-not-configured", suggestion: "", error: null };
+      if (cmd === "is_ai_configured") return false;
       return [];
     });
 

@@ -151,6 +151,7 @@
   let issueBranchMap: Map<number, string | null> = $state(new Map());
   let issueBranchChecksInFlight: Set<number> = $state(new Set());
   let issueRateLimited: boolean = $state(false);
+  let appliedPrefillIssueNumber: number | null = null;
 
   // AI prefix classification state (SPEC-a2f8e3b1)
   let prefixClassifying: boolean = $state(false);
@@ -394,15 +395,16 @@
     (async () => {
       try {
         const { invoke } = await import("$lib/tauriInvoke");
-        const result = await invoke<BranchSuggestResult>("suggest_branch_name", { description: "test" });
-        if (result.status === "ai-not-configured") {
+        const configured = await invoke<boolean>("is_ai_configured");
+        aiConfigured = configured;
+        if (!configured) {
           aiConfigured = false;
           if (branchNamingMode === "ai-suggest") {
             branchNamingMode = "direct";
           }
         }
       } catch {
-        // AI config check failed - assume configured
+        // AI config check failed - keep default mode.
       }
     })();
   });
@@ -634,9 +636,16 @@
 
   // Apply prefill from Issue tab ("Work on this" button).
   $effect(() => {
-    if (!prefillIssue) return;
+    if (!prefillIssue) {
+      appliedPrefillIssueNumber = null;
+      return;
+    }
+    if (appliedPrefillIssueNumber === prefillIssue.number) return;
+    appliedPrefillIssueNumber = prefillIssue.number;
+
     branchMode = "new";
     newBranchTab = "fromIssue";
+    issueBranchMap = new Map([[prefillIssue.number, null]]);
     selectedIssue = prefillIssue;
     void determinePrefixForIssue(prefillIssue);
   });
@@ -663,6 +672,13 @@
     void projectPath;
     if (branchMode !== "new" || newBranchTab !== "fromIssue") return;
     if (!ghCliAvailable || !projectPath) return;
+    if (
+      prefillIssue &&
+      selectedIssue?.number === prefillIssue.number &&
+      issueBranchMap.has(prefillIssue.number)
+    ) {
+      return;
+    }
     if (issues.length > 0 || issuesLoading) return;
     void loadIssues(1);
   });
@@ -933,8 +949,9 @@
       console.error("Failed to detect agents:", err);
       agents = [];
       selectedAgent = "";
+    } finally {
+      loading = false;
     }
-    loading = false;
   }
 
   async function handleLaunch() {
@@ -1083,10 +1100,17 @@
         const base = baseBranch.trim();
         if (!desc || !base) return;
 
-        const { invoke } = await import("$lib/tauriInvoke");
-        const suggestion = await invoke<BranchSuggestResult>("suggest_branch_name", {
-          description: desc,
-        });
+        let suggestion: BranchSuggestResult;
+        try {
+          const { invoke } = await import("$lib/tauriInvoke");
+          suggestion = await invoke<BranchSuggestResult>("suggest_branch_name", {
+            description: desc,
+          });
+        } catch {
+          branchNamingMode = "direct";
+          aiFallbackError = aiFallbackMessage;
+          return;
+        }
 
         if (suggestion.status !== "ok" || !suggestion.suggestion.trim()) {
           branchNamingMode = "direct";

@@ -76,7 +76,7 @@
 ## Phase 7: 仕上げ・横断
 
 - [x] T049 [P] [共通] デッドコード確認: Suggestモーダル関連の未使用インポート・型定義・CSS削除 `gwt-gui/src/lib/components/AgentLaunchForm.svelte`
-- [x] T050 [P] [共通] cargo clippy --all-targets --all-features -- -D warnings パス確認 `cargo clippy`
+- [x] T050 [P] [共通] cargo clippy --all-targets --all-features -- -D warnings パス確認 `cargo clippy --all-targets --all-features -- -D warnings`
 - [x] T051 [P] [共通] cargo fmt パス確認 `cargo fmt --check`
 - [x] T052 [P] [共通] svelte-check パス確認 `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
 - [x] T053 [共通] 全テスト最終確認: cargo test + cd gwt-gui && pnpm test

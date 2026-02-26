@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.12.7] - 2026-02-26
+
+### Bug Fixes
+
+- **version-history:** Show latest tags in version history (#1243)
+- Terminal_ready 待機中の端末出力順序レースを修正 (#1244)
+
 ## [7.12.6] - 2026-02-25
 
 ### Bug Fixes

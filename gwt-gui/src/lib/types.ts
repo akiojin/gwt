@@ -243,7 +243,8 @@ export interface Tab {
     | "projectMode"
     | "terminal"
     | "issueSpec"
-    | "issues";
+    | "issues"
+    | "prs";
   paneId?: string;
   cwd?: string;
   issueNumber?: number;
@@ -714,4 +715,33 @@ export interface DeveloperState {
   paneId: string;
   status: "starting" | "running" | "completed" | "error";
   worktree: { branchName: string; path: string };
+}
+
+// PR List types (SPEC-prlist)
+
+export interface PrListItem {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  isDraft: boolean;
+  headRefName: string;
+  baseRefName: string;
+  author: { login: string };
+  labels: Array<{ name: string; color: string }>;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+  body: string;
+  reviewRequests: Array<{ login: string }>;
+  assignees: Array<{ login: string }>;
+}
+
+export interface FetchPrListResponse {
+  items: PrListItem[];
+  ghStatus: GhCliStatus;
+}
+
+export interface GitHubUserResponse {
+  login: string;
+  ghStatus: GhCliStatus;
 }

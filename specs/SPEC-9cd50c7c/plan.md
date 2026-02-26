@@ -104,12 +104,12 @@
 **対象**: `gwt-gui/src/lib/components/AgentLaunchForm.svelte`
 
 - `handleLaunch()` 内の request 構築:
-  - AI Suggestモード時: `aiBranchDescription: aiDescription.trim()` をセット、`createBranch` は `{ name: "", base: baseBranch }` にする（バックエンドがAI生成名で上書き）
+  - AI Suggestモード時: 先に `suggest_branch_name` を呼んでブランチ名を確定し、`request.branch` と `createBranch.name` の両方に同じ確定名をセットして launch する
   - Directモード時: 従来通り `createBranch.name` にフルネームをセット
 - Launchボタンのdisabled条件を更新:
   - AI Suggestモード: `!aiDescription.trim()` の場合disabled
   - Directモード: 従来通り `!newBranchFullName.trim()` の場合disabled
-- AI設定チェック: フォーム初期化時に `invoke("check_ai_configured")` または既存の `suggest_branch_name` のレスポンスパターンを利用
+- AI設定チェック: フォーム初期化時に `invoke("is_ai_configured")` を利用（推論呼び出しは行わない）
 
 #### 2-5. フォールバック処理の実装
 

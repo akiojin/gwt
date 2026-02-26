@@ -3,7 +3,11 @@
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::Path;
+use std::process::{Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::gh_cli::{gh_command, is_gh_available};
 use super::remote::Remote;
@@ -11,6 +15,7 @@ use super::repository::{find_bare_repo_in_dir, is_git_repo};
 
 // `gh issue list --json comments` returns at most this many comments per issue.
 const GH_COMMENTS_PREVIEW_LIMIT: u32 = 100;
+const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Result of fetching issues with pagination info
 #[derive(Debug, Clone)]
@@ -627,11 +632,11 @@ fn remote_branch_exists_on_remote(
     remote_name: &str,
     branch_name: &str,
 ) -> Result<bool, String> {
-    let output = crate::process::command("git")
-        .args(["ls-remote", "--heads", remote_name, branch_name])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute git ls-remote: {}", e))?;
+    let output = run_git_with_timeout(
+        repo_path,
+        &["ls-remote", "--heads", remote_name, branch_name],
+        LS_REMOTE_TIMEOUT,
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -644,6 +649,81 @@ fn remote_branch_exists_on_remote(
     }
 
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+fn run_git_with_timeout(
+    repo_path: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut child = crate::process::command("git")
+        .args(args)
+        .current_dir(repo_path)
+        // Avoid hanging on interactive auth prompts.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn git command: {}", e))?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let stdout_handle = thread::spawn(move || {
+        if let Some(mut stdout) = stdout {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            buf
+        } else {
+            Vec::new()
+        }
+    });
+    let stderr_handle = thread::spawn(move || {
+        if let Some(mut stderr) = stderr {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        } else {
+            Vec::new()
+        }
+    });
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = stdout_handle.join().unwrap_or_else(|_| Vec::new());
+                let stderr = stderr_handle.join().unwrap_or_else(|_| Vec::new());
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(format!(
+                        "git {} timed out after {}s",
+                        args.join(" "),
+                        timeout.as_secs()
+                    ));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!("Failed while waiting for git command: {}", e));
+            }
+        }
+    }
 }
 
 /// Generate full branch name from type and issue

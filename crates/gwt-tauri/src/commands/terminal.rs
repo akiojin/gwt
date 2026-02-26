@@ -3704,6 +3704,10 @@ pub(crate) fn launch_agent_for_project_root(
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty());
 
+            if is_launch_cancelled(cancelled) {
+                return Err("Cancelled".to_string());
+            }
+
             (
                 create_new_worktree_path(&repo_path, &new_branch, base)?,
                 new_branch,
