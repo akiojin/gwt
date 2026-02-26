@@ -757,6 +757,7 @@ pub fn build_app(
             crate::commands::report::create_github_issue,
             crate::commands::report::capture_screen_text,
             crate::commands::pullrequest::update_pr_branch,
+            crate::commands::pullrequest::merge_pull_request,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
         ])

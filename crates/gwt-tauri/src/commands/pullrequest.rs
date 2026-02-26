@@ -125,6 +125,7 @@ const LATEST_BRANCH_PR_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_STATUS_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_STATUS_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(60);
 const PR_UPDATE_BRANCH_TIMEOUT: Duration = Duration::from_secs(8);
+const PR_MERGE_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_PR_STATUS_WARN_THRESHOLD: Duration = Duration::from_millis(1000);
 
 #[derive(Debug, Clone, Default)]
@@ -609,6 +610,81 @@ pub async fn update_pr_branch(project_path: String, pr_number: u64) -> Result<St
         .map_err(|e| format!("Task join failed: {e}"))?
 }
 
+/// Merge a pull request via GitHub REST API (SPEC-merge-pr FR-004)
+fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<String, String> {
+    use gwt_core::git::gh_cli::gh_command;
+    use gwt_core::git::resolve_repo_slug;
+
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    let slug = resolve_repo_slug(&repo_path)
+        .ok_or_else(|| "Failed to resolve repository slug".to_string())?;
+    let parts: Vec<&str> = slug.split('/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid repo slug: {}", slug));
+    }
+    let (owner, repo) = (parts[0], parts[1]);
+
+    let mut child = gh_command()
+        .args([
+            "api",
+            "-X",
+            "PUT",
+            &format!("/repos/{owner}/{repo}/pulls/{pr_number}/merge"),
+        ])
+        .current_dir(&repo_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to execute gh api: {}", e))?;
+
+    let stdout_handle = spawn_pipe_reader(child.stdout.take());
+    let stderr_handle = spawn_pipe_reader(child.stderr.take());
+
+    let status = match wait_with_timeout(&mut child, PR_MERGE_TIMEOUT) {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            let detail = stderr.trim();
+            if detail.is_empty() {
+                return Err(format!(
+                    "Failed to merge PR: gh api timed out after {}s",
+                    PR_MERGE_TIMEOUT.as_secs()
+                ));
+            }
+            return Err(format!(
+                "Failed to merge PR: gh api timed out after {}s: {}",
+                PR_MERGE_TIMEOUT.as_secs(),
+                detail
+            ));
+        }
+    };
+
+    let _stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+
+    if !status.success() {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Err("Failed to merge PR".to_string());
+        }
+        return Err(format!("Failed to merge PR: {detail}"));
+    }
+
+    Ok("Pull request merged successfully".to_string())
+}
+
+#[tauri::command]
+pub async fn merge_pull_request(project_path: String, pr_number: u64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || merge_pull_request_impl(project_path, pr_number))
+        .await
+        .map_err(|e| format!("Task join failed: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,5 +943,10 @@ mod tests {
             strip_known_remote_prefix("fork/feature/x", &remotes),
             "fork/feature/x"
         );
+    }
+
+    #[test]
+    fn test_pr_merge_timeout_value() {
+        assert_eq!(PR_MERGE_TIMEOUT.as_secs(), 15);
     }
 }

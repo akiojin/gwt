@@ -77,6 +77,7 @@
     openExternalUrl,
   } from "./lib/openExternalUrl";
   import { errorBus, type StructuredError } from "./lib/errorBus";
+  import { toastBus } from "./lib/toastBus";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -349,6 +350,11 @@
     toastMessage = null;
     toastAction = null;
   }
+
+  // Subscribe to toast bus for success/info notifications (SPEC-merge-pr FR-006)
+  const unsubToastBus = toastBus.subscribe((event) => {
+    showToast(event.message, event.durationMs ?? 5000);
+  });
 
   // Subscribe to error bus for report-worthy errors
   const unsubErrorBus = errorBus.subscribe((error) => {

@@ -17,7 +17,9 @@
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import PrStatusSection from "./PrStatusSection.svelte";
+  import MergeConfirmModal from "./MergeConfirmModal.svelte";
   import { openExternalUrl } from "../openExternalUrl";
+  import { toastBus } from "../toastBus";
 
   let {
     projectPath,
@@ -108,6 +110,8 @@
   const DOCKER_CONTEXT_CACHE_TTL_MS = 60_000;
   const UPDATE_BRANCH_POLL_ATTEMPTS = 8;
   const UPDATE_BRANCH_POLL_INTERVAL_MS = 1_500;
+  const MERGE_POLL_ATTEMPTS = 10;
+  const MERGE_POLL_INTERVAL_MS = 2_000;
 
   type CacheEntry<T> = {
     value: T;
@@ -1033,6 +1037,8 @@
   }
 
   let updatingBranch = $state(false);
+  let merging = $state(false);
+  let showMergeConfirm = $state(false);
 
   function handleOpenCiLog(run: WorkflowRunInfo): void {
     if (onOpenCiLog) {
@@ -1069,6 +1075,66 @@
       console.error("Failed to update branch:", err);
     } finally {
       updatingBranch = false;
+    }
+  }
+
+  function handleMerge(): void {
+    showMergeConfirm = true;
+  }
+
+  function closeMergeConfirm(): void {
+    showMergeConfirm = false;
+  }
+
+  async function pollPrDetailAfterMerge(
+    branch: string,
+    prNum: number,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < MERGE_POLL_ATTEMPTS; attempt++) {
+      if (!isViewingCurrentPr(branch, prNum)) return;
+
+      await loadPrDetail(branch, prNum, {
+        clearBeforeLoad: false,
+        showLoading: false,
+        errorPrefix: "Failed to refresh PR detail",
+      });
+
+      if (!isViewingCurrentPr(branch, prNum)) return;
+      if (prDetailError) return;
+      if (prDetail?.state === "MERGED") return;
+
+      if (attempt < MERGE_POLL_ATTEMPTS - 1) {
+        await waitMs(MERGE_POLL_INTERVAL_MS);
+      }
+    }
+  }
+
+  async function confirmMerge(): Promise<void> {
+    if (!prDetail || merging) return;
+    const branch = currentBranchName();
+    const prNum = prDetail.number;
+    showMergeConfirm = false;
+    merging = true;
+    try {
+      const invoke = await getInvoke();
+      await invoke<string>("merge_pull_request", {
+        projectPath,
+        prNumber: prNum,
+      });
+
+      toastBus.emit({ message: `PR #${prNum} merged successfully` });
+
+      if (branch) {
+        await pollPrDetailAfterMerge(branch, prNum);
+      }
+    } catch (err) {
+      toastBus.emit({
+        message: `Failed to merge PR: ${toErrorMessage(err)}`,
+        durationMs: 8000,
+      });
+      console.error("Failed to merge PR:", err);
+    } finally {
+      merging = false;
     }
   }
 
@@ -1360,6 +1426,15 @@
           onOpenCiLog={handleOpenCiLog}
           onUpdateBranch={handleUpdateBranch}
           updatingBranch={updatingBranch}
+          onMerge={handleMerge}
+          {merging}
+        />
+        <MergeConfirmModal
+          open={showMergeConfirm}
+          {prDetail}
+          {merging}
+          onClose={closeMergeConfirm}
+          onConfirm={confirmMerge}
         />
       {:else if activeTab === "docker"}
         <div class="quick-start docker-summary">

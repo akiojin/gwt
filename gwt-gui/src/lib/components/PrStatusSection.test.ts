@@ -564,4 +564,97 @@ describe("PrStatusSection", () => {
       expect(updateBtn).toBeNull();
     });
   });
+
+  // --- SPEC-merge-pr: Mergeable badge button tests ---
+
+  describe("Mergeable badge button (SPEC-merge-pr)", () => {
+    it("renders button when state=OPEN, mergeable=MERGEABLE, and onMerge is provided", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr, onMerge });
+
+      const btn = container.querySelector(".mergeable-badge-btn");
+      expect(btn).toBeTruthy();
+      expect(btn?.tagName).toBe("BUTTON");
+      expect(btn?.textContent).toContain("Mergeable");
+    });
+
+    it("renders span (not button) when state=CLOSED", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "CLOSED", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr, onMerge });
+
+      const btn = container.querySelector(".mergeable-badge-btn");
+      expect(btn).toBeNull();
+      const span = container.querySelector(".mergeable-badge");
+      expect(span).toBeTruthy();
+    });
+
+    it("renders span when mergeable=CONFLICTING", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "CONFLICTING" });
+      const { container } = await renderSection({ prDetail: pr, onMerge });
+
+      const btn = container.querySelector(".mergeable-badge-btn");
+      expect(btn).toBeNull();
+    });
+
+    it("renders span when mergeable=UNKNOWN", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "UNKNOWN" });
+      const { container } = await renderSection({ prDetail: pr, onMerge });
+
+      const btn = container.querySelector(".mergeable-badge-btn");
+      expect(btn).toBeNull();
+    });
+
+    it("renders span when onMerge is not provided even if OPEN+MERGEABLE", async () => {
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const btn = container.querySelector(".mergeable-badge-btn");
+      expect(btn).toBeNull();
+      const span = container.querySelector(".mergeable-badge");
+      expect(span).toBeTruthy();
+    });
+
+    it("calls onMerge when button is clicked", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr, onMerge });
+
+      const btn = container.querySelector(".mergeable-badge-btn") as HTMLElement;
+      await fireEvent.click(btn);
+      expect(onMerge).toHaveBeenCalledOnce();
+    });
+
+    it("shows disabled button with Merging... when merging=true", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
+      const { container } = await renderSection({ prDetail: pr, onMerge, merging: true });
+
+      const btn = container.querySelector(".mergeable-badge-btn") as HTMLButtonElement;
+      expect(btn).toBeTruthy();
+      expect(btn.disabled).toBe(true);
+      expect(btn.textContent).toContain("Merging...");
+    });
+
+    it("renders button when BEHIND but MERGEABLE", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE", mergeStateStatus: "BEHIND" });
+      const { container } = await renderSection({ prDetail: pr, onMerge });
+
+      const btn = container.querySelector(".mergeable-badge-btn");
+      expect(btn).toBeTruthy();
+    });
+
+    it("does not render button when state=MERGED", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({ state: "MERGED", mergeable: "UNKNOWN" });
+      const { container } = await renderSection({ prDetail: pr, onMerge });
+
+      const btn = container.querySelector(".mergeable-badge-btn");
+      expect(btn).toBeNull();
+    });
+  });
 });
