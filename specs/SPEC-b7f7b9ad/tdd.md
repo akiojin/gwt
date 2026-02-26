@@ -21,6 +21,11 @@
 3. `TerminalView` のメニュー連携
    - `gwt-terminal-edit-action` の `copy` / `paste` が paneId マッチ時のみ反映される
 
+4. `TerminalView` のフォーカス管理
+   - `active` が `false` になった時に `terminal.blur()` が呼ばれる
+   - 非アクティブ時にペーストショートカットがパススルーされる（`true` を返す）
+   - 非アクティブ時に ClipboardEvent の paste が無視される
+
 ## 回帰テスト
 
 - `cargo test -p gwt-tauri --no-default-features`

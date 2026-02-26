@@ -122,6 +122,20 @@
   $effect(() => {
     void active;
     void terminal;
+
+    if (active) return;
+    if (!terminal) return;
+
+    try {
+      terminal.blur();
+    } catch {
+      // Ignore blur errors in non-interactive contexts.
+    }
+  });
+
+  $effect(() => {
+    void active;
+    void terminal;
     void fitAddon;
 
     const term = terminal;
@@ -401,6 +415,7 @@
       }
 
       if (isPasteShortcut(event)) {
+        if (!active) return true;
         if (!navigator.clipboard?.readText) {
           return true;
         }
@@ -421,6 +436,7 @@
     });
 
     const handlePaste = (event: ClipboardEvent) => {
+      if (!active) return;
       const text = event.clipboardData?.getData("text/plain");
       if (!text) return;
       event.preventDefault();

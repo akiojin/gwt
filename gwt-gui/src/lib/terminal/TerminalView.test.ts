@@ -63,6 +63,7 @@ vi.mock("@xterm/xterm", () => ({
     loadAddon = vi.fn();
     open = vi.fn();
     focus = vi.fn();
+    blur = vi.fn();
     attachCustomKeyEventHandler = vi.fn(
       (handler: (event: KeyboardEvent) => boolean) => {
         customKeyEventHandler = handler;
@@ -1069,5 +1070,83 @@ describe("TerminalView", () => {
     // 4 events × scrollLines(7) each
     expect(term.scrollLines).toHaveBeenCalledTimes(4);
     expect(term.scrollLines).toHaveBeenCalledWith(7);
+  });
+
+  it("blurs terminal when active becomes false", async () => {
+    const rendered = await renderTerminalView({
+      paneId: "pane-blur",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    term.blur.mockClear();
+
+    await rendered.rerender({
+      paneId: "pane-blur",
+      active: false,
+    });
+
+    await waitFor(() => {
+      expect(term.blur).toHaveBeenCalled();
+    });
+  });
+
+  it("does not handle paste shortcut when inactive", async () => {
+    readTextMock.mockResolvedValue("pasted line");
+    await renderTerminalView({ paneId: "pane-inactive-paste", active: false });
+
+    await waitFor(() => {
+      expect(customKeyEventHandler).not.toBeNull();
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const handler = customKeyEventHandler!;
+    const event = new KeyboardEvent("keydown", {
+      key: "v",
+      metaKey: true,
+      bubbles: true,
+    });
+
+    const result = handler(event);
+    // Should return true to let the event pass through (not handled)
+    expect(result).toBe(true);
+  });
+
+  it("does not handle rootEl paste event when inactive", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-inactive-clipboard",
+      active: false,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    expect(rootEl).not.toBeNull();
+
+    invokeMock.mockClear();
+
+    const clipboardData = {
+      getData: vi.fn(() => "hello clipboard"),
+    };
+    const pasteEvent = new Event("paste", { bubbles: true }) as any;
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: clipboardData,
+      configurable: true,
+    });
+    const preventDefaultSpy = vi.spyOn(pasteEvent, "preventDefault");
+
+    rootEl.dispatchEvent(pasteEvent);
+
+    // Should not have called preventDefault or writeToTerminal
+    expect(preventDefaultSpy).not.toHaveBeenCalled();
+    expect(
+      invokeMock.mock.calls.some((c: any) => c[0] === "write_terminal"),
+    ).toBe(false);
   });
 });
