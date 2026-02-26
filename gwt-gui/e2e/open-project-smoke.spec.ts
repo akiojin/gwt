@@ -528,13 +528,14 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
       };
     }
 
-    const scrollback = (await globalWindow.__TAURI_INTERNALS__.invoke(
-      "capture_scrollback_tail",
+    const scrollbackBytes = (await globalWindow.__TAURI_INTERNALS__.invoke(
+      "terminal_ready",
       {
         paneId,
         maxBytes: 64 * 1024,
       },
-    )) as string;
+    )) as number[];
+    const scrollback = new TextDecoder().decode(new Uint8Array(scrollbackBytes));
 
     await globalWindow.__TAURI_INTERNALS__.invoke("write_terminal", {
       paneId,
@@ -571,7 +572,7 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
 
   expect(invokeCommands).toContain("spawn_shell");
   expect(invokeCommands).toContain("write_terminal");
-  expect(invokeCommands).toContain("capture_scrollback_tail");
+  expect(invokeCommands).toContain("terminal_ready");
 });
 test("navigates Summary tabs and opens workflow run page from PR checks", async ({
   page,
