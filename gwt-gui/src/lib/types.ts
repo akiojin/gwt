@@ -590,6 +590,7 @@ export interface PrStatusInfo {
   additions: number;
   deletions: number;
   mergeStateStatus?: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
+  retrying?: boolean;
 }
 
 export interface PrStatusLite {
@@ -600,6 +601,7 @@ export interface PrStatusLite {
   baseBranch: string;
   headBranch: string;
   checkSuites: WorkflowRunInfo[];
+  retrying?: boolean;
 }
 
 export interface BranchPrReference {
