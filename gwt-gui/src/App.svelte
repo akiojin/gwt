@@ -8,7 +8,6 @@
     LaunchFinishedPayload,
     LaunchProgressPayload,
     ProbePathResult,
-    RollbackResult,
     TerminalInfo,
     WorktreeInfo,
     TerminalAnsiProbe,
@@ -231,14 +230,6 @@
   let launchJobStartPending = false;
   let bufferedLaunchProgressEvents: LaunchProgressPayload[] = [];
   let bufferedLaunchFinishedEvents: LaunchFinishedPayload[] = [];
-  type IssueLaunchFollowup = {
-    projectPath: string;
-    issueNumber: number;
-    branchName: string;
-  };
-  let issueLaunchFollowups: Map<string, IssueLaunchFollowup> = $state(
-    new Map(),
-  );
 
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
@@ -402,67 +393,6 @@
     }
   }
 
-  function queueIssueLaunchFollowup(
-    jobId: string,
-    request: LaunchAgentRequest,
-  ) {
-    const issueNumber = request.issueNumber;
-    const branchName = request.createBranch?.name?.trim();
-    if (!projectPath || !issueNumber || !branchName) return;
-    issueLaunchFollowups = new Map(issueLaunchFollowups).set(jobId, {
-      projectPath,
-      issueNumber,
-      branchName,
-    });
-  }
-
-  async function handleIssueLaunchFinished(payload: LaunchFinishedPayload) {
-    const followup = issueLaunchFollowups.get(payload.jobId);
-    if (!followup) return;
-
-    const next = new Map(issueLaunchFollowups);
-    next.delete(payload.jobId);
-    issueLaunchFollowups = next;
-
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-
-      if (payload.status === "ok") {
-        await invoke("link_branch_to_issue", {
-          projectPath: followup.projectPath,
-          issueNumber: followup.issueNumber,
-          branchName: followup.branchName,
-        });
-        return;
-      }
-
-      const rollback = await invoke<RollbackResult>("rollback_issue_branch", {
-        projectPath: followup.projectPath,
-        branchName: followup.branchName,
-        // Only rollback local artifacts on launch failure.
-        // Remote deletion is unsafe here because the branch may have pre-existed remotely.
-        deleteRemote: false,
-      });
-
-      sidebarRefreshKey++;
-
-      const warnings: string[] = [];
-      if (!rollback.localDeleted) {
-        warnings.push("Local rollback was incomplete.");
-      }
-      if (rollback.error) {
-        warnings.push(rollback.error.trim());
-      }
-
-      if (warnings.length > 0) {
-        const verb = payload.status === "cancelled" ? "cancelled" : "failed";
-        showToast(`Issue launch ${verb}. ${warnings.join(" ")}`, 12000);
-      }
-    } catch (err) {
-      showToast(`Issue launch cleanup failed: ${toErrorMessage(err)}`, 12000);
-    }
-  }
-
   function debugLaunchEvent(message: string, payload: unknown) {
     console.debug(`[launch] ${message}`, payload);
   }
@@ -497,9 +427,6 @@
   }
 
   function applyLaunchFinishedPayload(payload: LaunchFinishedPayload) {
-    // Retry followup on buffered events to recover from early-finished races.
-    void handleIssueLaunchFinished(payload);
-
     if (payload.status === "cancelled") {
       handleLaunchModalClose();
       return;
@@ -895,7 +822,7 @@
     };
   });
 
-  // Handle issue-linking/rollback and progress modal state on launch completion.
+  // Handle progress modal state on launch completion.
   $effect(() => {
     let unlisten: null | (() => void) = null;
     let cancelled = false;
@@ -907,8 +834,6 @@
           "launch-finished",
           (event) => {
             const payload = event.payload;
-            // Issue-linking/rollback (existing logic, applies to all jobIds).
-            void handleIssueLaunchFinished(payload);
 
             // Progress modal state update (moved from LaunchProgressModal).
             if (launchJobId) {
@@ -1659,7 +1584,6 @@
       const { invoke } = await import("$lib/tauriInvoke");
       const jobId = await invoke<string>("start_launch_job", { request });
 
-      queueIssueLaunchFollowup(jobId, request);
       pendingLaunchRequest = request;
       launchJobId = jobId;
       launchJobStartPending = false;

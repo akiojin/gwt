@@ -26,6 +26,15 @@ pub struct FetchIssuesResult {
     pub has_next_page: bool,
 }
 
+/// Result of ensuring an issue-linked branch via `gh issue develop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueLinkedBranchStatus {
+    /// The branch was newly created and linked to the issue.
+    Created,
+    /// The branch already existed and was confirmed as linked to the issue.
+    AlreadyLinked,
+}
+
 /// GitHub label information
 #[derive(Debug, Clone)]
 pub struct GitHubLabel {
@@ -732,15 +741,112 @@ pub fn generate_branch_name(type_prefix: &str, issue_number: u64) -> String {
     format!("{}issue-{}", type_prefix, issue_number)
 }
 
-fn issue_develop_args(issue_number: u64, branch_name: &str) -> Vec<String> {
-    vec![
+fn issue_develop_args(issue_number: u64, branch_name: &str, base: Option<&str>) -> Vec<String> {
+    let mut args = vec![
         "issue".to_string(),
         "develop".to_string(),
         issue_number.to_string(),
         "--name".to_string(),
         branch_name.to_string(),
         "--checkout=false".to_string(),
-    ]
+    ];
+
+    if let Some(base_branch) = base.filter(|b| !b.trim().is_empty()) {
+        args.push("--base".to_string());
+        args.push(base_branch.trim().to_string());
+    }
+
+    args
+}
+
+fn issue_develop_list_args(issue_number: u64, repo_slug: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "issue".to_string(),
+        "develop".to_string(),
+        "--list".to_string(),
+        issue_number.to_string(),
+    ];
+
+    if let Some(slug) = repo_slug {
+        args.push("--repo".to_string());
+        args.push(slug.to_string());
+    }
+
+    args
+}
+
+fn contains_already_exists_message(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("already exists")
+}
+
+fn token_matches_branch(token: &str, branch_name: &str) -> bool {
+    let trimmed = token.trim_matches(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                ',' | ';'
+                    | '.'
+                    | ':'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '*'
+                    | '-'
+                    | '|'
+            )
+    });
+
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    trimmed == branch_name
+        || trimmed.ends_with(&format!(":{branch_name}"))
+        || trimmed.ends_with(&format!("/{branch_name}"))
+        || trimmed.contains(&format!("refs/heads/{branch_name}"))
+}
+
+fn issue_develop_list_mentions_branch(output: &str, branch_name: &str) -> bool {
+    output.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        token_matches_branch(trimmed, branch_name)
+            || trimmed
+                .split_whitespace()
+                .any(|token| token_matches_branch(token, branch_name))
+    })
+}
+
+fn verify_issue_branch_linked(
+    repo_path: &Path,
+    issue_number: u64,
+    branch_name: &str,
+) -> Result<bool, String> {
+    let repo_slug = resolve_repo_slug(repo_path);
+    let output = gh_command()
+        .args(issue_develop_list_args(issue_number, repo_slug.as_deref()))
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh issue develop --list: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue develop --list failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(issue_develop_list_mentions_branch(&stdout, branch_name))
 }
 
 /// Create a branch linked to a GitHub Issue using `gh issue develop` (FR-016)
@@ -756,30 +862,44 @@ fn issue_develop_args(issue_number: u64, branch_name: &str) -> Vec<String> {
 /// # Returns
 /// * `Ok(())` - Branch was successfully created and linked on GitHub
 /// * `Err(String)` - Error message if the command failed
+pub fn create_or_verify_linked_branch(
+    repo_path: &Path,
+    issue_number: u64,
+    branch_name: &str,
+    base_branch: Option<&str>,
+) -> Result<IssueLinkedBranchStatus, String> {
+    let output = gh_command()
+        .args(issue_develop_args(issue_number, branch_name, base_branch))
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh issue develop: {}", e))?;
+
+    if output.status.success() {
+        return Ok(IssueLinkedBranchStatus::Created);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{}\n{}", stderr, stdout);
+    if contains_already_exists_message(&combined) {
+        if verify_issue_branch_linked(repo_path, issue_number, branch_name)? {
+            return Ok(IssueLinkedBranchStatus::AlreadyLinked);
+        }
+        return Err(format!(
+            "[E1012] Issue branch exists but is not linked: {}",
+            branch_name
+        ));
+    }
+
+    Err(format!("gh issue develop failed: {}", stderr.trim()))
+}
+
 pub fn create_linked_branch(
     repo_path: &Path,
     issue_number: u64,
     branch_name: &str,
 ) -> Result<(), String> {
-    // FR-016a: Use --name to specify branch name
-    // FR-016b: Use --checkout=false so worktree handles checkout
-    let output = gh_command()
-        .args(issue_develop_args(issue_number, branch_name))
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue develop: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // SPEC-rb01a2f3 FR-003: Treat "already exists" as success
-        if stderr.contains("already exists") {
-            return Ok(());
-        }
-        return Err(format!("gh issue develop failed: {}", stderr.trim()));
-    }
-
-    // FR-019: Log success (caller should handle actual logging)
-    Ok(())
+    create_or_verify_linked_branch(repo_path, issue_number, branch_name, None).map(|_| ())
 }
 
 #[cfg(test)]
@@ -967,7 +1087,7 @@ mod tests {
 
     #[test]
     fn test_issue_develop_args_includes_checkout_false() {
-        let args = issue_develop_args(42, "feature/issue-42");
+        let args = issue_develop_args(42, "feature/issue-42", None);
         assert_eq!(
             args,
             vec![
@@ -982,6 +1102,69 @@ mod tests {
             .map(String::from)
             .collect::<Vec<String>>()
         );
+    }
+
+    #[test]
+    fn test_issue_develop_args_includes_base_when_provided() {
+        let args = issue_develop_args(42, "feature/issue-42", Some("develop"));
+        assert_eq!(
+            args,
+            vec![
+                "issue",
+                "develop",
+                "42",
+                "--name",
+                "feature/issue-42",
+                "--checkout=false",
+                "--base",
+                "develop",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
+        );
+    }
+
+    #[test]
+    fn test_issue_develop_args_omits_base_when_blank() {
+        let args = issue_develop_args(42, "feature/issue-42", Some("  "));
+        assert!(!args.iter().any(|arg| arg == "--base"));
+    }
+
+    #[test]
+    fn test_issue_develop_list_mentions_branch_owner_repo_format() {
+        let output = "akiojin/gwt:feature/issue-42";
+        assert!(issue_develop_list_mentions_branch(
+            output,
+            "feature/issue-42"
+        ));
+    }
+
+    #[test]
+    fn test_issue_develop_list_mentions_branch_refs_heads_format() {
+        let output = "refs/heads/feature/issue-42";
+        assert!(issue_develop_list_mentions_branch(
+            output,
+            "feature/issue-42"
+        ));
+    }
+
+    #[test]
+    fn test_issue_develop_list_mentions_branch_exact_token() {
+        let output = "- feature/issue-42";
+        assert!(issue_develop_list_mentions_branch(
+            output,
+            "feature/issue-42"
+        ));
+    }
+
+    #[test]
+    fn test_issue_develop_list_does_not_match_adjacent_name() {
+        let output = "akiojin/gwt:feature/issue-420";
+        assert!(!issue_develop_list_mentions_branch(
+            output,
+            "feature/issue-42"
+        ));
     }
 
     // ==========================================================
