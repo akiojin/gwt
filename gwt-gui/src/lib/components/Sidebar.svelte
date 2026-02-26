@@ -305,11 +305,14 @@
   });
 
 
-  // Derived prNumber for WorktreeSummaryPanel
-  let selectedPrNumber = $derived.by(() => {
+  // Derived selected PR status/number for WorktreeSummaryPanel
+  let selectedPrStatus = $derived.by(() => {
     if (!selectedBranch) return null;
-    const status = activePrStatuses[selectedBranch.name];
-    return status?.number ?? null;
+    return activePrStatuses[selectedBranch.name] ?? null;
+  });
+
+  let selectedPrNumber = $derived.by(() => {
+    return selectedPrStatus?.number ?? null;
   });
 
   function isTextEntryFocused(): boolean {
@@ -1477,6 +1480,7 @@
           {activeAgentTabBranch}
           preferredLanguage={appLanguage}
           prNumber={selectedPrNumber}
+          {selectedPrStatus}
           ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}

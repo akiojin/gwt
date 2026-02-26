@@ -1737,7 +1737,7 @@ describe("Sidebar", () => {
       if (cmd === "fetch_pr_status") {
         return {
           statuses: { "feature/alpha": initialPrStatus },
-          ghStatus: { status: "available", version: "2.0.0" },
+          ghStatus: { available: true, authenticated: true },
           repoKey: "/tmp/project",
         };
       }
@@ -1812,7 +1812,7 @@ describe("Sidebar", () => {
       if (cmd === "fetch_pr_status") {
         return {
           statuses: { "feature/beta": initialPrStatus },
-          ghStatus: { status: "available", version: "2.0.0" },
+          ghStatus: { available: true, authenticated: true },
           repoKey: "/tmp/project-beta",
         };
       }
@@ -1883,7 +1883,7 @@ describe("Sidebar", () => {
       if (cmd === "fetch_pr_status") {
         return {
           statuses: { "feature/gamma": initialPrStatus },
-          ghStatus: { status: "available", version: "2.0.0" },
+          ghStatus: { available: true, authenticated: true },
           repoKey: "/tmp/project-gamma",
         };
       }

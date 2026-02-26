@@ -10,6 +10,7 @@
     ToolSessionEntry,
     SessionSummaryResult,
     PrStatusInfo,
+    PrStatusLite,
     GhCliStatus,
     WorkflowRunInfo,
     SettingsData,
@@ -32,6 +33,7 @@
     activeAgentTabBranch = null,
     preferredLanguage = "auto",
     prNumber = null,
+    selectedPrStatus = null,
     ghCliStatus = null,
   }: {
     projectPath: string;
@@ -44,6 +46,7 @@
     activeAgentTabBranch?: string | null;
     preferredLanguage?: SettingsData["app_language"];
     prNumber?: number | null;
+    selectedPrStatus?: PrStatusLite | null;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
 
@@ -877,6 +880,13 @@
   }
 
   let resolvedPrNumber = $derived.by(() => latestBranchPr?.number ?? prNumber ?? null);
+  let prRetrying = $derived.by(() => {
+    const status = selectedPrStatus;
+    const prNum = resolvedPrNumber;
+    if (!status || prNum === null) return false;
+    if (status.number !== prNum) return false;
+    return status.retrying === true;
+  });
 
   $effect(() => {
     const nextProjectPath = projectPath ?? "";
@@ -1450,6 +1460,7 @@
           updatingBranch={updatingBranch}
           onMerge={handleMerge}
           {merging}
+          retrying={prRetrying}
         />
         <MergeConfirmModal
           open={showMergeConfirm}

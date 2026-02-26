@@ -30,16 +30,8 @@ GitHub GraphQL API が返す一時的な UNKNOWN ステータスに対して、R
 
 #### 1-2. RepoPrStatusCacheEntry にリトライ状態追加
 
-- PR 単位のリトライ状態を管理する構造体追加:
-
-```rust
-struct PrRetryState {
-    retrying: bool,
-    retry_count: u8,
-    branch_name: String,
-}
-```
-
+- PR 単位のリトライ状態を管理する `PrRetryState` を追加
+  - 保持項目: `retrying`（進行中フラグ）, `retry_count`（試行回数）, `branch_name`（対象ブランチ）
 - `RepoPrStatusCacheEntry` に `retry_states: HashMap<String, PrRetryState>` 追加
 
 #### 1-3. キャッシュ上書き保護
