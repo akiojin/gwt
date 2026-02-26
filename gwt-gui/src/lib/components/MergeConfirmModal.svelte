@@ -31,23 +31,26 @@
     return state.toLowerCase();
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      onClose();
-    }
+  function handleWindowKeydown(e: KeyboardEvent) {
+    if (!open || !prDetail) return;
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    onClose();
   }
 </script>
 
+<svelte:window onkeydown={handleWindowKeydown} />
+
 {#if open && prDetail}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="overlay modal-overlay"
     onclick={onClose}
-    onkeydown={handleKeydown}
     role="dialog"
     aria-modal="true"
     aria-label="Merge Pull Request"
+    tabindex="-1"
   >
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->

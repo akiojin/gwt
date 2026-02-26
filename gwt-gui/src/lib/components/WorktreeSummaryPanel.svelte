@@ -939,12 +939,16 @@
     }
   }
 
-  function isViewingCurrentPr(branch: string, prNum: number): boolean {
-    if (activeTab !== "pr") return false;
+  function isCurrentPrTarget(branch: string, prNum: number): boolean {
     if (currentBranchName() !== branch) return false;
     const currentPr = resolvedPrNumber;
     if (currentPr !== null && currentPr !== prNum) return false;
     return true;
+  }
+
+  function isViewingCurrentPr(branch: string, prNum: number): boolean {
+    if (activeTab !== "pr") return false;
+    return isCurrentPrTarget(branch, prNum);
   }
 
   async function pollPrDetailAfterBranchUpdate(
@@ -1091,7 +1095,7 @@
     prNum: number,
   ): Promise<void> {
     for (let attempt = 0; attempt < MERGE_POLL_ATTEMPTS; attempt++) {
-      if (!isViewingCurrentPr(branch, prNum)) return;
+      if (!isCurrentPrTarget(branch, prNum)) return;
 
       await loadPrDetail(branch, prNum, {
         clearBeforeLoad: false,
@@ -1099,7 +1103,7 @@
         errorPrefix: "Failed to refresh PR detail",
       });
 
-      if (!isViewingCurrentPr(branch, prNum)) return;
+      if (!isCurrentPrTarget(branch, prNum)) return;
       if (prDetailError) return;
       if (prDetail?.state === "MERGED") return;
 

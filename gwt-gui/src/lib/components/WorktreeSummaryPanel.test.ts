@@ -527,6 +527,62 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
+  it("keeps polling PR detail after merge even if user switches away from PR tab", async () => {
+    let prDetailCallCount = 0;
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail") {
+        prDetailCallCount += 1;
+        if (prDetailCallCount <= 2) {
+          return { ...prDetailFixture, state: "OPEN" };
+        }
+        return { ...prDetailFixture, state: "MERGED", mergeable: "UNKNOWN" };
+      }
+      if (cmd === "merge_pull_request") {
+        return await new Promise<string>((resolve) => {
+          setTimeout(() => resolve("accepted"), 1);
+        });
+      }
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const summaryTab = tabs[0] as HTMLElement;
+    const prTab = tabs[3] as HTMLElement;
+
+    await fireEvent.click(prTab);
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Mergeable" })).toBeTruthy();
+      expect(commandCalls("fetch_pr_detail")).toHaveLength(1);
+    });
+
+    vi.useFakeTimers();
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Mergeable" }));
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Merge" })).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Merge" }));
+    await fireEvent.click(summaryTab);
+    expect(summaryTab.classList.contains("active")).toBe(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await waitFor(() => {
+      expect(commandCalls("fetch_pr_detail").length).toBeGreaterThan(1);
+    });
+  });
+
   it("shows update-branch failure in PR tab", async () => {
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {

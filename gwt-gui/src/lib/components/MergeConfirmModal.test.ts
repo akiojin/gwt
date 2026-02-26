@@ -98,6 +98,19 @@ describe("MergeConfirmModal", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("calls onClose when Escape is pressed without moving focus into modal", async () => {
+    const onClose = vi.fn();
+    await renderModal({
+      open: true,
+      prDetail: makePrDetail(),
+      merging: false,
+      onClose,
+      onConfirm: vi.fn(),
+    });
+    await fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("disables Merge button and shows Merging... when merging is true", async () => {
     const { container } = await renderModal({
       open: true,
