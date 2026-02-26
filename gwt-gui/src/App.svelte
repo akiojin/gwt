@@ -8,7 +8,6 @@
     LaunchFinishedPayload,
     LaunchProgressPayload,
     ProbePathResult,
-    RollbackResult,
     TerminalInfo,
     WorktreeInfo,
     TerminalAnsiProbe,
@@ -79,6 +78,11 @@
   } from "./lib/openExternalUrl";
   import { errorBus, type StructuredError } from "./lib/errorBus";
   import { toastBus } from "./lib/toastBus";
+  import {
+    AGENT_PASTE_HINT_DISMISSED_KEY,
+    platformName,
+    shouldShowAgentPasteHint,
+  } from "./lib/terminal/pasteGuidance";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -166,6 +170,26 @@
     }
   }
 
+  function loadAgentPasteHintDismissed(): boolean {
+    if (typeof window === "undefined") return false;
+    try {
+      return (
+        window.localStorage.getItem(AGENT_PASTE_HINT_DISMISSED_KEY) === "1"
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function persistAgentPasteHintDismissed(): void {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(AGENT_PASTE_HINT_DISMISSED_KEY, "1");
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
   let projectPath: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let sidebarWidthPx: number = $state(loadSidebarWidth());
@@ -206,20 +230,14 @@
   let launchJobStartPending = false;
   let bufferedLaunchProgressEvents: LaunchProgressPayload[] = [];
   let bufferedLaunchFinishedEvents: LaunchFinishedPayload[] = [];
-  type IssueLaunchFollowup = {
-    projectPath: string;
-    issueNumber: number;
-    branchName: string;
-  };
-  let issueLaunchFollowups: Map<string, IssueLaunchFollowup> = $state(
-    new Map(),
-  );
 
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state(defaultAppTabs());
   let activeTabId: string = $state("projectMode");
+  let agentPasteHintDismissed = loadAgentPasteHintDismissed();
+  let agentPasteHintShownInSession = false;
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -375,67 +393,6 @@
     }
   }
 
-  function queueIssueLaunchFollowup(
-    jobId: string,
-    request: LaunchAgentRequest,
-  ) {
-    const issueNumber = request.issueNumber;
-    const branchName = request.createBranch?.name?.trim();
-    if (!projectPath || !issueNumber || !branchName) return;
-    issueLaunchFollowups = new Map(issueLaunchFollowups).set(jobId, {
-      projectPath,
-      issueNumber,
-      branchName,
-    });
-  }
-
-  async function handleIssueLaunchFinished(payload: LaunchFinishedPayload) {
-    const followup = issueLaunchFollowups.get(payload.jobId);
-    if (!followup) return;
-
-    const next = new Map(issueLaunchFollowups);
-    next.delete(payload.jobId);
-    issueLaunchFollowups = next;
-
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-
-      if (payload.status === "ok") {
-        await invoke("link_branch_to_issue", {
-          projectPath: followup.projectPath,
-          issueNumber: followup.issueNumber,
-          branchName: followup.branchName,
-        });
-        return;
-      }
-
-      const rollback = await invoke<RollbackResult>("rollback_issue_branch", {
-        projectPath: followup.projectPath,
-        branchName: followup.branchName,
-        // Only rollback local artifacts on launch failure.
-        // Remote deletion is unsafe here because the branch may have pre-existed remotely.
-        deleteRemote: false,
-      });
-
-      sidebarRefreshKey++;
-
-      const warnings: string[] = [];
-      if (!rollback.localDeleted) {
-        warnings.push("Local rollback was incomplete.");
-      }
-      if (rollback.error) {
-        warnings.push(rollback.error.trim());
-      }
-
-      if (warnings.length > 0) {
-        const verb = payload.status === "cancelled" ? "cancelled" : "failed";
-        showToast(`Issue launch ${verb}. ${warnings.join(" ")}`, 12000);
-      }
-    } catch (err) {
-      showToast(`Issue launch cleanup failed: ${toErrorMessage(err)}`, 12000);
-    }
-  }
-
   function debugLaunchEvent(message: string, payload: unknown) {
     console.debug(`[launch] ${message}`, payload);
   }
@@ -470,9 +427,6 @@
   }
 
   function applyLaunchFinishedPayload(payload: LaunchFinishedPayload) {
-    // Retry followup on buffered events to recover from early-finished races.
-    void handleIssueLaunchFinished(payload);
-
     if (payload.status === "cancelled") {
       handleLaunchModalClose();
       return;
@@ -868,7 +822,7 @@
     };
   });
 
-  // Handle issue-linking/rollback and progress modal state on launch completion.
+  // Handle progress modal state on launch completion.
   $effect(() => {
     let unlisten: null | (() => void) = null;
     let cancelled = false;
@@ -880,8 +834,6 @@
           "launch-finished",
           (event) => {
             const payload = event.payload;
-            // Issue-linking/rollback (existing logic, applies to all jobIds).
-            void handleIssueLaunchFinished(payload);
 
             // Progress modal state update (moved from LaunchProgressModal).
             if (launchJobId) {
@@ -1632,7 +1584,6 @@
       const { invoke } = await import("$lib/tauriInvoke");
       const jobId = await invoke<string>("start_launch_job", { request });
 
-      queueIssueLaunchFollowup(jobId, request);
       pendingLaunchRequest = request;
       launchJobId = jobId;
       launchJobStartPending = false;
@@ -2018,6 +1969,12 @@
   }
 
   function emitTerminalEditAction(action: "copy" | "paste") {
+    const editableEl = getActiveEditableElement(action);
+    if (editableEl && !editableEl.closest("[data-pane-id]")) {
+      void fallbackMenuEditAction(action);
+      return;
+    }
+
     const paneId = getActiveTerminalPaneId();
     if (!paneId) {
       void fallbackMenuEditAction(action);
@@ -2344,6 +2301,40 @@
     void tabs;
     void activeTabId;
     void syncWindowAgentTabs();
+  });
+
+  $effect(() => {
+    void tabs;
+    void activeTabId;
+
+    if (typeof navigator === "undefined") return;
+    const activeTab = tabs.find((tab) => tab.id === activeTabId);
+    const currentPlatform = platformName(
+      navigator as Navigator & {
+        userAgentData?: { platform?: string | null } | null;
+      },
+    );
+
+    if (
+      !shouldShowAgentPasteHint({
+        activeTabType: activeTab?.type,
+        platform: currentPlatform,
+        dismissed: agentPasteHintDismissed,
+        shownInSession: agentPasteHintShownInSession,
+      })
+    ) {
+      return;
+    }
+
+    showToast(
+      "Agent tab paste: Ctrl+Shift+V for text on Windows/Linux. Ctrl+V is passed through to the agent (for example, Codex image paste).",
+      10000,
+    );
+    agentPasteHintShownInSession = true;
+    if (!agentPasteHintDismissed) {
+      agentPasteHintDismissed = true;
+      persistAgentPasteHintDismissed();
+    }
   });
 
   async function restoreProjectAgentTabs(

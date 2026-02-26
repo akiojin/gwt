@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.13.1] - 2026-02-26
+
+### Bug Fixes
+
+- **gui:** Clarify terminal paste shortcuts and agent-tab guidance (#1263)
+- **gui:** Reset report dialog state on reopen (#1264)
+- **gui:** Route paste to active terminal tab instead of always targeting agent tab (#1266)
+- Normalize quoted windows batch command paths (#1267)
+- Issue起点ブランチ作成のリンク保証をbackendで一元化 (#1268)
+- Issue起点ブランチ作成のリンク保証をbackendで一元化 (#1270)
+- Issue起点ブランチ作成のリンク保証をbackendで一元化 (#1271)
+
+### Documentation
+
+- **spec:** Update SPEC-b7f7b9ad task completion status (#1269)
+
 ## [7.13.0] - 2026-02-26
 
 ### Bug Fixes

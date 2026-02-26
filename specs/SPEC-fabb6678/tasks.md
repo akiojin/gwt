@@ -12,6 +12,7 @@
 - US6（送信先リポ選択）→ Phase 3 に依存
 - US7（プライバシー保護）→ Phase 3 に依存
 - US8（送信失敗フォールバック）→ Phase 4 に依存
+- US9（再オープン時の状態初期化）→ Phase 3 に依存
 
 ## Phase 1: セットアップ
 
@@ -97,3 +98,12 @@
 - [x] T065 [P] `cd gwt-gui && pnpm test` で全フロントエンドテストが通ることを確認する（534/535、既存flaky 1件のみ失敗）
 - [x] T066 [P] `cargo test` で全バックエンドテストが通ることを確認する（433テスト合格）
 - [x] T067 型定義を更新する（StructuredError の TypeScript 型を types.ts に追加） `gwt-gui/src/lib/types.ts`
+
+## Phase 7: バグ修正 — 再オープン時の状態初期化 (US9)
+
+- [x] T068 [US9] `spec.md` に再オープン時状態初期化のユーザーストーリー/FR/SCを追記する `specs/SPEC-fabb6678/spec.md`
+- [x] T069 [US9] `plan.md` に実装方針（resetDialogState + mode優先）を追記する `specs/SPEC-fabb6678/plan.md`
+- [x] T070 [US9] TDDノートを追加する `specs/SPEC-fabb6678/tdd.md`
+- [x] T071 [US9] ReportDialog の再オープン初期化実装を追加する `gwt-gui/src/lib/components/ReportDialog.svelte`
+- [x] T072 [US9] 再オープン回帰テスト（入力/診断/送信失敗/mode反映）を追加する `gwt-gui/src/lib/components/ReportDialog.test.ts`
+- [x] T073 [US9] `pnpm test src/lib/components/ReportDialog.test.ts` を実行し、新規回帰テストを検証する `gwt-gui/`

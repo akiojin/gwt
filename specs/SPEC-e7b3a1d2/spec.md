@@ -117,7 +117,7 @@
 
 **受け入れシナリオ**:
 
-1. **前提条件** なし、**操作** README.md を確認、**期待結果** 以下が記載されている: Cmd+N (New Window), Cmd+O (Open Project), Cmd+C/V (Copy/Paste), Cmd+Shift+K (Cleanup Worktrees), Cmd+, (Preferences), Cmd+Shift+\[/\] (Previous/Next Tab), Cmd+\`/Cmd+Shift+\` (Window switching), Cmd+M (Minimize)
+1. **前提条件** なし、**操作** README.md を確認、**期待結果** 以下が記載されている: Cmd+N (New Window), Cmd+O (Open Project), Cmd+C (Copy), Paste shortcuts including terminal-pane note (Cmd+V on macOS / Ctrl+Shift+V on Windows/Linux terminal panes), Cmd+Shift+K (Cleanup Worktrees), Cmd+, (Preferences), Cmd+Shift+\[/\] (Previous/Next Tab), Cmd+\`/Cmd+Shift+\` (Window switching), Cmd+M (Minimize)
 2. **前提条件** なし、**操作** README.ja.md を確認、**期待結果** README.md と同等の内容が日本語で記載されている
 
 ## エッジケース
