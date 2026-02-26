@@ -1701,4 +1701,148 @@ describe("Sidebar", () => {
     await fireEvent.click(modeButtons[0] as HTMLButtonElement);
     expect(onModeChange).toHaveBeenCalledWith("branch");
   });
+
+  it("updates pollingStatuses when pr-status-updated event is received (T008)", async () => {
+    const branchA = {
+      ...branchFixture,
+      name: "feature/alpha",
+      commit_timestamp: 1_700_000_090,
+    };
+
+    const initialPrStatus = {
+      number: 42,
+      state: "OPEN" as const,
+      url: "https://github.com/test/repo/pull/42",
+      mergeable: "UNKNOWN" as const,
+      baseBranch: "main",
+      headBranch: "feature/alpha",
+      checkSuites: [],
+      retrying: true,
+    };
+
+    const resolvedPrStatus = {
+      number: 42,
+      state: "OPEN" as const,
+      url: "https://github.com/test/repo/pull/42",
+      mergeable: "MERGEABLE" as const,
+      baseBranch: "main",
+      headBranch: "feature/alpha",
+      checkSuites: [],
+      retrying: false,
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [branchA];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/alpha": initialPrStatus },
+          ghStatus: { status: "available", version: "2.0.0" },
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      refreshKey: 0,
+      mode: "branch",
+    });
+
+    // Wait for initial PR polling to complete
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    // Verify initial state shows retrying (pulse class)
+    const initialBadge = rendered.container.querySelector(".pr-badge");
+    expect(initialBadge?.classList.contains("pulse")).toBe(true);
+    expect(initialBadge?.textContent?.trim()).toBe("#42");
+
+    // Emit pr-status-updated event with resolved status
+    await emitTauriEvent("pr-status-updated", {
+      repoKey: "/tmp/project",
+      branch: "feature/alpha",
+      status: resolvedPrStatus,
+    });
+
+    // Verify that the pollingStatuses was updated (pulse should be gone)
+    await waitFor(() => {
+      const badge = rendered.container.querySelector(".pr-badge");
+      expect(badge).toBeTruthy();
+      expect(badge?.classList.contains("pulse")).toBe(false);
+    });
+  });
+
+  it("does not update pollingStatuses when pr-status-updated event has retrying=true", async () => {
+    const branchA = {
+      ...branchFixture,
+      name: "feature/beta",
+      commit_timestamp: 1_700_000_080,
+    };
+
+    const initialPrStatus = {
+      number: 55,
+      state: "OPEN" as const,
+      url: "https://github.com/test/repo/pull/55",
+      mergeable: "UNKNOWN" as const,
+      baseBranch: "main",
+      headBranch: "feature/beta",
+      checkSuites: [],
+      retrying: true,
+    };
+
+    const stillRetryingStatus = {
+      number: 55,
+      state: "OPEN" as const,
+      url: "https://github.com/test/repo/pull/55",
+      mergeable: "UNKNOWN" as const,
+      baseBranch: "main",
+      headBranch: "feature/beta",
+      checkSuites: [],
+      retrying: true,
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [branchA];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/beta": initialPrStatus },
+          ghStatus: { status: "available", version: "2.0.0" },
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project-beta",
+      onBranchSelect: vi.fn(),
+      refreshKey: 0,
+      mode: "branch",
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    // Should still be pulsing
+    const initialBadge = rendered.container.querySelector(".pr-badge");
+    expect(initialBadge?.classList.contains("pulse")).toBe(true);
+
+    // Emit pr-status-updated with retrying=true (should be ignored)
+    await emitTauriEvent("pr-status-updated", {
+      repoKey: "/tmp/project-beta",
+      branch: "feature/beta",
+      status: stillRetryingStatus,
+    });
+
+    // Badge should still have pulse (retrying event was ignored)
+    await new Promise((r) => setTimeout(r, 50));
+    const badgeAfter = rendered.container.querySelector(".pr-badge");
+    expect(badgeAfter?.classList.contains("pulse")).toBe(true);
+  });
 });
