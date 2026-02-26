@@ -1902,6 +1902,7 @@ fn launch_with_wsl_pty_write(
         env_vars: HashMap::new(), // WSL login shell handles base env
         terminal_shell: Some("wsl".to_string()),
         interactive: true,
+        windows_force_utf8: false,
     };
 
     let pane_id = {
@@ -1978,6 +1979,7 @@ fn launch_with_wsl_pty_write(
         env_vars: HashMap::new(),
         terminal_shell: Some("wsl".to_string()),
         interactive: false,
+        windows_force_utf8: false,
     };
 
     launch_with_config(&repo_path, fallback_config, meta, state, app_handle)
@@ -2017,6 +2019,7 @@ pub fn launch_terminal(
         env_vars: HashMap::new(),
         terminal_shell: None,
         interactive: true,
+        windows_force_utf8: cfg!(target_os = "windows"),
     };
 
     launch_with_config(&repo_path, config, None, &state, app_handle)
@@ -2169,6 +2172,7 @@ pub fn spawn_shell(
         env_vars: HashMap::new(),
         terminal_shell: terminal_shell_tag,
         interactive: true,
+        windows_force_utf8: false,
     };
 
     let pane_id = {
@@ -2547,6 +2551,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -2608,6 +2613,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create running pane");
 
@@ -2625,6 +2631,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create done pane");
 
@@ -2681,6 +2688,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -2723,6 +2731,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -2774,6 +2783,7 @@ mod tests {
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -3404,6 +3414,7 @@ services:
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             })
             .expect("failed to create test pane");
 
@@ -4324,6 +4335,7 @@ pub(crate) fn launch_agent_for_project_root(
                 env_vars: docker_env.clone(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             }
         }
         DockerExecMode::DockerRun {
@@ -4389,6 +4401,7 @@ pub(crate) fn launch_agent_for_project_root(
                 env_vars: HashMap::new(),
                 terminal_shell: None,
                 interactive: false,
+                windows_force_utf8: false,
             }
         }
         DockerExecMode::None => {
@@ -4439,6 +4452,7 @@ pub(crate) fn launch_agent_for_project_root(
                 env_vars,
                 terminal_shell,
                 interactive: true,
+                windows_force_utf8: cfg!(target_os = "windows"),
             }
         }
     };
