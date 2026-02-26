@@ -14,9 +14,11 @@
 
   let {
     projectPath,
+    isActive = true,
     onSwitchToWorktree,
   }: {
     projectPath: string;
+    isActive?: boolean;
     onSwitchToWorktree: (branchName: string) => void;
   } = $props();
 
@@ -35,7 +37,9 @@
   let prDetails: Map<number, PrStatusInfo> = $state(new Map());
   let loadedLimit: number = $state(30);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
-  let isTabActive: boolean = $state(true);
+  let isWindowVisible: boolean = $state(
+    typeof document === "undefined" ? true : !document.hidden,
+  );
 
   // Dialog state
   let mergeDialogPr: PrListItem | null = $state(null);
@@ -343,14 +347,18 @@
 
   // Visibility tracking for poll pause
   function handleVisibilityChange() {
-    isTabActive = !document.hidden;
+    if (typeof document === "undefined") {
+      isWindowVisible = true;
+      return;
+    }
+    isWindowVisible = !document.hidden;
   }
 
   // Polling
   function startPolling() {
     stopPolling();
     pollTimer = setInterval(() => {
-      if (!isTabActive || !ghCliAvailable) return;
+      if (!isActive || !isWindowVisible || !ghCliAvailable) return;
       void fetchPrs();
     }, 30000);
   }
@@ -377,12 +385,22 @@
 
   // Start polling when mounted
   $effect(() => {
-    if (ghCliAvailable) {
-      startPolling();
+    const shouldPoll = ghCliAvailable && isActive && isWindowVisible;
+    if (!shouldPoll) {
+      stopPolling();
+      return;
     }
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    startPolling();
     return () => {
       stopPolling();
+    };
+  });
+
+  $effect(() => {
+    if (typeof document === "undefined") return;
+    handleVisibilityChange();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   });

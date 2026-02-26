@@ -549,6 +549,28 @@ pub fn fetch_authenticated_user(repo_path: &Path) -> Result<String, String> {
 /// Merge a PR via `gh pr merge` (SPEC-prlist).
 ///
 /// `method` should be "merge", "squash", or "rebase".
+fn split_merge_commit_message(message: &str) -> Option<(String, Option<String>)> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut lines = trimmed.lines();
+    let subject = lines.next()?.trim();
+    if subject.is_empty() {
+        return None;
+    }
+
+    let body = lines.collect::<Vec<_>>().join("\n");
+    let body = if body.trim().is_empty() {
+        None
+    } else {
+        Some(body.trim().to_string())
+    };
+
+    Some((subject.to_string(), body))
+}
+
 pub fn merge_pr(
     repo_path: &Path,
     pr_number: u64,
@@ -568,8 +590,14 @@ pub fn merge_pr(
     }
 
     if let Some(msg) = commit_msg {
-        args.push("--body".to_string());
-        args.push(msg.to_string());
+        if let Some((subject, body)) = split_merge_commit_message(msg) {
+            args.push("--subject".to_string());
+            args.push(subject);
+            if let Some(body) = body {
+                args.push("--body".to_string());
+                args.push(body);
+            }
+        }
     }
 
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -755,6 +783,25 @@ mod tests {
     fn delete_remote_branch_returns_result() {
         // Verifies that the function signature compiles correctly
         let _: fn(&Path, &str) -> Result<(), String> = delete_remote_branch;
+    }
+
+    #[test]
+    fn split_merge_commit_message_single_line() {
+        let parsed = split_merge_commit_message("  chore: merge release  ").unwrap();
+        assert_eq!(parsed.0, "chore: merge release");
+        assert!(parsed.1.is_none());
+    }
+
+    #[test]
+    fn split_merge_commit_message_multiline() {
+        let parsed = split_merge_commit_message("feat: merge api\n\n- keep body").unwrap();
+        assert_eq!(parsed.0, "feat: merge api");
+        assert_eq!(parsed.1, Some("- keep body".to_string()));
+    }
+
+    #[test]
+    fn split_merge_commit_message_empty_returns_none() {
+        assert!(split_merge_commit_message("   \n  ").is_none());
     }
 
     // -- T003-T004: check_auth tests --

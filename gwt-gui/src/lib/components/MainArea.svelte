@@ -459,6 +459,7 @@
             {:else if tab.type === "prs"}
               <PrListPanel
                 {projectPath}
+                isActive={activeTabId === tab.id}
                 onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
               />
             {:else}

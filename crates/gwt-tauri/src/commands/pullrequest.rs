@@ -637,9 +637,54 @@ struct GitHubUserCacheEntry {
     fetched_at: Instant,
 }
 
-fn github_user_cache() -> &'static Mutex<Option<GitHubUserCacheEntry>> {
-    static CACHE: OnceLock<Mutex<Option<GitHubUserCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+fn github_user_cache() -> &'static Mutex<HashMap<String, GitHubUserCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitHubUserCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn extract_remote_host(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.starts_with("file://") {
+        return None;
+    }
+
+    if let Some((_, rest)) = trimmed.split_once("://") {
+        let rest = rest.rsplit_once('@').map(|(_, host)| host).unwrap_or(rest);
+        let host_end = rest
+            .find('/')
+            .or_else(|| rest.find(':'))
+            .unwrap_or(rest.len());
+        let host = rest.get(..host_end)?.trim();
+        if host.is_empty() {
+            return None;
+        }
+        return Some(host.to_ascii_lowercase());
+    }
+
+    let after_at = trimmed
+        .split_once('@')
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host_end = after_at
+        .find(':')
+        .or_else(|| after_at.find('/'))
+        .unwrap_or(after_at.len());
+    let host = after_at.get(..host_end)?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn github_user_cache_key(repo_path: &Path) -> String {
+    let host = Remote::default(repo_path)
+        .ok()
+        .flatten()
+        .and_then(|remote| {
+            extract_remote_host(&remote.fetch_url).or_else(|| extract_remote_host(&remote.push_url))
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{host}::{}", repo_path.to_string_lossy())
 }
 
 fn fetch_pr_list_impl(
@@ -712,23 +757,25 @@ fn fetch_github_user_impl(project_path: String) -> Result<GitHubUserResponse, St
         ));
     }
 
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_github_user"))?;
+    let cache_key = github_user_cache_key(&repo_path);
+
     // Check cache
     {
         let cache = github_user_cache();
-        let guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-        if let Some(entry) = guard.as_ref() {
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(entry) = guard.get(&cache_key) {
             if entry.fetched_at.elapsed() < GITHUB_USER_CACHE_TTL {
                 return Ok(GitHubUserResponse {
                     login: entry.login.clone(),
                     gh_status,
                 });
             }
+            guard.remove(&cache_key);
         }
     }
-
-    let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "fetch_github_user"))?;
 
     let login = gwt_core::git::gh_cli::fetch_authenticated_user(&repo_path)
         .map_err(|e| StructuredError::internal(&e, "fetch_github_user"))?;
@@ -737,10 +784,13 @@ fn fetch_github_user_impl(project_path: String) -> Result<GitHubUserResponse, St
     {
         let cache = github_user_cache();
         let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-        *guard = Some(GitHubUserCacheEntry {
-            login: login.clone(),
-            fetched_at: Instant::now(),
-        });
+        guard.insert(
+            cache_key,
+            GitHubUserCacheEntry {
+                login: login.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
     }
 
     Ok(GitHubUserResponse { login, gh_status })
@@ -1089,5 +1139,23 @@ mod tests {
             strip_known_remote_prefix("fork/feature/x", &remotes),
             "fork/feature/x"
         );
+    }
+
+    #[test]
+    fn test_extract_remote_host_https_and_ssh() {
+        assert_eq!(
+            extract_remote_host("https://github.com/example/repo.git"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_remote_host("git@github.enterprise.local:example/repo.git"),
+            Some("github.enterprise.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_remote_host_invalid_and_file_scheme() {
+        assert_eq!(extract_remote_host(""), None);
+        assert_eq!(extract_remote_host("file:///tmp/repo.git"), None);
     }
 }
