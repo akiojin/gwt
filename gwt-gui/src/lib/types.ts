@@ -591,6 +591,7 @@ export interface PrStatusInfo {
   additions: number;
   deletions: number;
   mergeStateStatus?: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
+  /** True while backend retry is in progress for UNKNOWN merge status. */
   retrying?: boolean;
 }
 
@@ -602,6 +603,7 @@ export interface PrStatusLite {
   baseBranch: string;
   headBranch: string;
   checkSuites: WorkflowRunInfo[];
+  /** True while backend retry is in progress for UNKNOWN merge status. */
   retrying?: boolean;
 }
 
@@ -650,6 +652,7 @@ export interface ReviewComment {
 export interface PrStatusResponse {
   statuses: Record<string, PrStatusLite | null>;
   ghStatus: GhCliStatus;
+  /** Repository identity key used to match `pr-status-updated` events. */
   repoKey?: string | null;
 }
 
