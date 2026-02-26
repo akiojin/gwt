@@ -151,6 +151,7 @@
   let issueBranchMap: Map<number, string | null> = $state(new Map());
   let issueBranchChecksInFlight: Set<number> = $state(new Set());
   let issueRateLimited: boolean = $state(false);
+  let appliedPrefillIssueNumber: number | null = null;
 
   // AI prefix classification state (SPEC-a2f8e3b1)
   let prefixClassifying: boolean = $state(false);
@@ -616,9 +617,16 @@
 
   // Apply prefill from Issue tab ("Work on this" button).
   $effect(() => {
-    if (!prefillIssue) return;
+    if (!prefillIssue) {
+      appliedPrefillIssueNumber = null;
+      return;
+    }
+    if (appliedPrefillIssueNumber === prefillIssue.number) return;
+    appliedPrefillIssueNumber = prefillIssue.number;
+
     branchMode = "new";
     newBranchTab = "fromIssue";
+    issueBranchMap = new Map([[prefillIssue.number, null]]);
     selectedIssue = prefillIssue;
     void determinePrefixForIssue(prefillIssue);
   });
@@ -645,6 +653,13 @@
     void projectPath;
     if (branchMode !== "new" || newBranchTab !== "fromIssue") return;
     if (!ghCliAvailable || !projectPath) return;
+    if (
+      prefillIssue &&
+      selectedIssue?.number === prefillIssue.number &&
+      issueBranchMap.has(prefillIssue.number)
+    ) {
+      return;
+    }
     if (issues.length > 0 || issuesLoading) return;
     void loadIssues(1);
   });
@@ -964,8 +979,9 @@
       console.error("Failed to detect agents:", err);
       agents = [];
       selectedAgent = "";
+    } finally {
+      loading = false;
     }
-    loading = false;
   }
 
   async function handleLaunch() {
