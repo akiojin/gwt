@@ -137,6 +137,7 @@ test("sidebar PR badge shows pulse animation when retrying=true", async ({
         [branchDevelop.name]: null,
       },
       ghStatus: { available: true, authenticated: true },
+      repoKey: "/tmp/gwt-playwright",
     },
     fetch_pr_detail: prDetailFixture,
     get_branch_session_summary: {
@@ -179,6 +180,7 @@ test("sidebar PR badge has no pulse when retrying=false", async ({ page }) => {
         [branchDevelop.name]: null,
       },
       ghStatus: { available: true, authenticated: true },
+      repoKey: "/tmp/gwt-playwright",
     },
   });
 
@@ -213,6 +215,7 @@ test("pr-status-updated event resolves pulse animation to normal state", async (
         [branchDevelop.name]: null,
       },
       ghStatus: { available: true, authenticated: true },
+      repoKey: "/tmp/gwt-playwright",
     },
   });
 
@@ -284,6 +287,7 @@ test("pr-status-updated event with retrying=true is ignored", async ({
         [branchDevelop.name]: null,
       },
       ghStatus: { available: true, authenticated: true },
+      repoKey: "/tmp/gwt-playwright",
     },
   });
 
