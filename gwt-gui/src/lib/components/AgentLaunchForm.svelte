@@ -1074,17 +1074,31 @@
         errorMessage = "Selected issue is no longer available. Please select another issue.";
         return;
       }
-      // AI Suggest mode: send description, use empty name placeholder
+      // AI Suggest mode: resolve suggested branch name before launch request.
       const isAiSuggestMode = newBranchTab === "manual" && branchNamingMode === "ai-suggest";
+      const aiFallbackMessage = "AI branch name generation failed. Please enter the branch name manually.";
 
       if (isAiSuggestMode) {
         const desc = aiDescription.trim();
-        if (!desc || !baseBranch.trim()) return;
-        request.branch = "ai-pending";
+        const base = baseBranch.trim();
+        if (!desc || !base) return;
+
+        const { invoke } = await import("$lib/tauriInvoke");
+        const suggestion = await invoke<BranchSuggestResult>("suggest_branch_name", {
+          description: desc,
+        });
+
+        if (suggestion.status !== "ok" || !suggestion.suggestion.trim()) {
+          branchNamingMode = "direct";
+          aiFallbackError = aiFallbackMessage;
+          return;
+        }
+
+        const fullName = suggestion.suggestion.trim();
+        request.branch = fullName;
         await onLaunch({
           ...request,
-          createBranch: { name: "ai-pending", base: baseBranch.trim() },
-          aiBranchDescription: desc,
+          createBranch: { name: fullName, base },
         });
       } else {
         if (!newBranchPrefix) return;
@@ -1106,7 +1120,7 @@
       onClose();
     } catch (err) {
       const errMsg = toErrorMessage(err);
-      if (errMsg.includes("[E2001]")) {
+      if (errMsg.includes("[E2001]") || errMsg.toLowerCase().includes("ai branch name generation failed")) {
         branchNamingMode = "direct";
         aiFallbackError = "AI branch name generation failed. Please enter the branch name manually.";
         return;
@@ -1861,7 +1875,7 @@
               ? !existingBranch.trim()
               : !baseBranch.trim() ||
                 (newBranchTab === "fromIssue"
-                  ? !canLaunchFromIssue(selectedIssue)
+                  ? !canLaunchFromIssue(selectedIssue) || newBranchPrefix === ""
                   : branchNamingMode === "ai-suggest"
                     ? !aiDescription.trim()
                     : newBranchPrefix === "" || !newBranchFullName.trim()))

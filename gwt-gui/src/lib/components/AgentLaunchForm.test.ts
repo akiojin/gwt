@@ -715,6 +715,85 @@ describe("AgentLaunchForm", () => {
     });
   });
 
+  it("keeps Launch disabled in fromIssue mode until a prefix is selected", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true };
+      }
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [
+            {
+              number: 42,
+              title: "Issue 42",
+              updatedAt: "2026-02-13T00:00:00Z",
+              labels: [],
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "classify_issue_branch_prefix") {
+        return { status: "error", error: "classification failed" };
+      }
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    await waitFor(() => {
+      expect((rendered.getByRole("button", { name: /#42/i }) as HTMLButtonElement).disabled).toBe(
+        false
+      );
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: /#42/i }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Auto-generated from issue #42")).toBeTruthy();
+    });
+
+    const launchButton = rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement;
+    expect(launchButton.disabled).toBe(true);
+  });
+
   it("does not link or rollback issue branch before async launch job completion", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
@@ -2142,15 +2221,64 @@ describe("AgentLaunchForm", () => {
 
   // ======== Phase 5 (T037-T046): Fallback + AI not configured ========
 
-  it("falls back to Direct mode with error banner on [E2001] launch error", async () => {
+  it("uses AI-suggested branch name for launch request", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: { description?: string }) => {
+      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
+      if (cmd === "list_worktree_branches") return [{ name: "main" }];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "suggest_branch_name") {
+        if (args?.description === "my feature") {
+          return { status: "ok", suggestion: "feature/my-feature", error: null };
+        }
+        return { status: "ok", suggestion: "feature/test", error: null };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.input(rendered.getByLabelText("Description"), { target: { value: "my feature" } });
+
+    await waitFor(() => {
+      const baseSelect = rendered.getByLabelText("Base Branch") as HTMLSelectElement;
+      const options = Array.from(baseSelect.options).map((o) => o.value);
+      expect(options).toContain("main");
+    });
+    await fireEvent.change(rendered.getByLabelText("Base Branch"), { target: { value: "main" } });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Launch" }));
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.branch).toBe("feature/my-feature");
+    expect(request.createBranch).toEqual({ name: "feature/my-feature", base: "main" });
+    expect(request.aiBranchDescription).toBeUndefined();
+  });
+
+  it("falls back to Direct mode with error banner when AI suggestion fails", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
       if (cmd === "list_worktree_branches") return [{ name: "main" }];
       if (cmd === "list_remote_branches") return [];
+      if (cmd === "suggest_branch_name") return { status: "error", suggestion: "", error: "timeout" };
       return [];
     });
 
-    const onLaunch = vi.fn().mockRejectedValue("[E2001] AI branch name generation failed: timeout");
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
     const rendered = await renderLaunchForm({
       projectPath: "/tmp/project",
       selectedBranch: "",
@@ -2182,19 +2310,27 @@ describe("AgentLaunchForm", () => {
       expect(rendered.queryByText(/AI branch name generation failed/)).not.toBeNull();
     });
 
+    expect(onLaunch).not.toHaveBeenCalled();
+
     // Should switch to Direct mode
     expect(rendered.queryByLabelText("New Branch Name")).not.toBeNull();
   });
 
   it("clears fallback error banner when mode is switched", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
+    invokeMock.mockImplementation(async (cmd: string, args?: { description?: string }) => {
       if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
       if (cmd === "list_worktree_branches") return [{ name: "main" }];
       if (cmd === "list_remote_branches") return [];
+      if (cmd === "suggest_branch_name") {
+        if (args?.description === "my feature") {
+          return { status: "error", suggestion: "", error: "timeout" };
+        }
+        return { status: "ok", suggestion: "feature/test", error: null };
+      }
       return [];
     });
 
-    const onLaunch = vi.fn().mockRejectedValueOnce("[E2001] AI branch name generation failed: timeout");
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
     const rendered = await renderLaunchForm({
       projectPath: "/tmp/project",
       selectedBranch: "",
