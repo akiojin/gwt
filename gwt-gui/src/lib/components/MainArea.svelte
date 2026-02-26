@@ -5,6 +5,7 @@
   import ProjectModePanel from "./ProjectModePanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
+  import PrListPanel from "./PrListPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
 
@@ -454,6 +455,11 @@
                 onWorkOnIssue={onWorkOnIssue ?? (() => {})}
                 onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
                 {onIssueCountChange}
+              />
+            {:else if tab.type === "prs"}
+              <PrListPanel
+                {projectPath}
+                onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
               />
             {:else}
               <div class="placeholder">
