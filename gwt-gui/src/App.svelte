@@ -1969,6 +1969,12 @@
   }
 
   function emitTerminalEditAction(action: "copy" | "paste") {
+    const editableEl = getActiveEditableElement(action);
+    if (editableEl && !editableEl.closest("[data-pane-id]")) {
+      void fallbackMenuEditAction(action);
+      return;
+    }
+
     const paneId = getActiveTerminalPaneId();
     if (!paneId) {
       void fallbackMenuEditAction(action);

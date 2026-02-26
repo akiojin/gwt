@@ -95,22 +95,68 @@
 
   let wasOpen = false;
 
+  function resetDialogState() {
+    // Bug report fields
+    bugTitle = "";
+    stepsToReproduce = "";
+    expectedResult = "";
+    actualResult = "";
+
+    // Feature request fields
+    featureTitle = "";
+    featureDescription = "";
+    useCase = "";
+    expectedBenefit = "";
+
+    // Diagnostic checkboxes
+    includeSystemInfo = true;
+    includeLogs = false;
+    includeScreenCapture = false;
+
+    // Collected diagnostic data
+    systemInfoText = "";
+    logsText = "";
+    logsUnavailable = false;
+    screenCaptureText = "";
+
+    // Terminal text capture state
+    terminalCaptureText = "";
+    terminalCaptureLoading = false;
+    terminalCaptureDone = false;
+
+    // Preview state
+    showPreview = false;
+    previewMarkdown = "";
+
+    // Error details toggle
+    showErrorDetails = false;
+
+    // Submit state
+    submitting = false;
+    submitMessage = "";
+    submitSuccess = false;
+    submitIssueUrl = "";
+    submitError = false;
+    submitBodyMarkdown = "";
+
+    // Repository target
+    targets = [GWT_TARGET];
+    selectedTargetIndex = 0;
+  }
+
   $effect(() => {
     if (!open) {
       wasOpen = false;
       return;
     }
 
+    if (!wasOpen) {
+      wasOpen = true;
+      resetDialogState();
+    }
+
     activeTab = mode;
     showPreview = false;
-    if (wasOpen) return;
-
-    wasOpen = true;
-    submitMessage = "";
-    submitSuccess = false;
-    submitError = false;
-    submitIssueUrl = "";
-    submitBodyMarkdown = "";
   });
 
   $effect(() => {

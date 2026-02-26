@@ -1,6 +1,6 @@
 # 実装計画: Error Reporting & Feature Suggestion
 
-**仕様ID**: `SPEC-fabb6678` | **日付**: 2026-02-22 | **仕様書**: `specs/SPEC-fabb6678/spec.md`
+**仕様ID**: `SPEC-fabb6678` | **日付**: 2026-02-26 | **仕様書**: `specs/SPEC-fabb6678/spec.md`
 
 ## 目的
 
@@ -376,6 +376,33 @@ case "help-suggest-feature":
   break;
 ```
 
+### Phase 4: ReportDialog 再オープン時の状態初期化 (US9)
+
+**目的**: 前回入力・診断状態・送信失敗状態の残留を防止し、再オープン時に常にクリーンな初期状態を保証する
+
+#### 4-1. 再オープン初期化の実装
+
+**対象ファイル**: `gwt-gui/src/lib/components/ReportDialog.svelte`
+
+- `open=false -> true` の遷移を検知し、`resetDialogState()` を実行する
+- 初期化対象:
+  - Bug/Feature 入力フィールド
+  - 診断チェック状態・診断収集結果
+  - Terminal Capture 状態（capturing/captured）
+  - Preview 状態
+  - Submit 成否メッセージとフォールバックUI表示状態
+  - Repository選択状態
+- アクティブタブは毎回 `mode` を優先し、前回タブを再利用しない
+
+#### 4-2. 回帰テストの追加
+
+**対象ファイル**: `gwt-gui/src/lib/components/ReportDialog.test.ts`
+
+- 再オープン時に Bug 入力が空に戻る
+- 再オープン時に診断チェック・Terminal Capture 状態が初期化される
+- 再オープン時に submit失敗メッセージとフォールバックUIが消える
+- 再オープン時に `mode` がアクティブタブへ反映される
+
 ## テスト
 
 ### バックエンド
@@ -393,6 +420,7 @@ case "help-suggest-feature":
 - `privacyMask`: 各マスキングパターンのユニットテスト（API キー、トークン、パスワード等）
 - `issueTemplate`: Bug Report / Feature Request テンプレート生成のテスト
 - `ReportDialog.svelte`: タブ切り替え、フィールド表示切り替え、Submit / Preview のテスト
+- `ReportDialog.svelte`: 再オープン時の状態初期化（入力、診断、送信失敗状態、mode反映）の回帰テスト
 - `diagnostics.ts`: 診断情報収集のテスト
 
 ## リスク・依存関係
@@ -411,3 +439,4 @@ case "help-suggest-feature":
 | Phase 1 | 構造化エラー + エラーバス + トースト | なし |
 | Phase 2 | 報告フォーム + GitHub Issues + マスキング | Phase 1 |
 | Phase 3 | スクリーンキャプチャ + Help メニュー | Phase 2 |
+| Phase 4 | ReportDialog再オープン時の状態初期化 | Phase 2 |
