@@ -491,6 +491,187 @@ pub fn create_remote_branch(repo_path: &Path, branch: &str, sha: &str) -> Result
     }
 }
 
+/// Fetch PR list via `gh pr list` (SPEC-prlist).
+///
+/// `state` should be "open", "closed", "merged", or "all".
+/// Returns a JSON array of PR objects.
+pub fn fetch_pr_list(
+    repo_path: &Path,
+    state: &str,
+    limit: u32,
+) -> Result<Vec<serde_json::Value>, String> {
+    let output = gh_command()
+        .args([
+            "pr",
+            "list",
+            "--state",
+            state,
+            "--json",
+            "number,title,state,isDraft,headRefName,baseRefName,author,labels,createdAt,updatedAt,url,body,reviewRequests,assignees",
+            "--limit",
+            &limit.to_string(),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run gh pr list: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh pr list failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&stdout)
+        .map_err(|e| format!("Failed to parse gh pr list output: {}", e))?;
+    Ok(parsed)
+}
+
+/// Fetch authenticated GitHub user login via `gh api user` (SPEC-prlist).
+pub fn fetch_authenticated_user(repo_path: &Path) -> Result<String, String> {
+    let output = gh_command()
+        .args(["api", "user", "--jq", ".login"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run gh api user: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh api user failed: {}", stderr.trim()));
+    }
+
+    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if login.is_empty() {
+        return Err("Empty login returned from gh api user".to_string());
+    }
+    Ok(login)
+}
+
+/// Merge a PR via `gh pr merge` (SPEC-prlist).
+///
+/// `method` should be "merge", "squash", or "rebase".
+fn split_merge_commit_message(message: &str) -> Option<(String, Option<String>)> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut lines = trimmed.lines();
+    let subject = lines.next()?.trim();
+    if subject.is_empty() {
+        return None;
+    }
+
+    let body = lines.collect::<Vec<_>>().join("\n");
+    let body = if body.trim().is_empty() {
+        None
+    } else {
+        Some(body.trim().to_string())
+    };
+
+    Some((subject.to_string(), body))
+}
+
+pub fn merge_pr(
+    repo_path: &Path,
+    pr_number: u64,
+    method: &str,
+    delete_branch: bool,
+    commit_msg: Option<&str>,
+) -> Result<String, String> {
+    let mut args = vec![
+        "pr".to_string(),
+        "merge".to_string(),
+        pr_number.to_string(),
+        format!("--{}", method),
+    ];
+
+    if delete_branch {
+        args.push("--delete-branch".to_string());
+    }
+
+    if let Some(msg) = commit_msg {
+        if let Some((subject, body)) = split_merge_commit_message(msg) {
+            args.push("--subject".to_string());
+            args.push(subject);
+            if let Some(body) = body {
+                args.push("--body".to_string());
+                args.push(body);
+            }
+        }
+    }
+
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let output = gh_command()
+        .args(&arg_refs)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run gh pr merge: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh pr merge failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(stdout)
+}
+
+/// Review a PR via `gh pr review` (SPEC-prlist).
+///
+/// `action` should be "approve", "request-changes", or "comment".
+pub fn review_pr(
+    repo_path: &Path,
+    pr_number: u64,
+    action: &str,
+    body: Option<&str>,
+) -> Result<String, String> {
+    let mut args = vec![
+        "pr".to_string(),
+        "review".to_string(),
+        pr_number.to_string(),
+        format!("--{}", action),
+    ];
+
+    if let Some(body_text) = body {
+        args.push("--body".to_string());
+        args.push(body_text.to_string());
+    }
+
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let output = gh_command()
+        .args(&arg_refs)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run gh pr review: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh pr review failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(stdout)
+}
+
+/// Mark a draft PR as ready for review via `gh pr ready` (SPEC-prlist).
+pub fn mark_pr_ready(repo_path: &Path, pr_number: u64) -> Result<String, String> {
+    let output = gh_command()
+        .args(["pr", "ready", &pr_number.to_string()])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run gh pr ready: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh pr ready failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(stdout)
+}
+
 /// Wait for a child process with a timeout.
 /// Returns `None` if the timeout is reached.
 fn wait_with_timeout(
@@ -602,6 +783,25 @@ mod tests {
     fn delete_remote_branch_returns_result() {
         // Verifies that the function signature compiles correctly
         let _: fn(&Path, &str) -> Result<(), String> = delete_remote_branch;
+    }
+
+    #[test]
+    fn split_merge_commit_message_single_line() {
+        let parsed = split_merge_commit_message("  chore: merge release  ").unwrap();
+        assert_eq!(parsed.0, "chore: merge release");
+        assert!(parsed.1.is_none());
+    }
+
+    #[test]
+    fn split_merge_commit_message_multiline() {
+        let parsed = split_merge_commit_message("feat: merge api\n\n- keep body").unwrap();
+        assert_eq!(parsed.0, "feat: merge api");
+        assert_eq!(parsed.1, Some("- keep body".to_string()));
+    }
+
+    #[test]
+    fn split_merge_commit_message_empty_returns_none() {
+        assert!(split_merge_commit_message("   \n  ").is_none());
     }
 
     // -- T003-T004: check_auth tests --

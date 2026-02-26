@@ -10,6 +10,8 @@
     onOpenCiLog,
     onUpdateBranch,
     updatingBranch = false,
+    onMerge,
+    merging = false,
   }: {
     prDetail?: PrStatusInfo | null;
     loading?: boolean;
@@ -18,6 +20,8 @@
     onOpenCiLog?: (run: WorkflowRunInfo) => void;
     onUpdateBranch?: () => Promise<void>;
     updatingBranch?: boolean;
+    onMerge?: () => void;
+    merging?: boolean;
   } = $props();
 
   let checksExpanded = $state(false);
@@ -67,6 +71,13 @@
       case "UNKNOWN":
         return "unknown";
     }
+  }
+
+  function isMergeClickable(
+    state: "OPEN" | "CLOSED" | "MERGED",
+    mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
+  ): boolean {
+    return state === "OPEN" && mergeable === "MERGEABLE";
   }
 
   function shouldShowMergeableBadge(
@@ -168,9 +179,19 @@
         <span class="pr-meta-label">Merge</span>
         <span class="pr-meta-value merge-meta-value">
           {#if shouldShowMergeableBadge(prDetail.state, prDetail.mergeStateStatus)}
-            <span class="mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}">
-              {mergeableLabel(prDetail.state, prDetail.mergeable)}
-            </span>
+            {#if isMergeClickable(prDetail.state, prDetail.mergeable) && onMerge}
+              <button
+                class="mergeable-badge-btn mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}"
+                disabled={merging}
+                onclick={() => onMerge?.()}
+              >
+                {merging ? "Merging..." : mergeableLabel(prDetail.state, prDetail.mergeable)}
+              </button>
+            {:else}
+              <span class="mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}">
+                {mergeableLabel(prDetail.state, prDetail.mergeable)}
+              </span>
+            {/if}
           {/if}
           {#if shouldShowMergeStateBadge(prDetail.state, prDetail.mergeable, prDetail.mergeStateStatus)}
             <span class="merge-state-badge {mergeStateClass(prDetail.mergeStateStatus!)}">
@@ -364,6 +385,22 @@
   .mergeable-badge.unknown {
     background: rgba(128, 128, 128, 0.15);
     color: var(--text-muted);
+  }
+
+  .mergeable-badge-btn {
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .mergeable-badge-btn:hover:not(:disabled) {
+    border-color: var(--green);
+    background: rgba(63, 185, 80, 0.25);
+  }
+
+  .mergeable-badge-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .label-pill {
