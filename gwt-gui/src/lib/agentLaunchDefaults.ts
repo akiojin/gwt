@@ -2,6 +2,7 @@ export const AGENT_LAUNCH_DEFAULTS_STORAGE_KEY = "gwt.launchAgentDefaults.v1";
 
 export type LaunchDefaultsSessionMode = "normal" | "continue" | "resume";
 export type LaunchDefaultsRuntimeTarget = "host" | "docker";
+export type LaunchDefaultsBranchNamingMode = "direct" | "ai-suggest";
 
 export type LaunchDefaults = {
   selectedAgent: string;
@@ -20,6 +21,7 @@ export type LaunchDefaults = {
   dockerRecreate: boolean;
   dockerKeep: boolean;
   selectedShell: string;
+  branchNamingMode: LaunchDefaultsBranchNamingMode;
 };
 
 type StoredLaunchDefaults = {
@@ -49,6 +51,10 @@ function normalizeSessionMode(value: unknown): LaunchDefaultsSessionMode {
 
 function normalizeRuntimeTarget(value: unknown): LaunchDefaultsRuntimeTarget {
   return normalizeString(value) === "docker" ? "docker" : "host";
+}
+
+function normalizeBranchNamingMode(value: unknown): LaunchDefaultsBranchNamingMode {
+  return normalizeString(value) === "direct" ? "direct" : "ai-suggest";
 }
 
 function sanitizeStringRecord(value: unknown): Record<string, string> {
@@ -83,6 +89,7 @@ function sanitizeLaunchDefaults(value: unknown): LaunchDefaults {
     dockerRecreate: raw.dockerRecreate === true,
     dockerKeep: raw.dockerKeep === true,
     selectedShell: normalizeString(raw.selectedShell),
+    branchNamingMode: normalizeBranchNamingMode(raw.branchNamingMode),
   };
 }
 

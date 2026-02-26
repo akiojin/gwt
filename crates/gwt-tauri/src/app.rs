@@ -603,6 +603,7 @@ pub fn build_app(
                 let _ = window.emit("window-will-hide", ());
                 api.prevent_close();
                 let _ = window.hide();
+                state.remove_window_from_history(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
@@ -669,7 +670,8 @@ pub fn build_app(
             crate::commands::sessions::get_agent_sidebar_view,
             crate::commands::sessions::get_branch_session_summary,
             crate::commands::sessions::rebuild_all_branch_session_summaries,
-            crate::commands::branch_suggest::suggest_branch_names,
+            crate::commands::branch_suggest::suggest_branch_name,
+            crate::commands::branch_suggest::is_ai_configured,
             crate::commands::terminal::launch_terminal,
             crate::commands::terminal::spawn_shell,
             crate::commands::terminal::launch_agent,

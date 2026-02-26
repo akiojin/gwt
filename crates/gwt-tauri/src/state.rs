@@ -1053,4 +1053,74 @@ mod tests {
             "re-armed confirm should be active"
         );
     }
+
+    #[test]
+    fn window_hidden_removed_from_cycling() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+
+        // Simulate closing window B (CloseRequested → hide → remove from history)
+        state.remove_window_from_history("B");
+
+        // B should not appear in cycling
+        assert_eq!(state.next_window(), Some("C".to_string()));
+        assert_eq!(state.next_window(), Some("A".to_string()));
+        assert_eq!(state.next_window(), Some("C".to_string()));
+    }
+
+    #[test]
+    fn window_refocused_after_hide_readded() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+
+        // Simulate closing B
+        state.remove_window_from_history("B");
+        // History: [A, C]
+
+        // Simulate B being reopened and focused
+        state.push_window_focus("B");
+        // History: [B, A, C]
+
+        assert_eq!(state.next_window(), Some("A".to_string()));
+        assert_eq!(state.next_window(), Some("C".to_string()));
+        assert_eq!(state.next_window(), Some("B".to_string()));
+    }
+
+    #[test]
+    fn hide_all_but_one_prevents_cycling() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+
+        // Close B and C
+        state.remove_window_from_history("B");
+        state.remove_window_from_history("C");
+        // History: [A]
+
+        assert_eq!(state.next_window(), None);
+    }
+
+    #[test]
+    fn most_recent_window_excludes_hidden() {
+        let state = AppState::new();
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B]
+
+        assert_eq!(state.most_recent_window(), Some("A".to_string()));
+
+        // Close A (most recent)
+        state.remove_window_from_history("A");
+        // History: [B]
+
+        assert_eq!(state.most_recent_window(), Some("B".to_string()));
+    }
 }

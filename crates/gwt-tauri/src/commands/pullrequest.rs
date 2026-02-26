@@ -264,6 +264,63 @@ where
     thread::spawn(move || pipe.map(read_pipe_to_string).unwrap_or_default())
 }
 
+fn select_repo_merge_method(
+    allow_merge_commit: bool,
+    allow_squash_merge: bool,
+    allow_rebase_merge: bool,
+) -> Option<&'static str> {
+    if allow_merge_commit {
+        Some("merge")
+    } else if allow_squash_merge {
+        Some("squash")
+    } else if allow_rebase_merge {
+        Some("rebase")
+    } else {
+        None
+    }
+}
+
+fn resolve_repo_merge_method(owner: &str, repo: &str, repo_path: &Path) -> Result<String, String> {
+    use gwt_core::git::gh_cli::gh_command;
+
+    let output = gh_command()
+        .args(["api", &format!("/repos/{owner}/{repo}")])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to fetch repository settings: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Err("Failed to fetch repository settings".to_string());
+        }
+        return Err(format!("Failed to fetch repository settings: {detail}"));
+    }
+
+    let repo_info: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse repository settings: {}", e))?;
+
+    let allow_merge_commit = repo_info
+        .get("allow_merge_commit")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let allow_squash_merge = repo_info
+        .get("allow_squash_merge")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let allow_rebase_merge = repo_info
+        .get("allow_rebase_merge")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let merge_method =
+        select_repo_merge_method(allow_merge_commit, allow_squash_merge, allow_rebase_merge)
+            .ok_or_else(|| "No merge methods are enabled for this repository".to_string())?;
+
+    Ok(merge_method.to_string())
+}
+
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
     let trimmed = branch.trim();
     let Some((first, rest)) = trimmed.split_once('/') else {
@@ -935,6 +992,7 @@ fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<Strin
         return Err(format!("Invalid repo slug: {}", slug));
     }
     let (owner, repo) = (parts[0], parts[1]);
+    let merge_method = resolve_repo_merge_method(owner, repo, &repo_path)?;
 
     let mut child = gh_command()
         .args([
@@ -942,6 +1000,8 @@ fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<Strin
             "-X",
             "PUT",
             &format!("/repos/{owner}/{repo}/pulls/{pr_number}/merge"),
+            "-f",
+            &format!("merge_method={merge_method}"),
         ])
         .current_dir(&repo_path)
         .stdout(Stdio::piped())
@@ -1801,5 +1861,22 @@ mod tests {
         let unknown_from_final = collect_unknown_branches(&final_statuses);
         assert_eq!(unknown_from_raw, vec!["feature/x".to_string()]);
         assert!(unknown_from_final.is_empty());
+    }
+
+    #[test]
+    fn test_select_repo_merge_method_prefers_merge_commit() {
+        assert_eq!(select_repo_merge_method(true, true, true), Some("merge"));
+        assert_eq!(select_repo_merge_method(true, false, false), Some("merge"));
+    }
+
+    #[test]
+    fn test_select_repo_merge_method_falls_back_to_squash_then_rebase() {
+        assert_eq!(select_repo_merge_method(false, true, true), Some("squash"));
+        assert_eq!(select_repo_merge_method(false, false, true), Some("rebase"));
+    }
+
+    #[test]
+    fn test_select_repo_merge_method_returns_none_when_all_disabled() {
+        assert_eq!(select_repo_merge_method(false, false, false), None);
     }
 }

@@ -318,7 +318,7 @@ export interface SessionSummaryResult {
 
 export interface BranchSuggestResult {
   status: "ok" | "ai-not-configured" | "error";
-  suggestions: string[];
+  suggestion: string;
   error?: string | null;
 }
 
@@ -566,6 +566,7 @@ export interface LaunchAgentRequest {
   dockerKeep?: boolean;
   issueNumber?: number;
   terminalShell?: string;
+  aiBranchDescription?: string;
 }
 
 // PR Status types (SPEC-d6949f99)
