@@ -1,6 +1,6 @@
 {
   "productName": "gwt",
-  "version": "7.12.6",
+  "version": "7.12.7",
   "identifier": "com.akiojin.gwt",
   "build": {
     "frontendDist": "../../gwt-gui/dist",
