@@ -294,9 +294,6 @@
     const rootEl = containerEl;
     if (!rootEl) return;
     let cancelled = false;
-    let receivedLiveOutput = false;
-    let restoringScrollback = true;
-    const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
     const wheelScrollState: WheelScrollState = {
       axis: null,
@@ -463,45 +460,57 @@
       writeToTerminalBytes(Array.from(bytes));
     });
 
-    // Subscribe first so startup output isn't lost before the listener attaches.
+    // Step 1: Set up the event listener (backend won't emit yet because
+    // frontend_ready is false, so no data loss).
+    // Step 2: Signal readiness via terminal_ready and write initial data.
     (async () => {
-      // Listen to terminal output from backend.
+      const pendingLiveOutput: Uint8Array[] = [];
+      let liveOutputReady = false;
+      const flushPendingLiveOutput = () => {
+        if (cancelled) {
+          pendingLiveOutput.length = 0;
+          liveOutputReady = true;
+          return;
+        }
+
+        while (pendingLiveOutput.length > 0) {
+          const chunk = pendingLiveOutput.shift();
+          if (!chunk) continue;
+          term.write(chunk);
+        }
+        liveOutputReady = true;
+      };
+
       const unlistenFn = await setupEventListener(term, (bytes) => {
-        receivedLiveOutput = true;
-        if (restoringScrollback) {
-          pendingLiveOutputChunks.push(bytes);
+        if (cancelled) return;
+        if (!liveOutputReady) {
+          pendingLiveOutput.push(bytes);
           return;
         }
         term.write(bytes);
       });
       if (cancelled) {
-        if (unlistenFn) {
-          unlistenFn();
-        }
+        unlistenFn?.();
         return;
       }
       if (unlistenFn) {
         unlisten = unlistenFn;
       }
 
-      // Best-effort: show recent scrollback so restored tabs aren't blank.
+      // Signal readiness and get initial scrollback as raw bytes (ANSI preserved).
       try {
         const { invoke } = await import("$lib/tauriInvoke");
-        const text = await invoke<string>("capture_scrollback_tail", {
+        const data = await invoke<number[]>("terminal_ready", {
           paneId,
           maxBytes: 64 * 1024,
         });
-        if (text) {
-          term.write(text);
+        if (data && data.length > 0) {
+          term.write(new Uint8Array(data));
         }
       } catch {
         // Ignore: not available outside Tauri runtime.
       } finally {
-        restoringScrollback = false;
-        for (const chunk of pendingLiveOutputChunks) {
-          term.write(chunk);
-        }
-        pendingLiveOutputChunks.length = 0;
+        flushPendingLiveOutput();
       }
     })();
 

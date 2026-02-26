@@ -11,6 +11,7 @@ use gwt_core::config::ProfilesConfig;
 use gwt_core::StructuredError;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -906,14 +907,18 @@ fn resolve_range_for_version(
 }
 
 fn list_version_tags(repo_path: &Path, max: Option<usize>) -> Result<Vec<String>, String> {
-    let args = vec![
-        "tag".to_string(),
-        "--list".to_string(),
-        "v*".to_string(),
-        "--sort=-v:refname".to_string(),
-    ];
+    let args = vec!["tag".to_string(), "--list".to_string(), "v*".to_string()];
     let out = git_output(repo_path, &args)?;
-    let mut tags: Vec<String> = out
+    let mut tags = parse_and_sort_version_tags(&out);
+
+    if let Some(n) = max {
+        tags.truncate(n);
+    }
+    Ok(tags)
+}
+
+fn parse_and_sort_version_tags(raw: &str) -> Vec<String> {
+    let mut tags: Vec<String> = raw
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
@@ -921,10 +926,22 @@ fn list_version_tags(repo_path: &Path, max: Option<usize>) -> Result<Vec<String>
         .map(|s| s.to_string())
         .collect();
 
-    if let Some(n) = max {
-        tags.truncate(n);
+    tags.sort_by(|a, b| compare_version_tag_desc(a, b));
+    tags
+}
+
+fn compare_version_tag_desc(a: &str, b: &str) -> Ordering {
+    match (parse_semver_tag(a), parse_semver_tag(b)) {
+        (Some(ver_a), Some(ver_b)) => ver_b.cmp(&ver_a).then_with(|| b.cmp(a)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => b.cmp(a),
     }
-    Ok(tags)
+}
+
+fn parse_semver_tag(tag: &str) -> Option<semver::Version> {
+    let raw = tag.strip_prefix('v')?;
+    semver::Version::parse(raw).ok()
 }
 
 fn rev_parse(repo_path: &Path, rev: &str) -> Result<String, String> {
@@ -1170,6 +1187,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_and_sort_version_tags_orders_semver_descending() {
+        let raw = "v7.9.0\nv7.12.6\nv7.10.0\nv7.12.5\n";
+        let sorted = parse_and_sort_version_tags(raw);
+        assert_eq!(
+            sorted,
+            vec![
+                "v7.12.6".to_string(),
+                "v7.12.5".to_string(),
+                "v7.10.0".to_string(),
+                "v7.9.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_and_sort_version_tags_keeps_non_semver_tags_stable_and_last() {
+        let raw = "v1.0.0\nv1.0\nv2.0.0\nv1.0.1\n";
+        let sorted = parse_and_sort_version_tags(raw);
+        assert_eq!(
+            sorted,
+            vec![
+                "v2.0.0".to_string(),
+                "v1.0.1".to_string(),
+                "v1.0.0".to_string(),
+                "v1.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn list_project_versions_includes_unreleased_and_tags() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
@@ -1187,6 +1234,8 @@ mod tests {
         assert!(!out.items.is_empty());
         assert_eq!(out.items[0].id, "unreleased");
         assert_eq!(out.items[0].range_to, "HEAD");
+        assert_eq!(out.items[1].id, "v1.0.1");
+        assert_eq!(out.items[2].id, "v1.0.0");
         assert!(out.items.iter().any(|i| i.id == "v1.0.1"));
         assert!(out.items.iter().any(|i| i.id == "v1.0.0"));
     }

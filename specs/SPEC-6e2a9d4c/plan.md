@@ -49,6 +49,25 @@
 - `cargo test -q -p gwt-core terminal::pane`
 - `cargo test -q -p gwt-tauri commands::terminal`
 
+### Phase 4: Backend-gated event emission（根本修正）
+
+PTY出力とフロントエンドリスナーのレースコンディションを根本的に解消する。
+
+- `crates/gwt-core/src/terminal/pane.rs` に `frontend_ready` フィールドとアクセサ、`read_scrollback_tail_raw` メソッドを追加する。
+- `crates/gwt-tauri/src/commands/terminal.rs` の `stream_pty_output` メインreadループに ready gate を追加し、`frontend_ready` が false の間は `terminal-output` イベントを emit しない。
+- `wsl_prompt_detect_and_inject` の reader スレッドにも同一の ready gate を適用する。
+- `terminal_ready` Tauri コマンドを追加し、scrollback の raw bytes（ANSI 除去なし）を返しつつ `frontend_ready` を true に設定する。
+- `crates/gwt-tauri/src/app.rs` の invoke_handler に `terminal_ready` を登録する。
+- `gwt-gui/src/lib/terminal/TerminalView.svelte` の onMount を `terminal_ready` ベースのフローへ整理し、`terminal_ready` 完了までの一時ライブ出力バッファを補助レイヤーとして維持する。
+- テスト更新: `TerminalView.test.ts` と `pane.rs` のテストを新しいフローに合わせる。
+
+## テスト（Phase 4）
+
+- `cargo test -q -p gwt-core terminal::pty`
+- `cargo test -q -p gwt-core terminal::pane`
+- `cargo test -q -p gwt-tauri commands::terminal`
+- `cd gwt-gui && pnpm test src/lib/terminal/TerminalView.test.ts`
+
 ## 非目標
 
 - Launch UI のデザイン変更
