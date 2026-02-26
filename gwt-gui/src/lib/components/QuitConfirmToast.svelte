@@ -6,6 +6,34 @@
   let visible = $state(false);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let unlisten: (() => void) | null = null;
+  const quitShortcutLabel = detectQuitShortcutLabel();
+
+  function detectQuitShortcutLabel(): string {
+    if (typeof navigator === "undefined") return "Quit";
+    const navWithUAData = navigator as Navigator & {
+      userAgentData?: { platform?: string };
+    };
+    const platformHint =
+      navWithUAData.userAgentData?.platform ||
+      navigator.platform ||
+      navigator.userAgent ||
+      "";
+    const normalized = platformHint.toLowerCase();
+    if (
+      normalized.includes("mac") ||
+      normalized.includes("iphone") ||
+      normalized.includes("ipad") ||
+      normalized.includes("ipod")
+    ) {
+      return "\u2318Q";
+    }
+    return "Alt+F4";
+  }
+
+  function isQuitShortcut(event: KeyboardEvent): boolean {
+    const key = event.key.toLowerCase();
+    return (event.metaKey && key === "q") || (event.altKey && key === "f4");
+  }
 
   function clearTimer() {
     if (timer) {
@@ -24,8 +52,9 @@
     if (visible) hide();
   }
 
-  function onKeyDown() {
-    if (visible) hide();
+  function onKeyDown(event: KeyboardEvent) {
+    if (!visible || isQuitShortcut(event)) return;
+    hide();
   }
 
   onMount(async () => {
@@ -51,7 +80,7 @@
 
 {#if visible}
   <div class="quit-confirm-toast fade-in" data-testid="quit-confirm-toast">
-    Press &#x2318;Q again to quit
+    Press {quitShortcutLabel} again to quit
   </div>
 {/if}
 

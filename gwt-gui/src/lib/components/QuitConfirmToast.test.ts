@@ -41,6 +41,14 @@ function countInvokeCalls(name: string): number {
   return invokeMock.mock.calls.filter((c) => c[0] === name).length;
 }
 
+function getToastText(rendered: ReturnType<typeof render>): string | null {
+  return rendered.queryByTestId("quit-confirm-toast")?.textContent?.trim() ?? null;
+}
+
+function expectToastVisible(rendered: ReturnType<typeof render>) {
+  expect(rendered.getByTestId("quit-confirm-toast")).toBeTruthy();
+}
+
 describe("QuitConfirmToast", () => {
   beforeEach(() => {
     cleanup();
@@ -58,7 +66,7 @@ describe("QuitConfirmToast", () => {
     const rendered = await renderQuitConfirmToast();
 
     await waitFor(() => {
-      expect(rendered.queryByText("Press ⌘Q again to quit")).toBeNull();
+      expect(rendered.queryByTestId("quit-confirm-toast")).toBeNull();
     });
   });
 
@@ -68,7 +76,10 @@ describe("QuitConfirmToast", () => {
     await emitTauriEvent("quit-confirm-show");
 
     await waitFor(() => {
-      expect(rendered.getByText("Press ⌘Q again to quit")).toBeTruthy();
+      expectToastVisible(rendered);
+      const text = getToastText(rendered);
+      expect(text).toContain("Press");
+      expect(text).toContain("again to quit");
     });
   });
 
@@ -80,13 +91,13 @@ describe("QuitConfirmToast", () => {
     await emitTauriEvent("quit-confirm-show");
 
     await waitFor(() => {
-      expect(rendered.getByText("Press ⌘Q again to quit")).toBeTruthy();
+      expectToastVisible(rendered);
     });
 
     vi.advanceTimersByTime(3000);
 
     await waitFor(() => {
-      expect(rendered.queryByText("Press ⌘Q again to quit")).toBeNull();
+      expect(rendered.queryByTestId("quit-confirm-toast")).toBeNull();
     });
 
     expect(countInvokeCalls("cancel_quit_confirm")).toBe(1);
@@ -98,13 +109,13 @@ describe("QuitConfirmToast", () => {
     await emitTauriEvent("quit-confirm-show");
 
     await waitFor(() => {
-      expect(rendered.getByText("Press ⌘Q again to quit")).toBeTruthy();
+      expectToastVisible(rendered);
     });
 
     await fireEvent.mouseDown(document);
 
     await waitFor(() => {
-      expect(rendered.queryByText("Press ⌘Q again to quit")).toBeNull();
+      expect(rendered.queryByTestId("quit-confirm-toast")).toBeNull();
     });
 
     expect(countInvokeCalls("cancel_quit_confirm")).toBe(1);
@@ -116,16 +127,52 @@ describe("QuitConfirmToast", () => {
     await emitTauriEvent("quit-confirm-show");
 
     await waitFor(() => {
-      expect(rendered.getByText("Press ⌘Q again to quit")).toBeTruthy();
+      expectToastVisible(rendered);
     });
 
     await fireEvent.keyDown(document, { key: "a" });
 
     await waitFor(() => {
-      expect(rendered.queryByText("Press ⌘Q again to quit")).toBeNull();
+      expect(rendered.queryByTestId("quit-confirm-toast")).toBeNull();
     });
 
     expect(countInvokeCalls("cancel_quit_confirm")).toBe(1);
+  });
+
+  it("does not hide toast on Cmd+Q keydown", async () => {
+    const rendered = await renderQuitConfirmToast();
+
+    await emitTauriEvent("quit-confirm-show");
+
+    await waitFor(() => {
+      expectToastVisible(rendered);
+    });
+
+    await fireEvent.keyDown(document, { key: "q", metaKey: true });
+
+    await waitFor(() => {
+      expectToastVisible(rendered);
+    });
+
+    expect(countInvokeCalls("cancel_quit_confirm")).toBe(0);
+  });
+
+  it("does not hide toast on Alt+F4 keydown", async () => {
+    const rendered = await renderQuitConfirmToast();
+
+    await emitTauriEvent("quit-confirm-show");
+
+    await waitFor(() => {
+      expectToastVisible(rendered);
+    });
+
+    await fireEvent.keyDown(document, { key: "F4", altKey: true });
+
+    await waitFor(() => {
+      expectToastVisible(rendered);
+    });
+
+    expect(countInvokeCalls("cancel_quit_confirm")).toBe(0);
   });
 
   it("has fade-in animation class when visible", async () => {

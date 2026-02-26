@@ -53,9 +53,8 @@
 ### Phase 3: クリーンアップ
 
 1. **従来のエージェント警告ダイアログの削除**
-   - `app.rs` の macOS 限定ダイアログロジック削除
-   - `exit_confirm_inflight` フィールドの廃止（不要になるため）
-   - `try_begin_exit_confirm` / `end_exit_confirm` 関数の削除
+   - `app.rs` の ExitRequested 側にある macOS 限定ダイアログロジックは削除済み
+   - `exit_confirm_inflight` と `try_begin_exit_confirm` / `end_exit_confirm` は tray quit 側で利用中のため、当仕様では削除対象から外し follow-up として扱う
 
 ## テスト
 

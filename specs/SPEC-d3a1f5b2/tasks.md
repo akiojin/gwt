@@ -6,14 +6,14 @@
 
 ## Phase 2: バックエンド - 状態管理
 
-- [x] T002 [US1] AppState に `quit_confirm_requested_at: Mutex<Option<Instant>>` を追加する `crates/gwt-tauri/src/state.rs`
+- [x] T002 [US1] AppState に quit-confirm の開始時刻を保持する状態を追加する `crates/gwt-tauri/src/state.rs`
 - [x] T003 [US1] quit_confirm 状態管理のユニットテストを書く（TDD: RED） `crates/gwt-tauri/src/state.rs`
 - [x] T004 [US1] quit_confirm 状態管理のメソッドを実装する（TDD: GREEN） `crates/gwt-tauri/src/state.rs`
 
 ## Phase 3: バックエンド - ExitRequested ハンドラ
 
-- [x] T005 [US1][US3][US4][US5] ExitRequested ハンドラの二重確認ロジックテストを書く（TDD: RED） `crates/gwt-tauri/src/app.rs`
-- [x] T006 [US1][US3][US4][US5] ExitRequested ハンドラを二重確認ロジックに書き換える `crates/gwt-tauri/src/app.rs`
+- [x] T005 [US1/US3/US4/US5] ExitRequested ハンドラの二重確認ロジックテストを書く（TDD: RED） `crates/gwt-tauri/src/app.rs`
+- [x] T006 [US1/US3/US4/US5] ExitRequested ハンドラを二重確認ロジックに書き換える `crates/gwt-tauri/src/app.rs`
 - [x] T007 [US2] `cancel_quit_confirm` Tauri コマンドを追加する `crates/gwt-tauri/src/commands/`
 - [x] T008 [US4] エージェント警告ダイアログのロジックをExitRequestedから削除する `crates/gwt-tauri/src/app.rs`
 
@@ -26,5 +26,5 @@
 
 ## Phase 5: クリーンアップ
 
-- [ ] T013 [US4] exit_confirm_inflight フィールドと関連関数（try_begin_exit_confirm / end_exit_confirm）を削除する `crates/gwt-tauri/src/state.rs` `crates/gwt-tauri/src/app.rs`
+- [ ] T013 [US4] `exit_confirm_inflight` と関連ロジックの整理（tray quit 側で利用中のため follow-up で扱う） `crates/gwt-tauri/src/state.rs` `crates/gwt-tauri/src/app.rs`
 - [x] T014 [P] cargo clippy / cargo test / svelte-check / vitest 全パスを確認する
