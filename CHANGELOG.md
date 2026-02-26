@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.13.0] - 2026-02-26
+
+### Bug Fixes
+
+- Harden cmd+q quit confirmation flow (#1247)
+- **gui:** マージ後PR表示の更新停止とMergeモーダルのEscape不達を修正 (#1250)
+- **version-history:** Refresh tags from remote for issue #1242 (#1251)
+- Prevent Launch Agent freeze on issue prefill (#1249) (#1252)
+- **gui:** Align AI branch launch naming and from-issue gating (#1253)
+- PR再試行ステータスの判定とrepoKey適用を修正 (#1255)
+- Force utf-8 for windows agent terminal launch (#1259)
+- Preserve known merge status and wire retrying in PR tab (#1258)
+
+### Features
+
+- Add PR dashboard and stabilize polling/cache/merge behavior (#1248)
+- Add PR dashboard and harden merge/window flows (#1254)
+
 ## [7.12.7] - 2026-02-26
 
 ### Bug Fixes
