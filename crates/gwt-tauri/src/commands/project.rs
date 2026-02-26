@@ -730,6 +730,12 @@ pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), Str
     Ok(())
 }
 
+/// Cancel the "Press ⌘Q again to quit" confirmation state.
+#[tauri::command]
+pub fn cancel_quit_confirm(state: State<AppState>) {
+    state.cancel_quit_confirm();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

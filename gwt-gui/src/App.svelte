@@ -27,6 +27,7 @@
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
+  import QuitConfirmToast from "./lib/components/QuitConfirmToast.svelte";
   import ReportDialog from "./lib/components/ReportDialog.svelte";
   import {
     formatWindowTitle,
@@ -77,6 +78,7 @@
     openExternalUrl,
   } from "./lib/openExternalUrl";
   import { errorBus, type StructuredError } from "./lib/errorBus";
+  import { toastBus } from "./lib/toastBus";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -349,6 +351,11 @@
     toastMessage = null;
     toastAction = null;
   }
+
+  // Subscribe to toast bus for success/info notifications (SPEC-merge-pr FR-006)
+  const unsubToastBus = toastBus.subscribe((event) => {
+    showToast(event.message, event.durationMs ?? 5000);
+  });
 
   // Subscribe to error bus for report-worthy errors
   const unsubErrorBus = errorBus.subscribe((error) => {
@@ -2775,6 +2782,8 @@
     onClose={() => { showAgentLaunch = false; prefillIssue = null; }}
   />
 {/if}
+
+<QuitConfirmToast />
 
 <CleanupModal
   open={showCleanupModal}
