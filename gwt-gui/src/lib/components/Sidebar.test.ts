@@ -1738,6 +1738,7 @@ describe("Sidebar", () => {
         return {
           statuses: { "feature/alpha": initialPrStatus },
           ghStatus: { status: "available", version: "2.0.0" },
+          repoKey: "/tmp/project",
         };
       }
       return [];
@@ -1812,6 +1813,7 @@ describe("Sidebar", () => {
         return {
           statuses: { "feature/beta": initialPrStatus },
           ghStatus: { status: "available", version: "2.0.0" },
+          repoKey: "/tmp/project-beta",
         };
       }
       return [];
@@ -1841,6 +1843,74 @@ describe("Sidebar", () => {
     });
 
     // Badge should still have pulse (retrying event was ignored)
+    await new Promise((r) => setTimeout(r, 50));
+    const badgeAfter = rendered.container.querySelector(".pr-badge");
+    expect(badgeAfter?.classList.contains("pulse")).toBe(true);
+  });
+
+  it("does not update pollingStatuses when pr-status-updated event repoKey differs", async () => {
+    const branchA = {
+      ...branchFixture,
+      name: "feature/gamma",
+      commit_timestamp: 1_700_000_070,
+    };
+
+    const initialPrStatus = {
+      number: 77,
+      state: "OPEN" as const,
+      url: "https://github.com/test/repo/pull/77",
+      mergeable: "UNKNOWN" as const,
+      baseBranch: "main",
+      headBranch: "feature/gamma",
+      checkSuites: [],
+      retrying: true,
+    };
+
+    const resolvedPrStatus = {
+      number: 77,
+      state: "OPEN" as const,
+      url: "https://github.com/test/repo/pull/77",
+      mergeable: "MERGEABLE" as const,
+      baseBranch: "main",
+      headBranch: "feature/gamma",
+      checkSuites: [],
+      retrying: false,
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [branchA];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/gamma": initialPrStatus },
+          ghStatus: { status: "available", version: "2.0.0" },
+          repoKey: "/tmp/project-gamma",
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project-gamma",
+      onBranchSelect: vi.fn(),
+      refreshKey: 0,
+      mode: "branch",
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    const initialBadge = rendered.container.querySelector(".pr-badge");
+    expect(initialBadge?.classList.contains("pulse")).toBe(true);
+
+    await emitTauriEvent("pr-status-updated", {
+      repoKey: "/tmp/another-project",
+      branch: "feature/gamma",
+      status: resolvedPrStatus,
+    });
+
     await new Promise((r) => setTimeout(r, 50));
     const badgeAfter = rendered.container.querySelector(".pr-badge");
     expect(badgeAfter?.classList.contains("pulse")).toBe(true);

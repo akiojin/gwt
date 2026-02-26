@@ -649,6 +649,7 @@ export interface ReviewComment {
 export interface PrStatusResponse {
   statuses: Record<string, PrStatusLite | null>;
   ghStatus: GhCliStatus;
+  repoKey?: string | null;
 }
 
 // === Project Mode 3-Layer Type Definitions ===

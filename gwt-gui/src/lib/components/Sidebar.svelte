@@ -92,6 +92,7 @@
   const PR_POLL_VISIBILITY_REFRESH_MIN_GAP_MS = 5_000;
   let pollingStatuses: Record<string, PrStatusLite | null> = $state({});
   let pollingGhCliStatus: GhCliStatus | null = $state(null);
+  let pollingRepoKey: string | null = $state(null);
   let prPollingBootstrappedPath: string | null = null;
   let prPollingActivePath: string | null = null;
   const prPollingInFlightPaths = new Set<string>();
@@ -105,6 +106,7 @@
       prPollingBootstrappedPath = null;
       pollingStatuses = {};
       pollingGhCliStatus = null;
+      pollingRepoKey = null;
     }
 
     if (!path) {
@@ -177,6 +179,7 @@
 
         if (queryBranches.length === 0) {
           pollingStatuses = {};
+          pollingRepoKey = null;
           return;
         }
         if (markBootstrap) {
@@ -186,6 +189,7 @@
         const result = await invoke<{
           statuses: Record<string, PrStatusLite | null>;
           ghStatus: GhCliStatus;
+          repoKey?: string | null;
         }>("fetch_pr_status", { projectPath: path, branches: queryBranches });
         if (!destroyed) {
           const statuses = result.statuses ?? {};
@@ -196,6 +200,7 @@
           }
           pollingStatuses = mappedStatuses;
           pollingGhCliStatus = result.ghStatus ?? null;
+          pollingRepoKey = result.repoKey ?? null;
         }
       } catch {
         // Polling failure is silent — keep stale data
@@ -254,7 +259,8 @@
           branch: string;
           status: PrStatusLite;
         }>("pr-status-updated", (event) => {
-          const { branch: eventBranch, status } = event.payload;
+          const { repoKey, branch: eventBranch, status } = event.payload;
+          if (!pollingRepoKey || repoKey !== pollingRepoKey) return;
           if (status.retrying) return;
           // Find matching entry in pollingStatuses by headBranch
           const next = { ...pollingStatuses };
