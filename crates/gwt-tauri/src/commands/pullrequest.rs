@@ -47,6 +47,7 @@ pub struct PrStatusLiteSummary {
     pub base_branch: String,
     pub head_branch: String,
     pub check_suites: Vec<WorkflowRunSummary>,
+    pub retrying: bool,
 }
 
 /// Serializable workflow run info for the frontend
@@ -284,6 +285,7 @@ fn to_pr_status_summary(info: &PrStatusInfo) -> PrStatusLiteSummary {
             .iter()
             .map(to_workflow_run_summary)
             .collect(),
+        retrying: false,
     }
 }
 
@@ -1012,6 +1014,7 @@ mod tests {
                     conclusion: Some("success".to_string()),
                     is_required: None,
                 }],
+                retrying: false,
             }),
         );
         statuses.insert("feature/y".to_string(), None);
@@ -1238,5 +1241,42 @@ mod tests {
     #[test]
     fn test_pr_merge_timeout_value() {
         assert_eq!(PR_MERGE_TIMEOUT.as_secs(), 15);
+    }
+
+    // ==========================================================
+    // T001: PrStatusLiteSummary retrying field serialization
+    // ==========================================================
+
+    #[test]
+    fn test_pr_status_lite_summary_retrying_serialization() {
+        let summary_retrying = PrStatusLiteSummary {
+            number: 1,
+            state: "OPEN".to_string(),
+            url: "https://example.com/1".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: None,
+            author: "alice".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/a".to_string(),
+            check_suites: vec![],
+            retrying: true,
+        };
+        let json = serde_json::to_string(&summary_retrying).unwrap();
+        assert!(json.contains("\"retrying\":true"));
+
+        let summary_not_retrying = PrStatusLiteSummary {
+            number: 2,
+            state: "OPEN".to_string(),
+            url: "https://example.com/2".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: None,
+            author: "bob".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/b".to_string(),
+            check_suites: vec![],
+            retrying: false,
+        };
+        let json = serde_json::to_string(&summary_not_retrying).unwrap();
+        assert!(json.contains("\"retrying\":false"));
     }
 }
