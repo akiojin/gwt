@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone)]
@@ -117,8 +117,10 @@ pub struct AppState {
     /// Tauri events are lost).
     pub launch_results: Mutex<HashMap<String, crate::commands::terminal::LaunchFinishedPayload>>,
     pub is_quitting: AtomicBool,
+    /// Timestamp of the first Cmd+Q press for "Press ⌘Q again to quit" flow.
+    pub quit_confirm_requested_at: Mutex<Option<Instant>>,
     /// Prevent multiple exit confirmation dialogs from showing at once.
-    #[cfg(any(not(test), target_os = "macos"))]
+    #[cfg(not(test))]
     pub exit_confirm_inflight: AtomicBool,
     pub os_env: Arc<RwLock<HashMap<String, String>>>,
     pub os_env_source: Arc<RwLock<EnvSource>>,
@@ -159,7 +161,8 @@ impl AppState {
             launch_jobs: Mutex::new(HashMap::new()),
             launch_results: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
-            #[cfg(any(not(test), target_os = "macos"))]
+            quit_confirm_requested_at: Mutex::new(None),
+            #[cfg(not(test))]
             exit_confirm_inflight: AtomicBool::new(false),
             os_env: Arc::new(RwLock::new(initial_env)),
             os_env_source: Arc::new(RwLock::new(EnvSource::ProcessEnv)),
@@ -430,6 +433,39 @@ impl AppState {
 
     pub fn request_quit(&self) {
         self.is_quitting.store(true, Ordering::SeqCst);
+    }
+
+    /// Begin the quit-confirm window ("Press ⌘Q again to quit").
+    ///
+    /// Returns `true` if this is the first Cmd+Q (newly entered confirm state),
+    /// `false` if already in confirm state.
+    pub fn begin_quit_confirm(&self) -> bool {
+        let Ok(mut slot) = self.quit_confirm_requested_at.lock() else {
+            return false;
+        };
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(Instant::now());
+        true
+    }
+
+    /// Returns `true` if quit confirm was started within `timeout` duration.
+    pub fn is_quit_confirm_active(&self, timeout: Duration) -> bool {
+        let Ok(slot) = self.quit_confirm_requested_at.lock() else {
+            return false;
+        };
+        match *slot {
+            Some(requested_at) => requested_at.elapsed() < timeout,
+            None => false,
+        }
+    }
+
+    /// Reset the quit-confirm state (clears the timestamp).
+    pub fn cancel_quit_confirm(&self) {
+        if let Ok(mut slot) = self.quit_confirm_requested_at.lock() {
+            *slot = None;
+        }
     }
 
     /// Push window to front of MRU list. If already present, move to front.
@@ -934,5 +970,64 @@ mod tests {
             .ok()
             .and_then(|guard| guard.clone());
         assert_eq!(cleared, None);
+    }
+
+    // ── quit_confirm state management ──
+
+    #[test]
+    fn quit_confirm_begin_returns_true_first_time() {
+        let state = AppState::new();
+        assert!(state.begin_quit_confirm(), "first call should return true");
+    }
+
+    #[test]
+    fn quit_confirm_begin_returns_false_when_already_active() {
+        let state = AppState::new();
+        assert!(state.begin_quit_confirm());
+        assert!(
+            !state.begin_quit_confirm(),
+            "second call should return false while confirm is active"
+        );
+    }
+
+    #[test]
+    fn quit_confirm_is_active_within_timeout() {
+        let state = AppState::new();
+        state.begin_quit_confirm();
+        assert!(
+            state.is_quit_confirm_active(Duration::from_secs(5)),
+            "should be active within generous timeout"
+        );
+    }
+
+    #[test]
+    fn quit_confirm_is_not_active_after_timeout() {
+        let state = AppState::new();
+        state.begin_quit_confirm();
+        // A zero-duration timeout means anything that already elapsed is expired.
+        assert!(
+            !state.is_quit_confirm_active(Duration::ZERO),
+            "should not be active after zero-duration timeout"
+        );
+    }
+
+    #[test]
+    fn quit_confirm_cancel_resets_state() {
+        let state = AppState::new();
+        assert!(state.begin_quit_confirm());
+        state.cancel_quit_confirm();
+        assert!(
+            state.begin_quit_confirm(),
+            "after cancel, begin should return true again"
+        );
+    }
+
+    #[test]
+    fn quit_confirm_cancel_when_not_active_is_noop() {
+        let state = AppState::new();
+        // Should not panic when called on a fresh state.
+        state.cancel_quit_confirm();
+        // State should still be usable afterwards.
+        assert!(state.begin_quit_confirm());
     }
 }
