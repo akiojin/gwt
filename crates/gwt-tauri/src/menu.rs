@@ -21,6 +21,7 @@ pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics
 
 pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
 pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
+pub const MENU_ID_GIT_PULL_REQUESTS: &str = "git-pull-requests";
 pub const MENU_ID_GIT_ISSUES: &str = "git-issues";
 
 pub const MENU_ID_EDIT_COPY: &str = "edit-copy";
@@ -171,6 +172,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+Shift+K"),
     )?;
+    let git_pull_requests = MenuItem::with_id(
+        app,
+        MENU_ID_GIT_PULL_REQUESTS,
+        "Pull Requests",
+        true,
+        None::<&str>,
+    )?;
     let git_issues = MenuItem::with_id(app, MENU_ID_GIT_ISSUES, "Issues", true, None::<&str>)?;
     let mut git_builder = SubmenuBuilder::new(app, "Git");
 
@@ -186,6 +194,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     }
 
     let git = git_builder
+        .item(&git_pull_requests)
         .item(&git_issues)
         .separator()
         .item(&git_cleanup_worktrees)
