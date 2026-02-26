@@ -145,6 +145,157 @@ describe("ReportDialog", () => {
     });
   });
 
+  it("resets bug report form fields when reopened", async () => {
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
+
+    const onclose = vi.fn();
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose,
+    });
+
+    await fireEvent.input(rendered.getByLabelText("Title"), {
+      target: { value: "Stale title" },
+    });
+    await fireEvent.input(rendered.getByLabelText("Steps to Reproduce"), {
+      target: { value: "1. open" },
+    });
+    await fireEvent.input(rendered.getByLabelText("Expected Result"), {
+      target: { value: "works" },
+    });
+    await fireEvent.input(rendered.getByLabelText("Actual Result"), {
+      target: { value: "broken" },
+    });
+
+    await rendered.rerender({ open: false, mode: "bug", onclose });
+    await rendered.rerender({ open: true, mode: "bug", onclose });
+
+    expect((rendered.getByLabelText("Title") as HTMLInputElement).value).toBe("");
+    expect((rendered.getByLabelText("Steps to Reproduce") as HTMLTextAreaElement).value).toBe("");
+    expect((rendered.getByLabelText("Expected Result") as HTMLTextAreaElement).value).toBe("");
+    expect((rendered.getByLabelText("Actual Result") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("resets diagnostics and terminal capture state when reopened", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "capture_screen_text") return "terminal capture";
+      return { owner: "akiojin", repo: "gwt", display: "akiojin/gwt" };
+    });
+
+    const onclose = vi.fn();
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose,
+    });
+
+    const labels = rendered.container.querySelectorAll(".checkbox-label");
+    const logsLabel = Array.from(labels).find((l) => l.textContent?.includes("Application Logs"));
+    const logsCheckbox = logsLabel?.querySelector("input[type='checkbox']") as HTMLInputElement;
+    const captureLabel = Array.from(labels).find((l) => l.textContent?.includes("Screen Capture (text)"));
+    const captureCheckbox = captureLabel?.querySelector("input[type='checkbox']") as HTMLInputElement;
+
+    await fireEvent.click(logsCheckbox);
+    await fireEvent.click(captureCheckbox);
+    await fireEvent.click(rendered.getByText("Capture Terminal Text"));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Recapture Terminal Text")).toBeTruthy();
+    });
+
+    await rendered.rerender({ open: false, mode: "bug", onclose });
+    await rendered.rerender({ open: true, mode: "bug", onclose });
+
+    const reopenedLabels = rendered.container.querySelectorAll(".checkbox-label");
+    const systemLabel = Array.from(reopenedLabels).find((l) => l.textContent?.includes("System Info"));
+    const reopenedLogsLabel = Array.from(reopenedLabels).find((l) =>
+      l.textContent?.includes("Application Logs"),
+    );
+    const reopenedCaptureLabel = Array.from(reopenedLabels).find((l) =>
+      l.textContent?.includes("Screen Capture (text)"),
+    );
+    const systemCheckbox = systemLabel?.querySelector("input[type='checkbox']") as HTMLInputElement;
+    const reopenedLogsCheckbox = reopenedLogsLabel?.querySelector("input[type='checkbox']") as HTMLInputElement;
+    const reopenedCaptureCheckbox = reopenedCaptureLabel?.querySelector(
+      "input[type='checkbox']",
+    ) as HTMLInputElement;
+
+    expect(systemCheckbox.checked).toBe(true);
+    expect(reopenedLogsCheckbox.checked).toBe(false);
+    expect(reopenedCaptureCheckbox.checked).toBe(false);
+    expect(rendered.getByText("Capture Terminal Text")).toBeTruthy();
+    expect(rendered.queryByText(/Captured \(\d+ chars\)/)).toBeNull();
+  });
+
+  it("clears submit failure state when reopened", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "detect_report_target") {
+        return { owner: "akiojin", repo: "gwt", display: "akiojin/gwt" };
+      }
+      if (command === "create_github_issue") {
+        throw new Error("gh not found");
+      }
+      return {};
+    });
+
+    const onclose = vi.fn();
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose,
+    });
+
+    await fireEvent.input(rendered.getByLabelText("Title"), {
+      target: { value: "Failing bug" },
+    });
+    await fireEvent.click(rendered.getByText("Submit"));
+    await waitFor(() => {
+      expect(rendered.getByText("Copy to Clipboard")).toBeTruthy();
+    });
+
+    await rendered.rerender({ open: false, mode: "bug", onclose });
+    await rendered.rerender({ open: true, mode: "bug", onclose });
+
+    expect(rendered.queryByText("Copy to Clipboard")).toBeNull();
+    expect(rendered.queryByText("Open in Browser")).toBeNull();
+    expect(
+      rendered.queryByText(
+        "Failed to create issue via GitHub CLI. You can copy the report or open it in your browser instead.",
+      ),
+    ).toBeNull();
+  });
+
+  it("uses mode as active tab each time the dialog is reopened", async () => {
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
+
+    const onclose = vi.fn();
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose,
+    });
+
+    await fireEvent.click(rendered.getByText("Feature Request"));
+    expect(rendered.getByLabelText("Description")).toBeTruthy();
+
+    await rendered.rerender({ open: false, mode: "bug", onclose });
+    await rendered.rerender({ open: true, mode: "bug", onclose });
+    expect(rendered.getByLabelText("Steps to Reproduce")).toBeTruthy();
+
+    await rendered.rerender({ open: false, mode: "feature", onclose });
+    await rendered.rerender({ open: true, mode: "feature", onclose });
+    expect(rendered.getByLabelText("Description")).toBeTruthy();
+  });
+
   it("shows error details section when prefillError is provided", async () => {
     invokeMock.mockResolvedValue({
       owner: "akiojin",
