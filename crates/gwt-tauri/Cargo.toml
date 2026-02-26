@@ -41,6 +41,7 @@ sha2.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
 fs2.workspace = true
+semver.workspace = true
 whisper-rs = { version = "0.15.1", default-features = false }
 hound = "3.5"
 
