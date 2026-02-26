@@ -27,6 +27,7 @@
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
+  import QuitConfirmToast from "./lib/components/QuitConfirmToast.svelte";
   import ReportDialog from "./lib/components/ReportDialog.svelte";
   import {
     formatWindowTitle,
@@ -2755,6 +2756,8 @@
     onClose={() => { showAgentLaunch = false; prefillIssue = null; }}
   />
 {/if}
+
+<QuitConfirmToast />
 
 <CleanupModal
   open={showCleanupModal}

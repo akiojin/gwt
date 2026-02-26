@@ -437,14 +437,16 @@ impl AppState {
 
     /// Begin the quit-confirm window ("Press ⌘Q again to quit").
     ///
-    /// Returns `true` if this is the first Cmd+Q (newly entered confirm state),
-    /// `false` if already in confirm state.
-    pub fn begin_quit_confirm(&self) -> bool {
+    /// Returns `true` if this call arms a new confirmation window, `false` if
+    /// the existing confirmation is still active within `timeout`.
+    pub fn begin_quit_confirm(&self, timeout: Duration) -> bool {
         let Ok(mut slot) = self.quit_confirm_requested_at.lock() else {
             return false;
         };
-        if slot.is_some() {
-            return false;
+        if let Some(requested_at) = *slot {
+            if requested_at.elapsed() < timeout {
+                return false;
+            }
         }
         *slot = Some(Instant::now());
         true
@@ -974,18 +976,23 @@ mod tests {
 
     // ── quit_confirm state management ──
 
+    const QUIT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+
     #[test]
     fn quit_confirm_begin_returns_true_first_time() {
         let state = AppState::new();
-        assert!(state.begin_quit_confirm(), "first call should return true");
+        assert!(
+            state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT),
+            "first call should return true"
+        );
     }
 
     #[test]
     fn quit_confirm_begin_returns_false_when_already_active() {
         let state = AppState::new();
-        assert!(state.begin_quit_confirm());
+        assert!(state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT));
         assert!(
-            !state.begin_quit_confirm(),
+            !state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT),
             "second call should return false while confirm is active"
         );
     }
@@ -993,7 +1000,7 @@ mod tests {
     #[test]
     fn quit_confirm_is_active_within_timeout() {
         let state = AppState::new();
-        state.begin_quit_confirm();
+        state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT);
         assert!(
             state.is_quit_confirm_active(Duration::from_secs(5)),
             "should be active within generous timeout"
@@ -1003,7 +1010,7 @@ mod tests {
     #[test]
     fn quit_confirm_is_not_active_after_timeout() {
         let state = AppState::new();
-        state.begin_quit_confirm();
+        state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT);
         // A zero-duration timeout means anything that already elapsed is expired.
         assert!(
             !state.is_quit_confirm_active(Duration::ZERO),
@@ -1014,10 +1021,10 @@ mod tests {
     #[test]
     fn quit_confirm_cancel_resets_state() {
         let state = AppState::new();
-        assert!(state.begin_quit_confirm());
+        assert!(state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT));
         state.cancel_quit_confirm();
         assert!(
-            state.begin_quit_confirm(),
+            state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT),
             "after cancel, begin should return true again"
         );
     }
@@ -1028,6 +1035,22 @@ mod tests {
         // Should not panic when called on a fresh state.
         state.cancel_quit_confirm();
         // State should still be usable afterwards.
-        assert!(state.begin_quit_confirm());
+        assert!(state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT));
+    }
+
+    #[test]
+    fn quit_confirm_begin_rearms_when_stale() {
+        let state = AppState::new();
+        if let Ok(mut slot) = state.quit_confirm_requested_at.lock() {
+            *slot = Some(Instant::now() - Duration::from_secs(30));
+        }
+        assert!(
+            state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT),
+            "expired confirm state should be re-armed"
+        );
+        assert!(
+            state.is_quit_confirm_active(QUIT_CONFIRM_TIMEOUT),
+            "re-armed confirm should be active"
+        );
     }
 }

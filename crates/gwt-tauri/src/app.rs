@@ -974,14 +974,18 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 
                 // 1st press → show toast
                 api.prevent_exit();
-                state.begin_quit_confirm();
+                state.begin_quit_confirm(QUIT_CONFIRM_TIMEOUT);
 
                 if let Some(window) = best_window(app_handle) {
                     // Show window if hidden (FR-007)
                     let _ = window.show();
                     let _ = window.set_focus();
                     // Emit event to frontmost window only (FR-009)
-                    let _ = window.emit("quit-confirm-show", ());
+                    let _ = window.emit_to(
+                        EventTarget::webview_window(window.label()),
+                        "quit-confirm-show",
+                        (),
+                    );
                 }
             }
         }
