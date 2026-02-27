@@ -7,7 +7,7 @@ use super::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Information about a worktree being migrated
@@ -233,6 +233,7 @@ fn evacuate_main_repo_files(source: &Path, temp_dir: &Path) -> Result<(), Migrat
 /// Restore evacuated files to the target worktree
 fn restore_evacuated_files(temp_dir: &Path, target: &Path) -> Result<(), MigrationError> {
     for entry_name in collect_evacuation_entries(temp_dir)? {
+        ensure_safe_top_level_entry(entry_name.as_os_str(), "restore evacuated path entry")?;
         let src_path = temp_dir.join(&entry_name);
         if !src_path.exists() {
             continue;
@@ -279,7 +280,17 @@ fn collect_evacuation_entries(temp_dir: &Path) -> Result<Vec<OsString>, Migratio
                         let mut decoded = Vec::with_capacity(manifest.entries.len());
                         for encoded_name in manifest.entries {
                             match decode_entry_name(&encoded_name) {
-                                Ok(name) => decoded.push(name),
+                                Ok(name) => {
+                                    if !is_safe_top_level_entry(name.as_os_str()) {
+                                        warn!(
+                                            path = %manifest_path.display(),
+                                            entry = %encoded_name,
+                                            "Unsafe evacuation manifest entry detected, falling back to directory scan"
+                                        );
+                                        return collect_evacuation_entries_from_scan(temp_dir);
+                                    }
+                                    decoded.push(name);
+                                }
                                 Err(err) => {
                                     warn!(
                                         path = %manifest_path.display(),
@@ -346,6 +357,7 @@ fn recover_stale_evacuation_data(source: &Path, temp_dir: &Path) -> Result<(), M
     );
 
     for entry_name in collect_evacuation_entries(temp_dir)? {
+        ensure_safe_top_level_entry(entry_name.as_os_str(), "stale evacuation entry")?;
         let src_path = temp_dir.join(&entry_name);
         if !src_path.exists() {
             continue;
@@ -421,6 +433,27 @@ fn decode_entry_name(encoded: &str) -> Result<OsString, String> {
     {
         Ok(OsString::from(String::from_utf8_lossy(&bytes).to_string()))
     }
+}
+
+fn is_safe_top_level_entry(name: &OsStr) -> bool {
+    let path = Path::new(name);
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return false;
+    }
+
+    let mut components = path.components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn ensure_safe_top_level_entry(name: &OsStr, context: &str) -> Result<(), MigrationError> {
+    if is_safe_top_level_entry(name) {
+        return Ok(());
+    }
+
+    Err(MigrationError::IoError {
+        path: PathBuf::from(name),
+        reason: format!("Invalid evacuation entry ({context})"),
+    })
 }
 
 fn move_path(src: &Path, dst: &Path, action: &str) -> Result<(), MigrationError> {
@@ -1325,5 +1358,26 @@ mod tests {
 
         let entries = collect_evacuation_entries(&temp_dir).unwrap();
         assert_eq!(entries, vec![name]);
+    }
+
+    #[test]
+    fn collect_entries_falls_back_when_manifest_contains_traversal() {
+        let temp = TempDir::new().unwrap();
+        let temp_dir = temp.path().join(".gwt-migration-temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("safe.txt"), "safe").unwrap();
+        let traversal = BASE64_STANDARD.encode("../evil".as_bytes());
+        let manifest = serde_json::json!({
+            "entries": [traversal],
+            "encoding": EVACUATION_MANIFEST_ENCODING,
+        });
+        std::fs::write(
+            temp_dir.join(EVACUATION_MANIFEST_FILENAME),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let entries = collect_evacuation_entries(&temp_dir).unwrap();
+        assert_eq!(entries, vec![OsString::from("safe.txt")]);
     }
 }
