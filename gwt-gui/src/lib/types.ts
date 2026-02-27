@@ -231,6 +231,14 @@ export interface ProfilesConfig {
   profiles: Record<string, Profile>;
 }
 
+export interface ProjectIndexSearchResult {
+  path: string;
+  description: string;
+  distance: number | null;
+  fileType: string | null;
+  size: number | null;
+}
+
 export interface Tab {
   id: string;
   label: string;
@@ -244,7 +252,8 @@ export interface Tab {
     | "terminal"
     | "issueSpec"
     | "issues"
-    | "prs";
+    | "prs"
+    | "projectIndex";
   paneId?: string;
   cwd?: string;
   issueNumber?: number;

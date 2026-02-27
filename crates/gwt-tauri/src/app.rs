@@ -772,6 +772,10 @@ pub fn build_app(
             crate::commands::pullrequest::mark_pr_ready,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
+            crate::commands::project_index::ensure_index_runtime,
+            crate::commands::project_index::index_project_cmd,
+            crate::commands::project_index::search_project_index_cmd,
+            crate::commands::project_index::get_index_status_cmd,
         ])
 }
 
