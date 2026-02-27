@@ -96,7 +96,7 @@
 
 {#if open}
   <div
-    class="overlay modal-overlay"
+    class="overlay modal-overlay modal-overlay-stacked"
     role="dialog"
     aria-modal="true"
     aria-label="Preparing Launch"
@@ -159,7 +159,7 @@
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.6);
-    z-index: 2000;
+    z-index: var(--z-modal-stacked);
   }
 
   .dialog {
