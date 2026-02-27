@@ -1,8 +1,8 @@
-# 機能仕様: mergeStateStatus UNKNOWN リトライ
+# 機能仕様: Worktree詳細 MERGE 状態判定の整理
 
 **仕様ID**: `SPEC-a9f2e3b1`
 **作成日**: 2026-02-26
-**更新日**: 2026-02-26
+**更新日**: 2026-02-27
 **ステータス**: レビュー中
 **カテゴリ**: GUI / Backend
 **依存仕様**:
@@ -10,97 +10,95 @@
 - SPEC-d6949f99（PRステータス取得）
 - SPEC-merge-pr（マージ機能）
 
-**入力**: ユーザー説明: "gh pr view の mergeStateStatus が一時的に UNKNOWN を返す場合、Worktree詳細ビューで Unknown のまま表示される。リトライして解決すべき"
+**入力**: ユーザー説明: 「MERGE表示の判定を整理したい。Blocked/Warning/Checking を明確化し、Unknown 表示を廃止したい」
 
 ## 背景
 
-- GitHub GraphQL API は PR の `mergeStateStatus` および `mergeable` フィールドで一時的に `UNKNOWN` を返すことがある
-- 典型的にはマージブランチの更新チェック中（5-10秒）だが、リベースや大規模リポジトリではそれ以上かかる
-- PR 作成直後も永続的に `UNKNOWN` になるケースがある
-- 現在の実装ではリトライロジックがなく、`UNKNOWN` がそのまま UI に表示される
-- これにより Worktree 詳細ビューのマージ可能性バッジが "Unknown" 表示、マージボタンが無効化されたままになる
+- GitHub GraphQL API は `mergeable` / `mergeStateStatus` で一時的に `UNKNOWN` を返すことがあり、従来 UI は `Unknown` 表示になる
+- Worktree詳細ビューでは、マージ不可理由（必須条件での失敗）と、マージ自体は可能だが非必須チェック失敗がある状態が混在して見える
+- サイドバーと詳細ビューで判定基準が分散し、表示の意味が一貫しない
+- その結果、ユーザーが「今マージできない理由」を即座に判断しづらい
 
 ## ユーザーシナリオとテスト *(必須)*
 
-### ユーザーストーリー 1 - UNKNOWN の自動リトライ (優先度: P0)
+### ユーザーストーリー 1 - Unknown 表示の廃止と確認中表示 (優先度: P0)
 
-ユーザーとして、PRの mergeStateStatus が一時的に UNKNOWN でも、バックグラウンドで自動リトライされ、最終的に正しいステータスが表示されてほしい。
+ユーザーとして、`UNKNOWN` をそのまま見せるのではなく、システムが確認中であることを `Checking merge status...` として表示してほしい。
 
-**独立したテスト**: UNKNOWN レスポンスを受信後、バックグラウンドリトライが起動し、解決済みステータスでキャッシュが更新される
+**独立したテスト**: `mergeable=UNKNOWN` または `mergeStateStatus=UNKNOWN` のとき、`Unknown` ではなく `checking` 表示になる
 
 **受け入れシナリオ**:
 
-1. **前提条件** PR が存在し GraphQL API が mergeStateStatus=UNKNOWN を返す、**操作** fetch_pr_status が呼ばれる、**期待結果** レスポンスに retrying=true フラグが付き、バックグラウンドでリトライタスクが起動する
-2. **前提条件** リトライ中の PR がある、**操作** バックグラウンドリトライが CLEAN を取得する、**期待結果** キャッシュが即座に更新され、Tauri イベントでフロントエンドに通知される
-3. **前提条件** 5回リトライしても UNKNOWN のまま、**操作** リトライ上限到達、**期待結果** リトライを停止し通常ポーリングサイクルに復帰。次回ポーリングで再度 UNKNOWN なら新たなリトライサイクルを開始
+1. **前提条件** `mergeable=UNKNOWN` が返る、**操作** PR ステータスを表示、**期待結果** MERGE 主バッジは `Checking merge status...` を表示する
+2. **前提条件** `retrying=true` の PR がある、**操作** Worktree詳細・サイドバーを表示、**期待結果** `checking` 表示かつパルスアニメーションを適用する
+3. **前提条件** `pr-status-updated` で解決済みステータスが通知される、**操作** 非同期更新を受信、**期待結果** `checking` から最終状態に遷移する
 
 ---
 
-### ユーザーストーリー 2 - リトライ中の UI 表示 (優先度: P0)
+### ユーザーストーリー 2 - Blocked と Checks warning の分離 (優先度: P0)
 
-ユーザーとして、PR ステータスが確認中であることが視覚的に分かるようにしてほしい。
+ユーザーとして、必須条件でマージ不能な状態は `Blocked`、非必須チェック失敗は別の `Checks warning` として区別してほしい。
 
-**独立したテスト**: retrying=true のとき、PrStatusSection のバッジがパルスアニメーション、マージボタンが disabled
+**独立したテスト**: 必須チェック失敗時は `Blocked`、非必須のみ失敗時は `Checks warning` が表示される
 
 **受け入れシナリオ**:
 
-1. **前提条件** retrying=true の PR がある、**操作** PrStatusSection を表示、**期待結果** mergeable バッジがパルス（点滅）アニメーションで表示され、マージボタンは disabled + "Checking merge status..." テキスト
-2. **前提条件** retrying=true の PR がある、**操作** サイドバーの Worktree リストを表示、**期待結果** 対象ブランチの PR ステータス表示もパルスアニメーション
-3. **前提条件** リトライが解決し retrying=false になった、**操作** Tauri イベント受信、**期待結果** パルスアニメーションが停止し、正しいステータスバッジが表示される
+1. **前提条件** 必須チェックが failure、**操作** PR ステータスを表示、**期待結果** MERGE 主バッジは `Blocked`
+2. **前提条件** 非必須チェックのみ failure（必須は成功）、**操作** PR ステータスを表示、**期待結果** 主バッジは `Mergeable` 系を維持し、`Checks warning` を併記
+3. **前提条件** 必須チェックと非必須チェックの両方が failure、**操作** PR ステータスを表示、**期待結果** `Blocked` を優先し、`Checks warning` は表示しない
 
 ---
 
-### ユーザーストーリー 3 - キャッシュ退行防止 (優先度: P1)
+### ユーザーストーリー 3 - 判定フローの一本化 (優先度: P1)
 
-ユーザーとして、一度確認できた正常な mergeable / mergeStateStatus が UNKNOWN に退行しないでほしい。
+ユーザーとして、サイドバーと詳細ビューで同じ判定基準で状態が表示されてほしい。
 
-**独立したテスト**: キャッシュに MERGEABLE が格納済みの PR に対し、新しい取得結果が UNKNOWN の場合、キャッシュの該当フィールドが上書きされない
+**独立したテスト**: バックエンドで算出した `merge_ui_state` を両画面が優先利用し、同一PRで同じ意味の状態になる
 
 **受け入れシナリオ**:
 
-1. **前提条件** キャッシュに mergeable=MERGEABLE, mergeStateStatus=CLEAN の PR がある、**操作** 新しい取得結果で mergeable=UNKNOWN が返る、**期待結果** キャッシュの mergeable, mergeStateStatus フィールドは既存値を維持し上書きされない
-2. **前提条件** キャッシュが空（初回取得）、**操作** mergeable=UNKNOWN が返る、**期待結果** UNKNOWN の値がキャッシュに格納される（初回は退行ではないため）
+1. **前提条件** `merge_ui_state=blocked` が返る、**操作** サイドバー表示、**期待結果** `mergeable=UNKNOWN` でも `checking` ではなく `blocked` として表示される
+2. **前提条件** `merge_ui_state` が未設定（旧キャッシュ等）、**操作** フロント表示、**期待結果** フロントエンドのフォールバック判定で同等の状態に解決する
 
 ## エッジケース
 
-- リトライ中にPRがクローズ/マージされた場合: 新しい状態をそのまま反映（UNKNOWN チェックはスキップ）
-- 同一PRに対する複数リトライタスクの重複起動: PrStatusCache の retrying フラグで排他制御
-- レート制限中のリトライ: cooldown_until が設定されていればリトライをスキップし、通常ポーリングに任せる
-- ページがバックグラウンド中のリトライ完了: キャッシュ更新 + イベント発行は行うが、フロントエンドのリスナーが非活性でも復帰時のポーリングでキャッシュから正常値を取得
-- PR detail (fetch_pr_detail) でも UNKNOWN が返った場合: detail はキャッシュ構造が異なるため、本仕様のスコープ外（ただし将来対応の検討余地あり）
+- `UNKNOWN` と必須チェック failure が同時に存在: `Blocked` を優先する
+- PR が `MERGED` / `CLOSED` の場合: 他条件より終端状態表示を優先する
+- リトライ中に `pr-status-updated` が `retrying=true` で届く場合: 進捗イベントとして扱い、既存表示を維持する
+- `merge_ui_state` が未設定の古いデータ: 既存フィールドからフロント側で互換フォールバックする
 
 ## 要件 *(必須)*
 
 ### 機能要件
 
-- **FR-001**: `fetch_pr_status_impl` で取得結果に `mergeable=UNKNOWN` または `mergeStateStatus=UNKNOWN` の PR がある場合、レスポンスの該当 PR に `retrying=true` を付与し、バックグラウンドリトライタスクを起動する
-- **FR-002**: バックグラウンドリトライは指数バックオフ（2s, 4s, 8s, 16s, 32s）で最大5回実行する
-- **FR-003**: リトライには既存の `build_pr_status_query` を UNKNOWN PR のブランチ名のみで再利用する
-- **FR-004**: リトライで UNKNOWN が解決した場合、キャッシュを即座に更新し、Tauri イベント `pr-status-updated` をフロントエンドに emit する
-- **FR-005**: 既存キャッシュに正常値がある PR について、新しい取得結果の `mergeable` または `mergeStateStatus` が UNKNOWN の場合、該当フィールドのキャッシュ上書きをスキップする
-- **FR-006**: `PrStatusLiteSummary` および `PrStatusResponse` に `retrying` フラグを追加し、フロントエンドに伝達する
-- **FR-007**: `PrStatusCache`（`RepoPrStatusCacheEntry`）に PR 単位のリトライ状態（retrying フラグ、retry_count）を追加する
-- **FR-008**: 同一 PR に対するリトライタスクの重複起動を防止する
-- **FR-009**: フロントエンドは `retrying=true` の場合、PrStatusSection のバッジおよびサイドバーの PR ステータス表示にパルスアニメーションを適用する
-- **FR-010**: リトライ中のマージボタンは disabled にし、"Checking merge status..." を表示する
-- **FR-011**: 5回リトライ後も未解決の場合、通常ポーリング（30秒）に復帰する。次回ポーリングで再度 UNKNOWN ならリトライサイクルを再開する
-- **FR-012**: マージボタンは retrying 中および UNKNOWN 未解決時は disabled を維持する
+- **FR-001**: バックエンドは `PrStatusLiteSummary` / `PrDetailResponse` に `merge_ui_state` を含める
+- **FR-002**: `merge_ui_state` は `merged | closed | checking | blocked | conflicting | mergeable` のいずれかである
+- **FR-003**: `blocked` 判定は `mergeStateStatus=BLOCKED`、必須チェック failure、`CHANGES_REQUESTED` のいずれかで成立する
+- **FR-004**: `checking` 判定は `retrying=true`、または `mergeable=UNKNOWN` / `mergeStateStatus=UNKNOWN`（ただし `blocked` 非該当時）で成立する
+- **FR-005**: 非必須チェック警告は `non_required_checks_warning` として返却し、非必須 failure があり必須 failure がない場合のみ true とする
+- **FR-006**: フロントエンドは MERGE 主バッジで `Unknown` 文言を表示しない。`UNKNOWN` 系は `Checking merge status...` として表示する
+- **FR-007**: フロントエンドは `blocked` を MERGE 主バッジで表示し、`mergeStateStatus` 補助バッジの `Blocked` 表示は行わない
+- **FR-008**: フロントエンドは `non_required_checks_warning=true` のとき `Checks warning` バッジを表示する
+- **FR-009**: サイドバー PR バッジは `merge_ui_state` を優先し、`blocked`/`checking`/`conflicting` を判定する
+- **FR-010**: `retrying=true` の間は `checking` 表示にパルスアニメーションを適用する
+- **FR-011**: `pr-status-updated` イベントで状態を非同期更新し、`retrying=false` の解決イベントで通常表示へ遷移する
+- **FR-012**: 既存 UNKNOWN リトライ（指数バックオフ 2s,4s,8s,16s,32s）とキャッシュ退行防止ロジックを維持する
 
 ### 非機能要件
 
-- **NFR-001**: リトライによる GitHub API 呼び出し増加は最大5回/PR/サイクル。レート制限 cooldown 中はリトライをスキップする
-- **NFR-002**: バックグラウンドリトライは Tauri コマンド応答をブロックしない（即座返却方式）
-- **NFR-003**: パルスアニメーションは CSS のみで実現し、JavaScript タイマーを使用しない
+- **NFR-001**: MERGE 判定ロジックはバックエンドに集約し、フロントは互換フォールバックのみを持つ
+- **NFR-002**: UI更新は同期ブロックせず、イベント駆動で反映する
+- **NFR-003**: 状態差分は既存テスト（Rust unit / Vitest / Playwright）で検証可能であること
 
 ## 制約と仮定
 
-- GitHub GraphQL API の UNKNOWN は通常5-30秒で解決するが、永続的な場合もある
-- 既存の `build_pr_status_query` は単一ブランチでも動作する（ブランチ名配列で1要素を渡す）
-- Tauri の `emit` はフロントエンドのウィンドウがバックグラウンドでもバッファされる
+- GitHub API の `UNKNOWN` は一時的な可能性が高いが、永続するケースもある
+- 必須/非必須の区別は GraphQL の `isRequired` を信頼する
+- 古いキャッシュ・互換データでは `merge_ui_state` が欠落しうる
 
 ## 成功基準 *(必須)*
 
-- **SC-001**: mergeStateStatus が一時的に UNKNOWN を返す PR について、62秒以内（5回リトライ完了）に正しいステータスが表示される（API が正常に解決した場合）
-- **SC-002**: UNKNOWN 状態の PR に対してユーザーに "Unknown" のまま放置される状況が発生しない（リトライ中はパルスアニメーションで確認中であることが伝わる）
-- **SC-003**: 既に正常値がキャッシュされている PR が UNKNOWN に退行しない
-- **SC-004**: リトライによる API 呼び出しがレート制限に抵触しない
+- **SC-001**: Worktree詳細ビューに `Unknown` 文言が残らない
+- **SC-002**: 必須 failure のとき `Blocked` が表示され、非必須のみ failure のとき `Checks warning` が表示される
+- **SC-003**: サイドバーと詳細ビューで同一PRの状態意味が一致する
+- **SC-004**: `retrying` 開始から解決イベントまで `checking` の非同期遷移が確認できる

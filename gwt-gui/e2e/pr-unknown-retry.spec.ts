@@ -162,8 +162,8 @@ test("sidebar PR badge shows pulse animation when retrying=true", async ({
 
   // Verify pulse class is applied (retrying=true)
   await expect(prBadge).toHaveClass(/pulse/);
-  // Verify UNKNOWN styling class
-  await expect(prBadge).toHaveClass(/unknown/);
+  // Verify checking styling class
+  await expect(prBadge).toHaveClass(/checking/);
 });
 
 test("sidebar PR badge has no pulse when retrying=false", async ({ page }) => {
@@ -342,5 +342,5 @@ test("pr-status-updated event with retrying=true is ignored", async ({
 
   // Badge should still show pulse (retrying=true event was ignored)
   await expect(prBadge).toHaveClass(/pulse/);
-  await expect(prBadge).toHaveClass(/unknown/);
+  await expect(prBadge).toHaveClass(/checking/);
 });

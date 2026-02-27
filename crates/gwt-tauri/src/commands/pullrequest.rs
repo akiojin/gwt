@@ -44,6 +44,8 @@ pub struct PrStatusLiteSummary {
     pub url: String,
     pub mergeable: String,
     pub merge_state_status: Option<String>,
+    pub merge_ui_state: String,
+    pub non_required_checks_warning: bool,
     pub author: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -92,6 +94,8 @@ pub struct PrDetailResponse {
     pub url: String,
     pub mergeable: String,
     pub merge_state_status: Option<String>,
+    pub merge_ui_state: String,
+    pub non_required_checks_warning: bool,
     pub author: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -212,6 +216,9 @@ fn apply_retry_state_overrides(
     for summary in statuses.values_mut().flatten() {
         if let Some(retry_state) = retry_states.get(&summary.head_branch) {
             summary.retrying = retry_state.retrying;
+            if retry_state.retrying {
+                summary.merge_ui_state = "checking".to_string();
+            }
         }
     }
 }
@@ -547,13 +554,90 @@ fn to_review_comment_summary(comment: &ReviewComment) -> ReviewCommentSummary {
     }
 }
 
+fn is_failure_conclusion(conclusion: Option<&str>) -> bool {
+    matches!(
+        conclusion,
+        Some("failure" | "cancelled" | "timed_out" | "action_required")
+    )
+}
+
+fn has_required_check_failure(check_suites: &[WorkflowRunInfo]) -> bool {
+    check_suites.iter().any(|run| {
+        run.is_required == Some(true) && is_failure_conclusion(run.conclusion.as_deref())
+    })
+}
+
+fn has_non_required_check_failure(check_suites: &[WorkflowRunInfo]) -> bool {
+    check_suites.iter().any(|run| {
+        run.is_required == Some(false) && is_failure_conclusion(run.conclusion.as_deref())
+    })
+}
+
+fn compute_non_required_checks_warning(check_suites: &[WorkflowRunInfo]) -> bool {
+    has_non_required_check_failure(check_suites) && !has_required_check_failure(check_suites)
+}
+
+fn has_changes_requested(reviews: &[ReviewInfo]) -> bool {
+    reviews
+        .iter()
+        .any(|review| review.state == "CHANGES_REQUESTED")
+}
+
+fn is_unknown_merge_fields(mergeable: &str, merge_state_status: Option<&str>) -> bool {
+    mergeable == "UNKNOWN" || matches!(merge_state_status, Some("UNKNOWN"))
+}
+
+fn compute_merge_ui_state(
+    state: &str,
+    mergeable: &str,
+    merge_state_status: Option<&str>,
+    retrying: bool,
+    check_suites: &[WorkflowRunInfo],
+    reviews: &[ReviewInfo],
+) -> &'static str {
+    if state == "MERGED" {
+        return "merged";
+    }
+    if state == "CLOSED" {
+        return "closed";
+    }
+    if retrying {
+        return "checking";
+    }
+    if merge_state_status == Some("BLOCKED")
+        || has_required_check_failure(check_suites)
+        || has_changes_requested(reviews)
+    {
+        return "blocked";
+    }
+    if is_unknown_merge_fields(mergeable, merge_state_status) {
+        return "checking";
+    }
+    if mergeable == "CONFLICTING" {
+        return "conflicting";
+    }
+    "mergeable"
+}
+
 fn to_pr_status_summary(info: &PrStatusInfo) -> PrStatusLiteSummary {
+    let merge_ui_state = compute_merge_ui_state(
+        &info.state,
+        &info.mergeable,
+        info.merge_state_status.as_deref(),
+        false,
+        &info.check_suites,
+        &info.reviews,
+    )
+    .to_string();
+    let non_required_checks_warning = compute_non_required_checks_warning(&info.check_suites);
     PrStatusLiteSummary {
         number: info.number,
         state: info.state.clone(),
         url: info.url.clone(),
         mergeable: info.mergeable.clone(),
         merge_state_status: info.merge_state_status.clone(),
+        merge_ui_state,
+        non_required_checks_warning,
         author: info.author.clone(),
         base_branch: info.base_branch.clone(),
         head_branch: info.head_branch.clone(),
@@ -567,6 +651,16 @@ fn to_pr_status_summary(info: &PrStatusInfo) -> PrStatusLiteSummary {
 }
 
 fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
+    let merge_ui_state = compute_merge_ui_state(
+        &info.state,
+        &info.mergeable,
+        info.merge_state_status.as_deref(),
+        false,
+        &info.check_suites,
+        &info.reviews,
+    )
+    .to_string();
+    let non_required_checks_warning = compute_non_required_checks_warning(&info.check_suites);
     PrDetailResponse {
         number: info.number,
         title: info.title.clone(),
@@ -574,6 +668,8 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
         url: info.url.clone(),
         mergeable: info.mergeable.clone(),
         merge_state_status: info.merge_state_status.clone(),
+        merge_ui_state,
+        non_required_checks_warning,
         author: info.author.clone(),
         base_branch: info.base_branch.clone(),
         head_branch: info.head_branch.clone(),
@@ -750,6 +846,7 @@ fn fetch_pr_status_impl(
         for summary in statuses.values_mut().flatten() {
             if unknown_branches.contains(&summary.head_branch) {
                 summary.retrying = true;
+                summary.merge_ui_state = "checking".to_string();
             }
         }
     }
@@ -1297,6 +1394,8 @@ mod tests {
                 url: "https://github.com/o/r/pull/42".to_string(),
                 mergeable: "MERGEABLE".to_string(),
                 merge_state_status: None,
+                merge_ui_state: "mergeable".to_string(),
+                non_required_checks_warning: false,
                 author: "alice".to_string(),
                 base_branch: "main".to_string(),
                 head_branch: "feature/x".to_string(),
@@ -1363,6 +1462,8 @@ mod tests {
             url: "https://github.com/o/r/pull/42".to_string(),
             mergeable: "MERGEABLE".to_string(),
             merge_state_status: None,
+            merge_ui_state: "mergeable".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/detail".to_string(),
@@ -1438,6 +1539,7 @@ mod tests {
         assert_eq!(summary.check_suites.len(), 1);
         assert_eq!(summary.check_suites[0].workflow_name, "CI");
         assert_eq!(summary.mergeable, "UNKNOWN");
+        assert_eq!(summary.merge_ui_state, "checking");
     }
 
     #[test]
@@ -1479,6 +1581,87 @@ mod tests {
             detail.review_comments[0].file_path,
             Some("file.rs".to_string())
         );
+        assert_eq!(detail.merge_ui_state, "mergeable");
+        assert!(!detail.non_required_checks_warning);
+    }
+
+    #[test]
+    fn test_compute_merge_ui_state_blocked_by_required_check_failure() {
+        let checks = vec![WorkflowRunInfo {
+            workflow_name: "CI".to_string(),
+            run_id: 100,
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            is_required: Some(true),
+        }];
+        let reviews = vec![];
+
+        let state =
+            compute_merge_ui_state("OPEN", "MERGEABLE", Some("CLEAN"), false, &checks, &reviews);
+        assert_eq!(state, "blocked");
+    }
+
+    #[test]
+    fn test_compute_merge_ui_state_checking_for_unknown_fields() {
+        let state = compute_merge_ui_state("OPEN", "UNKNOWN", Some("UNKNOWN"), false, &[], &[]);
+        assert_eq!(state, "checking");
+    }
+
+    #[test]
+    fn test_compute_merge_ui_state_prioritizes_blocked_over_unknown() {
+        let checks = vec![WorkflowRunInfo {
+            workflow_name: "Required CI".to_string(),
+            run_id: 20,
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            is_required: Some(true),
+        }];
+        let state = compute_merge_ui_state("OPEN", "UNKNOWN", Some("UNKNOWN"), false, &checks, &[]);
+        assert_eq!(state, "blocked");
+    }
+
+    #[test]
+    fn test_non_required_warning_detected_from_optional_checks() {
+        let checks = vec![
+            WorkflowRunInfo {
+                workflow_name: "Required CI".to_string(),
+                run_id: 10,
+                status: "completed".to_string(),
+                conclusion: Some("success".to_string()),
+                is_required: Some(true),
+            },
+            WorkflowRunInfo {
+                workflow_name: "Optional Lint".to_string(),
+                run_id: 11,
+                status: "completed".to_string(),
+                conclusion: Some("failure".to_string()),
+                is_required: Some(false),
+            },
+        ];
+
+        assert!(compute_non_required_checks_warning(&checks));
+    }
+
+    #[test]
+    fn test_non_required_warning_hidden_when_required_checks_fail() {
+        let checks = vec![
+            WorkflowRunInfo {
+                workflow_name: "Required CI".to_string(),
+                run_id: 30,
+                status: "completed".to_string(),
+                conclusion: Some("failure".to_string()),
+                is_required: Some(true),
+            },
+            WorkflowRunInfo {
+                workflow_name: "Optional Lint".to_string(),
+                run_id: 31,
+                status: "completed".to_string(),
+                conclusion: Some("failure".to_string()),
+                is_required: Some(false),
+            },
+        ];
+
+        assert!(!compute_non_required_checks_warning(&checks));
     }
 
     #[test]
@@ -1552,6 +1735,8 @@ mod tests {
             url: "https://example.com/1".to_string(),
             mergeable: "MERGEABLE".to_string(),
             merge_state_status: None,
+            merge_ui_state: "mergeable".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/a".to_string(),
@@ -1567,6 +1752,8 @@ mod tests {
             url: "https://example.com/2".to_string(),
             mergeable: "UNKNOWN".to_string(),
             merge_state_status: None,
+            merge_ui_state: "checking".to_string(),
+            non_required_checks_warning: false,
             author: "bob".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/b".to_string(),
@@ -1618,6 +1805,8 @@ mod tests {
             url: "https://example.com/1".to_string(),
             mergeable: "UNKNOWN".to_string(),
             merge_state_status: None,
+            merge_ui_state: "checking".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/a".to_string(),
@@ -1635,6 +1824,8 @@ mod tests {
             url: "https://example.com/1".to_string(),
             mergeable: "MERGEABLE".to_string(),
             merge_state_status: Some("UNKNOWN".to_string()),
+            merge_ui_state: "checking".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/a".to_string(),
@@ -1652,6 +1843,8 @@ mod tests {
             url: "https://example.com/1".to_string(),
             mergeable: "MERGEABLE".to_string(),
             merge_state_status: Some("CLEAN".to_string()),
+            merge_ui_state: "mergeable".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/a".to_string(),
@@ -1670,6 +1863,8 @@ mod tests {
             url: "https://example.com/42".to_string(),
             mergeable: "MERGEABLE".to_string(),
             merge_state_status: Some("CLEAN".to_string()),
+            merge_ui_state: "mergeable".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/x".to_string(),
@@ -1683,6 +1878,8 @@ mod tests {
             url: "https://example.com/42".to_string(),
             mergeable: "UNKNOWN".to_string(),
             merge_state_status: Some("UNKNOWN".to_string()),
+            merge_ui_state: "checking".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/x".to_string(),
@@ -1708,6 +1905,8 @@ mod tests {
             url: "https://example.com/42".to_string(),
             mergeable: "MERGEABLE".to_string(),
             merge_state_status: Some("CLEAN".to_string()),
+            merge_ui_state: "mergeable".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/x".to_string(),
@@ -1721,6 +1920,8 @@ mod tests {
             url: "https://example.com/42".to_string(),
             mergeable: "CONFLICTING".to_string(),
             merge_state_status: Some("UNKNOWN".to_string()),
+            merge_ui_state: "conflicting".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/x".to_string(),
@@ -1745,6 +1946,8 @@ mod tests {
             url: "https://example.com/42".to_string(),
             mergeable: "UNKNOWN".to_string(),
             merge_state_status: None,
+            merge_ui_state: "checking".to_string(),
+            non_required_checks_warning: false,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/x".to_string(),
@@ -1767,6 +1970,8 @@ mod tests {
                 url: "https://example.com/42".to_string(),
                 mergeable: "MERGEABLE".to_string(),
                 merge_state_status: Some("CLEAN".to_string()),
+                merge_ui_state: "mergeable".to_string(),
+                non_required_checks_warning: false,
                 author: "alice".to_string(),
                 base_branch: "main".to_string(),
                 head_branch: "feature/x".to_string(),
@@ -1798,6 +2003,8 @@ mod tests {
                 url: "https://example.com/42".to_string(),
                 mergeable: "UNKNOWN".to_string(),
                 merge_state_status: Some("UNKNOWN".to_string()),
+                merge_ui_state: "checking".to_string(),
+                non_required_checks_warning: false,
                 author: "alice".to_string(),
                 base_branch: "main".to_string(),
                 head_branch: "feature/x".to_string(),
