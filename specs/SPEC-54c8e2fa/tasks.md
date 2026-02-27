@@ -55,3 +55,39 @@
   - `cargo test -p gwt-tauri`
   - `cd gwt-gui && pnpm test`（関連テスト）
   - 必要最小限のフォーマット/lint確認
+
+### T008: TDD失敗テスト追加（Issue #1278 / branch一覧自己修復）
+
+- **ファイル**: `crates/gwt-core/src/git/branch.rs`
+- **内容**:
+  - `.git/config` に `branch..gh-merge-base` を注入した状態で `Branch::list` が復旧することを検証するテスト追加
+  - `.git/config` に `[branch ""]` セクションを注入した状態で `Branch::list_remote` が復旧することを検証するテスト追加
+  - 追加直後は RED を確認する
+
+### T009: TDD失敗テスト追加（空ブランチ名拒否）
+
+- **ファイル**: `crates/gwt-core/src/git/issue.rs`
+- **内容**:
+  - `create_or_verify_linked_branch(..., \"   \", ...)` が入力検証エラーを返すテスト追加
+  - 追加直後は RED を確認する
+
+### T010: branch一覧自己修復実装
+
+- **ファイル**: `crates/gwt-core/src/git/branch.rs`
+- **内容**:
+  - `for-each-ref` 失敗時の `gh-merge-base` 判定と repo config 修復処理を実装
+  - 修復対象を `branch..gh-merge-base` と `[branch \"\"]` のみに限定
+  - 修復後1回のみ再試行する
+
+### T011: 空ブランチ名入力バリデーション実装
+
+- **ファイル**: `crates/gwt-core/src/git/issue.rs`
+- **内容**:
+  - `create_or_verify_linked_branch` で `branch_name` の空白入力を即時エラー化
+  - `gh` 実行前に終了する
+
+### T012: GREEN確認（対象テスト）
+
+- **内容**:
+  - `cargo test -p gwt-core git::branch`
+  - `cargo test -p gwt-core git::issue`
