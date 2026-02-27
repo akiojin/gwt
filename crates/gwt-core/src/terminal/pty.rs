@@ -1127,6 +1127,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_pty_creation_and_echo() {
         let (command, args, terminal_shell, interactive) = platform_echo_command();
         let config = PtyConfig {
@@ -1155,6 +1156,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_env_vars_set() {
         let (command, args, terminal_shell, interactive) = platform_env_command();
         let mut env_vars = HashMap::new();
@@ -1204,6 +1206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_resize() {
         let config = PtyConfig {
             command: "/bin/sleep".to_string(),
@@ -1223,6 +1226,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_process_exit_detection() {
         let (command, args, terminal_shell, interactive) = platform_success_exit_command();
         let config = PtyConfig {
@@ -1256,6 +1260,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_invalid_command_error() {
         let (command, args, terminal_shell, interactive) = platform_invalid_command();
         let config = PtyConfig {

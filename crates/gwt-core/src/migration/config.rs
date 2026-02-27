@@ -44,6 +44,11 @@ impl MigrationConfig {
     pub fn backup_path(&self) -> PathBuf {
         self.target_root.join(".gwt-migration-backup")
     }
+
+    /// Get the temporary evacuation directory path for dirty main worktree files
+    pub fn evacuation_temp_path(&self) -> PathBuf {
+        self.target_root.join(".gwt-migration-temp")
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +92,19 @@ mod tests {
         assert_eq!(
             config.worktree_path("feature/test"),
             PathBuf::from("/project/feature/test")
+        );
+    }
+
+    #[test]
+    fn test_evacuation_temp_path() {
+        let config = MigrationConfig::new(
+            PathBuf::from("/old/repo"),
+            PathBuf::from("/project"),
+            "repo.git".to_string(),
+        );
+        assert_eq!(
+            config.evacuation_temp_path(),
+            PathBuf::from("/project/.gwt-migration-temp")
         );
     }
 }
