@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
+use std::thread;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "windows")]
 const GH_FALLBACK_PATHS: &[&str] = &[
@@ -16,6 +20,7 @@ const GH_FALLBACK_PATHS: &[&str] = &[
     "/opt/local/bin/gh",
     "/usr/bin/gh",
 ];
+const BROKEN_GH_MERGE_BASE_KEY: &str = "branch..gh-merge-base";
 
 /// PR status for cleanup safety judgment (SPEC-ad1ac432)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +53,290 @@ pub fn gh_command() -> std::process::Command {
         }
         None => crate::process::command("gh"),
     }
+}
+
+/// Run a gh command in a repository context, auto-repairing known broken git
+/// config (`branch..gh-merge-base`) once and retrying exactly once.
+pub fn run_gh_output_with_repair<I, S>(repo_path: &Path, args: I) -> std::io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = collect_gh_args(args);
+    run_gh_output_with_repair_once(repo_path, &args)
+}
+
+/// Run a gh command with timeout in a repository context, auto-repairing known
+/// broken git config (`branch..gh-merge-base`) once and retrying exactly once.
+pub fn run_gh_output_with_timeout_and_repair<I, S>(
+    repo_path: &Path,
+    args: I,
+    timeout: Duration,
+) -> std::io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = collect_gh_args(args);
+    let output = run_gh_output_with_timeout(repo_path, &args, timeout)?;
+    if !should_attempt_bad_config_repair(&output) {
+        return Ok(output);
+    }
+
+    match repair_bad_gh_merge_base_config(repo_path) {
+        Ok(true) => run_gh_output_with_timeout(repo_path, &args, timeout),
+        Ok(false) => Ok(output),
+        Err(err) => Err(std::io::Error::other(format!(
+            "Failed to auto-repair broken git config for gh: {}",
+            err
+        ))),
+    }
+}
+
+fn collect_gh_args<I, S>(args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect()
+}
+
+fn run_gh_output_with_repair_once(repo_path: &Path, args: &[String]) -> std::io::Result<Output> {
+    let output = run_gh_output(repo_path, args)?;
+    if !should_attempt_bad_config_repair(&output) {
+        return Ok(output);
+    }
+
+    match repair_bad_gh_merge_base_config(repo_path) {
+        Ok(true) => run_gh_output(repo_path, args),
+        Ok(false) => Ok(output),
+        Err(err) => Err(std::io::Error::other(format!(
+            "Failed to auto-repair broken git config for gh: {}",
+            err
+        ))),
+    }
+}
+
+fn run_gh_output(repo_path: &Path, args: &[String]) -> std::io::Result<Output> {
+    gh_command().args(args).current_dir(repo_path).output()
+}
+
+fn run_gh_output_with_timeout(
+    repo_path: &Path,
+    args: &[String],
+    timeout: Duration,
+) -> std::io::Result<Output> {
+    let mut child = gh_command()
+        .args(args)
+        .current_dir(repo_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout_handle = spawn_pipe_reader(child.stdout.take());
+    let stderr_handle = spawn_pipe_reader(child.stderr.take());
+
+    let status = match wait_with_timeout(&mut child, timeout) {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "gh {} timed out after {}s",
+                    args.join(" "),
+                    timeout.as_secs()
+                ),
+            ));
+        }
+    };
+
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn spawn_pipe_reader<T>(pipe: Option<T>) -> thread::JoinHandle<Vec<u8>>
+where
+    T: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let Some(mut pipe) = pipe else {
+            return Vec::new();
+        };
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        buf
+    })
+}
+
+fn should_attempt_bad_config_repair(output: &Output) -> bool {
+    if output.status.success() {
+        return false;
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    let combined = format!("{stderr}\n{stdout}");
+    combined.contains("bad config variable") && combined.contains(BROKEN_GH_MERGE_BASE_KEY)
+}
+
+fn repair_bad_gh_merge_base_config(repo_path: &Path) -> Result<bool, String> {
+    let common_dir = resolve_git_common_dir(repo_path)?;
+    let config_path = common_dir.join("config");
+    let original = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read {}: {}", config_path.display(), e))?;
+    let repaired = sanitize_bad_gh_merge_base_config(&original);
+    if repaired == original {
+        return Ok(false);
+    }
+
+    write_text_file_atomically(&config_path, &repaired)?;
+    Ok(true)
+}
+
+fn resolve_git_common_dir(repo_path: &Path) -> Result<PathBuf, String> {
+    let output = crate::process::command("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git rev-parse --git-common-dir: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git rev-parse --git-common-dir failed: {}",
+            stderr.trim()
+        ));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return Err("git rev-parse --git-common-dir returned an empty path".to_string());
+    }
+
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(repo_path.join(path))
+    }
+}
+
+fn sanitize_bad_gh_merge_base_config(content: &str) -> String {
+    let mut kept_lines = Vec::new();
+    let mut skipping_empty_branch_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if is_git_config_section_header(trimmed) {
+            skipping_empty_branch_section = is_empty_branch_section_header(trimmed);
+            if skipping_empty_branch_section {
+                continue;
+            }
+        }
+
+        if skipping_empty_branch_section || is_broken_merge_base_key_line(trimmed) {
+            continue;
+        }
+
+        kept_lines.push(line);
+    }
+
+    let mut result = kept_lines.join("\n");
+    if content.ends_with('\n') && !result.is_empty() {
+        result.push('\n');
+    }
+    result
+}
+
+fn is_git_config_section_header(trimmed: &str) -> bool {
+    trimmed.starts_with('[') && trimmed.ends_with(']')
+}
+
+fn is_empty_branch_section_header(trimmed: &str) -> bool {
+    if !is_git_config_section_header(trimmed) {
+        return false;
+    }
+
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed)
+        .trim();
+    let mut parts = inner.splitn(2, char::is_whitespace);
+    let section = parts.next().unwrap_or("").trim();
+    if !section.eq_ignore_ascii_case("branch") {
+        return false;
+    }
+
+    parts.next().unwrap_or("").trim() == "\"\""
+}
+
+fn is_broken_merge_base_key_line(trimmed: &str) -> bool {
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+        return false;
+    }
+
+    let key = trimmed
+        .split_once('=')
+        .map(|(k, _)| k)
+        .unwrap_or(trimmed)
+        .trim();
+    key.eq_ignore_ascii_case(BROKEN_GH_MERGE_BASE_KEY)
+}
+
+fn write_text_file_atomically(path: &Path, content: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Path has no parent directory: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = parent.join(format!(
+        ".{}.gwt-tmp-{}-{nonce}",
+        file_name,
+        std::process::id()
+    ));
+
+    std::fs::write(&tmp_path, content.as_bytes()).map_err(|e| {
+        format!(
+            "Failed to write temporary config {}: {}",
+            tmp_path.display(),
+            e
+        )
+    })?;
+
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
+    }
+
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to replace config {} with {}: {}",
+            path.display(),
+            tmp_path.display(),
+            err
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn is_gh_available() -> bool {
@@ -90,53 +379,23 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String
     let (owner, repo) = resolve_owner_repo(repo_path)?;
 
     let endpoint = format!("repos/{}/{}/git/refs/heads/{}", owner, repo, branch);
+    let output = run_gh_output_with_timeout_and_repair(
+        repo_path,
+        ["api", "-X", "DELETE", endpoint.as_str()],
+        Duration::from_secs(10),
+    )
+    .map_err(|e| format!("Failed to run gh api delete branch: {}", e))?;
 
-    let child = gh_command()
-        .args(["api", "-X", "DELETE", &endpoint])
-        .current_dir(repo_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    if output.status.success() {
+        return Ok(());
+    }
 
-    let Ok(mut child) = child else {
-        return Err("Failed to spawn gh command".to_string());
-    };
-
-    match wait_with_timeout(&mut child, Duration::from_secs(10)) {
-        Some(status) => {
-            if status.success() {
-                Ok(())
-            } else {
-                let stderr = child
-                    .stderr
-                    .take()
-                    .and_then(|mut s| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
-                        Some(buf)
-                    })
-                    .unwrap_or_default();
-                let stdout = child
-                    .stdout
-                    .take()
-                    .and_then(|mut s| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
-                        Some(buf)
-                    })
-                    .unwrap_or_default();
-                let combined = format!("{}{}", stderr, stdout);
-
-                match classify_delete_branch_error(&combined, branch) {
-                    None => Ok(()),
-                    Some(err) => Err(err),
-                }
-            }
-        }
-        None => {
-            let _ = child.kill();
-            Err(format!("Timeout deleting remote branch '{}' (10s)", branch))
-        }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let combined = format!("{}{}", stderr, stdout);
+    match classify_delete_branch_error(&combined, branch) {
+        None => Ok(()),
+        Some(err) => Err(err),
     }
 }
 
@@ -146,8 +405,9 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String
 /// Returns a map of branch name to PrStatus.
 /// On failure, returns an empty map (caller decides how to handle).
 pub fn get_pr_statuses(repo_path: &Path) -> HashMap<String, PrStatus> {
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "pr",
             "list",
             "--state",
@@ -156,9 +416,8 @@ pub fn get_pr_statuses(repo_path: &Path) -> HashMap<String, PrStatus> {
             "headRefName,state,mergedAt,updatedAt",
             "--limit",
             "200",
-        ])
-        .current_dir(repo_path)
-        .output();
+        ],
+    );
 
     let Ok(output) = output else {
         return HashMap::new();
@@ -267,10 +526,7 @@ fn gh_state_to_pr_status(state: &str) -> PrStatus {
 
 /// Resolve owner/repo from the repository using `gh repo view`.
 fn resolve_owner_repo(repo_path: &Path) -> Result<(String, String), String> {
-    let output = gh_command()
-        .args(["repo", "view", "--json", "owner,name"])
-        .current_dir(repo_path)
-        .output()
+    let output = run_gh_output_with_repair(repo_path, ["repo", "view", "--json", "owner,name"])
         .map_err(|e| format!("Failed to run gh repo view: {}", e))?;
 
     if !output.status.success() {
@@ -330,52 +586,23 @@ fn parse_ref_sha(json_str: &str) -> Result<String, String> {
 pub fn resolve_remote_branch_sha(repo_path: &Path, branch: &str) -> Result<String, String> {
     let (owner, repo) = resolve_owner_repo(repo_path)?;
     let endpoint = get_ref_endpoint(&owner, &repo, branch);
+    let output = run_gh_output_with_timeout_and_repair(
+        repo_path,
+        ["api", endpoint.as_str()],
+        Duration::from_secs(10),
+    )
+    .map_err(|e| format!("Failed to resolve SHA for '{}': {}", branch, e))?;
 
-    let child = gh_command()
-        .args(["api", &endpoint])
-        .current_dir(repo_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-
-    let Ok(mut child) = child else {
-        return Err("Failed to spawn gh command".to_string());
-    };
-
-    match wait_with_timeout(&mut child, Duration::from_secs(10)) {
-        Some(status) => {
-            if status.success() {
-                let stdout = child
-                    .stdout
-                    .take()
-                    .and_then(|mut s| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
-                        Some(buf)
-                    })
-                    .unwrap_or_default();
-                parse_ref_sha(&stdout)
-            } else {
-                let stderr = child
-                    .stderr
-                    .take()
-                    .and_then(|mut s| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
-                        Some(buf)
-                    })
-                    .unwrap_or_default();
-                Err(format!(
-                    "Failed to resolve SHA for '{}': {}",
-                    branch,
-                    stderr.trim()
-                ))
-            }
-        }
-        None => {
-            let _ = child.kill();
-            Err(format!("Timeout resolving SHA for '{}' (10s)", branch))
-        }
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_ref_sha(&stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "Failed to resolve SHA for '{}': {}",
+            branch,
+            stderr.trim()
+        ))
     }
 }
 
@@ -436,58 +663,31 @@ pub fn create_remote_branch(repo_path: &Path, branch: &str, sha: &str) -> Result
     let (owner, repo) = resolve_owner_repo(repo_path)?;
     let endpoint = create_ref_endpoint(&owner, &repo);
     let ref_value = format!("refs/heads/{}", branch);
-
-    let child = gh_command()
-        .args([
+    let ref_arg = format!("ref={}", ref_value);
+    let sha_arg = format!("sha={}", sha);
+    let output = run_gh_output_with_timeout_and_repair(
+        repo_path,
+        [
             "api",
             "--method",
             "POST",
-            &endpoint,
+            endpoint.as_str(),
             "-f",
-            &format!("ref={}", ref_value),
+            ref_arg.as_str(),
             "-f",
-            &format!("sha={}", sha),
-        ])
-        .current_dir(repo_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+            sha_arg.as_str(),
+        ],
+        Duration::from_secs(10),
+    )
+    .map_err(|e| format!("Failed to create remote branch '{}': {}", branch, e))?;
 
-    let Ok(mut child) = child else {
-        return Err("Failed to spawn gh command".to_string());
-    };
-
-    match wait_with_timeout(&mut child, Duration::from_secs(10)) {
-        Some(status) => {
-            if status.success() {
-                Ok(())
-            } else {
-                let stderr = child
-                    .stderr
-                    .take()
-                    .and_then(|mut s| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
-                        Some(buf)
-                    })
-                    .unwrap_or_default();
-                let stdout = child
-                    .stdout
-                    .take()
-                    .and_then(|mut s| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
-                        Some(buf)
-                    })
-                    .unwrap_or_default();
-                let combined = format!("{}{}", stderr, stdout);
-                Err(classify_create_branch_error(&combined, branch))
-            }
-        }
-        None => {
-            let _ = child.kill();
-            Err(format!("Timeout creating remote branch '{}' (10s)", branch))
-        }
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let combined = format!("{}{}", stderr, stdout);
+        Err(classify_create_branch_error(&combined, branch))
     }
 }
 
@@ -500,8 +700,10 @@ pub fn fetch_pr_list(
     state: &str,
     limit: u32,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let output = gh_command()
-        .args([
+    let limit_str = limit.to_string();
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "pr",
             "list",
             "--state",
@@ -509,10 +711,9 @@ pub fn fetch_pr_list(
             "--json",
             "number,title,state,isDraft,headRefName,baseRefName,author,labels,createdAt,updatedAt,url,body,reviewRequests,assignees",
             "--limit",
-            &limit.to_string(),
-        ])
-        .current_dir(repo_path)
-        .output()
+            limit_str.as_str(),
+        ],
+    )
         .map_err(|e| format!("Failed to run gh pr list: {}", e))?;
 
     if !output.status.success() {
@@ -528,10 +729,7 @@ pub fn fetch_pr_list(
 
 /// Fetch authenticated GitHub user login via `gh api user` (SPEC-prlist).
 pub fn fetch_authenticated_user(repo_path: &Path) -> Result<String, String> {
-    let output = gh_command()
-        .args(["api", "user", "--jq", ".login"])
-        .current_dir(repo_path)
-        .output()
+    let output = run_gh_output_with_repair(repo_path, ["api", "user", "--jq", ".login"])
         .map_err(|e| format!("Failed to run gh api user: {}", e))?;
 
     if !output.status.success() {
@@ -602,10 +800,7 @@ pub fn merge_pr(
 
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    let output = gh_command()
-        .args(&arg_refs)
-        .current_dir(repo_path)
-        .output()
+    let output = run_gh_output_with_repair(repo_path, arg_refs)
         .map_err(|e| format!("Failed to run gh pr merge: {}", e))?;
 
     if !output.status.success() {
@@ -640,10 +835,7 @@ pub fn review_pr(
 
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    let output = gh_command()
-        .args(&arg_refs)
-        .current_dir(repo_path)
-        .output()
+    let output = run_gh_output_with_repair(repo_path, arg_refs)
         .map_err(|e| format!("Failed to run gh pr review: {}", e))?;
 
     if !output.status.success() {
@@ -657,10 +849,8 @@ pub fn review_pr(
 
 /// Mark a draft PR as ready for review via `gh pr ready` (SPEC-prlist).
 pub fn mark_pr_ready(repo_path: &Path, pr_number: u64) -> Result<String, String> {
-    let output = gh_command()
-        .args(["pr", "ready", &pr_number.to_string()])
-        .current_dir(repo_path)
-        .output()
+    let pr_number = pr_number.to_string();
+    let output = run_gh_output_with_repair(repo_path, ["pr", "ready", pr_number.as_str()])
         .map_err(|e| format!("Failed to run gh pr ready: {}", e))?;
 
     if !output.status.success() {
@@ -696,6 +886,7 @@ fn wait_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn is_gh_available_returns_bool() {
@@ -1054,5 +1245,78 @@ mod tests {
         // 422 but different message should NOT be treated as success
         let result = classify_delete_branch_error("422 Validation Failed", "feat/v");
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn sanitize_config_removes_empty_branch_section() {
+        let input = r#"[core]
+  repositoryformatversion = 0
+[branch ""]
+  gh-merge-base = develop
+[branch "feature/test"]
+  remote = origin
+"#;
+        let result = sanitize_bad_gh_merge_base_config(input);
+        assert!(!result.contains("[branch \"\"]"));
+        assert!(!result.contains("gh-merge-base = develop"));
+        assert!(result.contains("[core]"));
+        assert!(result.contains("[branch \"feature/test\"]"));
+    }
+
+    #[test]
+    fn sanitize_config_removes_flat_bad_key_line() {
+        let input = r#"[core]
+  bare = false
+branch..gh-merge-base = develop
+"#;
+        let result = sanitize_bad_gh_merge_base_config(input);
+        assert!(!result.contains("branch..gh-merge-base"));
+        assert!(result.contains("[core]"));
+    }
+
+    #[test]
+    fn sanitize_config_keeps_valid_branch_merge_base() {
+        let input = r#"[branch "feature/test"]
+  gh-merge-base = develop
+"#;
+        let result = sanitize_bad_gh_merge_base_config(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn repair_bad_merge_base_config_updates_git_config() {
+        let repo = TempDir::new().expect("temp dir");
+        let init = crate::process::command("git")
+            .args(["init"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        let config_path = repo.path().join(".git").join("config");
+        let original = std::fs::read_to_string(&config_path).expect("read git config");
+        let modified = format!("{original}\n[branch \"\"]\n\tgh-merge-base = develop\n");
+        std::fs::write(&config_path, modified).expect("write broken config");
+
+        let repaired = repair_bad_gh_merge_base_config(repo.path()).expect("repair should succeed");
+        assert!(repaired);
+
+        let content = std::fs::read_to_string(&config_path).expect("read repaired config");
+        assert!(!content.contains("[branch \"\"]"));
+        assert!(!content.contains("branch..gh-merge-base"));
+    }
+
+    #[test]
+    fn repair_bad_merge_base_config_returns_false_when_no_change() {
+        let repo = TempDir::new().expect("temp dir");
+        let init = crate::process::command("git")
+            .args(["init"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        let repaired = repair_bad_gh_merge_base_config(repo.path()).expect("repair");
+        assert!(!repaired);
     }
 }
