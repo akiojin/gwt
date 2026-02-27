@@ -237,15 +237,6 @@
     checkedFiles: string[];
     updatedFiles: string[];
   };
-
-  function toErrorMessage(err: unknown): string {
-    if (typeof err === "string") return err;
-    if (err && typeof err === "object" && "message" in err) {
-      const msg = (err as { message?: unknown }).message;
-      if (typeof msg === "string") return msg;
-    }
-    return String(err);
-  }
   type TauriInvoke = <T>(
     command: string,
     args?: Record<string, unknown>,
