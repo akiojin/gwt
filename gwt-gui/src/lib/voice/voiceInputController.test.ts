@@ -2249,6 +2249,7 @@ describe("VoiceInputController", () => {
         (c: any[]) => c[0] === "transcribe_voice_audio"
       );
       expect(transcribeCall).toBeTruthy();
+      if (!transcribeCall) throw new Error("transcribe_voice_audio call not found");
       expect(transcribeCall[1].input.language).toBe("ja");
     });
 
@@ -2284,6 +2285,7 @@ describe("VoiceInputController", () => {
         (c: any[]) => c[0] === "transcribe_voice_audio"
       );
       expect(transcribeCall).toBeTruthy();
+      if (!transcribeCall) throw new Error("transcribe_voice_audio call not found");
       expect(transcribeCall[1].input.language).toBe("en");
     });
 
@@ -2624,6 +2626,7 @@ describe("VoiceInputController", () => {
         (c: any[]) => c[0] === "transcribe_voice_audio"
       );
       expect(transcribeCall).toBeTruthy();
+      if (!transcribeCall) throw new Error("transcribe_voice_audio call not found");
       expect(transcribeCall[1].input.quality).toBe("high");
     });
 

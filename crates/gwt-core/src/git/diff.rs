@@ -1208,10 +1208,7 @@ mod tests {
 
     #[test]
     fn normalize_numstat_path_brace_rename_no_surrounding() {
-        assert_eq!(
-            normalize_numstat_path("{old.rs => new.rs}"),
-            "new.rs"
-        );
+        assert_eq!(normalize_numstat_path("{old.rs => new.rs}"), "new.rs");
     }
 
     #[test]
@@ -1222,10 +1219,7 @@ mod tests {
     #[test]
     fn normalize_numstat_path_no_arrow_just_brace() {
         // Braces without " => " inside should be preserved
-        assert_eq!(
-            normalize_numstat_path("{some_content}"),
-            "{some_content}"
-        );
+        assert_eq!(normalize_numstat_path("{some_content}"), "{some_content}");
     }
 
     // --- split_known_remote_ref ---

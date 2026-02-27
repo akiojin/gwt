@@ -154,15 +154,13 @@ mod tests {
 
     #[test]
     fn count_messages_from_turns_key() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"turns":[{"x":1}]}"#).unwrap();
+        let json: serde_json::Value = serde_json::from_str(r#"{"turns":[{"x":1}]}"#).unwrap();
         assert_eq!(count_opencode_messages(&json), 1);
     }
 
     #[test]
     fn count_messages_from_events_key() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"events":[1,2,3,4]}"#).unwrap();
+        let json: serde_json::Value = serde_json::from_str(r#"{"events":[1,2,3,4]}"#).unwrap();
         assert_eq!(count_opencode_messages(&json), 4);
     }
 

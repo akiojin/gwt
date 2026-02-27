@@ -728,7 +728,12 @@ describe("Sidebar", () => {
       await vi.advanceTimersByTimeAsync(50);
       expect(countInvokeCalls("fetch_pr_status")).toBe(0);
     } finally {
-      if (resolveBranches) resolveBranches([branchFixture]);
+      const finalizeBranches = resolveBranches as unknown as
+        | ((value: Array<typeof branchFixture>) => void)
+        | null;
+      if (typeof finalizeBranches === "function") {
+        finalizeBranches([branchFixture]);
+      }
       vi.useRealTimers();
     }
   });

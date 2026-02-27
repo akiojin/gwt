@@ -1416,6 +1416,8 @@ mod tests {
 
     #[test]
     fn is_empty_dir_nonexistent() {
-        assert!(!is_empty_dir(std::path::Path::new("/nonexistent/path/12345")));
+        assert!(!is_empty_dir(std::path::Path::new(
+            "/nonexistent/path/12345"
+        )));
     }
 }

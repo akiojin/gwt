@@ -507,7 +507,7 @@ describe("CoordinatorDetail", () => {
   it("unmounts cleanly to exercise teardown branches", async () => {
     const dev = makeDeveloper({ id: "dev-teardown" });
     const rendered = await renderCoordinatorDetail({
-      coordinator: makeCoordinator({ status: "in_progress" }),
+      coordinator: makeCoordinator({ status: "running" }),
       issueTitle: "Teardown test",
       developers: [dev],
       tasks: [
@@ -656,8 +656,8 @@ describe("CoordinatorDetail", () => {
       developers: [],
       tasks: [
         makeTask({ id: "task-in-progress", name: "In Progress Task", status: "in_progress" as any }),
-        makeTask({ id: "task-starting", name: "Starting Task", status: "starting" }),
-        makeTask({ id: "task-restarting", name: "Restarting Task", status: "restarting" }),
+        makeTask({ id: "task-starting", name: "Starting Task", status: "starting" as any }),
+        makeTask({ id: "task-restarting", name: "Restarting Task", status: "restarting" as any }),
       ],
     });
 

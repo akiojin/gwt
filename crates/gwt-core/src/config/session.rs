@@ -884,7 +884,10 @@ updated_at = "2026-01-20T00:00:00Z"
 
     #[test]
     fn short_tool_label_claude_from_id() {
-        assert_eq!(short_tool_label(Some("claude-code"), "Some Label"), "Claude");
+        assert_eq!(
+            short_tool_label(Some("claude-code"), "Some Label"),
+            "Claude"
+        );
     }
 
     #[test]
@@ -904,26 +907,17 @@ updated_at = "2026-01-20T00:00:00Z"
 
     #[test]
     fn short_tool_label_open_code_hyphen_from_id() {
-        assert_eq!(
-            short_tool_label(Some("open-code"), "OpenCode"),
-            "OpenCode"
-        );
+        assert_eq!(short_tool_label(Some("open-code"), "OpenCode"), "OpenCode");
     }
 
     #[test]
     fn short_tool_label_claude_from_label_when_id_unknown() {
-        assert_eq!(
-            short_tool_label(Some("unknown"), "Claude Code"),
-            "Claude"
-        );
+        assert_eq!(short_tool_label(Some("unknown"), "Claude Code"), "Claude");
     }
 
     #[test]
     fn short_tool_label_codex_from_label() {
-        assert_eq!(
-            short_tool_label(Some("custom"), "Codex CLI"),
-            "Codex"
-        );
+        assert_eq!(short_tool_label(Some("custom"), "Codex CLI"), "Codex");
     }
 
     #[test]

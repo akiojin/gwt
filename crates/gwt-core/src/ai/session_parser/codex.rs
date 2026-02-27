@@ -279,7 +279,11 @@ mod tests {
         let sub = sessions.join("sub");
         fs::create_dir_all(&sub).unwrap();
 
-        fs::write(sessions.join("root.jsonl"), r#"{"payload":{"id":"sess-1"}}"#).unwrap();
+        fs::write(
+            sessions.join("root.jsonl"),
+            r#"{"payload":{"id":"sess-1"}}"#,
+        )
+        .unwrap();
         fs::write(sub.join("nested.jsonl"), r#"{"payload":{"id":"sess-2"}}"#).unwrap();
 
         let parser = CodexSessionParser::new(dir.path().to_path_buf());
@@ -324,7 +328,11 @@ mod tests {
         let sessions = dir.path().join(".codex").join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         let path = sessions.join("sess.jsonl");
-        fs::write(&path, r#"{"payload":{"id":"s1","cwd":"/repo/worktrees/feature-x"}}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"payload":{"id":"s1","cwd":"/repo/worktrees/feature-x"}}"#,
+        )
+        .unwrap();
 
         let parser = CodexSessionParser::new(dir.path().to_path_buf());
         let wt_path = std::path::PathBuf::from("/repo/worktrees/feature-x");
@@ -349,10 +357,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let parser = CodexSessionParser::new(dir.path().to_path_buf());
         let wt_path = std::path::PathBuf::from("/repo");
-        assert!(!parser.is_session_for_worktree(
-            &dir.path().join("nonexistent.jsonl"),
-            &wt_path
-        ));
+        assert!(!parser.is_session_for_worktree(&dir.path().join("nonexistent.jsonl"), &wt_path));
     }
 
     // --- parse_codex_session_id ---

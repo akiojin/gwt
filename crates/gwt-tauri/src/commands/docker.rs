@@ -254,12 +254,12 @@ mod tests {
             Remote {
                 name: "origin".to_string(),
                 fetch_url: "https://example.com/repo".to_string(),
-            push_url: "https://example.com/repo".to_string(),
+                push_url: "https://example.com/repo".to_string(),
             },
             Remote {
                 name: "upstream".to_string(),
                 fetch_url: "https://example.com/upstream".to_string(),
-            push_url: "https://example.com/upstream".to_string(),
+                push_url: "https://example.com/upstream".to_string(),
             },
         ];
         assert_eq!(

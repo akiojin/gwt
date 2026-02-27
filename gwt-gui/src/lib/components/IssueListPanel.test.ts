@@ -502,7 +502,7 @@ describe("IssueListPanel", () => {
         { login: "alice", avatarUrl: "https://avatars.example.com/alice.png" },
         { login: "bob", avatarUrl: "https://avatars.example.com/bob.png" },
       ],
-      milestone: { title: "v2.0" },
+      milestone: { title: "v2.0", number: 20 },
       commentsCount: 7,
       labels: [{ name: "bug", color: "d73a4a" }],
     });
@@ -544,7 +544,7 @@ describe("IssueListPanel", () => {
       assignees: [
         { login: "charlie", avatarUrl: "https://avatars.example.com/charlie.png" },
       ],
-      milestone: { title: "Sprint 5" },
+      milestone: { title: "Sprint 5", number: 5 },
       commentsCount: 12,
       labels: [{ name: "enhancement", color: "a2eeef" }],
     });

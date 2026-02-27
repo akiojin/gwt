@@ -682,10 +682,7 @@ mod tests {
             AgentType::from_tool_id("codex-cli"),
             Some(AgentType::CodexCli)
         );
-        assert_eq!(
-            AgentType::from_tool_id("CODEX"),
-            Some(AgentType::CodexCli)
-        );
+        assert_eq!(AgentType::from_tool_id("CODEX"), Some(AgentType::CodexCli));
     }
 
     #[test]
@@ -952,8 +949,7 @@ mod tests {
     #[test]
     fn extract_entry_array_tries_keys_in_order() {
         // If both "messages" and "history" exist, "messages" wins
-        let root =
-            serde_json::json!({"messages": [1, 2], "history": [3, 4, 5]});
+        let root = serde_json::json!({"messages": [1, 2], "history": [3, 4, 5]});
         assert_eq!(extract_entry_array(&root).len(), 2);
     }
 
@@ -1079,11 +1075,7 @@ mod tests {
 
     #[test]
     fn find_session_file_returns_none_for_nonexistent_root() {
-        let found = find_session_file(
-            std::path::Path::new("/nonexistent/path"),
-            "sess",
-            &["json"],
-        );
+        let found = find_session_file(std::path::Path::new("/nonexistent/path"), "sess", &["json"]);
         assert!(found.is_none());
     }
 

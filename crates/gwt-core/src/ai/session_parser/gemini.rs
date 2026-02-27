@@ -154,15 +154,13 @@ mod tests {
 
     #[test]
     fn count_messages_from_turns_key() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"turns":[{"x":1}]}"#).unwrap();
+        let json: serde_json::Value = serde_json::from_str(r#"{"turns":[{"x":1}]}"#).unwrap();
         assert_eq!(count_messages(&json), 1);
     }
 
     #[test]
     fn count_messages_from_events_key() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"events":[1,2,3,4,5]}"#).unwrap();
+        let json: serde_json::Value = serde_json::from_str(r#"{"events":[1,2,3,4,5]}"#).unwrap();
         assert_eq!(count_messages(&json), 5);
     }
 
@@ -181,8 +179,7 @@ mod tests {
 
     #[test]
     fn count_messages_returns_zero_for_non_array_value() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"messages":"string"}"#).unwrap();
+        let json: serde_json::Value = serde_json::from_str(r#"{"messages":"string"}"#).unwrap();
         assert_eq!(count_messages(&json), 0);
     }
 

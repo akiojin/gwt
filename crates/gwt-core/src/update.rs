@@ -1794,10 +1794,7 @@ mod tests {
 
     #[test]
     fn parse_tag_version_whitespace_trimmed() {
-        assert_eq!(
-            parse_tag_version("  v2.0.0  "),
-            Some(Version::new(2, 0, 0))
-        );
+        assert_eq!(parse_tag_version("  v2.0.0  "), Some(Version::new(2, 0, 0)));
     }
 
     // --- asset_name_from_url ---
@@ -1854,8 +1851,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("new.json");
         write_json_atomic(&path, &serde_json::json!({"key": "value"})).unwrap();
-        let content: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let content: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(content["key"], "value");
     }
 
