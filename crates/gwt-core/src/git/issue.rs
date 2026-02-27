@@ -9,7 +9,7 @@ use std::process::{Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::gh_cli::{gh_command, is_gh_available};
+use super::gh_cli::{gh_command, is_gh_available, run_gh_output_with_repair};
 use super::remote::Remote;
 use super::repository::{find_bare_repo_in_dir, is_git_repo};
 
@@ -196,10 +196,7 @@ pub fn fetch_open_issues(
     let repo_slug = resolve_repo_slug(repo_path);
     let args = issue_list_args(repo_slug.as_deref(), page, per_page, state);
 
-    let output = gh_command()
-        .args(args)
-        .current_dir(repo_path)
-        .output()
+    let output = run_gh_output_with_repair(repo_path, args)
         .map_err(|e| format!("Failed to execute gh CLI: {}", e))?;
 
     if !output.status.success() {
@@ -285,11 +282,9 @@ fn fetch_issue_comments_total_count(
     issue_number: u64,
 ) -> Result<u32, String> {
     let endpoint = format!("repos/{}/issues/{}", repo_slug, issue_number);
-    let output = gh_command()
-        .args(["api", &endpoint, "--jq", ".comments"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh api for issue comments: {}", e))?;
+    let output =
+        run_gh_output_with_repair(repo_path, ["api", endpoint.as_str(), "--jq", ".comments"])
+            .map_err(|e| format!("Failed to execute gh api for issue comments: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -524,10 +519,7 @@ pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubI
         args.push(slug.to_string());
     }
 
-    let output = gh_command()
-        .args(&args)
-        .current_dir(repo_path)
-        .output()
+    let output = run_gh_output_with_repair(repo_path, &args)
         .map_err(|e| format!("Failed to execute gh CLI: {}", e))?;
 
     if !output.status.success() {
@@ -834,11 +826,11 @@ fn verify_issue_branch_linked(
     branch_name: &str,
 ) -> Result<bool, String> {
     let repo_slug = resolve_repo_slug(repo_path);
-    let output = gh_command()
-        .args(issue_develop_list_args(issue_number, repo_slug.as_deref()))
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue develop --list: {}", e))?;
+    let output = run_gh_output_with_repair(
+        repo_path,
+        issue_develop_list_args(issue_number, repo_slug.as_deref()),
+    )
+    .map_err(|e| format!("Failed to execute gh issue develop --list: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -868,11 +860,16 @@ pub fn create_or_verify_linked_branch(
     branch_name: &str,
     base_branch: Option<&str>,
 ) -> Result<IssueLinkedBranchStatus, String> {
-    let output = gh_command()
-        .args(issue_develop_args(issue_number, branch_name, base_branch))
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue develop: {}", e))?;
+    let normalized_branch_name = branch_name.trim();
+    if normalized_branch_name.is_empty() {
+        return Err("[E1012] Branch name is required".to_string());
+    }
+
+    let output = run_gh_output_with_repair(
+        repo_path,
+        issue_develop_args(issue_number, normalized_branch_name, base_branch),
+    )
+    .map_err(|e| format!("Failed to execute gh issue develop: {}", e))?;
 
     if output.status.success() {
         return Ok(IssueLinkedBranchStatus::Created);
@@ -882,12 +879,12 @@ pub fn create_or_verify_linked_branch(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{}\n{}", stderr, stdout);
     if contains_already_exists_message(&combined) {
-        if verify_issue_branch_linked(repo_path, issue_number, branch_name)? {
+        if verify_issue_branch_linked(repo_path, issue_number, normalized_branch_name)? {
             return Ok(IssueLinkedBranchStatus::AlreadyLinked);
         }
         return Err(format!(
             "[E1012] Issue branch exists but is not linked: {}",
-            branch_name
+            normalized_branch_name
         ));
     }
 
@@ -1129,6 +1126,14 @@ mod tests {
     fn test_issue_develop_args_omits_base_when_blank() {
         let args = issue_develop_args(42, "feature/issue-42", Some("  "));
         assert!(!args.iter().any(|arg| arg == "--base"));
+    }
+
+    #[test]
+    fn test_create_or_verify_linked_branch_rejects_blank_branch_name() {
+        let repo = create_test_repo();
+        let err = create_or_verify_linked_branch(repo.path(), 42, "   ", None).unwrap_err();
+        assert!(err.contains("[E1012]"));
+        assert!(err.contains("Branch name is required"));
     }
 
     #[test]

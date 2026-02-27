@@ -3,7 +3,7 @@
 //! These helpers keep Spec/Plan/Tasks and related artifacts in a single
 //! GitHub Issue body instead of local markdown files.
 
-use super::gh_cli::gh_command;
+use super::gh_cli::run_gh_output_with_repair;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -169,17 +169,18 @@ pub fn get_spec_issue_detail(
     repo_path: &Path,
     issue_number: u64,
 ) -> Result<SpecIssueDetail, String> {
-    let output = gh_command()
-        .args([
+    let issue_number = issue_number.to_string();
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "issue",
             "view",
-            &issue_number.to_string(),
+            issue_number.as_str(),
             "--json",
             "number,title,body,updatedAt,labels,url",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue view: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to execute gh issue view: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -193,14 +194,14 @@ pub fn find_spec_issue_by_spec_id(
     repo_path: &Path,
     spec_id: &str,
 ) -> Result<Option<SpecIssueDetail>, String> {
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "issue", "list", "--state", "all", "--label", spec_id, "--json", "number", "--limit",
             "1",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue list: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to execute gh issue list: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -324,10 +325,8 @@ pub fn append_contract_comment(
 }
 
 pub fn close_spec_issue(repo_path: &Path, issue_number: u64) -> Result<(), String> {
-    let output = gh_command()
-        .args(["issue", "close", &issue_number.to_string()])
-        .current_dir(repo_path)
-        .output()
+    let issue_number = issue_number.to_string();
+    let output = run_gh_output_with_repair(repo_path, ["issue", "close", issue_number.as_str()])
         .map_err(|e| format!("Failed to execute gh issue close: {e}"))?;
 
     if !output.status.success() {
@@ -404,10 +403,7 @@ fn resolve_default_project_id(repo_path: &Path) -> Result<String, String> {
 }
 
 fn repo_name_with_owner(repo_path: &Path) -> Result<String, String> {
-    let output = gh_command()
-        .args(["repo", "view", "--json", "nameWithOwner"])
-        .current_dir(repo_path)
-        .output()
+    let output = run_gh_output_with_repair(repo_path, ["repo", "view", "--json", "nameWithOwner"])
         .map_err(|e| format!("Failed to execute gh repo view: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -446,8 +442,9 @@ fn query_repository_project_id(
     repo_name: &str,
 ) -> Result<Option<String>, String> {
     let query = "query($owner:String!, $repo:String!){ repository(owner:$owner, name:$repo){ projectsV2(first:20, orderBy:{field:UPDATED_AT, direction:DESC}){ nodes { id closed } } } }";
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
@@ -456,10 +453,9 @@ fn query_repository_project_id(
             &format!("owner={owner}"),
             "-F",
             &format!("repo={repo_name}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to query repository projects: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to query repository projects: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -503,18 +499,18 @@ fn query_owner_projects_by_kind(
     var_value: &str,
     repo_slug: &str,
 ) -> Result<Option<String>, String> {
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
             &format!("query={query}"),
             "-F",
             &format!("{var_name}={var_value}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to query owner projects: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to query owner projects: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Owner project query failed: {}", stderr.trim()));
@@ -676,14 +672,14 @@ fn gh_issue_create(
     body: &str,
     spec_id: &str,
 ) -> Result<u64, String> {
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL, "--label",
             spec_id,
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -701,11 +697,13 @@ fn gh_issue_edit(
     body: &str,
     spec_id: &str,
 ) -> Result<(), String> {
-    let output = gh_command()
-        .args([
+    let issue_number = issue_number.to_string();
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "issue",
             "edit",
-            &issue_number.to_string(),
+            issue_number.as_str(),
             "--title",
             title,
             "--body",
@@ -714,10 +712,9 @@ fn gh_issue_edit(
             SPEC_LABEL,
             "--add-label",
             spec_id,
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -738,17 +735,18 @@ fn fetch_issue_node_and_comments(
     repo_path: &Path,
     issue_number: u64,
 ) -> Result<(String, Vec<IssueCommentNode>), String> {
-    let output = gh_command()
-        .args([
+    let issue_number = issue_number.to_string();
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "issue",
             "view",
-            &issue_number.to_string(),
+            issue_number.as_str(),
             "--json",
             "id,comments",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue view comments: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to execute gh issue view comments: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("gh issue view failed: {}", stderr.trim()));
@@ -885,8 +883,9 @@ fn add_issue_comment(
     body: &str,
 ) -> Result<SpecIssueArtifactComment, String> {
     let query = "mutation($subject:ID!, $body:String!){ addComment(input:{subjectId:$subject, body:$body}) { commentEdge { node { id body updatedAt url } } } }";
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
@@ -895,10 +894,9 @@ fn add_issue_comment(
             &format!("subject={issue_node_id}"),
             "-F",
             &format!("body={body}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to add issue artifact comment: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to add issue artifact comment: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact add failed: {}", stderr.trim()));
@@ -925,8 +923,9 @@ fn update_issue_comment(
     body: &str,
 ) -> Result<SpecIssueArtifactComment, String> {
     let query = "mutation($id:ID!, $body:String!){ updateIssueComment(input:{id:$id, body:$body}) { issueComment { id body updatedAt url } } }";
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
@@ -935,10 +934,9 @@ fn update_issue_comment(
             &format!("id={comment_id}"),
             "-F",
             &format!("body={body}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to update issue artifact comment: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to update issue artifact comment: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact update failed: {}", stderr.trim()));
@@ -959,18 +957,18 @@ fn update_issue_comment(
 
 fn delete_issue_comment(repo_path: &Path, comment_id: &str) -> Result<(), String> {
     let query = "mutation($id:ID!){ deleteIssueComment(input:{id:$id}) { clientMutationId } }";
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
             &format!("query={query}"),
             "-F",
             &format!("id={comment_id}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to delete issue artifact comment: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to delete issue artifact comment: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact delete failed: {}", stderr.trim()));
@@ -1162,11 +1160,12 @@ fn parse_issue_number_from_create_output(output: &str) -> Result<u64, String> {
 }
 
 fn get_issue_node_id(repo_path: &Path, issue_number: u64) -> Result<String, String> {
-    let output = gh_command()
-        .args(["issue", "view", &issue_number.to_string(), "--json", "id"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh issue view for node id: {e}"))?;
+    let issue_number = issue_number.to_string();
+    let output = run_gh_output_with_repair(
+        repo_path,
+        ["issue", "view", issue_number.as_str(), "--json", "id"],
+    )
+    .map_err(|e| format!("Failed to execute gh issue view for node id: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("gh issue view failed: {}", stderr.trim()));
@@ -1193,18 +1192,18 @@ fn ensure_project_item(
 
     // If already added, look up existing item id.
     let list_query = "query($project:ID!){ node(id:$project){ ... on ProjectV2 { items(first:100){ nodes { id content { ... on Issue { id } } } } } } }";
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
             &format!("query={list_query}"),
             "-F",
             &format!("project={project_id}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to query project items: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to query project items: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Project item query failed: {}", stderr.trim()));
@@ -1239,8 +1238,9 @@ fn run_graphql_item_add(
     project_id: &str,
     issue_node_id: &str,
 ) -> Result<String, String> {
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
@@ -1249,10 +1249,9 @@ fn run_graphql_item_add(
             &format!("project={project_id}"),
             "-F",
             &format!("content={issue_node_id}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to add project item: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to add project item: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1277,18 +1276,18 @@ fn update_project_status(
     status_name: &str,
 ) -> Result<bool, String> {
     let query = "query($project:ID!){ node(id:$project){ ... on ProjectV2 { fields(first:100){ nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }";
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
             &format!("query={query}"),
             "-F",
             &format!("project={project_id}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to query project fields: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to query project fields: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Project field query failed: {}", stderr.trim()));
@@ -1335,8 +1334,9 @@ fn update_project_status(
     };
 
     let mutation = "mutation($project:ID!, $item:ID!, $field:ID!, $option:String!){ updateProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field, value:{ singleSelectOptionId:$option }}) { projectV2Item { id } } }";
-    let update_output = gh_command()
-        .args([
+    let update_output = run_gh_output_with_repair(
+        repo_path,
+        [
             "api",
             "graphql",
             "-f",
@@ -1349,10 +1349,9 @@ fn update_project_status(
             &format!("field={field_id}"),
             "-F",
             &format!("option={option_id}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to update project status: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("Failed to update project status: {e}"))?;
     if !update_output.status.success() {
         let stderr = String::from_utf8_lossy(&update_output.stderr);
         return Err(format!("Project status update failed: {}", stderr.trim()));
