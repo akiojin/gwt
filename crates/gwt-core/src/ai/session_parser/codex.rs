@@ -230,4 +230,232 @@ mod tests {
         let resolved = parser.session_file_path("sess-123");
         assert_eq!(resolved, path);
     }
+
+    // --- agent_type ---
+
+    #[test]
+    fn agent_type_returns_codex_cli() {
+        let dir = tempdir().unwrap();
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        assert_eq!(parser.agent_type(), AgentType::CodexCli);
+    }
+
+    // --- session_file_path edge cases ---
+
+    #[test]
+    fn session_file_path_returns_default_when_no_session_dir() {
+        let dir = tempdir().unwrap();
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let path = parser.session_file_path("nonexistent");
+        assert!(path.to_string_lossy().ends_with("nonexistent.jsonl"));
+    }
+
+    #[test]
+    fn session_file_path_finds_by_filename_match() {
+        let dir = tempdir().unwrap();
+        let sessions = dir.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("my-sess.jsonl");
+        fs::write(&path, r#"{"type":"message"}"#).unwrap();
+
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let resolved = parser.session_file_path("my-sess");
+        assert_eq!(resolved, path);
+    }
+
+    // --- list_sessions ---
+
+    #[test]
+    fn list_sessions_returns_empty_when_no_dir() {
+        let dir = tempdir().unwrap();
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        assert!(parser.list_sessions(None).is_empty());
+    }
+
+    #[test]
+    fn list_sessions_collects_from_nested_dirs() {
+        let dir = tempdir().unwrap();
+        let sessions = dir.path().join(".codex").join("sessions");
+        let sub = sessions.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        fs::write(
+            sessions.join("root.jsonl"),
+            r#"{"payload":{"id":"sess-1"}}"#,
+        )
+        .unwrap();
+        fs::write(sub.join("nested.jsonl"), r#"{"payload":{"id":"sess-2"}}"#).unwrap();
+
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let all = parser.list_sessions(None);
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn list_sessions_skips_non_session_files() {
+        let dir = tempdir().unwrap();
+        let sessions = dir.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        fs::write(sessions.join("sess.jsonl"), r#"{"payload":{"id":"s1"}}"#).unwrap();
+        fs::write(sessions.join("readme.txt"), "not a session").unwrap();
+
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let all = parser.list_sessions(None);
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn list_sessions_sorted_newest_first() {
+        let dir = tempdir().unwrap();
+        let sessions = dir.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        fs::write(sessions.join("old.jsonl"), r#"{"payload":{"id":"old"}}"#).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(sessions.join("new.jsonl"), r#"{"payload":{"id":"new"}}"#).unwrap();
+
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let all = parser.list_sessions(None);
+        assert_eq!(all[0].session_id, "new");
+    }
+
+    // --- is_session_for_worktree ---
+
+    #[test]
+    fn is_session_for_worktree_matches_cwd() {
+        let dir = tempdir().unwrap();
+        let sessions = dir.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("sess.jsonl");
+        fs::write(
+            &path,
+            r#"{"payload":{"id":"s1","cwd":"/repo/worktrees/feature-x"}}"#,
+        )
+        .unwrap();
+
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let wt_path = std::path::PathBuf::from("/repo/worktrees/feature-x");
+        assert!(parser.is_session_for_worktree(&path, &wt_path));
+    }
+
+    #[test]
+    fn is_session_for_worktree_no_match() {
+        let dir = tempdir().unwrap();
+        let sessions = dir.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("sess.jsonl");
+        fs::write(&path, r#"{"payload":{"id":"s1","cwd":"/other/path"}}"#).unwrap();
+
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let wt_path = std::path::PathBuf::from("/repo/worktrees/feature-x");
+        assert!(!parser.is_session_for_worktree(&path, &wt_path));
+    }
+
+    #[test]
+    fn is_session_for_worktree_nonexistent_file() {
+        let dir = tempdir().unwrap();
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let wt_path = std::path::PathBuf::from("/repo");
+        assert!(!parser.is_session_for_worktree(&dir.path().join("nonexistent.jsonl"), &wt_path));
+    }
+
+    // --- parse_codex_session_id ---
+
+    #[test]
+    fn parse_codex_session_id_extracts_from_payload() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        fs::write(&path, r#"{"payload":{"id":"my-session-id","cwd":"/repo"}}"#).unwrap();
+
+        let id = parse_codex_session_id(&path);
+        assert_eq!(id, Some("my-session-id".to_string()));
+    }
+
+    #[test]
+    fn parse_codex_session_id_returns_none_for_no_payload() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        fs::write(&path, r#"{"type":"message","content":"hi"}"#).unwrap();
+
+        let id = parse_codex_session_id(&path);
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn parse_codex_session_id_returns_none_for_empty_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        fs::write(&path, r#"{"payload":{"id":"","cwd":"/repo"}}"#).unwrap();
+
+        let id = parse_codex_session_id(&path);
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn parse_codex_session_id_returns_none_for_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        fs::write(&path, "").unwrap();
+
+        let id = parse_codex_session_id(&path);
+        assert!(id.is_none());
+    }
+
+    // --- parse ---
+
+    #[test]
+    fn parse_returns_error_for_missing_file() {
+        let dir = tempdir().unwrap();
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let result = parser.parse("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_reads_jsonl_session() {
+        let dir = tempdir().unwrap();
+        let sessions = dir.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"payload":{"id":"test-sess","cwd":"/repo"}}
+{"type":"message","role":"user","content":"Hello","timestamp":1700000000}
+{"type":"message","role":"assistant","content":"Hi","timestamp":1700000001}"#;
+        fs::write(sessions.join("test-sess.jsonl"), content).unwrap();
+
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let parsed = parser.parse("test-sess").unwrap();
+        assert_eq!(parsed.session_id, "test-sess");
+        assert_eq!(parsed.agent_type, AgentType::CodexCli);
+        assert_eq!(parsed.messages.len(), 2);
+    }
+
+    // --- list_sessions with worktree filter ---
+
+    #[test]
+    fn list_sessions_filters_by_worktree() {
+        let dir = tempdir().unwrap();
+        let sessions = dir.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Session with matching worktree
+        fs::write(
+            sessions.join("match.jsonl"),
+            r#"{"payload":{"id":"match","cwd":"/repo/wt/feature-x"}}"#,
+        )
+        .unwrap();
+
+        // Session with different worktree
+        fs::write(
+            sessions.join("other.jsonl"),
+            r#"{"payload":{"id":"other","cwd":"/other/path"}}"#,
+        )
+        .unwrap();
+
+        let parser = CodexSessionParser::new(dir.path().to_path_buf());
+        let wt_path = std::path::PathBuf::from("/repo/wt/feature-x");
+        let filtered = parser.list_sessions(Some(&wt_path));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].session_id, "match");
+    }
 }

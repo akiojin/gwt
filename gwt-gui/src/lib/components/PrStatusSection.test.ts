@@ -658,6 +658,176 @@ describe("PrStatusSection", () => {
     });
   });
 
+  // --- workflowStatusText branch coverage ---
+
+  describe("workflowStatusText branches", () => {
+    it("shows 'Queued' for queued status", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "queued", conclusion: null },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Queued");
+    });
+
+    it("shows raw status for unknown status", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "waiting" as any, conclusion: null },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("waiting");
+    });
+
+    it("shows 'Neutral' for neutral conclusion", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "neutral" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Neutral");
+    });
+
+    it("shows 'Skipped' for skipped conclusion", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "skipped" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Skipped");
+    });
+
+    it("shows 'Completed' for unknown conclusion", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "cancelled" as any },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Completed");
+    });
+  });
+
+  // --- handleCheckClick fallback: no onOpenCiLog ---
+
+  describe("handleCheckClick fallback", () => {
+    it("opens GitHub Actions URL when onOpenCiLog is not provided", async () => {
+      const windowOpenSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 789, status: "completed", conclusion: "success" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const checkItem = container.querySelector(".check-item") as HTMLElement;
+      await fireEvent.click(checkItem);
+
+      expect(windowOpenSpy).toHaveBeenCalledWith(
+        "https://github.com/owner/repo/actions/runs/789",
+        "_blank"
+      );
+      windowOpenSpy.mockRestore();
+    });
+  });
+
+  // --- reviewStateIcon: unknown state ---
+
+  describe("reviewStateIcon unknown state", () => {
+    it("shows '?' for unknown review state", async () => {
+      const reviews: ReviewInfo[] = [
+        { reviewer: "unknown-user", state: "SOME_NEW_STATE" as any },
+      ];
+      const pr = makePrDetail({ reviews });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateElement = container.querySelector(".review-state");
+      expect(stateElement?.textContent?.trim()).toBe("?");
+    });
+  });
+
+  // --- Comment without line number or code snippet ---
+
+  describe("comment branches", () => {
+    it("renders comment without line number", async () => {
+      const comments: ReviewComment[] = [
+        {
+          author: "bob",
+          body: "General comment",
+          filePath: "src/main.rs",
+          line: null,
+          codeSnippet: null,
+          createdAt: "2025-01-01T00:00:00Z",
+        },
+      ];
+      const pr = makePrDetail({ reviewComments: comments });
+      const { container } = await renderSection({ prDetail: pr });
+
+      expect(container.textContent).toContain("src/main.rs");
+      expect(container.textContent).not.toContain(":");
+      expect(container.querySelector(".code-snippet")).toBeNull();
+    });
+
+    it("renders comment without filePath", async () => {
+      const comments: ReviewComment[] = [
+        {
+          author: "carol",
+          body: "Top-level comment",
+          filePath: null,
+          line: null,
+          codeSnippet: null,
+          createdAt: "2025-01-01T00:00:00Z",
+        },
+      ];
+      const pr = makePrDetail({ reviewComments: comments });
+      const { container } = await renderSection({ prDetail: pr });
+
+      expect(container.textContent).toContain("carol");
+      expect(container.textContent).toContain("Top-level comment");
+      expect(container.querySelector(".comment-file")).toBeNull();
+    });
+  });
+
+  // --- mergeStateLabel default case ---
+
+  describe("mergeStateLabel default case", () => {
+    it("returns raw string for unrecognized merge state status", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "SOME_NEW_STATE" as any });
+      const { container } = await renderSection({ prDetail: pr });
+
+      // The merge state badge should show up with the raw string for recognized "show" states only.
+      // SOME_NEW_STATE is not in the show list, so it should not show a badge.
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+    });
+  });
+
   // --- T007: retrying prop – pulse animation & merge button control ---
 
   describe("retrying prop", () => {

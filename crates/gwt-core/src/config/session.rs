@@ -879,4 +879,207 @@ updated_at = "2026-01-20T00:00:00Z"
         assert!(!agent_has_hook_support(Some("opencode")));
         assert!(!agent_has_hook_support(None));
     }
+
+    // --- short_tool_label ---
+
+    #[test]
+    fn short_tool_label_claude_from_id() {
+        assert_eq!(
+            short_tool_label(Some("claude-code"), "Some Label"),
+            "Claude"
+        );
+    }
+
+    #[test]
+    fn short_tool_label_codex_from_id() {
+        assert_eq!(short_tool_label(Some("codex-cli"), "Some Label"), "Codex");
+    }
+
+    #[test]
+    fn short_tool_label_gemini_from_id() {
+        assert_eq!(short_tool_label(Some("gemini-cli"), "Gemini CLI"), "Gemini");
+    }
+
+    #[test]
+    fn short_tool_label_opencode_from_id() {
+        assert_eq!(short_tool_label(Some("opencode"), "OpenCode"), "OpenCode");
+    }
+
+    #[test]
+    fn short_tool_label_open_code_hyphen_from_id() {
+        assert_eq!(short_tool_label(Some("open-code"), "OpenCode"), "OpenCode");
+    }
+
+    #[test]
+    fn short_tool_label_claude_from_label_when_id_unknown() {
+        assert_eq!(short_tool_label(Some("unknown"), "Claude Code"), "Claude");
+    }
+
+    #[test]
+    fn short_tool_label_codex_from_label() {
+        assert_eq!(short_tool_label(Some("custom"), "Codex CLI"), "Codex");
+    }
+
+    #[test]
+    fn short_tool_label_fallback_to_label() {
+        assert_eq!(
+            short_tool_label(Some("custom"), "Custom Agent"),
+            "Custom Agent"
+        );
+    }
+
+    #[test]
+    fn short_tool_label_none_id_uses_label() {
+        assert_eq!(short_tool_label(None, "Claude Code"), "Claude");
+    }
+
+    #[test]
+    fn short_tool_label_none_id_unknown_label() {
+        assert_eq!(short_tool_label(None, "My Custom Tool"), "My Custom Tool");
+    }
+
+    // --- get_session_for_branch ---
+
+    #[test]
+    fn get_session_for_branch_found() {
+        let sessions = vec![
+            Session::new("/repo/.worktrees/a", "feature/a"),
+            Session::new("/repo/.worktrees/b", "feature/b"),
+        ];
+        let found = get_session_for_branch(&sessions, "feature/b");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().branch, "feature/b");
+    }
+
+    #[test]
+    fn get_session_for_branch_not_found() {
+        let sessions = vec![Session::new("/repo/.worktrees/a", "feature/a")];
+        let found = get_session_for_branch(&sessions, "nonexistent");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn get_session_for_branch_empty_list() {
+        let sessions: Vec<Session> = vec![];
+        let found = get_session_for_branch(&sessions, "feature/a");
+        assert!(found.is_none());
+    }
+
+    // --- Session::format_tool_usage ---
+
+    #[test]
+    fn format_tool_usage_with_agent_label() {
+        let mut session = Session::new("/repo", "main");
+        session.agent_label = Some("Gemini CLI".to_string());
+        session.tool_version = Some("0.2.1".to_string());
+        assert_eq!(
+            session.format_tool_usage(),
+            Some("Gemini@0.2.1".to_string())
+        );
+    }
+
+    #[test]
+    fn format_tool_usage_falls_back_to_agent_id() {
+        let mut session = Session::new("/repo", "main");
+        session.agent = Some("opencode".to_string());
+        session.agent_label = None;
+        session.tool_version = Some("1.0.0".to_string());
+        assert_eq!(
+            session.format_tool_usage(),
+            Some("OpenCode@1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn format_tool_usage_none_when_no_agent() {
+        let session = Session::new("/repo", "main");
+        assert_eq!(session.format_tool_usage(), None);
+    }
+
+    #[test]
+    fn format_tool_usage_defaults_to_latest_version() {
+        let mut session = Session::new("/repo", "main");
+        session.agent_label = Some("Claude Code".to_string());
+        session.tool_version = None;
+        assert_eq!(
+            session.format_tool_usage(),
+            Some("Claude@latest".to_string())
+        );
+    }
+
+    // --- Session save/load with corrupt data ---
+
+    #[test]
+    fn session_load_corrupt_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("corrupt.toml");
+        std::fs::write(&path, "this is not valid toml!!!").unwrap();
+        let result = Session::load(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_load_nonexistent() {
+        let result = Session::load(std::path::Path::new("/nonexistent/session.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_save_creates_parent_dirs() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("deep").join("nested").join("session.toml");
+        let session = Session::new("/repo", "main");
+        session.save(&path).unwrap();
+        assert!(path.exists());
+    }
+
+    // --- Session sessions_dir with env var ---
+
+    #[test]
+    fn sessions_dir_uses_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let custom_dir = temp.path().join("custom-sessions");
+        std::fs::create_dir_all(&custom_dir).unwrap();
+        let _env_guard = EnvVarGuard::set("GWT_SESSIONS_DIR", custom_dir.to_str().unwrap());
+
+        let dir = Session::sessions_dir();
+        assert_eq!(dir, custom_dir);
+    }
+
+    // --- should_mark_stopped edge cases ---
+
+    #[test]
+    fn should_mark_stopped_false_for_waiting_input_within_timeout() {
+        let mut session = Session::new("/test", "branch");
+        session.status = AgentStatus::WaitingInput;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(30));
+        assert!(!session.should_mark_stopped());
+    }
+
+    #[test]
+    fn should_mark_stopped_true_for_waiting_input_past_timeout() {
+        let mut session = Session::new("/test", "branch");
+        session.status = AgentStatus::WaitingInput;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(61));
+        assert!(session.should_mark_stopped());
+    }
+
+    #[test]
+    fn should_mark_stopped_false_for_unknown_status() {
+        let mut session = Session::new("/test", "branch");
+        session.status = AgentStatus::Unknown;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(120));
+        assert!(session.should_mark_stopped());
+    }
+
+    // --- looks_like_prompt additional tests ---
+
+    #[test]
+    fn infer_prompt_with_prompt_colon() {
+        let status = infer_agent_status("Enter password:\nPrompt: ", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
 }

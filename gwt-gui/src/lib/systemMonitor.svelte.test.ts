@@ -102,6 +102,180 @@ describe("createSystemMonitor", () => {
     monitor.destroy();
   });
 
+  it("recovers from poll failure and continues polling", async () => {
+    let callCount = 0;
+    invokeMock.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 2) throw new Error("temporary failure");
+      return systemInfo();
+    });
+
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const monitor = createSystemMonitor();
+      monitor.start();
+      await settle();
+      // warmup (1) + first poll (2=error)
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+
+      vi.advanceTimersByTime(5_000);
+      await settle();
+      // third call should succeed
+      expect(invokeMock).toHaveBeenCalledTimes(3);
+      expect(monitor.cpuUsage).toBe(42);
+
+      monitor.destroy();
+    } finally {
+      consoleWarnSpy.mockRestore();
+    }
+  });
+
+  it("exposes GPU info from system info response", async () => {
+    invokeMock.mockResolvedValue({
+      ...systemInfo(),
+      gpus: [
+        { name: "GPU-0", vram_total_bytes: 8000, vram_used_bytes: 4000, usage_percent: 50 },
+      ],
+    });
+
+    const monitor = createSystemMonitor();
+    monitor.start();
+    await settle();
+
+    expect(monitor.gpuInfos).toHaveLength(1);
+    expect(monitor.gpuInfos[0].name).toBe("GPU-0");
+
+    monitor.destroy();
+  });
+
+  it("stops polling when stop is called", async () => {
+    invokeMock.mockResolvedValue(systemInfo());
+    const monitor = createSystemMonitor();
+    monitor.start();
+    await settle();
+    expect(invokeMock).toHaveBeenCalledTimes(2); // warmup + first poll
+    invokeMock.mockClear();
+
+    monitor.stop();
+
+    vi.advanceTimersByTime(20_000);
+    await settle();
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    monitor.destroy();
+  });
+
+  it("does not start after destroy", async () => {
+    invokeMock.mockResolvedValue(systemInfo());
+    const monitor = createSystemMonitor();
+    monitor.destroy();
+
+    monitor.start();
+    await settle();
+    vi.advanceTimersByTime(10_000);
+    await settle();
+    // Should not have polled since destroyed before start
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("updates memUsed and memTotal from poll", async () => {
+    invokeMock.mockResolvedValue({
+      cpu_usage_percent: 75,
+      memory_used_bytes: 12,
+      memory_total_bytes: 32,
+      gpus: [],
+    });
+
+    const monitor = createSystemMonitor();
+    monitor.start();
+    await settle();
+
+    expect(monitor.memUsed).toBe(12);
+    expect(monitor.memTotal).toBe(32);
+    expect(monitor.cpuUsage).toBe(75);
+
+    monitor.destroy();
+  });
+
+  it("does not run duplicate warmup when warmup is already in progress", async () => {
+    let warmupResolve: ((value: ReturnType<typeof systemInfo>) => void) | null = null;
+    let callIndex = 0;
+    invokeMock.mockImplementation(async () => {
+      callIndex++;
+      if (callIndex === 1) {
+        // First call (warmup) blocks until we resolve it
+        return new Promise<ReturnType<typeof systemInfo>>((resolve) => {
+          warmupResolve = resolve;
+        });
+      }
+      return systemInfo();
+    });
+
+    const monitor = createSystemMonitor();
+    monitor.start();
+    await settle(2);
+    // warmup is in flight, only one call so far
+    expect(callIndex).toBe(1);
+
+    // Second start is no-op since running is already true
+    monitor.start();
+    await settle(2);
+    // warmup still hasn't been called again
+    expect(callIndex).toBe(1);
+
+    // resolve warmup
+    warmupResolve!(systemInfo());
+    await settle();
+    // After warmup resolves: pollOnce is called
+    expect(callIndex).toBeGreaterThanOrEqual(2);
+    monitor.destroy();
+  });
+
+  it("handles start called multiple times without double-polling", async () => {
+    invokeMock.mockResolvedValue(systemInfo());
+    const monitor = createSystemMonitor();
+
+    monitor.start();
+    monitor.start(); // second call should be no-op (running is already true)
+    await settle();
+    expect(invokeMock).toHaveBeenCalledTimes(2); // warmup + first poll (not doubled)
+
+    monitor.destroy();
+  });
+
+  it("scheduleNext does not schedule when timerId already exists", async () => {
+    invokeMock.mockResolvedValue(systemInfo());
+    const monitor = createSystemMonitor();
+    monitor.start();
+    await settle();
+    // Timer is already scheduled after first poll
+    // Advance partially
+    vi.advanceTimersByTime(2000);
+    await settle();
+    // Timer should still be ticking, not re-scheduled
+    vi.advanceTimersByTime(3000);
+    await settle();
+    // Should have exactly one more poll call
+    expect(invokeMock).toHaveBeenCalledTimes(3); // warmup + poll + poll
+    monitor.destroy();
+  });
+
+  it("handles gpus being null in response", async () => {
+    invokeMock.mockResolvedValue({
+      cpu_usage_percent: 10,
+      memory_used_bytes: 4,
+      memory_total_bytes: 8,
+      gpus: null,
+    });
+
+    const monitor = createSystemMonitor();
+    monitor.start();
+    await settle();
+
+    expect(monitor.gpuInfos).toEqual([]);
+    monitor.destroy();
+  });
+
   it("runs warmup only once even after visibility resume", async () => {
     invokeMock.mockResolvedValue(systemInfo());
     const monitor = createSystemMonitor();

@@ -1011,6 +1011,126 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
+  it("shows Docker tab with no context when detection returns null", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return null;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[4] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(dockerTab.classList.contains("active")).toBe(true);
+      expect(rendered.container.textContent).toContain("No Docker context");
+    });
+  });
+
+  it("shows session summary with warning when response has warning", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return { ...sessionSummaryFixture, warning: "Cache is stale" };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Cache is stale");
+    });
+  });
+
+  it("shows no summary placeholder when markdown is null and no error", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return { ...sessionSummaryFixture, markdown: null, error: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("No summary.");
+    });
+  });
+
+  it("shows empty state in PR tab when no PR exists", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("No PR")).toBeTruthy();
+    });
+  });
+
+  it("switches tabs and goes back preserving state", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+
+    // Go to Git tab
+    await fireEvent.click(tabs[1] as HTMLElement);
+    await waitFor(() => {
+      expect((tabs[1] as HTMLElement).classList.contains("active")).toBe(true);
+    });
+
+    // Go to Issue tab
+    await fireEvent.click(tabs[2] as HTMLElement);
+    await waitFor(() => {
+      expect((tabs[2] as HTMLElement).classList.contains("active")).toBe(true);
+    });
+
+    // Go back to Summary tab
+    await fireEvent.click(tabs[0] as HTMLElement);
+    await waitFor(() => {
+      expect((tabs[0] as HTMLElement).classList.contains("active")).toBe(true);
+    });
+  });
+
+  it("renders branch header with commit hash", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: { ...branchFixture, commit: "abcdef1" },
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector("h2")?.textContent).toBe("feature/markdown-ui");
+    });
+  });
+
   it("renders New Terminal button and fires onNewTerminal callback", async () => {
     const onNewTerminal = vi.fn();
     const rendered = await renderPanel({
@@ -1041,5 +1161,1713 @@ describe("WorktreeSummaryPanel", () => {
     // Clicking without callback should not throw
     const btn = rendered.getByTitle("New Terminal");
     await fireEvent.click(btn);
+  });
+
+  it("shows ghCliStatus not-authenticated message in PR tab", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      ghCliStatus: { available: true, authenticated: false },
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(
+        rendered.getByText("GitHub CLI (gh) is not authenticated. Run: gh auth login")
+      ).toBeTruthy();
+    });
+  });
+
+  it("shows session summary with status=error and custom error message", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          status: "error",
+          markdown: null,
+          error: "API key invalid",
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("API key invalid");
+      expect(rendered.container.textContent).toContain("Error");
+    });
+  });
+
+  it("shows ai-not-configured placeholder in Summary tab", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          status: "ai-not-configured",
+          markdown: null,
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("AI not configured");
+      expect(rendered.container.textContent).toContain(
+        "Configure AI in Settings to enable session summary."
+      );
+    });
+  });
+
+  it("shows disabled placeholder in Summary tab", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          status: "disabled",
+          markdown: null,
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Disabled");
+      expect(rendered.container.textContent).toContain("Session summary disabled.");
+    });
+  });
+
+  it("shows no-session placeholder in Summary tab", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          status: "no-session",
+          markdown: null,
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("No session");
+      expect(rendered.container.textContent).toContain("No session.");
+    });
+  });
+
+  it("shows Generating... placeholder when generating with no markdown", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          status: "ok",
+          generating: true,
+          markdown: null,
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Generating...");
+    });
+  });
+
+  it("shows session summary with generating=true and existing markdown (Updating...)", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          status: "ok",
+          generating: true,
+          markdown: "## Existing\nSome content",
+          toolId: "claude",
+          sessionId: "session-1",
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Updating...");
+    });
+  });
+
+  it("shows session summary error when get_branch_session_summary throws", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") throw new Error("Connection refused");
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain(
+        "Failed to generate session summary: Connection refused"
+      );
+    });
+  });
+
+  it("shows quick start error when get_branch_quick_start throws", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") throw new Error("Quick start failed");
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Failed to load Quick Start");
+    });
+  });
+
+  it("shows quick launch error when onQuickLaunch throws", async () => {
+    // loadQuickStart resets quickLaunchError, so we need the mock to be
+    // stable throughout the test to avoid the error being cleared by a
+    // subsequent $effect re-run of loadQuickStart.
+    let quickStartCallCount = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") {
+        quickStartCallCount++;
+        return [quickStartDockerEntry];
+      }
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const onQuickLaunch = vi.fn().mockRejectedValue(new Error("Launch failed"));
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch,
+    });
+
+    await waitFor(() => {
+      const btn = rendered.getByRole("button", { name: "Continue" });
+      expect((btn as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    // Stop loadQuickStart from resetting quickLaunchError by returning from cache
+    // (the cache is already populated from the first call)
+    await fireEvent.click(rendered.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => {
+      expect(onQuickLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    // The error should be visible now
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Failed to launch");
+    });
+  });
+
+  it("shows linked issue error when fetch_branch_linked_issue throws", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") throw new Error("Issue fetch failed");
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const issueTab = tabs[2] as HTMLElement;
+    await fireEvent.click(issueTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Failed to load linked issue");
+    });
+  });
+
+  it("shows docker context error when detect_docker_context throws", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") throw new Error("Docker detection failed");
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[4] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Failed to detect Docker context");
+    });
+  });
+
+  it("shows latest branch PR error when fetch_latest_branch_pr throws", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") throw new Error("PR fetch failed");
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Failed to load PR");
+    });
+  });
+
+  it("normalizes origin/ branch name and shows branch header", async () => {
+    const originBranch: BranchInfo = {
+      ...branchFixture,
+      name: "origin/feature/markdown-ui",
+    };
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: originBranch,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector("h2")?.textContent).toBe(
+        "origin/feature/markdown-ui"
+      );
+    });
+
+    // The normalized branch name should be used in invoke calls
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.some(
+          ([cmd, payload]) =>
+            cmd === "get_branch_session_summary" &&
+            payload?.branch === "feature/markdown-ui"
+        )
+      ).toBe(true);
+    });
+  });
+
+  it("displays session summary pane: prefix as Live indicator", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          sessionId: "pane:0",
+          toolId: "claude",
+          sourceType: "scrollback",
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Live (pane summary)");
+      expect(rendered.container.textContent).toContain("Live (scrollback)");
+    });
+  });
+
+  it("displays session summary with toolId only (no sessionId)", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          sessionId: null,
+          toolId: "codex",
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      // Should show just "codex" without session ID
+      const subtitle = rendered.container.querySelector(".quick-subtitle");
+      expect(subtitle?.textContent?.trim()).toContain("codex");
+    });
+  });
+
+  it("displays session summary subtitle with non-pane session id", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          sessionId: "session-42",
+          toolId: "codex",
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("codex #session-42");
+    });
+  });
+
+  it("keeps previous markdown during silent polling when refreshed result has null markdown", async () => {
+    vi.useFakeTimers();
+    let callCount = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") {
+        callCount += 1;
+        if (callCount === 1) {
+          return {
+            ...sessionSummaryFixture,
+            status: "ok",
+            markdown: "## First summary\\nKeep me",
+          };
+        }
+        return {
+          ...sessionSummaryFixture,
+          status: "ok",
+          markdown: null,
+        };
+      }
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: ["feature/markdown-ui"],
+      activeAgentTabBranch: "feature/markdown-ui",
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("First summary");
+      expect(sessionSummaryCalls().length).toBeGreaterThanOrEqual(1);
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await waitFor(() => {
+      expect(sessionSummaryCalls().length).toBeGreaterThanOrEqual(2);
+      expect(rendered.container.textContent).toContain("First summary");
+    });
+  });
+
+  it("shows meta section with language label and timestamps", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          language: "ja",
+          sourceType: "session",
+          inputMtimeMs: 1_700_000_000_000,
+          summaryUpdatedMs: 1_700_000_000_500,
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Language: Japanese");
+      expect(rendered.container.textContent).toContain("Source: Session");
+      expect(rendered.container.textContent).toContain("Input updated:");
+      expect(rendered.container.textContent).toContain("Summary updated:");
+    });
+  });
+
+  it("shows language=English label when summary language is en", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          language: "en",
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Language: English");
+    });
+  });
+
+  it("shows language=Auto label when summary language is auto", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          language: "auto",
+        };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Language: Auto");
+    });
+  });
+
+  it("shows linked issue with no labels as labels: none", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue")
+        return { ...linkedIssueFixture, labels: [] };
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: issueBranchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const issueTab = tabs[2] as HTMLElement;
+    await fireEvent.click(issueTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("labels: none")).toBeTruthy();
+    });
+  });
+
+  it("shows linked issue with updatedAt timestamp", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue")
+        return { ...linkedIssueFixture, updatedAt: "2026-02-17T00:00:00Z" };
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: issueBranchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const issueTab = tabs[2] as HTMLElement;
+    await fireEvent.click(issueTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("updated:");
+    });
+  });
+
+  it("shows Docker tab with HostOS runtime when docker_force_host is true", async () => {
+    const hostOsEntry = {
+      ...quickStartDockerEntry,
+      docker_force_host: true,
+      docker_service: "",
+      docker_container_name: "",
+      docker_compose_args: [],
+      docker_recreate: undefined,
+      docker_build: undefined,
+      docker_keep: undefined,
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [hostOsEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[4] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("runtime: HostOS");
+      expect(rendered.container.textContent).toContain("force-host: on");
+    });
+  });
+
+  it("shows Docker tab with docker_recreate and docker_keep flags", async () => {
+    const dockerEntry = {
+      ...quickStartDockerEntry,
+      docker_recreate: true,
+      docker_build: false,
+      docker_keep: true,
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [dockerEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[4] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("recreate: on");
+      expect(rendered.container.textContent).toContain("build: off");
+      expect(rendered.container.textContent).toContain("keep: on");
+    });
+  });
+
+  it("clears caches when projectPath changes", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("get_branch_quick_start", {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+      });
+    });
+
+    await rendered.rerender({
+      projectPath: "/tmp/project2",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.some(
+          ([cmd, payload]) =>
+            cmd === "get_branch_quick_start" && payload?.projectPath === "/tmp/project2"
+        )
+      ).toBe(true);
+    });
+  });
+
+  it("fires onLaunchAgent when Launch Agent button is clicked", async () => {
+    const onLaunchAgent = vi.fn();
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onLaunchAgent,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Launch Agent...")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByText("Launch Agent..."));
+    expect(onLaunchAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles session-summary-updated event from Tauri", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-updated"]).toBe("function");
+    });
+
+    // Fire a session-summary-updated event with updated markdown
+    listeners["session-summary-updated"]({
+      payload: {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+        result: {
+          status: "ok",
+          generating: false,
+          toolId: "claude",
+          sessionId: "session-1",
+          sourceType: "scrollback",
+          inputMtimeMs: 1_700_000_000_000,
+          summaryUpdatedMs: 1_700_000_000_500,
+          markdown: "## Updated Summary\nNew content",
+          warning: null,
+          error: null,
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Updated Summary");
+    });
+  });
+
+  it("ignores session-summary-updated event for different project", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-updated"]).toBe("function");
+    });
+
+    listeners["session-summary-updated"]({
+      payload: {
+        projectPath: "/tmp/other-project",
+        branch: "feature/markdown-ui",
+        result: {
+          status: "ok",
+          generating: false,
+          toolId: "claude",
+          sessionId: "session-1",
+          markdown: "## Should Not Appear",
+          warning: null,
+          error: null,
+        },
+      },
+    });
+
+    // The original summary should remain unchanged
+    await waitFor(() => {
+      expect(rendered.container.textContent).not.toContain("Should Not Appear");
+    });
+  });
+
+  it("ignores session-summary-updated payloads that are empty, branch-mismatched, or session-mismatched", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-updated"]).toBe("function");
+      expect(rendered.container.textContent).toContain("Summary body");
+    });
+
+    listeners["session-summary-updated"]({ payload: null });
+    listeners["session-summary-updated"]({
+      payload: {
+        projectPath: "/tmp/project",
+        branch: "feature/other-branch",
+        result: {
+          ...sessionSummaryFixture,
+          sessionId: "session-1",
+          markdown: "## Wrong Branch",
+        },
+      },
+    });
+    listeners["session-summary-updated"]({
+      payload: {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+        result: {
+          ...sessionSummaryFixture,
+          sessionId: null,
+          markdown: "## Missing Session",
+        },
+      },
+    });
+    listeners["session-summary-updated"]({
+      payload: {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+        result: {
+          ...sessionSummaryFixture,
+          sessionId: "session-999",
+          markdown: "## Different Session",
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Summary body");
+      expect(rendered.container.textContent).not.toContain("Wrong Branch");
+      expect(rendered.container.textContent).not.toContain("Missing Session");
+      expect(rendered.container.textContent).not.toContain("Different Session");
+    });
+  });
+
+  it("shows quick launch error message when callback rejects with a string", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [quickStartDockerEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const onQuickLaunch = vi.fn().mockImplementation(async () => {
+      throw "launch failed";
+    });
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch,
+    });
+
+    const continueButton = rendered.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
+    await waitFor(() => {
+      expect(continueButton.disabled).toBe(false);
+    });
+
+    await fireEvent.click(continueButton);
+
+    await waitFor(() => {
+      expect(rendered.getByText("Failed to launch: launch failed")).toBeTruthy();
+    });
+  });
+
+  it("loads deferred tab data even when requestAnimationFrame is unavailable", async () => {
+    const originalRaf = window.requestAnimationFrame;
+    (window as any).requestAnimationFrame = undefined;
+
+    try {
+      const rendered = await renderPanel({
+        projectPath: "/tmp/project",
+        selectedBranch: branchFixture,
+      });
+
+      await waitFor(() => {
+        expect(rendered.container.querySelectorAll(".summary-tab").length).toBe(5);
+      });
+
+      const issueTab = Array.from(rendered.container.querySelectorAll(".summary-tab")).find(
+        (tab) => tab.textContent?.trim() === "Issue",
+      ) as HTMLElement | undefined;
+      expect(issueTab).toBeTruthy();
+      await fireEvent.click(issueTab!);
+
+      await waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith("fetch_branch_linked_issue", {
+          projectPath: "/tmp/project",
+          branch: "feature/markdown-ui",
+        });
+      });
+    } finally {
+      window.requestAnimationFrame = originalRaf;
+    }
+  });
+
+  it("shows Git tab with ahead/behind counters", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      if (cmd === "get_git_change_summary") {
+        return {
+          file_count: 2,
+          commit_count: 1,
+          stash_count: 0,
+          base_branch: "main",
+          files: [],
+          ahead_by: 0,
+          behind_by: 0,
+        };
+      }
+      if (cmd === "get_base_branch_candidates") return ["main"];
+      if (cmd === "list_git_commits") return [];
+      if (cmd === "list_git_stash") return [];
+      return [];
+    });
+
+    const branchWithDivergence: BranchInfo = {
+      ...branchFixture,
+      ahead: 3,
+      behind: 2,
+      is_current: true,
+      divergence_status: "Diverged",
+    };
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchWithDivergence,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const gitTab = tabs[1] as HTMLElement;
+    await fireEvent.click(gitTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("(+3)");
+      expect(rendered.container.textContent).toContain("(-2)");
+      expect(rendered.container.textContent).toContain("Yes");
+      expect(rendered.container.textContent).toContain("Diverged");
+    });
+  });
+
+  it("opens CI log in external URL when onOpenCiLog is not provided", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail")
+        return {
+          ...prDetailFixture,
+          url: "https://github.com/test/repo/pull/42",
+          checkSuites: [
+            {
+              workflowName: "CI Build",
+              runId: 100,
+              status: "completed",
+              conclusion: "failure",
+            },
+          ],
+        };
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      // No onOpenCiLog provided
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".checks-section")).toBeTruthy();
+    });
+
+    const checksToggle = rendered.container.querySelector(".checks-toggle") as HTMLElement | null;
+    expect(checksToggle).toBeTruthy();
+    await fireEvent.click(checksToggle!);
+
+    const checkItem = rendered.container.querySelector(".check-item") as HTMLElement | null;
+    expect(checkItem).toBeTruthy();
+    await fireEvent.click(checkItem!);
+    await waitFor(() => {
+      expect(openExternalUrlMock).toHaveBeenCalledWith(
+        "https://github.com/test/repo/actions/runs/100"
+      );
+    });
+  });
+
+  it("fires onOpenCiLog callback when provided and CI row is clicked", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail")
+        return {
+          ...prDetailFixture,
+          checkSuites: [
+            {
+              workflowName: "CI Build",
+              runId: 200,
+              status: "completed",
+              conclusion: "success",
+            },
+          ],
+        };
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const onOpenCiLog = vi.fn();
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onOpenCiLog,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".checks-section")).toBeTruthy();
+    });
+
+    const checksToggle = rendered.container.querySelector(".checks-toggle") as HTMLElement | null;
+    expect(checksToggle).toBeTruthy();
+    await fireEvent.click(checksToggle!);
+
+    const checkItem = rendered.container.querySelector(".check-item") as HTMLElement | null;
+    expect(checkItem).toBeTruthy();
+    await fireEvent.click(checkItem!);
+    await waitFor(() => {
+      expect(onOpenCiLog).toHaveBeenCalledWith(200);
+    });
+  });
+
+  it("shows PR detail error when fetch_pr_detail fails", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail") throw new Error("detail lookup failed");
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("detail lookup failed");
+    });
+  });
+
+  it("does not skip disabled/ai-not-configured polling", async () => {
+    vi.useFakeTimers();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return { ...sessionSummaryFixture, status: "disabled", markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: ["feature/markdown-ui"],
+      activeAgentTabBranch: "feature/markdown-ui",
+    });
+
+    await waitFor(() => {
+      expect(sessionSummaryCalls()).toHaveLength(1);
+    });
+
+    // Even after 15s, the disabled status should not trigger additional calls
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(sessionSummaryCalls()).toHaveLength(1);
+  });
+
+  it("shows Gemini tool name in Docker tab quick start history", async () => {
+    const geminiEntry = {
+      ...quickStartDockerEntry,
+      tool_id: "gemini-cli",
+      tool_label: "Gemini",
+      session_id: "session-gemini",
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [geminiEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[4] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Gemini");
+    });
+  });
+
+  it("maps gemini tool id to quick launch agentId", async () => {
+    const geminiEntry = {
+      ...quickStartDockerEntry,
+      tool_id: "gemini-cli",
+      tool_label: "Some Gemini Label",
+      session_id: "session-gemini-launch",
+      timestamp: quickStartDockerEntry.timestamp + 20,
+    };
+
+    const onQuickLaunch = vi.fn(async () => {});
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [geminiEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch,
+    });
+
+    await waitFor(() => {
+      const continueBtn = rendered.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
+      expect(continueBtn.disabled).toBe(false);
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => {
+      expect(onQuickLaunch).toHaveBeenCalled();
+    });
+
+    expect(onQuickLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "gemini",
+        mode: "continue",
+        resumeSessionId: "session-gemini-launch",
+      }),
+    );
+  });
+
+  it("maps open-code tool id to opencode and keeps docker history entries with compose args", async () => {
+    const openCodeComposeOnly = {
+      ...quickStartDockerEntry,
+      tool_id: "open-code-cli",
+      tool_label: "Custom Label",
+      session_id: "session-open-code-compose-only",
+      docker_service: "",
+      docker_recreate: undefined,
+      docker_build: undefined,
+      docker_keep: undefined,
+      docker_force_host: undefined,
+      docker_container_name: "",
+      docker_compose_args: ["--profile", "dev"],
+      timestamp: quickStartDockerEntry.timestamp + 30,
+    };
+    const noDockerInfoEntry = {
+      ...quickStartDockerEntry,
+      tool_id: "claude",
+      session_id: "session-no-docker-info",
+      docker_service: "",
+      docker_recreate: undefined,
+      docker_build: undefined,
+      docker_keep: undefined,
+      docker_force_host: undefined,
+      docker_container_name: "",
+      docker_compose_args: [],
+      timestamp: quickStartDockerEntry.timestamp + 10,
+    };
+
+    const onQuickLaunch = vi.fn(async () => {});
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [noDockerInfoEntry, openCodeComposeOnly];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch,
+    });
+
+    await waitFor(() => {
+      const continueBtn = rendered.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
+      expect(continueBtn.disabled).toBe(false);
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Continue" }));
+    await waitFor(() => {
+      expect(onQuickLaunch).toHaveBeenCalled();
+    });
+    expect(onQuickLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "opencode",
+        mode: "continue",
+      }),
+    );
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[4] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("OpenCode");
+      expect(rendered.container.textContent).toContain("1 record");
+      expect(rendered.container.textContent).toContain("compose args: --profile dev");
+    });
+
+    expect(rendered.container.textContent).not.toContain("session-no-docker-info");
+  });
+
+  it("falls back to tool_label/tool_id for unknown tools in Docker history", async () => {
+    const unknownWithLabel = {
+      ...quickStartDockerEntry,
+      tool_id: "mystery-tool",
+      tool_label: "Mystery Label",
+      session_id: "session-unknown-with-label",
+      timestamp: quickStartDockerEntry.timestamp + 40,
+    };
+    const unknownWithId = {
+      ...quickStartDockerEntry,
+      tool_id: "mystery-id-only",
+      tool_label: "",
+      session_id: "session-unknown-with-id",
+      timestamp: quickStartDockerEntry.timestamp + 39,
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [unknownWithLabel, unknownWithId];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[4] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Mystery Label");
+      expect(rendered.container.textContent).toContain("mystery-id-only");
+    });
+  });
+
+  it("shows merge error toast when merge_pull_request fails", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+        if (cmd === "fetch_pr_detail") return prDetailFixture;
+        if (cmd === "merge_pull_request") throw new Error("Merge conflict");
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      });
+
+      const rendered = await renderPanel({
+        projectPath: "/tmp/project",
+        selectedBranch: branchFixture,
+      });
+
+      const tabs = rendered.container.querySelectorAll(".summary-tab");
+      const prTab = tabs[3] as HTMLElement;
+      await fireEvent.click(prTab);
+
+      await waitFor(() => {
+        expect(rendered.getByRole("button", { name: "Mergeable" })).toBeTruthy();
+      });
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Mergeable" }));
+      await waitFor(() => {
+        expect(rendered.getByRole("button", { name: "Merge" })).toBeTruthy();
+      });
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Merge" }));
+
+      await waitFor(() => {
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          "Failed to merge PR:",
+          expect.any(Error),
+        );
+      });
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it("shows rebuild progress with branch name when available", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const summaryTab = tabs[0] as HTMLElement;
+    await fireEvent.click(summaryTab);
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-rebuild-progress"]).toBe("function");
+    });
+
+    listeners["session-summary-rebuild-progress"]({
+      payload: {
+        projectPath: "/tmp/project",
+        language: "ja",
+        total: 5,
+        completed: 2,
+        branch: "feature/some-branch",
+        status: "in_progress",
+        error: null,
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Rebuilding summaries (2/5)");
+      expect(rendered.container.textContent).toContain("- feature/some-branch");
+    });
+  });
+
+  it("shows rebuild progress without branch suffix when branch is null", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-rebuild-progress"]).toBe("function");
+    });
+
+    listeners["session-summary-rebuild-progress"]({
+      payload: {
+        projectPath: "/tmp/project",
+        language: "en",
+        total: 3,
+        completed: 1,
+        branch: null,
+        status: "in_progress",
+        error: null,
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Rebuilding summaries (1/3)");
+      expect(rendered.container.textContent).not.toContain("- feature/");
+    });
+  });
+
+  it("ignores rebuild progress from different project path", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-rebuild-progress"]).toBe("function");
+    });
+
+    listeners["session-summary-rebuild-progress"]({
+      payload: {
+        projectPath: "/tmp/other-project",
+        language: "ja",
+        total: 3,
+        completed: 0,
+        branch: null,
+        status: "started",
+        error: null,
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(rendered.queryByText("Rebuilding summaries")).toBeNull();
+  });
+
+  it("ignores rebuild progress when payload is null", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-rebuild-progress"]).toBe("function");
+    });
+
+    // Should not throw
+    listeners["session-summary-rebuild-progress"]({
+      payload: null,
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(rendered.queryByText("Rebuilding summaries")).toBeNull();
+  });
+
+  it("shows OpenCode tool name in Docker tab quick start history", async () => {
+    const opencodeEntry = {
+      ...quickStartDockerEntry,
+      tool_id: "opencode",
+      tool_label: "OpenCode",
+      session_id: "session-opencode",
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [opencodeEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[4] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("OpenCode");
+    });
+  });
+
+  it("does not open external URL when onOpenCiLog is absent and PR URL does not match github pattern", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail")
+        return {
+          ...prDetailFixture,
+          // Use a non-GitHub URL so the regex does not match and workflowBase is null
+          url: "https://gitlab.com/test/repo/pull/42",
+          checkSuites: [
+            {
+              workflowName: "CI Build",
+              runId: 100,
+              status: "completed",
+              conclusion: "failure",
+            },
+          ],
+        };
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      // No onOpenCiLog provided — exercises the fallback path
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".checks-section")).toBeTruthy();
+    });
+
+    const checksToggle = rendered.container.querySelector(".checks-toggle") as HTMLElement | null;
+    expect(checksToggle).toBeTruthy();
+    await fireEvent.click(checksToggle!);
+
+    const checkItem = rendered.container.querySelector(".check-item") as HTMLElement | null;
+    expect(checkItem).toBeTruthy();
+    await fireEvent.click(checkItem!);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(openExternalUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("does not open external URL when onOpenCiLog is absent and prDetail URL is empty", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail")
+        return {
+          ...prDetailFixture,
+          url: "",
+          checkSuites: [
+            {
+              workflowName: "CI Build",
+              runId: 100,
+              status: "completed",
+              conclusion: "failure",
+            },
+          ],
+        };
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".checks-section")).toBeTruthy();
+    });
+
+    const checksToggle = rendered.container.querySelector(".checks-toggle") as HTMLElement | null;
+    expect(checksToggle).toBeTruthy();
+    await fireEvent.click(checksToggle!);
+
+    const checkItem = rendered.container.querySelector(".check-item") as HTMLElement | null;
+    expect(checkItem).toBeTruthy();
+    await fireEvent.click(checkItem!);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(openExternalUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("getInvoke throws when __TAURI_INTERNALS__ is absent and tauriInvoke module invoke is null", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const savedInternals = (globalThis as any).__TAURI_INTERNALS__;
+    delete (globalThis as any).__TAURI_INTERNALS__;
+
+    vi.doMock("$lib/tauriInvoke", () => ({ invoke: null }));
+    vi.resetModules();
+
+    try {
+      const { default: Panel } = await import("./WorktreeSummaryPanel.svelte");
+      const {
+        render: isolatedRender,
+        waitFor: isolatedWaitFor,
+        fireEvent: isolatedFireEvent,
+        cleanup: isolatedCleanup,
+      } = await import("@testing-library/svelte");
+      const baseInvoke = vi.fn(async (cmd: string) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+        if (cmd === "fetch_pr_detail") return prDetailFixture;
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      });
+
+      Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
+        value: { invoke: baseInvoke },
+        configurable: true,
+      });
+
+      const rendered = isolatedRender(Panel, {
+        props: {
+          projectPath: "/tmp/project",
+          selectedBranch: branchFixture,
+        },
+      });
+
+      const tabs = rendered.container.querySelectorAll(".summary-tab");
+      const prTab = tabs[3] as HTMLElement;
+      await isolatedFireEvent.click(prTab);
+
+      await isolatedWaitFor(() => {
+        expect(rendered.getByRole("button", { name: "Mergeable" })).toBeTruthy();
+      });
+
+      delete (globalThis as any).__TAURI_INTERNALS__;
+
+      await isolatedFireEvent.click(rendered.getByRole("button", { name: "Mergeable" }));
+      await isolatedWaitFor(() => {
+        expect(rendered.getByRole("button", { name: "Merge" })).toBeTruthy();
+      });
+
+      await isolatedFireEvent.click(rendered.getByRole("button", { name: "Merge" }));
+
+      await isolatedWaitFor(() => {
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          "Failed to merge PR:",
+          expect.any(Error),
+        );
+      });
+      isolatedCleanup();
+    } finally {
+      consoleErrorSpy.mockRestore();
+      vi.doMock("$lib/tauriInvoke", () => ({ invoke: invokeMock }));
+      vi.resetModules();
+      Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
+        value: savedInternals ?? { invoke: invokeMock },
+        configurable: true,
+      });
+    }
   });
 });

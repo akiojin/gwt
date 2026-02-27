@@ -3,4 +3,5 @@ dist
 .vite
 playwright-report
 test-results
+coverage-report.json
 pnpm-workspace.yaml

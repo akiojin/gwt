@@ -155,4 +155,231 @@ describe("MergeConfirmModal", () => {
     });
     expect(container.textContent).toContain("bob");
   });
+
+  it("renders all review state icons", async () => {
+    // Exercise every branch of reviewStateIcon: APPROVED, CHANGES_REQUESTED, COMMENTED, PENDING, DISMISSED, default
+    const reviews: ReviewInfo[] = [
+      { reviewer: "alice", state: "APPROVED" },
+      { reviewer: "bob", state: "CHANGES_REQUESTED" },
+      { reviewer: "carol", state: "COMMENTED" },
+      { reviewer: "dave", state: "PENDING" },
+      { reviewer: "eve", state: "DISMISSED" },
+    ];
+    const pr = makePrDetail({ reviews });
+    const { container } = await renderModal({
+      open: true,
+      prDetail: pr,
+      merging: false,
+      onClose: vi.fn(),
+      onConfirm: vi.fn(),
+    });
+
+    expect(container.textContent).toContain("alice");
+    expect(container.textContent).toContain("bob");
+    expect(container.textContent).toContain("carol");
+    expect(container.textContent).toContain("dave");
+    expect(container.textContent).toContain("eve");
+
+    // Verify review state icons are rendered
+    const reviewItems = container.querySelectorAll(".merge-review-item");
+    expect(reviewItems.length).toBe(5);
+
+    // Check the review state classes
+    const stateSpans = container.querySelectorAll(".review-state");
+    expect(stateSpans.length).toBe(5);
+
+    // Verify each state class is applied
+    const classes = Array.from(stateSpans).map((el) => el.className);
+    expect(classes.some((c) => c.includes("approved"))).toBe(true);
+    expect(classes.some((c) => c.includes("changes_requested"))).toBe(true);
+    expect(classes.some((c) => c.includes("commented"))).toBe(true);
+    expect(classes.some((c) => c.includes("pending"))).toBe(true);
+    expect(classes.some((c) => c.includes("dismissed"))).toBe(true);
+  });
+
+  it("renders unknown review state with fallback icon", async () => {
+    // Exercise the default branch in reviewStateIcon
+    const reviews = [
+      { reviewer: "unknown-user", state: "UNKNOWN_STATE" as any },
+    ];
+    const pr = makePrDetail({ reviews });
+    const { container } = await renderModal({
+      open: true,
+      prDetail: pr,
+      merging: false,
+      onClose: vi.fn(),
+      onConfirm: vi.fn(),
+    });
+
+    expect(container.textContent).toContain("unknown-user");
+    expect(container.textContent).toContain("?");
+  });
+
+  it("does not render checks section when checkSuites is empty", async () => {
+    const pr = makePrDetail({ checkSuites: [] });
+    const { container } = await renderModal({
+      open: true,
+      prDetail: pr,
+      merging: false,
+      onClose: vi.fn(),
+      onConfirm: vi.fn(),
+    });
+
+    expect(container.querySelector(".merge-checks")).toBeNull();
+  });
+
+  it("does not render reviews section when reviews is empty", async () => {
+    const pr = makePrDetail({ reviews: [] });
+    const { container } = await renderModal({
+      open: true,
+      prDetail: pr,
+      merging: false,
+      onClose: vi.fn(),
+      onConfirm: vi.fn(),
+    });
+
+    expect(container.querySelector(".merge-reviews")).toBeNull();
+  });
+
+  it("does not call onClose for non-Escape keys", async () => {
+    const onClose = vi.fn();
+    await renderModal({
+      open: true,
+      prDetail: makePrDetail(),
+      merging: false,
+      onClose,
+      onConfirm: vi.fn(),
+    });
+
+    await fireEvent.keyDown(window, { key: "Enter" });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("does not call onClose on Escape when modal is not open", async () => {
+    const onClose = vi.fn();
+    await renderModal({
+      open: false,
+      prDetail: makePrDetail(),
+      merging: false,
+      onClose,
+      onConfirm: vi.fn(),
+    });
+
+    await fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("does not call onClose on Escape when prDetail is null", async () => {
+    const onClose = vi.fn();
+    await renderModal({
+      open: true,
+      prDetail: null,
+      merging: false,
+      onClose,
+      onConfirm: vi.fn(),
+    });
+
+    await fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("calls onClose when overlay is clicked", async () => {
+    const onClose = vi.fn();
+    const { container } = await renderModal({
+      open: true,
+      prDetail: makePrDetail(),
+      merging: false,
+      onClose,
+      onConfirm: vi.fn(),
+    });
+
+    const overlay = container.querySelector(".modal-overlay") as HTMLElement;
+    expect(overlay).toBeTruthy();
+    await fireEvent.click(overlay);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("does not call onClose when dialog body is clicked (stopPropagation)", async () => {
+    const onClose = vi.fn();
+    const { container } = await renderModal({
+      open: true,
+      prDetail: makePrDetail(),
+      merging: false,
+      onClose,
+      onConfirm: vi.fn(),
+    });
+
+    const dialog = container.querySelector(".merge-dialog") as HTMLElement;
+    expect(dialog).toBeTruthy();
+    await fireEvent.click(dialog);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("calls onClose when close button (x) is clicked", async () => {
+    const onClose = vi.fn();
+    const { container } = await renderModal({
+      open: true,
+      prDetail: makePrDetail(),
+      merging: false,
+      onClose,
+      onConfirm: vi.fn(),
+    });
+
+    const closeBtn = container.querySelector(".close-btn") as HTMLElement;
+    expect(closeBtn).toBeTruthy();
+    await fireEvent.click(closeBtn);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("re-renders from open to closed to exercise teardown", async () => {
+    const { default: MergeConfirmModal } = await import("./MergeConfirmModal.svelte");
+    const reviews: ReviewInfo[] = [
+      { reviewer: "alice", state: "APPROVED" },
+      { reviewer: "bob", state: "CHANGES_REQUESTED" },
+    ];
+    const checkSuites: WorkflowRunInfo[] = [
+      { workflowName: "CI", runId: 1, status: "completed", conclusion: "success" },
+    ];
+    const rendered = render(MergeConfirmModal as any, {
+      props: {
+        open: true,
+        prDetail: makePrDetail({ reviews, checkSuites }),
+        merging: false,
+        onClose: vi.fn(),
+        onConfirm: vi.fn(),
+      },
+    });
+
+    expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
+
+    // Close the modal
+    await rendered.rerender({
+      open: false,
+      prDetail: null,
+      merging: false,
+      onClose: vi.fn(),
+      onConfirm: vi.fn(),
+    });
+
+    expect(rendered.container.querySelector(".modal-overlay")).toBeNull();
+  });
+
+  it("unmounts with full content to exercise cleanup branches", async () => {
+    const reviews: ReviewInfo[] = [
+      { reviewer: "alice", state: "APPROVED" },
+    ];
+    const checkSuites: WorkflowRunInfo[] = [
+      { workflowName: "CI", runId: 1, status: "completed", conclusion: "success" },
+    ];
+    const rendered = await renderModal({
+      open: true,
+      prDetail: makePrDetail({ reviews, checkSuites }),
+      merging: false,
+      onClose: vi.fn(),
+      onConfirm: vi.fn(),
+    });
+
+    expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
+    rendered.unmount();
+  });
 });

@@ -191,4 +191,22 @@ describe("QuitConfirmToast", () => {
       expect(toast.classList.contains("fade-in")).toBe(true);
     });
   });
+
+  it("does not hide on mousedown when toast is not visible", async () => {
+    await renderQuitConfirmToast();
+
+    // No event emitted, toast is not visible
+    await fireEvent.mouseDown(document);
+
+    // Should not crash and cancel_quit_confirm should not be called
+    expect(countInvokeCalls("cancel_quit_confirm")).toBe(0);
+  });
+
+  it("does not hide on keydown when toast is not visible", async () => {
+    await renderQuitConfirmToast();
+
+    await fireEvent.keyDown(document, { key: "a" });
+
+    expect(countInvokeCalls("cancel_quit_confirm")).toBe(0);
+  });
 });
