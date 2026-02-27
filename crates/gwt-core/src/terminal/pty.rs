@@ -991,6 +991,7 @@ mod tests {
     /// Helper: read from PTY reader in a separate thread with timeout.
     fn read_with_timeout(
         mut reader: Box<dyn Read + Send>,
+        mut writer: Option<Box<dyn Write + Send>>,
         timeout: Duration,
     ) -> Result<String, String> {
         let (tx, rx) = mpsc::channel();
@@ -1012,18 +1013,27 @@ mod tests {
             }
         });
 
-        // Collect output until timeout
+        // Collect output until EOF or timeout.
+        // On Windows/ConPTY, an initial cursor query escape sequence can arrive
+        // before the command output; returning early on the first idle tick makes
+        // the test flaky.
         let mut last_output = String::new();
+        let mut dsr_responded = false;
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(s)) => last_output = s,
-                Ok(Err(e)) => return Err(e),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if !last_output.is_empty() {
-                        return Ok(last_output);
+                Ok(Ok(s)) => {
+                    if !dsr_responded && s.contains("\u{1b}[6n") {
+                        if let Some(writer) = writer.as_mut() {
+                            let _ = writer.write_all(b"\x1b[1;1R");
+                            let _ = writer.flush();
+                        }
+                        dsr_responded = true;
                     }
+                    last_output = s;
                 }
+                Ok(Err(e)) => return Err(e),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -1035,26 +1045,109 @@ mod tests {
         }
     }
 
+    fn platform_echo_command() -> (String, Vec<String>, Option<String>, bool) {
+        if cfg!(windows) {
+            (
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "Write-Output hello".to_string(),
+                ],
+                None,
+                true,
+            )
+        } else {
+            (
+                "/bin/echo".to_string(),
+                vec!["hello".to_string()],
+                None,
+                false,
+            )
+        }
+    }
+
+    fn platform_env_command() -> (String, Vec<String>, Option<String>, bool) {
+        if cfg!(windows) {
+            (
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "Get-ChildItem Env: | ForEach-Object { \"{0}={1}\" -f $_.Name, $_.Value }"
+                        .to_string(),
+                ],
+                None,
+                true,
+            )
+        } else {
+            ("/usr/bin/env".to_string(), vec![], None, false)
+        }
+    }
+
+    fn platform_success_exit_command() -> (String, Vec<String>, Option<String>, bool) {
+        if cfg!(windows) {
+            (
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "exit 0".to_string(),
+                ],
+                None,
+                true,
+            )
+        } else {
+            ("/usr/bin/true".to_string(), vec![], None, false)
+        }
+    }
+
+    fn platform_invalid_command() -> (String, Vec<String>, Option<String>, bool) {
+        if cfg!(windows) {
+            (
+                "gwt-nonexistent-command-for-pty-test-xyz.exe".to_string(),
+                vec![],
+                None,
+                true,
+            )
+        } else {
+            (
+                "/nonexistent/command/that/does/not/exist".to_string(),
+                vec![],
+                None,
+                false,
+            )
+        }
+    }
+
     #[test]
     #[cfg(not(windows))]
     fn test_pty_creation_and_echo() {
+        let (command, args, terminal_shell, interactive) = platform_echo_command();
         let config = PtyConfig {
-            command: "/bin/echo".to_string(),
-            args: vec!["hello".to_string()],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
-            terminal_shell: None,
-            interactive: false,
+            terminal_shell,
+            interactive,
             windows_force_utf8: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
         let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
 
-        let output =
-            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read PTY output");
+        let output = read_with_timeout(reader, Some(writer), Duration::from_secs(5))
+            .expect("Failed to read PTY output");
 
         assert!(
             output.contains("hello"),
@@ -1065,28 +1158,30 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn test_env_vars_set() {
+        let (command, args, terminal_shell, interactive) = platform_env_command();
         let mut env_vars = HashMap::new();
         env_vars.insert("GWT_PANE_ID".to_string(), "pane-42".to_string());
         env_vars.insert("GWT_BRANCH".to_string(), "feature/test".to_string());
         env_vars.insert("GWT_SESSION_ID".to_string(), "sess-001".to_string());
 
         let config = PtyConfig {
-            command: "/usr/bin/env".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars,
             rows: 24,
             cols: 80,
-            terminal_shell: None,
-            interactive: false,
+            terminal_shell,
+            interactive,
             windows_force_utf8: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
         let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
 
-        let output =
-            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read PTY output");
+        let output = read_with_timeout(reader, Some(writer), Duration::from_secs(5))
+            .expect("Failed to read PTY output");
 
         assert!(
             output.contains("GWT_PANE_ID=pane-42"),
@@ -1133,23 +1228,27 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn test_process_exit_detection() {
+        let (command, args, terminal_shell, interactive) = platform_success_exit_command();
         let config = PtyConfig {
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
-            terminal_shell: None,
-            interactive: false,
+            terminal_shell,
+            interactive,
             windows_force_utf8: false,
         };
 
         let mut handle = PtyHandle::new(config).expect("Failed to create PTY");
+        let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
+        let _ = read_with_timeout(reader, Some(writer), Duration::from_secs(2));
 
         // Wait for process to exit
         let mut exited = false;
-        for _ in 0..50 {
+        for _ in 0..100 {
             if let Ok(Some(_status)) = handle.try_wait() {
                 exited = true;
                 break;
@@ -1163,15 +1262,16 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn test_invalid_command_error() {
+        let (command, args, terminal_shell, interactive) = platform_invalid_command();
         let config = PtyConfig {
-            command: "/nonexistent/command/that/does/not/exist".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
-            terminal_shell: None,
-            interactive: false,
+            terminal_shell,
+            interactive,
             windows_force_utf8: false,
         };
 
