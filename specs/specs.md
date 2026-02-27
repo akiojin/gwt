@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-1288](SPEC-1288/spec.md) | バグ修正仕様: From Issue でブランチ名に prefix が二重表示される | 2026-02-27 |
 | [SPEC-dc2ef2d3](SPEC-dc2ef2d3/spec.md) | 機能仕様: Worktree詳細ビューでCLAUDE.md/AGENTS.md/GEMINI.mdを確認・修正し編集起動 | 2026-02-27 |
 | [SPEC-54c8e2fa](SPEC-54c8e2fa/spec.md) | 機能仕様: Issue連携ブランチのリンク保証と起動フロー一元化 | 2026-02-26 |
 | [SPEC-9cd50c7c](SPEC-9cd50c7c/spec.md) | 機能仕様: AI自動ブランチ命名モード | 2026-02-26 |
