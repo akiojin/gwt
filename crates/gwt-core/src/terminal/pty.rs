@@ -1035,17 +1035,70 @@ mod tests {
         }
     }
 
+    fn platform_echo_command() -> (String, Vec<String>, bool) {
+        if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/C".to_string(), "echo hello".to_string()],
+                true,
+            )
+        } else {
+            ("/bin/echo".to_string(), vec!["hello".to_string()], false)
+        }
+    }
+
+    fn platform_env_command() -> (String, Vec<String>, bool) {
+        if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/C".to_string(), "set".to_string()],
+                true,
+            )
+        } else {
+            ("/usr/bin/env".to_string(), vec![], false)
+        }
+    }
+
+    fn platform_success_exit_command() -> (String, Vec<String>, bool) {
+        if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/C".to_string(), "exit 0".to_string()],
+                true,
+            )
+        } else {
+            ("/usr/bin/true".to_string(), vec![], false)
+        }
+    }
+
+    fn platform_invalid_command() -> (String, Vec<String>, bool) {
+        if cfg!(windows) {
+            (
+                "gwt-nonexistent-command-for-pty-test-xyz.exe".to_string(),
+                vec![],
+                true,
+            )
+        } else {
+            (
+                "/nonexistent/command/that/does/not/exist".to_string(),
+                vec![],
+                false,
+            )
+        }
+    }
+
     #[test]
     fn test_pty_creation_and_echo() {
+        let (command, args, interactive) = platform_echo_command();
         let config = PtyConfig {
-            command: "/bin/echo".to_string(),
-            args: vec!["hello".to_string()],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
             terminal_shell: None,
-            interactive: false,
+            interactive,
             windows_force_utf8: false,
         };
 
@@ -1063,20 +1116,21 @@ mod tests {
 
     #[test]
     fn test_env_vars_set() {
+        let (command, args, interactive) = platform_env_command();
         let mut env_vars = HashMap::new();
         env_vars.insert("GWT_PANE_ID".to_string(), "pane-42".to_string());
         env_vars.insert("GWT_BRANCH".to_string(), "feature/test".to_string());
         env_vars.insert("GWT_SESSION_ID".to_string(), "sess-001".to_string());
 
         let config = PtyConfig {
-            command: "/usr/bin/env".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars,
             rows: 24,
             cols: 80,
             terminal_shell: None,
-            interactive: false,
+            interactive,
             windows_force_utf8: false,
         };
 
@@ -1129,15 +1183,16 @@ mod tests {
 
     #[test]
     fn test_process_exit_detection() {
+        let (command, args, interactive) = platform_success_exit_command();
         let config = PtyConfig {
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
             terminal_shell: None,
-            interactive: false,
+            interactive,
             windows_force_utf8: false,
         };
 
@@ -1158,15 +1213,16 @@ mod tests {
 
     #[test]
     fn test_invalid_command_error() {
+        let (command, args, interactive) = platform_invalid_command();
         let config = PtyConfig {
-            command: "/nonexistent/command/that/does/not/exist".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
             terminal_shell: None,
-            interactive: false,
+            interactive,
             windows_force_utf8: false,
         };
 
