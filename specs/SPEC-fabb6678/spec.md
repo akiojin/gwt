@@ -2,7 +2,7 @@
 
 **仕様ID**: `SPEC-fabb6678`
 **作成日**: 2026-02-22
-**更新日**: 2026-02-26
+**更新日**: 2026-02-27
 **ステータス**: 実装済み（OS ネイティブ画像キャプチャは Phase 2 として延期）
 **カテゴリ**: GUI / Backend
 **依存仕様**:
@@ -145,6 +145,20 @@
 3. **前提条件** submit失敗によりフォールバックUIが表示中、**操作** ダイアログを閉じて再度開く、**期待結果** 失敗メッセージ/Copy/Openボタンは表示されない
 4. **前提条件** 前回はFeatureタブで終了、**操作** `showReportDialog("bug")` で開く、**期待結果** Bugタブがアクティブで表示される（起動mode優先）
 
+---
+
+### ユーザーストーリー 10 - 報告ダイアログの最前面表示保証 (優先度: P0)
+
+ユーザーとして、他のモーダル（Migration/Launch Progress など）が表示されている状態でも、Report Issue ダイアログを常に最前面で操作したい。
+
+**独立したテスト**: Migration モーダル表示中に Report Issue を開き、Report ダイアログの z-index が上位で、入力欄へフォーカス可能なことを確認
+
+**受け入れシナリオ**:
+
+1. **前提条件** `Migration Required` モーダルが表示中、**操作** `report-issue` メニューアクションを発火、**期待結果** Report ダイアログが前面で表示され、背面化しない
+2. **前提条件** `Preparing Launch` モーダルが表示中、**操作** `report-issue` メニューアクションを発火、**期待結果** Report ダイアログが前面で表示され、フォーム入力が可能
+3. **前提条件** Report ダイアログと別モーダルが同時表示中、**操作** Esc または backdrop クリックで Report を閉じる、**期待結果** Report のみ閉じ、背面モーダルは既存挙動を維持する
+
 ## エッジケース
 
 - GitHub API レート制限に達した場合: フォールバック（クリップボード + ブラウザ）を使用
@@ -153,6 +167,7 @@
 - フォームに何も入力せず送信しようとした場合: "Title" フィールドの必須バリデーション。Submit ボタンは Title が空の間は disabled
 - 複数ウィンドウが開いている場合のスクリーンショット: アクティブウィンドウ（フォームを表示しているウィンドウ）をキャプチャ
 - 報告モーダルが開いている状態で新たなエラーが発生: エラーはキューに入れ、モーダルを閉じた後にトーストを表示
+- Migration / Launch Progress などのモーダル表示中に Report Issue を開いた場合: Report を最前面レイヤーで表示し、入力操作を阻害しない
 - プロジェクト未オープン状態で報告: 送信先は akiojin/gwt 固定。作業リポジトリ選択は不可
 - 非常に長いログ出力: 最新 200 行に制限し、全文が必要な場合はローカルパスを案内
 
@@ -187,6 +202,9 @@
 - **FR-032**: 初期化対象は Bug/Feature 入力、診断チェック、診断収集結果、Terminal Capture 状態、Preview 状態、送信成否メッセージ、フォールバックUI、Repository選択でなければならない
 - **FR-033**: 再オープン時の既定値は System Info=ON / Application Logs=OFF / Screen Capture=OFF でなければならない
 - **FR-034**: 再オープン時のアクティブタブは直前状態ではなく、呼び出し元 `mode`（bug/feature）で決定しなければならない
+- **FR-035**: モーダル関連の z-index は CSS 変数ベースの共通レイヤー（`--z-modal-base`, `--z-modal-nested`, `--z-modal-stacked`, `--z-modal-report`）を用いて定義しなければならない
+- **FR-036**: `ReportDialog` の overlay は `--z-modal-report` を使用し、`MigrationModal` / `LaunchProgressModal` の overlay より高い優先度で表示されなければならない
+- **FR-037**: `MigrationModal` / `LaunchProgressModal` / ネストした confirm overlay はそれぞれ `--z-modal-stacked` / `--z-modal-stacked` / `--z-modal-nested` を使用し、固定値の直接指定を避けなければならない
 
 #### スクリーンキャプチャ
 
@@ -247,3 +265,5 @@
 - **SC-011**: ダイアログ再オープン時に前回入力・診断選択・Terminal Capture表示が残留しない
 - **SC-012**: ダイアログ再オープン時に送信失敗メッセージとフォールバックUIが残留しない
 - **SC-013**: ダイアログ再オープン時のアクティブタブが `mode` と一致する
+- **SC-014**: Migration モーダル表示中に Report ダイアログを開いても、Report の z-index が上位で前面表示される
+- **SC-015**: Report と Migration が同時表示中でも `#bug-title` がフォーカス可能で、入力操作がブロックされない

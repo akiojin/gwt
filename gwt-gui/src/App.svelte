@@ -3121,7 +3121,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: var(--z-modal-base);
   }
 
   .mono {
@@ -3344,7 +3344,7 @@
     bottom: 40px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 2000;
+    z-index: var(--z-toast);
     pointer-events: none;
   }
 
@@ -3476,7 +3476,7 @@
     background: var(--accent, #89b4fa);
     opacity: 0;
     pointer-events: none;
-    z-index: 9999;
+    z-index: var(--z-overlay-flash);
     animation: copy-flash-anim 0.25s ease-out forwards;
   }
 

@@ -403,6 +403,48 @@ case "help-suggest-feature":
 - 再オープン時に submit失敗メッセージとフォールバックUIが消える
 - 再オープン時に `mode` がアクティブタブへ反映される
 
+### Phase 5: モーダルレイヤー共通化と最前面保証 (US10)
+
+**目的**: ReportDialog が他モーダル表示中でも最前面で操作できることを、共通レイヤー設計で恒久化する
+
+#### 5-1. 共通 z-index トークン導入
+
+**対象ファイル**: `gwt-gui/src/styles/global.css`
+
+- CSS 変数を追加:
+  - `--z-modal-base`
+  - `--z-modal-nested`
+  - `--z-modal-stacked`
+  - `--z-modal-report`
+  - `--z-toast`
+  - `--z-quit-toast`
+  - `--z-overlay-flash`
+- レイヤークラスを追加:
+  - `.modal-overlay-nested`
+  - `.modal-overlay-stacked`
+  - `.modal-overlay-report`
+
+#### 5-2. モーダル適用
+
+**対象ファイル**: `gwt-gui/src/lib/components/ReportDialog.svelte`, `gwt-gui/src/lib/components/MigrationModal.svelte`, `gwt-gui/src/lib/components/LaunchProgressModal.svelte`, `gwt-gui/src/App.svelte`
+
+- `ReportDialog` overlay に `modal-overlay-report` を付与し、最上位表示を保証する
+- `MigrationModal` / `LaunchProgressModal` overlay に `modal-overlay-stacked` を付与する
+- `App.svelte` の overlay / toast / copy-flash の z-index を共通変数へ置換する
+
+#### 5-3. 既存モーダルの固定値撤去
+
+**対象ファイル**: `gwt-gui/src/lib/components/AboutDialog.svelte`, `gwt-gui/src/lib/components/AgentLaunchForm.svelte`, `gwt-gui/src/lib/components/CleanupModal.svelte`, `gwt-gui/src/lib/components/MergeDialog.svelte`, `gwt-gui/src/lib/components/MergeConfirmModal.svelte`, `gwt-gui/src/lib/components/ReviewDialog.svelte`, `gwt-gui/src/lib/components/QuitConfirmToast.svelte`
+
+- 直値の `z-index`（1000/1100/9999）を共通変数へ置換する
+
+#### 5-4. 回帰テスト（Unit + E2E）
+
+**対象ファイル**: `gwt-gui/src/lib/components/ReportDialog.test.ts`, `gwt-gui/e2e/dialogs-common.spec.ts`
+
+- Unit: Report overlay が `modal-overlay-report` を持つことを検証
+- E2E: Migration モーダル表示中に Report を開き、Report の `z-index` が上位で入力欄フォーカス可能であることを検証
+
 ## テスト
 
 ### バックエンド
@@ -421,6 +463,8 @@ case "help-suggest-feature":
 - `issueTemplate`: Bug Report / Feature Request テンプレート生成のテスト
 - `ReportDialog.svelte`: タブ切り替え、フィールド表示切り替え、Submit / Preview のテスト
 - `ReportDialog.svelte`: 再オープン時の状態初期化（入力、診断、送信失敗状態、mode反映）の回帰テスト
+- `ReportDialog.svelte` + モーダル競合: Report overlay が最前面クラスを持つこと
+- `dialogs-common.spec.ts`: Migration モーダル併存時の Report 最前面とフォーカス可能性
 - `diagnostics.ts`: 診断情報収集のテスト
 
 ## リスク・依存関係
@@ -431,6 +475,7 @@ case "help-suggest-feature":
 | macOS スクリーン収録権限の UX | 中 | 権限未許可時はテキストキャプチャへフォールバック |
 | GitHub API 認証の複雑さ | 中 | `gh` CLI のトークンを流用。未認証時はブラウザフォールバック |
 | 27コマンドモジュールの一括移行 | 高 | 機械的な置換が可能。`from_gwt_error` で自動変換 |
+| モーダル層変更による既存ダイアログ退行 | 中 | Unit + E2E で開閉・最前面・フォーカス可否を回帰検証 |
 
 ## マイルストーン
 
@@ -440,3 +485,4 @@ case "help-suggest-feature":
 | Phase 2 | 報告フォーム + GitHub Issues + マスキング | Phase 1 |
 | Phase 3 | スクリーンキャプチャ + Help メニュー | Phase 2 |
 | Phase 4 | ReportDialog再オープン時の状態初期化 | Phase 2 |
+| Phase 5 | モーダルレイヤー共通化 + Report最前面保証 | Phase 2 |

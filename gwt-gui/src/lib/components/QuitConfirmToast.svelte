@@ -90,7 +90,7 @@
     top: 16px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 9999;
+    z-index: var(--z-quit-toast);
     background: var(--bg-surface, #313244);
     color: var(--text-primary, #cdd6f4);
     border: 1px solid var(--border-color, #45475a);

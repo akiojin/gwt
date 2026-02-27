@@ -13,6 +13,7 @@
 - US7（プライバシー保護）→ Phase 3 に依存
 - US8（送信失敗フォールバック）→ Phase 4 に依存
 - US9（再オープン時の状態初期化）→ Phase 3 に依存
+- US10（報告ダイアログ最前面表示）→ Phase 3 に依存
 
 ## Phase 1: セットアップ
 
@@ -107,3 +108,16 @@
 - [x] T071 [US9] ReportDialog の再オープン初期化実装を追加する `gwt-gui/src/lib/components/ReportDialog.svelte`
 - [x] T072 [US9] 再オープン回帰テスト（入力/診断/送信失敗/mode反映）を追加する `gwt-gui/src/lib/components/ReportDialog.test.ts`
 - [x] T073 [US9] `pnpm test src/lib/components/ReportDialog.test.ts` を実行し、新規回帰テストを検証する `gwt-gui/`
+
+## Phase 8: バグ修正 — 報告ダイアログ最前面表示 (US10)
+
+- [x] T074 [US10] `spec.md` に US10（最前面表示保証）の受け入れシナリオと FR/SC を追記する `specs/SPEC-fabb6678/spec.md`
+- [x] T075 [US10] `plan.md` にモーダルレイヤー共通化方針（z-index トークン + 適用対象）を追記する `specs/SPEC-fabb6678/plan.md`
+- [x] T076 [US10] `global.css` にモーダルレイヤー z-index 変数と overlay レベルクラスを追加する `gwt-gui/src/styles/global.css`
+- [x] T077 [US10] `ReportDialog` を最前面レイヤーへ変更する（`modal-overlay-report`） `gwt-gui/src/lib/components/ReportDialog.svelte`
+- [x] T078 [US10] `LaunchProgressModal` / `MigrationModal` を stacked レイヤーへ変更する `gwt-gui/src/lib/components/LaunchProgressModal.svelte` `gwt-gui/src/lib/components/MigrationModal.svelte`
+- [x] T079 [US10] 既存モーダルの固定 z-index を共通変数参照へ置換する `gwt-gui/src/lib/components/AboutDialog.svelte` `gwt-gui/src/lib/components/AgentLaunchForm.svelte` `gwt-gui/src/lib/components/CleanupModal.svelte` `gwt-gui/src/lib/components/MergeDialog.svelte` `gwt-gui/src/lib/components/MergeConfirmModal.svelte` `gwt-gui/src/lib/components/ReviewDialog.svelte` `gwt-gui/src/lib/components/QuitConfirmToast.svelte` `gwt-gui/src/App.svelte`
+- [x] T080 [US10] Unit テストを追加する（Report overlay の最前面クラス） `gwt-gui/src/lib/components/ReportDialog.test.ts`
+- [x] T081 [US10] E2E テストを追加する（Migration モーダル併存時の Report 最前面 + フォーカス） `gwt-gui/e2e/dialogs-common.spec.ts`
+- [x] T082 [US10] `pnpm test src/lib/components/ReportDialog.test.ts` を実行し、追加 Unit を検証する `gwt-gui/`
+- [x] T083 [US10] `pnpm exec playwright test e2e/dialogs-common.spec.ts --project=chromium` を実行し、追加 E2E を検証する `gwt-gui/`
