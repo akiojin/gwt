@@ -4,6 +4,9 @@ use super::{
     backup::create_backup, config::MigrationConfig, error::MigrationError, state::MigrationState,
     validator::validate_migration,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -25,6 +28,16 @@ pub struct WorktreeMigrationInfo {
 
 /// Migration progress callback
 pub type MigrationProgress = Box<dyn Fn(MigrationState) + Send>;
+
+const EVACUATION_MANIFEST_FILENAME: &str = "evacuation-manifest.json";
+const EVACUATION_MANIFEST_ENCODING: &str = "base64-os";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvacuationManifest {
+    entries: Vec<String>,
+    #[serde(default)]
+    encoding: Option<String>,
+}
 
 /// Execute full migration (SPEC-a70a1ece T815, FR-201)
 /// SPEC-a70a1ece FR-150: Migration creates structure INSIDE the original repo directory
@@ -75,7 +88,7 @@ pub fn execute_migration(
 
     // Phase 4: Evacuate main repo files to temp directory (for dirty main worktree)
     info!("Phase 4: Checking if main repo files need evacuation");
-    let temp_evacuation_dir = config.target_root.join(".gwt-migration-temp");
+    let temp_evacuation_dir = config.evacuation_temp_path();
     if !config.dry_run {
         // Find main worktree (the original repo itself) using pre-computed is_main_repo
         if let Some(main_wt) = worktrees.iter().find(|wt| wt.is_main_repo) {
@@ -173,10 +186,16 @@ pub fn execute_migration(
 
 /// Evacuate main repo files (excluding .git, .worktrees, and the bare repo) to temp directory
 fn evacuate_main_repo_files(source: &Path, temp_dir: &Path) -> Result<(), MigrationError> {
+    if temp_dir.exists() {
+        recover_stale_evacuation_data(source, temp_dir)?;
+    }
+
     std::fs::create_dir_all(temp_dir).map_err(|e| MigrationError::IoError {
         path: temp_dir.to_path_buf(),
         reason: format!("Failed to create temp directory: {}", e),
     })?;
+
+    let mut evacuated_entries = Vec::new();
 
     for entry in std::fs::read_dir(source).map_err(|e| MigrationError::IoError {
         path: source.to_path_buf(),
@@ -193,6 +212,7 @@ fn evacuate_main_repo_files(source: &Path, temp_dir: &Path) -> Result<(), Migrat
         // Skip .git, .worktrees, and .gwt-* directories
         if name_str == ".git"
             || name_str == ".worktrees"
+            || name_str == ".gwt"
             || name_str.starts_with(".gwt-")
             || name_str.ends_with(".git")
         {
@@ -201,22 +221,105 @@ fn evacuate_main_repo_files(source: &Path, temp_dir: &Path) -> Result<(), Migrat
 
         let src_path = entry.path();
         let dst_path = temp_dir.join(&name);
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path).map_err(|e| MigrationError::IoError {
-                path: dst_path.clone(),
-                reason: format!("Failed to copy file: {}", e),
-            })?;
-        }
+        move_path(&src_path, &dst_path, "evacuate path")?;
+        evacuated_entries.push(encode_entry_name(&name));
     }
+
+    write_evacuation_manifest(temp_dir, &evacuated_entries)?;
 
     Ok(())
 }
 
 /// Restore evacuated files to the target worktree
 fn restore_evacuated_files(temp_dir: &Path, target: &Path) -> Result<(), MigrationError> {
+    for entry_name in collect_evacuation_entries(temp_dir)? {
+        let src_path = temp_dir.join(&entry_name);
+        if !src_path.exists() {
+            continue;
+        }
+
+        let dst_path = target.join(&entry_name);
+        move_path(&src_path, &dst_path, "restore evacuated path")?;
+    }
+
+    Ok(())
+}
+
+fn evacuation_manifest_path(temp_dir: &Path) -> PathBuf {
+    temp_dir.join(EVACUATION_MANIFEST_FILENAME)
+}
+
+fn write_evacuation_manifest(temp_dir: &Path, entries: &[String]) -> Result<(), MigrationError> {
+    let manifest_path = evacuation_manifest_path(temp_dir);
+    let manifest = EvacuationManifest {
+        entries: entries.to_vec(),
+        encoding: Some(EVACUATION_MANIFEST_ENCODING.to_string()),
+    };
+    let serialized =
+        serde_json::to_string_pretty(&manifest).map_err(|e| MigrationError::IoError {
+            path: manifest_path.clone(),
+            reason: format!("Failed to serialize evacuation manifest: {}", e),
+        })?;
+
+    std::fs::write(&manifest_path, serialized).map_err(|e| MigrationError::IoError {
+        path: manifest_path,
+        reason: format!("Failed to write evacuation manifest: {}", e),
+    })?;
+
+    Ok(())
+}
+
+fn collect_evacuation_entries(temp_dir: &Path) -> Result<Vec<OsString>, MigrationError> {
+    let manifest_path = evacuation_manifest_path(temp_dir);
+    if manifest_path.exists() {
+        match std::fs::read_to_string(&manifest_path) {
+            Ok(content) => match serde_json::from_str::<EvacuationManifest>(&content) {
+                Ok(manifest) => {
+                    if manifest.encoding.as_deref() == Some(EVACUATION_MANIFEST_ENCODING) {
+                        let mut decoded = Vec::with_capacity(manifest.entries.len());
+                        for encoded_name in manifest.entries {
+                            match decode_entry_name(&encoded_name) {
+                                Ok(name) => decoded.push(name),
+                                Err(err) => {
+                                    warn!(
+                                        path = %manifest_path.display(),
+                                        entry = %encoded_name,
+                                        error = %err,
+                                        "Failed to decode evacuation manifest entry, falling back to directory scan"
+                                    );
+                                    return collect_evacuation_entries_from_scan(temp_dir);
+                                }
+                            }
+                        }
+                        return Ok(decoded);
+                    }
+
+                    warn!(
+                        path = %manifest_path.display(),
+                        encoding = ?manifest.encoding,
+                        "Unsupported or missing evacuation manifest encoding, falling back to directory scan"
+                    );
+                    return collect_evacuation_entries_from_scan(temp_dir);
+                }
+                Err(err) => warn!(
+                    path = %manifest_path.display(),
+                    error = %err,
+                    "Failed to parse evacuation manifest, falling back to directory scan"
+                ),
+            },
+            Err(err) => warn!(
+                path = %manifest_path.display(),
+                error = %err,
+                "Failed to read evacuation manifest, falling back to directory scan"
+            ),
+        }
+    }
+
+    collect_evacuation_entries_from_scan(temp_dir)
+}
+
+fn collect_evacuation_entries_from_scan(temp_dir: &Path) -> Result<Vec<OsString>, MigrationError> {
+    let mut entries = Vec::new();
     for entry in std::fs::read_dir(temp_dir).map_err(|e| MigrationError::IoError {
         path: temp_dir.to_path_buf(),
         reason: format!("Failed to read temp directory: {}", e),
@@ -225,53 +328,112 @@ fn restore_evacuated_files(temp_dir: &Path, target: &Path) -> Result<(), Migrati
             path: temp_dir.to_path_buf(),
             reason: format!("Failed to read directory entry: {}", e),
         })?;
-
-        let src_path = entry.path();
-        let dst_path = target.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path).map_err(|e| MigrationError::IoError {
-                path: dst_path.clone(),
-                reason: format!("Failed to restore file: {}", e),
-            })?;
+        let name = entry.file_name();
+        if name == OsStr::new(EVACUATION_MANIFEST_FILENAME) {
+            continue;
         }
+        entries.push(name);
     }
+
+    Ok(entries)
+}
+
+fn recover_stale_evacuation_data(source: &Path, temp_dir: &Path) -> Result<(), MigrationError> {
+    info!(
+        temp = %temp_dir.display(),
+        source = %source.display(),
+        "Recovering stale evacuation data before starting new migration"
+    );
+
+    for entry_name in collect_evacuation_entries(temp_dir)? {
+        let src_path = temp_dir.join(&entry_name);
+        if !src_path.exists() {
+            continue;
+        }
+
+        let dst_path = source.join(&entry_name);
+        if dst_path.exists() {
+            return Err(MigrationError::IoError {
+                path: dst_path,
+                reason: "Stale evacuation entry conflicts with existing path".to_string(),
+            });
+        }
+
+        move_path(&src_path, &dst_path, "recover stale evacuated path")?;
+    }
+
+    std::fs::remove_dir_all(temp_dir).map_err(|e| MigrationError::IoError {
+        path: temp_dir.to_path_buf(),
+        reason: format!("Failed to remove stale evacuation temp directory: {}", e),
+    })?;
 
     Ok(())
 }
 
-/// Helper to copy directory recursively
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), MigrationError> {
-    std::fs::create_dir_all(dst).map_err(|e| MigrationError::IoError {
-        path: dst.to_path_buf(),
-        reason: format!("Failed to create directory: {}", e),
-    })?;
-
-    for entry in std::fs::read_dir(src).map_err(|e| MigrationError::IoError {
-        path: src.to_path_buf(),
-        reason: format!("Failed to read directory: {}", e),
-    })? {
-        let entry = entry.map_err(|e| MigrationError::IoError {
-            path: src.to_path_buf(),
-            reason: format!("Failed to read entry: {}", e),
-        })?;
-
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path).map_err(|e| MigrationError::IoError {
-                path: dst_path.clone(),
-                reason: format!("Failed to copy: {}", e),
-            })?;
-        }
+fn encode_entry_name(name: &OsStr) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        BASE64_STANDARD.encode(name.as_bytes())
     }
 
-    Ok(())
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let mut bytes = Vec::new();
+        for unit in name.encode_wide() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        BASE64_STANDARD.encode(bytes)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        BASE64_STANDARD.encode(name.to_string_lossy().as_bytes())
+    }
+}
+
+fn decode_entry_name(encoded: &str) -> Result<OsString, String> {
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|e| format!("Invalid base64 entry name: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(OsString::from_vec(bytes))
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        if bytes.len() % 2 != 0 {
+            return Err("Invalid UTF-16 byte length".to_string());
+        }
+        let units = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        Ok(OsString::from_wide(&units))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(OsString::from(String::from_utf8_lossy(&bytes).to_string()))
+    }
+}
+
+fn move_path(src: &Path, dst: &Path, action: &str) -> Result<(), MigrationError> {
+    std::fs::rename(src, dst).map_err(|e| MigrationError::IoError {
+        path: src.to_path_buf(),
+        reason: format!(
+            "Failed to {} from {} to {}: {}",
+            action,
+            src.display(),
+            dst.display(),
+            e
+        ),
+    })
 }
 
 /// Cleanup original .git directory before creating worktrees
@@ -1090,5 +1252,78 @@ mod tests {
     fn detects_directory_not_empty_error() {
         let err = std::io::Error::from_raw_os_error(66);
         assert!(is_directory_not_empty_error(&err));
+    }
+
+    #[test]
+    fn evacuate_and_restore_main_repo_files_move_entries() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let temp_dir = source.join(".gwt-migration-temp");
+
+        std::fs::create_dir_all(source.join(".git")).unwrap();
+        std::fs::write(source.join(".git/config"), "git").unwrap();
+        std::fs::create_dir_all(source.join(".gwt")).unwrap();
+        std::fs::write(source.join(".gwt/project.json"), "{\"a\":1}").unwrap();
+        std::fs::create_dir_all(source.join(".worktrees")).unwrap();
+        std::fs::create_dir_all(source.join(".svn/pristine/00")).unwrap();
+        std::fs::write(source.join(".svn/pristine/00/a.svn-base"), "svn").unwrap();
+        std::fs::write(source.join("notes.txt"), "note").unwrap();
+
+        evacuate_main_repo_files(&source, &temp_dir).unwrap();
+
+        assert!(source.join(".git/config").exists());
+        assert!(source.join(".gwt/project.json").exists());
+        assert!(source.join(".worktrees").exists());
+        assert!(!source.join(".svn").exists());
+        assert!(!source.join("notes.txt").exists());
+        assert!(temp_dir.join(".svn/pristine/00/a.svn-base").exists());
+        assert!(temp_dir.join("notes.txt").exists());
+        assert!(temp_dir.join(EVACUATION_MANIFEST_FILENAME).exists());
+
+        std::fs::create_dir_all(&target).unwrap();
+        restore_evacuated_files(&temp_dir, &target).unwrap();
+
+        assert!(target.join(".svn/pristine/00/a.svn-base").exists());
+        assert!(target.join("notes.txt").exists());
+        assert!(!target.join(".gwt").exists());
+        assert!(!temp_dir.join(".svn").exists());
+        assert!(!temp_dir.join("notes.txt").exists());
+        assert!(temp_dir.join(EVACUATION_MANIFEST_FILENAME).exists());
+    }
+
+    #[test]
+    fn recover_stale_evacuation_data_restores_entries() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let temp_dir = source.join(".gwt-migration-temp");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        std::fs::write(temp_dir.join("stale.txt"), "stale").unwrap();
+        write_evacuation_manifest(&temp_dir, &[encode_entry_name(OsStr::new("stale.txt"))])
+            .unwrap();
+
+        recover_stale_evacuation_data(&source, &temp_dir).unwrap();
+
+        assert!(source.join("stale.txt").exists());
+        assert!(!temp_dir.exists());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn manifest_roundtrip_preserves_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = TempDir::new().unwrap();
+        let temp_dir = temp.path().join(".gwt-migration-temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let name = OsString::from_vec(vec![0x66, 0x6f, 0x80]);
+        std::fs::write(temp_dir.join(&name), "x").unwrap();
+        write_evacuation_manifest(&temp_dir, &[encode_entry_name(name.as_os_str())]).unwrap();
+
+        let entries = collect_evacuation_entries(&temp_dir).unwrap();
+        assert_eq!(entries, vec![name]);
     }
 }
