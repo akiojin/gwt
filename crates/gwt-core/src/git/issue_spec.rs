@@ -130,6 +130,59 @@ impl SpecProjectPhase {
     }
 }
 
+/// Create a new spec issue. Returns the created issue detail.
+pub fn create_spec_issue(
+    repo_path: &Path,
+    title: &str,
+    sections: &SpecIssueSections,
+) -> Result<SpecIssueDetail, String> {
+    if title.trim().is_empty() {
+        return Err("title is required".to_string());
+    }
+
+    let checklist = SpecIssueChecklist::default();
+    // New issues use issue number as spec id (placeholder until created).
+    let placeholder_id = "new";
+    let body = render_issue_body(placeholder_id, sections, &checklist);
+
+    let number = gh_issue_create_without_spec_label(repo_path, title, &body)?;
+    // Re-render with the actual issue number as spec id.
+    let spec_id = format!("#{number}");
+    let body = render_issue_body(&spec_id, sections, &checklist);
+    gh_issue_edit_body(repo_path, number, title, &body)?;
+
+    get_spec_issue_detail(repo_path, number)
+}
+
+/// Update an existing spec issue by issue number. Returns the updated issue detail.
+pub fn update_spec_issue(
+    repo_path: &Path,
+    issue_number: u64,
+    title: &str,
+    sections: &SpecIssueSections,
+    expected_etag: Option<&str>,
+) -> Result<SpecIssueDetail, String> {
+    if title.trim().is_empty() {
+        return Err("title is required".to_string());
+    }
+
+    let existing = get_spec_issue_detail(repo_path, issue_number)?;
+
+    if let Some(expected) = expected_etag {
+        if !expected.trim().is_empty() && expected != existing.etag {
+            return Err("etag mismatch".to_string());
+        }
+    }
+
+    let checklist = parse_acceptance_checklist_from_body(&existing.body);
+    let spec_id = format!("#{issue_number}");
+    let body = render_issue_body(&spec_id, sections, &checklist);
+
+    gh_issue_edit_body(repo_path, issue_number, title, &body)?;
+    get_spec_issue_detail(repo_path, issue_number)
+}
+
+/// Backward-compatible upsert: finds by spec_id label, creates or updates.
 pub fn upsert_spec_issue(
     repo_path: &Path,
     spec_id: &str,
@@ -664,6 +717,58 @@ fn non_empty_or_default(value: &str, default_value: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Create issue with only `gwt-spec` label (no spec_id label).
+fn gh_issue_create_without_spec_label(
+    repo_path: &Path,
+    title: &str,
+    body: &str,
+) -> Result<u64, String> {
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
+            "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL,
+        ],
+    )
+    .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue create failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_issue_number_from_create_output(stdout.trim())
+}
+
+/// Edit issue body and title only (no label changes).
+fn gh_issue_edit_body(
+    repo_path: &Path,
+    issue_number: u64,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    let issue_number = issue_number.to_string();
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
+            "issue",
+            "edit",
+            issue_number.as_str(),
+            "--title",
+            title,
+            "--body",
+            body,
+        ],
+    )
+    .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue edit failed: {}", stderr.trim()));
+    }
+    Ok(())
 }
 
 fn gh_issue_create(
@@ -1307,7 +1412,7 @@ fn update_project_status(
 
     for node in nodes {
         let name = node.get("name").and_then(Value::as_str).unwrap_or_default();
-        if name != "Status" {
+        if name != "Status" && name != "Phase" {
             continue;
         }
         field_id = node.get("id").and_then(Value::as_str).map(str::to_string);
