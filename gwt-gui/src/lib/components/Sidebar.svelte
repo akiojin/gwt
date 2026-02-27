@@ -322,6 +322,25 @@
     return selectedPrStatus?.number ?? null;
   });
 
+  function prBadgeClass(status: PrStatusLite): string {
+    if (status.state === "MERGED") return "merged";
+    if (status.state === "CLOSED") return "closed";
+    const uiState = (status.mergeUiState ?? "").toLowerCase();
+    if (uiState === "blocked") return "blocked";
+    if (uiState === "conflicting") return "conflicting";
+    if (
+      status.retrying === true ||
+      uiState === "checking" ||
+      (!uiState && status.mergeable === "UNKNOWN")
+    ) {
+      return "checking";
+    }
+    if (status.mergeable === "CONFLICTING") {
+      return "conflicting";
+    }
+    return "open";
+  }
+
   function isTextEntryFocused(): boolean {
     if (typeof document === "undefined") return false;
     const active = document.activeElement;
@@ -1337,7 +1356,7 @@
               {#if activePrStatuses[branch.name]}
                 {@const prSt = activePrStatuses[branch.name]!}
                 <span
-                  class="pr-badge {prSt.state === 'MERGED' ? 'merged' : prSt.state === 'CLOSED' ? 'closed' : prSt.mergeable === 'MERGEABLE' ? 'open' : prSt.mergeable === 'CONFLICTING' ? 'conflicting' : 'unknown'}{prSt.retrying ? ' pulse' : ''}"
+                  class="pr-badge {prBadgeClass(prSt)}{prSt.retrying ? ' pulse' : ''}"
                   title="PR #{prSt.number}"
                 >
                   #{prSt.number}
@@ -1970,7 +1989,12 @@
     border-color: rgba(248, 81, 73, 0.35);
   }
 
-  .pr-badge.unknown {
+  .pr-badge.blocked {
+    color: var(--red);
+    border-color: rgba(248, 81, 73, 0.35);
+  }
+
+  .pr-badge.checking {
     color: var(--text-muted);
     border-color: rgba(128, 128, 128, 0.35);
   }
