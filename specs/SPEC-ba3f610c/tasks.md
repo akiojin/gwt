@@ -1,6 +1,6 @@
 # タスクリスト: プロジェクトモード（Project Mode）
 
-**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-19
+**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-27
 
 ## 完了済み（旧アーキテクチャ: MA + Agentビュー）
 
@@ -14,13 +14,14 @@
 ```text
 US1 (基本対話)     ← 全ストーリーの前提
 US2 (GitHub Issue)  ← US1
-US3 (Developer起動) ← US2
+US3 (Worker起動) ← US2
 US4 (完了検出)      ← US3
 US5 (成果物検証)    ← US4
 US6 (障害)         ← US3, US4
 US7 (セッション)    ← US1
 US8 (直接アクセス)  ← US3, US4
 US9 (コンテキスト)  ← US1
+US11 (ペルソナ)     ← US1, US3
 ```
 
 ## Phase 1: セットアップ
@@ -34,18 +35,23 @@ US9 (コンテキスト)  ← US1
   - data-model.md の ProjectIssue / CoordinatorState を実装
   - 依存: なし
 
-- [ ] T103 [P] [US1] エンティティモデル定義（ProjectTask拡張 / DeveloperState / DeveloperStatus） `crates/gwt-core/src/agent/task.rs` `crates/gwt-core/src/agent/developer.rs`
-  - 既存 Task に developers Vec を追加、DeveloperState 新規
+- [ ] T103 [P] [US1] エンティティモデル定義（ProjectTask拡張 / WorkerState / WorkerStatus） `crates/gwt-core/src/agent/task.rs` `crates/gwt-core/src/agent/worker.rs`
+  - 既存 Task に workers Vec を追加、WorkerState 新規
   - 依存: なし
 
 - [ ] T104 [P] [US1] フロント型定義を3層対応に拡張 `gwt-gui/src/lib/types.ts`
-  - ProjectModeState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState
+  - ProjectModeState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / WorkerState / WorkerPersona
   - 依存: なし
 
 - [ ] T105 [US1] SessionStore の AppState ワイヤリング `crates/gwt-tauri/src/state.rs` `crates/gwt-core/src/agent/session_store.rs`
   - 既存 SessionStore を ProjectModeSession 対応に拡張
   - AppState に SessionStore を追加し永続化パイプラインを接続
   - 依存: T101, T102, T103
+
+- [ ] T106 [P] [US11] ペルソナモデル定義（WorkerPersona / PersonaStore / PersonaScope） `crates/gwt-core/src/agent/persona.rs`
+  - WorkerPersona構造体、PersonaStore（ファイルI/O + 優先順位解決）、PersonaScope enum
+  - 組み込みデフォルト3種（Frontend/Backend/Fullstack）の定義
+  - 依存: なし
 
 ## Phase 2: 基盤（全ストーリー共通）
 
@@ -64,6 +70,46 @@ US9 (コンテキスト)  ← US1
 - [ ] T204 [P] [US1] PTY通信スキル化基盤インターフェース定義 `crates/gwt-tauri/src/commands/terminal.rs`
   - スキルAPIの入出力インターフェース定義（既存コマンドのラッパー）
   - 依存: T203
+
+- [ ] T205 [US1] [テスト] Lead用ツール拡張テスト `crates/gwt-tauri/src/agent_tools.rs`
+  - read_file / list_directory / search_code / get_git_status / list_personas のLLMツール動作検証
+  - 依存: T202
+
+- [ ] T206 [US1] Lead用ツール拡張実装 `crates/gwt-tauri/src/agent_tools.rs`
+  - Leadが使用する5ツールの実装（リポジトリ読み取り + ペルソナ一覧）
+  - 依存: T205, T106
+
+- [ ] T207 [US1] [テスト] Lead対話モードテスト `crates/gwt-tauri/src/agent_master.rs`
+  - ユーザー質問→コードベース調査（read_file/search_code）→回答の検証
+  - 依存: T206
+
+- [ ] T208 [US1] Lead対話モード実装 `crates/gwt-tauri/src/agent_master.rs`
+  - 質問検出→ツール呼び出し→回答生成のフロー
+  - 依存: T207
+
+- [ ] T209 [US1] [テスト] Lead計画モードテスト `crates/gwt-tauri/src/agent_master.rs`
+  - 収集→整理→仕様化→委譲の4フェーズ遷移と各フェーズの動作検証
+  - 依存: T202
+
+- [ ] T210 [US1] Lead計画モード実装 `crates/gwt-tauri/src/agent_master.rs`
+  - Collecting→Organizing→WaitingApproval→Specifying→Orchestratingの状態遷移
+  - 依存: T209
+
+- [ ] T211 [US1] [テスト] プロジェクト知識構築テスト `crates/gwt-tauri/src/agent_master.rs`
+  - セッション開始時のリポジトリスキャン→構造・技術スタック把握の検証
+  - 依存: T206
+
+- [ ] T212 [US1] プロジェクト知識構築実装 `crates/gwt-tauri/src/agent_master.rs`
+  - 初回/セッション開始時にread_file/list_directoryでプロジェクト構造を把握、セッションに永続化
+  - 依存: T211
+
+- [ ] T213 [US1] [テスト] システムプロンプト動的生成テスト `crates/gwt-core/src/agent/prompt_builder.rs`
+  - 静的部分 + リポジトリ情報 + ペルソナ一覧の動的結合検証
+  - 依存: T106, T212
+
+- [ ] T214 [US1] システムプロンプト動的生成実装 `crates/gwt-core/src/agent/prompt_builder.rs`
+  - PromptBuilder拡張: プロジェクト知識 + ペルソナ一覧を動的に組み込み
+  - 依存: T213
 
 ## Phase 3: US1 — モード切り替えと基本対話
 
@@ -86,11 +132,11 @@ US9 (コンテキスト)  ← US1
   - 依存: T303
 
 - [ ] T305 [US1] [テスト] ダッシュボード表示テスト `gwt-gui/src/lib/components/Dashboard.test.ts`
-  - Issue/Task/Developer階層表示、ステータスバッジ、折りたたみ、タスク数表示
+  - Issue/Task/Worker階層表示、ステータスバッジ、折りたたみ、タスク数表示
   - 依存: T104
 
 - [ ] T306 [US1] ダッシュボード実装 `gwt-gui/src/lib/components/Dashboard.svelte`
-  - 左カラム、Issue→Task→Developer階層、ステータスバッジ、折りたたみ/展開
+  - 左カラム、Issue→Task→Worker階層、ステータスバッジ、折りたたみ/展開
   - 依存: T305
 
 - [ ] T307 [US1] [テスト] AI設定未構成時エラー表示テスト `gwt-gui/src/lib/components/ProjectModePanel.test.ts`
@@ -124,6 +170,14 @@ US9 (コンテキスト)  ← US1
 - [ ] T314 [US1] Leadハイブリッド常駐実装 `crates/gwt-tauri/src/agent_master.rs`
   - イベント駆動 + 2分間隔ポーリング、イベント間はLLMコール不要
   - 依存: T313
+
+- [ ] T315 [US1] [テスト] チャットUI強化テスト `gwt-gui/src/lib/components/LeadChat.test.ts`
+  - Markdownレンダリング、Thought/Action折りたたみ、承認ボタン、タイピングインジケーター、フェーズ表示
+  - 依存: T304
+
+- [ ] T316 [US1] チャットUI強化実装 `gwt-gui/src/lib/components/LeadChat.svelte`
+  - MarkdownRenderer再利用、details要素、Approve/Request Changesボタン、フェーズバッジ
+  - 依存: T315
 
 ## Phase 4: US2 — GitHub Issue仕様管理と計画承認
 
@@ -178,16 +232,16 @@ US9 (コンテキスト)  ← US1
   - 依存: T411
 
 - [ ] T413 [US2] [テスト] Issue展開・Coordinator詳細テスト `gwt-gui/src/lib/components/IssueItem.test.ts`
-  - Issue展開時のCoordinator詳細表示（ステータス/CI結果/Developer一覧）
+  - Issue展開時のCoordinator詳細表示（ステータス/CI結果/Worker一覧）
   - 依存: T104
 
 - [ ] T414 [US2] Issue階層コンポーネント + Coordinator詳細展開実装 `gwt-gui/src/lib/components/IssueItem.svelte`
   - Issue情報、展開時Coordinator詳細、View Terminal/Chatリンク
   - 依存: T413
 
-## Phase 5: US3 — Developer起動と実装
+## Phase 5: US3 — Worker起動と実装
 
-> 独立テスト条件: Coordinatorからの指示でDeveloperがGUI内蔵ターミナルペインで起動しプロンプト受信すること
+> 独立テスト条件: Coordinatorからの指示でWorkerがGUI内蔵ターミナルペインで起動しプロンプト受信すること
 
 - [ ] T501 [US3] [テスト] Coordinator起動テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - Issue単位でのCoordinator起動→ターミナルペイン割当→cwd=リポジトリルート→GitHub Issue番号渡し
@@ -197,12 +251,12 @@ US9 (コンテキスト)  ← US1
   - GUI内蔵ターミナルペインでCoordinator起動、GitHub Issue番号渡し、複数並列管理
   - 依存: T501
 
-- [ ] T503 [US3] [テスト] タスク分割・Developer割り当てテスト `crates/gwt-tauri/src/commands/project_mode.rs`
-  - 1タスクに複数Developer+Worktreeを割り当てるロジック検証
+- [ ] T503 [US3] [テスト] タスク分割・Worker割り当てテスト `crates/gwt-tauri/src/commands/project_mode.rs`
+  - 1タスクに複数Worker+Worktreeを割り当てるロジック検証
   - 依存: T502
 
-- [ ] T504 [US3] タスク分割とDeveloper割り当て実装 `crates/gwt-tauri/src/commands/project_mode.rs`
-  - 大タスク→複数Developer並列、独立→別Worktree、依存→同一/merge連携
+- [ ] T504 [US3] タスク分割とWorker割り当て実装 `crates/gwt-tauri/src/commands/project_mode.rs`
+  - 大タスク→複数Worker並列、独立→別Worktree、依存→同一/merge連携
   - 依存: T503
 
 - [ ] T505 [US3] [テスト] Worktree/ブランチ自動作成テスト `crates/gwt-core/src/agent/worktree.rs`
@@ -213,11 +267,11 @@ US9 (コンテキスト)  ← US1
   - 既存 sanitize_branch_name() 拡張、worktreeパス生成、連番付与
   - 依存: T505
 
-- [ ] T507 [US3] [テスト] Developer起動テスト `crates/gwt-tauri/src/commands/project_mode.rs`
+- [ ] T507 [US3] [テスト] Worker起動テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - PTY直接通信でプロンプトが送信され、全自動モードで起動されるテスト
   - 依存: T504, T506
 
-- [ ] T508 [US3] Developer起動とプロンプト送信実装 `crates/gwt-tauri/src/commands/project_mode.rs`
+- [ ] T508 [US3] Worker起動とプロンプト送信実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - ユーザー指定エージェント種別の自動モードフラグ + アダプティブプロンプト + CLAUDE.md規約
   - 依存: T507
 
@@ -229,15 +283,23 @@ US9 (コンテキスト)  ← US1
   - Taskクリック→Branch Modeタブ切替→該当Worktree自動遷移
   - 依存: T509
 
-## Phase 6: US4 — Developer完了検出
+- [ ] T511 [US3] [テスト] Coordinatorペルソナ選定テスト `crates/gwt-tauri/src/commands/project_mode.rs`
+  - タスクtags分析→ペルソナtagsマッチ→最適ペルソナ選定の検証
+  - 依存: T106, T504
 
-> 独立テスト条件: DeveloperがタスクをComplete→Coordinatorが検出して次アクションに移行すること
+- [ ] T512 [US3] Coordinatorペルソナ選定実装 `crates/gwt-tauri/src/commands/project_mode.rs`
+  - PersonaStoreからペルソナ一覧取得→タスクtags照合→スコアリング→Worker起動にペルソナ適用
+  - 依存: T511
 
-- [ ] T601 [US4] [テスト] Developer完了検出テスト（Hook Stop / GWT_TASK_DONE / プロセス終了） `crates/gwt-tauri/src/commands/project_mode.rs`
+## Phase 6: US4 — Worker完了検出
+
+> 独立テスト条件: WorkerがタスクをComplete→Coordinatorが検出して次アクションに移行すること
+
+- [ ] T601 [US4] [テスト] Worker完了検出テスト（Hook Stop / GWT_TASK_DONE / プロセス終了） `crates/gwt-tauri/src/commands/project_mode.rs`
   - 各検出方式の動作検証、フォールバック順序の検証
   - 依存: T508
 
-- [ ] T602 [US4] Developer完了検出実装（複合方式） `crates/gwt-tauri/src/commands/project_mode.rs`
+- [ ] T602 [US4] Worker完了検出実装（複合方式） `crates/gwt-tauri/src/commands/project_mode.rs`
   - Hook Stop最優先 → フォールバック（出力パターン / プロセス終了）
   - 依存: T601
 
@@ -251,10 +313,10 @@ US9 (コンテキスト)  ← US1
 
 ## Phase 7: US5 — 成果物検証と統合（PR経由）
 
-> 独立テスト条件: Developer完了→テスト実行→PR作成→CI監視→修正ループが動作すること
+> 独立テスト条件: Worker完了→テスト実行→PR作成→CI監視→修正ループが動作すること
 
 - [ ] T701 [US5] [テスト] 成果物検証（テスト実行→PR作成）テスト `crates/gwt-tauri/src/commands/project_mode.rs`
-  - Developer完了→テスト実行→パス→PR作成のフロー検証
+  - Worker完了→テスト実行→パス→PR作成のフロー検証
   - 依存: T602
 
 - [ ] T702 [US5] 成果物検証とPR作成実装 `crates/gwt-tauri/src/commands/project_mode.rs`
@@ -262,18 +324,18 @@ US9 (コンテキスト)  ← US1
   - 依存: T701
 
 - [ ] T703 [US5] [テスト] CI監視・自律修正ループテスト `crates/gwt-tauri/src/commands/project_mode.rs`
-  - CI失敗検出→Developer修正指示→再プッシュ→CI再実行、最大3回→Lead報告の検証
+  - CI失敗検出→Worker修正指示→再プッシュ→CI再実行、最大3回→Lead報告の検証
   - 依存: T702
 
 - [ ] T704 [US5] CI監視・自律修正ループ実装 `crates/gwt-tauri/src/commands/project_mode.rs`
-  - gh pr checks監視 + Developer修正指示 + 3回失敗時Lead報告→ユーザー通知
+  - gh pr checks監視 + Worker修正指示 + 3回失敗時Lead報告→ユーザー通知
   - 依存: T703
 
-- [ ] T705 [US5] [テスト] Developer間コンテキスト共有テスト `crates/gwt-core/src/agent/worktree.rs`
-  - 先行タスクcommit→後続タスクにmerge→コンフリクト時Developer解決指示
+- [ ] T705 [US5] [テスト] Worker間コンテキスト共有テスト `crates/gwt-core/src/agent/worktree.rs`
+  - 先行タスクcommit→後続タスクにmerge→コンフリクト時Worker解決指示
   - 依存: T506
 
-- [ ] T706 [US5] Developer間コンテキスト共有実装 `crates/gwt-core/src/agent/worktree.rs`
+- [ ] T706 [US5] Worker間コンテキスト共有実装 `crates/gwt-core/src/agent/worktree.rs`
   - 先行タスクブランチのmerge実行、コンフリクト検出・解決指示
   - 依存: T705
 
@@ -282,7 +344,7 @@ US9 (コンテキスト)  ← US1
 > 独立テスト条件: 各層の障害シナリオで他層が独立して動作し続けること
 
 - [ ] T801 [US6] [テスト] 層間独立性テスト `crates/gwt-tauri/src/commands/project_mode.rs`
-  - Lead API障害時にCoordinator/Developer続行の検証
+  - Lead API障害時にCoordinator/Worker続行の検証
   - 依存: T602
 
 - [ ] T802 [US6] 層間独立性保証実装 `crates/gwt-tauri/src/commands/project_mode.rs`
@@ -294,7 +356,7 @@ US9 (コンテキスト)  ← US1
   - 依存: T802
 
 - [ ] T804 [US6] Coordinator自律再起動実装 `crates/gwt-tauri/src/agent_master.rs`
-  - クラッシュ検出→30秒以内に再起動→Developer状態再取得
+  - クラッシュ検出→30秒以内に再起動→Worker状態再取得
   - 依存: T803
 
 ## Phase 9: US7 — セッション永続化と再開
@@ -302,7 +364,7 @@ US9 (コンテキスト)  ← US1
 > 独立テスト条件: gwt終了→再起動→前回セッション復元で中断前の状態から継続できること
 
 - [ ] T901 [US7] [テスト] セッション永続化テスト `crates/gwt-tauri/src/commands/project_mode.rs`
-  - Lead会話/Coordinator状態/Developer状態/タスク一覧のJSON保存検証
+  - Lead会話/Coordinator状態/Worker状態/タスク一覧のJSON保存検証
   - 依存: T105
 
 - [ ] T902 [US7] セッション永続化実装 `crates/gwt-tauri/src/commands/project_mode.rs`
@@ -310,7 +372,7 @@ US9 (コンテキスト)  ← US1
   - 依存: T901
 
 - [ ] T903 [US7] [テスト] セッション復元・再開テスト `crates/gwt-tauri/src/commands/project_mode.rs`
-  - gwt再起動→最新未完了セッション復元→Coordinator/Developer再接続の検証
+  - gwt再起動→最新未完了セッション復元→Coordinator/Worker再接続の検証
   - 依存: T902
 
 - [ ] T904 [US7] セッション復元・再開実装 `crates/gwt-tauri/src/commands/project_mode.rs`
@@ -327,22 +389,22 @@ US9 (コンテキスト)  ← US1
 
 ## Phase 10: US8 — 直接アクセスと層間対話
 
-> 独立テスト条件: Developerターミナルに直接キー入力でき、CoordinatorにチャットでIssue展開から指示できること
+> 独立テスト条件: Workerターミナルに直接キー入力でき、CoordinatorにチャットでIssue展開から指示できること
 
 - [ ] T1001 [US8] [テスト] Coordinator詳細パネル表示テスト `gwt-gui/src/lib/components/CoordinatorDetail.test.ts`
-  - Coordinator状態、Developer一覧、View Terminal/Chatリンクの表示検証
+  - Coordinator状態、Worker一覧、View Terminal/Chatリンクの表示検証
   - 依存: T104
 
 - [ ] T1002 [US8] Coordinator詳細パネル実装 `gwt-gui/src/lib/components/CoordinatorDetail.svelte`
-  - 状態表示、CI結果、Developer一覧、ターミナル/チャットリンク
+  - 状態表示、CI結果、Worker一覧、ターミナル/チャットリンク
   - 依存: T1001
 
 - [ ] T1003 [US8] [テスト] 直接アクセステスト `gwt-gui/src/lib/components/`
-  - Developerターミナル直操作、Coordinatorチャット入力の検証
+  - Workerターミナル直操作、Coordinatorチャット入力の検証
   - 依存: T1002
 
 - [ ] T1004 [US8] 直接アクセス実装 `gwt-gui/src/lib/components/`
-  - Developerターミナルペイン直接キー入力、Coordinatorチャット送信
+  - Workerターミナルペイン直接キー入力、Coordinatorチャット送信
   - 依存: T1003
 
 ## Phase 11: US9 — コンテキスト管理
@@ -350,7 +412,7 @@ US9 (コンテキスト)  ← US1
 > 独立テスト条件: 長時間対話でコンテキスト閾値を超えた場合に要約圧縮が実行されること
 
 - [ ] T1101 [US9] [テスト] コンテキスト要約・圧縮テスト `crates/gwt-tauri/src/context_summarizer.rs`
-  - Developer: LLM自動（gwt不介入）、Lead/Coordinator: 80%閾値で圧縮実行の検証
+  - Worker: LLM自動（gwt不介入）、Lead/Coordinator: 80%閾値で圧縮実行の検証
   - 依存: T202
 
 - [ ] T1102 [US9] コンテキスト要約・圧縮実装 `crates/gwt-tauri/src/context_summarizer.rs`
@@ -415,12 +477,28 @@ US9 (コンテキスト)  ← US1
   - User/Project/Local選択とAgent別上書きフォームを追加
   - 依存: T1215, T1214
 
+- [ ] T1217 [P] [US11] [テスト] ペルソナ設定画面テスト `gwt-gui/src/lib/components/PersonaSettings.test.ts`
+  - ペルソナ一覧表示、追加/編集モーダル、削除確認、スコープ表示の検証
+  - 依存: T106, T104
+
+- [ ] T1218 [US11] ペルソナ設定画面実装 `gwt-gui/src/lib/components/PersonaSettings.svelte`
+  - カード一覧、CRUD モーダル、タグ入力、エージェントタイプ選択、スコープ表示
+  - 依存: T1217
+
+- [ ] T1219 [P] [US11] [テスト] ペルソナTauri連携テスト `crates/gwt-tauri/src/commands/settings.rs`
+  - Tauriコマンド経由でのペルソナCRUD（list_personas / save_persona / delete_persona）
+  - 依存: T106
+
+- [ ] T1220 [US11] ペルソナTauri連携実装 `crates/gwt-tauri/src/commands/settings.rs`
+  - PersonaStoreをTauriコマンドとして公開
+  - 依存: T1219
+
 - [ ] T1206 [P] [共通] ブランチモード GitHub Issueボタン `gwt-gui/src/lib/components/`
   - GUI上にGitHub Issueボタン設置、gwt内蔵AIがissue_specツールでGitHub Issue管理を実行
   - 依存: T1203
 
 - [ ] T1204 [P] [共通] ログ記録実装 `crates/gwt-tauri/src/`
-  - agent.lead.llm / agent.coordinator / agent.developer カテゴリのJSON Linesログ出力
+  - agent.lead.llm / agent.coordinator / agent.worker カテゴリのJSON Linesログ出力
   - 依存: T602
 
 - [ ] T1205 [共通] 仕様・計画・タスクの最終同期確認 `specs/SPEC-ba3f610c/`

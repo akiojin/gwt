@@ -1,6 +1,6 @@
 # データモデル: プロジェクトモード（Project Mode）
 
-**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-19
+**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-27
 
 ## エンティティ関係図
 
@@ -12,7 +12,8 @@ Project (1)
 │   ├── GitHub Issue (1)        ← 仕様・計画・タスク・TDDを格納
 │   ├── Coordinator (1)         ← GUI内蔵ターミナルペイン
 │   └── Task (N)                ← GitHub Issueのtasksセクションから生成
-│       └── Developer (N)       ← GUI内蔵ターミナルペイン
+│       └── Worker (N)          ← GUI内蔵ターミナルペイン（ペルソナの役割名で表示）
+│           ├── Persona (1)     ← Workerの専門性定義
 │           └── Worktree (1)    ← agent/ブランチ
 ```
 
@@ -32,18 +33,19 @@ Project (1)
 | base_branch | String | プロジェクト開始時のブランチ |
 | lead | LeadState | Lead状態 |
 | issues | Vec\<ProjectIssue\> | Issue一覧 |
-| developer_agent_type | AgentType | ユーザー指定のDeveloperエージェント種別 |
+| worker_agent_type | AgentType | ユーザー指定のWorkerエージェント種別 |
 
 ### LeadState
 
 | フィールド | 型 | 説明 |
 |---|---|---|
 | conversation | Vec\<LeadMessage\> | ユーザーとの対話履歴 |
-| status | LeadStatus | Idle / Thinking / WaitingApproval / Orchestrating / Error |
+| status | LeadStatus | Idle / Collecting / Organizing / WaitingApproval / Specifying / Orchestrating / Thinking / Error |
 | llm_call_count | u64 | LLMコール回数 |
 | estimated_tokens | u64 | 推定消費トークン数 |
 | active_issue_numbers | Vec\<u64\> | 管理中のGitHub Issue番号一覧 |
 | last_poll_at | Option\<DateTime\<Utc\>\> | 最終ポーリング日時 |
+| project_knowledge | Option\<ProjectKnowledge\> | リポジトリスキャン結果（プロジェクト構造・技術スタック） |
 
 ### LeadMessage
 
@@ -57,14 +59,18 @@ Project (1)
 ### LeadStatus enum
 
 ```text
-Idle → Thinking → WaitingApproval → Orchestrating → Idle
-                → Error → Idle
+Idle → Collecting → Organizing → WaitingApproval → Specifying → Orchestrating → Idle
+     → Thinking → Idle
+     → Error → Idle
 ```
 
-- **Idle**: イベント待ち（LLMコール不要）
-- **Thinking**: LLM処理中（ユーザー入力への応答 / GitHub Issue仕様管理実行）
-- **WaitingApproval**: ユーザーの承認待ち
-- **Orchestrating**: Coordinator管理・進捗監視中
+- **Idle**: 待機中（イベント待ち）
+- **Collecting**: ユーザーから要望を収集中
+- **Organizing**: 収集した要望をEpic/Storyに構造化中
+- **WaitingApproval**: 計画の承認待ち
+- **Specifying**: GitHub Issue作成中（spec/plan/tasks/tdd記録）
+- **Orchestrating**: Coordinator起動・管理中
+- **Thinking**: ユーザーの質問への回答を思考中（対話モード）
 - **Error**: LLM API障害等
 
 ### ProjectIssue
@@ -114,7 +120,7 @@ Starting → Running → Completed
 | description | String | タスク説明 |
 | status | TaskStatus | Pending / Ready / Running / Completed / Failed / Cancelled |
 | dependencies | Vec\<TaskId\> | 依存タスクID |
-| developers | Vec\<DeveloperState\> | 割り当てDeveloper一覧 |
+| workers | Vec\<WorkerState\> | 割り当てWorker一覧 |
 | test_verification | Option\<TestVerification\> | テスト検証結果 |
 | pull_request | Option\<PullRequestRef\> | PR情報 |
 | retry_count | u8 | リトライ回数 |
@@ -128,21 +134,60 @@ Pending → Ready → Running → Completed
                 → Cancelled
 ```
 
-### DeveloperState
+### WorkerState
 
 | フィールド | 型 | 説明 |
 |---|---|---|
 | id | SubAgentId | UUID v4 |
-| agent_type | AgentType | Claude / Codex / Gemini |
+| persona_id | Option\<String\> | ペルソナID参照 |
+| role_label | Option\<String\> | UI表示用（ペルソナのrole_labelから取得） |
+| agent_type | AgentType | Claude / Codex / Gemini（ペルソナ経由で解決） |
 | pane_id | String | GUI内蔵ターミナルペインID |
 | pid | Option\<u32\> | プロセスID |
-| status | DeveloperStatus | Starting / Running / WaitingInput / Completed / Error |
+| status | WorkerStatus | Starting / Running / WaitingInput / Completed / Error |
 | worktree | WorktreeRef | Worktree情報 |
 | started_at | DateTime\<Utc\> | 起動日時 |
 | completed_at | Option\<DateTime\<Utc\>\> | 完了日時 |
 | completion_source | Option\<CompletionSource\> | 完了検出方法 |
 
-### DeveloperStatus enum
+### WorkerPersona
+
+Workerの専門性を定義するプリセット。`~/.gwt/personas/` または `<repo>/.gwt/personas/` にTOML形式で保存。
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| id | String | ペルソナ識別子（例: "frontend-specialist"） |
+| name | String | 表示名（例: "Frontend Specialist"） |
+| role_label | String | UI表示名（例: "Frontend Dev"）。ダッシュボード等で使用 |
+| description | String | ペルソナの説明 |
+| tags | Vec\<String\> | スキルタグ（例: ["frontend", "svelte", "react"]） |
+| agent_type | AgentType | Claude / Codex / Gemini |
+| system_addition | String | Worker起動時にシステムプロンプトに追加されるテキスト |
+| auto_mode_flag | Option\<String\> | 自動モードフラグ上書き（オプション） |
+| additional_args | Vec\<String\> | 追加CLI引数（オプション） |
+
+### PersonaStore
+
+ペルソナの読み込み・保存・優先順位解決を管理する。
+
+| 操作 | シグネチャ | 説明 |
+|---|---|---|
+| list_personas | fn(project_path: Option\<&Path\>) -> Vec\<WorkerPersona\> | 利用可能な全ペルソナ一覧（優先順位解決済み） |
+| load_persona | fn(id: &str, project_path: Option\<&Path\>) -> Option\<WorkerPersona\> | IDでペルソナ読み込み |
+| save_persona | fn(persona: &WorkerPersona, scope: PersonaScope) -> Result\<()\> | ペルソナ保存 |
+| delete_persona | fn(id: &str, scope: PersonaScope) -> Result\<()\> | ペルソナ削除 |
+| builtin_defaults | fn() -> Vec\<WorkerPersona\> | 組み込みデフォルト（Frontend/Backend/Fullstack） |
+
+### PersonaScope enum
+
+```text
+Global   // ~/.gwt/personas/
+Project  // <repo>/.gwt/personas/
+```
+
+優先順位: Project > Global > 組み込み（同じidの場合）
+
+### WorkerStatus enum
 
 ```text
 Starting → Running → Completed
@@ -192,7 +237,7 @@ interface ProjectModeState {
   status: "active" | "paused" | "completed" | "failed";
   lead: LeadState;
   issues: ProjectIssue[];
-  developerAgentType: "claude" | "codex" | "gemini";
+  workerAgentType: "claude" | "codex" | "gemini";
 }
 ```
 
@@ -201,7 +246,7 @@ interface ProjectModeState {
 ```typescript
 interface LeadState {
   messages: LeadMessage[];
-  status: "idle" | "thinking" | "waiting_approval" | "orchestrating" | "error";
+  status: "idle" | "collecting" | "organizing" | "waiting_approval" | "specifying" | "orchestrating" | "thinking" | "error";
   llmCallCount: number;
   estimatedTokens: number;
 }
@@ -254,26 +299,42 @@ interface ProjectTask {
   id: string;
   name: string;
   status: "pending" | "ready" | "running" | "completed" | "failed" | "cancelled";
-  developers: DeveloperState[];
+  workers: WorkerState[];
   testStatus?: "not_run" | "running" | "passed" | "failed";
   pullRequest?: { number: number; url: string; ciStatus?: string };
   retryCount: number;
 }
 
 type DashboardTask = ProjectTask & {
-  developerCount: number;
+  workerCount: number;
 };
 ```
 
-### DeveloperState
+### WorkerState
 
 ```typescript
-interface DeveloperState {
+interface WorkerState {
   id: string;
+  personaId?: string;
+  roleLabel?: string;    // ペルソナのrole_label（UI表示用）
   agentType: "claude" | "codex" | "gemini";
   paneId: string;
   status: "starting" | "running" | "completed" | "error";
   worktree: { branchName: string; path: string };
+}
+```
+
+### WorkerPersona
+
+```typescript
+interface WorkerPersona {
+  id: string;
+  name: string;
+  roleLabel: string;
+  description: string;
+  tags: string[];
+  agentType: "claude" | "codex" | "gemini";
+  systemAddition: string;
 }
 ```
 
@@ -342,7 +403,7 @@ interface SkillRegistrationPreferences {
   "updated_at": "2026-02-19T12:30:00Z",
   "repository_path": "/path/to/repo",
   "base_branch": "feature/agent-mode",
-  "developer_agent_type": "claude",
+  "worker_agent_type": "claude",
   "lead": {
     "conversation": [],
     "status": "orchestrating",
@@ -369,11 +430,13 @@ interface SkillRegistrationPreferences {
           "id": "task-uuid-1",
           "name": "Implement login form",
           "status": "running",
-          "developers": [
+          "workers": [
             {
-              "id": "dev-uuid-1",
+              "id": "worker-uuid-1",
+              "persona_id": "frontend-specialist",
+              "role_label": "Frontend Dev",
               "agent_type": "claude",
-              "pane_id": "dev-1",
+              "pane_id": "worker-1",
               "pid": 12346,
               "status": "running",
               "worktree": {
@@ -394,9 +457,10 @@ interface SkillRegistrationPreferences {
 | 既存（gwt-core） | 新規（Project Mode） | 方針 |
 |---|---|---|
 | AgentSession | ProjectModeSession | フィールド大幅拡張（issues/lead追加） |
-| Task | ProjectTask | developers Vec追加（旧sub_agent単体→複数） |
-| SubAgent | DeveloperState | リネーム + フィールド整理 |
-| WorktreeRef | WorktreeRef | task_ids削除（Developer側から参照） |
+| Task | ProjectTask | workers Vec追加（旧sub_agent単体→複数） |
+| SubAgent | WorkerState | リネーム + フィールド整理 |
+| 新規 | WorkerPersona | ペルソナ定義（TOML→Rust構造体） |
+| WorktreeRef | WorktreeRef | task_ids削除（Worker側から参照） |
 | Conversation | LeadState.conversation | kind フィールド追加（progress等） |
 | SessionStore | SessionStore | ProjectModeSession対応に拡張 |
 | LegacyAgentState | ProjectModeState（フロント） | 3層構造に全面改訂 |

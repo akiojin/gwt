@@ -1,12 +1,12 @@
 # クイックスタート: プロジェクトモード（Project Mode）
 
-**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-19
+**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-27
 
 ## 前提
 
 - GUI版 gwt が起動できること
 - AI設定が有効であること（endpoint + model が設定済み）
-- Developer用エージェント（Claude Code等）がインストール済みであること
+- Worker用エージェント（Claude Code等）がインストール済みであること（ペルソナ設定は任意）
 - `gh` CLI が認証済みであること（GitHub Issue/PR機能を使う場合）
 
 ## 基本フロー
@@ -28,8 +28,8 @@
 ### 3. 自律実行を見守る
 
 - Leadが各IssueにCoordinatorを起動
-- CoordinatorがDeveloperを起動し実装を開始
-- ダッシュボード（左カラム）でIssue/Task/Developerの進捗を確認
+- CoordinatorがWorkerを起動し実装を開始
+- ダッシュボード（左カラム）でIssue/Task/Workerの進捗を確認
 - Leadが2分間隔で進捗をチャットに報告
 
 ### 4. 結果を確認する
@@ -55,7 +55,7 @@
 
 ### ダッシュボード操作
 
-1. Issue行をクリック → 展開（Task/Developer/Coordinator詳細）
+1. Issue行をクリック → 展開（Task/Worker/Coordinator詳細）
 2. Task行をクリック → Branch Modeの該当Worktreeにジャンプ
 3. `[View Terminal]` → CoordinatorターミナルをBranch Mode側で表示
 

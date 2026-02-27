@@ -1,16 +1,28 @@
-# TODO: Issue #1256 Modal Front Layering
+# TODO: Project Mode 改善 — 設計ドキュメント更新
 
 ## 背景
-Issue #1256「エラーリポートウィンドウを一番手前に表示」を、既存 `SPEC-fabb6678` に追記し、共通モーダル層設計と TDD（Unit + E2E）で修正する。
+
+Project Mode の仕様（SPEC-ba3f610c）を新ビジョンに基づいて更新する。設計のみ、コード変更なし。
+
+主な変更:
+
+- Developer → Worker リネーム（3層目の名称変更）
+- Lead の役割再定義（プロジェクト管理者 + 要件収集フロー）
+- Worker ペルソナ/プリセットシステムの設計
+- GUI ペルソナ設定画面の設計
+- チャット UI 強化の設計
 
 ## 実装ステップ
-- [x] SPEC-fabb6678（spec/plan/tasks/tdd）へ US10 + FR + 検証計画を追記
-- [x] モーダル共通 z-index トークンを導入し、モーダル関連コンポーネントへ適用
-- [x] ReportDialog 最前面保証の Unit テストを追加
-- [x] モーダル競合時の最前面保証 E2E を追加
-- [x] テスト/チェック実行（ReportDialog unit, dialogs-common e2e, svelte-check）
+
+- [x] spec.md の仕様更新（Developer→Worker、Lead再定義、ペルソナ追加、GUI設計）
+- [x] data-model.md の更新（Worker/Persona型追加、LeadStatus更新）
+- [x] plan.md の実装計画更新（ペルソナフェーズ追加、Lead拡張フェーズ追加）
+- [x] tasks.md のタスク一覧更新（ペルソナ・Lead拡張タスク追加）
+- [x] tdd.md / quickstart.md の整合性更新（Developer→Worker）
+- [x] 6ファイル間の整合性確認（markdownlint通過）
 
 ## 検証結果
-- [x] `cd gwt-gui && pnpm test src/lib/components/ReportDialog.test.ts`（pass: 27 tests）
-- [x] `cd gwt-gui && pnpm exec playwright test e2e/dialogs-common.spec.ts --project=chromium`（pass: 11 tests）
-- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`（0 errors / 1 warning）
+
+- [x] markdownlint: 全6ファイルでエラー・警告なし
+- [x] Developer残留確認: spec.md 2件（意図的: ペルソナ名 + 変更前対比）、research.md 3件（更新対象外）のみ
+- [x] 新規タスク追加確認: T106, T205-T214, T315-T316, T511-T512, T1217-T1220（計19件）
