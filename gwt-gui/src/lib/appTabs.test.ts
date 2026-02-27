@@ -58,4 +58,20 @@ describe("appTabs", () => {
     expect(reorderTabsByDrop(tabs, "unknown", "versionHistory", "before")).toBe(tabs);
     expect(reorderTabsByDrop(tabs, "settings", "settings", "after")).toBe(tabs);
   });
+
+  it("returns original array when overTabId not found", () => {
+    const tabs: Tab[] = [
+      { id: "a", label: "A", type: "projectMode" },
+      { id: "b", label: "B", type: "settings" },
+    ];
+    expect(reorderTabsByDrop(tabs, "a", "missing", "before")).toBe(tabs);
+  });
+
+  it("returns original array when dragTabId not found", () => {
+    const tabs: Tab[] = [
+      { id: "a", label: "A", type: "projectMode" },
+      { id: "b", label: "B", type: "settings" },
+    ];
+    expect(reorderTabsByDrop(tabs, "missing", "b", "before")).toBe(tabs);
+  });
 });

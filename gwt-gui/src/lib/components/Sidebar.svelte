@@ -8,6 +8,25 @@
     GhCliStatus,
     SettingsData,
   } from "../types";
+  import {
+    applyPrStatusUpdate,
+    buildFilterCacheKey as buildFilterCacheKeyHelper,
+    buildWorktreeMap as buildWorktreeMapHelper,
+    clampSidebarWidth as clampSidebarWidthHelper,
+    decideRefreshFailureAction,
+    divergenceClass as divergenceClassHelper,
+    divergenceIndicator as divergenceIndicatorHelper,
+    getSafetyLevel as getSafetyLevelHelper,
+    getSafetyTitle as getSafetyTitleHelper,
+    isBranchProtected as isBranchProtectedHelper,
+    normalizeBranchForPrLookup as normalizeBranchForPrLookupHelper,
+    normalizeTabBranch as normalizeTabBranchHelper,
+    resolveEventListen,
+    sortBranches as sortBranchesHelper,
+    toErrorMessage as toErrorMessageHelper,
+    toolUsageClass as toolUsageClassHelper,
+    type SidebarEventListen,
+  } from "./sidebarHelpers";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
@@ -25,10 +44,7 @@
     | { ok: true; snapshot: FilterCacheEntry }
     | { ok: false; errorMessage: string };
   type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-  type TauriEventListen = <T = unknown>(
-    event: string,
-    handler: (event: { payload: T }) => void
-  ) => Promise<() => void>;
+  type TauriEventListen = SidebarEventListen;
 
   let {
     projectPath,
@@ -262,19 +278,8 @@
           const { repoKey, branch: eventBranch, status } = event.payload;
           if (!pollingRepoKey || repoKey !== pollingRepoKey) return;
           if (status.retrying) return;
-          // Find matching entry in pollingStatuses by headBranch
-          const next = { ...pollingStatuses };
-          let updated = false;
-          for (const key of Object.keys(next)) {
-            const existing = next[key];
-            if (existing && existing.headBranch === eventBranch) {
-              next[key] = status;
-              updated = true;
-            }
-          }
-          if (updated) {
-            pollingStatuses = next;
-          }
+          const next = applyPrStatusUpdate(pollingStatuses, eventBranch, status);
+          if (next) pollingStatuses = next;
         });
         if (cancelled) {
           unlistenFn();
@@ -354,76 +359,11 @@
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
 
   function normalizeTabBranch(name: string): string {
-    const trimmed = name.trim();
-    return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
-  }
-
-  function stripRemotePrefix(name: string): string {
-    const trimmed = name.trim();
-    const slash = trimmed.indexOf("/");
-    if (slash <= 0) return trimmed;
-    return trimmed.slice(slash + 1);
-  }
-
-  function branchPriority(name: string): number {
-    const normalized = name.trim().toLowerCase();
-    const baseName = normalized.startsWith("origin/")
-      ? normalized.slice("origin/".length)
-      : normalized;
-    if (baseName === "main") return 2;
-    if (baseName === "develop") return 1;
-    return 0;
-  }
-
-  function branchSortTimestamp(branch: BranchInfo): number | null {
-    const value = (branch as { commit_timestamp?: unknown }).commit_timestamp;
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-    if (typeof value === "string") {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) ? parsed : null;
-    }
-    return null;
-  }
-
-  function compareBranches(
-    a: BranchInfo,
-    b: BranchInfo,
-    filter: FilterType
-  ): number {
-    if (filter === "All") {
-      const aRemote = remoteBranchNames.has(a.name) ? 1 : 0;
-      const bRemote = remoteBranchNames.has(b.name) ? 1 : 0;
-      if (aRemote !== bRemote) {
-        return aRemote - bRemote;
-      }
-    }
-
-    const aPriority = branchPriority(a.name);
-    const bPriority = branchPriority(b.name);
-    if (aPriority !== bPriority) {
-      return bPriority - aPriority;
-    }
-
-    const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-    if (sortMode === "name") {
-      return byName;
-    }
-
-    const aTs = branchSortTimestamp(a);
-    const bTs = branchSortTimestamp(b);
-    if (aTs === null && bTs === null) {
-      return byName;
-    }
-    if (aTs === null) return 1;
-    if (bTs === null) return -1;
-    if (aTs !== bTs) {
-      return bTs - aTs;
-    }
-    return byName;
+    return normalizeTabBranchHelper(name);
   }
 
   function sortBranches(list: BranchInfo[], filter: FilterType): BranchInfo[] {
-    return [...list].sort((a, b) => compareBranches(a, b, filter));
+    return sortBranchesHelper(list, filter, remoteBranchNames, sortMode);
   }
 
   function toggleSortMode() {
@@ -435,8 +375,7 @@
   }
 
   function normalizeBranchForPrLookup(branchName: string): string {
-    const trimmed = branchName.trim();
-    return remoteBranchNames.has(trimmed) ? stripRemotePrefix(trimmed) : trimmed;
+    return normalizeBranchForPrLookupHelper(branchName, remoteBranchNames);
   }
 
   function isSelectedBranch(branch: BranchInfo): boolean {
@@ -809,14 +748,17 @@
       return;
     }
 
-    if (background && hadFallbackCache) {
-      if (applyToActiveView && filter === activeFilter) {
-        loading = false;
-      }
+    const failureAction = decideRefreshFailureAction(
+      background,
+      hadFallbackCache,
+      applyToActiveView,
+      filter === activeFilter,
+    );
+    if (failureAction === "ignore") {
       return;
     }
-
-    if (!applyToActiveView || filter !== activeFilter) {
+    if (failureAction === "clear-loading") {
+      loading = false;
       return;
     }
 
@@ -925,18 +867,11 @@
   }
 
   function buildFilterCacheKey(filter: FilterType, path: string): string {
-    if (filter === "Remote") {
-      return `${path}::${refreshKey}`;
-    }
-    return `${path}::${refreshKey}::${localRefreshKey}`;
+    return buildFilterCacheKeyHelper(filter, path, refreshKey, localRefreshKey);
   }
 
   function buildWorktreeMap(worktrees: WorktreeInfo[]): Map<string, WorktreeInfo> {
-    const map = new Map<string, WorktreeInfo>();
-    for (const wt of worktrees) {
-      if (wt.branch) map.set(wt.branch, wt);
-    }
-    return map;
+    return buildWorktreeMapHelper(worktrees);
   }
 
   function applyCacheEntry(entry: FilterCacheEntry) {
@@ -968,11 +903,7 @@
   }
 
   function toErrorMessage(err: unknown): string {
-    if (typeof err === "string") return err;
-    if (err && typeof err === "object" && "message" in err) {
-      return String((err as { message?: unknown }).message);
-    }
-    return String(err);
+    return toErrorMessageHelper(err);
   }
 
   async function getInvoke(): Promise<TauriInvoke> {
@@ -982,15 +913,11 @@
 
   async function getEventListen(): Promise<TauriEventListen> {
     if (!tauriEventListenPromise) {
-      tauriEventListenPromise = import("@tauri-apps/api/event").then((mod) => {
-        const listenFn =
-          (mod as { listen?: TauriEventListen; default?: { listen?: TauriEventListen } }).listen ??
-          (mod as { default?: { listen?: TauriEventListen } }).default?.listen;
-        if (!listenFn) {
-          throw new Error("Tauri event listen API is unavailable");
-        }
-        return listenFn;
-      });
+      tauriEventListenPromise = import("@tauri-apps/api/event").then((mod) =>
+        resolveEventListen(
+          mod as { listen?: TauriEventListen; default?: { listen?: TauriEventListen } },
+        ),
+      );
     }
 
     try {
@@ -1002,76 +929,33 @@
   }
 
   function getSafetyLevel(branch: BranchInfo): string {
-    const wt = worktreeMap.get(branch.name);
-    if (!wt) return "";
-    return wt.safety_level || "";
+    return getSafetyLevelHelper(branch, worktreeMap);
   }
 
   function getSafetyTitle(branch: BranchInfo): string {
-    const level = getSafetyLevel(branch);
-    switch (level) {
-      case "safe":
-        return "Safe to delete";
-      case "warning":
-        return "Has uncommitted changes or unpushed commits";
-      case "danger":
-        return "Has uncommitted changes and unpushed commits";
-      case "disabled":
-        return "Protected or current branch";
-      default:
-        return "";
-    }
+    return getSafetyTitleHelper(branch, worktreeMap);
   }
 
   function isBranchProtected(branch: BranchInfo): boolean {
-    const wt = worktreeMap.get(branch.name);
-    return wt ? wt.is_protected || wt.is_current : false;
+    return isBranchProtectedHelper(branch, worktreeMap);
   }
 
   function divergenceIndicator(branch: BranchInfo): string {
-    switch (branch.divergence_status) {
-      case "Ahead":
-        return `+${branch.ahead}`;
-      case "Behind":
-        return `-${branch.behind}`;
-      case "Diverged":
-        return `+${branch.ahead} -${branch.behind}`;
-      default:
-        return "";
-    }
+    return divergenceIndicatorHelper(branch);
   }
 
   function divergenceClass(status: string): string {
-    switch (status) {
-      case "Ahead":
-        return "ahead";
-      case "Behind":
-        return "behind";
-      case "Diverged":
-        return "diverged";
-      default:
-        return "";
-    }
+    return divergenceClassHelper(status);
   }
 
   function toolUsageClass(usage: string | null | undefined): string {
-    const key = (usage ?? "").toLowerCase();
-    if (key.startsWith("claude@")) return "claude";
-    if (key.startsWith("codex@")) return "codex";
-    if (key.startsWith("gemini@")) return "gemini";
-    if (key.startsWith("opencode@") || key.startsWith("open-code@"))
-      return "opencode";
-    return "";
+    return toolUsageClassHelper(usage);
   }
 
   // --- Context menu ---
 
   function clampSidebarWidth(width: number): number {
-    const min = Number.isFinite(minWidthPx) ? minWidthPx : 220;
-    const maxCandidate = Number.isFinite(maxWidthPx) ? maxWidthPx : 520;
-    const max = Math.max(min, maxCandidate);
-    if (!Number.isFinite(width)) return min;
-    return Math.max(min, Math.min(max, Math.round(width)));
+    return clampSidebarWidthHelper(width, minWidthPx, maxWidthPx);
   }
 
   function emitSidebarWidth(nextWidthPx: number) {

@@ -205,6 +205,153 @@ describe("MigrationModal", () => {
     });
   });
 
+  it("updates progress steps during migration via listen events", async () => {
+    let progressHandler: ((event: { payload: any }) => void) | null = null;
+    let finishedHandler: ((event: { payload: any }) => void) | null = null;
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      if (eventName === "migration-progress") progressHandler = handler;
+      if (eventName === "migration-finished") finishedHandler = handler;
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue("job-001");
+    const onCompleted = vi.fn();
+
+    const rendered = await renderModal({
+      open: true,
+      sourceRoot: "/tmp/repo",
+      onCompleted,
+    });
+
+    await fireEvent.click(rendered.getByText("Migrate"));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("start_migration_job", { path: "/tmp/repo" });
+    });
+
+    // Wait for listen to be called
+    await waitFor(() => {
+      expect(progressHandler).toBeTruthy();
+    });
+
+    // Simulate progress: validating
+    progressHandler!({ payload: { jobId: "job-001", state: "validating", current: null, total: null } });
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Validating prerequisites");
+    });
+
+    // Simulate progress: migrating worktrees with counts
+    progressHandler!({ payload: { jobId: "job-001", state: "migratingWorktrees", current: 2, total: 5 } });
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Migrating worktrees (2/5)");
+    });
+
+    // Simulate finished
+    finishedHandler!({ payload: { jobId: "job-001", ok: true, projectPath: "/tmp/bare-repo" } });
+
+    await waitFor(() => {
+      expect(onCompleted).toHaveBeenCalledWith("/tmp/bare-repo");
+    });
+  });
+
+  it("shows error from migration-finished event", async () => {
+    let finishedHandler: ((event: { payload: any }) => void) | null = null;
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      if (eventName === "migration-finished") finishedHandler = handler;
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue("job-err");
+
+    const rendered = await renderModal({
+      open: true,
+      sourceRoot: "/tmp/repo",
+      onCompleted: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByText("Migrate"));
+
+    await waitFor(() => {
+      expect(finishedHandler).toBeTruthy();
+    });
+
+    finishedHandler!({ payload: { jobId: "job-err", ok: false, error: "Disk full" } });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Disk full");
+      expect(rendered.getByText("Retry Migration")).toBeTruthy();
+    });
+  });
+
+  it("ignores events from a different job", async () => {
+    let progressHandler: ((event: { payload: any }) => void) | null = null;
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      if (eventName === "migration-progress") progressHandler = handler;
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue("job-correct");
+
+    const rendered = await renderModal({
+      open: true,
+      sourceRoot: "/tmp/repo",
+      onCompleted: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByText("Migrate"));
+
+    await waitFor(() => {
+      expect(progressHandler).toBeTruthy();
+    });
+
+    // Send event for different job
+    progressHandler!({ payload: { jobId: "job-wrong", state: "completed", current: null, total: null } });
+
+    // Should still show Migrating... not completed
+    await waitFor(() => {
+      expect(rendered.getByText("Migrating...")).toBeTruthy();
+    });
+  });
+
+  it("resets state when dialog is re-opened", async () => {
+    invokeMock.mockRejectedValue(new Error("fail"));
+
+    const rendered = await renderModal({
+      open: true,
+      sourceRoot: "/tmp/repo",
+      onCompleted: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByText("Migrate"));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Failed to start migration.")).toBeTruthy();
+    });
+
+    // Close and re-open
+    await rendered.rerender({
+      open: false,
+      sourceRoot: "/tmp/repo",
+      onCompleted: vi.fn(),
+    });
+
+    invokeMock.mockResolvedValue("job-new");
+
+    await rendered.rerender({
+      open: true,
+      sourceRoot: "/tmp/repo",
+      onCompleted: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Migrate")).toBeTruthy();
+      expect(rendered.queryByText("Failed to start migration.")).toBeNull();
+    });
+  });
+
   it("has proper aria attributes for accessibility", async () => {
     const rendered = await renderModal({
       open: true,

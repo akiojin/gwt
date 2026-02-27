@@ -205,4 +205,80 @@ describe("IssueSpecPanel", () => {
       expect(errorEl).toBeTruthy();
     });
   });
+
+  it("does not call invoke when projectPath is empty", async () => {
+    invokeMock.mockResolvedValue(detailFixture);
+
+    const rendered = await renderPanel({
+      projectPath: "",
+      issueNumber: 42,
+    });
+
+    // Should stay in loading state without calling invoke
+    await new Promise((r) => setTimeout(r, 50));
+    expect(invokeMock).not.toHaveBeenCalledWith("get_spec_issue_detail_cmd", expect.anything());
+    expect(rendered.getByText("Loading issue spec...")).toBeTruthy();
+  });
+
+  it("does not call invoke when issueNumber is 0", async () => {
+    invokeMock.mockResolvedValue(detailFixture);
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      issueNumber: 0,
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(invokeMock).not.toHaveBeenCalledWith("get_spec_issue_detail_cmd", expect.anything());
+    expect(rendered.getByText("Loading issue spec...")).toBeTruthy();
+  });
+
+  it("renders specId only when provided", async () => {
+    invokeMock.mockResolvedValue(detailFixture);
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      issueNumber: 42,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("#42")).toBeTruthy();
+    });
+
+    // specId should not appear when not provided
+    expect(rendered.queryByText("SPEC-abc123")).toBeNull();
+  });
+
+  it("displays updatedAt and etag from detail", async () => {
+    invokeMock.mockResolvedValue(detailFixture);
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      issueNumber: 42,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Implement auth feature")).toBeTruthy();
+    });
+
+    expect(rendered.getByText(/2026-01-15T10:00:00Z/)).toBeTruthy();
+    expect(rendered.getByText(/etag-value/)).toBeTruthy();
+  });
+
+  it("renders filled section text instead of _TODO_", async () => {
+    invokeMock.mockResolvedValue(detailFixture);
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      issueNumber: 42,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Specification content")).toBeTruthy();
+      expect(rendered.getByText("Plan content")).toBeTruthy();
+    });
+
+    // No _TODO_ when sections are filled
+    expect(rendered.queryByText("_TODO_")).toBeNull();
+  });
 });

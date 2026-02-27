@@ -2514,4 +2514,184 @@ describe("AgentLaunchForm", () => {
     // Toggle should not be visible
     expect(rendered.container.querySelector(".branch-naming-toggle")).toBeNull();
   });
+
+  // ======== Docker branch coverage: compose not available, docker button click, dockerStatusHint ========
+
+  it("shows compose not available warning when docker_available but compose_available is false", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "compose",
+          compose_services: ["app"],
+          docker_available: true,
+          compose_available: false,
+          daemon_running: true,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("docker compose is not available.")).toBeTruthy();
+    });
+  });
+
+  it("shows dockerStatusHint when runtimeTarget is docker and images/containers status is available", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "compose",
+          compose_services: ["app"],
+          docker_available: true,
+          compose_available: true,
+          daemon_running: true,
+          force_host: false,
+          images_exist: false,
+          container_status: "not_found",
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    // Docker is auto-selected when compose_available and docker_available are true
+    // Wait for the status hint to appear
+    await waitFor(() => {
+      expect(rendered.getByText(/No images \/ No containers/)).toBeTruthy();
+    });
+  });
+
+  it("clicks Docker button to switch runtime to docker for dockerfile type", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "dockerfile",
+          compose_services: [],
+          docker_available: true,
+          compose_available: false,
+          daemon_running: true,
+          force_host: false,
+          images_exist: true,
+          container_status: "running",
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    // Wait for the runtime toggle to appear
+    await waitFor(() => {
+      expect(rendered.getByText("HostOS")).toBeTruthy();
+    });
+
+    // Click HostOS first to switch to host, then Docker to exercise the onclick handler
+    await fireEvent.click(rendered.getByText("HostOS"));
+
+    // Now find the Docker button by its text content in the mode-toggle
+    const runtimeGroup = rendered.container.querySelector('[aria-labelledby="runtime-label"]');
+    const btns = runtimeGroup?.querySelectorAll(".mode-btn") ?? [];
+    const dockerBtn = Array.from(btns).find(b => b.textContent?.trim() === "Docker") as HTMLButtonElement;
+    expect(dockerBtn).toBeTruthy();
+    await fireEvent.click(dockerBtn);
+
+    // Docker button should now have the active class
+    await waitFor(() => {
+      expect(dockerBtn.classList.contains("active")).toBe(true);
+    });
+  });
 });

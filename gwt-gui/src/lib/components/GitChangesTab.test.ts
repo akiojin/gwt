@@ -183,6 +183,190 @@ describe("GitChangesTab", () => {
     });
   });
 
+  it("renders Renamed kind color as cyan", async () => {
+    const renamedFiles: FileChange[] = [
+      {
+        path: "src/old-name.ts",
+        kind: "Renamed",
+        additions: 0,
+        deletions: 0,
+        is_binary: false,
+      },
+    ];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") return renamedFiles;
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await waitFor(() => {
+      const kindSpan = rendered.container.querySelector(".file-kind");
+      expect(kindSpan).toBeTruthy();
+      expect(kindSpan!.textContent).toBe("R");
+      expect((kindSpan as HTMLElement).style.color).toBe("var(--cyan)");
+    });
+  });
+
+  it("renders Deleted kind color as red", async () => {
+    const deletedFiles: FileChange[] = [
+      {
+        path: "src/removed.ts",
+        kind: "Deleted",
+        additions: 0,
+        deletions: 10,
+        is_binary: false,
+      },
+    ];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") return deletedFiles;
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await waitFor(() => {
+      const kindSpan = rendered.container.querySelector(".file-kind");
+      expect(kindSpan).toBeTruthy();
+      expect(kindSpan!.textContent).toBe("D");
+      expect((kindSpan as HTMLElement).style.color).toBe("var(--red)");
+    });
+  });
+
+  it("shows empty staged and unstaged sections separately", async () => {
+    const onlyStagedTree: WorkingTreeEntry[] = [
+      { path: "src/staged-only.ts", status: "Added", is_staged: true },
+    ];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") return [];
+      if (command === "get_working_tree_status") return onlyStagedTree;
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await fireEvent.click(rendered.getByRole("button", { name: "Uncommitted" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Staged")).toBeTruthy();
+      expect(rendered.getByText("src/staged-only.ts")).toBeTruthy();
+      expect(rendered.getByText("No unstaged changes")).toBeTruthy();
+    });
+  });
+
+  it("shows empty staged section when only unstaged changes exist", async () => {
+    const onlyUnstagedTree: WorkingTreeEntry[] = [
+      { path: "src/unstaged-only.ts", status: "Modified", is_staged: false },
+    ];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") return [];
+      if (command === "get_working_tree_status") return onlyUnstagedTree;
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await fireEvent.click(rendered.getByRole("button", { name: "Uncommitted" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("No staged changes")).toBeTruthy();
+      expect(rendered.getByText("src/unstaged-only.ts")).toBeTruthy();
+    });
+  });
+
+  it("handles diff fetch error gracefully", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") return fileChanges;
+      if (command === "get_file_diff") throw new Error("diff fetch failed");
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await waitFor(() => {
+      expect(rendered.getByText("index.ts")).toBeTruthy();
+    });
+
+    const fileRow = rendered.getByText("index.ts").closest(".file-row") as HTMLElement;
+    await fireEvent.click(fileRow);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Error: diff fetch failed");
+    });
+  });
+
+  it("handles non-Error object in toErrorMessage", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") throw 42;
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("42");
+    });
+  });
+
+  it("handles result null from get_branch_diff_files", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") return null;
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await waitFor(() => {
+      expect(rendered.getByText("No changes")).toBeTruthy();
+    });
+  });
+
+  it("handles result null from get_working_tree_status", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") return [];
+      if (command === "get_working_tree_status") return null;
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await fireEvent.click(rendered.getByRole("button", { name: "Uncommitted" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("No uncommitted changes")).toBeTruthy();
+    });
+  });
+
+  it("does not expand diff if already cached", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_branch_diff_files") return fileChanges;
+      if (command === "get_file_diff") return diffFixture;
+      return [];
+    });
+
+    const rendered = await renderTab();
+    await waitFor(() => {
+      expect(rendered.getByText("index.ts")).toBeTruthy();
+    });
+
+    // First click: expand and load diff
+    const fileRow = rendered.getByText("index.ts").closest(".file-row") as HTMLElement;
+    await fireEvent.click(fileRow);
+    await waitFor(() => {
+      expect(rendered.getByText("+added")).toBeTruthy();
+    });
+
+    // Collapse
+    await fireEvent.click(fileRow);
+    await waitFor(() => {
+      expect(rendered.queryByText("+added")).toBeNull();
+    });
+
+    // Clear call count after initial loads
+    const callCountBefore = invokeMock.mock.calls.filter((c: string[]) => c[0] === "get_file_diff").length;
+
+    // Re-expand: should use cached diff, not re-fetch
+    await fireEvent.click(fileRow);
+    await waitFor(() => {
+      expect(rendered.getByText("+added")).toBeTruthy();
+    });
+
+    const callCountAfter = invokeMock.mock.calls.filter((c: string[]) => c[0] === "get_file_diff").length;
+    expect(callCountAfter).toBe(callCountBefore);
+  });
+
   it("ignores stale committed response after base branch changes again", async () => {
     let resolveDevelop: ((value: FileChange[]) => void) | null = null;
 

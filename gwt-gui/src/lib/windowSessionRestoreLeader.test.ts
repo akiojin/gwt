@@ -5,6 +5,11 @@ import {
   tryAcquireWindowSessionRestoreLead,
 } from "./windowSessionRestoreLeader";
 
+const tauriInvokeMock = vi.fn();
+vi.mock("$lib/tauriInvoke", () => ({
+  invoke: (...args: unknown[]) => tauriInvokeMock(...args),
+}));
+
 describe("windowSessionRestoreLeader", () => {
   it("only allows main window as restore leader candidate", () => {
     expect(isWindowSessionRestoreLeaderCandidate("main")).toBe(true);
@@ -54,5 +59,48 @@ describe("windowSessionRestoreLeader", () => {
     await expect(
       releaseWindowSessionRestoreLead("main", failingInvoke as any),
     ).resolves.toBeUndefined();
+  });
+
+  it("returns false when acquire command returns non-true value", async () => {
+    const invoke = vi.fn().mockResolvedValue("not-a-boolean");
+    await expect(
+      tryAcquireWindowSessionRestoreLead("main", invoke as any),
+    ).resolves.toBe(false);
+  });
+
+  it("returns false when acquire command returns false", async () => {
+    const invoke = vi.fn().mockResolvedValue(false);
+    await expect(
+      tryAcquireWindowSessionRestoreLead("main", invoke as any),
+    ).resolves.toBe(false);
+  });
+
+  it("trims label with whitespace for release", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    await releaseWindowSessionRestoreLead("  main  ", invoke as any);
+    expect(invoke).toHaveBeenCalledWith("release_window_restore_leader", {
+      label: "main",
+    });
+  });
+
+  it("falls back to $lib/tauriInvoke when invokeFn is omitted for acquire", async () => {
+    tauriInvokeMock.mockResolvedValue(true);
+    const result = await tryAcquireWindowSessionRestoreLead("main");
+    expect(result).toBe(true);
+    expect(tauriInvokeMock).toHaveBeenCalledWith(
+      "try_acquire_window_restore_leader",
+      { label: "main" },
+    );
+    tauriInvokeMock.mockReset();
+  });
+
+  it("falls back to $lib/tauriInvoke when invokeFn is omitted for release", async () => {
+    tauriInvokeMock.mockResolvedValue(undefined);
+    await releaseWindowSessionRestoreLead("main");
+    expect(tauriInvokeMock).toHaveBeenCalledWith(
+      "release_window_restore_leader",
+      { label: "main" },
+    );
+    tauriInvokeMock.mockReset();
   });
 });

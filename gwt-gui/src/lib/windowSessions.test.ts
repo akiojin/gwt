@@ -106,6 +106,138 @@ describe("deduplicateByProjectPath", () => {
   });
 });
 
+describe("windowSessions – corrupted data", () => {
+  it("returns empty array when storage contains invalid JSON", () => {
+    const store = createMockStorage();
+    store.setItem(WINDOW_SESSIONS_STORAGE_KEY, "not-json{{{");
+    expect(loadWindowSessions(store)).toEqual([]);
+  });
+
+  it("returns empty array when storage contains a non-array JSON value", () => {
+    const store = createMockStorage();
+    store.setItem(WINDOW_SESSIONS_STORAGE_KEY, JSON.stringify({ foo: "bar" }));
+    expect(loadWindowSessions(store)).toEqual([]);
+  });
+
+  it("filters out entries with missing or non-string fields", () => {
+    const store = createMockStorage();
+    const data = [
+      { label: "valid", projectPath: "/tmp/valid" },
+      { label: 123, projectPath: "/tmp/bad-label" },
+      { label: "no-path" },
+      null,
+      42,
+      { label: "ok", projectPath: "/tmp/ok" },
+    ];
+    store.setItem(WINDOW_SESSIONS_STORAGE_KEY, JSON.stringify(data));
+    expect(loadWindowSessions(store)).toEqual([
+      { label: "valid", projectPath: "/tmp/valid" },
+      { label: "ok", projectPath: "/tmp/ok" },
+    ]);
+  });
+
+  it("handles entries where label or projectPath is empty after trim", () => {
+    const store = createMockStorage();
+    const data = [
+      { label: "   ", projectPath: "/tmp/blank-label" },
+      { label: "empty-path", projectPath: "   " },
+      { label: "good", projectPath: "/tmp/good" },
+    ];
+    store.setItem(WINDOW_SESSIONS_STORAGE_KEY, JSON.stringify(data));
+    expect(loadWindowSessions(store)).toEqual([
+      { label: "good", projectPath: "/tmp/good" },
+    ]);
+  });
+});
+
+describe("windowSessions – multi-window operations", () => {
+  it("upsert with empty label is a no-op", () => {
+    const store = createMockStorage();
+    upsertWindowSession("main", "/tmp/main", store);
+    upsertWindowSession("", "/tmp/empty-label", store);
+    upsertWindowSession("  ", "/tmp/blank-label", store);
+    expect(loadWindowSessions(store)).toEqual([
+      { label: "main", projectPath: "/tmp/main" },
+    ]);
+  });
+
+  it("upsert with empty projectPath is a no-op", () => {
+    const store = createMockStorage();
+    upsertWindowSession("main", "/tmp/main", store);
+    upsertWindowSession("no-path", "", store);
+    upsertWindowSession("blank-path", "  ", store);
+    expect(loadWindowSessions(store)).toEqual([
+      { label: "main", projectPath: "/tmp/main" },
+    ]);
+  });
+
+  it("removeWindowSession with empty label is a no-op", () => {
+    const store = createMockStorage();
+    upsertWindowSession("main", "/tmp/main", store);
+    removeWindowSession("", store);
+    removeWindowSession("  ", store);
+    expect(loadWindowSessions(store)).toEqual([
+      { label: "main", projectPath: "/tmp/main" },
+    ]);
+  });
+
+  it("getWindowSession returns null for empty label", () => {
+    const store = createMockStorage();
+    upsertWindowSession("main", "/tmp/main", store);
+    expect(getWindowSession("", store)).toBeNull();
+    expect(getWindowSession("  ", store)).toBeNull();
+  });
+
+  it("getWindowSession returns matching entry", () => {
+    const store = createMockStorage();
+    upsertWindowSession("main", "/tmp/main", store);
+    upsertWindowSession("dev", "/tmp/dev", store);
+    expect(getWindowSession("dev", store)).toEqual({
+      label: "dev",
+      projectPath: "/tmp/dev",
+    });
+  });
+
+  it("getWindowSession returns null for non-existent label", () => {
+    const store = createMockStorage();
+    upsertWindowSession("main", "/tmp/main", store);
+    expect(getWindowSession("unknown", store)).toBeNull();
+  });
+});
+
+describe("windowSessions – session restore", () => {
+  it("loadWindowSessions returns empty without storage", () => {
+    expect(loadWindowSessions(null)).toEqual([]);
+  });
+
+  it("loadWindowSessions returns empty with empty storage key", () => {
+    const store = createMockStorage();
+    expect(loadWindowSessions(store)).toEqual([]);
+  });
+
+  it("persistWindowSessions silently ignores null storage", () => {
+    // Should not throw
+    persistWindowSessions(
+      [{ label: "main", projectPath: "/tmp/main" }],
+      null,
+    );
+  });
+
+  it("preserves insertion order across multiple upserts", () => {
+    const store = createMockStorage();
+    upsertWindowSession("a", "/tmp/a", store);
+    upsertWindowSession("b", "/tmp/b", store);
+    upsertWindowSession("c", "/tmp/c", store);
+    upsertWindowSession("a", "/tmp/a-new", store); // moves 'a' to end
+
+    expect(loadWindowSessions(store)).toEqual([
+      { label: "b", projectPath: "/tmp/b" },
+      { label: "c", projectPath: "/tmp/c" },
+      { label: "a", projectPath: "/tmp/a-new" },
+    ]);
+  });
+});
+
 describe("pruneWindowSessions", () => {
   it("removes duplicate projectPath entries from storage", () => {
     const store = createMockStorage();

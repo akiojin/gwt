@@ -235,4 +235,125 @@ describe("ReviewDialog", () => {
       expect(cancelBtn.disabled).toBe(true);
     });
   });
+
+  it("handles string error in toErrorMessage", async () => {
+    invokeMock.mockRejectedValue("plain string error");
+
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose: vi.fn(),
+      onReviewed: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByText("Submit Review"));
+
+    await waitFor(() => {
+      expect(rendered.getByText("plain string error")).toBeTruthy();
+    });
+  });
+
+  it("handles non-standard error object in toErrorMessage", async () => {
+    invokeMock.mockRejectedValue({ code: 42 });
+
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose: vi.fn(),
+      onReviewed: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByText("Submit Review"));
+
+    await waitFor(() => {
+      const errorEl = rendered.container.querySelector(".dialog-error");
+      expect(errorEl).toBeTruthy();
+    });
+  });
+
+  it("sends undefined body when body is whitespace only", async () => {
+    invokeMock.mockResolvedValue("reviewed");
+    const onReviewed = vi.fn();
+
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 10,
+      prTitle: "Test",
+      onClose: vi.fn(),
+      onReviewed,
+    });
+
+    const textarea = rendered.container.querySelector("textarea") as HTMLTextAreaElement;
+    await fireEvent.input(textarea, { target: { value: "   " } });
+
+    await fireEvent.click(rendered.getByText("Submit Review"));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("review_pr", expect.objectContaining({
+        body: undefined,
+      }));
+    });
+  });
+
+  it("handles error object with non-string message in toErrorMessage", async () => {
+    invokeMock.mockRejectedValue({ message: 42 });
+
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose: vi.fn(),
+      onReviewed: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByText("Submit Review"));
+
+    await waitFor(() => {
+      const errorEl = rendered.container.querySelector(".dialog-error");
+      expect(errorEl).toBeTruthy();
+      // Falls through to String(err) since msg is not a string
+      expect(errorEl?.textContent).toContain("[object Object]");
+    });
+  });
+
+  it("allows switching to comment action", async () => {
+    invokeMock.mockResolvedValue("reviewed");
+
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose: vi.fn(),
+      onReviewed: vi.fn(),
+    });
+
+    const radios = rendered.container.querySelectorAll('input[type="radio"]') as NodeListOf<HTMLInputElement>;
+    const commentRadio = Array.from(radios).find((r) => r.value === "comment");
+    await fireEvent.click(commentRadio!);
+
+    await fireEvent.click(rendered.getByText("Submit Review"));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("review_pr", expect.objectContaining({
+        action: "comment",
+      }));
+    });
+  });
+
+  it("does not call onClose when clicking inside the dialog (not backdrop)", async () => {
+    const onClose = vi.fn();
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose,
+      onReviewed: vi.fn(),
+    });
+
+    const dialog = rendered.container.querySelector(".dialog") as HTMLElement;
+    await fireEvent.click(dialog);
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

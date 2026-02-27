@@ -399,6 +399,26 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("clears save message after timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const rendered = await renderSettingsPanel();
+      await rendered.findByRole("button", { name: "Save" });
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+      await waitFor(() => {
+        expect(rendered.getByText("Settings saved.")).toBeTruthy();
+      });
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await waitFor(() => {
+        expect(rendered.queryByText("Settings saved.")).toBeNull();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("edits and saves skill registration scope settings", async () => {
     const rendered = await renderSettingsPanel();
 
@@ -654,6 +674,25 @@ describe("SettingsPanel", () => {
             '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
           terminal_font_family:
             '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
+        }),
+      });
+    });
+  });
+
+  it("updates app language and persists it to saved settings", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await rendered.findByText("Appearance");
+    const appLanguage = rendered.container.querySelector("#app-language") as HTMLSelectElement;
+    expect(appLanguage).toBeTruthy();
+
+    await fireEvent.change(appLanguage, { target: { value: "ja" } });
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_settings", {
+        settings: expect.objectContaining({
+          app_language: "ja",
         }),
       });
     });
@@ -1138,6 +1177,26 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("falls back to no shells when shell discovery fails", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "get_available_shells") throw new Error("shell list failed");
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+      const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
+      expect(tabNames).not.toContain("Terminal");
+    });
+  });
+
   it("shows shell dropdown with version subtext in Terminal tab", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -1294,6 +1353,238 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("edits environment variable value inline", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await rendered.findByText("Environment Variables");
+
+    // The default profile has API_KEY=xxx
+    const envRows = rendered.container.querySelectorAll(".env-row");
+    expect(envRows.length).toBeGreaterThan(0);
+
+    const apiKeyRow = Array.from(envRows).find((r) =>
+      (r.textContent ?? "").includes("API_KEY")
+    ) as HTMLElement;
+    expect(apiKeyRow).toBeTruthy();
+
+    const valueInput = apiKeyRow.querySelector(".env-value") as HTMLInputElement;
+    await fireEvent.input(valueInput, { target: { value: "new-secret" } });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_profiles", {
+        config: expect.objectContaining({
+          profiles: expect.objectContaining({
+            default: expect.objectContaining({
+              env: expect.objectContaining({ API_KEY: "new-secret" }),
+            }),
+          }),
+        }),
+      });
+    });
+  });
+
+  it("switches profile edit dropdown and shows different profile's env", async () => {
+    const twoProfiles = structuredClone(profilesFixture);
+    twoProfiles.profiles.staging = {
+      name: "staging",
+      description: "",
+      env: { STAGE_KEY: "stage-val" },
+      disabled_env: [],
+      ai_enabled: true,
+      ai: {
+        endpoint: "https://api.openai.com/v1",
+        api_key: "stage-key",
+        model: "gpt-4o-mini",
+        language: "en",
+        summary_enabled: true,
+      },
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(twoProfiles);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await rendered.findByText("Environment Variables");
+
+    const profileEdit = rendered.container.querySelector("#profile-edit") as HTMLSelectElement;
+    await fireEvent.change(profileEdit, { target: { value: "staging" } });
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("STAGE_KEY");
+    });
+  });
+
+  it("does not prepend current model to list when already present", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-4o-mini" }, { id: "gpt-5" }];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      const options = Array.from(
+        rendered.container.querySelectorAll(".ai-model-select option")
+      ).map((o) => o.textContent?.trim());
+      // gpt-4o-mini is both in the API list and the current model; should not be duplicated
+      const occurrences = options.filter((o) => o === "gpt-4o-mini");
+      expect(occurrences.length).toBe(1);
+    });
+  });
+
+  it("shows model dropdown with empty current when profile has no model set", async () => {
+    const noModelProfiles = structuredClone(profilesFixture);
+    noModelProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "test-key",
+      model: "",
+      language: "en",
+      summary_enabled: true,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(noModelProfiles);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      const options = Array.from(
+        rendered.container.querySelectorAll(".ai-model-select option")
+      ).map((o) => o.textContent?.trim());
+      expect(options).toContain("gpt-5");
+      // No missing model warning since current is empty
+      expect(rendered.queryByText("Current model is not listed")).toBeNull();
+    });
+  });
+
+  it("updates selected AI model and persists it in profile config", async () => {
+    const rendered = await renderSettingsPanel();
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      const options = Array.from(
+        rendered.container.querySelectorAll(".ai-model-select option")
+      ).map((o) => o.textContent?.trim());
+      expect(options).toContain("gpt-5");
+    });
+
+    const modelSelect = rendered.container.querySelector(".ai-model-select") as HTMLSelectElement;
+    await fireEvent.change(modelSelect, { target: { value: "gpt-5" } });
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_profiles", {
+        config: expect.objectContaining({
+          profiles: expect.objectContaining({
+            default: expect.objectContaining({
+              ai: expect.objectContaining({ model: "gpt-5" }),
+            }),
+          }),
+        }),
+      });
+    });
+  });
+
+  it("shows model options without current model before refresh", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    // Before refresh, aiModelsLoadedKey !== currentAiRequestKey
+    // So current model from profile should not be shown in dropdown options
+    const options = Array.from(
+      rendered.container.querySelectorAll(".ai-model-select option")
+    ).map((o) => o.textContent?.trim());
+    // Options should be empty or just have placeholder since no models loaded yet
+    expect(options.length).toBeLessThanOrEqual(1);
+  });
+
+  it("shows refresh hint when endpoint changes after models are loaded", async () => {
+    const rendered = await renderSettingsPanel();
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      const options = Array.from(
+        rendered.container.querySelectorAll(".ai-model-select option")
+      ).map((o) => o.textContent?.trim());
+      expect(options).toContain("gpt-5");
+    });
+
+    const endpointField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((field) =>
+      (field.textContent ?? "").includes("Endpoint")
+    ) as HTMLElement | undefined;
+    const endpointInput = endpointField?.querySelector("input") as HTMLInputElement;
+    expect(endpointInput).toBeTruthy();
+    await fireEvent.input(endpointInput, { target: { value: "https://example.local/v1" } });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Click Refresh to load models from /v1/models.")).toBeTruthy();
+    });
+  });
+
   it("saves selected shell via Terminal tab", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -1331,6 +1622,832 @@ describe("SettingsPanel", () => {
           default_shell: "wsl",
         }),
       });
+    });
+  });
+
+  it("shows 'Create a profile' hint in AI Settings when no profile is selected", async () => {
+    // Use a profiles config with no active profile and no profile keys
+    const emptyProfiles: ProfilesConfig = {
+      version: 1,
+      active: null,
+      profiles: {},
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(emptyProfiles);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await waitFor(() => {
+      expect(rendered.getByText("Create a profile to configure AI settings.")).toBeTruthy();
+      expect(rendered.getByText("Create a profile to edit environment variables.")).toBeTruthy();
+    });
+  });
+
+  it("updates AI language field via dropdown selection", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await rendered.findByText("AI Settings (per profile)");
+
+    // Find the Profile Language select - it's inside an .ai-field with "Profile Language" label
+    const aiFields = rendered.container.querySelectorAll(".ai-field");
+    const languageField = Array.from(aiFields).find((f) =>
+      (f.textContent ?? "").includes("Profile Language")
+    ) as HTMLElement | undefined;
+    expect(languageField).toBeTruthy();
+
+    const languageSelect = languageField!.querySelector("select") as HTMLSelectElement;
+    expect(languageSelect).toBeTruthy();
+
+    await fireEvent.change(languageSelect, { target: { value: "ja" } });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_profiles", {
+        config: expect.objectContaining({
+          profiles: expect.objectContaining({
+            default: expect.objectContaining({
+              ai: expect.objectContaining({ language: "ja" }),
+            }),
+          }),
+        }),
+      });
+    });
+  });
+
+  it("toggles AI session summary enabled checkbox", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await rendered.findByText("AI Settings (per profile)");
+
+    const summaryCheckbox = rendered.container.querySelector("#ai-summary") as HTMLInputElement;
+    expect(summaryCheckbox).toBeTruthy();
+    expect(summaryCheckbox.checked).toBe(true); // fixture has summary_enabled: true
+
+    // Uncheck it
+    await fireEvent.change(summaryCheckbox, { target: { checked: false } });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_profiles", {
+        config: expect.objectContaining({
+          profiles: expect.objectContaining({
+            default: expect.objectContaining({
+              ai: expect.objectContaining({ summary_enabled: false }),
+            }),
+          }),
+        }),
+      });
+    });
+  });
+
+  it("keeps Refresh button disabled when endpoint is empty", async () => {
+    const noEndpointProfiles: ProfilesConfig = {
+      version: 1,
+      active: "default",
+      profiles: {
+        default: {
+          name: "default",
+          description: "",
+          env: {},
+          disabled_env: [],
+          ai: {
+            endpoint: "",
+            api_key: "",
+            model: "",
+            language: "en",
+            summary_enabled: true,
+          },
+        },
+      },
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(noEndpointProfiles);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await rendered.findByText("AI Settings (per profile)");
+
+    const refreshBtn = rendered.getByRole("button", { name: "Refresh" }) as HTMLButtonElement;
+    expect(refreshBtn.disabled).toBe(true);
+    expect(rendered.queryByText("Endpoint is required.")).toBeNull();
+  });
+
+  it("renders AI language ?? 'en' fallback when language field is undefined", async () => {
+    const noLangProfiles: ProfilesConfig = {
+      version: 1,
+      active: "default",
+      profiles: {
+        default: {
+          name: "default",
+          description: "",
+          env: {},
+          disabled_env: [],
+          ai: {
+            endpoint: "https://api.example.com/v1",
+            api_key: "key",
+            model: "gpt-4",
+            // language intentionally omitted to trigger ?? 'en' fallback
+            language: undefined as any,
+            summary_enabled: undefined as any,
+          },
+        },
+      },
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(noLangProfiles);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await rendered.findByText("AI Settings (per profile)");
+
+    // Profile Language select should fall back to "en" value
+    const aiFields = rendered.container.querySelectorAll(".ai-field");
+    const languageField = Array.from(aiFields).find((f) =>
+      (f.textContent ?? "").includes("Profile Language")
+    ) as HTMLElement | undefined;
+    expect(languageField).toBeTruthy();
+
+    const languageSelect = languageField!.querySelector("select") as HTMLSelectElement;
+    expect(languageSelect).toBeTruthy();
+    expect(languageSelect.value).toBe("en");
+
+    // Session Summary checkbox should fall back to false (unchecked)
+    const summaryCheckbox = rendered.container.querySelector("#ai-summary") as HTMLInputElement;
+    expect(summaryCheckbox).toBeTruthy();
+    expect(summaryCheckbox.checked).toBe(false);
+  });
+
+  it("shows repair failure message when repair_skill_registration_cmd throws", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "repair_skill_registration_cmd") throw new Error("repair failed");
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "GitHub Integration");
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Repair Skill Registration" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Failed to repair skill registration: repair failed")).toBeTruthy();
+    });
+  });
+
+  it("shows repair-remains-degraded message when repair returns non-ok status", async () => {
+    const degradedStatus: SkillRegistrationStatus = {
+      ...skillStatusFixture,
+      overall: "degraded",
+      last_error_message: "some issue",
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(degradedStatus);
+      if (command === "repair_skill_registration_cmd") return structuredClone(degradedStatus);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "GitHub Integration");
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Repair Skill Registration" }));
+
+    await waitFor(() => {
+      expect(
+        rendered.getByText("Skill registration remains degraded. Check details below.")
+      ).toBeTruthy();
+    });
+  });
+
+  it("shows skill status refresh failure message when refresh command throws", async () => {
+    let callCount = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_skill_registration_status_cmd") {
+        callCount++;
+        if (callCount > 1) throw new Error("refresh network error");
+        return structuredClone(skillStatusFixture);
+      }
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "GitHub Integration");
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh Skill Status" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Failed to refresh skill status: refresh network error")).toBeTruthy();
+    });
+  });
+
+  it("shows last_error_message when skill status has global error", async () => {
+    const errorStatus: SkillRegistrationStatus = {
+      ...skillStatusFixture,
+      overall: "failed",
+      last_error_message: "global skill registration error",
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(errorStatus);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "GitHub Integration");
+
+    await waitFor(() => {
+      expect(rendered.getByText("global skill registration error")).toBeTruthy();
+    });
+  });
+
+  it("shows agent error_message and missing_skills in skill agent list", async () => {
+    const withAgentError: SkillRegistrationStatus = {
+      overall: "degraded",
+      agents: [
+        {
+          agent_id: "claude",
+          label: "Claude Code",
+          skills_path: "/tmp/.claude/skills",
+          registered: false,
+          missing_skills: ["gwt-pty-communication"],
+          error_code: "MISSING_SKILLS",
+          error_message: "Some skills are not installed",
+        },
+      ],
+      last_checked_at: 1_739_763_600_000,
+      last_error_message: null,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(withAgentError);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "GitHub Integration");
+
+    await waitFor(() => {
+      expect(rendered.getByText("Missing: gwt-pty-communication")).toBeTruthy();
+      expect(rendered.getByText("Some skills are not installed")).toBeTruthy();
+      // Agent without skills_path won't show path - but Claude has one
+      expect(rendered.container.textContent).toContain("/tmp/.claude/skills");
+    });
+  });
+
+  it("defaults shell selection to empty string when default_shell is null", async () => {
+    const noShellSettings = structuredClone(settingsFixture);
+    (noShellSettings as any).default_shell = null;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(noShellSettings);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "get_available_shells") return structuredClone(shellsFixture);
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+      const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
+      expect(tabNames).toContain("Terminal");
+    });
+
+    await switchToTab(rendered, "Terminal");
+
+    await waitFor(() => {
+      const select = rendered.container.querySelector("#default-shell") as HTMLSelectElement;
+      expect(select).toBeTruthy();
+      expect(select.value).toBe("");
+    });
+
+    // Selecting empty string (System Default) should set shell to null
+    const select = rendered.container.querySelector("#default-shell") as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: "" } });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_settings", {
+        settings: expect.objectContaining({
+          default_shell: null,
+        }),
+      });
+    });
+  });
+
+  it("shows loading state for skill status via Refreshing label", async () => {
+    let resolveSkill!: (v: any) => void;
+    const pendingSkill = new Promise<any>((r) => { resolveSkill = r; });
+    let callCount = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_skill_registration_status_cmd") {
+        callCount++;
+        if (callCount === 1) return structuredClone(skillStatusFixture);
+        return pendingSkill;
+      }
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "GitHub Integration");
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
+    });
+
+    // Trigger a refresh that will stay pending
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh Skill Status" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Refreshing...")).toBeTruthy();
+    });
+
+    resolveSkill(structuredClone(skillStatusFixture));
+  });
+
+  it("shows voice capability loading message when checking capability", async () => {
+    let resolveCapability!: (v: any) => void;
+    const pendingCapability = new Promise<any>((r) => { resolveCapability = r; });
+    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_voice_capability") {
+        return pendingCapability;
+      }
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Voice Input");
+
+    await waitFor(() => {
+      expect(rendered.getByText("Checking voice runtime capability...")).toBeTruthy();
+    });
+
+    resolveCapability({ available: true, reason: null });
+  });
+
+  it("handles voice capability check error gracefully and keeps fields enabled", async () => {
+    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_voice_capability") {
+        throw new Error("tauri not available");
+      }
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Voice Input");
+
+    await waitFor(() => {
+      // When capability check throws, voiceAvailable defaults to true
+      // so no unavailable banner should be shown
+      const voiceEnabled = rendered.container.querySelector("#voice-input-enabled") as HTMLInputElement;
+      expect(voiceEnabled).toBeTruthy();
+      expect(voiceEnabled.disabled).toBe(false);
+    });
+
+    // Should not show the unavailable reason banner
+    expect(
+      rendered.queryByText(/GPU acceleration and Qwen runtime are required/)
+    ).toBeNull();
+  });
+
+  it("passes gpuAvailable=false when WebGL renderer is software", async () => {
+    const realCreateElement = document.createElement.bind(document);
+    const fakeGl = {
+      getExtension: vi.fn(() => ({ UNMASKED_RENDERER_WEBGL: 0x9246 })),
+      getParameter: vi.fn(() => "Google SwiftShader"),
+    };
+    const createSpy = vi.spyOn(document, "createElement").mockImplementation(((tagName: string) => {
+      if (String(tagName).toLowerCase() === "canvas") {
+        return {
+          getContext: vi.fn((kind: string) => (kind === "webgl2" ? fakeGl : null)),
+        } as unknown as HTMLCanvasElement;
+      }
+      return realCreateElement(tagName);
+    }) as typeof document.createElement);
+
+    try {
+      await renderSettingsPanel();
+      await waitFor(() => {
+        expect(tauriCoreInvokeMock).toHaveBeenCalledWith(
+          "get_voice_capability",
+          expect.objectContaining({ gpuAvailable: false }),
+        );
+      });
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
+  it("passes gpuAvailable=true when WebGL renderer is hardware accelerated", async () => {
+    const realCreateElement = document.createElement.bind(document);
+    const fakeGl = {
+      getExtension: vi.fn(() => ({ UNMASKED_RENDERER_WEBGL: 0x9246 })),
+      getParameter: vi.fn(() => "NVIDIA GeForce RTX"),
+    };
+    const createSpy = vi.spyOn(document, "createElement").mockImplementation(((tagName: string) => {
+      if (String(tagName).toLowerCase() === "canvas") {
+        return {
+          getContext: vi.fn((kind: string) => (kind === "webgl2" ? fakeGl : null)),
+        } as unknown as HTMLCanvasElement;
+      }
+      return realCreateElement(tagName);
+    }) as typeof document.createElement);
+
+    try {
+      await renderSettingsPanel();
+      await waitFor(() => {
+        expect(tauriCoreInvokeMock).toHaveBeenCalledWith(
+          "get_voice_capability",
+          expect.objectContaining({ gpuAvailable: true }),
+        );
+      });
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
+  it("passes gpuAvailable=true when renderer extension is unavailable", async () => {
+    const realCreateElement = document.createElement.bind(document);
+    const fakeGl = {
+      getExtension: vi.fn(() => null),
+      getParameter: vi.fn(),
+    };
+    const createSpy = vi.spyOn(document, "createElement").mockImplementation(((tagName: string) => {
+      if (String(tagName).toLowerCase() === "canvas") {
+        return {
+          getContext: vi.fn((kind: string) => (kind === "webgl2" ? fakeGl : null)),
+        } as unknown as HTMLCanvasElement;
+      }
+      return realCreateElement(tagName);
+    }) as typeof document.createElement);
+
+    try {
+      await renderSettingsPanel();
+      await waitFor(() => {
+        expect(tauriCoreInvokeMock).toHaveBeenCalledWith(
+          "get_voice_capability",
+          expect.objectContaining({ gpuAvailable: true }),
+        );
+      });
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
+  it("clears AI model state when endpoint is removed after model refresh", async () => {
+    const noModelProfiles = structuredClone(profilesFixture);
+    noModelProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "test-key",
+      model: "",
+      language: "en",
+      summary_enabled: true,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(noModelProfiles);
+      if (command === "list_ai_models") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("No models returned from /v1/models.")).toBeTruthy();
+    });
+
+    const endpointField = Array.from(
+      rendered.container.querySelectorAll(".ai-field"),
+    ).find((field) => (field.textContent ?? "").includes("Endpoint")) as HTMLElement | undefined;
+    expect(endpointField).toBeTruthy();
+    const endpointInput = endpointField?.querySelector("input") as HTMLInputElement;
+    expect(endpointInput).toBeTruthy();
+    await fireEvent.input(endpointInput, { target: { value: "" } });
+
+    await waitFor(() => {
+      expect(rendered.queryByText("No models returned from /v1/models.")).toBeNull();
+      const refreshBtn = rendered.getByRole("button", { name: "Refresh" }) as HTMLButtonElement;
+      expect(refreshBtn.disabled).toBe(true);
+    });
+  });
+
+  it("shows default unavailable reason when voice capability reason is null", async () => {
+    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_voice_capability") {
+        return { available: false, reason: null };
+      }
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Voice Input");
+
+    await waitFor(() => {
+      expect(
+        rendered.getByText(/GPU acceleration and Qwen runtime are required/)
+      ).toBeTruthy();
+    });
+  });
+
+  it("refreshes skill status and shows message on success", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "GitHub Integration");
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh Skill Status" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Skill status refreshed.")).toBeTruthy();
+    });
+  });
+
+  it("shows error state when settings are null after load error", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return null as any;
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      const loading = rendered.container.querySelector(".loading");
+      expect((loading?.textContent ?? "").startsWith("Failed to load settings:")).toBe(true);
+    });
+  });
+
+  it("normalizes malformed loaded data and keeps tabs usable", async () => {
+    const malformedSettings = structuredClone(settingsFixture) as SettingsData & Record<string, unknown>;
+    malformedSettings.ui_font_size = null as unknown as number;
+    malformedSettings.terminal_font_size = undefined as unknown as number;
+    malformedSettings.ui_font_family = "";
+    malformedSettings.terminal_font_family = "";
+    malformedSettings.app_language = "xx" as SettingsData["app_language"];
+    malformedSettings.voice_input = {
+      enabled: true,
+      engine: "whisper" as any,
+      hotkey: "",
+      ptt_hotkey: "",
+      language: "fr" as any,
+      quality: "ultra" as any,
+      model: "",
+    } as SettingsData["voice_input"];
+    malformedSettings.agent_skill_registration_default_scope = "invalid" as any;
+    malformedSettings.agent_skill_registration_codex_scope = "user";
+    malformedSettings.agent_skill_registration_claude_scope = "project";
+    malformedSettings.agent_skill_registration_gemini_scope = "local";
+
+    const malformedProfiles: ProfilesConfig = {
+      version: 1,
+      active: null,
+      profiles: {},
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(malformedSettings);
+      if (command === "get_profiles") return structuredClone(malformedProfiles);
+      if (command === "get_skill_registration_status_cmd") {
+        return {
+          overall: null,
+          agents: [
+            {
+              agent_id: null,
+              label: null,
+              skills_path: null,
+              registered: false,
+              missing_skills: [42, "req-a"],
+              error_code: null,
+              error_message: null,
+            },
+          ],
+          last_checked_at: null,
+          last_error_message: null,
+        } as any;
+      }
+      if (command === "get_available_shells") {
+        return [{ id: "pwsh", name: "PowerShell", version: null }];
+      }
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      const tabNames = Array.from(
+        rendered.container.querySelectorAll(".settings-tab-btn"),
+      ).map((btn) => btn.textContent?.trim());
+      expect(tabNames).toEqual([
+        "Appearance",
+        "Voice Input",
+        "GitHub Integration",
+        "Profiles",
+        "Terminal",
+      ]);
+    });
+
+    const appLanguageSelect = rendered.container.querySelector(
+      "#app-language",
+    ) as HTMLSelectElement | null;
+    expect(appLanguageSelect?.value).toBe("auto");
+
+    await switchToTab(rendered, "Voice Input");
+    await waitFor(() => {
+      const hotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement | null;
+      const pttHotkey = rendered.container.querySelector(
+        "#voice-ptt-hotkey",
+      ) as HTMLInputElement | null;
+      const language = rendered.container.querySelector(
+        "#voice-language",
+      ) as HTMLSelectElement | null;
+      const quality = rendered.container.querySelector(
+        "#voice-quality",
+      ) as HTMLSelectElement | null;
+      const model = rendered.container.querySelector("#voice-model") as HTMLInputElement | null;
+      expect(hotkey?.value).toBe("Mod+Shift+M");
+      expect(pttHotkey?.value).toBe("Mod+Shift+Space");
+      expect(language?.value).toBe("auto");
+      expect(quality?.value).toBe("balanced");
+      expect(model?.value).toBe("Qwen/Qwen3-ASR-1.7B");
+    });
+
+    await switchToTab(rendered, "GitHub Integration");
+    await waitFor(() => {
+      expect(rendered.getByText("Overall: FAILED")).toBeTruthy();
+      const agentLabel = rendered.container.querySelector(
+        ".skill-agent-label",
+      ) as HTMLElement | null;
+      expect(agentLabel?.textContent?.trim()).toBe("Unknown");
+      expect(rendered.getByText("Missing: req-a")).toBeTruthy();
+      expect(rendered.getByText(/Last checked:/)).toBeTruthy();
+    });
+
+    await switchToTab(rendered, "Terminal");
+    await waitFor(() => {
+      const shellSelect = rendered.container.querySelector(
+        "#default-shell",
+      ) as HTMLSelectElement | null;
+      expect(shellSelect).toBeTruthy();
+      expect(shellSelect?.options[1]?.textContent?.trim()).toBe("PowerShell");
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await waitFor(() => {
+      expect(rendered.getByText("Create a profile to edit environment variables.")).toBeTruthy();
+      expect(rendered.getByText("Create a profile to configure AI settings.")).toBeTruthy();
     });
   });
 });

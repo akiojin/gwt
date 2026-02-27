@@ -223,4 +223,80 @@ describe("MergeDialog", () => {
       expect(cancelBtn.disabled).toBe(true);
     });
   });
+
+  it("handles string error in toErrorMessage", async () => {
+    invokeMock.mockRejectedValue("raw string error");
+
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose: vi.fn(),
+      onMerged: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByText("Merge"));
+
+    await waitFor(() => {
+      expect(rendered.getByText("raw string error")).toBeTruthy();
+    });
+  });
+
+  it("handles non-standard error object in toErrorMessage", async () => {
+    invokeMock.mockRejectedValue({ code: 500 });
+
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose: vi.fn(),
+      onMerged: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByText("Merge"));
+
+    await waitFor(() => {
+      const errorEl = rendered.container.querySelector(".dialog-error");
+      expect(errorEl).toBeTruthy();
+    });
+  });
+
+  it("sends undefined commitMsg when message is whitespace only", async () => {
+    invokeMock.mockResolvedValue("merged");
+    const onMerged = vi.fn();
+
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose: vi.fn(),
+      onMerged,
+    });
+
+    const textarea = rendered.container.querySelector("textarea") as HTMLTextAreaElement;
+    await fireEvent.input(textarea, { target: { value: "   " } });
+
+    await fireEvent.click(rendered.getByText("Merge"));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("merge_pr", expect.objectContaining({
+        commitMsg: undefined,
+      }));
+    });
+  });
+
+  it("does not call onClose when clicking inside the dialog (not backdrop)", async () => {
+    const onClose = vi.fn();
+    const rendered = await renderDialog({
+      projectPath: "/tmp/project",
+      prNumber: 1,
+      prTitle: "Test",
+      onClose,
+      onMerged: vi.fn(),
+    });
+
+    const dialog = rendered.container.querySelector(".dialog") as HTMLElement;
+    await fireEvent.click(dialog);
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });
