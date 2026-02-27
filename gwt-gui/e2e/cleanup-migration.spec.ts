@@ -51,8 +51,9 @@ test("cleanup modal opens from Cleanup button in sidebar", async ({
   await openRecentProject(page);
 
   await page.getByRole("button", { name: "Cleanup" }).click();
-
-  await expect(page.getByText("Clean Up")).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Cleanup Worktrees" }),
+  ).toBeVisible();
 });
 
 test("cleanup modal shows worktree branches", async ({ page }) => {
@@ -64,9 +65,12 @@ test("cleanup modal shows worktree branches", async ({ page }) => {
   await openRecentProject(page);
 
   await page.getByRole("button", { name: "Cleanup" }).click();
-  await expect(page.getByText("Clean Up")).toBeVisible();
+  const cleanupDialog = page.getByRole("dialog", {
+    name: "Cleanup Worktrees",
+  });
+  await expect(cleanupDialog).toBeVisible();
 
-  await expect(page.getByText("feature/cleanup-test")).toBeVisible();
+  await expect(cleanupDialog.getByText("feature/cleanup-test")).toBeVisible();
 });
 
 test("cleanup modal shows both safe and warning worktrees", async ({
@@ -80,10 +84,13 @@ test("cleanup modal shows both safe and warning worktrees", async ({
   await openRecentProject(page);
 
   await page.getByRole("button", { name: "Cleanup" }).click();
-  await expect(page.getByText("Clean Up")).toBeVisible();
+  const cleanupDialog = page.getByRole("dialog", {
+    name: "Cleanup Worktrees",
+  });
+  await expect(cleanupDialog).toBeVisible();
 
-  await expect(page.getByText("feature/cleanup-test")).toBeVisible();
-  await expect(page.getByText("feature/unsafe-branch")).toBeVisible();
+  await expect(cleanupDialog.getByText("feature/cleanup-test")).toBeVisible();
+  await expect(cleanupDialog.getByText("feature/unsafe-branch")).toBeVisible();
 });
 
 test("cleanup modal allows selecting worktrees via checkbox", async ({
@@ -118,7 +125,9 @@ test("cleanup modal handles empty worktree list", async ({ page }) => {
   await openRecentProject(page);
 
   await page.getByRole("button", { name: "Cleanup" }).click();
-  await expect(page.getByText("Clean Up")).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Cleanup Worktrees" }),
+  ).toBeVisible();
 });
 
 test("migration modal shows step labels", async ({ page }) => {
@@ -175,7 +184,11 @@ test("migration modal shows source root path", async ({ page }) => {
   await dismissSkillRegistrationScopeDialogIfPresent(page);
   await page.locator("button.recent-item").first().click();
 
-  await expect(page.getByText("/tmp/gwt-playwright")).toBeVisible();
+  const migrationDialog = page.getByRole("dialog", {
+    name: "Migration Required",
+  });
+  await expect(migrationDialog).toBeVisible();
+  await expect(migrationDialog.getByText("/tmp/gwt-playwright")).toBeVisible();
 });
 
 test("cleanup worktree checkbox can be toggled", async ({ page }) => {
