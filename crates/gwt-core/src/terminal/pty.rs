@@ -991,6 +991,7 @@ mod tests {
     /// Helper: read from PTY reader in a separate thread with timeout.
     fn read_with_timeout(
         mut reader: Box<dyn Read + Send>,
+        mut writer: Option<Box<dyn Write + Send>>,
         timeout: Duration,
     ) -> Result<String, String> {
         let (tx, rx) = mpsc::channel();
@@ -1017,10 +1018,20 @@ mod tests {
         // before the command output; returning early on the first idle tick makes
         // the test flaky.
         let mut last_output = String::new();
+        let mut dsr_responded = false;
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(s)) => last_output = s,
+                Ok(Ok(s)) => {
+                    if !dsr_responded && s.contains("\u{1b}[6n") {
+                        if let Some(writer) = writer.as_mut() {
+                            let _ = writer.write_all(b"\x1b[1;1R");
+                            let _ = writer.flush();
+                        }
+                        dsr_responded = true;
+                    }
+                    last_output = s;
+                }
                 Ok(Err(e)) => return Err(e),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1132,9 +1143,10 @@ mod tests {
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
         let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
 
-        let output =
-            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read PTY output");
+        let output = read_with_timeout(reader, Some(writer), Duration::from_secs(5))
+            .expect("Failed to read PTY output");
 
         assert!(
             output.contains("hello"),
@@ -1164,9 +1176,10 @@ mod tests {
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
         let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
 
-        let output =
-            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read PTY output");
+        let output = read_with_timeout(reader, Some(writer), Duration::from_secs(5))
+            .expect("Failed to read PTY output");
 
         assert!(
             output.contains("GWT_PANE_ID=pane-42"),
@@ -1225,6 +1238,9 @@ mod tests {
         };
 
         let mut handle = PtyHandle::new(config).expect("Failed to create PTY");
+        let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
+        let _ = read_with_timeout(reader, Some(writer), Duration::from_secs(2));
 
         // Wait for process to exit
         let mut exited = false;
