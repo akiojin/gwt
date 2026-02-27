@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { PrStatusInfo, WorkflowRunInfo } from "../types";
+  import type { MergeUiState, PrStatusInfo, WorkflowRunInfo } from "../types";
   import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
 
   let {
@@ -27,6 +27,14 @@
   } = $props();
 
   let checksExpanded = $state(false);
+  const resolvedMergeUiState = $derived.by(() => {
+    if (!prDetail) return "checking" as MergeUiState;
+    return resolveMergeUiState(prDetail, retrying);
+  });
+  const checksWarning = $derived.by(() => {
+    if (!prDetail) return false;
+    return shouldShowChecksWarning(prDetail);
+  });
 
   function reviewStateIcon(state: string): string {
     switch (state) {
@@ -45,71 +53,124 @@
     }
   }
 
-  function mergeableLabel(
-    state: "OPEN" | "CLOSED" | "MERGED",
-    m: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
-  ): string {
-    if (state === "MERGED") return "Merged";
-    switch (m) {
-      case "MERGEABLE":
-        return "Mergeable";
-      case "CONFLICTING":
+  function isFailureConclusion(
+    conclusion: WorkflowRunInfo["conclusion"] | string | null | undefined
+  ): boolean {
+    return [
+      "failure",
+      "cancelled",
+      "timed_out",
+      "action_required",
+    ].includes((conclusion ?? "").toString());
+  }
+
+  function hasRequiredCheckFailure(checks: WorkflowRunInfo[]): boolean {
+    return checks.some(
+      (check) =>
+        check.isRequired === true && isFailureConclusion(check.conclusion),
+    );
+  }
+
+  function hasNonRequiredCheckFailure(checks: WorkflowRunInfo[]): boolean {
+    return checks.some(
+      (check) =>
+        check.isRequired === false && isFailureConclusion(check.conclusion),
+    );
+  }
+
+  function hasChangesRequested(pr: PrStatusInfo): boolean {
+    return pr.reviews.some((review) => review.state === "CHANGES_REQUESTED");
+  }
+
+  function asMergeUiState(value: string | null | undefined): MergeUiState | null {
+    switch ((value ?? "").toString()) {
+      case "merged":
+      case "closed":
+      case "checking":
+      case "blocked":
+      case "conflicting":
+      case "mergeable":
+        return value as MergeUiState;
+      default:
+        return null;
+    }
+  }
+
+  function resolveMergeUiState(pr: PrStatusInfo, retryingNow: boolean): MergeUiState {
+    const explicit = asMergeUiState(pr.mergeUiState ?? null);
+    if (explicit) return explicit;
+
+    if (pr.state === "MERGED") return "merged";
+    if (pr.state === "CLOSED") return "closed";
+    if (retryingNow) return "checking";
+    if (
+      pr.mergeStateStatus === "BLOCKED" ||
+      hasRequiredCheckFailure(pr.checkSuites) ||
+      hasChangesRequested(pr)
+    ) {
+      return "blocked";
+    }
+    if (pr.mergeable === "UNKNOWN" || pr.mergeStateStatus === "UNKNOWN") {
+      return "checking";
+    }
+    if (pr.mergeable === "CONFLICTING") return "conflicting";
+    return "mergeable";
+  }
+
+  function mergeUiLabel(uiState: MergeUiState): string {
+    switch (uiState) {
+      case "merged":
+        return "Merged";
+      case "closed":
+        return "Closed";
+      case "checking":
+        return "Checking merge status...";
+      case "blocked":
+        return "Blocked";
+      case "conflicting":
         return "Conflicting";
-      case "UNKNOWN":
-        return "Unknown";
+      case "mergeable":
+      default:
+        return "Mergeable";
     }
   }
 
-  function mergeableClass(
-    state: "OPEN" | "CLOSED" | "MERGED",
-    m: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
-  ): string {
-    if (state === "MERGED") return "merged";
-    switch (m) {
-      case "MERGEABLE":
-        return "mergeable";
-      case "CONFLICTING":
-        return "conflicting";
-      case "UNKNOWN":
-        return "unknown";
+  function mergeUiClass(uiState: MergeUiState): string {
+    return uiState;
+  }
+
+  function shouldShowChecksWarning(pr: PrStatusInfo): boolean {
+    if (typeof pr.nonRequiredChecksWarning === "boolean") {
+      return pr.nonRequiredChecksWarning;
     }
+    return hasNonRequiredCheckFailure(pr.checkSuites) && !hasRequiredCheckFailure(pr.checkSuites);
   }
 
-  function isMergeClickable(
-    state: "OPEN" | "CLOSED" | "MERGED",
-    mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
-  ): boolean {
-    return state === "OPEN" && mergeable === "MERGEABLE";
-  }
-
-  function shouldShowMergeableBadge(
-    state: "OPEN" | "CLOSED" | "MERGED",
-    mergeStateStatus: string | null | undefined
-  ): boolean {
-    if (state === "MERGED") return true;
-    return mergeStateStatus !== "BLOCKED";
+  function canShowMergeButton(pr: PrStatusInfo, uiState: MergeUiState): boolean {
+    return uiState === "mergeable" && pr.state === "OPEN" && pr.mergeable === "MERGEABLE";
   }
 
   /**
    * States that should display an additional badge.
-   * CLEAN, HAS_HOOKS, UNKNOWN are hidden.
+   * CLEAN, BLOCKED, HAS_HOOKS, UNKNOWN are hidden.
    * DIRTY + CONFLICTING is hidden to avoid duplicate "Conflicting/Conflicts" badges.
    */
   function shouldShowMergeStateBadge(
     state: "OPEN" | "CLOSED" | "MERGED",
+    uiState: MergeUiState,
     mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN",
     s: string | null | undefined
   ): boolean {
     if (!s) return false;
-    if (state === "MERGED") return false;
+    if (state === "MERGED" || state === "CLOSED") return false;
+    if (uiState === "blocked") return false;
     if (s === "DIRTY" && mergeable === "CONFLICTING") return false;
-    return ["BEHIND", "BLOCKED", "DIRTY", "DRAFT", "UNSTABLE"].includes(s);
+    return ["BEHIND", "DIRTY", "DRAFT", "UNSTABLE"].includes(s);
   }
 
   function mergeStateLabel(s: string): string {
     switch (s) {
       case "BEHIND": return "Behind base";
-      case "BLOCKED": return "Blocked";
       case "DIRTY": return "Conflicts";
       case "DRAFT": return "Draft";
       case "UNSTABLE": return "Unstable";
@@ -121,7 +182,7 @@
     switch (s) {
       case "BEHIND": return "behind";
       case "DIRTY":
-      case "BLOCKED": return "blocked";
+        return "blocked";
       case "UNSTABLE": return "unstable";
       default: return "neutral";
     }
@@ -180,22 +241,25 @@
       <div class="pr-meta-item">
         <span class="pr-meta-label">Merge</span>
         <span class="pr-meta-value merge-meta-value">
-          {#if shouldShowMergeableBadge(prDetail.state, prDetail.mergeStateStatus)}
-            {#if isMergeClickable(prDetail.state, prDetail.mergeable) && onMerge}
-              <button
-                class="mergeable-badge-btn mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}{retrying ? ' pulse' : ''}"
-                disabled={merging || retrying}
-                onclick={() => onMerge?.()}
-              >
-                {merging ? "Merging..." : retrying ? "Checking merge status..." : mergeableLabel(prDetail.state, prDetail.mergeable)}
-              </button>
-            {:else}
-              <span class="mergeable-badge {mergeableClass(prDetail.state, prDetail.mergeable)}{retrying ? ' pulse' : ''}">
-                {mergeableLabel(prDetail.state, prDetail.mergeable)}
-              </span>
-            {/if}
+          {#if canShowMergeButton(prDetail, resolvedMergeUiState) && onMerge}
+            <button
+              class="mergeable-badge-btn mergeable-badge {mergeUiClass(resolvedMergeUiState)}"
+              disabled={merging || resolvedMergeUiState === "checking"}
+              onclick={() => onMerge?.()}
+            >
+              {merging ? "Merging..." : mergeUiLabel(resolvedMergeUiState)}
+            </button>
+          {:else}
+            <span
+              class="mergeable-badge {mergeUiClass(resolvedMergeUiState)}{resolvedMergeUiState === 'checking' ? ' pulse' : ''}"
+            >
+              {mergeUiLabel(resolvedMergeUiState)}
+            </span>
           {/if}
-          {#if shouldShowMergeStateBadge(prDetail.state, prDetail.mergeable, prDetail.mergeStateStatus)}
+          {#if checksWarning}
+            <span class="merge-warning-badge">Checks warning</span>
+          {/if}
+          {#if shouldShowMergeStateBadge(prDetail.state, resolvedMergeUiState, prDetail.mergeable, prDetail.mergeStateStatus)}
             <span class="merge-state-badge {mergeStateClass(prDetail.mergeStateStatus!)}">
               {mergeStateLabel(prDetail.mergeStateStatus!)}
             </span>
@@ -382,6 +446,30 @@
   .mergeable-badge.conflicting {
     background: rgba(248, 81, 73, 0.15);
     color: var(--red);
+  }
+
+  .mergeable-badge.blocked {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--red);
+  }
+
+  .mergeable-badge.checking {
+    background: rgba(128, 128, 128, 0.15);
+    color: var(--text-muted);
+  }
+
+  .mergeable-badge.closed {
+    background: rgba(248, 81, 73, 0.12);
+    color: var(--red);
+  }
+
+  .merge-warning-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: var(--ui-font-xs);
+    font-weight: 600;
+    background: rgba(227, 179, 65, 0.15);
+    color: var(--yellow, #e3b341);
   }
 
   .mergeable-badge.unknown {
