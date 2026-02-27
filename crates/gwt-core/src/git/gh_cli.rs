@@ -260,20 +260,33 @@ fn sanitize_bad_gh_merge_base_config(content: &str) -> String {
     result
 }
 
+fn config_section_header_inner(trimmed: &str) -> Option<&str> {
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+
+    let close_idx = trimmed.find(']')?;
+    let inner = trimmed[1..close_idx].trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    let trailing = trimmed[close_idx + 1..].trim_start();
+    if trailing.is_empty() || trailing.starts_with(';') || trailing.starts_with('#') {
+        Some(inner)
+    } else {
+        None
+    }
+}
+
 fn is_git_config_section_header(trimmed: &str) -> bool {
-    trimmed.starts_with('[') && trimmed.ends_with(']')
+    config_section_header_inner(trimmed).is_some()
 }
 
 fn is_empty_branch_section_header(trimmed: &str) -> bool {
-    if !is_git_config_section_header(trimmed) {
+    let Some(inner) = config_section_header_inner(trimmed) else {
         return false;
-    }
-
-    let inner = trimmed
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(trimmed)
-        .trim();
+    };
     let mut parts = inner.splitn(2, char::is_whitespace);
     let section = parts.next().unwrap_or("").trim();
     if !section.eq_ignore_ascii_case("branch") {
@@ -1281,6 +1294,36 @@ branch..gh-merge-base = develop
 "#;
         let result = sanitize_bad_gh_merge_base_config(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn sanitize_config_preserves_entries_after_comment_style_section_header() {
+        let input = r#"[branch ""]
+  gh-merge-base = develop
+[core] ; keep this section
+  bare = false
+[remote "origin"]
+  fetch = +refs/heads/*:refs/remotes/origin/*
+"#;
+        let result = sanitize_bad_gh_merge_base_config(input);
+        assert!(!result.contains("[branch \"\"]"));
+        assert!(result.contains("[core] ; keep this section"));
+        assert!(result.contains("bare = false"));
+        assert!(result.contains("[remote \"origin\"]"));
+    }
+
+    #[test]
+    fn sanitize_config_removes_empty_branch_section_with_trailing_comment() {
+        let input = r#"[branch ""] ; invalid empty branch section
+  gh-merge-base = develop
+[core]
+  bare = false
+"#;
+        let result = sanitize_bad_gh_merge_base_config(input);
+        assert!(!result.contains("[branch \"\"]"));
+        assert!(!result.contains("gh-merge-base = develop"));
+        assert!(result.contains("[core]"));
+        assert!(result.contains("bare = false"));
     }
 
     #[test]
