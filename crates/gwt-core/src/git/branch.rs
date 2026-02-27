@@ -82,48 +82,77 @@ fn should_attempt_gh_merge_base_repair(repo_path: &Path, stderr: &str) -> bool {
 }
 
 fn config_contains_repairable_entries(repo_path: &Path) -> bool {
-    let Some(config_path) = resolve_repo_config_path(repo_path) else {
-        return false;
-    };
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
-        return false;
-    };
-    let (_, changed) = strip_bad_gh_merge_base_entries(&contents);
-    changed
+    resolve_repo_config_paths(repo_path)
+        .iter()
+        .any(|config_path| {
+            let Ok(contents) = std::fs::read_to_string(config_path) else {
+                return false;
+            };
+            let (_, changed) = strip_bad_gh_merge_base_entries(&contents);
+            changed
+        })
 }
 
 fn repair_bad_gh_merge_base_config(repo_path: &Path) -> std::io::Result<bool> {
-    let Some(config_path) = resolve_repo_config_path(repo_path) else {
-        return Ok(false);
-    };
+    let mut repaired = false;
+    for config_path in resolve_repo_config_paths(repo_path) {
+        let contents = std::fs::read_to_string(&config_path)?;
+        let (sanitized, changed) = strip_bad_gh_merge_base_entries(&contents);
+        if !changed {
+            continue;
+        }
 
-    let contents = std::fs::read_to_string(&config_path)?;
-    let (sanitized, changed) = strip_bad_gh_merge_base_entries(&contents);
-    if !changed {
-        return Ok(false);
+        write_config_atomic(&config_path, &sanitized)?;
+        repaired = true;
     }
 
-    write_config_atomic(&config_path, &sanitized)?;
-    Ok(true)
+    Ok(repaired)
 }
 
-fn resolve_repo_config_path(repo_path: &Path) -> Option<PathBuf> {
+fn resolve_repo_config_paths(repo_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
     let dot_git = repo_path.join(".git");
     if dot_git.is_dir() {
-        return Some(dot_git.join("config"));
+        push_existing_unique_config_path(&mut paths, dot_git.join("config"));
+        return paths;
     }
 
     if dot_git.is_file() {
-        let gitdir = resolve_gitdir_from_dot_git_file(&dot_git)?;
-        return Some(gitdir.join("config"));
+        if let Some(gitdir) = resolve_gitdir_from_dot_git_file(&dot_git) {
+            if let Some(common_dir) = resolve_common_dir_from_gitdir(&gitdir) {
+                push_existing_unique_config_path(&mut paths, common_dir.join("config"));
+            }
+            push_existing_unique_config_path(&mut paths, gitdir.join("config"));
+        }
+        return paths;
     }
 
     let bare_config = repo_path.join("config");
-    if bare_config.is_file() {
-        return Some(bare_config);
+    push_existing_unique_config_path(&mut paths, bare_config);
+    paths
+}
+
+fn push_existing_unique_config_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if candidate.is_file() && !paths.iter().any(|path| path == &candidate) {
+        paths.push(candidate);
+    }
+}
+
+fn resolve_common_dir_from_gitdir(gitdir: &Path) -> Option<PathBuf> {
+    let commondir_path = gitdir.join("commondir");
+    let raw = std::fs::read_to_string(commondir_path).ok()?;
+    let common = raw.trim();
+    if common.is_empty() {
+        return None;
     }
 
-    None
+    let resolved = if Path::new(common).is_absolute() {
+        PathBuf::from(common)
+    } else {
+        gitdir.join(common)
+    };
+
+    Some(resolved.canonicalize().unwrap_or(resolved))
 }
 
 fn resolve_gitdir_from_dot_git_file(dot_git_path: &Path) -> Option<PathBuf> {
@@ -150,7 +179,7 @@ fn strip_bad_gh_merge_base_entries(contents: &str) -> (String, bool) {
     let mut in_empty_branch_section = false;
 
     for raw_line in contents.split_inclusive('\n') {
-        let line = raw_line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        let line = raw_line.trim_end_matches(['\r', '\n']);
         let trimmed = line.trim();
         let is_section_header = trimmed.starts_with('[') && trimmed.ends_with(']');
 
@@ -217,13 +246,33 @@ fn write_config_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let tmp_path = path.with_file_name(format!("{file_name}.gwt.tmp"));
 
     std::fs::write(&tmp_path, contents.as_bytes())?;
-    if let Err(_rename_err) = std::fs::rename(&tmp_path, path) {
+    if let Err(first_rename_err) = std::fs::rename(&tmp_path, path) {
+        let mut backup_contents: Option<Vec<u8>> = None;
         if path.exists() {
-            let _ = std::fs::remove_file(path);
+            backup_contents = Some(std::fs::read(path).map_err(|backup_err| {
+                std::io::Error::new(
+                    backup_err.kind(),
+                    format!(
+                        "failed to backup config before rename retry: {} (initial rename error: {})",
+                        backup_err, first_rename_err
+                    ),
+                )
+            })?);
+            std::fs::remove_file(path)?;
         }
-        if let Err(err) = std::fs::rename(&tmp_path, path) {
+
+        if let Err(second_rename_err) = std::fs::rename(&tmp_path, path) {
+            if let Some(backup) = backup_contents {
+                let _ = std::fs::write(path, backup);
+            }
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(err);
+            return Err(std::io::Error::new(
+                second_rename_err.kind(),
+                format!(
+                    "failed to replace config atomically: initial rename error: {}; retry rename error: {}",
+                    first_rename_err, second_rename_err
+                ),
+            ));
         }
     }
 
@@ -1142,7 +1191,7 @@ impl std::fmt::Display for DivergenceStatus {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
@@ -1184,6 +1233,10 @@ mod tests {
             .open(&config_path)
             .unwrap();
         writeln!(file, "\n{content}").unwrap();
+    }
+
+    fn canonicalize_or_self(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
     }
 
     fn create_repo_with_remote() -> (TempDir, String) {
@@ -1241,6 +1294,56 @@ mod tests {
         let config = std::fs::read_to_string(temp.path().join(".git").join("config")).unwrap();
         assert!(!config.contains("[branch \"\"]"));
         assert!(!config.contains("gh-merge-base"));
+    }
+
+    #[test]
+    fn test_resolve_repo_config_paths_prefers_common_config_for_linked_worktree() {
+        let repo = create_test_repo();
+        let base = Branch::current(repo.path()).unwrap().unwrap().name;
+        let wt_parent = TempDir::new().unwrap();
+        let wt_path = wt_parent.path().join("linked-worktree");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/linked-config",
+                wt_path.to_str().unwrap(),
+                &base,
+            ],
+        );
+
+        let paths = resolve_repo_config_paths(&wt_path);
+        let shared_config = canonicalize_or_self(&repo.path().join(".git").join("config"));
+        assert_eq!(paths.first(), Some(&shared_config));
+    }
+
+    #[test]
+    fn test_list_branches_repairs_shared_config_from_linked_worktree_path() {
+        let repo = create_test_repo();
+        let base = Branch::current(repo.path()).unwrap().unwrap().name;
+        let wt_parent = TempDir::new().unwrap();
+        let wt_path = wt_parent.path().join("repair-worktree");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/repair-config",
+                wt_path.to_str().unwrap(),
+                &base,
+            ],
+        );
+        append_to_local_config(repo.path(), "branch..gh-merge-base = origin/main");
+
+        let branches = Branch::list(&wt_path).unwrap();
+        assert!(!branches.is_empty());
+
+        let shared_config =
+            std::fs::read_to_string(repo.path().join(".git").join("config")).unwrap();
+        assert!(!shared_config.contains("branch..gh-merge-base"));
     }
 
     #[test]
