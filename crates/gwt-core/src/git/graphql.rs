@@ -4,13 +4,10 @@
 //! and parse responses into `PrStatusInfo` structs.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
-use std::process::{Child, ExitStatus, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use super::gh_cli::gh_command;
+use super::gh_cli::run_gh_output_with_timeout_and_repair;
 use super::issue::resolve_repo_slug;
 use super::pullrequest::{PrStatusInfo, ReviewComment, ReviewInfo, WorkflowRunInfo};
 
@@ -36,80 +33,17 @@ const GH_PR_STATUS_ALIAS_TIMEOUT: Duration = Duration::from_secs(4);
 const GH_PR_DETAIL_TIMEOUT: Duration = Duration::from_secs(6);
 const GH_RUN_VIEW_LOG_TIMEOUT: Duration = Duration::from_secs(8);
 
-fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    return None;
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-fn read_pipe_to_string<T: Read>(mut pipe: T) -> String {
-    let mut buf = String::new();
-    let _ = pipe.read_to_string(&mut buf);
-    buf
-}
-
-fn spawn_pipe_reader<T>(pipe: Option<T>) -> thread::JoinHandle<String>
-where
-    T: Read + Send + 'static,
-{
-    thread::spawn(move || pipe.map(read_pipe_to_string).unwrap_or_default())
-}
-
 fn run_gh_command_output_with_timeout(
     repo_path: &Path,
     args: &[String],
     timeout: Duration,
     command_label: &str,
 ) -> Result<String, String> {
-    let mut child = gh_command()
-        .args(args)
-        .current_dir(repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let output = run_gh_output_with_timeout_and_repair(repo_path, args, timeout)
         .map_err(|e| format!("Failed to execute {}: {}", command_label, e))?;
 
-    let stdout_handle = spawn_pipe_reader(child.stdout.take());
-    let stderr_handle = spawn_pipe_reader(child.stderr.take());
-
-    let status = match wait_with_timeout(&mut child, timeout) {
-        Some(status) => status,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_handle.join();
-            let stderr = stderr_handle.join().unwrap_or_default();
-            let detail = stderr.trim();
-            if detail.is_empty() {
-                return Err(format!(
-                    "{} timed out after {}s",
-                    command_label,
-                    timeout.as_secs()
-                ));
-            }
-            return Err(format!(
-                "{} timed out after {}s: {}",
-                command_label,
-                timeout.as_secs(),
-                detail
-            ));
-        }
-    };
-
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
-
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let detail = stderr.trim();
         if detail.is_empty() {
             return Err(format!("{} failed", command_label));
@@ -117,7 +51,7 @@ fn run_gh_command_output_with_timeout(
         return Err(format!("{} failed: {}", command_label, detail));
     }
 
-    Ok(stdout)
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn graphql_string_literal(value: &str) -> String {
