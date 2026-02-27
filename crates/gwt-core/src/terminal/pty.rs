@@ -1036,6 +1036,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_pty_creation_and_echo() {
         let config = PtyConfig {
             command: "/bin/echo".to_string(),
@@ -1062,6 +1063,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_env_vars_set() {
         let mut env_vars = HashMap::new();
         env_vars.insert("GWT_PANE_ID".to_string(), "pane-42".to_string());
@@ -1109,6 +1111,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_resize() {
         let config = PtyConfig {
             command: "/bin/sleep".to_string(),
@@ -1128,6 +1131,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_process_exit_detection() {
         let config = PtyConfig {
             command: "/usr/bin/true".to_string(),
@@ -1157,6 +1161,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_invalid_command_error() {
         let config = PtyConfig {
             command: "/nonexistent/command/that/does/not/exist".to_string(),
