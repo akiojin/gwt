@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# migrate-specs-to-issues.sh
+# Migrate local specs/SPEC-*/ directories to GitHub Issues with gwt-spec label.
+#
+# Usage:
+#   ./scripts/migrate-specs-to-issues.sh [--dry-run] [--specs-dir DIR]
+#
+# Options:
+#   --dry-run       Show what would be done without creating issues
+#   --specs-dir     Path to specs/ directory (default: auto-detect from develop worktree)
+
+set -euo pipefail
+
+DRY_RUN=false
+SPECS_DIR=""
+REPORT_FILE="migration-report.json"
+RATE_LIMIT_BATCH=10
+RATE_LIMIT_SLEEP=3
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --specs-dir)
+      SPECS_DIR="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Auto-detect specs directory
+if [[ -z "$SPECS_DIR" ]]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ -z "$REPO_ROOT" ]]; then
+    echo "Error: Not in a git repository" >&2
+    exit 1
+  fi
+  # Try current directory first, then common worktree locations
+  for candidate in \
+    "$REPO_ROOT/specs" \
+    "$(dirname "$(dirname "$REPO_ROOT")")/develop/specs" \
+    "$(dirname "$REPO_ROOT")/develop/specs"; do
+    if [[ -d "$candidate" ]]; then
+      SPECS_DIR="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$SPECS_DIR" ]]; then
+    echo "Error: specs/ directory not found. Use --specs-dir to specify." >&2
+    exit 1
+  fi
+fi
+
+echo "Specs directory: $SPECS_DIR"
+echo "Dry run: $DRY_RUN"
+
+# Collect SPEC directories (exclude archive/)
+SPEC_DIRS=()
+for dir in "$SPECS_DIR"/SPEC-*/; do
+  [[ -d "$dir" ]] || continue
+  SPEC_DIRS+=("$dir")
+done
+
+echo "Found ${#SPEC_DIRS[@]} spec directories to migrate"
+
+# Initialize report
+echo "[" > "$REPORT_FILE"
+FIRST_ENTRY=true
+COUNT=0
+SUCCESS=0
+FAILED=0
+
+read_section() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    cat "$file"
+  else
+    echo "_TODO_"
+  fi
+}
+
+# Extract title from spec.md (first line starting with #)
+extract_title() {
+  local spec_file="$1"
+  if [[ -f "$spec_file" ]]; then
+    grep -m1 '^#' "$spec_file" | sed 's/^[#]*//' | sed 's/^ *//' | head -c 200
+  else
+    echo "Untitled spec"
+  fi
+}
+
+# Build issue body from spec directory files
+build_issue_body() {
+  local dir="$1"
+  local spec_id="$2"
+  local spec_content plan_content tasks_content tdd_content
+  local research_content data_model_content quickstart_content
+  local contracts_note checklists_note
+
+  spec_content=$(read_section "$dir/spec.md")
+  plan_content=$(read_section "$dir/plan.md")
+  tasks_content=$(read_section "$dir/tasks.md")
+  tdd_content=$(read_section "$dir/tdd.md")
+  research_content=$(read_section "$dir/research.md")
+  data_model_content=$(read_section "$dir/data-model.md")
+  quickstart_content=$(read_section "$dir/quickstart.md")
+
+  # Check for contracts/ and checklists/ subdirectories
+  if [[ -d "$dir/contracts" ]] && [[ -n "$(ls -A "$dir/contracts" 2>/dev/null)" ]]; then
+    contracts_note="Migrated from local files. See artifact comments below."
+  else
+    contracts_note="Artifact files under \`contracts/\` are managed in issue comments with \`contract:<name>\` entries."
+  fi
+
+  if [[ -d "$dir/checklists" ]] && [[ -n "$(ls -A "$dir/checklists" 2>/dev/null)" ]]; then
+    checklists_note="Migrated from local files. See artifact comments below."
+  else
+    checklists_note="Artifact files under \`checklists/\` are managed in issue comments with \`checklist:<name>\` entries."
+  fi
+
+  cat <<BODY
+<!-- GWT_SPEC_ID:${spec_id} -->
+
+## Spec
+
+${spec_content}
+
+## Plan
+
+${plan_content}
+
+## Tasks
+
+${tasks_content}
+
+## TDD
+
+${tdd_content}
+
+## Research
+
+${research_content}
+
+## Data Model
+
+${data_model_content}
+
+## Quickstart
+
+${quickstart_content}
+
+## Contracts
+
+${contracts_note}
+
+## Checklists
+
+${checklists_note}
+
+## Acceptance Checklist
+
+- [ ] Add acceptance checklist
+BODY
+}
+
+# Create artifact comments for contracts/ and checklists/ files
+create_artifact_comments() {
+  local dir="$1"
+  local issue_number="$2"
+
+  for subdir in contracts checklists; do
+    local artifact_dir="$dir/$subdir"
+    [[ -d "$artifact_dir" ]] || continue
+
+    local kind="${subdir%s}"  # contracts -> contract, checklists -> checklist
+    for file in "$artifact_dir"/*; do
+      [[ -f "$file" ]] || continue
+      local name
+      name=$(basename "$file")
+      local content
+      content=$(cat "$file")
+
+      if [[ "$DRY_RUN" == "true" ]]; then
+        echo "  [dry-run] Would create $kind artifact comment: $name"
+      else
+        local comment_body
+        comment_body=$(cat <<ARTIFACT
+<!-- GWT_SPEC_ARTIFACT:${kind}:${name} -->
+${kind}:${name}
+
+${content}
+ARTIFACT
+)
+        gh issue comment "$issue_number" --body "$comment_body" > /dev/null 2>&1 || \
+          echo "  Warning: Failed to create $kind artifact: $name"
+      fi
+    done
+  done
+}
+
+add_report_entry() {
+  local old_id="$1"
+  local issue_number="$2"
+  local title="$3"
+  local status="$4"
+
+  if [[ "$FIRST_ENTRY" == "true" ]]; then
+    FIRST_ENTRY=false
+  else
+    echo "," >> "$REPORT_FILE"
+  fi
+
+  # Escape JSON strings
+  title=$(echo "$title" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr -d '\n')
+
+  cat >> "$REPORT_FILE" <<ENTRY
+  {"oldSpecId": "${old_id}", "issueNumber": ${issue_number}, "title": "${title}", "status": "${status}"}
+ENTRY
+}
+
+for dir in "${SPEC_DIRS[@]}"; do
+  spec_name=$(basename "$dir")
+  spec_file="$dir/spec.md"
+
+  title=$(extract_title "$spec_file")
+  if [[ -z "$title" || "$title" == "Untitled spec" ]]; then
+    title="$spec_name"
+  fi
+
+  COUNT=$((COUNT + 1))
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "[$COUNT] [dry-run] Would create issue: $title (from $spec_name)"
+    add_report_entry "$spec_name" 0 "$title" "dry-run"
+    SUCCESS=$((SUCCESS + 1))
+  else
+    echo -n "[$COUNT] Creating issue: $title ... "
+
+    body=$(build_issue_body "$dir" "$spec_name")
+
+    issue_url=$(gh issue create \
+      --label gwt-spec \
+      --title "$title" \
+      --body "$body" 2>&1) || {
+      echo "FAILED"
+      add_report_entry "$spec_name" 0 "$title" "failed"
+      FAILED=$((FAILED + 1))
+      continue
+    }
+
+    # Extract issue number from URL
+    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$')
+
+    if [[ -n "$issue_number" ]]; then
+      # Update GWT_SPEC_ID marker with actual issue number
+      updated_body="${body/GWT_SPEC_ID:${spec_name}/GWT_SPEC_ID:#${issue_number}}"
+      gh issue edit "$issue_number" --body "$updated_body" > /dev/null 2>&1 || true
+
+      # Create artifact comments
+      create_artifact_comments "$dir" "$issue_number"
+
+      echo "OK (#$issue_number)"
+      add_report_entry "$spec_name" "$issue_number" "$title" "migrated"
+      SUCCESS=$((SUCCESS + 1))
+    else
+      echo "FAILED (could not parse issue number)"
+      add_report_entry "$spec_name" 0 "$title" "failed"
+      FAILED=$((FAILED + 1))
+    fi
+  fi
+
+  # Rate limiting
+  if [[ "$DRY_RUN" == "false" ]] && (( COUNT % RATE_LIMIT_BATCH == 0 )); then
+    echo "  (rate limit pause: ${RATE_LIMIT_SLEEP}s)"
+    sleep "$RATE_LIMIT_SLEEP"
+  fi
+done
+
+echo "]" >> "$REPORT_FILE"
+
+echo ""
+echo "Migration complete: $SUCCESS succeeded, $FAILED failed out of $COUNT total"
+echo "Report: $REPORT_FILE"
