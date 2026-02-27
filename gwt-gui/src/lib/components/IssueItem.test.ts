@@ -200,4 +200,256 @@ describe("IssueItem", () => {
 
     expect(rendered.getByText(/3 retries/)).toBeTruthy();
   });
+
+  it("renders pending status color correctly", async () => {
+    // Exercise the pending branch in statusColor (line 15)
+    const issue = makeIssue({
+      status: "pending",
+      tasks: [
+        {
+          id: "task-pending",
+          name: "Pending task",
+          status: "pending" as any,
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+    });
+    const rendered = await renderIssueItem({ issue });
+
+    const badge = rendered.container.querySelector('[data-testid="issue-detail-status"]');
+    expect(badge?.getAttribute("data-status")).toBe("pending");
+    expect(rendered.getByText("Pending task")).toBeTruthy();
+  });
+
+  it("applies statusColor for all switch branches via task statuses", async () => {
+    // Exercise ci_fail, cancelled, not_run, and default (lines 30-37)
+    const allStatuses = [
+      "pending",
+      "planned",
+      "ready",
+      "in_progress",
+      "running",
+      "starting",
+      "restarting",
+      "completed",
+      "passed",
+      "failed",
+      "error",
+      "crashed",
+      "ci_fail",
+      "cancelled",
+      "not_run",
+      "unknown_xyz",
+    ];
+
+    const tasks = allStatuses.map((status, i) => ({
+      id: `task-${status}`,
+      name: `Task ${status}`,
+      status: status as any,
+      developers: [] as DeveloperState[],
+      retryCount: 0,
+    }));
+
+    const issue = makeIssue({
+      status: "in_progress",
+      tasks,
+    });
+    const rendered = await renderIssueItem({ issue });
+
+    for (const status of allStatuses) {
+      expect(rendered.getByText(`Task ${status}`)).toBeTruthy();
+    }
+  });
+
+  it("renders task with pullRequest but no ciStatus", async () => {
+    // Exercise the {#if task.pullRequest} branch without ciStatus
+    const issue = makeIssue({
+      tasks: [
+        {
+          id: "task-pr-no-ci",
+          name: "PR no CI",
+          status: "running",
+          developers: [],
+          retryCount: 0,
+          pullRequest: {
+            number: 10,
+            url: "https://github.com/org/repo/pull/10",
+          },
+        },
+      ],
+    });
+    const rendered = await renderIssueItem({ issue });
+
+    expect(rendered.getByText("PR #10")).toBeTruthy();
+    // No CI badge should appear
+    const ciBadge = rendered.container.querySelector('[data-testid="ci-status-task-pr-no-ci"]');
+    expect(ciBadge).toBeNull();
+  });
+
+  it("renders task with no pullRequest and no retry", async () => {
+    // Exercise retryCount === 0 (no retry badge) and no pullRequest
+    const issue = makeIssue({
+      tasks: [
+        {
+          id: "task-clean",
+          name: "Clean task",
+          status: "completed",
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+    });
+    const rendered = await renderIssueItem({ issue });
+
+    expect(rendered.getByText("Clean task")).toBeTruthy();
+    expect(rendered.queryByText(/retries/)).toBeNull();
+    expect(rendered.queryByText(/PR #/)).toBeNull();
+  });
+
+  it("renders tasks without developers (empty developer list)", async () => {
+    // Exercise the {#if task.developers.length > 0} false branch
+    const issue = makeIssue({
+      tasks: [
+        {
+          id: "task-no-devs",
+          name: "Solo task",
+          status: "pending" as any,
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+    });
+    const rendered = await renderIssueItem({ issue });
+
+    expect(rendered.getByText("Solo task")).toBeTruthy();
+    expect(rendered.container.querySelectorAll(".developer-item").length).toBe(0);
+  });
+
+  it("renders without onViewTerminal callback", async () => {
+    const issue = makeIssue({
+      coordinator: makeCoordinator(),
+    });
+    const rendered = await renderIssueItem({ issue });
+
+    // Click view terminal without callback - should not throw
+    const viewBtn = rendered.container.querySelector('[data-testid="view-terminal-btn"]');
+    expect(viewBtn).toBeTruthy();
+    await fireEvent.click(viewBtn!);
+  });
+
+  it("exercises statusPulse for non-pulsing statuses", async () => {
+    const issue = makeIssue({
+      status: "completed",
+      tasks: [
+        {
+          id: "task-nopulse",
+          name: "No pulse",
+          status: "completed",
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+    });
+    const rendered = await renderIssueItem({ issue });
+
+    const statusDots = rendered.container.querySelectorAll(".status-dot");
+    for (const dot of statusDots) {
+      expect(dot.classList.contains("pulse")).toBe(false);
+    }
+  });
+
+  it("exercises statusPulse for starting/restarting statuses", async () => {
+    const issue = makeIssue({
+      status: "in_progress",
+      tasks: [
+        {
+          id: "task-pulse-start",
+          name: "Starting task",
+          status: "running",
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+    });
+    const rendered = await renderIssueItem({ issue });
+
+    // The issue status dot for in_progress should have pulse
+    const badge = rendered.container.querySelector('[data-testid="issue-detail-status"]');
+    expect(badge?.classList.contains("pulse")).toBe(true);
+  });
+
+  it("handles coordinator with various statuses", async () => {
+    // Test different coordinator statuses to exercise statusColor branches via coordinator
+    for (const status of ["starting", "completed", "crashed"] as const) {
+      cleanup();
+      const issue = makeIssue({
+        coordinator: makeCoordinator({ status }),
+      });
+      const rendered = await renderIssueItem({ issue });
+
+      expect(rendered.getByText(status)).toBeTruthy();
+    }
+  });
+
+  it("re-renders with different task configs to exercise update branches", async () => {
+    const { default: IssueItem } = await import("./IssueItem.svelte");
+    const dev = makeDeveloper({ id: "dev-rr" });
+    const rendered = render(IssueItem, {
+      props: {
+        issue: makeIssue({
+          status: "in_progress",
+          coordinator: makeCoordinator({ status: "running" }),
+          tasks: [
+            {
+              id: "task-rr",
+              name: "Running task",
+              status: "running",
+              developers: [dev],
+              retryCount: 2,
+              pullRequest: { number: 5, url: "https://example.com/pr/5", ciStatus: "passed" },
+            },
+          ],
+        }),
+      },
+    });
+
+    expect(rendered.getByText("Running task")).toBeTruthy();
+    expect(rendered.getByText("PR #5")).toBeTruthy();
+    expect(rendered.getByText("2 retries")).toBeTruthy();
+
+    // Re-render with no tasks, no coordinator - exercises template conditional update paths
+    await rendered.rerender({
+      issue: makeIssue({
+        status: "completed",
+        coordinator: undefined,
+        tasks: [],
+      }),
+    });
+
+    expect(rendered.getByText("No tasks")).toBeTruthy();
+    expect(rendered.queryByText("Coordinator")).toBeNull();
+  });
+
+  it("unmounts with complex state to exercise teardown branches", async () => {
+    const dev = makeDeveloper({ id: "dev-umount", status: "running" });
+    const issue = makeIssue({
+      status: "in_progress",
+      coordinator: makeCoordinator({ status: "running" }),
+      tasks: [
+        {
+          id: "task-umount",
+          name: "Unmount task",
+          status: "running",
+          developers: [dev],
+          retryCount: 1,
+          pullRequest: { number: 99, url: "https://example.com/pr/99", ciStatus: "failed" },
+        },
+      ],
+    });
+
+    const rendered = await renderIssueItem({ issue });
+    expect(rendered.getByText("Unmount task")).toBeTruthy();
+    rendered.unmount();
+  });
 });

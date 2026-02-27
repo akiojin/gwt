@@ -1116,6 +1116,224 @@ describe("TerminalView", () => {
     expect(result).toBe(true);
   });
 
+  it("handles font size change event", async () => {
+    await renderTerminalView({ paneId: "pane-font-size-event", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    const term = terminalInstances[0];
+
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-size", { detail: 16 }),
+    );
+
+    await waitFor(() => {
+      expect(term.options.fontSize).toBe(16);
+      expect((window as any).__gwtTerminalFontSize).toBe(16);
+    });
+  });
+
+  it("ignores font size change event with out-of-range value", async () => {
+    await renderTerminalView({ paneId: "pane-font-bad", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    const term = terminalInstances[0];
+    const originalSize = term.options.fontSize;
+
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-size", { detail: 99 }),
+    );
+
+    // Should not have changed
+    expect(term.options.fontSize).toBe(originalSize);
+  });
+
+  it("ignores font family change event with empty string", async () => {
+    await renderTerminalView({ paneId: "pane-font-empty", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    const term = terminalInstances[0];
+    const originalFamily = term.options.fontFamily;
+
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-family", { detail: "   " }),
+    );
+
+    expect(term.options.fontFamily).toBe(originalFamily);
+  });
+
+  it("uses stored terminal font size for xterm initialization", async () => {
+    (window as any).__gwtTerminalFontSize = 18;
+    await renderTerminalView({ paneId: "pane-stored-size", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    expect(terminalInstances[0].options.fontSize).toBe(18);
+  });
+
+  it("uses default font size when stored value is out of range", async () => {
+    (window as any).__gwtTerminalFontSize = 5; // below min 8
+    await renderTerminalView({ paneId: "pane-oob-size", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    expect(terminalInstances[0].options.fontSize).toBe(13);
+  });
+
+  it("handles Ctrl+C shortcut for SIGINT when there is no selection", async () => {
+    await renderTerminalView({ paneId: "pane-sigint", active: true });
+
+    await waitFor(() => {
+      expect(customKeyEventHandler).not.toBeNull();
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const handler = customKeyEventHandler!;
+    const term = terminalInstances[0];
+    term.getSelection = vi.fn(() => "");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "c",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    const preventDefaultMock = vi.spyOn(event, "preventDefault");
+
+    const result = handler(event);
+
+    expect(result).toBe(false);
+    expect(preventDefaultMock).toHaveBeenCalled();
+    // Should have sent SIGINT (0x03) via write_terminal
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some((c) => c[0] === "write_terminal")).toBe(true);
+    });
+  });
+
+  it("copies selected text with Cmd+C", async () => {
+    writeTextMock.mockResolvedValue(undefined);
+    await renderTerminalView({ paneId: "pane-copy-sel", active: true });
+
+    await waitFor(() => {
+      expect(customKeyEventHandler).not.toBeNull();
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const handler = customKeyEventHandler!;
+    const term = terminalInstances[0];
+    term.getSelection = vi.fn(() => "selected text");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "c",
+      metaKey: true,
+      bubbles: true,
+    });
+    vi.spyOn(event, "preventDefault");
+
+    const result = handler(event);
+    expect(result).toBe(false);
+
+    await waitFor(() => {
+      expect(writeTextMock).toHaveBeenCalledWith("selected text");
+    });
+  });
+
+  it("delegates Cmd+other to browser layer", async () => {
+    await renderTerminalView({ paneId: "pane-meta-delegate", active: true });
+
+    await waitFor(() => {
+      expect(customKeyEventHandler).not.toBeNull();
+    });
+
+    const handler = customKeyEventHandler!;
+    const event = new KeyboardEvent("keydown", {
+      key: "n",
+      metaKey: true,
+      bubbles: true,
+    });
+
+    const result = handler(event);
+    expect(result).toBe(false);
+  });
+
+  it("passes non-keydown events through", async () => {
+    await renderTerminalView({ paneId: "pane-keyup", active: true });
+
+    await waitFor(() => {
+      expect(customKeyEventHandler).not.toBeNull();
+    });
+
+    const handler = customKeyEventHandler!;
+    const event = new KeyboardEvent("keyup", {
+      key: "c",
+      metaKey: true,
+      bubbles: true,
+    });
+
+    const result = handler(event);
+    expect(result).toBe(true);
+  });
+
+  it("handles paste via clipboard event on rootEl", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-clipboard-paste",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    expect(rootEl).not.toBeNull();
+
+    const clipboardData = {
+      getData: vi.fn(() => "clipboard text"),
+    };
+    const pasteEvent = new Event("paste", { bubbles: true }) as any;
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: clipboardData,
+      configurable: true,
+    });
+    const preventDefaultSpy = vi.spyOn(pasteEvent, "preventDefault");
+
+    rootEl.dispatchEvent(pasteEvent);
+
+    await waitFor(() => {
+      expect(preventDefaultSpy).toHaveBeenCalled();
+      expect(invokeMock.mock.calls.some((c) => c[0] === "write_terminal")).toBe(true);
+    });
+  });
+
+  it("ignores edit action for different paneId", async () => {
+    writeTextMock.mockResolvedValue(undefined);
+    readTextMock.mockResolvedValue("hello");
+
+    await renderTerminalView({ paneId: "pane-edit-ignore", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    term.getSelection = vi.fn(() => "text");
+
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-edit-action", {
+        detail: { action: "copy", paneId: "different-pane" },
+      }),
+    );
+
+    // Should not have been called for a different pane
+    expect(writeTextMock).not.toHaveBeenCalled();
+  });
+
   it("does not handle rootEl paste event when inactive", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-inactive-clipboard",

@@ -760,6 +760,365 @@ describe("MainArea", () => {
     expect(onTabReorder).toHaveBeenCalledWith("settings", "versionHistory", "after");
   });
 
+  it("shows settings and versionHistory panel content", async () => {
+    const tabs: Tab[] = [
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "settings", label: "Settings", type: "settings" },
+      { id: "versionHistory", label: "Version History", type: "versionHistory" },
+    ];
+    const rendered = await renderMainArea({ tabs, activeTabId: "settings" });
+
+    // Settings tab should be active
+    const settingsTab = getTabByLabel(rendered.container, "Settings");
+    expect(settingsTab.classList.contains("active")).toBe(true);
+  });
+
+  it("shows empty placeholder when no non-terminal tabs", async () => {
+    const tabs: Tab[] = [];
+    const rendered = await renderMainArea({ tabs, activeTabId: "" });
+
+    expect(rendered.getByText("Select a tab")).toBeTruthy();
+  });
+
+  it("handles tab select callback on tab click", async () => {
+    const onTabSelect = vi.fn();
+    const tabs: Tab[] = [
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "settings", label: "Settings", type: "settings" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "projectMode",
+      onTabSelect,
+    });
+
+    const settingsTab = getTabByLabel(rendered.container, "Settings");
+    await fireEvent.click(settingsTab);
+    expect(onTabSelect).toHaveBeenCalledWith("settings");
+  });
+
+  it("ignores pointer drag when button is not left-click", async () => {
+    const onTabReorder = vi.fn();
+    const tabs: Tab[] = [
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "settings", label: "Settings", type: "settings" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "projectMode",
+      onTabReorder,
+    });
+
+    const settingsTab = getTabByLabel(rendered.container, "Settings");
+    // Right-click should not start drag
+    await fireEvent.pointerDown(settingsTab, {
+      button: 2,
+      pointerId: 1,
+      clientX: 120,
+    });
+
+    expect(onTabReorder).not.toHaveBeenCalled();
+  });
+
+  it("renders issues tab panel", async () => {
+    const onWorkOnIssue = vi.fn();
+    const onSwitchToWorktree = vi.fn();
+    const onIssueCountChange = vi.fn();
+    const tabs: Tab[] = [
+      { id: "issues-1", label: "Issues", type: "issues" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "issues-1",
+    });
+    // The tab should be rendered
+    const tabEl = getTabByLabel(rendered.container, "Issues");
+    expect(tabEl).toBeTruthy();
+    // Should have a panel-wrapper active for the issues tab
+    const panels = rendered.container.querySelectorAll(".panel-wrapper.active");
+    expect(panels.length).toBe(1);
+  });
+
+  it("renders prs tab panel", async () => {
+    const tabs: Tab[] = [
+      { id: "prs-1", label: "Pull Requests", type: "prs" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "prs-1",
+    });
+    const tabEl = getTabByLabel(rendered.container, "Pull Requests");
+    expect(tabEl).toBeTruthy();
+    const panels = rendered.container.querySelectorAll(".panel-wrapper.active");
+    expect(panels.length).toBe(1);
+  });
+
+  it("renders issueSpec tab panel", async () => {
+    const tabs: Tab[] = [
+      { id: "issueSpec-1", label: "Issue Spec", type: "issueSpec", issueNumber: 42, specId: "spec-1" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "issueSpec-1",
+    });
+    const tabEl = getTabByLabel(rendered.container, "Issue Spec");
+    expect(tabEl).toBeTruthy();
+    const panels = rendered.container.querySelectorAll(".panel-wrapper.active");
+    expect(panels.length).toBe(1);
+  });
+
+  it("shows panel-fallback placeholder when active tab is agent without paneId and non-terminal tabs exist", async () => {
+    const tabs: Tab[] = [
+      { id: "settings", label: "Settings", type: "settings" },
+      { id: "agent-no-pane", label: "Agent", type: "agent" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "agent-no-pane",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Should show detached terminal placeholder within panel-fallback
+    const fallbacks = rendered.container.querySelectorAll(".placeholder.panel-fallback");
+    expect(fallbacks.length).toBeGreaterThan(0);
+    expect(rendered.getByText("Agent starting...")).toBeTruthy();
+  });
+
+  it("shows select-a-tab panel-fallback when non-terminal tabs exist but active tab is not among them", async () => {
+    const tabs: Tab[] = [
+      { id: "settings", label: "Settings", type: "settings" },
+    ];
+    // activeTabId doesn't match any tab
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "nonexistent",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    const fallbacks = rendered.container.querySelectorAll(".placeholder.panel-fallback");
+    expect(fallbacks.length).toBeGreaterThan(0);
+  });
+
+  it("renders different agent dot classes (claude, gemini, opencode)", async () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: "",
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    class ResizeObserverMock {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: ResizeObserverMock,
+    });
+
+    const tabs: Tab[] = [
+      {
+        id: "agent-claude",
+        label: "Claude",
+        type: "agent",
+        paneId: "pane-claude",
+        agentId: "claude",
+      },
+      {
+        id: "agent-gemini",
+        label: "Gemini",
+        type: "agent",
+        paneId: "pane-gemini",
+        agentId: "gemini",
+      },
+      {
+        id: "agent-opencode",
+        label: "OpenCode",
+        type: "agent",
+        paneId: "pane-opencode",
+        agentId: "opencode",
+      },
+    ];
+
+    try {
+      const rendered = await renderMainArea({
+        tabs,
+        activeTabId: "agent-claude",
+      });
+
+      expect(rendered.container.querySelector(".tab-dot.claude")).toBeTruthy();
+      expect(rendered.container.querySelector(".tab-dot.gemini")).toBeTruthy();
+      expect(rendered.container.querySelector(".tab-dot.opencode")).toBeTruthy();
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      if (originalResizeObserver) {
+        Object.defineProperty(globalThis, "ResizeObserver", {
+          configurable: true,
+          value: originalResizeObserver,
+        });
+      } else {
+        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      }
+    }
+  });
+
+  it("shows terminal tab title with cwd", async () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: "",
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    class ResizeObserverMock {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: ResizeObserverMock,
+    });
+
+    const tabs: Tab[] = [
+      {
+        id: "term-1",
+        label: "Terminal",
+        type: "terminal",
+        cwd: "/some/path",
+        paneId: "pane-term",
+      },
+    ];
+
+    try {
+      const rendered = await renderMainArea({
+        tabs,
+        activeTabId: "term-1",
+      });
+
+      const termTab = getTabByLabel(rendered.container, "Terminal");
+      expect(termTab.getAttribute("title")).toBe("/some/path");
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      if (originalResizeObserver) {
+        Object.defineProperty(globalThis, "ResizeObserver", {
+          configurable: true,
+          value: originalResizeObserver,
+        });
+      } else {
+        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      }
+    }
+  });
+
+  it("shows empty title for terminal tab without cwd", async () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: "",
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    class ResizeObserverMock {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: ResizeObserverMock,
+    });
+
+    const tabs: Tab[] = [
+      {
+        id: "term-1",
+        label: "Terminal",
+        type: "terminal",
+        paneId: "pane-term",
+      },
+    ];
+
+    try {
+      const rendered = await renderMainArea({
+        tabs,
+        activeTabId: "term-1",
+      });
+
+      const termTab = getTabByLabel(rendered.container, "Terminal");
+      expect(termTab.getAttribute("title")).toBe("");
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      if (originalResizeObserver) {
+        Object.defineProperty(globalThis, "ResizeObserver", {
+          configurable: true,
+          value: originalResizeObserver,
+        });
+      } else {
+        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      }
+    }
+  });
+
+  it("shows empty title for non-terminal tabs", async () => {
+    const tabs: Tab[] = [
+      { id: "settings", label: "Settings", type: "settings" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "settings",
+    });
+    const tab = getTabByLabel(rendered.container, "Settings");
+    expect(tab.getAttribute("title")).toBe("");
+  });
+
+  it("renders issueSpec tab with default issueNumber when not provided", async () => {
+    const tabs: Tab[] = [
+      { id: "issueSpec-2", label: "Issue Spec", type: "issueSpec", specId: "spec-2" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "issueSpec-2",
+    });
+    const panels = rendered.container.querySelectorAll(".panel-wrapper.active");
+    expect(panels.length).toBe(1);
+  });
+
   it("resets pointer drag state on pointercancel", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
@@ -815,5 +1174,78 @@ describe("MainArea", () => {
         value: originalElementFromPoint,
       });
     }
+  });
+
+  it("renders versionHistory tab panel when it is the active tab", async () => {
+    // Exercises the {:else if tab.type === "versionHistory"} branch (line 443)
+    const tabs: Tab[] = [
+      { id: "versionHistory-1", label: "Version History", type: "versionHistory" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "versionHistory-1",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    const tabEl = getTabByLabel(rendered.container, "Version History");
+    expect(tabEl).toBeTruthy();
+    // versionHistory panel-wrapper should be active
+    const panels = rendered.container.querySelectorAll(".panel-wrapper.active");
+    expect(panels.length).toBe(1);
+  });
+
+  it("passes onWorkOnIssue callback (non-null) to IssueListPanel instead of fallback", async () => {
+    // Covers the "left side of ??" for onWorkOnIssue ?? (() => {}) (lines 455-456)
+    const onWorkOnIssue = vi.fn();
+    const onSwitchToWorktree = vi.fn();
+
+    const { default: MainArea } = await import("./MainArea.svelte");
+    const rendered = render(MainArea, {
+      props: {
+        projectPath: "/tmp/project",
+        selectedBranch: null,
+        onLaunchAgent: vi.fn(),
+        onQuickLaunch: vi.fn(),
+        onTabSelect: vi.fn(),
+        onTabClose: vi.fn(),
+        onTabReorder: vi.fn(),
+        activeTabId: "issues-1",
+        tabs: [{ id: "issues-1", label: "Issues", type: "issues" }] as Tab[],
+        onWorkOnIssue,
+        onSwitchToWorktree,
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    const panels = rendered.container.querySelectorAll(".panel-wrapper.active");
+    expect(panels.length).toBe(1);
+  });
+
+  it("passes onSwitchToWorktree callback (non-null) to PrListPanel instead of fallback", async () => {
+    // Covers the "left side of ??" for onSwitchToWorktree ?? (() => {}) (line 463)
+    const onSwitchToWorktree = vi.fn();
+
+    const { default: MainArea } = await import("./MainArea.svelte");
+    const rendered = render(MainArea, {
+      props: {
+        projectPath: "/tmp/project",
+        selectedBranch: null,
+        onLaunchAgent: vi.fn(),
+        onQuickLaunch: vi.fn(),
+        onTabSelect: vi.fn(),
+        onTabClose: vi.fn(),
+        onTabReorder: vi.fn(),
+        activeTabId: "prs-1",
+        tabs: [{ id: "prs-1", label: "Pull Requests", type: "prs" }] as Tab[],
+        onSwitchToWorktree,
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    const panels = rendered.container.querySelectorAll(".panel-wrapper.active");
+    expect(panels.length).toBe(1);
   });
 });

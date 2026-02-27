@@ -288,4 +288,269 @@ describe("Dashboard", () => {
 
     expect(rows).toEqual(["issue-row-i-1", "issue-row-i-2", "issue-row-i-3"]);
   });
+
+  it("renders with default empty issues (default prop value)", async () => {
+    // Render with minimal props to exercise the default parameter for issues = [] (line 5)
+    const { default: Dashboard } = await import("./Dashboard.svelte");
+    const rendered = render(Dashboard, {
+      props: {} as any,
+    });
+
+    expect(rendered.getByText("No issues yet")).toBeTruthy();
+  });
+
+  it("applies statusColor for cancelled and default (unknown) statuses", async () => {
+    // Exercise the cancelled and default branches in statusColor (lines 51-53)
+    const issues: DashboardIssue[] = [
+      makeIssue({
+        id: "cancelled-issue",
+        title: "Cancelled",
+        status: "cancelled" as any,
+        expanded: true,
+        tasks: [
+          {
+            id: "task-cancelled",
+            name: "Cancelled task",
+            status: "cancelled",
+            developers: [],
+            retryCount: 0,
+          },
+        ],
+        taskTotalCount: 1,
+      }),
+      makeIssue({
+        id: "unknown-issue",
+        title: "Unknown status",
+        status: "unknown_xyz" as any,
+        expanded: false,
+      }),
+    ];
+    const rendered = await renderDashboard({ issues });
+
+    expect(rendered.getByText("Cancelled")).toBeTruthy();
+    expect(rendered.getByText("Unknown status")).toBeTruthy();
+  });
+
+  it("renders all statusColor switch branches via issues", async () => {
+    const allStatuses = [
+      "pending",
+      "planned",
+      "ready",
+      "in_progress",
+      "running",
+      "starting",
+      "restarting",
+      "completed",
+      "passed",
+      "failed",
+      "error",
+      "crashed",
+      "ci_fail",
+      "cancelled",
+      "totally_unknown",
+    ];
+
+    const issues: DashboardIssue[] = allStatuses.map((status, i) =>
+      makeIssue({
+        id: `status-${status}`,
+        title: `Issue ${status}`,
+        status: status as any,
+        expanded: false,
+        taskCompletedCount: 0,
+        taskTotalCount: 0,
+      }),
+    );
+
+    const rendered = await renderDashboard({ issues });
+
+    for (const status of allStatuses) {
+      expect(rendered.getByText(`Issue ${status}`)).toBeTruthy();
+    }
+  });
+
+  it("exercises toggleExpand with issue that has explicit expanded override", async () => {
+    const issue = makeIssue({
+      id: "toggle-test",
+      expanded: true,
+      tasks: [
+        {
+          id: "task-toggle",
+          name: "Toggle task",
+          status: "running",
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+      taskTotalCount: 1,
+    });
+    const rendered = await renderDashboard({ issues: [issue] });
+
+    // Initially expanded
+    expect(rendered.getByText("Toggle task")).toBeTruthy();
+
+    // Toggle collapse
+    const headerBtn = rendered.container.querySelector(
+      '[data-testid="issue-row-toggle-test"] .issue-header',
+    ) as HTMLButtonElement;
+    await fireEvent.click(headerBtn);
+
+    // Should be collapsed
+    expect(rendered.queryByText("Toggle task")).toBeNull();
+
+    // Toggle expand again
+    await fireEvent.click(headerBtn);
+
+    // Should be expanded again
+    expect(rendered.getByText("Toggle task")).toBeTruthy();
+  });
+
+  it("renders expanded issue with no tasks", async () => {
+    const issue = makeIssue({
+      expanded: true,
+      tasks: [],
+      taskTotalCount: 0,
+    });
+    const rendered = await renderDashboard({ issues: [issue] });
+
+    expect(rendered.getByText("No tasks")).toBeTruthy();
+  });
+
+  it("renders expanded issue without coordinator", async () => {
+    const issue = makeIssue({
+      expanded: true,
+      coordinator: undefined,
+      tasks: [
+        {
+          id: "task-no-coord",
+          name: "No coordinator task",
+          status: "running",
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+      taskTotalCount: 1,
+    });
+    const rendered = await renderDashboard({ issues: [issue] });
+
+    expect(rendered.getByText("No coordinator task")).toBeTruthy();
+    expect(rendered.queryByText(/Coordinator:/)).toBeNull();
+  });
+
+  it("renders tasks with no developers (no dev-count badge)", async () => {
+    const issue = makeIssue({
+      expanded: true,
+      tasks: [
+        {
+          id: "task-no-devs",
+          name: "Solo task",
+          status: "pending",
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+      taskTotalCount: 1,
+    });
+    const rendered = await renderDashboard({ issues: [issue] });
+
+    expect(rendered.getByText("Solo task")).toBeTruthy();
+    // No dev-count badge
+    expect(rendered.container.querySelectorAll(".dev-count").length).toBe(0);
+  });
+
+  it("exercises statusPulse for non-pulsing and pulsing statuses", async () => {
+    const issues: DashboardIssue[] = [
+      makeIssue({
+        id: "pulse-test",
+        status: "in_progress",
+        expanded: true,
+        tasks: [
+          {
+            id: "task-pulse",
+            name: "Pulsing",
+            status: "running",
+            developers: [],
+            retryCount: 0,
+          },
+          {
+            id: "task-nopulse",
+            name: "Not pulsing",
+            status: "completed",
+            developers: [],
+            retryCount: 0,
+          },
+        ],
+        taskTotalCount: 2,
+      }),
+    ];
+    const rendered = await renderDashboard({ issues });
+
+    const issueDot = rendered.container.querySelector('[data-testid="issue-status-pulse-test"]');
+    expect(issueDot?.classList.contains("pulse")).toBe(true);
+
+    const taskDotPulse = rendered.container.querySelector('[data-testid="task-status-task-pulse"]');
+    expect(taskDotPulse?.classList.contains("pulse")).toBe(true);
+
+    const taskDotNoPulse = rendered.container.querySelector('[data-testid="task-status-task-nopulse"]');
+    expect(taskDotNoPulse?.classList.contains("pulse")).toBe(false);
+  });
+
+  it("calls onTaskClick without callback (undefined)", async () => {
+    const issue = makeIssue({
+      expanded: true,
+      tasks: [
+        {
+          id: "task-nocb",
+          name: "No callback task",
+          status: "pending",
+          developers: [],
+          retryCount: 0,
+        },
+      ],
+      taskTotalCount: 1,
+    });
+    const rendered = await renderDashboard({ issues: [issue] });
+
+    const taskRow = rendered.getByTestId("task-row-task-nocb");
+    // Clicking without callback should not throw
+    await fireEvent.click(taskRow);
+  });
+
+  it("re-renders with different issue configs to exercise update branches", async () => {
+    const { default: Dashboard } = await import("./Dashboard.svelte");
+    const rendered = render(Dashboard, {
+      props: {
+        issues: [
+          makeIssue({
+            id: "rr-issue",
+            expanded: true,
+            coordinator: { paneId: "c1", status: "running" },
+            tasks: [
+              {
+                id: "rr-task",
+                name: "RR task",
+                status: "running",
+                developers: [
+                  {
+                    id: "dev-rr",
+                    agentType: "claude",
+                    paneId: "p1",
+                    status: "running",
+                    worktree: { branchName: "feat/rr", path: "/tmp" },
+                  },
+                ],
+                retryCount: 0,
+              },
+            ],
+            taskTotalCount: 1,
+          }),
+        ],
+      },
+    });
+
+    expect(rendered.getByText("RR task")).toBeTruthy();
+
+    // Re-render to empty
+    await rendered.rerender({ issues: [] });
+    expect(rendered.getByText("No issues yet")).toBeTruthy();
+  });
 });

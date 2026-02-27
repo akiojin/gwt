@@ -13,6 +13,12 @@ vi.mock("@tauri-apps/plugin-shell", () => ({
   open: vi.fn(),
 }));
 
+// Mock openExternalUrl
+const mockOpenExternalUrl = vi.fn();
+vi.mock("../openExternalUrl", () => ({
+  openExternalUrl: (...args: unknown[]) => mockOpenExternalUrl(...args),
+}));
+
 function makeIssue(overrides: Partial<GitHubIssueInfo> = {}): GitHubIssueInfo {
   return {
     number: 1,
@@ -47,6 +53,7 @@ async function renderIssueListPanel(props?: {
 describe("IssueListPanel", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
+    mockOpenExternalUrl.mockReset();
   });
 
   afterEach(() => {
@@ -485,5 +492,493 @@ describe("IssueListPanel", () => {
     await waitFor(() => {
       expect(onIssueCountChange).toHaveBeenCalledWith(3);
     });
+  });
+
+  it("displays assignees, milestones, and comments in list view", async () => {
+    const issue = makeIssue({
+      number: 10,
+      title: "Full meta Issue",
+      assignees: [
+        { login: "alice", avatarUrl: "https://avatars.example.com/alice.png" },
+        { login: "bob", avatarUrl: "https://avatars.example.com/bob.png" },
+      ],
+      milestone: { title: "v2.0", number: 20 },
+      commentsCount: 7,
+      labels: [{ name: "bug", color: "d73a4a" }],
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Full meta Issue")).toBeTruthy();
+    });
+
+    // Assignee avatars
+    const avatars = rendered.container.querySelectorAll(".ilp-avatar");
+    expect(avatars.length).toBeGreaterThanOrEqual(2);
+    expect(avatars[0]?.getAttribute("alt")).toBe("alice");
+    expect(avatars[1]?.getAttribute("alt")).toBe("bob");
+
+    // Milestone
+    expect(rendered.container.textContent).toContain("v2.0");
+
+    // Comments count
+    expect(rendered.getByText("7")).toBeTruthy();
+  });
+
+  it("displays detail view with assignees, milestone, and comments count", async () => {
+    const issue = makeIssue({
+      number: 20,
+      title: "Detail Meta Issue",
+      state: "closed",
+      body: "Some body text",
+      assignees: [
+        { login: "charlie", avatarUrl: "https://avatars.example.com/charlie.png" },
+      ],
+      milestone: { title: "Sprint 5", number: 5 },
+      commentsCount: 12,
+      labels: [{ name: "enhancement", color: "a2eeef" }],
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "fetch_github_issue_detail") return issue;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Detail Meta Issue")).toBeTruthy();
+    });
+
+    // Open detail
+    await fireEvent.click(rendered.container.querySelector(".ilp-issue-row")!);
+
+    await waitFor(() => {
+      expect(rendered.getByText(/Back/)).toBeTruthy();
+      // Wait until detail is fully loaded (not in loading state)
+      expect(rendered.container.querySelector(".ilp-detail-state")).toBeTruthy();
+    });
+
+    // State badge should show "closed" with the closed class
+    const stateBadge = rendered.container.querySelector(".ilp-detail-state");
+    expect(stateBadge?.textContent?.trim()).toBe("closed");
+    expect(stateBadge?.classList.contains("closed")).toBe(true);
+
+    // Assignee avatar in detail
+    const detailAvatars = rendered.container.querySelectorAll(
+      ".ilp-detail-meta .ilp-avatar"
+    );
+    expect(detailAvatars.length).toBeGreaterThanOrEqual(1);
+
+    // Milestone in detail
+    expect(rendered.container.querySelector(".ilp-detail-milestone")).toBeTruthy();
+    expect(rendered.container.textContent).toContain("Sprint 5");
+
+    // Comments in detail
+    expect(rendered.container.textContent).toContain("12 comments");
+
+    // Labels in detail
+    expect(rendered.container.querySelector(".ilp-detail-meta .ilp-issue-label")).toBeTruthy();
+  });
+
+  it("shows 'No description provided.' when detail issue has no body", async () => {
+    const issue = makeIssue({
+      number: 30,
+      title: "No Body Issue",
+      body: undefined,
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "fetch_github_issue_detail") return issue;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("No Body Issue")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.container.querySelector(".ilp-issue-row")!);
+
+    await waitFor(() => {
+      expect(rendered.getByText("No description provided.")).toBeTruthy();
+    });
+  });
+
+  it("shows detail error from fetch_github_issue_detail failure", async () => {
+    const issue = makeIssue({ number: 40, title: "Error Detail Issue", body: "body" });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "fetch_github_issue_detail") throw new Error("Detail fetch failed");
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Error Detail Issue")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.container.querySelector(".ilp-issue-row")!);
+
+    // The detail view should show - fetchIssueDetail catches the error and
+    // sets detailError while also falling back to the initial issue.
+    // The error message may be from the dynamic import or from the mock throw.
+    await waitFor(() => {
+      expect(rendered.getByText(/Back/)).toBeTruthy();
+      const errorDiv = rendered.container.querySelector(".ilp-error");
+      expect(errorDiv).toBeTruthy();
+    });
+  });
+
+  it("clicks 'Open in GitHub' in detail view", async () => {
+    const issue = makeIssue({
+      number: 50,
+      title: "GitHub Link Issue",
+      body: "body text",
+      htmlUrl: "https://github.com/test/repo/issues/50",
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "fetch_github_issue_detail") return issue;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("GitHub Link Issue")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.container.querySelector(".ilp-issue-row")!);
+
+    await waitFor(() => {
+      expect(rendered.getByText("Open in GitHub")).toBeTruthy();
+    });
+
+    // Click the button - it should invoke openExternalUrl
+    await fireEvent.click(rendered.getByText("Open in GitHub"));
+
+    await waitFor(() => {
+      expect(mockOpenExternalUrl).toHaveBeenCalledWith(
+        "https://github.com/test/repo/issues/50"
+      );
+    });
+  });
+
+  it("handles non-Error throws in toErrorMessage", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") throw 42;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("42");
+    });
+  });
+
+  it("handles string error in toErrorMessage", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") throw "plain string error";
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("plain string error");
+    });
+  });
+
+  it("handles check_gh_cli_status exception gracefully", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status") throw new Error("CLI check failed");
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      // Should fall back to ghCliStatus = { available: false, authenticated: false }
+      expect(rendered.getByText(/GitHub CLI.*not available/i)).toBeTruthy();
+    });
+  });
+
+  it("does not re-fetch when clicking already active state filter", async () => {
+    const issues = [makeIssue({ number: 1, title: "Open Issue" })];
+    let fetchCallCount = 0;
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") {
+        fetchCallCount++;
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branch") return null;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Open Issue")).toBeTruthy();
+    });
+
+    const initialCallCount = fetchCallCount;
+
+    // Click the already active "Open" button
+    const openBtn = rendered.getByText("Open");
+    await fireEvent.click(openBtn);
+
+    // Should not trigger additional fetch
+    expect(fetchCallCount).toBe(initialCallCount);
+  });
+
+  it("clears label filter with Clear button", async () => {
+    const issues: GitHubIssueInfo[] = [
+      makeIssue({ number: 1, title: "Bug report", labels: [{ name: "bug", color: "d73a4a" }] }),
+      makeIssue({ number: 2, title: "New feature", labels: [{ name: "enhancement", color: "a2eeef" }] }),
+    ];
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Bug report")).toBeTruthy();
+    });
+
+    // Click a label chip to filter
+    const labelChips = rendered.container.querySelectorAll(".ilp-label-chip");
+    const bugChip = Array.from(labelChips).find((el) => el.textContent?.trim() === "bug");
+    await fireEvent.click(bugChip!);
+
+    await waitFor(() => {
+      expect(rendered.queryByText("New feature")).toBeNull();
+    });
+
+    // Clear button should appear
+    const clearBtn = rendered.container.querySelector(".ilp-label-clear");
+    expect(clearBtn).toBeTruthy();
+    expect(clearBtn?.textContent?.trim()).toBe("Clear");
+
+    await fireEvent.click(clearBtn!);
+
+    await waitFor(() => {
+      expect(rendered.getByText("Bug report")).toBeTruthy();
+      expect(rendered.getByText("New feature")).toBeTruthy();
+    });
+  });
+
+  it("shows WT button in list and prevents event propagation on click", async () => {
+    const issue = makeIssue({ number: 5, title: "WT Click Issue" });
+    const onSwitchToWorktree = vi.fn();
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") {
+        const issueNum = (args as { issueNumber?: number })?.issueNumber;
+        return issueNum === 5 ? "feature/issue-5" : null;
+      }
+      if (cmd === "fetch_github_issue_detail") return issue;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel({ onSwitchToWorktree });
+
+    await waitFor(() => {
+      expect(rendered.getByText("WT")).toBeTruthy();
+    });
+
+    // Click WT button - should not navigate to detail
+    const wtBtn = rendered.getByText("WT");
+    await fireEvent.click(wtBtn);
+
+    expect(onSwitchToWorktree).toHaveBeenCalledWith("feature/issue-5");
+    // Should still be in list view (not detail)
+    expect(rendered.queryByText(/Back/)).toBeNull();
+  });
+
+  it("displays issue with invalid label color gracefully", async () => {
+    const issue = makeIssue({
+      number: 60,
+      title: "Invalid Color Issue",
+      labels: [{ name: "weird", color: "xyz123" }],
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Invalid Color Issue")).toBeTruthy();
+    });
+
+    // The label should still render even with invalid color
+    const labels = rendered.container.querySelectorAll(".ilp-issue-label");
+    const weirdLabel = Array.from(labels).find((el) => el.textContent?.trim() === "weird");
+    expect(weirdLabel).toBeTruthy();
+    // With invalid hex, labelStyle returns "" so style should be empty
+    expect(weirdLabel?.getAttribute("style")).toBe("");
+  });
+
+  it("shows spec issue detail with IssueSpecPanel", async () => {
+    const specIssue = makeIssue({
+      number: 70,
+      title: "Spec Issue",
+      body: "Some spec body",
+      labels: [{ name: "spec", color: "0075ca" }],
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [specIssue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "fetch_github_issue_detail") return specIssue;
+      if (cmd === "fetch_issue_spec") return { markdown: "# Spec content", error: null };
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Spec Issue")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.container.querySelector(".ilp-issue-row")!);
+
+    await waitFor(() => {
+      expect(rendered.getByText(/Back/)).toBeTruthy();
+      // The IssueSpecPanel component should be rendered for spec issues
+      // We can check the detail body exists
+      expect(rendered.container.querySelector(".ilp-detail-body")).toBeTruthy();
+    });
+  });
+
+  it("shows loading indicator when issues are being loaded", async () => {
+    // Use a never-resolving promise to keep the loading state visible
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") {
+        // Never resolve - keeps loading=true
+        return new Promise<FetchIssuesResponse>(() => {});
+      }
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Loading issues...")).toBeTruthy();
+    });
+  });
+
+  it("handles detail loading indicator while fetching issue detail", async () => {
+    const issue = makeIssue({ number: 80, title: "Slow Detail Issue", body: "body" });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "fetch_github_issue_detail") {
+        // Never resolve - keeps detail loading state
+        return new Promise<GitHubIssueInfo>(() => {});
+      }
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Slow Detail Issue")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.container.querySelector(".ilp-issue-row")!);
+
+    await waitFor(() => {
+      expect(rendered.getByText("Loading issue details...")).toBeTruthy();
+    });
+  });
+
+  it("handles find_existing_issue_branch error gracefully", async () => {
+    const issue = makeIssue({ number: 90, title: "Branch Error Issue" });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") throw new Error("Branch lookup failed");
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Branch Error Issue")).toBeTruthy();
+    });
+
+    // WT button should not be shown (error falls back to null)
+    expect(rendered.queryByText("WT")).toBeNull();
   });
 });

@@ -1587,4 +1587,249 @@ mod tests {
         let client = AIClient::new_for_list_models("https://api.openai.com/v1", "key").unwrap();
         assert_eq!(client.cumulative_tokens(), 0);
     }
+
+    // ========================================
+    // AIClient::new validation tests
+    // ========================================
+
+    #[test]
+    fn test_new_client_empty_endpoint() {
+        let settings = ResolvedAISettings {
+            endpoint: "".to_string(),
+            api_key: "key".to_string(),
+            model: "gpt-4o".to_string(),
+            language: "auto".to_string(),
+        };
+        let result = AIClient::new(settings);
+        assert!(matches!(result, Err(AIError::ConfigError(_))));
+    }
+
+    #[test]
+    fn test_new_client_whitespace_endpoint() {
+        let settings = ResolvedAISettings {
+            endpoint: "   ".to_string(),
+            api_key: "key".to_string(),
+            model: "gpt-4o".to_string(),
+            language: "auto".to_string(),
+        };
+        let result = AIClient::new(settings);
+        assert!(matches!(result, Err(AIError::ConfigError(_))));
+    }
+
+    #[test]
+    fn test_new_client_empty_model() {
+        let settings = ResolvedAISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "".to_string(),
+            language: "auto".to_string(),
+        };
+        let result = AIClient::new(settings);
+        assert!(matches!(result, Err(AIError::ConfigError(_))));
+    }
+
+    #[test]
+    fn test_new_client_valid() {
+        let settings = ResolvedAISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "gpt-4o".to_string(),
+            language: "auto".to_string(),
+        };
+        let result = AIClient::new(settings);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_new_client_empty_api_key_allowed() {
+        let settings = ResolvedAISettings {
+            endpoint: "http://localhost:11434/v1".to_string(),
+            api_key: "".to_string(),
+            model: "llama3".to_string(),
+            language: "auto".to_string(),
+        };
+        let result = AIClient::new(settings);
+        assert!(result.is_ok());
+    }
+
+    // ========================================
+    // URL building edge cases
+    // ========================================
+
+    #[test]
+    fn test_build_responses_url_standard() {
+        let url = build_responses_url("https://api.openai.com/v1").unwrap();
+        assert_eq!(url.as_str(), "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn test_build_responses_url_trailing_slash() {
+        let url = build_responses_url("https://api.openai.com/v1/").unwrap();
+        assert_eq!(url.as_str(), "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn test_build_responses_url_already_has_path() {
+        let url = build_responses_url("https://api.openai.com/v1/responses").unwrap();
+        assert_eq!(url.as_str(), "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn test_build_responses_url_invalid() {
+        let result = build_responses_url("not-a-url");
+        assert!(result.is_err());
+    }
+
+    // ========================================
+    // Azure endpoint detection
+    // ========================================
+
+    #[test]
+    fn test_is_azure_endpoint_true() {
+        let url = Url::parse("https://myinstance.openai.azure.com/v1").unwrap();
+        assert!(is_azure_endpoint(&url));
+    }
+
+    #[test]
+    fn test_is_azure_endpoint_false() {
+        let url = Url::parse("https://api.openai.com/v1").unwrap();
+        assert!(!is_azure_endpoint(&url));
+    }
+
+    #[test]
+    fn test_is_azure_endpoint_localhost_false() {
+        let url = Url::parse("http://localhost:8080/v1").unwrap();
+        assert!(!is_azure_endpoint(&url));
+    }
+
+    // ========================================
+    // build_responses_input
+    // ========================================
+
+    #[test]
+    fn test_build_responses_input_system_instruction() {
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are a helper.".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            },
+        ];
+        let (instructions, input) = build_responses_input(&messages);
+        assert_eq!(instructions, Some("You are a helper.".to_string()));
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0].role, "user");
+    }
+
+    #[test]
+    fn test_build_responses_input_no_system() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+        }];
+        let (instructions, input) = build_responses_input(&messages);
+        assert!(instructions.is_none());
+        assert_eq!(input.len(), 1);
+    }
+
+    #[test]
+    fn test_build_responses_input_empty() {
+        let messages: Vec<ChatMessage> = vec![];
+        let (instructions, input) = build_responses_input(&messages);
+        assert!(instructions.is_none());
+        assert!(input.is_empty());
+    }
+
+    // ========================================
+    // extract_error_message
+    // ========================================
+
+    #[test]
+    fn test_extract_error_message_from_json() {
+        let body = r#"{"error":{"message":"Rate limit exceeded"}}"#;
+        let msg = extract_error_message(body);
+        assert_eq!(msg, Some("Rate limit exceeded".to_string()));
+    }
+
+    #[test]
+    fn test_extract_error_message_returns_none_for_string_error() {
+        // extract_error_message only handles {"error":{"message":"..."}} format
+        let body = r#"{"error":"Something went wrong"}"#;
+        let msg = extract_error_message(body);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_extract_error_message_invalid_json() {
+        let msg = extract_error_message("not json");
+        assert!(msg.is_none());
+    }
+
+    // ========================================
+    // parse_response edge cases
+    // ========================================
+
+    #[test]
+    fn test_parse_response_with_usage_empty_output() {
+        let body = r#"{"output":[]}"#;
+        let result = parse_response_with_usage(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_response_with_usage_invalid_json() {
+        let result = parse_response_with_usage("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_chat_completion_empty_choices() {
+        let body = r#"{"choices":[]}"#;
+        let result = parse_chat_completion_with_usage(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_chat_completion_null_content() {
+        let body = r#"{"choices":[{"message":{"content":null}}]}"#;
+        let result = parse_chat_completion_with_usage(body);
+        assert!(result.is_err());
+    }
+
+    // ========================================
+    // parse_tool_call
+    // ========================================
+
+    #[test]
+    fn test_parse_tool_call_from_function_call() {
+        let value = serde_json::json!({
+            "id": "call_1",
+            "name": "send_keys",
+            "arguments": "{\"pane_id\":\"p1\"}"
+        });
+        let tool = parse_tool_call(&value).unwrap();
+        assert_eq!(tool.name, "send_keys");
+        assert_eq!(tool.call_id, Some("call_1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_tool_call_with_object_arguments() {
+        let value = serde_json::json!({
+            "name": "bash",
+            "arguments": {"cmd": "ls"}
+        });
+        let tool = parse_tool_call(&value).unwrap();
+        assert_eq!(tool.name, "bash");
+        assert_eq!(tool.arguments.get("cmd").unwrap().as_str(), Some("ls"));
+    }
+
+    #[test]
+    fn test_parse_tool_call_missing_name() {
+        let value = serde_json::json!({"arguments": "{}"});
+        let result = parse_tool_call(&value);
+        assert!(result.is_none());
+    }
 }
