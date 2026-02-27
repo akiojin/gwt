@@ -38,6 +38,7 @@
     onLaunchAgent,
     onQuickLaunch,
     onNewTerminal,
+    onOpenDocsEditor,
     onResize,
     onOpenCiLog,
     widthPx = 260,
@@ -61,6 +62,7 @@
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onNewTerminal?: () => void;
+    onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
     onResize?: (nextWidthPx: number) => void;
     onOpenCiLog?: (runId: number) => void;
     widthPx?: number;
@@ -1485,6 +1487,7 @@
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
           onNewTerminal={onNewTerminal}
+          onOpenDocsEditor={onOpenDocsEditor}
           {onOpenCiLog}
         />
       </div>

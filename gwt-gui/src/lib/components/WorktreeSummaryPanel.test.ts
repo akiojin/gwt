@@ -1028,6 +1028,70 @@ describe("WorktreeSummaryPanel", () => {
     expect(onNewTerminal).toHaveBeenCalledTimes(1);
   });
 
+  it("checks/fixes docs and opens editor callback from header button", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      if (cmd === "check_and_fix_agent_instruction_docs") {
+        return {
+          worktreePath: "/tmp/project/.gwt/worktrees/feature-markdown-ui",
+          checkedFiles: ["CLAUDE.md", "AGENTS.md", "GEMINI.md"],
+          updatedFiles: ["AGENTS.md"],
+        };
+      }
+      return [];
+    });
+
+    const onOpenDocsEditor = vi.fn().mockResolvedValue(undefined);
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onOpenDocsEditor,
+    });
+
+    const button = await rendered.findByRole("button", { name: "Check/Fix Docs + Edit" });
+    await fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(commandCalls("check_and_fix_agent_instruction_docs")).toHaveLength(1);
+      expect(onOpenDocsEditor).toHaveBeenCalledWith(
+        "/tmp/project/.gwt/worktrees/feature-markdown-ui"
+      );
+    });
+  });
+
+  it("shows docs check error and skips editor callback on failure", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      if (cmd === "check_and_fix_agent_instruction_docs") {
+        throw new Error("worktree not found");
+      }
+      return [];
+    });
+
+    const onOpenDocsEditor = vi.fn().mockResolvedValue(undefined);
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onOpenDocsEditor,
+    });
+
+    const button = await rendered.findByRole("button", { name: "Check/Fix Docs + Edit" });
+    await fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(rendered.getByText(/Failed to check\/fix docs:/)).toBeTruthy();
+    });
+    expect(onOpenDocsEditor).not.toHaveBeenCalled();
+  });
+
   it("renders New Terminal button even without onNewTerminal callback", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",

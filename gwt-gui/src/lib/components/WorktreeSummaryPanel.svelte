@@ -28,6 +28,7 @@
     onLaunchAgent,
     onQuickLaunch,
     onNewTerminal,
+    onOpenDocsEditor,
     onOpenCiLog,
     agentTabBranches = [],
     activeAgentTabBranch = null,
@@ -41,6 +42,7 @@
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onNewTerminal?: () => void;
+    onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
     onOpenCiLog?: (runId: number) => void;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
@@ -56,6 +58,8 @@
   let quickLaunchError: string | null = $state(null);
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
+  let docsActionBusy: boolean = $state(false);
+  let docsActionError: string | null = $state(null);
 
   type SummaryTab =
     | "summary"
@@ -161,6 +165,12 @@
     branch?: string | null;
     status: string;
     error?: string | null;
+  };
+
+  type InstructionDocsCheckResult = {
+    worktreePath: string;
+    checkedFiles: string[];
+    updatedFiles: string[];
   };
 
   function toErrorMessage(err: unknown): string {
@@ -1050,6 +1060,40 @@
     }
   }
 
+  async function handleCheckFixDocsAndEdit() {
+    if (docsActionBusy) return;
+    const branch = currentBranchName();
+    if (!branch) {
+      docsActionError = "Select a branch before checking docs.";
+      return;
+    }
+
+    docsActionBusy = true;
+    docsActionError = null;
+    try {
+      const invoke = await getInvoke();
+      const result = await invoke<InstructionDocsCheckResult>(
+        "check_and_fix_agent_instruction_docs",
+        {
+          projectPath,
+          branch,
+        },
+      );
+
+      const updatedCount = result.updatedFiles?.length ?? 0;
+      const suffix = updatedCount === 0 ? "No changes needed." : `Updated ${updatedCount} file(s).`;
+      toastBus.emit({ message: `Docs check complete. ${suffix}` });
+
+      if (onOpenDocsEditor) {
+        await onOpenDocsEditor(result.worktreePath);
+      }
+    } catch (err) {
+      docsActionError = `Failed to check/fix docs: ${toErrorMessage(err)}`;
+    } finally {
+      docsActionBusy = false;
+    }
+  }
+
   let updatingBranch = $state(false);
   let merging = $state(false);
   let showMergeConfirm = $state(false);
@@ -1206,6 +1250,13 @@
             New
           </button>
           <button
+            class="header-quick-btn ghost"
+            disabled={docsActionBusy}
+            onclick={handleCheckFixDocsAndEdit}
+          >
+            {docsActionBusy ? "Checking..." : "Check/Fix Docs + Edit"}
+          </button>
+          <button
             class="new-terminal-btn"
             title="New Terminal"
             onclick={() => onNewTerminal?.()}
@@ -1223,6 +1274,9 @@
       {/if}
       {#if quickLaunchError}
         <div class="quick-error">{quickLaunchError}</div>
+      {/if}
+      {#if docsActionError}
+        <div class="quick-error">{docsActionError}</div>
       {/if}
 
       <div class="summary-tabs">
