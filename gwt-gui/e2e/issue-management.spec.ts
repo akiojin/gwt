@@ -68,7 +68,7 @@ test("Issue tab shows linked issue when available", async ({ page }) => {
   await page.goto("/");
   await setMockCommandResponses(page, {
     ...standardBranchResponses(),
-    get_branch_linked_issue: linkedIssueFixture,
+    fetch_branch_linked_issue: linkedIssueFixture,
   });
   await openRecentProject(page);
 
@@ -89,7 +89,7 @@ test("Issue tab shows issue number", async ({ page }) => {
   await page.goto("/");
   await setMockCommandResponses(page, {
     ...standardBranchResponses(),
-    get_branch_linked_issue: linkedIssueFixture,
+    fetch_branch_linked_issue: linkedIssueFixture,
   });
   await openRecentProject(page);
 
@@ -103,7 +103,9 @@ test("Issue tab shows issue number", async ({ page }) => {
     .getByRole("button", { name: "Issue", exact: true })
     .click();
 
-  await expect(page.getByText("#101")).toBeVisible();
+  await expect(page.locator(".issue-panel .quick-subtitle")).toContainText(
+    "#101",
+  );
 });
 
 test("Issue tab becomes active when clicked", async ({ page }) => {
