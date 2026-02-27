@@ -882,7 +882,7 @@ describe("IssueListPanel", () => {
       number: 70,
       title: "Spec Issue",
       body: "Some spec body",
-      labels: [{ name: "spec", color: "0075ca" }],
+      labels: [{ name: "gwt-spec", color: "0075ca" }],
     });
 
     mockInvoke.mockImplementation(async (cmd: string) => {
