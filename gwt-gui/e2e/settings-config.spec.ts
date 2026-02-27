@@ -52,7 +52,10 @@ test("changes UI font size via spinbutton and saves", async ({ page }) => {
   await openSettings(page, standardSettingsResponses());
 
   // Find the UI Font Size spinbutton and clear + fill
-  const uiFontSpinbutton = page.locator(".settings-content").getByRole("spinbutton").nth(1);
+  const uiFontSpinbutton = page
+    .locator(".settings-tab-content")
+    .getByRole("spinbutton")
+    .nth(1);
   await expect(uiFontSpinbutton).toBeVisible();
   await uiFontSpinbutton.fill("16");
 
@@ -72,7 +75,10 @@ test("changes terminal font size via spinbutton and saves", async ({
   await openSettings(page, standardSettingsResponses());
 
   // Terminal Font Size is the first spinbutton
-  const termFontSpinbutton = page.locator(".settings-content").getByRole("spinbutton").nth(0);
+  const termFontSpinbutton = page
+    .locator(".settings-tab-content")
+    .getByRole("spinbutton")
+    .nth(0);
   await expect(termFontSpinbutton).toBeVisible();
   await termFontSpinbutton.fill("18");
 
@@ -159,7 +165,7 @@ test("Profiles tab shows default profile", async ({ page }) => {
     .getByRole("button", { name: "Profiles", exact: true })
     .click();
 
-  await expect(page.getByText("default")).toBeVisible();
+  await expect(page.locator("#active-profile")).toHaveValue("default");
 });
 
 test("UI Font Family selector shows presets", async ({ page }) => {
@@ -283,6 +289,10 @@ test("Protected Branches section is visible", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
   await expect(page.getByText("Protected Branches")).toBeVisible();
-  await expect(page.getByText("main")).toBeVisible();
-  await expect(page.getByText("develop")).toBeVisible();
+  await expect(
+    page.locator(".branch-tags .branch-tag").filter({ hasText: "main" }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".branch-tags .branch-tag").filter({ hasText: "develop" }),
+  ).toBeVisible();
 });
