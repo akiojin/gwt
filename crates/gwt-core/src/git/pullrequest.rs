@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::gh_cli::{gh_command, is_gh_available};
+use super::gh_cli::{is_gh_available, run_gh_output_with_repair};
 
 /// Detailed PR status information retrieved via GraphQL API (SPEC-d6949f99)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,8 +186,9 @@ impl PrCache {
             return None;
         }
 
-        let output = gh_command()
-            .args([
+        let output = run_gh_output_with_repair(
+            repo_path,
+            [
                 "pr",
                 "list",
                 "--state",
@@ -198,10 +199,9 @@ impl PrCache {
                 "20",
                 "--json",
                 "number,title,headRefName,state,url,updatedAt",
-            ])
-            .current_dir(repo_path)
-            .output()
-            .ok()?;
+            ],
+        )
+        .ok()?;
 
         if !output.status.success() {
             return None;
@@ -287,8 +287,9 @@ fn fetch_prs(repo_path: &Path) -> Result<Vec<PullRequest>, std::io::Error> {
 /// Fetch PRs by state using GitHub CLI
 fn fetch_prs_by_state(repo_path: &Path, state: &str) -> Result<Vec<PullRequest>, std::io::Error> {
     // gh pr list --state open --json number,title,headRefName,state --limit 100
-    let output = gh_command()
-        .args([
+    let output = run_gh_output_with_repair(
+        repo_path,
+        [
             "pr",
             "list",
             "--state",
@@ -297,9 +298,8 @@ fn fetch_prs_by_state(repo_path: &Path, state: &str) -> Result<Vec<PullRequest>,
             "number,title,headRefName,state,url,updatedAt",
             "--limit",
             "100",
-        ])
-        .current_dir(repo_path)
-        .output()?;
+        ],
+    )?;
 
     if !output.status.success() {
         return Ok(Vec::new());

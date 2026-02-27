@@ -2,6 +2,7 @@
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use chrono::{DateTime, Utc};
+use gwt_core::git::gh_cli::{run_gh_output_with_repair, run_gh_output_with_timeout_and_repair};
 use gwt_core::git::graphql;
 use gwt_core::git::{
     is_gh_cli_authenticated, is_gh_cli_available, PrCache, PrListItem, PrStatusInfo, Remote,
@@ -10,9 +11,7 @@ use gwt_core::git::{
 use gwt_core::StructuredError;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -235,35 +234,6 @@ fn rate_limit_cooldown_until(reset_at: Option<&str>) -> Instant {
         .unwrap_or_else(|| Instant::now() + PR_STATUS_RATE_LIMIT_BACKOFF)
 }
 
-fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    return None;
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-fn read_pipe_to_string<T: Read>(mut pipe: T) -> String {
-    let mut buf = String::new();
-    let _ = pipe.read_to_string(&mut buf);
-    buf
-}
-
-fn spawn_pipe_reader<T>(pipe: Option<T>) -> thread::JoinHandle<String>
-where
-    T: Read + Send + 'static,
-{
-    thread::spawn(move || pipe.map(read_pipe_to_string).unwrap_or_default())
-}
-
 fn select_repo_merge_method(
     allow_merge_commit: bool,
     allow_squash_merge: bool,
@@ -281,12 +251,7 @@ fn select_repo_merge_method(
 }
 
 fn resolve_repo_merge_method(owner: &str, repo: &str, repo_path: &Path) -> Result<String, String> {
-    use gwt_core::git::gh_cli::gh_command;
-
-    let output = gh_command()
-        .args(["api", &format!("/repos/{owner}/{repo}")])
-        .current_dir(repo_path)
-        .output()
+    let output = run_gh_output_with_repair(repo_path, ["api", &format!("/repos/{owner}/{repo}")])
         .map_err(|e| format!("Failed to fetch repository settings: {}", e))?;
 
     if !output.status.success() {
@@ -922,7 +887,6 @@ pub async fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, S
 
 /// Update a PR branch with the latest base branch changes (SPEC-de3290fc T008)
 fn update_pr_branch_impl(project_path: String, pr_number: u64) -> Result<String, String> {
-    use gwt_core::git::gh_cli::gh_command;
     use gwt_core::git::resolve_repo_slug;
 
     let project_root = Path::new(&project_path);
@@ -936,48 +900,20 @@ fn update_pr_branch_impl(project_path: String, pr_number: u64) -> Result<String,
     }
     let (owner, repo) = (parts[0], parts[1]);
 
-    let mut child = gh_command()
-        .args([
+    let output = run_gh_output_with_timeout_and_repair(
+        &repo_path,
+        [
             "api",
             "-X",
             "PUT",
             &format!("/repos/{owner}/{repo}/pulls/{pr_number}/update-branch"),
-        ])
-        .current_dir(&repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to execute gh api: {}", e))?;
+        ],
+        PR_UPDATE_BRANCH_TIMEOUT,
+    )
+    .map_err(|e| format!("Failed to execute gh api: {}", e))?;
 
-    let stdout_handle = spawn_pipe_reader(child.stdout.take());
-    let stderr_handle = spawn_pipe_reader(child.stderr.take());
-
-    let status = match wait_with_timeout(&mut child, PR_UPDATE_BRANCH_TIMEOUT) {
-        Some(status) => status,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_handle.join();
-            let stderr = stderr_handle.join().unwrap_or_default();
-            let detail = stderr.trim();
-            if detail.is_empty() {
-                return Err(format!(
-                    "Failed to update PR branch: gh api timed out after {}s",
-                    PR_UPDATE_BRANCH_TIMEOUT.as_secs()
-                ));
-            }
-            return Err(format!(
-                "Failed to update PR branch: gh api timed out after {}s: {}",
-                PR_UPDATE_BRANCH_TIMEOUT.as_secs(),
-                detail
-            ));
-        }
-    };
-
-    let _stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
-
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let detail = stderr.trim();
         if detail.is_empty() {
             return Err("Failed to update PR branch".to_string());
@@ -997,7 +933,6 @@ pub async fn update_pr_branch(project_path: String, pr_number: u64) -> Result<St
 
 /// Merge a pull request via GitHub REST API (SPEC-merge-pr FR-004)
 fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<String, String> {
-    use gwt_core::git::gh_cli::gh_command;
     use gwt_core::git::resolve_repo_slug;
 
     let project_root = Path::new(&project_path);
@@ -1012,50 +947,22 @@ fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<Strin
     let (owner, repo) = (parts[0], parts[1]);
     let merge_method = resolve_repo_merge_method(owner, repo, &repo_path)?;
 
-    let mut child = gh_command()
-        .args([
+    let output = run_gh_output_with_timeout_and_repair(
+        &repo_path,
+        [
             "api",
             "-X",
             "PUT",
             &format!("/repos/{owner}/{repo}/pulls/{pr_number}/merge"),
             "-f",
             &format!("merge_method={merge_method}"),
-        ])
-        .current_dir(&repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to execute gh api: {}", e))?;
+        ],
+        PR_MERGE_TIMEOUT,
+    )
+    .map_err(|e| format!("Failed to execute gh api: {}", e))?;
 
-    let stdout_handle = spawn_pipe_reader(child.stdout.take());
-    let stderr_handle = spawn_pipe_reader(child.stderr.take());
-
-    let status = match wait_with_timeout(&mut child, PR_MERGE_TIMEOUT) {
-        Some(status) => status,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_handle.join();
-            let stderr = stderr_handle.join().unwrap_or_default();
-            let detail = stderr.trim();
-            if detail.is_empty() {
-                return Err(format!(
-                    "Failed to merge PR: gh api timed out after {}s",
-                    PR_MERGE_TIMEOUT.as_secs()
-                ));
-            }
-            return Err(format!(
-                "Failed to merge PR: gh api timed out after {}s: {}",
-                PR_MERGE_TIMEOUT.as_secs(),
-                detail
-            ));
-        }
-    };
-
-    let _stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
-
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let detail = stderr.trim();
         if detail.is_empty() {
             return Err("Failed to merge PR".to_string());
