@@ -437,8 +437,16 @@
       handleLaunchModalClose();
       return;
     }
+    const error = payload.error || "Launch failed.";
+    const recoveredBranch = parseE1004BranchName(error);
+    if (recoveredBranch && pendingLaunchRequest) {
+      pendingLaunchRequest = {
+        ...pendingLaunchRequest,
+        branch: recoveredBranch,
+      };
+    }
     launchStatus = "error";
-    launchError = payload.error || "Launch failed.";
+    launchError = error;
   }
 
   function flushBufferedLaunchEventsForActiveJob() {
@@ -1407,6 +1415,17 @@
     return b ? normalizeBranchName(b) : "Worktree";
   }
 
+  function parseE1004BranchName(errorMessage: string): string | null {
+    const match = errorMessage.match(/\[E1004\]\s+Branch already exists:\s*(.+)$/m);
+    if (!match) return null;
+    const raw = match[1]?.trim() ?? "";
+    if (!raw) return null;
+    if (raw.startsWith("'") && raw.endsWith("'") && raw.length > 1) {
+      return raw.slice(1, -1);
+    }
+    return raw;
+  }
+
   function terminalTabLabel(
     pathLike: string | null | undefined,
     fallback = "Terminal",
@@ -1633,7 +1652,8 @@
 
   function handleLaunchSuccess(paneId: string) {
     const req = pendingLaunchRequest;
-    const label = req ? worktreeTabLabel(req.branch) : "Worktree";
+    const requestedBranch = req?.branch?.trim() ?? "";
+    const label = req ? worktreeTabLabel(requestedBranch) : "Worktree";
     const requestedAgentId = inferAgentId(req?.agentId);
 
     const newTab: Tab = {
@@ -1654,17 +1674,32 @@
       triggerRestoreProjectAgentTabs(projectPath);
     }
 
-    if (!newTab.agentId) {
+    const needsBranchResolution = requestedBranch.length === 0;
+    if (needsBranchResolution || !newTab.agentId) {
       void (async () => {
         try {
           const { invoke } = await import("$lib/tauriInvoke");
           const terminals = await invoke<TerminalInfo[]>("list_terminals");
           const terminal = terminals.find((t) => t.pane_id === paneId);
+          if (!terminal) return;
+
+          const updates: Partial<Tab> = {};
+          if (needsBranchResolution) {
+            const resolvedBranch = terminal.branch_name?.trim() ?? "";
+            if (resolvedBranch) {
+              updates.label = worktreeTabLabel(resolvedBranch);
+            }
+          }
+
           const terminalAgentId = inferAgentId(terminal?.agent_name);
-          if (!terminalAgentId) return;
+          if (!newTab.agentId && terminalAgentId) {
+            updates.agentId = terminalAgentId;
+          }
+
+          if (Object.keys(updates).length === 0) return;
 
           tabs = tabs.map((t) =>
-            t.id === newTab.id ? { ...t, agentId: terminalAgentId } : t,
+            t.id === newTab.id ? { ...t, ...updates } : t,
           );
         } catch {
           // Ignore: fallback color is used when terminal metadata is unavailable.

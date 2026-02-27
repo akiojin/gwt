@@ -88,7 +88,6 @@
   - `branchNamingMode: "direct" | "ai-suggest"` — セグメンテッドボタンの選択状態
   - `aiDescription: string` — AI Suggestモードの説明入力値
   - `aiConfigured: boolean` — AI設定の有無（フォーム呈示時にチェック）
-  - `aiFallbackError: string | null` — フォールバック時のエラーバナー
 - セグメンテッドボタン（manualタブ内、newBranchTab === "manual" 時のみ表示）:
   - "Direct" / "AI Suggest" の2択
   - AI未設定時: "AI Suggest" セグメントを `disabled` + ツールチップ
@@ -104,23 +103,22 @@
 **対象**: `gwt-gui/src/lib/components/AgentLaunchForm.svelte`
 
 - `handleLaunch()` 内の request 構築:
-  - AI Suggestモード時: 先に `suggest_branch_name` を呼んでブランチ名を確定し、`request.branch` と `createBranch.name` の両方に同じ確定名をセットして launch する
+  - AI Suggestモード時: フォーム側では推論を呼ばず、`aiBranchDescription` と `createBranch.name=""` を設定して `start_launch_job` に渡す
   - Directモード時: 従来通り `createBranch.name` にフルネームをセット
 - Launchボタンのdisabled条件を更新:
   - AI Suggestモード: `!aiDescription.trim()` の場合disabled
   - Directモード: 従来通り `!newBranchFullName.trim()` の場合disabled
 - AI設定チェック: フォーム初期化時に `invoke("is_ai_configured")` を利用（推論呼び出しは行わない）
 
-#### 2-5. フォールバック処理の実装
+#### 2-5. AI失敗時表示の整理
 
-**対象**: `gwt-gui/src/lib/components/AgentLaunchForm.svelte`
+**対象**: `gwt-gui/src/App.svelte`, `gwt-gui/src/lib/components/LaunchProgressModal.svelte`
 
-- `launch-finished` イベントのエラーハンドリング（親コンポーネントまたは本コンポーネント）:
-  - `error` に `[E2001]` が含まれる場合:
-    1. `branchNamingMode` を `"direct"` に切替
-    2. `aiFallbackError` を "AI suggestion failed. Please enter branch name manually." にセット
-    3. `aiDescription` は内部保持（クリアしない）
-  - バナーの自動消去: `branchNamingMode` が変更されたら `aiFallbackError = null`
+- `[E2001]` は launch job の失敗として扱い、Prepare Launchモーダルの `error` 表示にそのまま出す
+- `AgentLaunchForm` 側の自動Direct切替・エラーバナーは持たない
+- 失敗時の再入力はユーザーが明示的にフォームを再オープンして行う
+- `[E1004] Branch already exists` の場合はエラーメッセージからブランチ名を復元し、`Use Existing Branch` 再実行時に同一ブランチで再launchできる状態を維持する
+- AI Suggest成功時にリクエスト上の `branch` が空でも、`list_terminals` の `branch_name` で新規タブのラベルを補完し、サイドバーのブランチ紐付け判定を維持する
 
 ### Phase 3: テスト・クリーンアップ
 
@@ -139,8 +137,8 @@
 - AI未設定: AI Suggestセグメントdisabled
 - AI Suggest + Description空: Launchボタンdisabled
 - AI Suggest + Description入力: Launchボタンenabled
+- AI Suggest + Description入力: `suggest_branch_name` を事前呼び出しせず `aiBranchDescription` を launch request に含める
 - モード永続化: localStorageに保存・復元
-- フォールバック: エラーバナー表示 + Directモード切替
 - Description値保持: モード切替後もaiDescriptionが内部保持される
 
 #### 3-3. コードクリーンアップ
@@ -153,7 +151,7 @@
 
 | リスク | 影響度 | 対策 |
 |--------|--------|------|
-| AI応答がworktreeステップを大幅に遅延させる | 中 | 既存AIClientのタイムアウトに依存。フォールバック処理でカバー |
+| AI応答がworktreeステップを大幅に遅延させる | 中 | 既存AIClientのタイムアウトに依存。失敗時はPrepare Launchモーダルで即時可視化 |
 | AI生成ブランチ名がremote-firstフローで既存ブランチと衝突 | 低 | 既存の[E1004]エラーハンドリングがそのまま機能する |
 | agentLaunchDefaults のスキーマ変更で既存保存データが壊れる | 低 | loadLaunchDefaults()の既存のnullフォールバックで吸収 |
 
@@ -173,6 +171,6 @@
 - セグメンテッドボタンの表示切替
 - AI未設定時のdisabled状態
 - バリデーション（Description空→Launch disabled）
+- AI Suggest時に事前推論せずlaunch requestへ説明を渡す
 - モード永続化（保存・復元・AI未設定時の降格）
-- フォールバック（エラーバナー表示・モード切替・バナー自動消去）
 - Description値の内部保持
