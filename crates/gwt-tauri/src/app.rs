@@ -697,6 +697,7 @@ pub fn build_app(
             crate::commands::skills::repair_skill_registration_cmd,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
+            crate::commands::clause_docs::check_and_fix_agent_instruction_docs,
             crate::commands::voice::get_voice_capability,
             crate::commands::voice::ensure_voice_runtime,
             crate::commands::voice::prepare_voice_model,
