@@ -18,6 +18,7 @@
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
 | [SPEC-9cd50c7c](SPEC-9cd50c7c/spec.md) | 機能仕様: Launch AgentのブランチAI提案機能を改善する。現在の「Suggestモーダルで3候補から選択」を廃止し、「Direct入力 or AI提案」の... | 2026-02-26 |
+| [SPEC-54c8e2fa](SPEC-54c8e2fa/spec.md) | 機能仕様: Issue連携ブランチのリンク保証と起動フロー一元化（Issue #1278 hardening 含む） | 2026-02-26 |
 | [SPEC-91f01230](SPEC-91f01230/spec.md) | バグ修正仕様: Version History を最新タグ10件に固定表示する（Issue #1230） | 2026-02-25 |
 | [SPEC-c2df2e7a](SPEC-c2df2e7a/spec.md) | バグ修正仕様: From Issue の Branch Exists 誤判定（stale remote-tracking ref） | 2026-02-25 |
 | [SPEC-25251fb9](SPEC-25251fb9/spec.md) | バグ修正: ターミナル行数増加時のトラックパッドスクロール不能 | 2026-02-24 |

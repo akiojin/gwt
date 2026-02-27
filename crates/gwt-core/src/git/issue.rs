@@ -868,8 +868,17 @@ pub fn create_or_verify_linked_branch(
     branch_name: &str,
     base_branch: Option<&str>,
 ) -> Result<IssueLinkedBranchStatus, String> {
+    let normalized_branch_name = branch_name.trim();
+    if normalized_branch_name.is_empty() {
+        return Err("[E1012] Branch name is required".to_string());
+    }
+
     let output = gh_command()
-        .args(issue_develop_args(issue_number, branch_name, base_branch))
+        .args(issue_develop_args(
+            issue_number,
+            normalized_branch_name,
+            base_branch,
+        ))
         .current_dir(repo_path)
         .output()
         .map_err(|e| format!("Failed to execute gh issue develop: {}", e))?;
@@ -882,12 +891,12 @@ pub fn create_or_verify_linked_branch(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{}\n{}", stderr, stdout);
     if contains_already_exists_message(&combined) {
-        if verify_issue_branch_linked(repo_path, issue_number, branch_name)? {
+        if verify_issue_branch_linked(repo_path, issue_number, normalized_branch_name)? {
             return Ok(IssueLinkedBranchStatus::AlreadyLinked);
         }
         return Err(format!(
             "[E1012] Issue branch exists but is not linked: {}",
-            branch_name
+            normalized_branch_name
         ));
     }
 
@@ -1129,6 +1138,14 @@ mod tests {
     fn test_issue_develop_args_omits_base_when_blank() {
         let args = issue_develop_args(42, "feature/issue-42", Some("  "));
         assert!(!args.iter().any(|arg| arg == "--base"));
+    }
+
+    #[test]
+    fn test_create_or_verify_linked_branch_rejects_blank_branch_name() {
+        let repo = create_test_repo();
+        let err = create_or_verify_linked_branch(repo.path(), 42, "   ", None).unwrap_err();
+        assert!(err.contains("[E1012]"));
+        assert!(err.contains("Branch name is required"));
     }
 
     #[test]

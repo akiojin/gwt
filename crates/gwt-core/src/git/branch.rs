@@ -3,13 +3,232 @@
 use crate::error::{GwtError, Result};
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
+const GH_MERGE_BASE_BAD_KEY: &str = "branch..gh-merge-base";
+
+fn run_git_output(repo_path: &Path, operation: &str, args: &[&str]) -> Result<Output> {
+    crate::process::command("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| GwtError::GitOperationFailed {
+            operation: operation.to_string(),
+            details: e.to_string(),
+        })
+}
+
+fn run_for_each_ref_with_repair(repo_path: &Path, format_arg: &str, refs: &str) -> Result<Output> {
+    let args = ["for-each-ref", format_arg, refs];
+    let output = run_git_output(repo_path, "for-each-ref", &args)?;
+    if output.status.success() {
+        return Ok(output);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !should_attempt_gh_merge_base_repair(repo_path, &stderr) {
+        return Err(GwtError::GitOperationFailed {
+            operation: "for-each-ref".to_string(),
+            details: stderr,
+        });
+    }
+
+    warn!(
+        category = "git",
+        repo_path = %repo_path.display(),
+        "Detected invalid gh-merge-base branch config, attempting local config repair"
+    );
+
+    match repair_bad_gh_merge_base_config(repo_path) {
+        Ok(true) => {
+            let retry = run_git_output(repo_path, "for-each-ref", &args)?;
+            if retry.status.success() {
+                return Ok(retry);
+            }
+            Err(GwtError::GitOperationFailed {
+                operation: "for-each-ref".to_string(),
+                details: String::from_utf8_lossy(&retry.stderr).to_string(),
+            })
+        }
+        Ok(false) => Err(GwtError::GitOperationFailed {
+            operation: "for-each-ref".to_string(),
+            details: stderr,
+        }),
+        Err(repair_err) => Err(GwtError::GitOperationFailed {
+            operation: "for-each-ref".to_string(),
+            details: format!(
+                "{}\nconfig repair failed: {}",
+                stderr.trim_end(),
+                repair_err
+            ),
+        }),
+    }
+}
+
+fn should_attempt_gh_merge_base_repair(repo_path: &Path, stderr: &str) -> bool {
+    let lowered = stderr.to_ascii_lowercase();
+    if !lowered.contains("bad config") {
+        return false;
+    }
+    if lowered.contains("gh-merge-base") {
+        return true;
+    }
+    config_contains_repairable_entries(repo_path)
+}
+
+fn config_contains_repairable_entries(repo_path: &Path) -> bool {
+    let Some(config_path) = resolve_repo_config_path(repo_path) else {
+        return false;
+    };
+    let Ok(contents) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let (_, changed) = strip_bad_gh_merge_base_entries(&contents);
+    changed
+}
+
+fn repair_bad_gh_merge_base_config(repo_path: &Path) -> std::io::Result<bool> {
+    let Some(config_path) = resolve_repo_config_path(repo_path) else {
+        return Ok(false);
+    };
+
+    let contents = std::fs::read_to_string(&config_path)?;
+    let (sanitized, changed) = strip_bad_gh_merge_base_entries(&contents);
+    if !changed {
+        return Ok(false);
+    }
+
+    write_config_atomic(&config_path, &sanitized)?;
+    Ok(true)
+}
+
+fn resolve_repo_config_path(repo_path: &Path) -> Option<PathBuf> {
+    let dot_git = repo_path.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git.join("config"));
+    }
+
+    if dot_git.is_file() {
+        let gitdir = resolve_gitdir_from_dot_git_file(&dot_git)?;
+        return Some(gitdir.join("config"));
+    }
+
+    let bare_config = repo_path.join("config");
+    if bare_config.is_file() {
+        return Some(bare_config);
+    }
+
+    None
+}
+
+fn resolve_gitdir_from_dot_git_file(dot_git_path: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(dot_git_path).ok()?;
+    let raw = content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+        .trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        dot_git_path.parent().map(|p| p.join(path))
+    }
+}
+
+fn strip_bad_gh_merge_base_entries(contents: &str) -> (String, bool) {
+    let mut sanitized = String::with_capacity(contents.len());
+    let mut changed = false;
+    let mut in_empty_branch_section = false;
+
+    for raw_line in contents.split_inclusive('\n') {
+        let line = raw_line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        let trimmed = line.trim();
+        let is_section_header = trimmed.starts_with('[') && trimmed.ends_with(']');
+
+        if is_section_header {
+            in_empty_branch_section = is_empty_branch_section_header(trimmed);
+            if in_empty_branch_section {
+                changed = true;
+                continue;
+            }
+        } else if in_empty_branch_section {
+            changed = true;
+            continue;
+        }
+
+        if is_bad_gh_merge_base_key_assignment(trimmed) {
+            changed = true;
+            continue;
+        }
+
+        sanitized.push_str(raw_line);
+    }
+
+    if !changed {
+        (contents.to_string(), false)
+    } else {
+        (sanitized, true)
+    }
+}
+
+fn is_empty_branch_section_header(trimmed: &str) -> bool {
+    let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .map(str::trim)
+    else {
+        return false;
+    };
+
+    if !inner.starts_with("branch") {
+        return false;
+    }
+
+    let rest = inner["branch".len()..].trim();
+    rest == "\"\"" || rest == "''"
+}
+
+fn is_bad_gh_merge_base_key_assignment(trimmed: &str) -> bool {
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+        return false;
+    }
+
+    let Some((key, _value)) = trimmed.split_once('=') else {
+        return false;
+    };
+
+    key.trim() == GH_MERGE_BASE_BAD_KEY
+}
+
+fn write_config_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let tmp_path = path.with_file_name(format!("{file_name}.gwt.tmp"));
+
+    std::fs::write(&tmp_path, contents.as_bytes())?;
+    if let Err(_rename_err) = std::fs::rename(&tmp_path, path) {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+    }
+
+    Ok(())
+}
 
 fn run_git_with_timeout(
     repo_path: &Path,
@@ -179,25 +398,11 @@ impl Branch {
             "Listing branches"
         );
 
-        let output = crate::process::command("git")
-            .args([
-                "for-each-ref",
-                "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)%09%(committerdate:unix)%09%(upstream:track)",
-                "refs/heads/",
-            ])
-            .current_dir(repo_path)
-            .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "for-each-ref".to_string(),
-                details: e.to_string(),
-            })?;
-
-        if !output.status.success() {
-            return Err(GwtError::GitOperationFailed {
-                operation: "for-each-ref".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
-            });
-        }
+        let output = run_for_each_ref_with_repair(
+            repo_path,
+            "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)%09%(committerdate:unix)%09%(upstream:track)",
+            "refs/heads/",
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut branches = Vec::new();
@@ -259,25 +464,11 @@ impl Branch {
             "Listing remote branches"
         );
 
-        let output = crate::process::command("git")
-            .args([
-                "for-each-ref",
-                "--format=%(refname:short)%09%(objectname:short)%09%(committerdate:unix)",
-                "refs/remotes/",
-            ])
-            .current_dir(repo_path)
-            .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "for-each-ref".to_string(),
-                details: e.to_string(),
-            })?;
-
-        if !output.status.success() {
-            return Err(GwtError::GitOperationFailed {
-                operation: "for-each-ref".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
-            });
-        }
+        let output = run_for_each_ref_with_repair(
+            repo_path,
+            "--format=%(refname:short)%09%(objectname:short)%09%(committerdate:unix)",
+            "refs/remotes/",
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut branches = Vec::new();
@@ -950,6 +1141,7 @@ impl std::fmt::Display for DivergenceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -985,6 +1177,15 @@ mod tests {
         run_git(repo_path, &["commit", "-m", message]);
     }
 
+    fn append_to_local_config(repo_path: &Path, content: &str) {
+        let config_path = repo_path.join(".git").join("config");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config_path)
+            .unwrap();
+        writeln!(file, "\n{content}").unwrap();
+    }
+
     fn create_repo_with_remote() -> (TempDir, String) {
         let temp = create_test_repo();
         let origin = TempDir::new().unwrap();
@@ -1013,6 +1214,33 @@ mod tests {
         let branches = Branch::list(temp.path()).unwrap();
         assert_eq!(branches.len(), 1);
         assert!(branches[0].is_current);
+    }
+
+    #[test]
+    fn test_list_branches_recovers_from_bad_gh_merge_base_config() {
+        let temp = create_test_repo();
+        append_to_local_config(temp.path(), "branch..gh-merge-base = origin/main");
+
+        let branches = Branch::list(temp.path()).unwrap();
+        assert!(!branches.is_empty());
+
+        let config = std::fs::read_to_string(temp.path().join(".git").join("config")).unwrap();
+        assert!(!config.contains("branch..gh-merge-base"));
+    }
+
+    #[test]
+    fn test_list_remote_recovers_from_empty_branch_section_config() {
+        let temp = create_test_repo();
+        append_to_local_config(
+            temp.path(),
+            "branch..gh-merge-base = origin/main\n[branch \"\"]\n\tgh-merge-base = origin/main",
+        );
+
+        let _ = Branch::list_remote(temp.path()).unwrap();
+
+        let config = std::fs::read_to_string(temp.path().join(".git").join("config")).unwrap();
+        assert!(!config.contains("[branch \"\"]"));
+        assert!(!config.contains("gh-merge-base"));
     }
 
     #[test]

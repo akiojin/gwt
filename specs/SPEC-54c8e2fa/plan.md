@@ -5,6 +5,7 @@
 ## 概要
 
 Issue起点 launch のブランチ作成/リンクを backend で一体化し、`linked branch` を保証する。`already exists` を単純成功扱いせず、実リンク確認を行う。
+併せて Issue #1278 の再発防止として、`gh-merge-base` 起因の壊れた repo config をブランチ一覧取得時に限定自己修復する。
 
 ## 実装フェーズ
 
@@ -48,7 +49,24 @@ Issue起点 launch のブランチ作成/リンクを backend で一体化し、
 2. `gwt-tauri` unit: request struct と issueNumber分岐の振る舞い検証
 3. `gwt-gui` unit: launch後追い invoke が消えていることの回帰確認
 
+### Phase 5: Issue #1278 hardening（config自己修復 + 入力検証）
+
+**ファイル**: `crates/gwt-core/src/git/branch.rs`, `crates/gwt-core/src/git/issue.rs`
+
+1. `for-each-ref` 実行失敗時、`bad config variable` + `gh-merge-base` を検出した場合のみ repo config 修復を実行
+2. 修復対象は `branch..gh-merge-base` 行と `[branch ""]` セクションに限定
+3. 修復後に `for-each-ref` を1回だけ再試行し、再失敗時は既存 `E1013` を返却
+4. `create_or_verify_linked_branch` で空ブランチ名を事前バリデーションし、`gh` 実行前にエラー終了
+
+## TDD順序（必須）
+
+1. `branch.rs` に再現テストを追加し、修復未実装で RED を確認する
+2. `issue.rs` に空ブランチ名の再現テストを追加し、バリデーション未実装で RED を確認する
+3. 実装を追加して両テストを GREEN 化する
+4. `cargo test -p gwt-core git::branch` / `cargo test -p gwt-core git::issue` を完走する
+
 ## リスク
 
 - `gh issue develop --list` の出力仕様差分で判定漏れが起こる可能性があるため、複数フォーマットに対応した判定関数を実装する
 - backend rollback の条件を誤ると既存ブランチを削除する危険があるため、「新規作成フラグ」の明示管理を必須にする
+- config 修復対象を広げすぎると意図しない設定破壊の危険があるため、除去対象キー/セクションを厳密固定する
