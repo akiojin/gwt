@@ -2304,19 +2304,13 @@ describe("AgentLaunchForm", () => {
     expect(rendered.queryByLabelText("Description")).toBeNull();
   });
 
-  // ======== Phase 5 (T037-T046): Fallback + AI not configured ========
+  // ======== Phase 5: AI launch payload + AI not configured ========
 
-  it("uses AI-suggested branch name for launch request", async () => {
-    invokeMock.mockImplementation(async (cmd: string, args?: { description?: string }) => {
+  it("submits AI description to launch request without pre-calling suggest_branch_name", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
       if (cmd === "list_worktree_branches") return [{ name: "main" }];
       if (cmd === "list_remote_branches") return [];
-      if (cmd === "suggest_branch_name") {
-        if (args?.description === "my feature") {
-          return { status: "ok", suggestion: "feature/my-feature", error: null };
-        }
-        return { status: "ok", suggestion: "feature/test", error: null };
-      }
       return [];
     });
 
@@ -2348,105 +2342,12 @@ describe("AgentLaunchForm", () => {
       expect(onLaunch).toHaveBeenCalledTimes(1);
     });
 
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "suggest_branch_name")).toBe(false);
+
     const request = onLaunch.mock.calls[0][0] as any;
-    expect(request.branch).toBe("feature/my-feature");
-    expect(request.createBranch).toEqual({ name: "feature/my-feature", base: "main" });
-    expect(request.aiBranchDescription).toBeUndefined();
-  });
-
-  it("falls back to Direct mode with error banner when AI suggestion fails", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
-      if (cmd === "list_worktree_branches") return [{ name: "main" }];
-      if (cmd === "list_remote_branches") return [];
-      if (cmd === "suggest_branch_name") return { status: "error", suggestion: "", error: "timeout" };
-      return [];
-    });
-
-    const onLaunch = vi.fn().mockResolvedValue(undefined);
-    const rendered = await renderLaunchForm({
-      projectPath: "/tmp/project",
-      selectedBranch: "",
-      onLaunch,
-      onClose: vi.fn(),
-    });
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
-    });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
-
-    // Enter description in AI Suggest mode (default)
-    await fireEvent.input(rendered.getByLabelText("Description"), { target: { value: "my feature" } });
-
-    // Wait for base branch to be loaded and select it
-    await waitFor(() => {
-      const baseSelect = rendered.getByLabelText("Base Branch") as HTMLSelectElement;
-      expect(baseSelect).toBeTruthy();
-      const options = Array.from(baseSelect.options).map((o) => o.value);
-      expect(options).toContain("main");
-    });
-    await fireEvent.change(rendered.getByLabelText("Base Branch"), { target: { value: "main" } });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Launch" }));
-
-    await waitFor(() => {
-      expect(rendered.queryByText(/AI branch name generation failed/)).not.toBeNull();
-    });
-
-    expect(onLaunch).not.toHaveBeenCalled();
-
-    // Should switch to Direct mode
-    expect(rendered.queryByLabelText("New Branch Name")).not.toBeNull();
-  });
-
-  it("clears fallback error banner when mode is switched", async () => {
-    invokeMock.mockImplementation(async (cmd: string, args?: { description?: string }) => {
-      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
-      if (cmd === "list_worktree_branches") return [{ name: "main" }];
-      if (cmd === "list_remote_branches") return [];
-      if (cmd === "suggest_branch_name") {
-        if (args?.description === "my feature") {
-          return { status: "error", suggestion: "", error: "timeout" };
-        }
-        return { status: "ok", suggestion: "feature/test", error: null };
-      }
-      return [];
-    });
-
-    const onLaunch = vi.fn().mockResolvedValue(undefined);
-    const rendered = await renderLaunchForm({
-      projectPath: "/tmp/project",
-      selectedBranch: "",
-      onLaunch,
-      onClose: vi.fn(),
-    });
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
-    });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
-    await fireEvent.input(rendered.getByLabelText("Description"), { target: { value: "my feature" } });
-
-    // Wait for base branch to be loaded and select it
-    await waitFor(() => {
-      const baseSelect = rendered.getByLabelText("Base Branch") as HTMLSelectElement;
-      const options = Array.from(baseSelect.options).map((o) => o.value);
-      expect(options).toContain("main");
-    });
-    await fireEvent.change(rendered.getByLabelText("Base Branch"), { target: { value: "main" } });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Launch" }));
-
-    await waitFor(() => {
-      expect(rendered.queryByText(/AI branch name generation failed/)).not.toBeNull();
-    });
-
-    // Switch back to AI Suggest - error should clear
-    await fireEvent.click(rendered.getByRole("button", { name: "AI Suggest" }));
-    expect(rendered.queryByText(/AI branch name generation failed/)).toBeNull();
+    expect(request.branch).toBe("");
+    expect(request.createBranch).toEqual({ name: "", base: "main" });
+    expect(request.aiBranchDescription).toBe("my feature");
   });
 
   it("disables AI Suggest segment when AI is not configured", async () => {

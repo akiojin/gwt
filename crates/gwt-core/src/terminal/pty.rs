@@ -92,17 +92,48 @@ fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
+fn strip_wrapping_quotes(value: &str) -> Option<&str> {
+    if value.len() < 2 {
+        return None;
+    }
+
+    let bytes = value.as_bytes();
+    let first = bytes[0];
+    let last = bytes[value.len() - 1];
+    let wrapped = (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'');
+    if wrapped {
+        Some(value[1..value.len() - 1].trim())
+    } else {
+        None
+    }
+}
+
+fn strip_wrapping_escaped_quotes(value: &str) -> Option<&str> {
+    if value.len() < 4 {
+        return None;
+    }
+
+    let wrapped = (value.starts_with("\\\"") && value.ends_with("\\\""))
+        || (value.starts_with("\\'") && value.ends_with("\\'"));
+    if wrapped {
+        Some(value[2..value.len() - 2].trim())
+    } else {
+        None
+    }
+}
+
 fn strip_wrapping_quotes_recursive(value: &str) -> String {
     let mut current = value.trim();
-    while current.len() >= 2 {
-        let bytes = current.as_bytes();
-        let first = bytes[0];
-        let last = bytes[current.len() - 1];
-        let wrapped = (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'');
-        if !wrapped {
-            break;
+    loop {
+        if let Some(next) = strip_wrapping_quotes(current) {
+            current = next;
+            continue;
         }
-        current = current[1..current.len() - 1].trim();
+        if let Some(next) = strip_wrapping_escaped_quotes(current) {
+            current = next;
+            continue;
+        }
+        break;
     }
     current.to_string()
 }
@@ -720,6 +751,14 @@ mod tests {
             strip_wrapping_quotes_recursive("\"C:\\Tools\\npx.cmd\""),
             "C:\\Tools\\npx.cmd"
         );
+        assert_eq!(
+            strip_wrapping_quotes_recursive(r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#),
+            r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+        assert_eq!(
+            strip_wrapping_quotes_recursive(r#"\"C:\Tools\npx.cmd\""#),
+            r#"C:\Tools\npx.cmd"#
+        );
     }
 
     #[test]
@@ -734,6 +773,14 @@ mod tests {
     fn is_windows_batch_command_for_platform_detects_wrapped_cmd_extension() {
         assert!(is_windows_batch_command_for_platform(
             "'\"C:\\Program Files\\nodejs\\npx.cmd\"'",
+            |_| None
+        ));
+    }
+
+    #[test]
+    fn is_windows_batch_command_for_platform_detects_escaped_wrapped_cmd_extension() {
+        assert!(is_windows_batch_command_for_platform(
+            r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
             |_| None
         ));
     }
@@ -761,6 +808,28 @@ mod tests {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             "'\"C:\\Program Files\\nodejs\\npx.cmd\"'",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "\"C:\\Program Files\\nodejs\\npx.cmd\" --yes @openai/codex@latest".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_normalizes_escaped_wrapped_batch_path() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
             &args,
             true,
             || "pwsh".to_string(),

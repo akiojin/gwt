@@ -9,7 +9,7 @@
 
 - なし（既存のAIブランチ提案機能を置換する）
 
-**入力**: ユーザー説明: "Launch AgentのブランチAI提案機能を改善する。現在の「Suggestモーダルで3候補から選択」を廃止し、「Direct入力 or AI提案」のセグメンテッドボタン切り替え式にする。AI提案モードではDescription単行入力のみ表示し、Launch後の起動プロセス内（worktreeステップ）でAIが1つだけブランチ名を自動生成する。生成されたブランチ名でそのまま（確認なし）worktreeを作成する。モード選択はlocalStorageで永続化。AI失敗時はDirectモードにフォールバック+エラーバナー表示。AI未設定環境ではAI Suggestセグメントをdisabled。fromIssueタブには適用しない（manualタブのみ）。既存のsuggest_branch_namesコマンドを1つ生成に改修。PrefixもAIに完全委任。"
+**入力**: ユーザー説明: "Launch AgentのブランチAI提案機能を改善する。現在の「Suggestモーダルで3候補から選択」を廃止し、「Direct入力 or AI提案」のセグメンテッドボタン切り替え式にする。AI提案モードではDescription単行入力のみ表示し、Launch後の起動プロセス内（worktreeステップ）でAIが1つだけブランチ名を自動生成する。生成されたブランチ名でそのまま（確認なし）worktreeを作成する。モード選択はlocalStorageで永続化。AI失敗時はPrepare Launchモーダルで失敗表示する。AI未設定環境ではAI Suggestセグメントをdisabled。fromIssueタブには適用しない（manualタブのみ）。既存のsuggest_branch_namesコマンドを1つ生成に改修。PrefixもAIに完全委任。"
 
 ## 背景
 
@@ -61,16 +61,16 @@
 
 ---
 
-### ユーザーストーリー 4 - AI提案失敗時のフォールバック (優先度: P1)
+### ユーザーストーリー 4 - AI提案失敗時のエラー表示 (優先度: P1)
 
 ユーザーとして、AI提案が失敗しても手動入力でLaunchを続行したい。
 
-**独立したテスト**: AI提案が失敗すると、フォームに戻りDirectモードに切り替わり、警告バナーが表示される
+**独立したテスト**: AI提案が失敗すると、Prepare Launchモーダル内でエラーが表示される
 
 **受け入れシナリオ**:
 
-1. **前提条件** AI Suggestモードで説明入力済み、**操作** Launch後にAI提案がAPIエラーを返す、**期待結果** 起動プロセスが中断し、フォームに戻り、Directモードに自動切替、フォーム上部に"AI suggestion failed. Please enter branch name manually."バナーが表示される
-2. **前提条件** AI Suggestモードで説明入力済み、**操作** Launch後にAI提案がタイムアウト、**期待結果** 同上のフォールバック動作
+1. **前提条件** AI Suggestモードで説明入力済み、**操作** Launch後にAI提案がAPIエラーを返す、**期待結果** 起動プロセスが中断し、Prepare Launchモーダルに `[E2001] AI branch name generation failed: ...` が表示される
+2. **前提条件** AI Suggestモードで説明入力済み、**操作** Launch後にAI提案がタイムアウト、**期待結果** 同様にPrepare Launchモーダルで失敗が表示される
 
 ---
 
@@ -87,11 +87,12 @@
 ## エッジケース
 
 - AI未設定環境: AI SuggestセグメントをdisabledにしてDirectモードを強制
-- AI応答が空文字やパース不能: フォールバック動作（Directモードに切替+エラーバナー表示）
+- AI応答が空文字やパース不能: Launchを失敗として終了し、Prepare Launchモーダルにエラー表示
 - 起動プロセスのCancel: 通常のCancel処理（launch全体を中止）
 - AIが生成したブランチ名が既に存在: 既存のブランチ重複エラーハンドリングに従う
-- ネットワーク障害: AI提案のHTTPエラーとしてフォールバック動作
+- ネットワーク障害: AI提案のHTTPエラーとしてPrepare Launchモーダルにエラー表示
 - 永続化されたモードがAI Suggestだが、AI設定が後から削除された場合: Directモードに自動降格
+- AI Suggest経路でフロント側 `branch` が空の場合でも、成功時はタブ表示/集計で実ブランチ名に解決されること
 
 ## 要件 *(必須)*
 
@@ -103,7 +104,7 @@
 - **FR-004**: AI Suggestモードでは、Launch後の起動プロセス内（worktreeステップ）でAIにブランチ名を1つ生成させる
 - **FR-005**: AIはPrefix（feature/bugfix/hotfix/release/）を含む完全なブランチ名を1つ生成する
 - **FR-006**: 生成されたブランチ名でそのままworktreeを作成する（ユーザー確認なし）
-- **FR-007**: AI提案失敗時はフォームに戻り、Directモードに自動切替し、フォーム上部にエラーバナーを表示する。バナーはモード切替時（Direct⇔AI Suggest）に自動消去する
+- **FR-007**: AI提案失敗時は起動ジョブを失敗として終了し、Prepare Launchモーダルのエラー表示に失敗内容（`[E2001]`）を表示する
 - **FR-008**: 選択したモード（Direct / AI Suggest）を永続化し、次回フォーム起動時に復元する
 - **FR-009**: AI未設定環境ではAI Suggestセグメントをdisabledにする。AI設定の有無はフォーム呈示時にバックエンドへ問い合わせて判定する
 - **FR-010**: AI Suggestモードで説明が空の場合、Launchボタンをdisabledにする
@@ -111,6 +112,7 @@
 - **FR-012**: 既存のブランチ名提案機能を1つ生成に改修する
 - **FR-013**: fromIssueタブにはDirect/AI Suggest切り替えを適用しない
 - **FR-014**: Description入力値はモード切替時もクリアせず内部で保持し、AI Suggestモードに戻した際に復元する
+- **FR-015**: AI Suggest経路で `[E1004] Branch already exists` が返った場合、`Use Existing Branch` 再実行時に同一ブランチ名で再launchできるようにブランチ名コンテキストを保持する
 
 ### 非機能要件
 
@@ -127,7 +129,7 @@
 ## 成功基準 *(必須)*
 
 - **SC-001**: AI SuggestモードでDescription入力→Launch→ブランチ名自動生成→worktree作成が1クリックで完了する
-- **SC-002**: AI提案失敗時にDirectモードへフォールバックし、ユーザーが手動入力で続行できる
+- **SC-002**: AI提案失敗時にPrepare Launchモーダルで失敗内容が表示される
 - **SC-003**: モード選択が次回起動時に正しく復元される
 - **SC-004**: 既存のSuggestモーダルのコードがすべて削除されている
 - **SC-005**: 全テストがパスする

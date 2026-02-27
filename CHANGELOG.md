@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.13.3] - 2026-02-27
+
+### Bug Fixes
+
+- Auto-repair invalid branch..gh-merge-base config for gh workflows (#1281)
+- Recover branch listing from invalid gh-merge-base config (#1279)
+
+### Documentation
+
+- Strengthen CLAUDE workflow with plan and verification rules (#1280)
+
+## [7.13.2] - 2026-02-27
+
+### Bug Fixes
+
+- Normalize escaped windows batch command wrappers (#1265) (#1273)
+- **gui:** Prepare launchでAIブランチ生成実行とE1004回帰修正 (#1274)
+
 ## [7.13.1] - 2026-02-26
 
 ### Bug Fixes
