@@ -1037,23 +1037,41 @@ mod tests {
     fn platform_echo_command() -> (String, Vec<String>, Option<String>, bool) {
         if cfg!(windows) {
             (
-                "echo".to_string(),
-                vec!["hello".to_string()],
-                Some("cmd".to_string()),
-                false,
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "Write-Output hello".to_string(),
+                ],
+                None,
+                true,
             )
         } else {
-            ("/bin/echo".to_string(), vec!["hello".to_string()], None, false)
+            (
+                "/bin/echo".to_string(),
+                vec!["hello".to_string()],
+                None,
+                false,
+            )
         }
     }
 
     fn platform_env_command() -> (String, Vec<String>, Option<String>, bool) {
         if cfg!(windows) {
             (
-                "set".to_string(),
-                vec![],
-                Some("cmd".to_string()),
-                false,
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "Get-ChildItem Env: | ForEach-Object { \"{0}={1}\" -f $_.Name, $_.Value }"
+                        .to_string(),
+                ],
+                None,
+                true,
             )
         } else {
             ("/usr/bin/env".to_string(), vec![], None, false)
@@ -1063,10 +1081,16 @@ mod tests {
     fn platform_success_exit_command() -> (String, Vec<String>, Option<String>, bool) {
         if cfg!(windows) {
             (
-                "exit".to_string(),
-                vec!["0".to_string()],
-                Some("cmd".to_string()),
-                false,
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "exit 0".to_string(),
+                ],
+                None,
+                true,
             )
         } else {
             ("/usr/bin/true".to_string(), vec![], None, false)
@@ -1079,7 +1103,7 @@ mod tests {
                 "gwt-nonexistent-command-for-pty-test-xyz.exe".to_string(),
                 vec![],
                 None,
-                false,
+                true,
             )
         } else {
             (
