@@ -6,6 +6,7 @@ use gwt_core::git::Remote;
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
 use serde::Serialize;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 const CLAUDE_MD_DEFAULT_CONTENT: &str = r#"# CLAUDE.md
@@ -91,7 +92,9 @@ fn resolve_worktree_path_for_branch(repo_path: &Path, branch_ref: &str) -> Resul
     let remotes = Remote::list(repo_path).unwrap_or_default();
     let normalized = strip_known_remote_prefix(branch_ref, &remotes);
 
-    let mut worktree = manager.get_by_branch_basic(normalized).map_err(|e| e.to_string())?;
+    let mut worktree = manager
+        .get_by_branch_basic(normalized)
+        .map_err(|e| e.to_string())?;
     if worktree.is_none() && normalized != branch_ref {
         worktree = manager
             .get_by_branch_basic(branch_ref)
@@ -112,10 +115,15 @@ fn resolve_worktree_path_for_branch(repo_path: &Path, branch_ref: &str) -> Resul
 fn ensure_claude_md(path: &Path) -> Result<bool, String> {
     match std::fs::read_to_string(path) {
         Ok(content) if !content.trim().is_empty() => Ok(false),
-        Ok(_) | Err(_) => {
+        Ok(_) => {
             write_atomic(path, CLAUDE_MD_DEFAULT_CONTENT).map_err(|e| e.to_string())?;
             Ok(true)
         }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            write_atomic(path, CLAUDE_MD_DEFAULT_CONTENT).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        Err(err) => Err(err.to_string()),
     }
 }
 
@@ -132,10 +140,11 @@ fn ensure_claude_ref_file(path: &Path) -> Result<bool, String> {
                 Ok(true)
             }
         }
-        Err(_) => {
+        Err(err) if err.kind() == ErrorKind::NotFound => {
             write_atomic(path, &format!("{CLAUDE_REF}\n")).map_err(|e| e.to_string())?;
             Ok(true)
         }
+        Err(err) => Err(err.to_string()),
     }
 }
 
@@ -241,8 +250,9 @@ mod tests {
         let (_temp, repo_path, worktree_path) = setup_repo_with_feature_worktree();
         let project_path = repo_path.to_string_lossy().to_string();
 
-        let out = check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
-            .expect("check/fix should succeed");
+        let out =
+            check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
+                .expect("check/fix should succeed");
 
         assert_eq!(out.checked_files, vec![CLAUDE_MD, AGENTS_MD, GEMINI_MD]);
         assert_eq!(out.updated_files, vec![CLAUDE_MD, AGENTS_MD, GEMINI_MD]);
@@ -252,14 +262,17 @@ mod tests {
             .expect("canonicalize actual worktree path");
         assert_eq!(actual_worktree_path, expected_worktree_path);
 
-        let claude = std::fs::read_to_string(worktree_path.join(CLAUDE_MD)).expect("read CLAUDE.md");
+        let claude =
+            std::fs::read_to_string(worktree_path.join(CLAUDE_MD)).expect("read CLAUDE.md");
         assert!(claude.contains("## ワークフロー設計"));
         assert!(claude.contains("## タスク管理"));
 
-        let agents = std::fs::read_to_string(worktree_path.join(AGENTS_MD)).expect("read AGENTS.md");
+        let agents =
+            std::fs::read_to_string(worktree_path.join(AGENTS_MD)).expect("read AGENTS.md");
         assert_eq!(agents, "@CLAUDE.md\n");
 
-        let gemini = std::fs::read_to_string(worktree_path.join(GEMINI_MD)).expect("read GEMINI.md");
+        let gemini =
+            std::fs::read_to_string(worktree_path.join(GEMINI_MD)).expect("read GEMINI.md");
         assert_eq!(gemini, "@CLAUDE.md\n");
     }
 
@@ -277,8 +290,9 @@ mod tests {
         std::fs::write(&gemini_path, "@CLAUDE.md\ncustom gemini instructions\n")
             .expect("write GEMINI.md");
 
-        let out = check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
-            .expect("check/fix should succeed");
+        let out =
+            check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
+                .expect("check/fix should succeed");
 
         assert_eq!(out.updated_files, vec![AGENTS_MD]);
 
@@ -298,7 +312,34 @@ mod tests {
         let (_temp, repo_path, _worktree_path) = setup_repo_with_feature_worktree();
         let project_path = repo_path.to_string_lossy().to_string();
 
-        let out = check_and_fix_agent_instruction_docs(project_path, "feature/not-found".to_string());
+        let out =
+            check_and_fix_agent_instruction_docs(project_path, "feature/not-found".to_string());
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn ensure_claude_md_returns_error_for_non_utf8_content_without_overwrite() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let file_path = temp.path().join(CLAUDE_MD);
+        let original = vec![0xff, 0xfe, 0x41, 0x00];
+        std::fs::write(&file_path, &original).expect("write non-utf8 CLAUDE.md");
+
+        let out = ensure_claude_md(&file_path);
+        assert!(out.is_err());
+        let after = std::fs::read(&file_path).expect("read CLAUDE.md bytes");
+        assert_eq!(after, original);
+    }
+
+    #[test]
+    fn ensure_claude_ref_file_returns_error_for_non_utf8_content_without_overwrite() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let file_path = temp.path().join(AGENTS_MD);
+        let original = vec![0xff, 0xfe, 0x41, 0x00];
+        std::fs::write(&file_path, &original).expect("write non-utf8 AGENTS.md");
+
+        let out = ensure_claude_ref_file(&file_path);
+        assert!(out.is_err());
+        let after = std::fs::read(&file_path).expect("read AGENTS.md bytes");
+        assert_eq!(after, original);
     }
 }

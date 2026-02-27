@@ -119,6 +119,11 @@
     'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
   const DEFAULT_TERMINAL_FONT_FAMILY =
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
+  const AGENT_INSTRUCTION_DOC_FILES = [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+  ] as const;
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -1516,15 +1521,24 @@
     platform: string,
     shellId?: "wsl" | "powershell" | "cmd",
   ): string {
-    const files = "CLAUDE.md AGENTS.md GEMINI.md";
+    const files = AGENT_INSTRUCTION_DOC_FILES.join(" ");
+    const codeArgs = AGENT_INSTRUCTION_DOC_FILES.map((file) => `-g ${file}`).join(
+      " ",
+    );
+    const powershellNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
+      (file) => `notepad ${file}`,
+    ).join("; ");
+    const cmdNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
+      (file) => `notepad ${file}`,
+    ).join(" & ");
     if (isWindowsPlatform(platform)) {
       if (shellId === "wsl") {
         return `vi ${files}`;
       }
       if (shellId === "powershell") {
-        return "if (Get-Command code -ErrorAction SilentlyContinue) { code -g CLAUDE.md -g AGENTS.md -g GEMINI.md } else { notepad CLAUDE.md; notepad AGENTS.md; notepad GEMINI.md }";
+        return `if (Get-Command code -ErrorAction SilentlyContinue) { code ${codeArgs} } else { ${powershellNotepadFallback} }`;
       }
-      return "where code >NUL 2>&1 && (code -g CLAUDE.md -g AGENTS.md -g GEMINI.md) || (notepad CLAUDE.md & notepad AGENTS.md & notepad GEMINI.md)";
+      return `where code >NUL 2>&1 && (code ${codeArgs}) || (${cmdNotepadFallback})`;
     }
 
     return `vi ${files}`;
