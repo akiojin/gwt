@@ -30,6 +30,13 @@
   --ui-font-xl:  calc(var(--ui-font-base) + 3px);
   --ui-font-2xl: calc(var(--ui-font-base) + 5px);
   --ui-font-3xl: calc(var(--ui-font-base) + 7px);
+  --z-modal-base: 1000;
+  --z-modal-nested: 1100;
+  --z-modal-stacked: 2000;
+  --z-modal-report: 3000;
+  --z-toast: 2500;
+  --z-quit-toast: 4000;
+  --z-overlay-flash: 9999;
 }
 
 * {
@@ -55,7 +62,19 @@ html, body, #app {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.6);
-  z-index: 1000;
+  z-index: var(--z-modal-base);
+}
+
+.modal-overlay-nested {
+  z-index: var(--z-modal-nested);
+}
+
+.modal-overlay-stacked {
+  z-index: var(--z-modal-stacked);
+}
+
+.modal-overlay-report {
+  z-index: var(--z-modal-report);
 }
 
 .modal-dialog-shell {
