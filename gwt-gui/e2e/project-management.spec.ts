@@ -118,6 +118,7 @@ test("opens project and displays branch list in sidebar", async ({
 test("probe_path with gwtProject navigates to project", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
+  await waitForInvokeCommand(page, "open_project");
   const log = await getInvokeLog(page);
   expect(log).toContain("probe_path");
   expect(log).toContain("open_project");

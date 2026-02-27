@@ -108,18 +108,63 @@ fn strip_wrapping_quotes(value: &str) -> Option<&str> {
     }
 }
 
+fn escaped_wrapping_quote_prefix(value: &str) -> Option<(usize, u8)> {
+    let bytes = value.as_bytes();
+    let mut slash_count = 0;
+    while slash_count < bytes.len() && bytes[slash_count] == b'\\' {
+        slash_count += 1;
+    }
+
+    if slash_count == 0 || slash_count >= bytes.len() {
+        return None;
+    }
+
+    let quote = bytes[slash_count];
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+
+    Some((slash_count, quote))
+}
+
+fn escaped_wrapping_quote_suffix(value: &str, quote: u8) -> Option<usize> {
+    let bytes = value.as_bytes();
+    if bytes.last().copied()? != quote || bytes.len() < 2 {
+        return None;
+    }
+
+    let mut slash_count = 0usize;
+    let mut idx = bytes.len() - 1;
+    while idx > 0 && bytes[idx - 1] == b'\\' {
+        slash_count += 1;
+        idx -= 1;
+    }
+
+    if slash_count == 0 {
+        None
+    } else {
+        Some(slash_count)
+    }
+}
+
 fn strip_wrapping_escaped_quotes(value: &str) -> Option<&str> {
     if value.len() < 4 {
         return None;
     }
 
-    let wrapped = (value.starts_with("\\\"") && value.ends_with("\\\""))
-        || (value.starts_with("\\'") && value.ends_with("\\'"));
-    if wrapped {
-        Some(value[2..value.len() - 2].trim())
-    } else {
-        None
+    let (prefix_slashes, quote) = escaped_wrapping_quote_prefix(value)?;
+    let suffix_slashes = escaped_wrapping_quote_suffix(value, quote)?;
+    if prefix_slashes != suffix_slashes {
+        return None;
     }
+
+    let prefix_len = prefix_slashes + 1;
+    let suffix_len = suffix_slashes + 1;
+    if value.len() < prefix_len + suffix_len {
+        return None;
+    }
+
+    Some(value[prefix_len..value.len() - suffix_len].trim())
 }
 
 fn strip_wrapping_quotes_recursive(value: &str) -> String {
@@ -759,6 +804,18 @@ mod tests {
             strip_wrapping_quotes_recursive(r#"\"C:\Tools\npx.cmd\""#),
             r#"C:\Tools\npx.cmd"#
         );
+        assert_eq!(
+            strip_wrapping_quotes_recursive(r#"'\\\"C:\Program Files\nodejs\npx.cmd\\\"'"#),
+            r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+        assert_eq!(
+            strip_wrapping_quotes_recursive(r#"\\\"C:\Tools\npx.cmd\\\""#),
+            r#"C:\Tools\npx.cmd"#
+        );
+        assert_eq!(
+            strip_wrapping_quotes_recursive(r#"\\\"C:\Tools\npx.cmd\""#),
+            r#"\\\"C:\Tools\npx.cmd\""#
+        );
     }
 
     #[test]
@@ -781,6 +838,14 @@ mod tests {
     fn is_windows_batch_command_for_platform_detects_escaped_wrapped_cmd_extension() {
         assert!(is_windows_batch_command_for_platform(
             r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
+            |_| None
+        ));
+    }
+
+    #[test]
+    fn is_windows_batch_command_for_platform_detects_double_escaped_wrapped_cmd_extension() {
+        assert!(is_windows_batch_command_for_platform(
+            r#"'\\\"C:\Program Files\nodejs\npx.cmd\\\"'"#,
             |_| None
         ));
     }
@@ -830,6 +895,28 @@ mod tests {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "\"C:\\Program Files\\nodejs\\npx.cmd\" --yes @openai/codex@latest".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_normalizes_double_escaped_wrapped_batch_path() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            r#"'\\\"C:\Program Files\nodejs\npx.cmd\\\"'"#,
             &args,
             true,
             || "pwsh".to_string(),

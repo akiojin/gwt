@@ -9,6 +9,7 @@ import {
   openRecentProject,
   setMockCommandResponses,
   standardBranchResponses,
+  detectedAgents,
   getInvokeLog,
 } from "./support/helpers";
 
@@ -188,7 +189,7 @@ test("shows current branch indicator asterisk", async ({ page }) => {
   await expect(mainBranch).toContainText("*");
 });
 
-test("shows agent-running indicator when is_agent_running is true", async ({
+test("shows agent-running indicator when branch has a running agent tab", async ({
   page,
 }) => {
   await page.goto("/");
@@ -196,13 +197,21 @@ test("shows agent-running indicator when is_agent_running is true", async ({
     list_worktree_branches: [
       branchMain,
       branchDevelop,
-      { ...branchFeature, is_agent_running: true },
+      { ...branchFeature, is_agent_running: true, agent_status: "running" },
     ],
     list_remote_branches: [],
     list_worktrees: [],
     fetch_pr_status: {
       statuses: {},
       ghStatus: { available: true, authenticated: true },
+    },
+    detect_agents: detectedAgents,
+    list_agent_versions: {
+      agentId: "codex",
+      package: "codex",
+      tags: ["latest"],
+      versions: ["0.99.0"],
+      source: "cache",
     },
   });
   await openRecentProject(page);
@@ -211,8 +220,26 @@ test("shows agent-running indicator when is_agent_running is true", async ({
     .locator(".branch-item")
     .filter({ hasText: branchFeature.name });
   await expect(featureBranch).toBeVisible();
-  // Agent running branches should have some visual indicator (pulse dot or similar)
-  await expect(featureBranch.locator(".agent-dot, .agent-indicator, .pulse")).toBeVisible();
+  await featureBranch.click();
+  await page
+    .locator(".worktree-summary-panel")
+    .getByRole("button", { name: "Launch Agent..." })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Launch Agent" })
+    .getByRole("button", { name: "Launch", exact: true })
+    .click();
+
+  await expect
+    .poll(async () => {
+      const log = await getInvokeLog(page);
+      return log.includes("start_launch_job");
+    })
+    .toBe(true);
+
+  await expect(
+    featureBranch.locator(".agent-indicator-slot .agent-pulse-dot"),
+  ).toBeVisible();
 });
 
 test("WorktreeSummaryPanel shows Launch Agent button for non-main branch", async ({

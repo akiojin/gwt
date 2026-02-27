@@ -40,10 +40,21 @@ jobs:
           fi
         timeout-minutes: 10
 
+  test-windows-rust:
+    name: Test (Rust, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Windows PTY regression tests
+        run: cargo test -p gwt-core terminal::pty -- --test-threads=1
+        timeout-minutes: 15
+
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, test-windows-rust]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
