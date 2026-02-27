@@ -278,7 +278,7 @@ test("PR badge shows open class for MERGEABLE state", async ({ page }) => {
   await expect(prBadge).toHaveClass(/open/);
 });
 
-test("PR badge shows unknown class for UNKNOWN state", async ({ page }) => {
+test("PR badge shows retrying class for UNKNOWN state", async ({ page }) => {
   await page.goto("/");
   await setMockCommandResponses(page, {
     list_worktree_branches: [branchMain, branchDevelop, branchFeature],
@@ -301,7 +301,8 @@ test("PR badge shows unknown class for UNKNOWN state", async ({ page }) => {
 
   const prBadge = page.locator(".pr-badge", { hasText: "#42" });
   await expect(prBadge).toBeVisible();
-  await expect(prBadge).toHaveClass(/unknown/);
+  await expect(prBadge).toHaveClass(/pulse/);
+  await expect(prBadge).toHaveClass(/unknown|checking/);
 });
 
 test("pr-status-updated event updates badge", async ({ page }) => {
