@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-spec-ops
-description: GitHub Issue-first SPEC operations for gwt (create/update/sync artifacts and project phase).
+description: GitHub Issue-first の仕様管理（SPEC）。要件定義・仕様作成・仕様策定・仕様設計・TDD設計・計画作成・タスク生成・品質チェックリスト生成を GitHub Issue (gwt-spec ラベル) 上で実行する。「仕様を書いて」「specを作成」「TDD」「要件定義」「plan/tasks を生成」「仕様の曖昧さ解消」「整合性分析」と言われたときに使用。
 ---
 
 # gwt Issue SPEC Ops
