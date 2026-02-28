@@ -557,7 +557,7 @@ fn to_review_comment_summary(comment: &ReviewComment) -> ReviewCommentSummary {
 fn is_failure_conclusion(conclusion: Option<&str>) -> bool {
     matches!(
         conclusion,
-        Some("failure" | "cancelled" | "timed_out" | "action_required")
+        Some("failure" | "cancelled" | "timed_out" | "action_required" | "startup_failure")
     )
 }
 
@@ -578,9 +578,15 @@ fn compute_non_required_checks_warning(check_suites: &[WorkflowRunInfo]) -> bool
 }
 
 fn has_changes_requested(reviews: &[ReviewInfo]) -> bool {
-    reviews
-        .iter()
-        .any(|review| review.state == "CHANGES_REQUESTED")
+    let mut latest_state_by_reviewer: HashMap<&str, &str> = HashMap::new();
+    for review in reviews {
+        // GraphQL reviews(last: N) returns chronological order within the returned page.
+        // Overwriting keeps the latest state for each reviewer in the sampled window.
+        latest_state_by_reviewer.insert(review.reviewer.as_str(), review.state.as_str());
+    }
+    latest_state_by_reviewer
+        .values()
+        .any(|state| *state == "CHANGES_REQUESTED")
 }
 
 fn is_unknown_merge_fields(mergeable: &str, merge_state_status: Option<&str>) -> bool {
@@ -1618,6 +1624,49 @@ mod tests {
         }];
         let state = compute_merge_ui_state("OPEN", "UNKNOWN", Some("UNKNOWN"), false, &checks, &[]);
         assert_eq!(state, "blocked");
+    }
+
+    #[test]
+    fn test_compute_merge_ui_state_blocked_by_startup_failure() {
+        let checks = vec![WorkflowRunInfo {
+            workflow_name: "Required CI".to_string(),
+            run_id: 21,
+            status: "completed".to_string(),
+            conclusion: Some("startup_failure".to_string()),
+            is_required: Some(true),
+        }];
+        let state = compute_merge_ui_state("OPEN", "MERGEABLE", Some("CLEAN"), false, &checks, &[]);
+        assert_eq!(state, "blocked");
+    }
+
+    #[test]
+    fn test_has_changes_requested_uses_latest_state_per_reviewer() {
+        let reviews = vec![
+            ReviewInfo {
+                reviewer: "alice".to_string(),
+                state: "CHANGES_REQUESTED".to_string(),
+            },
+            ReviewInfo {
+                reviewer: "alice".to_string(),
+                state: "APPROVED".to_string(),
+            },
+        ];
+        assert!(!has_changes_requested(&reviews));
+    }
+
+    #[test]
+    fn test_has_changes_requested_true_when_latest_state_is_changes_requested() {
+        let reviews = vec![
+            ReviewInfo {
+                reviewer: "alice".to_string(),
+                state: "APPROVED".to_string(),
+            },
+            ReviewInfo {
+                reviewer: "bob".to_string(),
+                state: "CHANGES_REQUESTED".to_string(),
+            },
+        ];
+        assert!(has_changes_requested(&reviews));
     }
 
     #[test]

@@ -164,6 +164,8 @@ describe("PrStatusSection", () => {
 
   it("renders checks warning badge for non-required check failure", async () => {
     const pr = makePrDetail({
+      mergeUiState: "mergeable",
+      nonRequiredChecksWarning: true,
       checkSuites: [
         { workflowName: "CI", runId: 1, status: "completed", conclusion: "success", isRequired: true },
         { workflowName: "Lint", runId: 2, status: "completed", conclusion: "failure", isRequired: false },
@@ -177,6 +179,8 @@ describe("PrStatusSection", () => {
 
   it("does not render checks warning when required checks are failing", async () => {
     const pr = makePrDetail({
+      mergeUiState: "blocked",
+      nonRequiredChecksWarning: false,
       checkSuites: [
         { workflowName: "CI", runId: 1, status: "completed", conclusion: "failure", isRequired: true },
         { workflowName: "Lint", runId: 2, status: "completed", conclusion: "failure", isRequired: false },
@@ -190,6 +194,8 @@ describe("PrStatusSection", () => {
     const pr = makePrDetail({
       mergeable: "UNKNOWN",
       mergeStateStatus: "UNKNOWN",
+      mergeUiState: "blocked",
+      nonRequiredChecksWarning: false,
       checkSuites: [
         { workflowName: "CI", runId: 1, status: "completed", conclusion: "failure", isRequired: true },
       ],
@@ -900,6 +906,21 @@ describe("PrStatusSection", () => {
 
       const badge = container.querySelector(".mergeable-badge");
       expect(badge?.textContent).toContain("Checking merge status...");
+    });
+
+    it("prefers retrying state over explicit mergeUiState from detail payload", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({
+        state: "OPEN",
+        mergeable: "MERGEABLE",
+        mergeUiState: "mergeable",
+      });
+      const { container } = await renderSection({ prDetail: pr, onMerge, retrying: true });
+
+      const badge = container.querySelector(".mergeable-badge");
+      expect(badge?.classList.contains("checking")).toBe(true);
+      expect(badge?.textContent).toContain("Checking merge status...");
+      expect(container.querySelector(".mergeable-badge-btn")).toBeNull();
     });
 
     it("does not apply .pulse class when retrying=false (default)", async () => {
