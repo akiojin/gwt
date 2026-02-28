@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 const SPEC_LABEL: &str = "gwt-spec";
+const PROJECT_FIELD_STATUS: &str = "Status";
+const PROJECT_FIELD_PHASE: &str = "Phase";
 const SECTION_SPEC: &str = "Spec";
 const SECTION_PLAN: &str = "Plan";
 const SECTION_TASKS: &str = "Tasks";
@@ -145,11 +147,11 @@ pub fn create_spec_issue(
     let placeholder_id = "new";
     let body = render_issue_body(placeholder_id, sections, &checklist);
 
-    let number = gh_issue_create_without_spec_label(repo_path, title, &body)?;
+    let number = gh_issue_create(repo_path, title, &body, None)?;
     // Re-render with the actual issue number as spec id.
     let spec_id = format!("#{number}");
     let body = render_issue_body(&spec_id, sections, &checklist);
-    gh_issue_edit_body(repo_path, number, title, &body)?;
+    gh_issue_edit(repo_path, number, title, &body, None)?;
 
     get_spec_issue_detail(repo_path, number)
 }
@@ -168,17 +170,13 @@ pub fn update_spec_issue(
 
     let existing = get_spec_issue_detail(repo_path, issue_number)?;
 
-    if let Some(expected) = expected_etag {
-        if !expected.trim().is_empty() && expected != existing.etag {
-            return Err("etag mismatch".to_string());
-        }
-    }
+    check_etag(expected_etag, &existing.etag)?;
 
     let checklist = parse_acceptance_checklist_from_body(&existing.body);
     let spec_id = format!("#{issue_number}");
     let body = render_issue_body(&spec_id, sections, &checklist);
 
-    gh_issue_edit_body(repo_path, issue_number, title, &body)?;
+    gh_issue_edit(repo_path, issue_number, title, &body, None)?;
     get_spec_issue_detail(repo_path, issue_number)
 }
 
@@ -205,16 +203,12 @@ pub fn upsert_spec_issue(
     let body = render_issue_body(spec_id, sections, &checklist);
 
     if let Some(issue) = existing.as_ref() {
-        if let Some(expected) = expected_etag {
-            if !expected.trim().is_empty() && expected != issue.etag {
-                return Err("etag mismatch".to_string());
-            }
-        }
-        gh_issue_edit(repo_path, issue.number, title, &body, spec_id)?;
+        check_etag(expected_etag, &issue.etag)?;
+        gh_issue_edit(repo_path, issue.number, title, &body, Some(spec_id))?;
         return get_spec_issue_detail(repo_path, issue.number);
     }
 
-    let number = gh_issue_create(repo_path, title, &body, spec_id)?;
+    let number = gh_issue_create(repo_path, title, &body, Some(spec_id))?;
     get_spec_issue_detail(repo_path, number)
 }
 
@@ -318,11 +312,7 @@ pub fn upsert_spec_issue_artifact_comment(
         .find(|artifact| artifact.kind == kind && artifact.artifact_name == artifact_name);
 
     if let Some(found) = existing {
-        if let Some(expected) = expected_etag {
-            if !expected.trim().is_empty() && expected != found.etag {
-                return Err("etag mismatch".to_string());
-            }
-        }
+        check_etag(expected_etag, &found.etag)?;
         return update_issue_comment(repo_path, issue_number, &found.comment_id, &body);
     }
 
@@ -350,11 +340,7 @@ pub fn delete_spec_issue_artifact_comment(
         return Ok(false);
     };
 
-    if let Some(expected) = expected_etag {
-        if !expected.trim().is_empty() && expected != found.etag {
-            return Err("etag mismatch".to_string());
-        }
-    }
+    check_etag(expected_etag, &found.etag)?;
 
     delete_issue_comment(repo_path, &found.comment_id)?;
     Ok(true)
@@ -719,54 +705,11 @@ fn non_empty_or_default(value: &str, default_value: &str) -> String {
     }
 }
 
-/// Create issue with only `gwt-spec` label (no spec_id label).
-fn gh_issue_create_without_spec_label(
-    repo_path: &Path,
-    title: &str,
-    body: &str,
-) -> Result<u64, String> {
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL,
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh issue create failed: {}", stderr.trim()));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_issue_number_from_create_output(stdout.trim())
-}
-
-/// Edit issue body and title only (no label changes).
-fn gh_issue_edit_body(
-    repo_path: &Path,
-    issue_number: u64,
-    title: &str,
-    body: &str,
-) -> Result<(), String> {
-    let issue_number = issue_number.to_string();
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue",
-            "edit",
-            issue_number.as_str(),
-            "--title",
-            title,
-            "--body",
-            body,
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh issue edit failed: {}", stderr.trim()));
+fn check_etag(expected: Option<&str>, actual: &str) -> Result<(), String> {
+    if let Some(e) = expected {
+        if !e.trim().is_empty() && e != actual {
+            return Err("etag mismatch".to_string());
+        }
     }
     Ok(())
 }
@@ -775,16 +718,17 @@ fn gh_issue_create(
     repo_path: &Path,
     title: &str,
     body: &str,
-    spec_id: &str,
+    extra_label: Option<&str>,
 ) -> Result<u64, String> {
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL, "--label",
-            spec_id,
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
+    let mut args = vec![
+        "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL,
+    ];
+    if let Some(label) = extra_label {
+        args.extend(["--label", label]);
+    }
+
+    let output = run_gh_output_with_repair(repo_path, args)
+        .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -800,26 +744,24 @@ fn gh_issue_edit(
     issue_number: u64,
     title: &str,
     body: &str,
-    spec_id: &str,
+    extra_label: Option<&str>,
 ) -> Result<(), String> {
     let issue_number = issue_number.to_string();
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue",
-            "edit",
-            issue_number.as_str(),
-            "--title",
-            title,
-            "--body",
-            body,
-            "--add-label",
-            SPEC_LABEL,
-            "--add-label",
-            spec_id,
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
+    let mut args = vec![
+        "issue",
+        "edit",
+        issue_number.as_str(),
+        "--title",
+        title,
+        "--body",
+        body,
+    ];
+    if let Some(label) = extra_label {
+        args.extend(["--add-label", SPEC_LABEL, "--add-label", label]);
+    }
+
+    let output = run_gh_output_with_repair(repo_path, args)
+        .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1412,7 +1354,7 @@ fn update_project_status(
 
     for node in nodes {
         let name = node.get("name").and_then(Value::as_str).unwrap_or_default();
-        if name != "Status" && name != "Phase" {
+        if name != PROJECT_FIELD_STATUS && name != PROJECT_FIELD_PHASE {
             continue;
         }
         field_id = node.get("id").and_then(Value::as_str).map(str::to_string);
