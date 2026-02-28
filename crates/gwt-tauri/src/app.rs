@@ -167,6 +167,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
+        crate::menu::MENU_ID_TOOLS_PROJECT_INDEX => Some("project-index"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
         crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
@@ -1051,6 +1052,10 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
+        );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_TOOLS_PROJECT_INDEX),
+            Some("project-index")
         );
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_HELP_CHECK_UPDATES),

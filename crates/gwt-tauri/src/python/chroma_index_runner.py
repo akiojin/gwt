@@ -313,42 +313,40 @@ def action_index(project_root: str, db_path: str) -> dict:
     )
 
     files = collect_files(root)
-
-    if not files:
-        return {"ok": True, "filesIndexed": 0, "durationMs": 0}
+    current_ids = {str(f.relative_to(root)) for f in files}
 
     # Batch upsert
     batch_size = 100
     total_indexed = 0
 
-    for i in range(0, len(files), batch_size):
-        batch = files[i : i + batch_size]
-        ids = []
-        documents = []
-        metadatas = []
+    if files:
+        for i in range(0, len(files), batch_size):
+            batch = files[i : i + batch_size]
+            ids = []
+            documents = []
+            metadatas = []
 
-        for fpath in batch:
-            rel = str(fpath.relative_to(root))
-            desc = extract_description(fpath, root)
-            try:
-                size = fpath.stat().st_size
-            except OSError:
-                size = 0
+            for fpath in batch:
+                rel = str(fpath.relative_to(root))
+                desc = extract_description(fpath, root)
+                try:
+                    size = fpath.stat().st_size
+                except OSError:
+                    size = 0
 
-            ids.append(rel)
-            documents.append(f"{rel}: {desc}")
-            metadatas.append({
-                "path": rel,
-                "description": desc,
-                "file_type": fpath.suffix.lstrip(".") or "unknown",
-                "size": size,
-            })
+                ids.append(rel)
+                documents.append(f"{rel}: {desc}")
+                metadatas.append({
+                    "path": rel,
+                    "description": desc,
+                    "file_type": fpath.suffix.lstrip(".") or "unknown",
+                    "size": size,
+                })
 
-        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
-        total_indexed += len(batch)
+            collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+            total_indexed += len(batch)
 
-    # Remove stale entries
-    current_ids = {str(f.relative_to(root)) for f in files}
+    # Remove stale entries (including the empty-file-set case)
     try:
         existing = collection.get()
         stale = [eid for eid in existing["ids"] if eid not in current_ids]

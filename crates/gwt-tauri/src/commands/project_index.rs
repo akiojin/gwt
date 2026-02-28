@@ -19,6 +19,7 @@ static CHROMA_RUNTIME_PROBE: Mutex<Option<Result<(), String>>> = Mutex::new(None
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChromaRunnerResponse {
     ok: bool,
     error: Option<String>,
@@ -472,5 +473,25 @@ mod tests {
     fn chroma_venv_dir_is_under_runtime() {
         let dir = chroma_venv_dir().unwrap();
         assert!(dir.to_string_lossy().contains("chroma-venv"));
+    }
+
+    #[test]
+    fn chroma_runner_response_deserializes_camel_case_metrics() {
+        let json = r#"{
+            "ok": true,
+            "filesIndexed": 42,
+            "durationMs": 1234,
+            "indexed": true,
+            "totalFiles": 42,
+            "dbSizeBytes": 2048
+        }"#;
+
+        let parsed: ChromaRunnerResponse =
+            serde_json::from_str(json).expect("parse runner response");
+        assert_eq!(parsed.files_indexed, Some(42));
+        assert_eq!(parsed.duration_ms, Some(1234));
+        assert_eq!(parsed.indexed, Some(true));
+        assert_eq!(parsed.total_files, Some(42));
+        assert_eq!(parsed.db_size_bytes, Some(2048));
     }
 }
