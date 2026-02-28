@@ -301,6 +301,7 @@ test("PR badge shows checking class for UNKNOWN retrying state", async ({ page }
 
   const prBadge = page.locator(".pr-badge", { hasText: "#42" });
   await expect(prBadge).toBeVisible();
+  await expect(prBadge).toHaveClass(/pulse/);
   await expect(prBadge).toHaveClass(/checking/);
 });
 
