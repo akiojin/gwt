@@ -19,3 +19,10 @@ Use gwt terminal commands as the transport for agent-to-agent communication.
 
 - Prefer targeted `send_keys_to_pane` for deterministic orchestration.
 - Use `capture_scrollback_tail` before sending follow-up instructions.
+
+## Environment
+
+- `GWT_PROJECT_ROOT`: absolute path to the project root. PTY commands are scoped to the caller's project; panes belonging to other projects are not visible or accessible.
+- `GWT_PANE_ID`: pane ID of the current terminal session.
+- `GWT_BRANCH`: branch name of the current session.
+- `GWT_AGENT`: agent name of the current session.
