@@ -164,7 +164,7 @@ fn infer_status_from_pane(state: &AppState, pane_id: &str) -> AgentStatus {
     };
 
     let scrollback_tail =
-        capture_scrollback_tail_from_state(state, pane_id, 4096).unwrap_or_default();
+        capture_scrollback_tail_from_state(state, pane_id, 4096, None).unwrap_or_default();
 
     infer_agent_status(&scrollback_tail, process_alive)
 }
