@@ -7,7 +7,9 @@ export const AGENT_INSTRUCTION_DOC_FILES = [
 export type DocsEditorShellId = "wsl" | "powershell" | "cmd";
 
 /**
- * Returns true when the current runtime platform should be treated as Windows.
+ * Returns whether the runtime platform should be treated as Windows.
+ * @param platform Platform label from the frontend runtime environment.
+ * @returns True when the platform string includes `win`.
  */
 export function isWindowsPlatform(platform: string): boolean {
   return platform.toLowerCase().includes("win");
@@ -15,6 +17,9 @@ export function isWindowsPlatform(platform: string): boolean {
 
 /**
  * Docs editor tabs are auto-closed only for vi-based flows.
+ * @param platform Platform label from the frontend runtime environment.
+ * @param shellId Optional configured shell id for Windows (`wsl`/`powershell`/`cmd`).
+ * @returns True when docs tabs should auto-close after terminal completion.
  */
 export function shouldAutoCloseDocsEditorTab(
   platform: string,
@@ -27,6 +32,8 @@ export function shouldAutoCloseDocsEditorTab(
 /**
  * Terminal status values returned by list_terminals use string labels.
  * completed(*) and error:* indicate the interactive process has finished.
+ * @param status Terminal status string returned by `list_terminals`.
+ * @returns True when the process status is `completed*` or `error*`.
  */
 export function isTerminalProcessEnded(status: string): boolean {
   const normalized = status.trim().toLowerCase();
@@ -35,6 +42,9 @@ export function isTerminalProcessEnded(status: string): boolean {
 
 /**
  * Builds the shell command for opening CLAUDE/AGENTS/GEMINI instruction files.
+ * @param platform Platform label from the frontend runtime environment.
+ * @param shellId Optional configured shell id for Windows (`wsl`/`powershell`/`cmd`).
+ * @returns Shell command string to open/edit instruction files.
  */
 export function buildDocsEditorCommand(
   platform: string,
