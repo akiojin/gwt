@@ -61,6 +61,7 @@
       "cancelled",
       "timed_out",
       "action_required",
+      "startup_failure",
     ].includes((conclusion ?? "").toString());
   }
 
@@ -97,12 +98,11 @@
   }
 
   function resolveMergeUiState(pr: PrStatusInfo, retryingNow: boolean): MergeUiState {
-    const explicit = asMergeUiState(pr.mergeUiState ?? null);
-    if (explicit) return explicit;
-
     if (pr.state === "MERGED") return "merged";
     if (pr.state === "CLOSED") return "closed";
     if (retryingNow) return "checking";
+    const explicit = asMergeUiState(pr.mergeUiState ?? null);
+    if (explicit) return explicit;
     if (
       pr.mergeStateStatus === "BLOCKED" ||
       hasRequiredCheckFailure(pr.checkSuites) ||
