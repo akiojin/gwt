@@ -96,8 +96,14 @@ read_section() {
 # Extract title from spec.md (first line starting with #)
 extract_title() {
   local spec_file="$1"
+  local title=""
   if [[ -f "$spec_file" ]]; then
-    grep -m1 '^#' "$spec_file" | sed 's/^[#]*//' | sed 's/^ *//' | head -c 200
+    title=$(awk '/^#/ {sub(/^#+[[:space:]]*/, ""); print; exit}' "$spec_file" || true)
+    if [[ -n "$title" ]]; then
+      echo "$title" | head -c 200
+    else
+      echo "Untitled spec"
+    fi
   else
     echo "Untitled spec"
   fi
@@ -263,7 +269,7 @@ for dir in "${SPEC_DIRS[@]}"; do
     }
 
     # Extract issue number from URL
-    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$')
+    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$' || true)
 
     if [[ -n "$issue_number" ]]; then
       # Update GWT_SPEC_ID marker with actual issue number
