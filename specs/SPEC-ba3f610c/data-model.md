@@ -176,7 +176,7 @@ Workerの専門性を定義するプリセット。`~/.gwt/personas/` または 
 | load_persona | fn(id: &str, project_path: Option\<&Path\>) -> Option\<WorkerPersona\> | IDでペルソナ読み込み |
 | save_persona | fn(persona: &WorkerPersona, scope: PersonaScope) -> Result\<()\> | ペルソナ保存 |
 | delete_persona | fn(id: &str, scope: PersonaScope) -> Result\<()\> | ペルソナ削除 |
-| builtin_defaults | fn() -> Vec\<WorkerPersona\> | 組み込みデフォルト（Frontend/Backend/Fullstack） |
+| builtin_defaults | fn() -> Vec\<WorkerPersona\> | 組み込みデフォルト（ペルソナ例テーブル全8種） |
 
 ### PersonaScope enum
 

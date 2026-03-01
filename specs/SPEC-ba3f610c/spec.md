@@ -553,7 +553,7 @@ additional_args = []
 
 - グローバルプリセット: `~/.gwt/personas/*.toml`
 - プロジェクト上書き: `<repo>/.gwt/personas/*.toml` (optional)
-- 組み込みデフォルト: gwt バイナリに同梱（Frontend/Backend/Fullstack の3つ）
+- 組み込みデフォルト: gwt バイナリに同梱（ペルソナ例テーブルの全8種）
 - 優先順位: プロジェクト > グローバル > 組み込み（同じidの場合）
 
 #### Coordinator の Worker 選定ロジック
