@@ -1,6 +1,46 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.0.0] - 2026-03-01
+
+### Bug Fixes
+
+- Harden Windows batch quote normalization and CI coverage (#1265) (#1287)
+- **gui:** Keep report dialog topmost across modal stacks (#1256) (#1290)
+- **gui:** Resolve duplicated prefix display in from issue branch name (#1288) (#1292)
+- **pr:** Unify merge state badges and remove unknown UI (#1293)
+- **pr:** Unify merge state badges and remove unknown UI (#1295)
+- Harden migration evacuation data safety for issue #1235 (#1291)
+- **test:** Stabilize windows pty regression commands (#1294)
+- **test:** Stabilize windows pty and retrying badge checks (#1375)
+- **pr:** Unify merge state badges and remove unknown UI (#1374)
+- Harden migration evacuation data safety for issue #1235 (follow-up) (#1373)
+- **test:** Stabilize windows pty and retrying checks follow-up (#1376)
+- **pr:** Follow up merge-state review feedback (#1378)
+- Preserve evacuation data until migration completion (issue #1235 follow-up) (#1379)
+
+### Documentation
+
+- **spec:** Refresh project mode persona design and agent precedence (#1382)
+
+### Features
+
+- **gui:** Add check/fix docs action for agent instruction files (#1285)
+- Add ChromaDB project structure index with semantic search (#1377)
+- Migrate spec management from local files to GitHub Issues (#1372)
+- Add ChromaDB project structure index with semantic search (#1380)
+- **skill:** Add spec-to-issue migration workflow (#1383)
+
+### Miscellaneous Tasks
+
+- Sync feature/update-clause-docs with develop (#1289)
+- Sync feature/worktree-detail-merge-logic with develop (follow-up) (#1381)
+
+### Testing
+
+- Improve coverage to 90% target (#1284)
+- Fix e2e CI failures after coverage update (#1286)
+
 ## [7.13.3] - 2026-02-27
 
 ### Bug Fixes
