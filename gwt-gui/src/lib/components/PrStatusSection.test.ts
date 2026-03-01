@@ -141,14 +141,14 @@ describe("PrStatusSection", () => {
     expect(badge?.textContent).toContain("Conflicting");
   });
 
-  it("renders mergeable badge with correct class - UNKNOWN", async () => {
+  it("renders checking badge when mergeable is UNKNOWN", async () => {
     const pr = makePrDetail({ mergeable: "UNKNOWN" });
     const { container } = await renderSection({ prDetail: pr });
 
     const badge = container.querySelector(".mergeable-badge");
     expect(badge).toBeTruthy();
-    expect(badge?.classList.contains("unknown")).toBe(true);
-    expect(badge?.textContent).toContain("Unknown");
+    expect(badge?.classList.contains("checking")).toBe(true);
+    expect(badge?.textContent).toContain("Checking merge status...");
   });
 
   it("renders merged badge when PR state is MERGED even if mergeable is UNKNOWN", async () => {
@@ -159,7 +159,51 @@ describe("PrStatusSection", () => {
     expect(badge).toBeTruthy();
     expect(badge?.classList.contains("merged")).toBe(true);
     expect(badge?.textContent).toContain("Merged");
-    expect(badge?.textContent).not.toContain("Unknown");
+    expect(badge?.textContent).not.toContain("Checking");
+  });
+
+  it("renders checks warning badge for non-required check failure", async () => {
+    const pr = makePrDetail({
+      mergeUiState: "mergeable",
+      nonRequiredChecksWarning: true,
+      checkSuites: [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "success", isRequired: true },
+        { workflowName: "Lint", runId: 2, status: "completed", conclusion: "failure", isRequired: false },
+      ],
+    });
+    const { container } = await renderSection({ prDetail: pr });
+    const warning = container.querySelector(".merge-warning-badge");
+    expect(warning).toBeTruthy();
+    expect(warning?.textContent).toContain("Checks warning");
+  });
+
+  it("does not render checks warning when required checks are failing", async () => {
+    const pr = makePrDetail({
+      mergeUiState: "blocked",
+      nonRequiredChecksWarning: false,
+      checkSuites: [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "failure", isRequired: true },
+        { workflowName: "Lint", runId: 2, status: "completed", conclusion: "failure", isRequired: false },
+      ],
+    });
+    const { container } = await renderSection({ prDetail: pr });
+    expect(container.querySelector(".merge-warning-badge")).toBeNull();
+  });
+
+  it("renders blocked when required checks fail even if merge fields are unknown", async () => {
+    const pr = makePrDetail({
+      mergeable: "UNKNOWN",
+      mergeStateStatus: "UNKNOWN",
+      mergeUiState: "blocked",
+      nonRequiredChecksWarning: false,
+      checkSuites: [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "failure", isRequired: true },
+      ],
+    });
+    const { container } = await renderSection({ prDetail: pr });
+    const badge = container.querySelector(".mergeable-badge");
+    expect(badge?.classList.contains("blocked")).toBe(true);
+    expect(badge?.textContent).toContain("Blocked");
   });
 
   it("renders reviews with correct state icons", async () => {
@@ -405,14 +449,16 @@ describe("PrStatusSection", () => {
       expect(stateStatusBadge?.classList.contains("behind")).toBe(true);
     });
 
-    it("displays 'Blocked' badge when mergeStateStatus is BLOCKED", async () => {
+    it("displays blocked merge badge when mergeStateStatus is BLOCKED", async () => {
       const pr = makePrDetail({ mergeStateStatus: "BLOCKED" });
       const { container } = await renderSection({ prDetail: pr });
 
+      const mergeBadge = container.querySelector(".mergeable-badge");
+      expect(mergeBadge).toBeTruthy();
+      expect(mergeBadge?.classList.contains("blocked")).toBe(true);
+      expect(mergeBadge?.textContent).toContain("Blocked");
       const stateStatusBadge = container.querySelector(".merge-state-badge");
-      expect(stateStatusBadge).toBeTruthy();
-      expect(stateStatusBadge?.textContent).toContain("Blocked");
-      expect(stateStatusBadge?.classList.contains("blocked")).toBe(true);
+      expect(stateStatusBadge).toBeNull();
     });
 
     it("shows only 'Blocked' when mergeStateStatus is BLOCKED and mergeable is MERGEABLE", async () => {
@@ -420,10 +466,10 @@ describe("PrStatusSection", () => {
       const { container } = await renderSection({ prDetail: pr });
 
       const mergeableBadge = container.querySelector(".mergeable-badge");
-      expect(mergeableBadge).toBeNull();
+      expect(mergeableBadge).toBeTruthy();
+      expect(mergeableBadge?.textContent).toContain("Blocked");
       const stateStatusBadge = container.querySelector(".merge-state-badge");
-      expect(stateStatusBadge).toBeTruthy();
-      expect(stateStatusBadge?.textContent).toContain("Blocked");
+      expect(stateStatusBadge).toBeNull();
     });
 
     it("displays 'Conflicts' badge when mergeStateStatus is DIRTY", async () => {
@@ -482,12 +528,15 @@ describe("PrStatusSection", () => {
       expect(stateStatusBadge).toBeNull();
     });
 
-    it("does not display badge when mergeStateStatus is UNKNOWN", async () => {
+    it("shows checking merge badge when mergeStateStatus is UNKNOWN", async () => {
       const pr = makePrDetail({ mergeStateStatus: "UNKNOWN" });
       const { container } = await renderSection({ prDetail: pr });
 
       const stateStatusBadge = container.querySelector(".merge-state-badge");
       expect(stateStatusBadge).toBeNull();
+      const mergeableBadge = container.querySelector(".mergeable-badge");
+      expect(mergeableBadge?.classList.contains("checking")).toBe(true);
+      expect(mergeableBadge?.textContent).toContain("Checking merge status...");
     });
 
     it("does not display badge when mergeStateStatus is null", async () => {
@@ -658,6 +707,176 @@ describe("PrStatusSection", () => {
     });
   });
 
+  // --- workflowStatusText branch coverage ---
+
+  describe("workflowStatusText branches", () => {
+    it("shows 'Queued' for queued status", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "queued", conclusion: null },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Queued");
+    });
+
+    it("shows raw status for unknown status", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "waiting" as any, conclusion: null },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("waiting");
+    });
+
+    it("shows 'Neutral' for neutral conclusion", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "neutral" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Neutral");
+    });
+
+    it("shows 'Skipped' for skipped conclusion", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "skipped" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Skipped");
+    });
+
+    it("shows 'Completed' for unknown conclusion", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "cancelled" as any },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Completed");
+    });
+  });
+
+  // --- handleCheckClick fallback: no onOpenCiLog ---
+
+  describe("handleCheckClick fallback", () => {
+    it("opens GitHub Actions URL when onOpenCiLog is not provided", async () => {
+      const windowOpenSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 789, status: "completed", conclusion: "success" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const checkItem = container.querySelector(".check-item") as HTMLElement;
+      await fireEvent.click(checkItem);
+
+      expect(windowOpenSpy).toHaveBeenCalledWith(
+        "https://github.com/owner/repo/actions/runs/789",
+        "_blank"
+      );
+      windowOpenSpy.mockRestore();
+    });
+  });
+
+  // --- reviewStateIcon: unknown state ---
+
+  describe("reviewStateIcon unknown state", () => {
+    it("shows '?' for unknown review state", async () => {
+      const reviews: ReviewInfo[] = [
+        { reviewer: "unknown-user", state: "SOME_NEW_STATE" as any },
+      ];
+      const pr = makePrDetail({ reviews });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateElement = container.querySelector(".review-state");
+      expect(stateElement?.textContent?.trim()).toBe("?");
+    });
+  });
+
+  // --- Comment without line number or code snippet ---
+
+  describe("comment branches", () => {
+    it("renders comment without line number", async () => {
+      const comments: ReviewComment[] = [
+        {
+          author: "bob",
+          body: "General comment",
+          filePath: "src/main.rs",
+          line: null,
+          codeSnippet: null,
+          createdAt: "2025-01-01T00:00:00Z",
+        },
+      ];
+      const pr = makePrDetail({ reviewComments: comments });
+      const { container } = await renderSection({ prDetail: pr });
+
+      expect(container.textContent).toContain("src/main.rs");
+      expect(container.textContent).not.toContain(":");
+      expect(container.querySelector(".code-snippet")).toBeNull();
+    });
+
+    it("renders comment without filePath", async () => {
+      const comments: ReviewComment[] = [
+        {
+          author: "carol",
+          body: "Top-level comment",
+          filePath: null,
+          line: null,
+          codeSnippet: null,
+          createdAt: "2025-01-01T00:00:00Z",
+        },
+      ];
+      const pr = makePrDetail({ reviewComments: comments });
+      const { container } = await renderSection({ prDetail: pr });
+
+      expect(container.textContent).toContain("carol");
+      expect(container.textContent).toContain("Top-level comment");
+      expect(container.querySelector(".comment-file")).toBeNull();
+    });
+  });
+
+  // --- mergeStateLabel default case ---
+
+  describe("mergeStateLabel default case", () => {
+    it("returns raw string for unrecognized merge state status", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "SOME_NEW_STATE" as any });
+      const { container } = await renderSection({ prDetail: pr });
+
+      // The merge state badge should show up with the raw string for recognized "show" states only.
+      // SOME_NEW_STATE is not in the show list, so it should not show a badge.
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+    });
+  });
+
   // --- T007: retrying prop – pulse animation & merge button control ---
 
   describe("retrying prop", () => {
@@ -671,14 +890,13 @@ describe("PrStatusSection", () => {
       expect(badge?.classList.contains("pulse")).toBe(true);
     });
 
-    it("disables merge button when retrying=true", async () => {
+    it("does not render merge button when retrying=true", async () => {
       const onMerge = vi.fn();
       const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
       const { container } = await renderSection({ prDetail: pr, onMerge, retrying: true });
 
       const btn = container.querySelector(".mergeable-badge-btn") as HTMLButtonElement;
-      expect(btn).toBeTruthy();
-      expect(btn.disabled).toBe(true);
+      expect(btn).toBeNull();
     });
 
     it("shows 'Checking merge status...' text when retrying=true", async () => {
@@ -686,8 +904,23 @@ describe("PrStatusSection", () => {
       const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });
       const { container } = await renderSection({ prDetail: pr, onMerge, retrying: true });
 
-      const btn = container.querySelector(".mergeable-badge-btn");
-      expect(btn?.textContent).toContain("Checking merge status...");
+      const badge = container.querySelector(".mergeable-badge");
+      expect(badge?.textContent).toContain("Checking merge status...");
+    });
+
+    it("prefers retrying state over explicit mergeUiState from detail payload", async () => {
+      const onMerge = vi.fn();
+      const pr = makePrDetail({
+        state: "OPEN",
+        mergeable: "MERGEABLE",
+        mergeUiState: "mergeable",
+      });
+      const { container } = await renderSection({ prDetail: pr, onMerge, retrying: true });
+
+      const badge = container.querySelector(".mergeable-badge");
+      expect(badge?.classList.contains("checking")).toBe(true);
+      expect(badge?.textContent).toContain("Checking merge status...");
+      expect(container.querySelector(".mergeable-badge-btn")).toBeNull();
     });
 
     it("does not apply .pulse class when retrying=false (default)", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { formatAboutVersion, formatWindowTitle } from "./windowTitle";
 
 describe("formatWindowTitle", () => {
@@ -18,6 +18,39 @@ describe("formatWindowTitle", () => {
         projectPath: "/tmp/repo",
       })
     ).toBe("/tmp/repo");
+  });
+});
+
+describe("formatWindowTitle – additional branches", () => {
+  it("shows empty string projectPath as appName", () => {
+    expect(
+      formatWindowTitle({
+        appName: "gwt",
+        projectPath: "",
+      })
+    ).toBe("gwt");
+  });
+});
+
+describe("getAppVersionSafe", () => {
+  it("returns version string when Tauri API is available", async () => {
+    vi.doMock("@tauri-apps/api/app", () => ({
+      getVersion: () => Promise.resolve("7.0.0"),
+    }));
+    const { getAppVersionSafe } = await import("./windowTitle");
+    const result = await getAppVersionSafe();
+    expect(result).toBe("7.0.0");
+    vi.doUnmock("@tauri-apps/api/app");
+  });
+
+  it("returns null when Tauri API throws", async () => {
+    vi.doMock("@tauri-apps/api/app", () => ({
+      getVersion: () => Promise.reject(new Error("not in tauri")),
+    }));
+    const mod = await import("./windowTitle");
+    const result = await mod.getAppVersionSafe();
+    expect(result).toBeNull();
+    vi.doUnmock("@tauri-apps/api/app");
   });
 });
 

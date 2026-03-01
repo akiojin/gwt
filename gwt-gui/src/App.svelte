@@ -119,6 +119,11 @@
     'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
   const DEFAULT_TERMINAL_FONT_FAMILY =
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
+  const AGENT_INSTRUCTION_DOC_FILES = [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+  ] as const;
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -1486,6 +1491,93 @@
     }
   }
 
+  function detectPlatform(): string {
+    return platformName(
+      navigator as Navigator & {
+        userAgentData?: { platform?: string | null } | null;
+      },
+    );
+  }
+
+  function isWindowsPlatform(platform: string): boolean {
+    return platform.toLowerCase().includes("win");
+  }
+
+  async function resolveWindowsDocsShellId(): Promise<"wsl" | "powershell" | "cmd"> {
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const settings = await invoke<Pick<SettingsData, "default_shell">>("get_settings");
+      const shell = (settings.default_shell ?? "").trim().toLowerCase();
+      if (shell === "wsl" || shell === "powershell" || shell === "cmd") {
+        return shell;
+      }
+    } catch {
+      // Fall back to cmd when settings are unavailable.
+    }
+    return "cmd";
+  }
+
+  function buildDocsEditorCommand(
+    platform: string,
+    shellId?: "wsl" | "powershell" | "cmd",
+  ): string {
+    const files = AGENT_INSTRUCTION_DOC_FILES.join(" ");
+    const codeArgs = AGENT_INSTRUCTION_DOC_FILES.map((file) => `-g ${file}`).join(
+      " ",
+    );
+    const powershellNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
+      (file) => `notepad ${file}`,
+    ).join("; ");
+    const cmdNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
+      (file) => `notepad ${file}`,
+    ).join(" & ");
+    if (isWindowsPlatform(platform)) {
+      if (shellId === "wsl") {
+        return `vi ${files}`;
+      }
+      if (shellId === "powershell") {
+        return `if (Get-Command code -ErrorAction SilentlyContinue) { code ${codeArgs} } else { ${powershellNotepadFallback} }`;
+      }
+      return `where code >NUL 2>&1 && (code ${codeArgs}) || (${cmdNotepadFallback})`;
+    }
+
+    return `vi ${files}`;
+  }
+
+  async function handleOpenDocsEditor(worktreePath: string) {
+    const workingDir = worktreePath.trim();
+    if (!workingDir) return;
+
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const platform = detectPlatform();
+      const shellId = isWindowsPlatform(platform)
+        ? await resolveWindowsDocsShellId()
+        : undefined;
+      const paneId = await invoke<string>(
+        "spawn_shell",
+        shellId ? { workingDir, shell: shellId } : { workingDir },
+      );
+
+      const tab: Tab = {
+        id: `terminal-${paneId}`,
+        label: "Docs Edit",
+        type: "terminal",
+        paneId,
+        cwd: workingDir,
+      };
+      tabs = [...tabs, tab];
+      activeTabId = tab.id;
+
+      const command = `${buildDocsEditorCommand(platform, shellId)}\n`;
+      const data = Array.from(new TextEncoder().encode(command));
+      await invoke("write_terminal", { paneId, data });
+    } catch (err) {
+      showToast(`Failed to open docs editor: ${toErrorMessage(err)}`, 8000);
+      console.error("Failed to open docs editor:", err);
+    }
+  }
+
   async function respawnStoredTerminalTabs(
     storedTabs: StoredTerminalTab[],
     targetProjectPath: string,
@@ -1819,6 +1911,23 @@
       id: "prs",
       label: "Pull Requests",
       type: "prs",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function openProjectIndexTab() {
+    const existing = tabs.find(
+      (t) => t.type === "projectIndex" || t.id === "projectIndex",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+    const tab: Tab = {
+      id: "projectIndex",
+      label: "Project Index",
+      type: "projectIndex",
     };
     tabs = [...tabs, tab];
     activeTabId = tab.id;
@@ -2198,6 +2307,9 @@
         break;
       case "git-pull-requests":
         openPullRequestsTab();
+        break;
+      case "project-index":
+        openProjectIndexTab();
         break;
       case "check-updates":
         {
@@ -2764,6 +2876,7 @@
           onLaunchAgent={requestAgentLaunch}
           onQuickLaunch={handleAgentLaunch}
           onNewTerminal={handleNewTerminal}
+          onOpenDocsEditor={handleOpenDocsEditor}
           onOpenCiLog={handleOpenCiLog}
         />
       {/if}
@@ -3121,7 +3234,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: var(--z-modal-base);
   }
 
   .mono {
@@ -3344,7 +3457,7 @@
     bottom: 40px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 2000;
+    z-index: var(--z-toast);
     pointer-events: none;
   }
 
@@ -3476,7 +3589,7 @@
     background: var(--accent, #89b4fa);
     opacity: 0;
     pointer-events: none;
-    z-index: 9999;
+    z-index: var(--z-overlay-flash);
     animation: copy-flash-anim 0.25s ease-out forwards;
   }
 

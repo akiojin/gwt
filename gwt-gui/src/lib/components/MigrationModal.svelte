@@ -152,7 +152,7 @@
 </script>
 
 {#if open}
-  <div class="overlay modal-overlay" role="dialog" aria-modal="true" aria-label="Migration Required">
+  <div class="overlay modal-overlay modal-overlay-stacked" role="dialog" aria-modal="true" aria-label="Migration Required">
     <div class="dialog modal-dialog-shell">
       <div class="header">
         <h2>Migration Required</h2>
@@ -198,7 +198,7 @@
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.6);
-    z-index: 2000;
+    z-index: var(--z-modal-stacked);
   }
 
   .dialog {

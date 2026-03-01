@@ -21,6 +21,33 @@
   import MergeConfirmModal from "./MergeConfirmModal.svelte";
   import { openExternalUrl } from "../openExternalUrl";
   import { toastBus } from "../toastBus";
+  import {
+    toErrorMessage,
+    normalizeBranchName,
+    formatSessionSummaryTimestamp,
+    normalizeSummaryLanguage,
+    summaryLanguageLabel,
+    agentIdForToolId,
+    toolClass,
+    displayToolName,
+    displayToolVersion,
+    normalizeString,
+    hasDockerInfo,
+    dockerMode,
+    dockerModeClass,
+    formatComposeArgs,
+    formatTimestamp,
+    quickStartEntryKey,
+    normalizeLinkedIssue,
+    formatIsoTimestamp,
+    sessionSummaryHeaderSubtitle,
+    hasSessionSummaryIdentity,
+    hasSessionSummaryMeta,
+    sessionSummarySourceLabel,
+    linkedIssueTitle,
+    type DockerMode,
+    type DockerModeClass,
+  } from "./worktreeSummaryHelpers";
 
   let {
     projectPath,
@@ -28,6 +55,7 @@
     onLaunchAgent,
     onQuickLaunch,
     onNewTerminal,
+    onOpenDocsEditor,
     onOpenCiLog,
     agentTabBranches = [],
     activeAgentTabBranch = null,
@@ -41,6 +69,7 @@
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onNewTerminal?: () => void;
+    onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
     onOpenCiLog?: (runId: number) => void;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
@@ -56,6 +85,8 @@
   let quickLaunchError: string | null = $state(null);
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
+  let docsActionBusy: boolean = $state(false);
+  let docsActionError: string | null = $state(null);
 
   type SummaryTab =
     | "summary"
@@ -105,6 +136,46 @@
   let summaryRebuildCompleted = $state(0);
   let summaryRebuildBranch: string | null = $state(null);
   let summaryRebuildError: string | null = $state(null);
+
+  let sessionSummaryHeaderText = $derived.by(() =>
+    sessionSummaryHeaderSubtitle({
+      summaryRebuildInProgress,
+      summaryRebuildCompleted,
+      summaryRebuildTotal,
+      summaryRebuildBranch,
+      sessionSummaryLoading,
+      sessionSummaryStatus,
+      sessionSummaryToolId,
+      sessionSummarySessionId,
+      sessionSummaryGenerating,
+      sessionSummaryMarkdown,
+    }),
+  );
+  let sessionSummaryHasIdentity = $derived.by(() =>
+    hasSessionSummaryIdentity(
+      sessionSummaryStatus,
+      sessionSummaryToolId,
+      sessionSummarySessionId,
+    ),
+  );
+  let sessionSummaryInputTime = $derived.by(() =>
+    formatSessionSummaryTimestamp(sessionSummaryInputMtimeMs),
+  );
+  let sessionSummaryUpdatedTime = $derived.by(() =>
+    formatSessionSummaryTimestamp(sessionSummaryUpdatedMs),
+  );
+  let sessionSummaryLanguageLabel = $derived.by(() =>
+    summaryLanguageLabel(sessionSummaryLanguage),
+  );
+  let sessionSummaryHasMeta = $derived.by(() =>
+    hasSessionSummaryMeta(
+      sessionSummarySourceType,
+      sessionSummaryLanguageLabel,
+      sessionSummaryInputTime,
+      sessionSummaryUpdatedTime,
+    ),
+  );
+
   const SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS = 15000;
   const SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS = 60000;
   const QUICK_START_CACHE_TTL_MS = 30_000;
@@ -121,8 +192,6 @@
     fetchedAtMs: number;
   };
 
-  type DockerMode = "HostOS" | "Docker" | "Unknown";
-  type DockerModeClass = "hostos" | "docker" | "unknown";
   type DockerSummaryRow = {
     entry: ToolSessionEntry;
     mode: DockerMode;
@@ -163,23 +232,15 @@
     error?: string | null;
   };
 
-  function toErrorMessage(err: unknown): string {
-    if (typeof err === "string") return err;
-    if (err && typeof err === "object" && "message" in err) {
-      const msg = (err as { message?: unknown }).message;
-      if (typeof msg === "string") return msg;
-    }
-    return String(err);
-  }
-
+  type InstructionDocsCheckResult = {
+    worktreePath: string;
+    checkedFiles: string[];
+    updatedFiles: string[];
+  };
   type TauriInvoke = <T>(
     command: string,
     args?: Record<string, unknown>,
   ) => Promise<T>;
-
-  function normalizeBranchName(name: string): string {
-    return name.startsWith("origin/") ? name.slice("origin/".length) : name;
-  }
 
   function currentBranchName(): string {
     const rawBranch = selectedBranch?.name?.trim() ?? "";
@@ -215,21 +276,6 @@
     });
   }
 
-  function normalizeSummaryLanguage(value: string | null | undefined): string {
-    const language = (value ?? "").trim().toLowerCase();
-    if (language === "ja" || language === "en" || language === "auto") {
-      return language;
-    }
-    return "auto";
-  }
-
-  function summaryLanguageLabel(value: string | null): string | null {
-    const language = normalizeSummaryLanguage(value);
-    if (language === "ja") return "Japanese";
-    if (language === "en") return "English";
-    return language === "auto" ? "Auto" : null;
-  }
-
   function hasAgentTabForBranch(branch: string): boolean {
     const target = normalizeBranchName(branch);
     return (agentTabBranches ?? [])
@@ -242,123 +288,6 @@
     const active = (activeAgentTabBranch ?? "").trim();
     if (!active) return false;
     return normalizeBranchName(active) === target;
-  }
-
-  function formatSessionSummaryTimestamp(ms: number | null): string | null {
-    if (ms === null || !Number.isFinite(ms) || ms <= 0) return null;
-    const d = new Date(ms);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  }
-
-  function agentIdForToolId(toolId: string): LaunchAgentRequest["agentId"] {
-    const key = (toolId ?? "").toLowerCase();
-    if (key.includes("claude")) return "claude";
-    if (key.includes("codex")) return "codex";
-    if (key.includes("gemini")) return "gemini";
-    if (key.includes("opencode") || key.includes("open-code")) return "opencode";
-    return toolId as LaunchAgentRequest["agentId"];
-  }
-
-  function toolClass(entry: ToolSessionEntry): string {
-    const id = entry.tool_id?.toLowerCase() ?? "";
-    if (id.includes("claude")) return "claude";
-    if (id.includes("codex")) return "codex";
-    if (id.includes("gemini")) return "gemini";
-    if (id.includes("opencode") || id.includes("open-code")) return "opencode";
-    return "";
-  }
-
-  function displayToolName(entry: ToolSessionEntry): string {
-    const id = entry.tool_id?.toLowerCase() ?? "";
-    if (id.includes("claude")) return "Claude";
-    if (id.includes("codex")) return "Codex";
-    if (id.includes("gemini")) return "Gemini";
-    if (id.includes("opencode") || id.includes("open-code")) return "OpenCode";
-    return entry.tool_label || entry.tool_id;
-  }
-
-  function displayToolVersion(entry: ToolSessionEntry): string {
-    const v = entry.tool_version?.trim();
-    return v && v.length > 0 ? v : "latest";
-  }
-
-  function displayModelLabel(entry: ToolSessionEntry): string | null {
-    const model = entry.model?.trim();
-    if (model) return model;
-    const tool = entry.tool_id?.toLowerCase() ?? "";
-    if (
-      tool.includes("codex") ||
-      tool.includes("claude") ||
-      tool.includes("gemini") ||
-      tool.includes("opencode") ||
-      tool.includes("open-code")
-    ) {
-      return "default";
-    }
-    return null;
-  }
-
-  function runtimeLabel(entry: ToolSessionEntry): string | null {
-    if (entry.docker_force_host === true) {
-      return "HostOS";
-    }
-
-    const hasDockerService = (entry.docker_service ?? "").trim().length > 0;
-    if (entry.docker_recreate !== undefined) return "Docker";
-    if (entry.docker_build !== undefined) return "Docker";
-    if (entry.docker_keep !== undefined) return "Docker";
-    if (hasDockerService) return "Docker";
-    if (entry.docker_force_host === false) return "Docker";
-
-    return null;
-  }
-
-  function runtimeService(entry: ToolSessionEntry): string | null {
-    const service = (entry.docker_service ?? "").trim();
-    return service.length > 0 ? service : null;
-  }
-
-  function normalizeString(value: string | null | undefined): string {
-    return (value ?? "").trim();
-  }
-
-  function hasDockerInfo(entry: ToolSessionEntry): boolean {
-    if (entry.docker_force_host !== undefined && entry.docker_force_host !== null)
-      return true;
-    if (normalizeString(entry.docker_service).length > 0) return true;
-    if (normalizeString(entry.docker_container_name).length > 0) return true;
-    if (entry.docker_compose_args && entry.docker_compose_args.length > 0) return true;
-    if (entry.docker_recreate !== undefined) return true;
-    if (entry.docker_build !== undefined) return true;
-    if (entry.docker_keep !== undefined) return true;
-    return false;
-  }
-
-  function dockerMode(entry: ToolSessionEntry): DockerMode {
-    if (entry.docker_force_host === true) return "HostOS";
-    if (hasDockerInfo(entry)) return "Docker";
-    return "Unknown";
-  }
-
-  function dockerModeClass(entry: ToolSessionEntry): DockerModeClass {
-    const mode = dockerMode(entry);
-    if (mode === "HostOS") return "hostos";
-    if (mode === "Docker") return "docker";
-    return "unknown";
-  }
-
-  function formatComposeArgs(
-    args: string[] | null | undefined
-  ): string | null {
-    if (!args || args.length === 0) return null;
-    const normalized = args.map((arg) => normalizeString(arg)).filter((arg) => arg.length > 0);
-    return normalized.length > 0 ? normalized.join(" ") : null;
-  }
-
-  function formatTimestamp(timestamp: number): string {
-    const value = Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : "n/a";
-    return value;
   }
 
   let dockerSummaryRows: DockerSummaryRow[] = $derived.by(() => {
@@ -374,30 +303,6 @@
       }))
       .sort((left, right) => right.entry.timestamp - left.entry.timestamp);
   });
-
-  function quickStartEntryKey(entry: ToolSessionEntry): string {
-    const session = entry.session_id?.trim();
-    if (session) return session;
-    return `${entry.tool_id}-${entry.timestamp}`;
-  }
-
-  function normalizeLinkedIssue(value: unknown): BranchLinkedIssueInfo | null {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-
-    const candidate = value as Partial<BranchLinkedIssueInfo>;
-    if (typeof candidate.number !== "number") return null;
-    if (typeof candidate.title !== "string") return null;
-
-    return {
-      number: candidate.number,
-      title: candidate.title,
-      updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : "",
-      labels: Array.isArray(candidate.labels)
-        ? candidate.labels.filter((label): label is string => typeof label === "string")
-        : [],
-      url: typeof candidate.url === "string" ? candidate.url : "",
-    };
-  }
 
   let latestQuickStartEntry: ToolSessionEntry | null = $derived.by(() => {
     if (quickStartEntries.length === 0) return null;
@@ -466,14 +371,6 @@
         quickStartLoading = false;
       }
     }
-  }
-
-  function formatIsoTimestamp(value: string | null | undefined): string | null {
-    const raw = (value ?? "").trim();
-    if (!raw) return null;
-    const parsed = new Date(raw);
-    if (Number.isNaN(parsed.getTime())) return raw;
-    return parsed.toLocaleString();
   }
 
   async function loadBranchLinkedIssue(options: LoadOptions = {}) {
@@ -1050,6 +947,40 @@
     }
   }
 
+  async function handleCheckFixDocsAndEdit() {
+    if (docsActionBusy) return;
+    const branch = currentBranchName();
+    if (!branch) {
+      docsActionError = "Select a branch before checking docs.";
+      return;
+    }
+
+    docsActionBusy = true;
+    docsActionError = null;
+    try {
+      const invoke = await getInvoke();
+      const result = await invoke<InstructionDocsCheckResult>(
+        "check_and_fix_agent_instruction_docs",
+        {
+          projectPath,
+          branch,
+        },
+      );
+
+      const updatedCount = result.updatedFiles?.length ?? 0;
+      const suffix = updatedCount === 0 ? "No changes needed." : `Updated ${updatedCount} file(s).`;
+      toastBus.emit({ message: `Docs check complete. ${suffix}` });
+
+      if (onOpenDocsEditor) {
+        await onOpenDocsEditor(result.worktreePath);
+      }
+    } catch (err) {
+      docsActionError = `Failed to check/fix docs: ${toErrorMessage(err)}`;
+    } finally {
+      docsActionBusy = false;
+    }
+  }
+
   let updatingBranch = $state(false);
   let merging = $state(false);
   let showMergeConfirm = $state(false);
@@ -1206,6 +1137,13 @@
             New
           </button>
           <button
+            class="header-quick-btn ghost"
+            disabled={docsActionBusy}
+            onclick={handleCheckFixDocsAndEdit}
+          >
+            {docsActionBusy ? "Checking..." : "Check/Fix Docs + Edit"}
+          </button>
+          <button
             class="new-terminal-btn"
             title="New Terminal"
             onclick={() => onNewTerminal?.()}
@@ -1223,6 +1161,9 @@
       {/if}
       {#if quickLaunchError}
         <div class="quick-error">{quickLaunchError}</div>
+      {/if}
+      {#if docsActionError}
+        <div class="quick-error">{docsActionError}</div>
       {/if}
 
       <div class="summary-tabs">
@@ -1275,61 +1216,31 @@
         <div class="quick-start ai-summary">
           <div class="quick-header">
             <span class="quick-title">Summary</span>
-            {#if summaryRebuildInProgress}
-              <span class="quick-subtitle rebuild-progress">
-                <span class="summary-spinner" aria-hidden="true"></span>
-                Rebuilding summaries ({summaryRebuildCompleted}/{summaryRebuildTotal})
-                {#if summaryRebuildBranch}
-                  - {summaryRebuildBranch}
+            {#if sessionSummaryHeaderText}
+              <span class="quick-subtitle" class:rebuild-progress={summaryRebuildInProgress}>
+                {#if summaryRebuildInProgress}
+                  <span class="summary-spinner" aria-hidden="true"></span>
                 {/if}
+                {sessionSummaryHeaderText}
               </span>
-            {:else if sessionSummaryLoading}
-              <span class="quick-subtitle">Loading...</span>
-            {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
-              <span class="quick-subtitle">
-                {#if sessionSummarySessionId?.startsWith("pane:")}
-                  {sessionSummaryToolId} - Live (pane summary)
-                {:else if sessionSummarySessionId}
-                  {sessionSummaryToolId} #{sessionSummarySessionId}
-                {:else}
-                  {sessionSummaryToolId}
-                {/if}
-                {#if sessionSummaryGenerating}
-                  {sessionSummaryMarkdown ? " - Updating..." : " - Generating..."}
-                {/if}
-              </span>
-            {:else if sessionSummaryStatus === "ai-not-configured"}
-              <span class="quick-subtitle">AI not configured</span>
-            {:else if sessionSummaryStatus === "disabled"}
-              <span class="quick-subtitle">Disabled</span>
-            {:else if sessionSummaryStatus === "no-session"}
-              <span class="quick-subtitle">No session</span>
-            {:else if sessionSummaryStatus === "error"}
-              <span class="quick-subtitle">Error</span>
             {/if}
           </div>
 
-          {#if sessionSummaryStatus === "ok" &&
-            (sessionSummaryToolId || sessionSummarySessionId)}
-            {@const inputTime = formatSessionSummaryTimestamp(sessionSummaryInputMtimeMs)}
-            {@const updatedTime = formatSessionSummaryTimestamp(sessionSummaryUpdatedMs)}
-            {@const languageLabel = summaryLanguageLabel(sessionSummaryLanguage)}
-            {#if sessionSummarySourceType || languageLabel || inputTime || updatedTime}
+          {#if sessionSummaryHasIdentity}
+            {#if sessionSummaryHasMeta}
               <div class="session-summary-meta">
                 <span class="meta-item">
-                  Source: {sessionSummarySourceType === "scrollback" ||
-                  sessionSummarySessionId?.startsWith("pane:")
-                    ? "Live (scrollback)"
-                    : "Session"}
+                  Source: {sessionSummarySourceLabel(
+                    sessionSummarySourceType,
+                    sessionSummarySessionId,
+                  )}
                 </span>
-                {#if languageLabel}
-                  <span class="meta-item">Language: {languageLabel}</span>
+                <span class="meta-item">Language: {sessionSummaryLanguageLabel}</span>
+                {#if sessionSummaryInputTime}
+                  <span class="meta-item">Input updated: {sessionSummaryInputTime}</span>
                 {/if}
-                {#if inputTime}
-                  <span class="meta-item">Input updated: {inputTime}</span>
-                {/if}
-                {#if updatedTime}
-                  <span class="meta-item">Summary updated: {updatedTime}</span>
+                {#if sessionSummaryUpdatedTime}
+                  <span class="meta-item">Summary updated: {sessionSummaryUpdatedTime}</span>
                 {/if}
               </div>
             {/if}
@@ -1432,7 +1343,7 @@
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                #{linkedIssue.number} {linkedIssue.title}
+                {linkedIssueTitle(linkedIssue)}
               </a>
               <div class="quick-meta">
                 {#if issueUpdated}

@@ -37,4 +37,41 @@ mod tests {
         assert!(!encoded.contains('/'));
         assert!(!encoded.is_empty());
     }
+
+    #[test]
+    fn encode_preserves_alphanumeric() {
+        let path = PathBuf::from("/abc123");
+        let encoded = encode_claude_project_path(&path);
+        assert!(encoded.contains("abc123"));
+    }
+
+    #[test]
+    fn encode_preserves_dots_and_underscores() {
+        let path = PathBuf::from("my_project.v2");
+        let encoded = encode_claude_project_path(&path);
+        assert!(encoded.contains("my_project.v2"));
+    }
+
+    #[test]
+    fn encode_replaces_spaces() {
+        let path = PathBuf::from("/home/user/my project");
+        let encoded = encode_claude_project_path(&path);
+        assert!(!encoded.contains(' '));
+    }
+
+    #[test]
+    fn encode_replaces_special_chars() {
+        let path = PathBuf::from("/path/with@special#chars");
+        let encoded = encode_claude_project_path(&path);
+        assert!(!encoded.contains('@'));
+        assert!(!encoded.contains('#'));
+    }
+
+    #[test]
+    fn encode_same_path_gives_same_result() {
+        let path = PathBuf::from("/repo/worktrees/feature-x");
+        let a = encode_claude_project_path(&path);
+        let b = encode_claude_project_path(&path);
+        assert_eq!(a, b);
+    }
 }

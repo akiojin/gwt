@@ -19,6 +19,10 @@ describe("setupMenuActionListener", () => {
     vi.clearAllMocks();
     const mockUnlisten = vi.fn();
     mockListen.mockResolvedValue(mockUnlisten);
+    // Restore default implementation after tests that override it
+    mockGetCurrentWebviewWindow.mockImplementation(() => ({
+      listen: mockListen,
+    }));
   });
 
   it("uses window-scoped listener instead of global listener", async () => {
@@ -62,6 +66,61 @@ describe("setupMenuActionListener", () => {
 
     await expect(setupMenuActionListener(handler)).rejects.toThrow(
       "menu-action listener init failed",
+    );
+  });
+
+  // Covers toErrorMessage line 12: non-Error value passed to String()
+  it("converts non-Error listener setup errors via String()", async () => {
+    mockListen.mockRejectedValue(42);
+    const handler = vi.fn();
+
+    await expect(setupMenuActionListener(handler)).rejects.toThrow(
+      "menu-action listener init failed: 42",
+    );
+  });
+
+  // Covers second catch block when getCurrentWebviewWindow() itself throws
+  it("wraps error when getCurrentWebviewWindow() throws", async () => {
+    mockGetCurrentWebviewWindow.mockImplementation(() => {
+      throw new Error("API not loaded");
+    });
+
+    const handler = vi.fn();
+
+    await expect(setupMenuActionListener(handler)).rejects.toThrow(
+      "menu-action listener init failed: API not loaded",
+    );
+  });
+
+  // Covers toErrorMessage line 12 via the second catch path with non-Error
+  it("converts non-Error from getCurrentWebviewWindow via String()", async () => {
+    mockGetCurrentWebviewWindow.mockImplementation(() => {
+      throw "string-error";
+    });
+
+    const handler = vi.fn();
+
+    await expect(setupMenuActionListener(handler)).rejects.toThrow(
+      "menu-action listener init failed: string-error",
+    );
+  });
+
+  // Covers line 27: the first catch block when dynamic import fails.
+  // vi.resetModules + vi.doMock replaces the module for a fresh import.
+  // This must be the LAST test as it contaminates the module cache.
+  it("throws when webviewWindow API import fails", async () => {
+    vi.resetModules();
+    vi.doMock("@tauri-apps/api/webviewWindow", () => {
+      throw new Error("module not found");
+    });
+
+    const { setupMenuActionListener: freshSetup } = await import(
+      "./menuAction"
+    );
+
+    const handler = vi.fn();
+    await expect(freshSetup(handler)).rejects.toThrow(
+      "webviewWindow API unavailable for menu-action listener",
     );
   });
 });

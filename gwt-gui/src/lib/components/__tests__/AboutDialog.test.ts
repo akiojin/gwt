@@ -203,6 +203,204 @@ describe("AboutDialog", () => {
     expect(rendered.getByText("not installed")).toBeTruthy();
   });
 
+  it("renders 'installed' for agent with available=true but no version", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "detect_agents") {
+        return [
+          { id: "codex", name: "Codex", available: true, authenticated: true, version: "" },
+        ];
+      }
+      if (command === "get_stats") {
+        return { global: { agents: [], worktrees_created: 0 }, repos: [] };
+      }
+      return null;
+    });
+
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "general",
+      onclose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Codex")).toBeTruthy();
+      expect(rendered.getByText("installed")).toBeTruthy();
+    });
+  });
+
+  it("handles loadAgents failure gracefully", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "detect_agents") throw new Error("backend down");
+      if (command === "get_stats") {
+        return { global: { agents: [], worktrees_created: 0 }, repos: [] };
+      }
+      return null;
+    });
+
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "general",
+      onclose: vi.fn(),
+    });
+
+    // Should render without agent list when load fails
+    await waitFor(() => {
+      expect(rendered.getByText("gwt")).toBeTruthy();
+    });
+
+    expect(rendered.queryByText("Detected Agents")).toBeNull();
+  });
+
+  it("handles loadStats failure gracefully on statistics tab", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "detect_agents") return [];
+      if (command === "get_stats") throw new Error("stats unavailable");
+      return null;
+    });
+
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "statistics",
+      onclose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("No statistics yet")).toBeTruthy();
+    });
+  });
+
+  it("does not close dialog when clicking inside the dialog area", async () => {
+    const onclose = vi.fn();
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "general",
+      onclose,
+    });
+
+    await rendered.findByText("gwt");
+    const dialogEl = rendered.container.querySelector(".about-dialog") as HTMLElement;
+    await fireEvent.click(dialogEl);
+
+    expect(onclose).not.toHaveBeenCalled();
+  });
+
+  it("shows 'No GPU detected' when gpuInfos is empty in system tab", async () => {
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "system",
+      cpuUsage: 10,
+      memUsed: 4 * 1024 ** 3,
+      memTotal: 16 * 1024 ** 3,
+      gpuInfos: [],
+      onclose: vi.fn(),
+    });
+
+    await rendered.findByText("No GPU detected");
+  });
+
+  it("shows 0% memory when memTotal is 0", async () => {
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "system",
+      cpuUsage: 50,
+      memUsed: 0,
+      memTotal: 0,
+      gpuInfos: [],
+      onclose: vi.fn(),
+    });
+
+    await rendered.findByText("CPU");
+    // memPct should be 0 since memTotal=0
+    expect(rendered.container.textContent).toContain("0%");
+  });
+
+  it("shows Loading statistics... while stats are loading", async () => {
+    // Make get_stats hang so statsLoading stays true
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "detect_agents") return [];
+      if (command === "get_stats") return new Promise(() => {});
+      return null;
+    });
+
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "statistics",
+      onclose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Loading statistics...")).toBeTruthy();
+    });
+  });
+
+  it("shows no agent launches when filtered repo has no agents", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "detect_agents") return [];
+      if (command === "get_stats") {
+        return {
+          global: {
+            agents: [{ agent_id: "codex", model: "gpt-5", count: 2 }],
+            worktrees_created: 5,
+          },
+          repos: [
+            {
+              repo_path: "/tmp/repo-a",
+              stats: {
+                agents: [{ agent_id: "codex", model: "gpt-5", count: 2 }],
+                worktrees_created: 5,
+              },
+            },
+          ],
+        };
+      }
+      return null;
+    });
+
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "statistics",
+      onclose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("codex")).toBeTruthy();
+    });
+
+    // Filter by a non-matching repo path (not in the list)
+    const repoSelect = rendered.container.querySelector("#repo-filter") as HTMLSelectElement;
+    // Select an existing repo that has agents
+    await fireEvent.change(repoSelect, { target: { value: "/tmp/repo-a" } });
+
+    await waitFor(() => {
+      expect(rendered.getByText("codex")).toBeTruthy();
+    });
+  });
+
+  it("renders GPU section with usage_percent but no VRAM", async () => {
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "system",
+      cpuUsage: 10,
+      memUsed: 4 * 1024 ** 3,
+      memTotal: 16 * 1024 ** 3,
+      gpuInfos: [
+        {
+          name: "Test GPU",
+          usage_percent: 50,
+          vram_total_bytes: null,
+          vram_used_bytes: null,
+        },
+      ],
+      onclose: vi.fn(),
+    });
+
+    await rendered.findByText("GPU");
+    expect(rendered.getByText("Test GPU")).toBeTruthy();
+    expect(rendered.getByText("50%")).toBeTruthy();
+    // No VRAM display
+    expect(rendered.container.textContent).not.toContain("VRAM");
+  });
+
   it("renders statistics table and supports repository filter", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "detect_agents") return [];

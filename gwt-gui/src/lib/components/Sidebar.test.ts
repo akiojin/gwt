@@ -688,6 +688,125 @@ describe("Sidebar", () => {
     }
   });
 
+  it("ignores visibility refresh while branch list has not been bootstrapped yet", async () => {
+    vi.useFakeTimers();
+    let resolveBranches: ((value: typeof branchFixture[]) => void) | null = null;
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") {
+          return new Promise<typeof branchFixture[]>((resolve) => {
+            resolveBranches = resolve;
+          });
+        }
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const hiddenState = { value: false };
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => hiddenState.value,
+      });
+      const activeState = { element: document.body as Element | null };
+      Object.defineProperty(document, "activeElement", {
+        configurable: true,
+        get: () => activeState.element,
+      });
+
+      await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(50);
+      expect(countInvokeCalls("fetch_pr_status")).toBe(0);
+    } finally {
+      const finalizeBranches = resolveBranches as unknown as
+        | ((value: Array<typeof branchFixture>) => void)
+        | null;
+      if (typeof finalizeBranches === "function") {
+        finalizeBranches([branchFixture]);
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips visibility-triggered refresh when input is focused or refresh is too recent", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") return Promise.resolve([branchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const hiddenState = { value: false };
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => hiddenState.value,
+      });
+      const activeState = { element: document.body as Element | null };
+      Object.defineProperty(document, "activeElement", {
+        configurable: true,
+        get: () => activeState.element,
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
+      const searchInput = rendered.getByPlaceholderText("Filter branches...") as HTMLInputElement;
+
+      const beforeFocusedRefresh = countInvokeCalls("fetch_pr_status");
+      activeState.element = searchInput;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(20);
+      const afterFocusedRefresh = countInvokeCalls("fetch_pr_status");
+      expect(afterFocusedRefresh).toBeGreaterThanOrEqual(beforeFocusedRefresh);
+
+      // Hidden path should only clear timer.
+      hiddenState.value = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(20);
+      const afterHiddenRefresh = countInvokeCalls("fetch_pr_status");
+      expect(afterHiddenRefresh).toBeGreaterThanOrEqual(afterFocusedRefresh);
+
+      // Too-recent refresh path should skip immediate refresh.
+      hiddenState.value = false;
+      activeState.element = document.body;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(20);
+      const afterRecentRefresh = countInvokeCalls("fetch_pr_status");
+      expect(afterRecentRefresh).toBeGreaterThanOrEqual(afterHiddenRefresh);
+
+      // Once enough time has passed, visibility refresh runs.
+      await vi.advanceTimersByTimeAsync(6000);
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThanOrEqual(afterRecentRefresh);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps worktree list visible during 10s agent-status fallback polling", async () => {
     vi.useFakeTimers();
     try {
@@ -1914,5 +2033,797 @@ describe("Sidebar", () => {
     await new Promise((r) => setTimeout(r, 50));
     const badgeAfter = rendered.container.querySelector(".pr-badge");
     expect(badgeAfter?.classList.contains("pulse")).toBe(true);
+  });
+
+  it("shows tool usage badge when branch has last_tool_usage", async () => {
+    const toolBranch = {
+      ...branchFixture,
+      name: "feature/with-tool",
+      last_tool_usage: "claude@3.5",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [toolBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/with-tool");
+    const toolUsageBadge = rendered.container.querySelector(".tool-usage");
+    expect(toolUsageBadge).toBeTruthy();
+    expect(toolUsageBadge?.textContent?.trim()).toBe("claude@3.5");
+    expect(toolUsageBadge?.classList.contains("claude")).toBe(true);
+  });
+
+  it("shows codex tool usage class for codex@ prefix", async () => {
+    const codexBranch = {
+      ...branchFixture,
+      name: "feature/codex-tool",
+      last_tool_usage: "codex@1.0",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [codexBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/codex-tool");
+    const toolUsageBadge = rendered.container.querySelector(".tool-usage");
+    expect(toolUsageBadge).toBeTruthy();
+    expect(toolUsageBadge?.classList.contains("codex")).toBe(true);
+  });
+
+  it("shows gemini tool usage class for gemini@ prefix", async () => {
+    const geminiBranch = {
+      ...branchFixture,
+      name: "feature/gemini-tool",
+      last_tool_usage: "gemini@2.0",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [geminiBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/gemini-tool");
+    const toolUsageBadge = rendered.container.querySelector(".tool-usage");
+    expect(toolUsageBadge).toBeTruthy();
+    expect(toolUsageBadge?.classList.contains("gemini")).toBe(true);
+  });
+
+  it("shows opencode tool usage class for opencode@ prefix", async () => {
+    const opencodeBranch = {
+      ...branchFixture,
+      name: "feature/opencode-tool",
+      last_tool_usage: "opencode@1.0",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [opencodeBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/opencode-tool");
+    const toolUsageBadge = rendered.container.querySelector(".tool-usage");
+    expect(toolUsageBadge).toBeTruthy();
+    expect(toolUsageBadge?.classList.contains("opencode")).toBe(true);
+  });
+
+  it("shows open-code tool usage class for open-code@ prefix", async () => {
+    const openCodeBranch = {
+      ...branchFixture,
+      name: "feature/open-code-tool",
+      last_tool_usage: "open-code@1.0",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [openCodeBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/open-code-tool");
+    const toolUsageBadge = rendered.container.querySelector(".tool-usage");
+    expect(toolUsageBadge).toBeTruthy();
+    expect(toolUsageBadge?.classList.contains("opencode")).toBe(true);
+  });
+
+  it("shows no tool usage class for unknown tool prefix", async () => {
+    const unknownToolBranch = {
+      ...branchFixture,
+      name: "feature/unknown-tool",
+      last_tool_usage: "sometool@1.0",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [unknownToolBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/unknown-tool");
+    const toolUsageBadge = rendered.container.querySelector(".tool-usage");
+    expect(toolUsageBadge).toBeTruthy();
+    expect(toolUsageBadge?.classList.contains("claude")).toBe(false);
+    expect(toolUsageBadge?.classList.contains("codex")).toBe(false);
+    expect(toolUsageBadge?.classList.contains("gemini")).toBe(false);
+    expect(toolUsageBadge?.classList.contains("opencode")).toBe(false);
+  });
+
+  it("does not show tool usage badge when branch has no last_tool_usage", async () => {
+    const noToolBranch = {
+      ...branchFixture,
+      name: "feature/no-tool",
+      last_tool_usage: null,
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [noToolBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/no-tool");
+    const toolUsageBadge = rendered.container.querySelector(".tool-usage");
+    expect(toolUsageBadge).toBeNull();
+  });
+
+  it("shows divergence indicator for Ahead status", async () => {
+    const aheadBranch = {
+      ...branchFixture,
+      name: "feature/ahead",
+      divergence_status: "Ahead",
+      ahead: 3,
+      behind: 0,
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [aheadBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/ahead");
+    const divergence = rendered.container.querySelector(".divergence");
+    expect(divergence).toBeTruthy();
+    expect(divergence?.textContent?.trim()).toBe("+3");
+    expect(divergence?.classList.contains("ahead")).toBe(true);
+  });
+
+  it("shows divergence indicator for Behind status", async () => {
+    const behindBranch = {
+      ...branchFixture,
+      name: "feature/behind",
+      divergence_status: "Behind",
+      ahead: 0,
+      behind: 5,
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [behindBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/behind");
+    const divergence = rendered.container.querySelector(".divergence");
+    expect(divergence).toBeTruthy();
+    expect(divergence?.textContent?.trim()).toBe("-5");
+    expect(divergence?.classList.contains("behind")).toBe(true);
+  });
+
+  it("shows divergence indicator for Diverged status", async () => {
+    const divergedBranch = {
+      ...branchFixture,
+      name: "feature/diverged",
+      divergence_status: "Diverged",
+      ahead: 2,
+      behind: 4,
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [divergedBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/diverged");
+    const divergence = rendered.container.querySelector(".divergence");
+    expect(divergence).toBeTruthy();
+    expect(divergence?.textContent?.trim()).toBe("+2 -4");
+    expect(divergence?.classList.contains("diverged")).toBe(true);
+  });
+
+  it("does not show divergence indicator for UpToDate status", async () => {
+    const upToDateBranch = {
+      ...branchFixture,
+      name: "feature/uptodate",
+      divergence_status: "UpToDate",
+      ahead: 0,
+      behind: 0,
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [upToDateBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/uptodate");
+    const divergence = rendered.container.querySelector(".divergence");
+    expect(divergence).toBeNull();
+  });
+
+  it("shows safety dot with warning level", async () => {
+    const warningBranch = {
+      ...branchFixture,
+      name: "feature/warning-branch",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [warningBranch];
+      if (command === "list_worktrees") return [
+        {
+          path: "/tmp/project/feature/warning-branch",
+          branch: "feature/warning-branch",
+          safety_level: "warning",
+          is_protected: false,
+          is_current: false,
+        },
+      ];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/warning-branch");
+    const safetyDot = rendered.container.querySelector(".safety-dot.warning");
+    expect(safetyDot).toBeTruthy();
+    expect(safetyDot?.getAttribute("title")).toBe("Has uncommitted changes or unpushed commits");
+  });
+
+  it("shows safety dot with safe level", async () => {
+    const safeBranch = {
+      ...branchFixture,
+      name: "feature/safe-branch",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [safeBranch];
+      if (command === "list_worktrees") return [
+        {
+          path: "/tmp/project/feature/safe-branch",
+          branch: "feature/safe-branch",
+          safety_level: "safe",
+          is_protected: false,
+          is_current: false,
+        },
+      ];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/safe-branch");
+    const safetyDot = rendered.container.querySelector(".safety-dot.safe");
+    expect(safetyDot).toBeTruthy();
+    expect(safetyDot?.getAttribute("title")).toBe("Safe to delete");
+  });
+
+  it("shows safety dot with danger level", async () => {
+    const dangerBranch = {
+      ...branchFixture,
+      name: "feature/danger-branch",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [dangerBranch];
+      if (command === "list_worktrees") return [
+        {
+          path: "/tmp/project/feature/danger-branch",
+          branch: "feature/danger-branch",
+          safety_level: "danger",
+          is_protected: false,
+          is_current: false,
+        },
+      ];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/danger-branch");
+    const safetyDot = rendered.container.querySelector(".safety-dot.danger");
+    expect(safetyDot).toBeTruthy();
+    expect(safetyDot?.getAttribute("title")).toBe("Has uncommitted changes and unpushed commits");
+  });
+
+  it("shows safety dot with disabled level for protected branches", async () => {
+    const disabledBranch = {
+      ...branchFixture,
+      name: "feature/protected-branch",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [disabledBranch];
+      if (command === "list_worktrees") return [
+        {
+          path: "/tmp/project/feature/protected-branch",
+          branch: "feature/protected-branch",
+          safety_level: "disabled",
+          is_protected: true,
+          is_current: false,
+        },
+      ];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText("feature/protected-branch");
+    const safetyDot = rendered.container.querySelector(".safety-dot.disabled");
+    expect(safetyDot).toBeTruthy();
+    expect(safetyDot?.getAttribute("title")).toBe("Protected or current branch");
+  });
+
+  it("shows PR badge with merged state", async () => {
+    const mergedBranch = {
+      ...branchFixture,
+      name: "feature/merged-pr",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [mergedBranch];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/merged-pr": {
+            number: 99,
+            state: "MERGED",
+            url: "https://github.com/test/repo/pull/99",
+            mergeable: "UNKNOWN",
+            baseBranch: "main",
+            headBranch: "feature/merged-pr",
+            checkSuites: [],
+            retrying: false,
+          } },
+          ghStatus: { available: true, authenticated: true },
+          repoKey: "/tmp/project",
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    const prBadge = rendered.container.querySelector(".pr-badge");
+    expect(prBadge?.classList.contains("merged")).toBe(true);
+    expect(prBadge?.textContent?.trim()).toBe("#99");
+  });
+
+  it("shows PR badge with closed state", async () => {
+    const closedBranch = {
+      ...branchFixture,
+      name: "feature/closed-pr",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [closedBranch];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/closed-pr": {
+            number: 88,
+            state: "CLOSED",
+            url: "https://github.com/test/repo/pull/88",
+            mergeable: "UNKNOWN",
+            baseBranch: "main",
+            headBranch: "feature/closed-pr",
+            checkSuites: [],
+            retrying: false,
+          } },
+          ghStatus: { available: true, authenticated: true },
+          repoKey: "/tmp/project",
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    const prBadge = rendered.container.querySelector(".pr-badge");
+    expect(prBadge?.classList.contains("closed")).toBe(true);
+    expect(prBadge?.textContent?.trim()).toBe("#88");
+  });
+
+  it("shows PR badge with conflicting state", async () => {
+    const conflictBranch = {
+      ...branchFixture,
+      name: "feature/conflict-pr",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [conflictBranch];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/conflict-pr": {
+            number: 77,
+            state: "OPEN",
+            url: "https://github.com/test/repo/pull/77",
+            mergeable: "CONFLICTING",
+            baseBranch: "main",
+            headBranch: "feature/conflict-pr",
+            checkSuites: [],
+            retrying: false,
+          } },
+          ghStatus: { available: true, authenticated: true },
+          repoKey: "/tmp/project",
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    const prBadge = rendered.container.querySelector(".pr-badge");
+    expect(prBadge?.classList.contains("conflicting")).toBe(true);
+    expect(prBadge?.textContent?.trim()).toBe("#77");
+  });
+
+  it("shows PR badge with checking state when mergeable is unknown", async () => {
+    const unknownBranch = {
+      ...branchFixture,
+      name: "feature/unknown-pr",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [unknownBranch];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/unknown-pr": {
+            number: 66,
+            state: "OPEN",
+            url: "https://github.com/test/repo/pull/66",
+            mergeable: "UNKNOWN",
+            baseBranch: "main",
+            headBranch: "feature/unknown-pr",
+            checkSuites: [],
+            retrying: false,
+          } },
+          ghStatus: { available: true, authenticated: true },
+          repoKey: "/tmp/project",
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    const prBadge = rendered.container.querySelector(".pr-badge");
+    expect(prBadge?.classList.contains("checking")).toBe(true);
+    expect(prBadge?.textContent?.trim()).toBe("#66");
+  });
+
+  it("shows PR badge with blocked state when mergeUiState is blocked", async () => {
+    const blockedBranch = {
+      ...branchFixture,
+      name: "feature/blocked-pr",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [blockedBranch];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/blocked-pr": {
+            number: 65,
+            state: "OPEN",
+            url: "https://github.com/test/repo/pull/65",
+            mergeable: "UNKNOWN",
+            mergeUiState: "blocked",
+            baseBranch: "main",
+            headBranch: "feature/blocked-pr",
+            checkSuites: [],
+            retrying: false,
+          } },
+          ghStatus: { available: true, authenticated: true },
+          repoKey: "/tmp/project",
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    const prBadge = rendered.container.querySelector(".pr-badge");
+    expect(prBadge?.classList.contains("blocked")).toBe(true);
+    expect(prBadge?.textContent?.trim()).toBe("#65");
+  });
+
+  it("does not show agent indicator for Remote filter branches", async () => {
+    const remoteBranch = {
+      ...branchFixture,
+      name: "origin/feature/sidebar-size",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_remote_branches") return [remoteBranch];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      agentTabBranches: ["feature/sidebar-size"],
+    });
+
+    // Switch to Remote filter
+    const remoteButton = rendered.getByRole("button", { name: "Remote" });
+    await fireEvent.click(remoteButton);
+
+    await rendered.findByText("origin/feature/sidebar-size");
+    const slot = rendered.container.querySelector(".agent-indicator-slot.agent-active");
+    expect(slot).toBeNull();
+  });
+
+  it("handles double-click on branch to activate", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const onBranchActivate = vi.fn();
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      onBranchActivate,
+    });
+
+    const branchLabel = await rendered.findByText(branchFixture.name);
+    const branchButton = branchLabel.closest("button");
+    expect(branchButton).toBeTruthy();
+
+    await fireEvent.dblClick(branchButton as HTMLElement);
+    expect(onBranchActivate).toHaveBeenCalledWith(branchFixture);
+  });
+
+  it("does not activate branch on double-click when branch is being deleted", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const onBranchActivate = vi.fn();
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      onBranchActivate,
+    });
+
+    const branchLabel = await rendered.findByText(branchFixture.name);
+    const branchButton = branchLabel.closest("button");
+
+    // Mark branch as deleting
+    await waitFor(() =>
+      expect(
+        listenMock.mock.calls.some((call) => call[0] === "cleanup-progress")
+      ).toBe(true)
+    );
+    await emitTauriEvent("cleanup-progress", {
+      branch: branchFixture.name,
+      status: "deleting",
+    });
+    await waitFor(() => {
+      expect(branchButton?.classList.contains("deleting")).toBe(true);
+    });
+
+    await fireEvent.dblClick(branchButton as HTMLElement);
+    expect(onBranchActivate).not.toHaveBeenCalled();
+  });
+
+  it("shows PR badge with open mergeable state", async () => {
+    const openBranch = {
+      ...branchFixture,
+      name: "feature/open-pr",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [openBranch];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/open-pr": {
+            number: 55,
+            state: "OPEN",
+            url: "https://github.com/test/repo/pull/55",
+            mergeable: "MERGEABLE",
+            baseBranch: "main",
+            headBranch: "feature/open-pr",
+            checkSuites: [],
+            retrying: false,
+          } },
+          ghStatus: { available: true, authenticated: true },
+          repoKey: "/tmp/project",
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    const prBadge = rendered.container.querySelector(".pr-badge");
+    expect(prBadge?.classList.contains("open")).toBe(true);
+    expect(prBadge?.textContent?.trim()).toBe("#55");
+  });
+
+  it("clears branches on cleanup-completed event", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText(branchFixture.name);
+
+    // Trigger cleanup-completed event
+    await waitFor(() =>
+      expect(
+        listenMock.mock.calls.some((call) => call[0] === "cleanup-completed")
+      ).toBe(true)
+    );
+    await emitTauriEvent("cleanup-completed", {});
+
+    // Should trigger a re-fetch
+    await waitFor(() => {
+      expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(1);
+    });
+  });
+
+  it("ignores non-left-click on summary resize handle", async () => {
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const summaryResizeHandle = rendered.container.querySelector<HTMLButtonElement>(
+      ".summary-resize-handle"
+    );
+    expect(summaryResizeHandle).toBeTruthy();
+
+    // Right click should not start summary resize
+    await fireEvent.pointerDown(summaryResizeHandle as HTMLElement, {
+      button: 2,
+      pointerId: 99,
+      clientY: 200,
+    });
+    expect(document.body.style.cursor).not.toBe("row-resize");
   });
 });

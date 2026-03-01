@@ -1185,4 +1185,139 @@ mod tests {
         let summary = get_git_change_summary(&bare, "origin/develop", "main").unwrap();
         assert_eq!(summary.base_branch, "master");
     }
+
+    // --- normalize_numstat_path ---
+
+    #[test]
+    fn normalize_numstat_path_no_rename() {
+        assert_eq!(normalize_numstat_path("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn normalize_numstat_path_simple_rename() {
+        assert_eq!(normalize_numstat_path("old.rs => new.rs"), "new.rs");
+    }
+
+    #[test]
+    fn normalize_numstat_path_brace_rename() {
+        assert_eq!(
+            normalize_numstat_path("dir/{old.rs => new.rs}/file"),
+            "dir/new.rs/file"
+        );
+    }
+
+    #[test]
+    fn normalize_numstat_path_brace_rename_no_surrounding() {
+        assert_eq!(normalize_numstat_path("{old.rs => new.rs}"), "new.rs");
+    }
+
+    #[test]
+    fn normalize_numstat_path_empty() {
+        assert_eq!(normalize_numstat_path(""), "");
+    }
+
+    #[test]
+    fn normalize_numstat_path_no_arrow_just_brace() {
+        // Braces without " => " inside should be preserved
+        assert_eq!(normalize_numstat_path("{some_content}"), "{some_content}");
+    }
+
+    // --- split_known_remote_ref ---
+
+    #[test]
+    fn split_known_remote_ref_with_origin() {
+        let remotes = vec!["origin".to_string()];
+        assert_eq!(
+            split_known_remote_ref("origin/feature/x", &remotes),
+            Some(("origin", "feature/x"))
+        );
+    }
+
+    #[test]
+    fn split_known_remote_ref_unknown_remote() {
+        let remotes = vec!["origin".to_string()];
+        assert_eq!(split_known_remote_ref("fork/feature/x", &remotes), None);
+    }
+
+    #[test]
+    fn split_known_remote_ref_no_slash() {
+        let remotes = vec!["origin".to_string()];
+        assert_eq!(split_known_remote_ref("main", &remotes), None);
+    }
+
+    #[test]
+    fn split_known_remote_ref_strip_remotes_prefix() {
+        let remotes = vec!["origin".to_string()];
+        assert_eq!(
+            split_known_remote_ref("remotes/origin/feature/x", &remotes),
+            Some(("origin", "feature/x"))
+        );
+    }
+
+    #[test]
+    fn split_known_remote_ref_empty_remotes() {
+        let remotes: Vec<String> = vec![];
+        assert_eq!(split_known_remote_ref("origin/main", &remotes), None);
+    }
+
+    // --- FileChangeKind ---
+
+    #[test]
+    fn file_change_kind_serialize_roundtrip() {
+        let kinds = vec![
+            FileChangeKind::Added,
+            FileChangeKind::Modified,
+            FileChangeKind::Deleted,
+            FileChangeKind::Renamed,
+        ];
+        for kind in &kinds {
+            let json = serde_json::to_string(kind).unwrap();
+            let deserialized: FileChangeKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, kind);
+        }
+    }
+
+    // --- GitChangeSummary ---
+
+    #[test]
+    fn git_change_summary_serialize() {
+        let summary = GitChangeSummary {
+            file_count: 5,
+            commit_count: 3,
+            stash_count: 1,
+            base_branch: "main".to_string(),
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["file_count"], 5);
+        assert_eq!(json["commit_count"], 3);
+        assert_eq!(json["stash_count"], 1);
+        assert_eq!(json["base_branch"], "main");
+    }
+
+    // --- FileDiff ---
+
+    #[test]
+    fn file_diff_serialize() {
+        let diff = FileDiff {
+            content: "diff content".to_string(),
+            truncated: true,
+        };
+        let json = serde_json::to_value(&diff).unwrap();
+        assert_eq!(json["content"], "diff content");
+        assert_eq!(json["truncated"], true);
+    }
+
+    // --- WorkingTreeEntry ---
+
+    #[test]
+    fn working_tree_entry_serialize() {
+        let entry = WorkingTreeEntry {
+            path: "src/main.rs".to_string(),
+            status: FileChangeKind::Modified,
+            is_staged: true,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["path"], "src/main.rs");
+        assert_eq!(json["is_staged"], true);
+    }
 }

@@ -1534,4 +1534,516 @@ mod tests {
 
         assert_eq!(found.unwrap(), Some(expected));
     }
+
+    // --- asset_matches_arch ---
+
+    #[test]
+    fn asset_matches_arch_aarch64_matches_aarch64() {
+        assert!(asset_matches_arch("gwt-macos-aarch64.tar.gz", "aarch64"));
+    }
+
+    #[test]
+    fn asset_matches_arch_arm64_matches_aarch64() {
+        assert!(asset_matches_arch("gwt_7.1.0_arm64.dmg", "aarch64"));
+    }
+
+    #[test]
+    fn asset_matches_arch_x86_64_matches_x86_64() {
+        assert!(asset_matches_arch("gwt-linux-x86_64.tar.gz", "x86_64"));
+    }
+
+    #[test]
+    fn asset_matches_arch_x64_matches_x86_64() {
+        assert!(asset_matches_arch("gwt_7.1.0_x64.dmg", "x86_64"));
+    }
+
+    #[test]
+    fn asset_matches_arch_amd64_matches_x86_64() {
+        assert!(asset_matches_arch("gwt-linux-amd64.tar.gz", "x86_64"));
+    }
+
+    #[test]
+    fn asset_matches_arch_wrong_arch_no_match() {
+        assert!(!asset_matches_arch("gwt-macos-aarch64.tar.gz", "x86_64"));
+    }
+
+    #[test]
+    fn asset_matches_arch_unknown_arch_always_true() {
+        assert!(asset_matches_arch("gwt-riscv.tar.gz", "riscv64"));
+    }
+
+    // --- installer_kind_for_url ---
+
+    #[test]
+    fn installer_kind_macos_dmg() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        assert_eq!(
+            installer_kind_for_url(&platform, "https://example.com/gwt.dmg"),
+            Some(InstallerKind::MacDmg)
+        );
+    }
+
+    #[test]
+    fn installer_kind_macos_non_dmg_returns_none() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        assert_eq!(
+            installer_kind_for_url(&platform, "https://example.com/gwt.tar.gz"),
+            None
+        );
+    }
+
+    #[test]
+    fn installer_kind_windows_msi() {
+        let platform = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(
+            installer_kind_for_url(&platform, "https://example.com/gwt.msi"),
+            Some(InstallerKind::WindowsMsi)
+        );
+    }
+
+    #[test]
+    fn installer_kind_windows_non_msi_returns_none() {
+        let platform = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(
+            installer_kind_for_url(&platform, "https://example.com/gwt.zip"),
+            None
+        );
+    }
+
+    #[test]
+    fn installer_kind_linux_returns_none() {
+        let platform = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(
+            installer_kind_for_url(&platform, "https://example.com/gwt.deb"),
+            None
+        );
+    }
+
+    // --- Platform methods ---
+
+    #[test]
+    fn platform_artifact_linux_x86_64() {
+        let p = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(p.artifact(), Some("linux-x86_64"));
+    }
+
+    #[test]
+    fn platform_artifact_linux_aarch64() {
+        let p = Platform {
+            os: "linux".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        assert_eq!(p.artifact(), Some("linux-arm64"));
+    }
+
+    #[test]
+    fn platform_artifact_macos_x86_64() {
+        let p = Platform {
+            os: "macos".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(p.artifact(), Some("macos-x86_64"));
+    }
+
+    #[test]
+    fn platform_artifact_macos_aarch64() {
+        let p = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        assert_eq!(p.artifact(), Some("macos-arm64"));
+    }
+
+    #[test]
+    fn platform_artifact_windows_x86_64() {
+        let p = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(p.artifact(), Some("windows-x86_64"));
+    }
+
+    #[test]
+    fn platform_artifact_unknown_returns_none() {
+        let p = Platform {
+            os: "freebsd".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(p.artifact(), None);
+    }
+
+    #[test]
+    fn platform_binary_name_windows() {
+        let p = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(p.binary_name(), "gwt.exe");
+    }
+
+    #[test]
+    fn platform_binary_name_non_windows() {
+        let p = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(p.binary_name(), "gwt");
+    }
+
+    #[test]
+    fn platform_portable_asset_name_linux() {
+        let p = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(
+            p.portable_asset_name(),
+            Some("gwt-linux-x86_64.tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn platform_portable_asset_name_windows() {
+        let p = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(
+            p.portable_asset_name(),
+            Some("gwt-windows-x86_64.zip".to_string())
+        );
+    }
+
+    #[test]
+    fn platform_portable_asset_name_unknown_returns_none() {
+        let p = Platform {
+            os: "freebsd".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(p.portable_asset_name(), None);
+    }
+
+    // --- choose_apply_plan ---
+
+    #[test]
+    fn choose_apply_plan_portable_when_no_installer() {
+        let platform = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let plan = choose_apply_plan(
+            &platform,
+            None,
+            Some("https://example.com/gwt.tar.gz"),
+            None,
+        );
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Portable {
+                url: "https://example.com/gwt.tar.gz".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn choose_apply_plan_returns_none_when_nothing_available() {
+        let platform = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let plan = choose_apply_plan(&platform, None, None, None);
+        assert!(plan.is_none());
+    }
+
+    // --- parse_tag_version ---
+
+    #[test]
+    fn parse_tag_version_with_prerelease() {
+        let v = parse_tag_version("v1.2.3-beta.1");
+        assert!(v.is_some());
+        assert_eq!(v.unwrap(), Version::parse("1.2.3-beta.1").unwrap());
+    }
+
+    #[test]
+    fn parse_tag_version_invalid() {
+        assert!(parse_tag_version("not-a-version").is_none());
+    }
+
+    #[test]
+    fn parse_tag_version_empty() {
+        assert!(parse_tag_version("").is_none());
+    }
+
+    #[test]
+    fn parse_tag_version_whitespace_trimmed() {
+        assert_eq!(parse_tag_version("  v2.0.0  "), Some(Version::new(2, 0, 0)));
+    }
+
+    // --- asset_name_from_url ---
+
+    #[test]
+    fn asset_name_from_url_simple() {
+        assert_eq!(
+            asset_name_from_url("https://github.com/releases/download/v1.0.0/gwt.tar.gz"),
+            Some("gwt.tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn asset_name_from_url_empty_returns_none() {
+        assert_eq!(asset_name_from_url(""), None);
+    }
+
+    #[test]
+    fn asset_name_from_url_trailing_slash() {
+        // url.split('/').next_back() returns ""
+        assert_eq!(asset_name_from_url("https://example.com/"), None);
+    }
+
+    // --- read_cache / write_cache ---
+
+    #[test]
+    fn read_cache_nonexistent_returns_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nonexistent.json");
+        assert!(read_cache(&path).is_err());
+    }
+
+    #[test]
+    fn write_cache_creates_parent_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("deep").join("nested").join("cache.json");
+        let cache = UpdateCacheFile {
+            checked_at: Utc::now(),
+            latest_version: Some("1.0.0".to_string()),
+            release_url: None,
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        write_cache(&path, &cache).unwrap();
+        let loaded = read_cache(&path).unwrap();
+        assert_eq!(loaded.latest_version, Some("1.0.0".to_string()));
+    }
+
+    // --- write_json_atomic ---
+
+    #[test]
+    fn write_json_atomic_creates_new_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("new.json");
+        write_json_atomic(&path, &serde_json::json!({"key": "value"})).unwrap();
+        let content: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(content["key"], "value");
+    }
+
+    // --- find_extracted_binary ---
+
+    #[test]
+    fn find_extracted_binary_in_subdir() {
+        let temp = tempfile::tempdir().unwrap();
+        let subdir = temp.path().join("gwt-macos-arm64");
+        fs::create_dir(&subdir).unwrap();
+        let bin = subdir.join("gwt");
+        fs::write(&bin, b"binary").unwrap();
+
+        let found = find_extracted_binary(temp.path(), "gwt").unwrap();
+        assert_eq!(found, Some(bin));
+    }
+
+    #[test]
+    fn find_extracted_binary_at_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("gwt");
+        fs::write(&bin, b"binary").unwrap();
+
+        let found = find_extracted_binary(temp.path(), "gwt").unwrap();
+        assert_eq!(found, Some(bin));
+    }
+
+    #[test]
+    fn find_extracted_binary_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let found = find_extracted_binary(temp.path(), "gwt").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_extracted_binary_deeply_nested() {
+        let temp = tempfile::tempdir().unwrap();
+        let deep = temp.path().join("a").join("b").join("c");
+        fs::create_dir_all(&deep).unwrap();
+        let bin = deep.join("gwt");
+        fs::write(&bin, b"binary").unwrap();
+
+        let found = find_extracted_binary(temp.path(), "gwt").unwrap();
+        assert_eq!(found, Some(bin));
+    }
+
+    // --- extract_archive ---
+
+    #[test]
+    fn extract_archive_unsupported_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("archive.rar");
+        fs::write(&path, b"not a real archive").unwrap();
+        let result = extract_archive(&path, temp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unsupported archive format"));
+    }
+
+    // --- is_dir_writable ---
+
+    #[test]
+    fn is_dir_writable_temp_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(is_dir_writable(temp.path()).unwrap());
+    }
+
+    // --- sh_single_quote (macOS only) ---
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sh_single_quote_empty() {
+        assert_eq!(sh_single_quote(""), "''");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sh_single_quote_no_special() {
+        assert_eq!(sh_single_quote("hello"), "'hello'");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sh_single_quote_with_single_quote() {
+        assert_eq!(sh_single_quote("it's"), "'it'\\''s'");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sh_single_quote_with_spaces() {
+        assert_eq!(sh_single_quote("hello world"), "'hello world'");
+    }
+
+    // --- escape_applescript_string (macOS only) ---
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn escape_applescript_no_special() {
+        assert_eq!(escape_applescript_string("hello"), "hello");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn escape_applescript_with_backslash() {
+        assert_eq!(escape_applescript_string("a\\b"), "a\\\\b");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn escape_applescript_with_double_quote() {
+        assert_eq!(escape_applescript_string("say \"hi\""), "say \\\"hi\\\"");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn escape_applescript_with_both() {
+        assert_eq!(escape_applescript_string("a\\\"b"), "a\\\\\\\"b");
+    }
+
+    // --- find_installer_asset_url ---
+
+    #[test]
+    fn find_installer_asset_url_linux_returns_none() {
+        let platform = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let assets = vec![GitHubAsset {
+            name: "gwt.deb".to_string(),
+            browser_download_url: "https://example.com/gwt.deb".to_string(),
+        }];
+        assert!(find_installer_asset_url(&platform, &assets).is_none());
+    }
+
+    #[test]
+    fn find_installer_asset_url_macos_fallback_to_any_dmg() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        // No arch-specific DMG, just a generic one
+        let assets = vec![GitHubAsset {
+            name: "gwt_universal.dmg".to_string(),
+            browser_download_url: "https://example.com/universal.dmg".to_string(),
+        }];
+        assert_eq!(
+            find_installer_asset_url(&platform, &assets).as_deref(),
+            Some("https://example.com/universal.dmg")
+        );
+    }
+
+    #[test]
+    fn find_installer_asset_url_windows_legacy_naming_fallback() {
+        let platform = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let assets = vec![GitHubAsset {
+            name: "gwt-windows-x86_64.msi".to_string(),
+            browser_download_url: "https://example.com/legacy.msi".to_string(),
+        }];
+        assert_eq!(
+            find_installer_asset_url(&platform, &assets).as_deref(),
+            Some("https://example.com/legacy.msi")
+        );
+    }
+
+    #[test]
+    fn find_installer_asset_url_empty_assets() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        assert!(find_installer_asset_url(&platform, &[]).is_none());
+    }
+
+    // --- UpdateState serialization ---
+
+    #[test]
+    fn update_state_up_to_date_serialization() {
+        let state = UpdateState::UpToDate { checked_at: None };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["state"], "up_to_date");
+    }
+
+    #[test]
+    fn update_state_failed_serialization() {
+        let state = UpdateState::Failed {
+            message: "network error".to_string(),
+            failed_at: Utc::now(),
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["state"], "failed");
+        assert_eq!(json["message"], "network error");
+    }
 }

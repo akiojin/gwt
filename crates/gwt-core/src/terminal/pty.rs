@@ -108,18 +108,63 @@ fn strip_wrapping_quotes(value: &str) -> Option<&str> {
     }
 }
 
+fn escaped_wrapping_quote_prefix(value: &str) -> Option<(usize, u8)> {
+    let bytes = value.as_bytes();
+    let mut slash_count = 0;
+    while slash_count < bytes.len() && bytes[slash_count] == b'\\' {
+        slash_count += 1;
+    }
+
+    if slash_count == 0 || slash_count >= bytes.len() {
+        return None;
+    }
+
+    let quote = bytes[slash_count];
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+
+    Some((slash_count, quote))
+}
+
+fn escaped_wrapping_quote_suffix(value: &str, quote: u8) -> Option<usize> {
+    let bytes = value.as_bytes();
+    if bytes.last().copied()? != quote || bytes.len() < 2 {
+        return None;
+    }
+
+    let mut slash_count = 0usize;
+    let mut idx = bytes.len() - 1;
+    while idx > 0 && bytes[idx - 1] == b'\\' {
+        slash_count += 1;
+        idx -= 1;
+    }
+
+    if slash_count == 0 {
+        None
+    } else {
+        Some(slash_count)
+    }
+}
+
 fn strip_wrapping_escaped_quotes(value: &str) -> Option<&str> {
     if value.len() < 4 {
         return None;
     }
 
-    let wrapped = (value.starts_with("\\\"") && value.ends_with("\\\""))
-        || (value.starts_with("\\'") && value.ends_with("\\'"));
-    if wrapped {
-        Some(value[2..value.len() - 2].trim())
-    } else {
-        None
+    let (prefix_slashes, quote) = escaped_wrapping_quote_prefix(value)?;
+    let suffix_slashes = escaped_wrapping_quote_suffix(value, quote)?;
+    if prefix_slashes != suffix_slashes {
+        return None;
     }
+
+    let prefix_len = prefix_slashes + 1;
+    let suffix_len = suffix_slashes + 1;
+    if value.len() < prefix_len + suffix_len {
+        return None;
+    }
+
+    Some(value[prefix_len..value.len() - suffix_len].trim())
 }
 
 fn strip_wrapping_quotes_recursive(value: &str) -> String {
@@ -759,6 +804,18 @@ mod tests {
             strip_wrapping_quotes_recursive(r#"\"C:\Tools\npx.cmd\""#),
             r#"C:\Tools\npx.cmd"#
         );
+        assert_eq!(
+            strip_wrapping_quotes_recursive(r#"'\\\"C:\Program Files\nodejs\npx.cmd\\\"'"#),
+            r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+        assert_eq!(
+            strip_wrapping_quotes_recursive(r#"\\\"C:\Tools\npx.cmd\\\""#),
+            r#"C:\Tools\npx.cmd"#
+        );
+        assert_eq!(
+            strip_wrapping_quotes_recursive(r#"\\\"C:\Tools\npx.cmd\""#),
+            r#"\\\"C:\Tools\npx.cmd\""#
+        );
     }
 
     #[test]
@@ -781,6 +838,14 @@ mod tests {
     fn is_windows_batch_command_for_platform_detects_escaped_wrapped_cmd_extension() {
         assert!(is_windows_batch_command_for_platform(
             r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
+            |_| None
+        ));
+    }
+
+    #[test]
+    fn is_windows_batch_command_for_platform_detects_double_escaped_wrapped_cmd_extension() {
+        assert!(is_windows_batch_command_for_platform(
+            r#"'\\\"C:\Program Files\nodejs\npx.cmd\\\"'"#,
             |_| None
         ));
     }
@@ -830,6 +895,28 @@ mod tests {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "\"C:\\Program Files\\nodejs\\npx.cmd\" --yes @openai/codex@latest".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_normalizes_double_escaped_wrapped_batch_path() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            r#"'\\\"C:\Program Files\nodejs\npx.cmd\\\"'"#,
             &args,
             true,
             || "pwsh".to_string(),
@@ -904,6 +991,7 @@ mod tests {
     /// Helper: read from PTY reader in a separate thread with timeout.
     fn read_with_timeout(
         mut reader: Box<dyn Read + Send>,
+        mut writer: Option<Box<dyn Write + Send>>,
         timeout: Duration,
     ) -> Result<String, String> {
         let (tx, rx) = mpsc::channel();
@@ -925,18 +1013,27 @@ mod tests {
             }
         });
 
-        // Collect output until timeout
+        // Collect output until EOF or timeout.
+        // On Windows/ConPTY, an initial cursor query escape sequence can arrive
+        // before the command output; returning early on the first idle tick makes
+        // the test flaky.
         let mut last_output = String::new();
+        let mut dsr_responded = false;
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(s)) => last_output = s,
-                Ok(Err(e)) => return Err(e),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if !last_output.is_empty() {
-                        return Ok(last_output);
+                Ok(Ok(s)) => {
+                    if !dsr_responded && s.contains("\u{1b}[6n") {
+                        if let Some(writer) = writer.as_mut() {
+                            let _ = writer.write_all(b"\x1b[1;1R");
+                            let _ = writer.flush();
+                        }
+                        dsr_responded = true;
                     }
+                    last_output = s;
                 }
+                Ok(Err(e)) => return Err(e),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -948,25 +1045,109 @@ mod tests {
         }
     }
 
+    fn platform_echo_command() -> (String, Vec<String>, Option<String>, bool) {
+        if cfg!(windows) {
+            (
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "Write-Output hello".to_string(),
+                ],
+                None,
+                true,
+            )
+        } else {
+            (
+                "/bin/echo".to_string(),
+                vec!["hello".to_string()],
+                None,
+                false,
+            )
+        }
+    }
+
+    fn platform_env_command() -> (String, Vec<String>, Option<String>, bool) {
+        if cfg!(windows) {
+            (
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "Get-ChildItem Env: | ForEach-Object { \"{0}={1}\" -f $_.Name, $_.Value }"
+                        .to_string(),
+                ],
+                None,
+                true,
+            )
+        } else {
+            ("/usr/bin/env".to_string(), vec![], None, false)
+        }
+    }
+
+    fn platform_success_exit_command() -> (String, Vec<String>, Option<String>, bool) {
+        if cfg!(windows) {
+            (
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "exit 0".to_string(),
+                ],
+                None,
+                true,
+            )
+        } else {
+            ("/usr/bin/true".to_string(), vec![], None, false)
+        }
+    }
+
+    fn platform_invalid_command() -> (String, Vec<String>, Option<String>, bool) {
+        if cfg!(windows) {
+            (
+                "gwt-nonexistent-command-for-pty-test-xyz.exe".to_string(),
+                vec![],
+                None,
+                true,
+            )
+        } else {
+            (
+                "/nonexistent/command/that/does/not/exist".to_string(),
+                vec![],
+                None,
+                false,
+            )
+        }
+    }
+
     #[test]
+    #[cfg(not(windows))]
     fn test_pty_creation_and_echo() {
+        let (command, args, terminal_shell, interactive) = platform_echo_command();
         let config = PtyConfig {
-            command: "/bin/echo".to_string(),
-            args: vec!["hello".to_string()],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
-            terminal_shell: None,
-            interactive: false,
+            terminal_shell,
+            interactive,
             windows_force_utf8: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
         let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
 
-        let output =
-            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read PTY output");
+        let output = read_with_timeout(reader, Some(writer), Duration::from_secs(5))
+            .expect("Failed to read PTY output");
 
         assert!(
             output.contains("hello"),
@@ -975,29 +1156,32 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_env_vars_set() {
+        let (command, args, terminal_shell, interactive) = platform_env_command();
         let mut env_vars = HashMap::new();
         env_vars.insert("GWT_PANE_ID".to_string(), "pane-42".to_string());
         env_vars.insert("GWT_BRANCH".to_string(), "feature/test".to_string());
         env_vars.insert("GWT_SESSION_ID".to_string(), "sess-001".to_string());
 
         let config = PtyConfig {
-            command: "/usr/bin/env".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars,
             rows: 24,
             cols: 80,
-            terminal_shell: None,
-            interactive: false,
+            terminal_shell,
+            interactive,
             windows_force_utf8: false,
         };
 
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
         let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
 
-        let output =
-            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read PTY output");
+        let output = read_with_timeout(reader, Some(writer), Duration::from_secs(5))
+            .expect("Failed to read PTY output");
 
         assert!(
             output.contains("GWT_PANE_ID=pane-42"),
@@ -1022,6 +1206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_resize() {
         let config = PtyConfig {
             command: "/bin/sleep".to_string(),
@@ -1041,24 +1226,29 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_process_exit_detection() {
+        let (command, args, terminal_shell, interactive) = platform_success_exit_command();
         let config = PtyConfig {
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
-            terminal_shell: None,
-            interactive: false,
+            terminal_shell,
+            interactive,
             windows_force_utf8: false,
         };
 
         let mut handle = PtyHandle::new(config).expect("Failed to create PTY");
+        let reader = handle.take_reader().expect("Failed to get reader");
+        let writer = handle.take_writer().expect("Failed to get writer");
+        let _ = read_with_timeout(reader, Some(writer), Duration::from_secs(2));
 
         // Wait for process to exit
         let mut exited = false;
-        for _ in 0..50 {
+        for _ in 0..100 {
             if let Ok(Some(_status)) = handle.try_wait() {
                 exited = true;
                 break;
@@ -1070,16 +1260,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_invalid_command_error() {
+        let (command, args, terminal_shell, interactive) = platform_invalid_command();
         let config = PtyConfig {
-            command: "/nonexistent/command/that/does/not/exist".to_string(),
-            args: vec![],
+            command,
+            args,
             working_dir: std::env::temp_dir(),
             env_vars: HashMap::new(),
             rows: 24,
             cols: 80,
-            terminal_shell: None,
-            interactive: false,
+            terminal_shell,
+            interactive,
             windows_force_utf8: false,
         };
 

@@ -723,11 +723,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: var(--z-modal-base);
   }
 
   .confirm-overlay {
-    z-index: 1100;
+    z-index: var(--z-modal-nested);
   }
 
   .dialog {

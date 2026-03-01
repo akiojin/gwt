@@ -17,6 +17,23 @@
     type LaunchDefaults,
   } from "../agentLaunchDefaults";
   import { determinePrefixFromLabels } from "../agentUtils";
+  import {
+    buildNewBranchName,
+    canLaunchFromIssue as canLaunchFromIssueHelper,
+    classifyIssuePrefix,
+    dockerStatusHint as dockerStatusHintHelper,
+    isIssueSelectable as isIssueSelectableHelper,
+    isStaleIssueClassifyRequest,
+    parseEnvOverrides,
+    parseExtraArgs,
+    resolveDockerContextSelection,
+    shouldLoadMoreIssues,
+    splitBranchNamePrefix as splitBranchNamePrefixHelper,
+    supportsModelFor,
+    toErrorMessage,
+    type BranchPrefix,
+    type RuntimeTarget,
+  } from "./agentLaunchFormHelpers";
 
   let {
     projectPath,
@@ -36,7 +53,6 @@
 
   type BranchMode = "existing" | "new";
   type SessionMode = "normal" | "continue" | "resume";
-  type RuntimeTarget = "host" | "docker";
 
   type AgentVersionsInfo = {
     agentId: string;
@@ -115,7 +131,6 @@
   // "New Branch" fields are editable by the user.
   let baseBranch: string = $state(existingBranch);
 
-  type BranchPrefix = "feature/" | "bugfix/" | "hotfix/" | "release/" | "";
   const BRANCH_PREFIXES: BranchPrefix[] = ["feature/", "bugfix/", "hotfix/", "release/"];
 
   let newBranchPrefix: BranchPrefix = $state("feature/" as BranchPrefix);
@@ -164,10 +179,8 @@
     })()
   );
 
-  let issueBranchName = $derived(
-    selectedIssue
-      ? `${newBranchPrefix}issue-${selectedIssue.number}`
-      : ""
+  let issueBranchSuffix = $derived(
+    selectedIssue ? `issue-${selectedIssue.number}` : ""
   );
 
   let ghCliAvailable = $derived(
@@ -213,35 +226,7 @@
   );
 
   // Human-readable Docker status hint
-  let dockerStatusHint = $derived(
-    (() => {
-      if (runtimeTarget !== "docker") return "";
-      const imgStatus = dockerContext?.images_exist;
-      const ctrStatus = dockerContext?.container_status;
-      if (imgStatus == null || ctrStatus == null) return "";
-      const imgLabel = imgStatus ? "Images ready" : "No images";
-      const ctrLabel =
-        ctrStatus === "running" ? "Containers running"
-        : ctrStatus === "stopped" ? "Containers stopped"
-        : "No containers";
-      const actions: string[] = [];
-      if (!imgStatus) actions.push("build");
-      if (ctrStatus === "not_found") actions.push("create");
-      else if (ctrStatus === "stopped") actions.push("recreate");
-      const suffix = actions.length > 0
-        ? ` \u2014 will ${actions.join(" and ")} automatically`
-        : "";
-      return `${imgLabel} / ${ctrLabel}${suffix}`;
-    })()
-  );
-  function supportsModelFor(agentId: string): boolean {
-    return (
-      agentId === "codex" ||
-      agentId === "claude" ||
-      agentId === "gemini" ||
-      agentId === "opencode"
-    );
-  }
+  let dockerStatusHint = $derived(dockerStatusHintHelper(runtimeTarget, dockerContext));
 
   let supportsModel = $derived(supportsModelFor(selectedAgent));
   let supportsReasoning = $derived(selectedAgent === "codex");
@@ -492,15 +477,6 @@
     if (dockerRecreateRequired) dockerRecreate = true;
   });
 
-  function toErrorMessage(err: unknown): string {
-    if (typeof err === "string") return err;
-    if (err && typeof err === "object" && "message" in err) {
-      const msg = (err as { message?: unknown }).message;
-      if (typeof msg === "string") return msg;
-    }
-    return String(err);
-  }
-
   async function loadAgentConfig() {
     agentConfigLoading = true;
     agentConfigError = null;
@@ -536,56 +512,8 @@
     };
   }
 
-  function parseExtraArgs(text: string): string[] {
-    return text
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-  }
-
-  function parseEnvOverrides(
-    text: string
-  ): { env: Record<string, string>; error: string | null } {
-    const env: Record<string, string> = {};
-    const lines = text.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const raw = lines[i].trim();
-      if (!raw || raw.startsWith("#")) continue;
-      const idx = raw.indexOf("=");
-      if (idx <= 0) {
-        return {
-          env: {},
-          error: `Invalid env override at line ${i + 1}. Use KEY=VALUE.`,
-        };
-      }
-      const key = raw.slice(0, idx).trim();
-      const value = raw.slice(idx + 1).trimStart();
-      if (!key) {
-        return { env: {}, error: `Invalid env override at line ${i + 1}. Key is required.` };
-      }
-      env[key] = value;
-    }
-    return { env, error: null };
-  }
-
-  function buildNewBranchName(prefix: BranchPrefix, suffix: string): string {
-    const s = suffix.trim();
-    if (!s) return "";
-    return `${prefix}${s}`;
-  }
-
-  function splitBranchNamePrefix(input: string): { prefix: BranchPrefix; suffix: string } | null {
-    const trimmed = input.trim();
-    for (const p of BRANCH_PREFIXES) {
-      if (trimmed.startsWith(p)) {
-        return { prefix: p, suffix: trimmed.slice(p.length) };
-      }
-    }
-    return null;
-  }
-
   function setNewBranchFromFullName(fullName: string): boolean {
-    const parsed = splitBranchNamePrefix(fullName);
+    const parsed = splitBranchNamePrefixHelper(fullName, BRANCH_PREFIXES);
     if (!parsed) {
       return false;
     }
@@ -596,7 +524,7 @@
 
   function handleNewBranchSuffixInput(raw: string) {
     // When users paste a full branch name (e.g., "feature/foo"), split it and keep suffix editable.
-    const parsed = splitBranchNamePrefix(raw);
+    const parsed = splitBranchNamePrefixHelper(raw, BRANCH_PREFIXES);
     if (parsed) {
       newBranchPrefix = parsed.prefix;
       newBranchSuffix = parsed.suffix;
@@ -781,18 +709,34 @@
         labels: issue.labels.map(l => l.name),
         body: issue.body ?? null,
       });
-      if (reqId !== classifyRequestId || selectedIssue?.number !== issueNumber) return; // stale request
-      if (result.status === "ok" && result.prefix) {
-        const prefix = `${result.prefix}/` as BranchPrefix;
-        if ((BRANCH_PREFIXES as readonly string[]).includes(prefix)) {
-          newBranchPrefix = prefix;
-          prefixCache.set(issue.number, prefix);
-          return;
-        }
+      if (
+        isStaleIssueClassifyRequest(
+          reqId,
+          classifyRequestId,
+          selectedIssue?.number,
+          issueNumber,
+        )
+      ) {
+        return;
+      }
+      const prefix = classifyIssuePrefix(result, BRANCH_PREFIXES);
+      if (prefix) {
+        newBranchPrefix = prefix;
+        prefixCache.set(issue.number, prefix);
+        return;
       }
       // Invalid response, AI not configured, or error → leave unselected
     } catch {
-      if (reqId !== classifyRequestId || selectedIssue?.number !== issueNumber) return;
+      if (
+        isStaleIssueClassifyRequest(
+          reqId,
+          classifyRequestId,
+          selectedIssue?.number,
+          issueNumber,
+        )
+      ) {
+        return;
+      }
     } finally {
       if (reqId === classifyRequestId) {
         prefixClassifying = false;
@@ -801,14 +745,11 @@
   }
 
   function isIssueSelectable(issueNumber: number): boolean {
-    if (issueBranchChecksInFlight.has(issueNumber)) return false;
-    if (!issueBranchMap.has(issueNumber)) return false;
-    return !issueBranchMap.get(issueNumber);
+    return isIssueSelectableHelper(issueNumber, issueBranchChecksInFlight, issueBranchMap);
   }
 
   function canLaunchFromIssue(issue: GitHubIssueInfo | null): boolean {
-    if (!issue) return false;
-    return isIssueSelectable(issue.number);
+    return canLaunchFromIssueHelper(issue?.number, issueBranchChecksInFlight, issueBranchMap);
   }
 
   function selectIssue(issue: GitHubIssueInfo) {
@@ -821,8 +762,17 @@
     const el = e.target as HTMLElement;
     if (!el) return;
     const threshold = 50;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
-    if (atBottom && issuesHasNextPage && !issuesLoading && !issueRateLimited) {
+    if (
+      shouldLoadMoreIssues(
+        el.scrollHeight,
+        el.scrollTop,
+        el.clientHeight,
+        threshold,
+        issuesHasNextPage,
+        issuesLoading,
+        issueRateLimited,
+      )
+    ) {
       void loadIssues(issuesPage + 1);
     }
   }
@@ -861,59 +811,16 @@
       if (dockerContextKey !== key) return;
 
       dockerContext = ctx;
-
-      if (!ctx || ctx.force_host || ctx.file_type === "none") {
-        runtimeTarget = "host" as RuntimeTarget;
-        dockerService = "";
-        pendingRuntimePreference = null;
-        pendingDockerServicePreference = "";
-        return;
-      }
-
-      const services = ctx.compose_services ?? [];
-
-      const composeLike =
-        ctx.file_type === "compose" ||
-        (ctx.file_type === "devcontainer" && services.length > 0);
-
-      if (composeLike) {
-        const canUseDocker = ctx.docker_available && ctx.compose_available;
-        if (pendingRuntimePreference === "host") {
-          runtimeTarget = "host";
-        } else if (pendingRuntimePreference === "docker" && canUseDocker) {
-          runtimeTarget = "docker";
-        } else {
-          runtimeTarget = canUseDocker ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
-        }
-
-        if (services.length === 0) {
-          dockerService = "";
-          pendingRuntimePreference = null;
-          pendingDockerServicePreference = "";
-          return;
-        }
-        const preferredService = pendingDockerServicePreference.trim();
-        if (preferredService && services.includes(preferredService)) {
-          dockerService = preferredService;
-        } else if (!services.includes(dockerService)) {
-          dockerService = services[0];
-        }
-        pendingRuntimePreference = null;
-        pendingDockerServicePreference = "";
-        return;
-      }
-
-      // Dockerfile / image-based devcontainer.
-      if (pendingRuntimePreference === "host") {
-        runtimeTarget = "host";
-      } else if (pendingRuntimePreference === "docker" && ctx.docker_available) {
-        runtimeTarget = "docker";
-      } else {
-        runtimeTarget = ctx.docker_available ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
-      }
-      dockerService = "";
-      pendingRuntimePreference = null;
-      pendingDockerServicePreference = "";
+      const next = resolveDockerContextSelection({
+        context: ctx,
+        pendingRuntimePreference,
+        pendingDockerServicePreference,
+        dockerService,
+      });
+      runtimeTarget = next.runtimeTarget;
+      dockerService = next.dockerService;
+      pendingRuntimePreference = next.pendingRuntimePreference;
+      pendingDockerServicePreference = next.pendingDockerServicePreference;
     } catch (err) {
       const key = `${projectPath}::${refBranch}`;
       if (dockerContextKey !== key) return;
@@ -1106,7 +1013,7 @@
       } else {
         if (!newBranchPrefix) return;
         const fullName = issueForLaunch
-          ? issueBranchName
+          ? buildNewBranchName(newBranchPrefix, issueBranchSuffix)
           : newBranchFullName.trim();
         if (!baseBranch.trim() || !fullName) return;
         request.branch = fullName;
@@ -1402,7 +1309,7 @@
                   {/if}
                   <input
                     type="text"
-                    value={issueBranchName}
+                    value={issueBranchSuffix}
                     readonly
                   />
                 </div>
@@ -1891,7 +1798,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: var(--z-modal-base);
   }
 
   .dialog {
