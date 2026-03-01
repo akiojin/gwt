@@ -33,7 +33,7 @@ Project (1)
 | base_branch | String | プロジェクト開始時のブランチ |
 | lead | LeadState | Lead状態 |
 | issues | Vec\<ProjectIssue\> | Issue一覧 |
-| worker_agent_type | AgentType | ユーザー指定のWorkerエージェント種別 |
+| worker_agent_type | Option\<AgentType\> | 起動時のWorkerエージェント種別固定指定（未指定可） |
 
 ### LeadState
 
@@ -191,6 +191,7 @@ Project  // <repo>/.gwt/personas/
 
 ```text
 Starting → Running → Completed
+                   → WaitingInput → Running
                    → Error → [Coordinator判断でリトライ or 差し替え]
 ```
 
@@ -237,7 +238,7 @@ interface ProjectModeState {
   status: "active" | "paused" | "completed" | "failed";
   lead: LeadState;
   issues: ProjectIssue[];
-  workerAgentType: "claude" | "codex" | "gemini";
+  workerAgentType?: "claude" | "codex" | "gemini";
 }
 ```
 
@@ -319,7 +320,7 @@ interface WorkerState {
   roleLabel?: string;    // ペルソナのrole_label（UI表示用）
   agentType: "claude" | "codex" | "gemini";
   paneId: string;
-  status: "starting" | "running" | "completed" | "error";
+  status: "starting" | "running" | "waiting_input" | "completed" | "error";
   worktree: { branchName: string; path: string };
 }
 ```
@@ -403,7 +404,7 @@ interface SkillRegistrationPreferences {
   "updated_at": "2026-02-19T12:30:00Z",
   "repository_path": "/path/to/repo",
   "base_branch": "feature/agent-mode",
-  "worker_agent_type": "claude",
+  "worker_agent_type": null,
   "lead": {
     "conversation": [],
     "status": "orchestrating",

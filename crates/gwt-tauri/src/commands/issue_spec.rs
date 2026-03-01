@@ -2,11 +2,11 @@
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::git::{
-    close_spec_issue, delete_spec_issue_artifact_comment, find_spec_issue_by_spec_id,
-    get_spec_issue_detail, list_spec_issue_artifact_comments, sync_issue_to_project,
-    upsert_spec_issue, upsert_spec_issue_artifact_comment, ProjectSyncResult,
-    SpecIssueArtifactComment, SpecIssueArtifactKind, SpecIssueDetail, SpecIssueSections,
-    SpecProjectPhase,
+    close_spec_issue, create_spec_issue, delete_spec_issue_artifact_comment,
+    find_spec_issue_by_spec_id, get_spec_issue_detail, list_spec_issue_artifact_comments,
+    sync_issue_to_project, update_spec_issue, upsert_spec_issue,
+    upsert_spec_issue_artifact_comment, ProjectSyncResult, SpecIssueArtifactComment,
+    SpecIssueArtifactKind, SpecIssueDetail, SpecIssueSections, SpecProjectPhase,
 };
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,42 @@ impl From<ProjectSyncResult> for SyncSpecIssueProjectResult {
             warning: value.warning,
         }
     }
+}
+
+#[tauri::command]
+pub fn create_spec_issue_cmd(
+    project_path: String,
+    title: String,
+    sections: SpecIssueSectionsData,
+) -> Result<SpecIssueDetailData, StructuredError> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "create_spec_issue_cmd"))?;
+    let detail = create_spec_issue(&repo_path, title.trim(), &sections.into())
+        .map_err(|e| StructuredError::internal(&e, "create_spec_issue_cmd"))?;
+    Ok(detail.into())
+}
+
+#[tauri::command]
+pub fn update_spec_issue_cmd(
+    project_path: String,
+    issue_number: u64,
+    title: String,
+    sections: SpecIssueSectionsData,
+    expected_etag: Option<String>,
+) -> Result<SpecIssueDetailData, StructuredError> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "update_spec_issue_cmd"))?;
+    let detail = update_spec_issue(
+        &repo_path,
+        issue_number,
+        title.trim(),
+        &sections.into(),
+        expected_etag.as_deref(),
+    )
+    .map_err(|e| StructuredError::internal(&e, "update_spec_issue_cmd"))?;
+    Ok(detail.into())
 }
 
 #[tauri::command]

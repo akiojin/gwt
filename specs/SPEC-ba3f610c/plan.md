@@ -153,7 +153,7 @@ gwt-gui/src/
 - Coordinator/Workerは新規の状態管理モジュールとして追加する
 - GUI UIはダッシュボード（左）+ Leadチャット（右）の2カラム構成で実装する
 - Coordinator→Lead通信はハイブリッド（重要イベント: Tauriイベント、途中経過: scrollback読み取り）
-- Workerのエージェント種別はプロジェクトモード起動時にユーザーが指定する
+- Workerのエージェント種別は、起動時に固定指定がある場合はそれを優先し、未指定時は`persona.agent_type`、未設定なら`claude`を使用する
 - コンテキスト要約はWorkerはLLM自動、Lead/Coordinatorはgwt側で80%閾値制御
 - PTY通信は既存のsend_keys系を維持しつつ、スキルとしてのインターフェースを追加する
 - Claude Code Hook連携は`plugins/gwt-integration/hooks/hooks.json`を正本とし、5イベントを`gwt-tauri hook <Event>`へ転送する

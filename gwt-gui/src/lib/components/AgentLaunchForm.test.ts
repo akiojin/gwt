@@ -953,6 +953,17 @@ describe("AgentLaunchForm", () => {
     const issueButton = rendered.getByRole("button", { name: /#99/i });
     await fireEvent.click(issueButton);
 
+    await waitFor(() => {
+      expect(rendered.getByText("Auto-generated from issue #99")).toBeTruthy();
+    });
+    const issueBranchField = rendered
+      .getByText("Auto-generated from issue #99")
+      .closest(".field") as HTMLElement;
+    const issuePrefixSelect = issueBranchField.querySelector("select") as HTMLSelectElement;
+    const issueBranchInput = issueBranchField.querySelector("input[readonly]") as HTMLInputElement;
+    expect(issuePrefixSelect.value).toBe("bugfix/");
+    expect(issueBranchInput.value).toBe("issue-99");
+
     const launchButton = rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement;
     await waitFor(() => {
       expect(launchButton.disabled).toBe(false);
@@ -964,6 +975,8 @@ describe("AgentLaunchForm", () => {
     });
 
     const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.branch).toBe("bugfix/issue-99");
+    expect(request.createBranch).toEqual({ name: "bugfix/issue-99", base: "main" });
     expect(request.issueNumber).toBe(99);
     expect(
       invokeMock.mock.calls.some((call: any[]) => call[0] === "link_branch_to_issue")

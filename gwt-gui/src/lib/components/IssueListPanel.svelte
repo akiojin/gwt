@@ -270,9 +270,7 @@
   }
 
   function isSpecIssue(issue: GitHubIssueInfo): boolean {
-    return issue.labels.some(
-      (l) => l.name.toLowerCase() === "spec" || l.name.toLowerCase().startsWith("spec:")
-    );
+    return issue.labels.some((l) => l.name.toLowerCase() === "gwt-spec");
   }
 
   // Setup IntersectionObserver for infinite scroll
