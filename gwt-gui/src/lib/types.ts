@@ -580,6 +580,14 @@ export interface LaunchAgentRequest {
 
 // PR Status types (SPEC-d6949f99)
 
+export type MergeUiState =
+  | "merged"
+  | "closed"
+  | "checking"
+  | "blocked"
+  | "conflicting"
+  | "mergeable";
+
 export interface PrStatusInfo {
   number: number;
   title: string;
@@ -600,6 +608,10 @@ export interface PrStatusInfo {
   additions: number;
   deletions: number;
   mergeStateStatus?: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
+  /** UI-oriented merge state synthesized by backend. */
+  mergeUiState?: MergeUiState;
+  /** True when only non-required checks are failing. */
+  nonRequiredChecksWarning?: boolean;
   /** True while backend retry is in progress for UNKNOWN merge status. */
   retrying?: boolean;
 }
@@ -612,6 +624,10 @@ export interface PrStatusLite {
   baseBranch: string;
   headBranch: string;
   checkSuites: WorkflowRunInfo[];
+  /** UI-oriented merge state synthesized by backend. */
+  mergeUiState?: MergeUiState;
+  /** True when only non-required checks are failing. */
+  nonRequiredChecksWarning?: boolean;
   /** True while backend retry is in progress for UNKNOWN merge status. */
   retrying?: boolean;
 }
