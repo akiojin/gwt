@@ -90,6 +90,10 @@ def _pattern_to_regex(pattern: str) -> Optional[re.Pattern]:
         return None  # skip negation patterns for simplicity
 
     pattern = pattern.rstrip("/")
+    pattern = pattern.lstrip("/")
+    if not pattern:
+        return None
+
     regex = pattern.replace(".", r"\.")
     regex = regex.replace("**", "{{GLOBSTAR}}")
     regex = regex.replace("*", "[^/]*")

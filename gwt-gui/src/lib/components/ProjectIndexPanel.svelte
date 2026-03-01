@@ -109,7 +109,6 @@
   {#if statusError}
     <div class="error-message">Failed to load index status: {statusError}</div>
   {/if}
-
   <div class="results">
     {#if results.length > 0}
       {#each results as item}
