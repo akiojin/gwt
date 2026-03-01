@@ -6,10 +6,16 @@ export const AGENT_INSTRUCTION_DOC_FILES = [
 
 export type DocsEditorShellId = "wsl" | "powershell" | "cmd";
 
+/**
+ * Returns true when the current runtime platform should be treated as Windows.
+ */
 export function isWindowsPlatform(platform: string): boolean {
   return platform.toLowerCase().includes("win");
 }
 
+/**
+ * Docs editor tabs are auto-closed only for vi-based flows.
+ */
 export function shouldAutoCloseDocsEditorTab(
   platform: string,
   shellId?: DocsEditorShellId,
@@ -18,11 +24,18 @@ export function shouldAutoCloseDocsEditorTab(
   return shellId === "wsl";
 }
 
+/**
+ * Terminal status values returned by list_terminals use string labels.
+ * completed(*) and error:* indicate the interactive process has finished.
+ */
 export function isTerminalProcessEnded(status: string): boolean {
   const normalized = status.trim().toLowerCase();
   return normalized.startsWith("completed") || normalized.startsWith("error");
 }
 
+/**
+ * Builds the shell command for opening CLAUDE/AGENTS/GEMINI instruction files.
+ */
 export function buildDocsEditorCommand(
   platform: string,
   shellId?: DocsEditorShellId,

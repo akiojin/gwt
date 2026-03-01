@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 const SPEC_LABEL: &str = "gwt-spec";
+const PROJECT_FIELD_STATUS: &str = "Status";
+const PROJECT_FIELD_PHASE: &str = "Phase";
 const SECTION_SPEC: &str = "Spec";
 const SECTION_PLAN: &str = "Plan";
 const SECTION_TASKS: &str = "Tasks";
@@ -130,6 +132,55 @@ impl SpecProjectPhase {
     }
 }
 
+/// Create a new spec issue. Returns the created issue detail.
+pub fn create_spec_issue(
+    repo_path: &Path,
+    title: &str,
+    sections: &SpecIssueSections,
+) -> Result<SpecIssueDetail, String> {
+    if title.trim().is_empty() {
+        return Err("title is required".to_string());
+    }
+
+    let checklist = SpecIssueChecklist::default();
+    // New issues use issue number as spec id (placeholder until created).
+    let placeholder_id = "new";
+    let body = render_issue_body(placeholder_id, sections, &checklist);
+
+    let number = gh_issue_create(repo_path, title, &body, None)?;
+    // Re-render with the actual issue number as spec id.
+    let spec_id = format!("#{number}");
+    let body = render_issue_body(&spec_id, sections, &checklist);
+    let edit_result = gh_issue_edit(repo_path, number, title, &body, None);
+    let detail_result = get_spec_issue_detail(repo_path, number);
+    finalize_created_issue(number, edit_result, detail_result)
+}
+
+/// Update an existing spec issue by issue number. Returns the updated issue detail.
+pub fn update_spec_issue(
+    repo_path: &Path,
+    issue_number: u64,
+    title: &str,
+    sections: &SpecIssueSections,
+    expected_etag: Option<&str>,
+) -> Result<SpecIssueDetail, String> {
+    if title.trim().is_empty() {
+        return Err("title is required".to_string());
+    }
+
+    let existing = get_spec_issue_detail(repo_path, issue_number)?;
+
+    check_etag(expected_etag, &existing.etag)?;
+
+    let checklist = parse_acceptance_checklist_from_body(&existing.body);
+    let spec_id = format!("#{issue_number}");
+    let body = render_issue_body(&spec_id, sections, &checklist);
+
+    gh_issue_edit(repo_path, issue_number, title, &body, None)?;
+    get_spec_issue_detail(repo_path, issue_number)
+}
+
+/// Backward-compatible upsert: finds by spec_id label, creates or updates.
 pub fn upsert_spec_issue(
     repo_path: &Path,
     spec_id: &str,
@@ -152,16 +203,12 @@ pub fn upsert_spec_issue(
     let body = render_issue_body(spec_id, sections, &checklist);
 
     if let Some(issue) = existing.as_ref() {
-        if let Some(expected) = expected_etag {
-            if !expected.trim().is_empty() && expected != issue.etag {
-                return Err("etag mismatch".to_string());
-            }
-        }
-        gh_issue_edit(repo_path, issue.number, title, &body, spec_id)?;
+        check_etag(expected_etag, &issue.etag)?;
+        gh_issue_edit(repo_path, issue.number, title, &body, Some(spec_id))?;
         return get_spec_issue_detail(repo_path, issue.number);
     }
 
-    let number = gh_issue_create(repo_path, title, &body, spec_id)?;
+    let number = gh_issue_create(repo_path, title, &body, Some(spec_id))?;
     get_spec_issue_detail(repo_path, number)
 }
 
@@ -265,11 +312,7 @@ pub fn upsert_spec_issue_artifact_comment(
         .find(|artifact| artifact.kind == kind && artifact.artifact_name == artifact_name);
 
     if let Some(found) = existing {
-        if let Some(expected) = expected_etag {
-            if !expected.trim().is_empty() && expected != found.etag {
-                return Err("etag mismatch".to_string());
-            }
-        }
+        check_etag(expected_etag, &found.etag)?;
         return update_issue_comment(repo_path, issue_number, &found.comment_id, &body);
     }
 
@@ -297,11 +340,7 @@ pub fn delete_spec_issue_artifact_comment(
         return Ok(false);
     };
 
-    if let Some(expected) = expected_etag {
-        if !expected.trim().is_empty() && expected != found.etag {
-            return Err("etag mismatch".to_string());
-        }
-    }
+    check_etag(expected_etag, &found.etag)?;
 
     delete_issue_comment(repo_path, &found.comment_id)?;
     Ok(true)
@@ -666,20 +705,46 @@ fn non_empty_or_default(value: &str, default_value: &str) -> String {
     }
 }
 
+fn check_etag(expected: Option<&str>, actual: &str) -> Result<(), String> {
+    if let Some(e) = expected {
+        if !e.trim().is_empty() && e != actual {
+            return Err("etag mismatch".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn finalize_created_issue(
+    issue_number: u64,
+    edit_result: Result<(), String>,
+    detail_result: Result<SpecIssueDetail, String>,
+) -> Result<SpecIssueDetail, String> {
+    match detail_result {
+        Ok(detail) => Ok(detail),
+        Err(detail_err) => match edit_result {
+            Ok(()) => Err(detail_err),
+            Err(edit_err) => Err(format!(
+                "Issue #{issue_number} was created, but follow-up update and fetch failed (edit: {edit_err}; fetch: {detail_err})"
+            )),
+        },
+    }
+}
+
 fn gh_issue_create(
     repo_path: &Path,
     title: &str,
     body: &str,
-    spec_id: &str,
+    extra_label: Option<&str>,
 ) -> Result<u64, String> {
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL, "--label",
-            spec_id,
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
+    let mut args = vec![
+        "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL,
+    ];
+    if let Some(label) = extra_label {
+        args.extend(["--label", label]);
+    }
+
+    let output = run_gh_output_with_repair(repo_path, args)
+        .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -695,26 +760,24 @@ fn gh_issue_edit(
     issue_number: u64,
     title: &str,
     body: &str,
-    spec_id: &str,
+    extra_label: Option<&str>,
 ) -> Result<(), String> {
     let issue_number = issue_number.to_string();
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue",
-            "edit",
-            issue_number.as_str(),
-            "--title",
-            title,
-            "--body",
-            body,
-            "--add-label",
-            SPEC_LABEL,
-            "--add-label",
-            spec_id,
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
+    let mut args = vec![
+        "issue",
+        "edit",
+        issue_number.as_str(),
+        "--title",
+        title,
+        "--body",
+        body,
+    ];
+    if let Some(label) = extra_label {
+        args.extend(["--add-label", SPEC_LABEL, "--add-label", label]);
+    }
+
+    let output = run_gh_output_with_repair(repo_path, args)
+        .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1302,36 +1365,7 @@ fn update_project_status(
         .and_then(Value::as_array)
         .ok_or_else(|| "Project fields not found".to_string())?;
 
-    let mut field_id: Option<String> = None;
-    let mut option_id: Option<String> = None;
-
-    for node in nodes {
-        let name = node.get("name").and_then(Value::as_str).unwrap_or_default();
-        if name != "Status" {
-            continue;
-        }
-        field_id = node.get("id").and_then(Value::as_str).map(str::to_string);
-        if let Some(options) = node.get("options").and_then(Value::as_array) {
-            for option in options {
-                let opt_name = option
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if opt_name == status_name {
-                    option_id = option.get("id").and_then(Value::as_str).map(str::to_string);
-                    break;
-                }
-            }
-        }
-        break;
-    }
-
-    let Some(field_id) = field_id else {
-        return Err("Status field not found in project".to_string());
-    };
-    let Some(option_id) = option_id else {
-        return Err(format!("Status option not found: {status_name}"));
-    };
+    let (field_id, option_id) = select_project_status_field_and_option(nodes, status_name)?;
 
     let mutation = "mutation($project:ID!, $item:ID!, $field:ID!, $option:String!){ updateProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field, value:{ singleSelectOptionId:$option }}) { projectV2Item { id } } }";
     let update_output = run_gh_output_with_repair(
@@ -1357,6 +1391,48 @@ fn update_project_status(
         return Err(format!("Project status update failed: {}", stderr.trim()));
     }
     Ok(true)
+}
+
+fn select_project_status_field_and_option(
+    nodes: &[Value],
+    status_name: &str,
+) -> Result<(String, String), String> {
+    let mut has_status_like_field = false;
+
+    for node in nodes {
+        let name = node.get("name").and_then(Value::as_str).unwrap_or_default();
+        if name != PROJECT_FIELD_STATUS && name != PROJECT_FIELD_PHASE {
+            continue;
+        }
+        has_status_like_field = true;
+
+        let Some(field_id) = node.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(options) = node.get("options").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for option in options {
+            let opt_name = option
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if opt_name != status_name {
+                continue;
+            }
+            let Some(option_id) = option.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            return Ok((field_id.to_string(), option_id.to_string()));
+        }
+    }
+
+    if !has_status_like_field {
+        return Err("Status field not found in project".to_string());
+    }
+
+    Err(format!("Status option not found: {status_name}"))
 }
 
 #[cfg(test)]
@@ -1485,5 +1561,84 @@ mod tests {
         let project_id =
             select_project_id_from_owner_projects(&payload, "akiojin/gwt").expect("project id");
         assert_eq!(project_id, "PVT_match");
+    }
+
+    #[test]
+    fn select_project_status_field_and_option_checks_next_candidate_field() {
+        let nodes = vec![
+            serde_json::json!({
+                "id": "field-status",
+                "name": "Status",
+                "options": [
+                    { "id": "opt-todo", "name": "Todo" }
+                ]
+            }),
+            serde_json::json!({
+                "id": "field-phase",
+                "name": "Phase",
+                "options": [
+                    { "id": "opt-done", "name": "Done" }
+                ]
+            }),
+        ];
+
+        let (field_id, option_id) =
+            select_project_status_field_and_option(&nodes, "Done").expect("status option");
+        assert_eq!(field_id, "field-phase");
+        assert_eq!(option_id, "opt-done");
+    }
+
+    #[test]
+    fn select_project_status_field_and_option_returns_not_found_when_no_candidate_field() {
+        let nodes = vec![serde_json::json!({
+            "id": "field-priority",
+            "name": "Priority",
+            "options": [
+                { "id": "opt-high", "name": "High" }
+            ]
+        })];
+
+        let err =
+            select_project_status_field_and_option(&nodes, "Done").expect_err("status field error");
+        assert_eq!(err, "Status field not found in project");
+    }
+
+    #[test]
+    fn finalize_created_issue_returns_detail_even_when_edit_failed() {
+        let detail = SpecIssueDetail {
+            number: 42,
+            title: "created".to_string(),
+            url: "https://example.com/issues/42".to_string(),
+            updated_at: "2026-03-01T00:00:00Z".to_string(),
+            spec_id: None,
+            labels: vec![],
+            etag: "etag".to_string(),
+            body: "body".to_string(),
+            sections: SpecIssueSections::default(),
+        };
+
+        let result = finalize_created_issue(
+            42,
+            Err("gh issue edit failed: transient".to_string()),
+            Ok(detail.clone()),
+        )
+        .expect("should return created issue detail");
+
+        assert_eq!(result.number, detail.number);
+        assert_eq!(result.title, detail.title);
+    }
+
+    #[test]
+    fn finalize_created_issue_reports_created_issue_when_follow_up_fails() {
+        let err = finalize_created_issue(
+            77,
+            Err("gh issue edit failed".to_string()),
+            Err("gh issue view failed".to_string()),
+        )
+        .expect_err("should fail with contextual message");
+
+        assert!(err.contains("Issue #77 was created"));
+        assert!(err.contains("edit: gh issue edit failed"));
+        assert!(err.contains("fetch: gh issue view failed"));
     }
 }

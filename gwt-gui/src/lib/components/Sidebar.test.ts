@@ -2565,7 +2565,7 @@ describe("Sidebar", () => {
     expect(prBadge?.textContent?.trim()).toBe("#77");
   });
 
-  it("shows PR badge with unknown mergeable state", async () => {
+  it("shows PR badge with checking state when mergeable is unknown", async () => {
     const unknownBranch = {
       ...branchFixture,
       name: "feature/unknown-pr",
@@ -2604,8 +2604,52 @@ describe("Sidebar", () => {
     });
 
     const prBadge = rendered.container.querySelector(".pr-badge");
-    expect(prBadge?.classList.contains("unknown")).toBe(true);
+    expect(prBadge?.classList.contains("checking")).toBe(true);
     expect(prBadge?.textContent?.trim()).toBe("#66");
+  });
+
+  it("shows PR badge with blocked state when mergeUiState is blocked", async () => {
+    const blockedBranch = {
+      ...branchFixture,
+      name: "feature/blocked-pr",
+      commit_timestamp: 1_700_000_090,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_worktree_branches") return [blockedBranch];
+      if (cmd === "list_worktrees") return [];
+      if (cmd === "fetch_pr_status") {
+        return {
+          statuses: { "feature/blocked-pr": {
+            number: 65,
+            state: "OPEN",
+            url: "https://github.com/test/repo/pull/65",
+            mergeable: "UNKNOWN",
+            mergeUiState: "blocked",
+            baseBranch: "main",
+            headBranch: "feature/blocked-pr",
+            checkSuites: [],
+            retrying: false,
+          } },
+          ghStatus: { available: true, authenticated: true },
+          repoKey: "/tmp/project",
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const prBadge = rendered.container.querySelector(".pr-badge");
+      expect(prBadge).toBeTruthy();
+    });
+
+    const prBadge = rendered.container.querySelector(".pr-badge");
+    expect(prBadge?.classList.contains("blocked")).toBe(true);
+    expect(prBadge?.textContent?.trim()).toBe("#65");
   });
 
   it("does not show agent indicator for Remote filter branches", async () => {

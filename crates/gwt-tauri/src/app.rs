@@ -167,6 +167,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
+        crate::menu::MENU_ID_TOOLS_PROJECT_INDEX => Some("project-index"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
         crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
@@ -745,6 +746,8 @@ pub fn build_app(
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
             crate::commands::issue::classify_issue_branch_prefix,
+            crate::commands::issue_spec::create_spec_issue_cmd,
+            crate::commands::issue_spec::update_spec_issue_cmd,
             crate::commands::issue_spec::upsert_spec_issue_cmd,
             crate::commands::issue_spec::get_spec_issue_detail_cmd,
             crate::commands::issue_spec::find_spec_issue_by_spec_id_cmd,
@@ -772,6 +775,10 @@ pub fn build_app(
             crate::commands::pullrequest::mark_pr_ready,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
+            crate::commands::project_index::ensure_index_runtime,
+            crate::commands::project_index::index_project_cmd,
+            crate::commands::project_index::search_project_index_cmd,
+            crate::commands::project_index::get_index_status_cmd,
         ])
 }
 
@@ -1047,6 +1054,10 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
+        );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_TOOLS_PROJECT_INDEX),
+            Some("project-index")
         );
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_HELP_CHECK_UPDATES),

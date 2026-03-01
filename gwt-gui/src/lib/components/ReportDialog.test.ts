@@ -507,6 +507,26 @@ describe("ReportDialog", () => {
     expect(onclose).toHaveBeenCalledTimes(1);
   });
 
+  it("marks report overlay as the top modal layer", async () => {
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
+
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose: vi.fn(),
+    });
+
+    const overlay = rendered.container.querySelector(
+      ".report-overlay",
+    ) as HTMLDivElement;
+    expect(overlay).toBeTruthy();
+    expect(overlay.classList.contains("modal-overlay-report")).toBe(true);
+  });
+
   it("calls onclose on Escape key", async () => {
     invokeMock.mockResolvedValue({
       owner: "akiojin",

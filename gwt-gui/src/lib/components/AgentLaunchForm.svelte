@@ -179,10 +179,8 @@
     })()
   );
 
-  let issueBranchName = $derived(
-    selectedIssue
-      ? `${newBranchPrefix}issue-${selectedIssue.number}`
-      : ""
+  let issueBranchSuffix = $derived(
+    selectedIssue ? `issue-${selectedIssue.number}` : ""
   );
 
   let ghCliAvailable = $derived(
@@ -1015,7 +1013,7 @@
       } else {
         if (!newBranchPrefix) return;
         const fullName = issueForLaunch
-          ? issueBranchName
+          ? buildNewBranchName(newBranchPrefix, issueBranchSuffix)
           : newBranchFullName.trim();
         if (!baseBranch.trim() || !fullName) return;
         request.branch = fullName;
@@ -1311,7 +1309,7 @@
                   {/if}
                   <input
                     type="text"
-                    value={issueBranchName}
+                    value={issueBranchSuffix}
                     readonly
                   />
                 </div>
@@ -1800,7 +1798,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: var(--z-modal-base);
   }
 
   .dialog {

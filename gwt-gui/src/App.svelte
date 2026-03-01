@@ -1959,6 +1959,23 @@
     activeTabId = tab.id;
   }
 
+  function openProjectIndexTab() {
+    const existing = tabs.find(
+      (t) => t.type === "projectIndex" || t.id === "projectIndex",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+    const tab: Tab = {
+      id: "projectIndex",
+      label: "Project Index",
+      type: "projectIndex",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
   function handleIssueCountChange(count: number) {
     tabs = tabs.map((t) =>
       t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
@@ -2333,6 +2350,9 @@
         break;
       case "git-pull-requests":
         openPullRequestsTab();
+        break;
+      case "project-index":
+        openProjectIndexTab();
         break;
       case "check-updates":
         {
@@ -3257,7 +3277,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: var(--z-modal-base);
   }
 
   .mono {
@@ -3480,7 +3500,7 @@
     bottom: 40px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 2000;
+    z-index: var(--z-toast);
     pointer-events: none;
   }
 
@@ -3612,7 +3632,7 @@
     background: var(--accent, #89b4fa);
     opacity: 0;
     pointer-events: none;
-    z-index: 9999;
+    z-index: var(--z-overlay-flash);
     animation: copy-flash-anim 0.25s ease-out forwards;
   }
 

@@ -168,7 +168,7 @@ jobs:
           }
       - name: Upload artifacts (Linux)
         if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: gwt-linux
           path: |
@@ -176,13 +176,13 @@ jobs:
             target/release/bundle/appimage/*.AppImage
       - name: Upload artifacts (macOS)
         if: matrix.platform == 'macos'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: gwt-macos
           path: target/release/bundle/dmg/*.dmg
       - name: Upload artifacts (Windows)
         if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: gwt-windows
           path: |
@@ -195,7 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Display artifacts

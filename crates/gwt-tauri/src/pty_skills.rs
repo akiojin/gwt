@@ -49,7 +49,7 @@ pub struct PaneInfo {
 
 /// Send input to a specific pane.
 pub fn send_to_pane(state: &AppState, pane_id: &str, text: &str) -> PtySkillResult {
-    match send_keys_to_pane_from_state(state, pane_id, text) {
+    match send_keys_to_pane_from_state(state, pane_id, text, None) {
         Ok(()) => PtySkillResult {
             success: true,
             output: None,
@@ -82,7 +82,7 @@ pub fn broadcast(state: &AppState, text: &str) -> PtySkillResult {
 /// Capture recent output from a pane.
 pub fn capture_output(state: &AppState, pane_id: &str, max_bytes: Option<usize>) -> PtySkillResult {
     let limit = max_bytes.unwrap_or(0);
-    match capture_scrollback_tail_from_state(state, pane_id, limit) {
+    match capture_scrollback_tail_from_state(state, pane_id, limit, None) {
         Ok(text) => PtySkillResult {
             success: true,
             output: Some(text),
@@ -243,6 +243,7 @@ mod tests {
             terminal_shell: None,
             interactive: false,
             windows_force_utf8: false,
+            project_root: std::env::temp_dir(),
         })
         .expect("failed to create test pane");
 
@@ -288,6 +289,7 @@ mod tests {
             terminal_shell: None,
             interactive: false,
             windows_force_utf8: false,
+            project_root: std::env::temp_dir(),
         })
         .expect("failed to create test pane");
 

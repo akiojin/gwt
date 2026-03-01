@@ -9,7 +9,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "7.13.3"
+version = "8.0.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -31,7 +31,7 @@ tar = "0.4"
 zip = "8.0"
 
 # Git operations
-gix = { version = "0.79", default-features = false, features = [
+gix = { version = "0.80", default-features = false, features = [
     "blocking-network-client",
     "worktree-mutation",
 ] }

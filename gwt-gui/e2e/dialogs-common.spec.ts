@@ -212,3 +212,69 @@ test("Feature Request dialog form has readable font sizes", async ({
   expect(typography?.labelFontSizePx ?? 0).toBeGreaterThanOrEqual(13);
   expect(typography?.textareaFontSizePx ?? 0).toBeGreaterThanOrEqual(14);
 });
+
+test("Report dialog stays above migration modal when both are open", async ({
+  page,
+}) => {
+  await installTauriMock(page, {
+    commandResponses: {
+      get_recent_projects: [defaultRecentProject],
+      probe_path: {
+        kind: "migrationRequired",
+        migrationSourceRoot: "/tmp/gwt-playwright",
+      },
+    },
+  });
+
+  await page.goto("/");
+  await openRecentProject(page);
+  await expect(
+    page.getByRole("dialog", { name: "Migration Required" }),
+  ).toBeVisible();
+
+  await waitForMenuActionListener(page);
+  await emitTauriEvent(page, "menu-action", { action: "report-issue" });
+
+  const reportDialog = page.getByRole("dialog", { name: "Report" });
+  const migrationDialog = page.getByRole("dialog", {
+    name: "Migration Required",
+  });
+  await expect(reportDialog).toBeVisible();
+  await expect(migrationDialog).toBeVisible();
+
+  const layering = await page.evaluate(() => {
+    const report = document.querySelector<HTMLElement>(
+      "[role='dialog'][aria-label='Report']",
+    );
+    const migration = document.querySelector<HTMLElement>(
+      "[role='dialog'][aria-label='Migration Required']",
+    );
+    if (!report || !migration) {
+      return { reportZ: -1, migrationZ: -1, topLayerDialog: null };
+    }
+
+    const reportRect = report.getBoundingClientRect();
+    const probeX = reportRect.left + reportRect.width / 2;
+    const probeY = reportRect.top + 20;
+    const topAtPoint = document.elementFromPoint(probeX, probeY);
+    const topLayerDialog = topAtPoint
+      ?.closest("[role='dialog']")
+      ?.getAttribute("aria-label");
+
+    return {
+      reportZ: Number.parseInt(getComputedStyle(report).zIndex || "0", 10),
+      migrationZ: Number.parseInt(
+        getComputedStyle(migration).zIndex || "0",
+        10,
+      ),
+      topLayerDialog: topLayerDialog ?? null,
+    };
+  });
+
+  expect(layering.reportZ).toBeGreaterThan(layering.migrationZ);
+  expect(layering.topLayerDialog).toBe("Report");
+
+  const title = page.locator("#bug-title");
+  await title.click();
+  await expect(title).toBeFocused();
+});

@@ -286,6 +286,12 @@ pub fn open_project(
                     });
                 }
 
+                // Build project structure index in background
+                {
+                    let index_path = project_root_str.clone();
+                    crate::commands::project_index::spawn_background_index(index_path);
+                }
+
                 return Ok(OpenProjectResult {
                     info,
                     action: OpenProjectAction::Opened,
