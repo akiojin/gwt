@@ -601,7 +601,10 @@ additional_args = []
   - Claude Code: `--dangerously-skip-permissions`フラグで起動
   - Codex: `--full-auto`フラグで起動
   - Gemini: 利用可能な自動承認フラグで起動
-- **Workerのエージェント種別はプロジェクトモード起動時にユーザーが指定する**。指定されたエージェント種別が全Workerに適用される。
+- **Workerのエージェント種別は以下の優先順位で決定する**:
+  1. プロジェクトモード起動時にユーザーが「Workerエージェント種別の固定指定」を行った場合は、その指定値を全Workerに適用する（`persona.agent_type`を上書き）。
+  2. 固定指定がない場合は、各Workerに割り当てた`persona.agent_type`を使用する。
+  3. `persona.agent_type`が未設定の場合は`claude`をデフォルトとして使用する。
 
 ### Worker並列実行制御
 
@@ -921,6 +924,7 @@ additional_args = []
 - **FR-103**: Coordinatorはタスクのtagsとペルソナのtagsのマッチ度でWorkerペルソナを選定しなければならない
 - **FR-104**: Leadは推奨ペルソナをCoordinatorに指定できなければならない
 - **FR-105**: ペルソナ設定画面でペルソナのCRUDが可能でなければならない
+- **FR-106**: Workerのagent_type解決は「起動時の固定指定 > `persona.agent_type` > `claude`」の優先順位で行わなければならない
 
 #### Lead拡張関連
 
