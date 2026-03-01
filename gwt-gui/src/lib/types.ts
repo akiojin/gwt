@@ -650,6 +650,7 @@ export interface WorkflowRunInfo {
     | "cancelled"
     | "timed_out"
     | "action_required"
+    | "startup_failure"
     | "skipped"
     | null;
   isRequired?: boolean;

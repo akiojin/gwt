@@ -8,6 +8,7 @@ export function workflowStatusIcon(run: WorkflowRunInfo): string {
     case "success":
       return "\u2713";
     case "failure":
+    case "startup_failure":
       return "\u2717";
     case "neutral":
     case "skipped":
@@ -25,6 +26,7 @@ export function workflowStatusClass(run: WorkflowRunInfo): string {
     case "success":
       return "pass";
     case "failure":
+    case "startup_failure":
       return "fail";
     default:
       return "neutral";

@@ -80,7 +80,11 @@
   }
 
   function hasChangesRequested(pr: PrStatusInfo): boolean {
-    return pr.reviews.some((review) => review.state === "CHANGES_REQUESTED");
+    const latestStateByReviewer = new Map<string, string>();
+    for (const review of pr.reviews) {
+      latestStateByReviewer.set(review.reviewer, review.state);
+    }
+    return [...latestStateByReviewer.values()].some((state) => state === "CHANGES_REQUESTED");
   }
 
   function asMergeUiState(value: string | null | undefined): MergeUiState | null {
@@ -195,6 +199,7 @@
     switch (run.conclusion) {
       case "success": return "Success";
       case "failure": return "Failure";
+      case "startup_failure": return "Failure";
       case "neutral": return "Neutral";
       case "skipped": return "Skipped";
       default: return "Completed";

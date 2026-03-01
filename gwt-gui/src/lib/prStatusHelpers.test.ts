@@ -23,6 +23,10 @@ describe("workflowStatusIcon", () => {
     expect(workflowStatusIcon(makeRun({ status: "completed", conclusion: "failure" }))).toBe("\u2717");
   });
 
+  it("returns X for completed startup_failure", () => {
+    expect(workflowStatusIcon(makeRun({ status: "completed", conclusion: "startup_failure" }))).toBe("\u2717");
+  });
+
   it("returns dash for completed neutral", () => {
     expect(workflowStatusIcon(makeRun({ status: "completed", conclusion: "neutral" }))).toBe("\u2014");
   });
@@ -51,6 +55,10 @@ describe("workflowStatusClass", () => {
 
   it("returns fail for completed failure", () => {
     expect(workflowStatusClass(makeRun({ status: "completed", conclusion: "failure" }))).toBe("fail");
+  });
+
+  it("returns fail for completed startup_failure", () => {
+    expect(workflowStatusClass(makeRun({ status: "completed", conclusion: "startup_failure" }))).toBe("fail");
   });
 
   it("returns neutral for completed neutral", () => {

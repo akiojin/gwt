@@ -766,6 +766,20 @@ describe("PrStatusSection", () => {
       expect(conclusion?.textContent).toContain("Skipped");
     });
 
+    it("shows 'Failure' for startup_failure conclusion", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "startup_failure" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusion = container.querySelector(".check-conclusion");
+      expect(conclusion?.textContent).toContain("Failure");
+    });
+
     it("shows 'Completed' for unknown conclusion", async () => {
       const checkSuites: WorkflowRunInfo[] = [
         { workflowName: "CI", runId: 1, status: "completed", conclusion: "cancelled" as any },
@@ -778,6 +792,40 @@ describe("PrStatusSection", () => {
 
       const conclusion = container.querySelector(".check-conclusion");
       expect(conclusion?.textContent).toContain("Completed");
+    });
+  });
+
+  describe("hasChangesRequested fallback", () => {
+    it("does not show blocked when same reviewer's latest state is APPROVED", async () => {
+      const pr = makePrDetail({
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        reviews: [
+          { reviewer: "alice", state: "CHANGES_REQUESTED" },
+          { reviewer: "alice", state: "APPROVED" },
+        ],
+      });
+
+      const { container } = await renderSection({ prDetail: pr });
+      const badge = container.querySelector(".mergeable-badge");
+      expect(badge?.classList.contains("mergeable")).toBe(true);
+      expect(badge?.textContent).toContain("Mergeable");
+    });
+
+    it("shows blocked when same reviewer's latest state is CHANGES_REQUESTED", async () => {
+      const pr = makePrDetail({
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        reviews: [
+          { reviewer: "alice", state: "APPROVED" },
+          { reviewer: "alice", state: "CHANGES_REQUESTED" },
+        ],
+      });
+
+      const { container } = await renderSection({ prDetail: pr });
+      const badge = container.querySelector(".mergeable-badge");
+      expect(badge?.classList.contains("blocked")).toBe(true);
+      expect(badge?.textContent).toContain("Blocked");
     });
   });
 
