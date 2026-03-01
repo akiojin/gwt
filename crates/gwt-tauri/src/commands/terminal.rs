@@ -2223,9 +2223,11 @@ pub fn spawn_shell(
                 "spawn_shell",
             )
         })?;
-        manager.spawn_shell(&resolved_dir, config, 24, 80).map_err(|e| {
-            StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
-        })?
+        manager
+            .spawn_shell(&resolved_dir, config, 24, 80)
+            .map_err(|e| {
+                StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
+            })?
     };
 
     let reader = {
@@ -5423,10 +5425,7 @@ pub fn close_terminal(
 /// returned (multi-project isolation). When omitted, all panes are listed
 /// (backwards-compatible).
 #[tauri::command]
-pub fn list_terminals(
-    state: State<AppState>,
-    project_root: Option<String>,
-) -> Vec<TerminalInfo> {
+pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> Vec<TerminalInfo> {
     let manager = match state.pane_manager.lock() {
         Ok(m) => m,
         Err(_) => return Vec::new(),
