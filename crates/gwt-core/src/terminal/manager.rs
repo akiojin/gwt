@@ -167,6 +167,7 @@ impl PaneManager {
             terminal_shell: config.terminal_shell,
             interactive: config.interactive,
             windows_force_utf8: config.windows_force_utf8,
+            project_root: repo_root.to_path_buf(),
         };
         let pane = TerminalPane::new(pane_config)?;
         self.add_pane(pane)?;
@@ -180,6 +181,7 @@ impl PaneManager {
     /// Returns the generated pane ID.
     pub fn spawn_shell(
         &mut self,
+        repo_root: &Path,
         config: BuiltinLaunchConfig,
         rows: u16,
         cols: u16,
@@ -206,6 +208,7 @@ impl PaneManager {
             terminal_shell: config.terminal_shell,
             interactive: config.interactive,
             windows_force_utf8: config.windows_force_utf8,
+            project_root: repo_root.to_path_buf(),
         };
         let pane = TerminalPane::new(pane_config)?;
         self.add_pane(pane)?;
@@ -225,6 +228,14 @@ impl PaneManager {
     /// Mutable slice of all panes.
     pub fn panes_mut(&mut self) -> &mut [TerminalPane] {
         &mut self.panes
+    }
+
+    /// Immutable references to panes belonging to the given project root.
+    pub fn panes_for_project(&self, project_root: &Path) -> Vec<&TerminalPane> {
+        self.panes
+            .iter()
+            .filter(|p| p.project_root() == project_root)
+            .collect()
     }
 
     /// Current active index.
@@ -340,6 +351,10 @@ mod tests {
 
     /// Helper: create a TerminalPane backed by `/usr/bin/true` (exits immediately).
     fn create_test_pane(id: &str) -> TerminalPane {
+        create_test_pane_for_project(id, std::env::temp_dir())
+    }
+
+    fn create_test_pane_for_project(id: &str, project_root: PathBuf) -> TerminalPane {
         TerminalPane::new(PaneConfig {
             pane_id: id.to_string(),
             command: "/usr/bin/true".to_string(),
@@ -354,6 +369,7 @@ mod tests {
             terminal_shell: None,
             interactive: false,
             windows_force_utf8: false,
+            project_root,
         })
         .expect("failed to create test pane")
     }
@@ -843,6 +859,7 @@ mod tests {
     fn test_spawn_shell_success() {
         use crate::terminal::BuiltinLaunchConfig;
         let mut mgr = PaneManager::new();
+        let repo_root = std::env::temp_dir();
         let config = BuiltinLaunchConfig {
             command: "/usr/bin/true".to_string(),
             args: vec!["-l".to_string()],
@@ -855,7 +872,7 @@ mod tests {
             interactive: false,
             windows_force_utf8: false,
         };
-        let pane_id = mgr.spawn_shell(config, 24, 80).unwrap();
+        let pane_id = mgr.spawn_shell(&repo_root, config, 24, 80).unwrap();
         assert!(!pane_id.is_empty());
         assert!(pane_id.starts_with("pane-"));
         assert_eq!(mgr.pane_count(), 1);
@@ -868,6 +885,7 @@ mod tests {
     fn test_spawn_shell_sets_active() {
         use crate::terminal::BuiltinLaunchConfig;
         let mut mgr = PaneManager::new();
+        let repo_root = std::env::temp_dir();
         mgr.add_pane(create_test_pane("p0")).unwrap();
         assert_eq!(mgr.active_index(), 0);
 
@@ -883,11 +901,38 @@ mod tests {
             interactive: false,
             windows_force_utf8: false,
         };
-        let pane_id = mgr.spawn_shell(config, 24, 80).unwrap();
+        let pane_id = mgr.spawn_shell(&repo_root, config, 24, 80).unwrap();
         assert_eq!(mgr.pane_count(), 2);
         assert_eq!(mgr.active_index(), 1);
         let active = mgr.active_pane().unwrap();
         assert_eq!(active.pane_id(), pane_id);
+    }
+
+    // --- 32. panes_for_project filters by project root ---
+
+    #[test]
+    fn test_panes_for_project_filters_correctly() {
+        let mut mgr = PaneManager::new();
+        let project_a = PathBuf::from("/tmp/project-a");
+        let project_b = PathBuf::from("/tmp/project-b");
+
+        mgr.add_pane(create_test_pane_for_project("pa1", project_a.clone()))
+            .unwrap();
+        mgr.add_pane(create_test_pane_for_project("pa2", project_a.clone()))
+            .unwrap();
+        mgr.add_pane(create_test_pane_for_project("pb1", project_b.clone()))
+            .unwrap();
+
+        let a_panes = mgr.panes_for_project(&project_a);
+        assert_eq!(a_panes.len(), 2);
+        assert!(a_panes.iter().all(|p| p.project_root() == project_a));
+
+        let b_panes = mgr.panes_for_project(&project_b);
+        assert_eq!(b_panes.len(), 1);
+        assert_eq!(b_panes[0].pane_id(), "pb1");
+
+        let c_panes = mgr.panes_for_project(Path::new("/tmp/project-c"));
+        assert!(c_panes.is_empty());
     }
 
     // --- 31. remove_pane ---

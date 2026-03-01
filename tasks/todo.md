@@ -1,15 +1,26 @@
-# TODO: Issue #1288 From Issue Branch Name Display
+# TODO: プロジェクト単位の完全分離（PTY・ChromaDB・GitHub Issue）
 
 ## 背景
-Issue #1288「From Issue からブランチ作成時にブランチ名の表示が不自然（prefix が重複して見える）」を、`SPEC-1288` と TDD で修正する。
+
+gwt で複数プロジェクト同時利用時に PTY 通信・ChromaDB 検索・GitHub Issue がプロジェクト境界を越える問題を修正する。
 
 ## 実装ステップ
-- [x] `specs/SPEC-1288/spec.md`, `plan.md`, `tasks.md` を作成して要件を定義
-- [x] `AgentLaunchForm.svelte` の From Issue 表示を suffix-only（`issue-<number>`）に修正
-- [x] Launch 時の branch 名組み立てを full name（`{prefix}issue-{number}`）で固定
-- [x] `AgentLaunchForm.test.ts` に表示と payload の回帰テストを追加
-- [x] テスト/チェック実行（対象 test + svelte-check）
+
+- [x] T001 gwt-spec Issue 作成 (#1395)
+- [x] T002 `TerminalPane`/`PaneConfig` に `project_root` フィールド追加
+- [x] T003 `PaneManager` に `panes_for_project()` メソッド追加
+- [x] T004 `list_terminals` にプロジェクトフィルタ適用
+- [x] T005 `send_keys_to_pane`/`capture_scrollback_tail` にプロジェクト検証追加
+- [x] T006 MCP ハンドラにプロジェクトフィルタ追加
+- [x] T007 `gwt-project-index` SKILL.md 更新
+- [x] T008 `gwt-issue-spec-ops` SKILL.md 更新
+- [x] T009 `gwt-spec-to-issue-migration` SKILL.md 更新
+- [x] T010 `gwt-pty-communication` SKILL.md 更新
+- [x] T011 `.codex/skills/gwt-spec-to-issue-migration/` 削除
+- [x] T012 `cargo test` + `cargo clippy` + markdownlint 検証
 
 ## 検証結果
-- [x] `cd gwt-gui && pnpm test src/lib/components/AgentLaunchForm.test.ts`（pass: 39 tests）
-- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`（0 errors / 1 warning: 既存 `MergeDialog.svelte`）
+
+- [x] `cargo test` — 534 tests passed (gwt-tauri) + 4 tests passed (voice_eval)
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` — 警告なし
+- [x] `npx markdownlint-cli` — 4つの SKILL.md エラーなし
