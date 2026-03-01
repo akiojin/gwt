@@ -8,6 +8,7 @@
   import PrListPanel from "./PrListPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
+  import ProjectIndexPanel from "./ProjectIndexPanel.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
     return (
@@ -462,6 +463,8 @@
                 isActive={activeTabId === tab.id}
                 onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
               />
+            {:else if tab.type === "projectIndex"}
+              <ProjectIndexPanel {projectPath} />
             {:else}
               <div class="placeholder">
                 <h2>Select a tab</h2>

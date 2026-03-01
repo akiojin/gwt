@@ -36,7 +36,19 @@ const ISSUE_SPEC_SKILL: ManagedSkill = ManagedSkill {
     )),
 };
 
-const MANAGED_SKILLS: &[ManagedSkill] = &[PTY_COMMUNICATION_SKILL, ISSUE_SPEC_SKILL];
+const PROJECT_INDEX_SKILL: ManagedSkill = ManagedSkill {
+    name: "gwt-project-index",
+    body: include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/gwt-integration/skills/gwt-project-index/SKILL.md"
+    )),
+};
+
+const MANAGED_SKILLS: &[ManagedSkill] = &[
+    PTY_COMMUNICATION_SKILL,
+    ISSUE_SPEC_SKILL,
+    PROJECT_INDEX_SKILL,
+];
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
 const SETTINGS_LOAD_FAILED_CODE: &str = "SETTINGS_LOAD_FAILED";
 const SKILLS_PATH_UNAVAILABLE_CODE: &str = "SKILLS_PATH_UNAVAILABLE";
