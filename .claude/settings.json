@@ -16,7 +16,6 @@
     "ralph-loop@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true,
     "plugin-dev@claude-plugins-official": true,
-    "worktree-protection-hooks@gwt-plugins": true,
-    "speckit@akiojin-skills": true
+    "worktree-protection-hooks@gwt-plugins": true
   }
 }
