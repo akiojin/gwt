@@ -1,6 +1,6 @@
 # 実装計画: Worktree詳細ビューでCLAUDE.md/AGENTS.md/GEMINI.mdを確認・修正し編集起動
 
-**仕様ID**: `SPEC-dc2ef2d3` | **日付**: 2026-02-27 | **仕様書**: `specs/SPEC-dc2ef2d3/spec.md`
+**仕様ID**: `SPEC-dc2ef2d3` | **日付**: 2026-03-01 | **仕様書**: `specs/SPEC-dc2ef2d3/spec.md`
 
 ## 目的
 
@@ -51,6 +51,16 @@
     - shell が `powershell`/`cmd` -> `code` 優先、失敗時 `notepad`
   - 非Windows -> `vi`
 
+### Phase 4: vi 終了連動で docs 編集タブを自動クローズ
+
+- `App.svelte`
+  - docs 編集用 pane_id を局所的に追跡し、`list_terminals` で状態監視する。
+  - terminal 状態が `completed`/`error` のとき `close_terminal` を呼び自動クローズする。
+  - 手動でタブ削除された pane_id は監視対象から除外する。
+- `gwt-gui/src/lib/docsEditor.ts`
+  - コマンド生成/自動クローズ条件/終了判定を pure function 化して切り出す。
+  - `vi` 経路は `vi ...; exit` を返し、終了時に shell を閉じる。
+
 ## テスト
 
 ### バックエンド
@@ -64,6 +74,7 @@
 - 新規ボタンが表示され、押下時に command が呼ばれる。
 - command 成功時に `onOpenDocsEditor` が `worktreePath` で呼ばれる。
 - command 失敗時にエラー表示し、コールバックは呼ばれない。
+- `docsEditor.ts` の単体テストで command 分岐と自動クローズ判定を検証する。
 
 ## リスクと緩和
 

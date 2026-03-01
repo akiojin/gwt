@@ -2,11 +2,11 @@
 
 **仕様ID**: `SPEC-dc2ef2d3`  
 **作成日**: 2026-02-27  
-**更新日**: 2026-02-27  
+**更新日**: 2026-03-01  
 **ステータス**: ドラフト  
 **カテゴリ**: GUI  
 **依存仕様**: `SPEC-7c0444a8`（Worktree Summary）  
-**入力**: ユーザー説明: "CLAUDE.mdやAGENTS.mdの内容を確認・修正する機能を実装したい。Windows(PowerShell/cmd)でも編集起動したい。"
+**入力**: ユーザー説明: "CLAUDE.mdやAGENTS.mdの内容を確認・修正する機能を実装したい。Windows(PowerShell/cmd)でも編集起動したい。viが終了したらタブも終了してほしい。"
 
 ## 背景
 
@@ -45,11 +45,24 @@
 
 **独立したテスト**: worktree 未存在 branch 指定時に修正・編集起動が行われないこと。
 
+### ユーザーストーリー 4 - vi終了時は docs 編集タブを自動で閉じたい (優先度: P1)
+
+ユーザーとして、`vi` を終了したら docs 編集専用タブを自動で閉じたい。
+
+**独立したテスト**: `vi` 経路（非Windows / Windows+WSL）で終了判定時にタブが閉じること、PowerShell/cmd 経路では自動クローズ対象外であること。
+
+**受け入れシナリオ**:
+
+1. **前提条件** macOS/Linux で docs 編集を開始、**操作** `vi` を終了、**期待結果** docs 編集タブが自動で閉じる。
+2. **前提条件** Windows + WSL shell で docs 編集を開始、**操作** `vi` を終了、**期待結果** docs 編集タブが自動で閉じる。
+3. **前提条件** Windows + PowerShell/cmd で docs 編集を開始、**操作** `code` または `notepad` 経路を利用、**期待結果** auto close 監視対象外として従来どおり明示操作でタブを閉じる。
+
 ## エッジケース
 
 - `branch` が空文字の場合はバリデーションエラーを返す。
 - `worktree` が Missing/Prunable/Locked で編集不能な場合はエラーで中断する。
 - `CLAUDE.md` が存在しても空白のみの場合は初期テンプレートで再生成する。
+- docs 編集タブを手動で閉じた場合は auto close 監視対象から除外する。
 
 ## 要件
 
@@ -65,6 +78,9 @@
 - **FR-008**: 編集コマンドは環境別に分岐し、WSL は `vi`、Windows PowerShell/cmd は `code` 優先かつ `notepad` フォールバックを使用しなければならない。
 - **FR-009**: 実行中はボタンを disabled にし、多重実行を防止しなければならない。
 - **FR-010**: `CLAUDE.md` 初期テンプレートは指定された Qiita 記事の構成（ワークフロー設計/タスク管理/コア原則）を反映しなければならない。
+- **FR-011**: `vi` 経路（非Windows / Windows+WSL）では編集コマンドを `vi ...; exit` とし、`vi` 終了後に shell プロセスを終了させなければならない。
+- **FR-012**: frontend は docs 編集タブのみを対象に terminal 状態を監視し、`completed` または `error` 状態を検知したら当該タブを自動クローズしなければならない。
+- **FR-013**: PowerShell/cmd 経路は auto close 対象外とし、既存の編集起動挙動（`code` 優先 / `notepad` フォールバック）を維持しなければならない。
 
 ### 非機能要件
 
@@ -84,3 +100,4 @@
 - **SC-002**: `AGENTS.md` と `GEMINI.md` の既存記述を保持したまま `@CLAUDE.md` が補完される。
 - **SC-003**: Windows (PowerShell/cmd) で `vi` 依存なく編集開始できる。
 - **SC-004**: `cargo test -p gwt-tauri clause_docs` と `pnpm --dir gwt-gui test -- WorktreeSummaryPanel.test.ts` が成功する。
+- **SC-005**: `pnpm --dir gwt-gui exec vitest run src/lib/docsEditor.test.ts` が成功し、`vi` 終了時クローズ判定ロジックの回帰を検出できる。

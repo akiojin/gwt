@@ -23,8 +23,12 @@
 
 - [x] T030 [US1] backend unit test（作成/補完/未存在branchエラー）を追加する `crates/gwt-tauri/src/commands/clause_docs.rs`
 - [x] T031 [US1] WorktreeSummaryPanel test（成功/失敗時UI）を追加する `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
+- [x] T032 [US4] [RED] docs editor コマンド/終了判定の単体テストを追加し、未実装状態で失敗を確認する `gwt-gui/src/lib/docsEditor.test.ts`
+- [x] T033 [US4] [GREEN] docs editor ロジックを `docsEditor.ts` へ切り出して App に適用する `gwt-gui/src/lib/docsEditor.ts` `gwt-gui/src/App.svelte`
 
 ## Phase 5: 検証
 
 - [x] T040 [P] [共通] `cargo test -p gwt-tauri clause_docs` を実行して成功を確認する
 - [x] T041 [P] [共通] `pnpm --dir gwt-gui test -- WorktreeSummaryPanel.test.ts` を実行して成功を確認する
+- [x] T042 [P] [共通] `pnpm --dir gwt-gui exec vitest run src/lib/docsEditor.test.ts` を実行して成功を確認する
+- [x] T043 [P] [共通] `pnpm --dir gwt-gui check` を実行して型/構文エラーがないことを確認する

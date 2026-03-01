@@ -83,6 +83,13 @@
     platformName,
     shouldShowAgentPasteHint,
   } from "./lib/terminal/pasteGuidance";
+  import {
+    buildDocsEditorCommand,
+    isTerminalProcessEnded,
+    isWindowsPlatform,
+    shouldAutoCloseDocsEditorTab,
+    type DocsEditorShellId,
+  } from "./lib/docsEditor";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -119,11 +126,6 @@
     'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
   const DEFAULT_TERMINAL_FONT_FAMILY =
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
-  const AGENT_INSTRUCTION_DOC_FILES = [
-    "CLAUDE.md",
-    "AGENTS.md",
-    "GEMINI.md",
-  ] as const;
   const DOCS_EDITOR_AUTO_CLOSE_POLL_MS = 1200;
 
   function clampSidebarWidth(widthPx: number): number {
@@ -1548,18 +1550,6 @@
     );
   }
 
-  function isWindowsPlatform(platform: string): boolean {
-    return platform.toLowerCase().includes("win");
-  }
-
-  function shouldAutoCloseDocsEditorTab(
-    platform: string,
-    shellId?: "wsl" | "powershell" | "cmd",
-  ): boolean {
-    if (!isWindowsPlatform(platform)) return true;
-    return shellId === "wsl";
-  }
-
   function addDocsEditorAutoClosePane(paneId: string) {
     const normalized = paneId.trim();
     if (!normalized) return;
@@ -1576,14 +1566,7 @@
     );
   }
 
-  function isTerminalProcessEnded(status: string): boolean {
-    const normalized = status.trim().toLowerCase();
-    return (
-      normalized.startsWith("completed") || normalized.startsWith("error")
-    );
-  }
-
-  async function resolveWindowsDocsShellId(): Promise<"wsl" | "powershell" | "cmd"> {
+  async function resolveWindowsDocsShellId(): Promise<DocsEditorShellId> {
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const settings = await invoke<Pick<SettingsData, "default_shell">>("get_settings");
@@ -1595,33 +1578,6 @@
       // Fall back to cmd when settings are unavailable.
     }
     return "cmd";
-  }
-
-  function buildDocsEditorCommand(
-    platform: string,
-    shellId?: "wsl" | "powershell" | "cmd",
-  ): string {
-    const files = AGENT_INSTRUCTION_DOC_FILES.join(" ");
-    const codeArgs = AGENT_INSTRUCTION_DOC_FILES.map((file) => `-g ${file}`).join(
-      " ",
-    );
-    const powershellNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
-      (file) => `notepad ${file}`,
-    ).join("; ");
-    const cmdNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
-      (file) => `notepad ${file}`,
-    ).join(" & ");
-    if (isWindowsPlatform(platform)) {
-      if (shellId === "wsl") {
-        return `vi ${files}; exit`;
-      }
-      if (shellId === "powershell") {
-        return `if (Get-Command code -ErrorAction SilentlyContinue) { code ${codeArgs} } else { ${powershellNotepadFallback} }`;
-      }
-      return `where code >NUL 2>&1 && (code ${codeArgs}) || (${cmdNotepadFallback})`;
-    }
-
-    return `vi ${files}; exit`;
   }
 
   async function handleOpenDocsEditor(worktreePath: string) {

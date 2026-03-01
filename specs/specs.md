@@ -1,6 +1,6 @@
 # 仕様一覧
 
-**最終更新**: 2026-02-27
+**最終更新**: 2026-03-01
 
 - 現行の仕様・要件: `specs/SPEC-XXXXXXXX/spec.md`
 - 以前までのTUIの仕様・要件（archive）: `specs/archive/SPEC-XXXXXXXX/spec.md`
