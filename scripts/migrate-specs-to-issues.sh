@@ -41,11 +41,11 @@ if [[ -z "$SPECS_DIR" ]]; then
     echo "Error: Not in a git repository" >&2
     exit 1
   fi
-  # Try current directory first, then common worktree locations
+  # Prefer develop worktree first, then current repository
   for candidate in \
-    "$REPO_ROOT/specs" \
     "$(dirname "$(dirname "$REPO_ROOT")")/develop/specs" \
-    "$(dirname "$REPO_ROOT")/develop/specs"; do
+    "$(dirname "$REPO_ROOT")/develop/specs" \
+    "$REPO_ROOT/specs"; do
     if [[ -d "$candidate" ]]; then
       SPECS_DIR="$candidate"
       break
@@ -68,6 +68,14 @@ for dir in "$SPECS_DIR"/SPEC-*/; do
 done
 
 echo "Found ${#SPEC_DIRS[@]} spec directories to migrate"
+
+if [[ ${#SPEC_DIRS[@]} -eq 0 ]]; then
+  echo "[]" > "$REPORT_FILE"
+  echo ""
+  echo "Migration complete: 0 succeeded, 0 failed out of 0 total"
+  echo "Report: $REPORT_FILE"
+  exit 0
+fi
 
 # Initialize report
 echo "[" > "$REPORT_FILE"

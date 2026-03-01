@@ -1349,36 +1349,7 @@ fn update_project_status(
         .and_then(Value::as_array)
         .ok_or_else(|| "Project fields not found".to_string())?;
 
-    let mut field_id: Option<String> = None;
-    let mut option_id: Option<String> = None;
-
-    for node in nodes {
-        let name = node.get("name").and_then(Value::as_str).unwrap_or_default();
-        if name != PROJECT_FIELD_STATUS && name != PROJECT_FIELD_PHASE {
-            continue;
-        }
-        field_id = node.get("id").and_then(Value::as_str).map(str::to_string);
-        if let Some(options) = node.get("options").and_then(Value::as_array) {
-            for option in options {
-                let opt_name = option
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if opt_name == status_name {
-                    option_id = option.get("id").and_then(Value::as_str).map(str::to_string);
-                    break;
-                }
-            }
-        }
-        break;
-    }
-
-    let Some(field_id) = field_id else {
-        return Err("Status field not found in project".to_string());
-    };
-    let Some(option_id) = option_id else {
-        return Err(format!("Status option not found: {status_name}"));
-    };
+    let (field_id, option_id) = select_project_status_field_and_option(nodes, status_name)?;
 
     let mutation = "mutation($project:ID!, $item:ID!, $field:ID!, $option:String!){ updateProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field, value:{ singleSelectOptionId:$option }}) { projectV2Item { id } } }";
     let update_output = run_gh_output_with_repair(
@@ -1404,6 +1375,48 @@ fn update_project_status(
         return Err(format!("Project status update failed: {}", stderr.trim()));
     }
     Ok(true)
+}
+
+fn select_project_status_field_and_option(
+    nodes: &[Value],
+    status_name: &str,
+) -> Result<(String, String), String> {
+    let mut has_status_like_field = false;
+
+    for node in nodes {
+        let name = node.get("name").and_then(Value::as_str).unwrap_or_default();
+        if name != PROJECT_FIELD_STATUS && name != PROJECT_FIELD_PHASE {
+            continue;
+        }
+        has_status_like_field = true;
+
+        let Some(field_id) = node.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(options) = node.get("options").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for option in options {
+            let opt_name = option
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if opt_name != status_name {
+                continue;
+            }
+            let Some(option_id) = option.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            return Ok((field_id.to_string(), option_id.to_string()));
+        }
+    }
+
+    if !has_status_like_field {
+        return Err("Status field not found in project".to_string());
+    }
+
+    Err(format!("Status option not found: {status_name}"))
 }
 
 #[cfg(test)]
@@ -1532,5 +1545,45 @@ mod tests {
         let project_id =
             select_project_id_from_owner_projects(&payload, "akiojin/gwt").expect("project id");
         assert_eq!(project_id, "PVT_match");
+    }
+
+    #[test]
+    fn select_project_status_field_and_option_checks_next_candidate_field() {
+        let nodes = vec![
+            serde_json::json!({
+                "id": "field-status",
+                "name": "Status",
+                "options": [
+                    { "id": "opt-todo", "name": "Todo" }
+                ]
+            }),
+            serde_json::json!({
+                "id": "field-phase",
+                "name": "Phase",
+                "options": [
+                    { "id": "opt-done", "name": "Done" }
+                ]
+            }),
+        ];
+
+        let (field_id, option_id) =
+            select_project_status_field_and_option(&nodes, "Done").expect("status option");
+        assert_eq!(field_id, "field-phase");
+        assert_eq!(option_id, "opt-done");
+    }
+
+    #[test]
+    fn select_project_status_field_and_option_returns_not_found_when_no_candidate_field() {
+        let nodes = vec![serde_json::json!({
+            "id": "field-priority",
+            "name": "Priority",
+            "options": [
+                { "id": "opt-high", "name": "High" }
+            ]
+        })];
+
+        let err =
+            select_project_status_field_and_option(&nodes, "Done").expect_err("status field error");
+        assert_eq!(err, "Status field not found in project");
     }
 }
