@@ -47,7 +47,7 @@ jobs:
 
           cargo run -p gwt-tauri --bin voice_eval -- "${ARGS[@]}"
       - name: Upload report artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: voice-eval-report
           path: tests/voice_eval/latest-report.json
