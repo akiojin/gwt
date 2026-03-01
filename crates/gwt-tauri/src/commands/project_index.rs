@@ -84,13 +84,9 @@ fn chroma_venv_dir() -> Result<PathBuf, String> {
 }
 
 fn chroma_python_path(venv_dir: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        return venv_dir.join("Scripts").join("python.exe");
-    }
-
-    #[cfg(not(windows))]
-    {
+    if cfg!(windows) {
+        venv_dir.join("Scripts").join("python.exe")
+    } else {
         venv_dir.join("bin").join("python3")
     }
 }
@@ -141,7 +137,14 @@ fn ensure_chroma_runner_script() -> Result<PathBuf, String> {
                 .map_err(|e| format!("Failed to stat chroma helper script: {e}"))?
                 .permissions();
             perm.set_mode(0o700);
-            let _ = fs::set_permissions(&script_path, perm);
+            if let Err(e) = fs::set_permissions(&script_path, perm) {
+                warn!(
+                    category = "project_index",
+                    path = %script_path.display(),
+                    error = %e,
+                    "Failed to set permissions on chroma helper script"
+                );
+            }
         }
     }
 

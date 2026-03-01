@@ -8,6 +8,7 @@
   let results = $state<ProjectIndexSearchResult[]>([]);
   let searching = $state(false);
   let error = $state<string | null>(null);
+  let statusError = $state<string | null>(null);
   let indexStatus = $state<{
     indexed: boolean;
     totalFiles: number;
@@ -17,12 +18,14 @@
 
   async function loadStatus() {
     statusLoading = true;
+    statusError = null;
     try {
       indexStatus = await invoke("get_index_status_cmd", {
         projectRoot: projectPath,
       });
     } catch (e) {
       indexStatus = null;
+      statusError = String(e);
     } finally {
       statusLoading = false;
     }
@@ -56,7 +59,9 @@
 
   function formatDistance(d: number | null | undefined): string {
     if (d == null) return "";
-    return (1 - d).toFixed(0) + "%";
+    const clampedDistance = Math.max(0, Math.min(1, d));
+    const similarityPercent = Math.round((1 - clampedDistance) * 100);
+    return `${similarityPercent}%`;
   }
 
   function formatSize(bytes: number): string {
@@ -99,6 +104,10 @@
 
   {#if error}
     <div class="error-message">{error}</div>
+  {/if}
+
+  {#if statusError}
+    <div class="error-message">Failed to load index status: {statusError}</div>
   {/if}
 
   <div class="results">

@@ -159,7 +159,7 @@ def collect_files(project_root: Path) -> List[Path]:
 # Description extraction
 # ---------------------------------------------------------------------------
 
-def extract_description(file_path: Path, project_root: Path) -> str:
+def extract_description(file_path: Path) -> str:
     """Extract a short description from a file's content."""
     suffix = file_path.suffix.lower()
     name = file_path.name.lower()
@@ -256,8 +256,12 @@ def extract_description(file_path: Path, project_root: Path) -> str:
     if suffix == ".py":
         for line in lines[:10]:
             stripped = line.strip()
-            if stripped.startswith('"""') or stripped.startswith("'''"):
-                text = stripped[3:].rstrip('"""').rstrip("'''").strip()
+            if stripped.startswith('"""'):
+                text = stripped[3:].removesuffix('"""').strip()
+                if text:
+                    return text
+            if stripped.startswith("'''"):
+                text = stripped[3:].removesuffix("'''").strip()
                 if text:
                     return text
             if stripped.startswith("#") and not stripped.startswith("#!"):
@@ -328,7 +332,7 @@ def action_index(project_root: str, db_path: str) -> dict:
 
             for fpath in batch:
                 rel = str(fpath.relative_to(root))
-                desc = extract_description(fpath, root)
+                desc = extract_description(fpath)
                 try:
                     size = fpath.stat().st_size
                 except OSError:
@@ -352,8 +356,9 @@ def action_index(project_root: str, db_path: str) -> dict:
         stale = [eid for eid in existing["ids"] if eid not in current_ids]
         if stale:
             collection.delete(ids=stale)
-    except Exception:
-        pass  # non-critical
+    except Exception as exc:
+        # Non-critical: keep indexing successful but preserve diagnostics.
+        print(f"Warning: stale entry cleanup failed: {exc}", file=sys.stderr)
 
     elapsed = int((time.monotonic() - start) * 1000)
     return {
