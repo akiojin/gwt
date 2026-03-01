@@ -164,9 +164,6 @@ pub fn execute_migration(
             info!("Cleaning up root directory files");
             cleanup_root_files(config, &worktrees)?;
         }
-        // Remove temp directory
-        info!("Removing temp evacuation directory");
-        let _ = std::fs::remove_dir_all(&temp_evacuation_dir);
     }
     info!("Phase 8 complete");
 
@@ -176,6 +173,18 @@ pub fn execute_migration(
     if !config.dry_run {
         cleanup_old_worktrees_dir(config)?;
         create_project_config(config)?;
+
+        // Keep evacuation temp data until all migration phases succeed.
+        if temp_evacuation_dir.exists() {
+            info!("Phase 9: Removing temp evacuation directory");
+            if let Err(e) = std::fs::remove_dir_all(&temp_evacuation_dir) {
+                warn!(
+                    temp = %temp_evacuation_dir.display(),
+                    error = %e,
+                    "Failed to remove temp evacuation directory after successful migration"
+                );
+            }
+        }
     }
     info!("Phase 9 complete: Migration cleanup done");
 
@@ -240,7 +249,7 @@ fn restore_evacuated_files(temp_dir: &Path, target: &Path) -> Result<(), Migrati
         }
 
         let dst_path = target.join(&entry_name);
-        move_path(&src_path, &dst_path, "restore evacuated path")?;
+        copy_path(&src_path, &dst_path, "restore evacuated path")?;
     }
 
     Ok(())
@@ -466,6 +475,63 @@ fn move_path(src: &Path, dst: &Path, action: &str) -> Result<(), MigrationError>
             dst.display(),
             e
         ),
+    })
+}
+
+fn copy_path(src: &Path, dst: &Path, action: &str) -> Result<(), MigrationError> {
+    if dst.exists() {
+        return Err(MigrationError::IoError {
+            path: dst.to_path_buf(),
+            reason: format!("Failed to {}: destination already exists", action),
+        });
+    }
+
+    if src.is_dir() {
+        std::fs::create_dir_all(dst).map_err(|e| MigrationError::IoError {
+            path: dst.to_path_buf(),
+            reason: format!("Failed to create directory while {}: {}", action, e),
+        })?;
+
+        for entry in std::fs::read_dir(src).map_err(|e| MigrationError::IoError {
+            path: src.to_path_buf(),
+            reason: format!("Failed to read directory while {}: {}", action, e),
+        })? {
+            let entry = entry.map_err(|e| MigrationError::IoError {
+                path: src.to_path_buf(),
+                reason: format!("Failed to read directory entry while {}: {}", action, e),
+            })?;
+            let child_src = entry.path();
+            let child_dst = dst.join(entry.file_name());
+            copy_path(&child_src, &child_dst, action)?;
+        }
+
+        return Ok(());
+    }
+
+    if src.is_file() {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| MigrationError::IoError {
+                path: parent.to_path_buf(),
+                reason: format!("Failed to create parent directory while {}: {}", action, e),
+            })?;
+        }
+
+        std::fs::copy(src, dst).map_err(|e| MigrationError::IoError {
+            path: src.to_path_buf(),
+            reason: format!(
+                "Failed to {} from {} to {}: {}",
+                action,
+                src.display(),
+                dst.display(),
+                e
+            ),
+        })?;
+        return Ok(());
+    }
+
+    Err(MigrationError::IoError {
+        path: src.to_path_buf(),
+        reason: format!("Failed to {}: unsupported file type", action),
     })
 }
 
@@ -1288,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn evacuate_and_restore_main_repo_files_move_entries() {
+    fn evacuate_and_restore_main_repo_files_keeps_temp_entries_until_completion() {
         let temp = TempDir::new().unwrap();
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -1320,8 +1386,8 @@ mod tests {
         assert!(target.join(".svn/pristine/00/a.svn-base").exists());
         assert!(target.join("notes.txt").exists());
         assert!(!target.join(".gwt").exists());
-        assert!(!temp_dir.join(".svn").exists());
-        assert!(!temp_dir.join("notes.txt").exists());
+        assert!(temp_dir.join(".svn/pristine/00/a.svn-base").exists());
+        assert!(temp_dir.join("notes.txt").exists());
         assert!(temp_dir.join(EVACUATION_MANIFEST_FILENAME).exists());
     }
 

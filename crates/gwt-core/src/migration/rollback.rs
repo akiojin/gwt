@@ -70,6 +70,12 @@ fn recover_evacuated_main_repo_files(config: &MigrationConfig) -> Result<(), Mig
             continue;
         }
         let dst_path = config.source_root.join(&entry_name);
+        if dst_path.exists() {
+            return Err(MigrationError::IoError {
+                path: dst_path,
+                reason: "Evacuated entry conflicts with existing path during rollback".to_string(),
+            });
+        }
         std::fs::rename(&src_path, &dst_path).map_err(|e| MigrationError::IoError {
             path: src_path.clone(),
             reason: format!(
@@ -376,6 +382,39 @@ mod tests {
         assert!(source.join(".svn/pristine/a.svn-base").exists());
         assert!(source.join("notes.txt").exists());
         assert!(!temp_dir.exists());
+    }
+
+    #[test]
+    fn test_recover_evacuated_main_repo_files_errors_on_destination_conflict() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        let config = MigrationConfig::new(source.clone(), source.clone(), "repo.git".to_string());
+
+        let temp_dir = config.evacuation_temp_path();
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("notes.txt"), "note").unwrap();
+        std::fs::write(source.join("notes.txt"), "existing").unwrap();
+        let entry_notes = BASE64_STANDARD.encode("notes.txt".as_bytes());
+        let manifest = serde_json::json!({
+            "entries": [entry_notes],
+            "encoding": EVACUATION_MANIFEST_ENCODING,
+        });
+        std::fs::write(
+            temp_dir.join(EVACUATION_MANIFEST_FILENAME),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let err = recover_evacuated_main_repo_files(&config).unwrap_err();
+        match err {
+            MigrationError::IoError { reason, .. } => {
+                assert!(reason.contains("conflicts with existing path"));
+            }
+            other => panic!("expected IoError, got {other:?}"),
+        }
+        assert!(temp_dir.exists());
+        assert!(temp_dir.join("notes.txt").exists());
     }
 
     #[test]
