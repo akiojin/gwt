@@ -1916,6 +1916,23 @@
     activeTabId = tab.id;
   }
 
+  function openProjectIndexTab() {
+    const existing = tabs.find(
+      (t) => t.type === "projectIndex" || t.id === "projectIndex",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+    const tab: Tab = {
+      id: "projectIndex",
+      label: "Project Index",
+      type: "projectIndex",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
   function handleIssueCountChange(count: number) {
     tabs = tabs.map((t) =>
       t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
@@ -2290,6 +2307,9 @@
         break;
       case "git-pull-requests":
         openPullRequestsTab();
+        break;
+      case "project-index":
+        openProjectIndexTab();
         break;
       case "check-updates":
         {
