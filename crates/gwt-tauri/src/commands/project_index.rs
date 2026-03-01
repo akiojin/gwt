@@ -84,13 +84,9 @@ fn chroma_venv_dir() -> Result<PathBuf, String> {
 }
 
 fn chroma_python_path(venv_dir: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        return venv_dir.join("Scripts").join("python.exe");
-    }
-
-    #[cfg(not(windows))]
-    {
+    if cfg!(windows) {
+        venv_dir.join("Scripts").join("python.exe")
+    } else {
         venv_dir.join("bin").join("python3")
     }
 }
@@ -141,7 +137,14 @@ fn ensure_chroma_runner_script() -> Result<PathBuf, String> {
                 .map_err(|e| format!("Failed to stat chroma helper script: {e}"))?
                 .permissions();
             perm.set_mode(0o700);
-            let _ = fs::set_permissions(&script_path, perm);
+            if let Err(e) = fs::set_permissions(&script_path, perm) {
+                warn!(
+                    category = "project_index",
+                    path = %script_path.display(),
+                    error = %e,
+                    "Failed to set permissions on chroma helper script"
+                );
+            }
         }
     }
 
@@ -261,15 +264,6 @@ fn probe_chroma_runtime_cached() -> Result<(), String> {
 }
 
 fn ensure_chroma_runtime_sync() -> Result<IndexRuntimeSetupResult, String> {
-    if probe_chroma_runtime_cached().is_ok() {
-        let python = find_python_binary()?;
-        return Ok(IndexRuntimeSetupResult {
-            ready: true,
-            installed: false,
-            python_path: python.to_string_lossy().to_string(),
-        });
-    }
-
     let runtime_dir = gwt_runtime_dir()?;
     fs::create_dir_all(&runtime_dir)
         .map_err(|e| format!("Failed to create runtime directory: {e}"))?;
@@ -279,11 +273,22 @@ fn ensure_chroma_runtime_sync() -> Result<IndexRuntimeSetupResult, String> {
     let mut installed = false;
 
     if !managed_python.is_file() {
+        // Invalidate probe cache because find_python_binary() target is about to change.
+        clear_runtime_probe_cache();
         let bootstrap_python = find_system_python()?;
         let mut cmd = command_os(&bootstrap_python);
         cmd.arg("-m").arg("venv").arg(&venv_dir);
         run_command_with_output(cmd, "Failed to create chroma runtime virtual environment")?;
         installed = true;
+    }
+
+    // Only consider runtime "ready" when the managed runtime can probe successfully.
+    if run_chroma_runner(&managed_python, "probe", None, None, None, None).is_ok() {
+        return Ok(IndexRuntimeSetupResult {
+            ready: true,
+            installed,
+            python_path: managed_python.to_string_lossy().to_string(),
+        });
     }
 
     // Upgrade pip
