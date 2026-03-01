@@ -12,12 +12,14 @@ gwt maintains a vector search index of all project files using ChromaDB embeddin
 Run in terminal to find files related to a feature or concept:
 
 ```bash
-python3 ~/.gwt/runtime/chroma_index_runner.py \
+~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
   --action search \
   --db-path .gwt/index \
   --query "your search query" \
   --n-results 10
 ```
+
+On Windows, use `~/.gwt/runtime/chroma-venv/Scripts/python.exe` as the Python executable.
 
 ## Output format
 
