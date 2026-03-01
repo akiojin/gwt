@@ -50,7 +50,7 @@ US11 (ペルソナ)     ← US1, US3
 
 - [ ] T106 [P] [US11] ペルソナモデル定義（WorkerPersona / PersonaStore / PersonaScope） `crates/gwt-core/src/agent/persona.rs`
   - WorkerPersona構造体、PersonaStore（ファイルI/O + 優先順位解決）、PersonaScope enum
-  - 組み込みデフォルト8種（ペルソナ例テーブル全種）の定義
+  - 組み込みデフォルト8種（ペルソナ例テーブル全8種）の定義
   - 依存: なし
 
 ## Phase 2: 基盤（全ストーリー共通）
