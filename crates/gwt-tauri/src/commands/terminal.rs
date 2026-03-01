@@ -2206,7 +2206,7 @@ pub fn spawn_shell(
     let config = BuiltinLaunchConfig {
         command: final_cmd,
         args: final_args,
-        working_dir: resolved_dir,
+        working_dir: resolved_dir.clone(),
         branch_name: "terminal".to_string(),
         agent_name: "terminal".to_string(),
         agent_color: AgentColor::White,
@@ -2223,7 +2223,7 @@ pub fn spawn_shell(
                 "spawn_shell",
             )
         })?;
-        manager.spawn_shell(config, 24, 80).map_err(|e| {
+        manager.spawn_shell(&resolved_dir, config, 24, 80).map_err(|e| {
             StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
         })?
     };
@@ -2593,6 +2593,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -2623,7 +2624,7 @@ mod tests {
             }
         }
 
-        let result = send_keys_to_pane_from_state(&state, pane_id, "hello\n");
+        let result = send_keys_to_pane_from_state(&state, pane_id, "hello\n", None);
         assert!(result.is_err());
 
         let mut mgr = state.pane_manager.lock().unwrap();
@@ -2655,6 +2656,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create running pane");
 
@@ -2673,6 +2675,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create done pane");
 
@@ -2730,6 +2733,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -2741,7 +2745,7 @@ mod tests {
                 .expect("failed to write test bytes");
         }
 
-        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024, None)
             .expect("capture should succeed");
         assert!(captured.contains("hi red"));
         assert!(!captured.contains("\x1b"));
@@ -2773,6 +2777,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -2794,7 +2799,7 @@ mod tests {
             );
         }
 
-        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024, None)
             .expect("capture should succeed");
         assert!(captured.contains("[PTY stream error: mock read failure]"));
 
@@ -2825,6 +2830,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -2837,7 +2843,7 @@ mod tests {
         let output = String::from_utf8_lossy(&bytes);
         assert_eq!(output, "\r\nPress Enter to close this tab.\r\n");
 
-        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024, None)
             .expect("capture should succeed");
         assert!(captured.contains("Press Enter to close this tab."));
 
@@ -3474,6 +3480,7 @@ services:
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -5255,6 +5262,7 @@ pub(crate) fn send_keys_to_pane_from_state(
     state: &AppState,
     pane_id: &str,
     text: &str,
+    project_root: Option<&std::path::Path>,
 ) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
@@ -5268,6 +5276,16 @@ pub(crate) fn send_keys_to_pane_from_state(
     let pane = manager
         .pane_mut_by_id(pane_id)
         .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+
+    // Project isolation: reject access to panes belonging to a different project.
+    if let Some(root) = project_root {
+        if pane.project_root() != root {
+            return Err(format!(
+                "Access denied: pane {} belongs to a different project",
+                pane_id
+            ));
+        }
+    }
 
     let _ = pane.check_status();
     match pane.status() {
@@ -5320,13 +5338,18 @@ pub(crate) fn send_keys_broadcast_from_state(
 }
 
 /// Send text to a terminal pane (pane_id required).
+///
+/// When `project_root` is provided, access is restricted to panes belonging
+/// to that project (multi-project isolation).
 #[tauri::command]
 pub fn send_keys_to_pane(
     pane_id: String,
     text: String,
+    project_root: Option<String>,
     state: State<AppState>,
 ) -> Result<(), StructuredError> {
-    send_keys_to_pane_from_state(&state, &pane_id, &text)
+    let root = project_root.map(PathBuf::from);
+    send_keys_to_pane_from_state(&state, &pane_id, &text, root.as_deref())
         .map_err(|e| StructuredError::internal(&e, "send_keys_to_pane"))
 }
 
@@ -5394,17 +5417,29 @@ pub fn close_terminal(
     Ok(())
 }
 
-/// List all active terminal panes
+/// List terminal panes scoped to the given project root.
+///
+/// When `project_root` is provided, only panes belonging to that project are
+/// returned (multi-project isolation). When omitted, all panes are listed
+/// (backwards-compatible).
 #[tauri::command]
-pub fn list_terminals(state: State<AppState>) -> Vec<TerminalInfo> {
+pub fn list_terminals(
+    state: State<AppState>,
+    project_root: Option<String>,
+) -> Vec<TerminalInfo> {
     let manager = match state.pane_manager.lock() {
         Ok(m) => m,
         Err(_) => return Vec::new(),
     };
 
+    let project_filter = project_root.map(PathBuf::from);
     manager
         .panes()
         .iter()
+        .filter(|pane| match &project_filter {
+            Some(root) => pane.project_root() == root.as_path(),
+            None => true,
+        })
         .map(|pane| {
             let status = match pane.status() {
                 PaneStatus::Running => "running".to_string(),
@@ -5425,6 +5460,7 @@ pub(crate) fn capture_scrollback_tail_from_state(
     state: &AppState,
     pane_id: &str,
     max_bytes: usize,
+    project_root: Option<&std::path::Path>,
 ) -> Result<String, String> {
     let max_bytes = match max_bytes {
         0 => DEFAULT_SCROLLBACK_TAIL_BYTES,
@@ -5439,6 +5475,15 @@ pub(crate) fn capture_scrollback_tail_from_state(
             .lock()
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         if let Some(pane) = mgr.pane_mut_by_id(pane_id) {
+            // Project isolation: reject access to panes belonging to a different project.
+            if let Some(root) = project_root {
+                if pane.project_root() != root {
+                    return Err(format!(
+                        "Access denied: pane {} belongs to a different project",
+                        pane_id
+                    ));
+                }
+            }
             pane.flush_scrollback().map_err(|e| e.to_string())?;
         }
     }
@@ -5570,14 +5615,19 @@ pub fn probe_terminal_ansi(
 }
 
 /// Capture the scrollback tail for a pane as plain text (ANSI stripped).
+///
+/// When `project_root` is provided, access is restricted to panes belonging
+/// to that project (multi-project isolation).
 #[tauri::command]
 pub fn capture_scrollback_tail(
     state: State<AppState>,
     pane_id: String,
     max_bytes: Option<usize>,
+    project_root: Option<String>,
 ) -> Result<String, StructuredError> {
     let max_bytes = max_bytes.unwrap_or(DEFAULT_SCROLLBACK_TAIL_BYTES);
-    capture_scrollback_tail_from_state(&state, &pane_id, max_bytes)
+    let root = project_root.map(PathBuf::from);
+    capture_scrollback_tail_from_state(&state, &pane_id, max_bytes, root.as_deref())
         .map_err(|e| StructuredError::internal(&e, "capture_scrollback_tail"))
 }
 
