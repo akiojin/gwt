@@ -737,6 +737,48 @@ describe("CleanupModal", () => {
     });
   });
 
+  it("rolls back remote toggle when saving settings fails", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: false };
+      if (command === "get_cleanup_pr_statuses") return {};
+      if (command === "get_cleanup_branch_protection") return [worktreeFixture.branch];
+      if (command === "set_cleanup_settings") throw new Error("save failed");
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project-toggle-fail",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    let remoteToggle: Element | null = null;
+    await waitFor(() => {
+      remoteToggle = rendered.container.querySelector("[data-testid='remote-toggle']");
+      expect(remoteToggle).toBeTruthy();
+    });
+    if (!remoteToggle) {
+      throw new Error("remote toggle not found");
+    }
+
+    const remoteSwitch = remoteToggle.querySelector(".toggle-switch");
+    expect(remoteSwitch?.classList.contains("toggle-on")).toBe(false);
+    await fireEvent.click(remoteToggle);
+
+    await waitFor(() => {
+      const args = invokeArgsFor("set_cleanup_settings")[0];
+      expect(args).toEqual({
+        projectPath: "/tmp/project-toggle-fail",
+        settings: { delete_remote_branches: true },
+      });
+      expect(remoteSwitch?.classList.contains("toggle-on")).toBe(false);
+    });
+  });
+
   it("fetches branch protection only after enabling remote toggle", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];

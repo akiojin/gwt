@@ -449,7 +449,12 @@ fn has_deletion_rule(rule_types_output: &str) -> bool {
     rule_types_output
         .lines()
         .map(str::trim)
-        .any(|rule_type| rule_type == "deletion")
+        .filter(|rule_type| !rule_type.is_empty())
+        .map(|rule_type| {
+            serde_json::from_str::<String>(rule_type)
+                .unwrap_or_else(|_| rule_type.trim_matches('"').to_string())
+        })
+        .any(|rule_type| rule_type.eq_ignore_ascii_case("deletion"))
 }
 
 /// Get PR statuses for all branches (SPEC-ad1ac432 T007-T008).
@@ -1331,13 +1336,13 @@ mod tests {
 
     #[test]
     fn has_deletion_rule_true_for_paginated_multi_line_output() {
-        let output = "required_status_checks\npull_request\nworkflow\ndeletion\n";
+        let output = "\"required_status_checks\"\n\"pull_request\"\n\"workflow\"\n\"deletion\"\n";
         assert!(has_deletion_rule(output));
     }
 
     #[test]
     fn has_deletion_rule_false_when_deletion_is_missing() {
-        let output = "required_status_checks\npull_request\nworkflow\n";
+        let output = "\"required_status_checks\"\n\"pull_request\"\n\"workflow\"\n";
         assert!(!has_deletion_rule(output));
     }
 

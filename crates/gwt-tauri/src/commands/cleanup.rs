@@ -493,7 +493,11 @@ pub async fn cleanup_worktrees(
 
                             match gwt_core::git::gh_cli::delete_remote_branch(&repo_path, branch) {
                                 Ok(()) => (Some(true), None, Some("deleted".to_string())),
-                                Err(e) if e.starts_with(gwt_core::git::gh_cli::PROTECTED_BRANCH_PREFIX) => {
+                                Err(e)
+                                    if e.starts_with(
+                                        gwt_core::git::gh_cli::PROTECTED_BRANCH_PREFIX,
+                                    ) =>
+                                {
                                     (Some(true), Some(e), Some("skipped".to_string()))
                                 }
                                 Err(e) => (Some(false), Some(e), Some("failed".to_string())),

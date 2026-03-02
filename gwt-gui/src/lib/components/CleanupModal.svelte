@@ -179,6 +179,8 @@
   }
 
   async function handleToggleRemote() {
+    const previousDeleteRemote = deleteRemote;
+    const previousBranchProtection = new Set(branchProtection);
     const nextDeleteRemote = !deleteRemote;
     deleteRemote = nextDeleteRemote;
     try {
@@ -207,7 +209,8 @@
       }
       await invoke("set_cleanup_settings", { projectPath, settings: { delete_remote_branches: deleteRemote } });
     } catch {
-      branchProtection = new Set();
+      deleteRemote = previousDeleteRemote;
+      branchProtection = previousBranchProtection;
     }
   }
 
