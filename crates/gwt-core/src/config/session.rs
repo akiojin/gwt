@@ -343,6 +343,9 @@ fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
     if id_lower.contains("opencode") || id_lower.contains("open-code") {
         return "OpenCode".to_string();
     }
+    if id_lower.contains("copilot") {
+        return "GitHub Copilot".to_string();
+    }
 
     let label_lower = tool_label.to_lowercase();
     if label_lower.contains("claude") {
@@ -356,6 +359,9 @@ fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
     }
     if label_lower.contains("opencode") || label_lower.contains("open-code") {
         return "OpenCode".to_string();
+    }
+    if label_lower.contains("copilot") {
+        return "GitHub Copilot".to_string();
     }
 
     tool_label.to_string()
@@ -911,6 +917,14 @@ updated_at = "2026-01-20T00:00:00Z"
     }
 
     #[test]
+    fn short_tool_label_copilot_from_id() {
+        assert_eq!(
+            short_tool_label(Some("github-copilot"), "Some Label"),
+            "GitHub Copilot"
+        );
+    }
+
+    #[test]
     fn short_tool_label_claude_from_label_when_id_unknown() {
         assert_eq!(short_tool_label(Some("unknown"), "Claude Code"), "Claude");
     }
@@ -918,6 +932,14 @@ updated_at = "2026-01-20T00:00:00Z"
     #[test]
     fn short_tool_label_codex_from_label() {
         assert_eq!(short_tool_label(Some("custom"), "Codex CLI"), "Codex");
+    }
+
+    #[test]
+    fn short_tool_label_copilot_from_label() {
+        assert_eq!(
+            short_tool_label(Some("custom"), "GitHub Copilot"),
+            "GitHub Copilot"
+        );
     }
 
     #[test]

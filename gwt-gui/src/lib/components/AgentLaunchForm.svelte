@@ -264,7 +264,11 @@
               { value: "gemini-2.5-flash", label: "gemini-2.5-flash" },
               { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite" },
             ]
-          : []
+          : selectedAgent === "copilot"
+            ? [
+                { value: "gpt-4.1", label: "GPT-4.1" },
+              ]
+            : []
   );
 
   let versionSelectOptions = $derived(
@@ -460,6 +464,15 @@
           : storedVersion;
     } else {
       agentVersion = currentAgentNotInstalled ? "latest" : "installed";
+    }
+  });
+
+  $effect(() => {
+    if (selectedAgent !== "copilot") return;
+    const current = model.trim();
+    if (!current) return;
+    if (!modelOptions.some((opt) => opt.value === current)) {
+      model = "";
     }
   });
 

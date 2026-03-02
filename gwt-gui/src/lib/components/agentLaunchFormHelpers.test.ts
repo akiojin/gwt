@@ -42,6 +42,7 @@ describe("agentLaunchFormHelpers", () => {
     expect(supportsModelFor("claude")).toBe(true);
     expect(supportsModelFor("gemini")).toBe(true);
     expect(supportsModelFor("opencode")).toBe(true);
+    expect(supportsModelFor("copilot")).toBe(true);
     expect(supportsModelFor("custom")).toBe(false);
   });
 
