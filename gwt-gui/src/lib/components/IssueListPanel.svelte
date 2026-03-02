@@ -52,6 +52,7 @@
   let fetchRequestId = 0;
 
   let sentinelRef: HTMLDivElement | null = $state(null);
+  let listRef: HTMLDivElement | null = $state(null);
 
   let filteredIssues = $derived(
     (() => {
@@ -185,15 +186,21 @@
       hasNextPage = resp.hasNextPage;
 
       onIssueCountChange?.(issues.length);
-      await loadBranchLinks(resp.issues, append, requestId);
+
+      // Reset loading state immediately after issue data is received
+      loading = false;
+      loadingMore = false;
+
+      // Check if sentinel is still visible after loading completes
+      queueMicrotask(() => checkSentinelVisibility());
+
+      // Fire-and-forget: don't block UI on branch link search
+      void loadBranchLinks(resp.issues, append, requestId);
     } catch (err) {
       if (requestId !== fetchRequestId) return;
       error = toErrorMessage(err);
-    } finally {
-      if (requestId === fetchRequestId) {
-        loading = false;
-        loadingMore = false;
-      }
+      loading = false;
+      loadingMore = false;
     }
   }
 
@@ -329,6 +336,15 @@
     return issueBranchMap.get(issueNumber) === ISSUE_BRANCH_LOOKUP_UNKNOWN;
   }
 
+  function checkSentinelVisibility() {
+    if (!sentinelRef || !listRef || !hasNextPage || loading || loadingMore) return;
+    const containerRect = listRef.getBoundingClientRect();
+    const sentinelRect = sentinelRef.getBoundingClientRect();
+    if (sentinelRect.top < containerRect.bottom) {
+      void fetchIssues(page + 1, true);
+    }
+  }
+
   // Setup IntersectionObserver for infinite scroll
   $effect(() => {
     if (!sentinelRef) return;
@@ -338,7 +354,7 @@
           void fetchIssues(page + 1, true);
         }
       },
-      { threshold: 0.1 }
+      { root: listRef, threshold: 0.1 }
     );
     observer.observe(sentinelRef);
     return () => observer.disconnect();
@@ -448,7 +464,7 @@
       <div class="ilp-empty">No issues found.</div>
     {:else}
       <!-- Issue List -->
-      <div class="ilp-list">
+      <div class="ilp-list" bind:this={listRef}>
         {#each filteredIssues as issue (issue.number)}
           {@const existingBranch = resolveExistingBranch(issue.number)}
           {@const lookupUnknown = isBranchLookupUnknown(issue.number)}

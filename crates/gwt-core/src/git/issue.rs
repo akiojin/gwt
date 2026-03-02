@@ -200,6 +200,9 @@ pub fn fetch_open_issues(
 /// Fetch issues with category/body options.
 ///
 /// `category` can be `"all"`, `"issues"` (exclude `gwt-spec`), or `"specs"` (only `gwt-spec`).
+///
+/// When a repo slug is available, uses the GitHub Search API for O(1) per-page pagination.
+/// Falls back to `gh issue list` when the slug cannot be resolved.
 pub fn fetch_issues_with_options(
     repo_path: &Path,
     page: u32,
@@ -216,8 +219,23 @@ pub fn fetch_issues_with_options(
     }
 
     let repo_slug = resolve_repo_slug(repo_path);
+
+    // Use Search API when repo slug is available (O(1) pagination)
+    if let Some(ref slug) = repo_slug {
+        return fetch_issues_via_search_api(
+            repo_path,
+            slug,
+            page,
+            per_page,
+            state,
+            include_body,
+            category,
+        );
+    }
+
+    // Fallback to gh issue list (no repo slug available)
     let args = issue_list_args_with_options(
-        repo_slug.as_deref(),
+        None,
         page,
         per_page,
         state,
@@ -249,9 +267,168 @@ pub fn fetch_issues_with_options(
     for issue in &mut issues {
         // Keep list retrieval lightweight. Exact comment counts are resolved in detail view.
         if include_body {
-            hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), issue);
+            hydrate_comments_count_from_rest_if_needed(repo_path, None, issue);
         }
     }
+
+    Ok(FetchIssuesResult {
+        issues,
+        has_next_page,
+    })
+}
+
+/// Fetch issues using GitHub REST Search API (O(1) per page).
+fn fetch_issues_via_search_api(
+    repo_path: &Path,
+    repo_slug: &str,
+    page: u32,
+    per_page: u32,
+    state: &str,
+    include_body: bool,
+    category: &str,
+) -> Result<FetchIssuesResult, String> {
+    let endpoint = issue_search_api_endpoint(repo_slug, page, per_page, state, category);
+    let output = run_gh_output_with_repair(repo_path, ["api", &endpoint])
+        .map_err(|e| format!("Failed to execute gh api: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh api search/issues failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = parse_search_issues_json(&stdout, per_page)?;
+
+    if include_body {
+        for issue in &mut result.issues {
+            hydrate_comments_count_from_rest_if_needed(repo_path, Some(repo_slug), issue);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Build the Search API endpoint URL for issue listing.
+fn issue_search_api_endpoint(
+    repo_slug: &str,
+    page: u32,
+    per_page: u32,
+    state: &str,
+    category: &str,
+) -> String {
+    let state_value = if state == "closed" { "closed" } else { "open" };
+    let category_parsed = parse_issue_category(category);
+
+    let mut query_parts = vec![
+        format!("repo:{}", repo_slug),
+        "is:issue".to_string(),
+        format!("state:{}", state_value),
+        "sort:updated-desc".to_string(),
+    ];
+
+    match category_parsed {
+        IssueCategory::Specs => {
+            query_parts.push(format!("label:{}", SPEC_LABEL));
+        }
+        IssueCategory::Issues => {
+            query_parts.push(format!("-label:{}", SPEC_LABEL));
+        }
+        IssueCategory::All => {}
+    }
+
+    let q = query_parts.join("+");
+    let fetch_count = per_page + 1; // +1 to detect hasNextPage
+    format!("search/issues?q={q}&per_page={fetch_count}&page={page}")
+}
+
+/// Parse a GitHub REST Search API response into `FetchIssuesResult`.
+fn parse_search_issues_json(json: &str, per_page: u32) -> Result<FetchIssuesResult, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    let items = parsed
+        .get("items")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Expected 'items' array in search response".to_string())?;
+
+    let has_next_page = items.len() > per_page as usize;
+
+    let issues: Vec<GitHubIssue> = items
+        .iter()
+        .take(per_page as usize)
+        .filter_map(|item| {
+            let number = item.get("number")?.as_u64()?;
+            let title = item.get("title")?.as_str()?.to_string();
+            let updated_at = item.get("updated_at")?.as_str()?.to_string();
+            let labels = item
+                .get("labels")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|label| {
+                            let name = label.get("name")?.as_str()?.to_string();
+                            let color = label
+                                .get("color")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            Some(GitHubLabel { name, color })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let body = item.get("body").and_then(|v| v.as_str()).map(String::from);
+            let state = item
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("open")
+                .to_string();
+            let html_url = item
+                .get("html_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let assignees = item
+                .get("assignees")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|a| {
+                            let login = a.get("login")?.as_str()?.to_string();
+                            let avatar_url = a
+                                .get("avatar_url")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            Some(GitHubAssignee { login, avatar_url })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let comments_count = parse_comments_count(item);
+            let milestone = item.get("milestone").and_then(|v| {
+                if v.is_null() {
+                    return None;
+                }
+                let title = v.get("title")?.as_str()?.to_string();
+                let number = v.get("number")?.as_u64()? as u32;
+                Some(GitHubMilestone { title, number })
+            });
+
+            Some(GitHubIssue {
+                number,
+                title,
+                updated_at,
+                labels,
+                body,
+                state,
+                html_url,
+                assignees,
+                comments_count,
+                milestone,
+            })
+        })
+        .collect();
 
     Ok(FetchIssuesResult {
         issues,
@@ -2056,5 +2233,188 @@ mod tests {
             extract_issue_number_from_branch_name("feature/not-an-issue"),
             None
         );
+    }
+
+    // ==========================================================
+    // Search API endpoint construction tests
+    // ==========================================================
+
+    #[test]
+    fn test_issue_search_api_endpoint_all_category() {
+        let endpoint = issue_search_api_endpoint("owner/repo", 1, 30, "open", "all");
+        assert_eq!(
+            endpoint,
+            "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc&per_page=31&page=1"
+        );
+    }
+
+    #[test]
+    fn test_issue_search_api_endpoint_issues_category() {
+        let endpoint = issue_search_api_endpoint("owner/repo", 2, 10, "open", "issues");
+        assert_eq!(
+            endpoint,
+            "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc+-label:gwt-spec&per_page=11&page=2"
+        );
+    }
+
+    #[test]
+    fn test_issue_search_api_endpoint_specs_category() {
+        let endpoint = issue_search_api_endpoint("owner/repo", 1, 20, "closed", "specs");
+        assert_eq!(
+            endpoint,
+            "search/issues?q=repo:owner/repo+is:issue+state:closed+sort:updated-desc+label:gwt-spec&per_page=21&page=1"
+        );
+    }
+
+    #[test]
+    fn test_issue_search_api_endpoint_defaults_to_open_for_unknown_state() {
+        let endpoint = issue_search_api_endpoint("owner/repo", 1, 10, "unknown", "all");
+        assert!(endpoint.contains("state:open"));
+    }
+
+    // ==========================================================
+    // Search API JSON parsing tests
+    // ==========================================================
+
+    #[test]
+    fn test_parse_search_issues_json_basic() {
+        let json = r#"{
+            "total_count": 2,
+            "items": [
+                {
+                    "number": 42,
+                    "title": "Fix login bug",
+                    "updated_at": "2025-01-25T10:00:00Z",
+                    "state": "open",
+                    "html_url": "https://github.com/user/repo/issues/42",
+                    "labels": [{"name": "bug", "color": "d73a4a"}],
+                    "body": "Issue body",
+                    "assignees": [{"login": "octocat", "avatar_url": "https://avatars.example.com/1"}],
+                    "comments": 5,
+                    "milestone": {"title": "v1.0", "number": 1}
+                },
+                {
+                    "number": 10,
+                    "title": "Update docs",
+                    "updated_at": "2025-01-24T08:00:00Z",
+                    "state": "open",
+                    "html_url": "https://github.com/user/repo/issues/10",
+                    "labels": [],
+                    "assignees": [],
+                    "comments": 0,
+                    "milestone": null
+                }
+            ]
+        }"#;
+
+        let result = parse_search_issues_json(json, 30).unwrap();
+        assert_eq!(result.issues.len(), 2);
+        assert!(!result.has_next_page);
+
+        let issue = &result.issues[0];
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.title, "Fix login bug");
+        assert_eq!(issue.updated_at, "2025-01-25T10:00:00Z");
+        assert_eq!(issue.state, "open");
+        assert_eq!(issue.html_url, "https://github.com/user/repo/issues/42");
+        assert_eq!(issue.labels.len(), 1);
+        assert_eq!(issue.labels[0].name, "bug");
+        assert_eq!(issue.labels[0].color, "d73a4a");
+        assert_eq!(issue.body.as_deref(), Some("Issue body"));
+        assert_eq!(issue.assignees.len(), 1);
+        assert_eq!(issue.assignees[0].login, "octocat");
+        assert_eq!(
+            issue.assignees[0].avatar_url,
+            "https://avatars.example.com/1"
+        );
+        assert_eq!(issue.comments_count, 5);
+        assert!(issue.milestone.is_some());
+        let ms = issue.milestone.as_ref().unwrap();
+        assert_eq!(ms.title, "v1.0");
+        assert_eq!(ms.number, 1);
+
+        let issue2 = &result.issues[1];
+        assert_eq!(issue2.number, 10);
+        assert!(issue2.milestone.is_none());
+    }
+
+    #[test]
+    fn test_parse_search_issues_json_has_next_page_detection() {
+        // per_page=2, but 3 items returned → has_next_page = true, only 2 issues kept
+        let json = r#"{
+            "total_count": 10,
+            "items": [
+                {"number": 1, "title": "A", "updated_at": "2025-01-03T00:00:00Z", "state": "open", "html_url": "", "labels": [], "assignees": [], "comments": 0, "milestone": null},
+                {"number": 2, "title": "B", "updated_at": "2025-01-02T00:00:00Z", "state": "open", "html_url": "", "labels": [], "assignees": [], "comments": 0, "milestone": null},
+                {"number": 3, "title": "C", "updated_at": "2025-01-01T00:00:00Z", "state": "open", "html_url": "", "labels": [], "assignees": [], "comments": 0, "milestone": null}
+            ]
+        }"#;
+
+        let result = parse_search_issues_json(json, 2).unwrap();
+        assert!(result.has_next_page);
+        assert_eq!(result.issues.len(), 2);
+        assert_eq!(result.issues[0].number, 1);
+        assert_eq!(result.issues[1].number, 2);
+    }
+
+    #[test]
+    fn test_parse_search_issues_json_no_next_page() {
+        // per_page=5, only 2 items returned → has_next_page = false
+        let json = r#"{
+            "total_count": 2,
+            "items": [
+                {"number": 1, "title": "A", "updated_at": "2025-01-02T00:00:00Z", "state": "open", "html_url": "", "labels": [], "assignees": [], "comments": 0, "milestone": null},
+                {"number": 2, "title": "B", "updated_at": "2025-01-01T00:00:00Z", "state": "open", "html_url": "", "labels": [], "assignees": [], "comments": 0, "milestone": null}
+            ]
+        }"#;
+
+        let result = parse_search_issues_json(json, 5).unwrap();
+        assert!(!result.has_next_page);
+        assert_eq!(result.issues.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_search_issues_json_empty_items() {
+        let json = r#"{"total_count": 0, "items": []}"#;
+        let result = parse_search_issues_json(json, 30).unwrap();
+        assert!(result.issues.is_empty());
+        assert!(!result.has_next_page);
+    }
+
+    #[test]
+    fn test_parse_search_issues_json_invalid_json() {
+        let result = parse_search_issues_json("not json", 30);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_search_issues_json_missing_items_field() {
+        let json = r#"{"total_count": 0}"#;
+        let result = parse_search_issues_json(json, 30);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("items"));
+    }
+
+    #[test]
+    fn test_parse_search_issues_json_closed_state() {
+        let json = r#"{
+            "total_count": 1,
+            "items": [
+                {
+                    "number": 99,
+                    "title": "Closed issue",
+                    "updated_at": "2025-01-01T00:00:00Z",
+                    "state": "closed",
+                    "html_url": "https://github.com/user/repo/issues/99",
+                    "labels": [],
+                    "assignees": [],
+                    "comments": 0,
+                    "milestone": null
+                }
+            ]
+        }"#;
+
+        let result = parse_search_issues_json(json, 30).unwrap();
+        assert_eq!(result.issues[0].state, "closed");
     }
 }
