@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::State;
+use tauri::Manager;
 
 const ISSUE_LIST_CACHE_TTL_MS: i64 = 120_000;
 const ISSUE_LIST_CACHE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -363,10 +363,9 @@ fn normalize_issue_state(state: &str) -> String {
     }
 }
 
-/// Fetch GitHub issues with pagination (FR-010)
-#[tauri::command]
+/// Fetch GitHub issues with pagination (FR-010) – blocking impl
 #[allow(clippy::too_many_arguments)]
-pub fn fetch_github_issues(
+fn fetch_github_issues_impl(
     project_path: String,
     page: u32,
     per_page: u32,
@@ -374,7 +373,7 @@ pub fn fetch_github_issues(
     category: Option<String>,
     include_body: Option<bool>,
     force_refresh: Option<bool>,
-    app_state: State<AppState>,
+    app_state: &AppState,
 ) -> Result<FetchIssuesResponse, StructuredError> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
@@ -390,10 +389,9 @@ pub fn fetch_github_issues(
     let now_ms = now_millis();
 
     if cache_enabled && force_refresh {
-        invalidate_issue_cache_for_repo(&app_state, &repo_path, &repo_key);
+        invalidate_issue_cache_for_repo(app_state, &repo_path, &repo_key);
     } else if cache_enabled {
-        if let Some(hit) =
-            try_get_issue_cache(&app_state, &repo_path, &repo_key, &cache_key, now_ms)
+        if let Some(hit) = try_get_issue_cache(app_state, &repo_path, &repo_key, &cache_key, now_ms)
         {
             return Ok(hit);
         }
@@ -401,11 +399,11 @@ pub fn fetch_github_issues(
 
     let mut fetch_owner = false;
     if cache_enabled {
-        fetch_owner = mark_issue_cache_inflight(&app_state, &inflight_key);
+        fetch_owner = mark_issue_cache_inflight(app_state, &inflight_key);
         if !fetch_owner {
-            wait_for_issue_cache_inflight(&app_state, &inflight_key);
+            wait_for_issue_cache_inflight(app_state, &inflight_key);
             if let Some(hit) =
-                try_get_issue_cache(&app_state, &repo_path, &repo_key, &cache_key, now_millis())
+                try_get_issue_cache(app_state, &repo_path, &repo_key, &cache_key, now_millis())
             {
                 return Ok(hit);
             }
@@ -430,7 +428,7 @@ pub fn fetch_github_issues(
         Ok(response) => {
             if cache_enabled {
                 put_issue_cache(
-                    &app_state,
+                    app_state,
                     &repo_path,
                     &repo_key,
                     &cache_key,
@@ -444,15 +442,46 @@ pub fn fetch_github_issues(
     };
 
     if cache_enabled && fetch_owner {
-        clear_issue_cache_inflight(&app_state, &inflight_key);
+        clear_issue_cache_inflight(app_state, &inflight_key);
     }
 
     result
 }
 
-/// Fetch a single GitHub issue detail
+/// Fetch GitHub issues with pagination (FR-010)
 #[tauri::command]
-pub fn fetch_github_issue_detail(
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_github_issues(
+    project_path: String,
+    page: u32,
+    per_page: u32,
+    state: Option<String>,
+    category: Option<String>,
+    include_body: Option<bool>,
+    force_refresh: Option<bool>,
+    app: tauri::AppHandle<tauri::Wry>,
+) -> Result<FetchIssuesResponse, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_state = app.state::<AppState>();
+        fetch_github_issues_impl(
+            project_path,
+            page,
+            per_page,
+            state,
+            category,
+            include_body,
+            force_refresh,
+            &app_state,
+        )
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(&format!("Task join failed: {e}"), "fetch_github_issues")
+    })?
+}
+
+/// Fetch a single GitHub issue detail – blocking impl
+fn fetch_github_issue_detail_impl(
     project_path: String,
     issue_number: u64,
 ) -> Result<IssueInfo, StructuredError> {
@@ -463,6 +492,24 @@ pub fn fetch_github_issue_detail(
     let issue = fetch_issue_detail(&repo_path, issue_number)
         .map_err(|e| StructuredError::internal(&e, "fetch_github_issue_detail"))?;
     Ok(issue_to_info(issue))
+}
+
+/// Fetch a single GitHub issue detail
+#[tauri::command]
+pub async fn fetch_github_issue_detail(
+    project_path: String,
+    issue_number: u64,
+) -> Result<IssueInfo, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fetch_github_issue_detail_impl(project_path, issue_number)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "fetch_github_issue_detail",
+        )
+    })?
 }
 
 fn extract_issue_number_from_branch(branch: &str) -> Option<u64> {
@@ -492,9 +539,8 @@ fn is_issue_not_found_error(message: &str) -> bool {
         || (lower.contains("issue with the number") && lower.contains("(repository.issue)"))
 }
 
-/// Fetch issue linked to branch naming pattern (`issue-<number>`).
-#[tauri::command]
-pub fn fetch_branch_linked_issue(
+/// Fetch issue linked to branch naming pattern (`issue-<number>`) – blocking impl
+fn fetch_branch_linked_issue_impl(
     project_path: String,
     branch: String,
 ) -> Result<Option<BranchLinkedIssueInfo>, StructuredError> {
@@ -517,6 +563,24 @@ pub fn fetch_branch_linked_issue(
         Err(err) if is_issue_not_found_error(&err) => Ok(None),
         Err(err) => Err(StructuredError::internal(&err, "fetch_branch_linked_issue")),
     }
+}
+
+/// Fetch issue linked to branch naming pattern (`issue-<number>`).
+#[tauri::command]
+pub async fn fetch_branch_linked_issue(
+    project_path: String,
+    branch: String,
+) -> Result<Option<BranchLinkedIssueInfo>, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fetch_branch_linked_issue_impl(project_path, branch)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "fetch_branch_linked_issue",
+        )
+    })?
 }
 
 /// Check gh CLI availability and authentication (FR-011)
@@ -549,9 +613,8 @@ pub fn find_existing_issue_branch(
         .map_err(|e| StructuredError::internal(&e, "find_existing_issue_branch"))
 }
 
-/// Bulk lookup of existing issue branches for list rendering.
-#[tauri::command]
-pub fn find_existing_issue_branches_bulk(
+/// Bulk lookup of existing issue branches for list rendering – blocking impl
+fn find_existing_issue_branches_bulk_impl(
     project_path: String,
     issue_numbers: Vec<u64>,
 ) -> Result<Vec<IssueBranchMatch>, StructuredError> {
@@ -571,6 +634,24 @@ pub fn find_existing_issue_branches_bulk(
         .collect();
     matches.sort_by_key(|m| m.issue_number);
     Ok(matches)
+}
+
+/// Bulk lookup of existing issue branches for list rendering.
+#[tauri::command]
+pub async fn find_existing_issue_branches_bulk(
+    project_path: String,
+    issue_numbers: Vec<u64>,
+) -> Result<Vec<IssueBranchMatch>, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        find_existing_issue_branches_bulk_impl(project_path, issue_numbers)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "find_existing_issue_branches_bulk",
+        )
+    })?
 }
 
 /// Link a branch to a GitHub issue via `gh issue develop` (FR-013)
