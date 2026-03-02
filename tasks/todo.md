@@ -29,7 +29,7 @@ gwt に 5 番目の AI コーディングエージェントとして GitHub Copi
 
 ---
 
-# TODO: Issue一覧の無限スクロール "Loading more" フリーズ修正
+## TODO: Issue一覧の無限スクロール "Loading more" フリーズ修正
 
 ## 背景（Cleanup）
 
