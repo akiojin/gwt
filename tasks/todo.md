@@ -1,4 +1,64 @@
-# fix: Cleanup — 保護ブランチの事前表示とエラーハンドリング (#1404)
+# TODO: GitHub Copilot CLI 対応
+
+## 背景（Copilot CLI 対応）
+
+gwt に 5 番目の AI コーディングエージェントとして GitHub Copilot CLI（`copilot` コマンド、npm: `@github/copilot`）を追加する。既存の 4 エージェント（Claude Code / Codex / Gemini / OpenCode）と同じパターンに従い、最小限の変更で統合する。
+
+仕様 Issue: #1411
+
+## 実装ステップ（Copilot CLI 対応）
+
+- [x] T000 gwt-spec Issue 作成 (#1411)
+- [x] T001 Rust テスト追加（terminal.rs — TDD）
+- [x] T002 フロントエンドテスト追加（TDD）
+- [x] T003 terminal.rs — 5 つの match 関数に copilot アーム追加
+- [x] T004 agents.rs — detect_copilot() 追加 + detect_agents 登録
+- [x] T005 agentUtils.ts — AgentId 型 + inferAgentId に copilot 追加
+- [x] T006 agentLaunchFormHelpers.ts — supportsModelFor() に copilot 追加
+- [x] T007 AgentLaunchForm.svelte — modelOptions に copilot 用モデル一覧追加
+- [x] T008 agentLaunchFormHelpers.test.ts — copilot テストアサーション追加
+- [x] T009 agentUtils.test.ts — copilot テストアサーション追加
+- [x] T010 cargo test 検証
+- [x] T011 フロントエンドテスト検証（pnpm test）
+
+## 検証結果（Copilot CLI 対応）
+
+- [x] `cargo test -p gwt-tauri -- copilot` — 6 テスト全パス（548 テスト中）
+- [x] `cd gwt-gui && pnpm test` — 65 ファイル / 1394 テスト全パス
+- [x] `npx svelte-check` — エラー 0 件
+
+---
+
+## TODO: Issue一覧の無限スクロール "Loading more" フリーズ修正
+
+## 背景（Cleanup）
+
+Issue一覧パネルの無限スクロールで「Loading more」中にUIがフリーズする。
+根本原因: 同期 Tauri コマンドが IPC スレッドをブロック + O(n^2) ページネーション + ブランチリンク検索のブロック + IntersectionObserver 再発火不良。
+
+## 実装ステップ（Cleanup）
+
+- [x] T001 GitHub Issue 仕様策定（gwt-spec ラベル）→ #1408
+- [x] T002 TDD テスト作成（RED 確認）
+  - [x] T002a Rust: Search API エンドポイント生成テスト（4件）
+  - [x] T002b Rust: Search API レスポンスパーステスト（7件）
+  - [x] T002c Frontend: 無限スクロール継続ロードテスト（2件）
+- [x] T003 Fix 1: Issue コマンドの async 化（IPC ブロック解消）
+- [x] T004 Fix 2+3: フロントエンド改善（非同期ブランチリンク + IO 修正）
+- [x] T005 Fix 4: O(1) ページネーション（REST Search API）
+- [x] T006 全テスト GREEN 確認 + lint + 型チェック
+
+## 検証結果（Cleanup）
+
+- [x] `cargo test -p gwt-core --lib` — 1422 tests passed（新規11件含む）
+- [x] `cargo test -p gwt-tauri` — 32 tests passed
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` — 警告なし
+- [x] `cd gwt-gui && pnpm test` — 34 tests passed（新規2件含む）
+- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` — 0 errors
+
+---
+
+## fix: Cleanup — 保護ブランチの事前表示とエラーハンドリング (#1404)
 
 ## 背景（Cleanup保護ブランチ）
 

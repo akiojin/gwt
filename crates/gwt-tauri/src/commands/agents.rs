@@ -3,6 +3,7 @@
 use crate::commands::terminal::builtin_agent_def;
 use crate::state::{AgentVersionsCache, AppState};
 use gwt_core::agent::{claude, codex, gemini, AgentInfo};
+use gwt_core::git::is_gh_cli_authenticated;
 use gwt_core::terminal::runner::{
     choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
 };
@@ -256,6 +257,7 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
                     std::env::var("GOOGLE_API_KEY").is_ok()
                         || std::env::var("GEMINI_API_KEY").is_ok()
                 }
+                "copilot" => is_gh_cli_authenticated(),
                 _ => false,
             };
 
@@ -294,6 +296,20 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
         })
     }
 
+    fn detect_copilot() -> Option<AgentInfo> {
+        let path = which("copilot").ok()?;
+        let version = gwt_core::agent::get_command_version("copilot", "--version")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        let authenticated = is_gh_cli_authenticated();
+        Some(AgentInfo {
+            name: "GitHub Copilot".to_string(),
+            version,
+            path: Some(path),
+            authenticated,
+        })
+    }
+
     vec![
         map_with_fallback(
             "claude",
@@ -323,6 +339,14 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
             "opencode",
             "OpenCode",
             detect_opencode(),
+            runner,
+            bunx_path_str.as_deref(),
+            npx_path_str.as_deref(),
+        ),
+        map_with_fallback(
+            "copilot",
+            "GitHub Copilot",
+            detect_copilot(),
             runner,
             bunx_path_str.as_deref(),
             npx_path_str.as_deref(),

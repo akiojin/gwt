@@ -54,6 +54,20 @@ describe("IssueListPanel", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     mockOpenExternalUrl.mockReset();
+
+    // Provide IntersectionObserver stub for jsdom
+    if (!globalThis.IntersectionObserver) {
+      globalThis.IntersectionObserver = class IntersectionObserver {
+        constructor(_callback: IntersectionObserverCallback) {}
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+        readonly root = null;
+        readonly rootMargin = "0px";
+        readonly thresholds: readonly number[] = [0];
+        takeRecords(): IntersectionObserverEntry[] { return []; }
+      } as unknown as typeof globalThis.IntersectionObserver;
+    }
   });
 
   afterEach(() => {
@@ -1073,6 +1087,165 @@ describe("IssueListPanel", () => {
     await waitFor(() => {
       expect(rendered.getByText("Loading issue details...")).toBeTruthy();
     });
+  });
+
+  it("resets loadingMore immediately after issue fetch, before branch links complete", async () => {
+    const page1Issues = Array.from({ length: 30 }, (_, i) =>
+      makeIssue({ number: i + 1, title: `Issue ${i + 1}` })
+    );
+    const page2Issues = Array.from({ length: 5 }, (_, i) =>
+      makeIssue({ number: i + 31, title: `Issue ${i + 31}` })
+    );
+    let branchLinkResolve: (v: unknown[]) => void = () => {};
+    const branchLinkPromise = new Promise<unknown[]>((resolve) => {
+      branchLinkResolve = resolve;
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") {
+        const p = (args as { page?: number })?.page ?? 1;
+        if (p === 1)
+          return { issues: page1Issues, hasNextPage: true } as FetchIssuesResponse;
+        return { issues: page2Issues, hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") {
+        return branchLinkPromise;
+      }
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Issue 1")).toBeTruthy();
+    });
+
+    // Loading more indicator should NOT be visible since loadingMore should be false
+    // (branch links are still pending but loadingMore was reset)
+    expect(rendered.queryByText("Loading more...")).toBeNull();
+
+    // Cleanup
+    branchLinkResolve([]);
+  });
+
+  it("keeps earlier page branch lookup results when next page loading starts", async () => {
+    const page1Issue = makeIssue({ number: 1, title: "Issue 1" });
+    const page2Issue = makeIssue({ number: 2, title: "Issue 2" });
+    const originalIntersectionObserver = globalThis.IntersectionObserver;
+
+    let resolvePage1Lookup: (v: unknown[]) => void = () => {};
+    let page1LookupStarted = false;
+    let intersectionTriggered = false;
+
+    globalThis.IntersectionObserver = class IntersectionObserver {
+      private callback: IntersectionObserverCallback;
+
+      constructor(callback: IntersectionObserverCallback) {
+        this.callback = callback;
+      }
+
+      observe() {
+        if (intersectionTriggered) return;
+        intersectionTriggered = true;
+        queueMicrotask(() => {
+          this.callback(
+            [{ isIntersecting: true } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver
+          );
+        });
+      }
+
+      unobserve() {}
+      disconnect() {}
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds: readonly number[] = [0];
+      takeRecords(): IntersectionObserverEntry[] { return []; }
+    } as unknown as typeof globalThis.IntersectionObserver;
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") {
+        const p = (args as { page?: number })?.page ?? 1;
+        if (p === 1) return { issues: [page1Issue], hasNextPage: true } as FetchIssuesResponse;
+        if (p === 2) return { issues: [page2Issue], hasNextPage: false } as FetchIssuesResponse;
+        return { issues: [], hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") {
+        const nums = ((args as { issueNumbers?: number[] })?.issueNumbers ?? []).slice().sort();
+        if (!page1LookupStarted && nums.length === 1 && nums[0] === 1) {
+          page1LookupStarted = true;
+          return new Promise<unknown[]>((resolve) => {
+            resolvePage1Lookup = resolve;
+          });
+        }
+        return [];
+      }
+      return null;
+    });
+
+    try {
+      const rendered = await renderIssueListPanel();
+
+      await waitFor(() => {
+        expect(rendered.getByText("Issue 1")).toBeTruthy();
+        expect(rendered.getByText("Issue 2")).toBeTruthy();
+      });
+      expect(rendered.queryByText("WT")).toBeNull();
+
+      resolvePage1Lookup([{ issueNumber: 1, branchName: "feature/issue-1" }]);
+
+      await waitFor(() => {
+        expect(rendered.getByText("WT")).toBeTruthy();
+      });
+    } finally {
+      globalThis.IntersectionObserver = originalIntersectionObserver;
+    }
+  });
+
+  it("allows category tab change while branch links are loading", async () => {
+    const regularIssue = makeIssue({ number: 1, title: "Regular" });
+    const specIssue = makeIssue({ number: 2, title: "Spec", labels: [{ name: "gwt-spec", color: "0075ca" }] });
+    let branchLinkResolve: (v: unknown[]) => void = () => {};
+    let branchCallCount = 0;
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") {
+        const category = (args as { category?: string })?.category ?? "issues";
+        if (category === "specs")
+          return { issues: [specIssue], hasNextPage: false } as FetchIssuesResponse;
+        return { issues: [regularIssue], hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") {
+        branchCallCount++;
+        if (branchCallCount === 1) {
+          return new Promise<unknown[]>((resolve) => { branchLinkResolve = resolve; });
+        }
+        return [];
+      }
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Regular")).toBeTruthy();
+    });
+
+    // Switch to specs tab while branch links may still be loading
+    await fireEvent.click(rendered.getByRole("button", { name: "Specs" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Spec")).toBeTruthy();
+    });
+
+    // Cleanup
+    branchLinkResolve([]);
   });
 
   it("handles find_existing_issue_branches_bulk error as unknown linkage state", async () => {

@@ -1,3 +1,5 @@
+import type { AgentId } from "./agentUtils";
+
 export type AgentStatusValue = "unknown" | "running" | "waiting_input" | "stopped";
 
 export interface StructuredError {
@@ -242,7 +244,7 @@ export interface ProjectIndexSearchResult {
 export interface Tab {
   id: string;
   label: string;
-  agentId?: "claude" | "codex" | "gemini" | "opencode";
+  agentId?: AgentId;
   type:
     | "summary"
     | "agent"

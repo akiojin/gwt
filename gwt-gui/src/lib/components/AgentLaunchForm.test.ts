@@ -308,6 +308,43 @@ describe("AgentLaunchForm", () => {
     ]);
   });
 
+  it("displays only supported copilot model options", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "copilot",
+            name: "GitHub Copilot",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
+    const values = Array.from(modelSelect.options).map((o) => o.value);
+    const labels = Array.from(modelSelect.options).map((o) => o.textContent);
+    expect(values).toEqual(["", "gpt-4.1"]);
+    expect(labels).toEqual(["Default", "GPT-4.1"]);
+  });
+
   it("passes selected codex model to launch request", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
