@@ -1130,6 +1130,82 @@ describe("IssueListPanel", () => {
     branchLinkResolve([]);
   });
 
+  it("keeps earlier page branch lookup results when next page loading starts", async () => {
+    const page1Issue = makeIssue({ number: 1, title: "Issue 1" });
+    const page2Issue = makeIssue({ number: 2, title: "Issue 2" });
+    const originalIntersectionObserver = globalThis.IntersectionObserver;
+
+    let resolvePage1Lookup: (v: unknown[]) => void = () => {};
+    let page1LookupStarted = false;
+    let intersectionTriggered = false;
+
+    globalThis.IntersectionObserver = class IntersectionObserver {
+      private callback: IntersectionObserverCallback;
+
+      constructor(callback: IntersectionObserverCallback) {
+        this.callback = callback;
+      }
+
+      observe() {
+        if (intersectionTriggered) return;
+        intersectionTriggered = true;
+        queueMicrotask(() => {
+          this.callback(
+            [{ isIntersecting: true } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver
+          );
+        });
+      }
+
+      unobserve() {}
+      disconnect() {}
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds: readonly number[] = [0];
+      takeRecords(): IntersectionObserverEntry[] { return []; }
+    } as unknown as typeof globalThis.IntersectionObserver;
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") {
+        const p = (args as { page?: number })?.page ?? 1;
+        if (p === 1) return { issues: [page1Issue], hasNextPage: true } as FetchIssuesResponse;
+        if (p === 2) return { issues: [page2Issue], hasNextPage: false } as FetchIssuesResponse;
+        return { issues: [], hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") {
+        const nums = ((args as { issueNumbers?: number[] })?.issueNumbers ?? []).slice().sort();
+        if (!page1LookupStarted && nums.length === 1 && nums[0] === 1) {
+          page1LookupStarted = true;
+          return new Promise<unknown[]>((resolve) => {
+            resolvePage1Lookup = resolve;
+          });
+        }
+        return [];
+      }
+      return null;
+    });
+
+    try {
+      const rendered = await renderIssueListPanel();
+
+      await waitFor(() => {
+        expect(rendered.getByText("Issue 1")).toBeTruthy();
+        expect(rendered.getByText("Issue 2")).toBeTruthy();
+      });
+      expect(rendered.queryByText("WT")).toBeNull();
+
+      resolvePage1Lookup([{ issueNumber: 1, branchName: "feature/issue-1" }]);
+
+      await waitFor(() => {
+        expect(rendered.getByText("WT")).toBeTruthy();
+      });
+    } finally {
+      globalThis.IntersectionObserver = originalIntersectionObserver;
+    }
+  });
+
   it("allows category tab change while branch links are loading", async () => {
     const regularIssue = makeIssue({ number: 1, title: "Regular" });
     const specIssue = makeIssue({ number: 2, title: "Spec", labels: [{ name: "gwt-spec", color: "0075ca" }] });

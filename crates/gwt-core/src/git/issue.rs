@@ -17,6 +17,7 @@ use super::repository::{find_bare_repo_in_dir, is_git_repo};
 const GH_COMMENTS_PREVIEW_LIMIT: u32 = 100;
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 const SPEC_LABEL: &str = "gwt-spec";
+const SEARCH_API_MAX_RESULTS: u64 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueCategory {
@@ -186,8 +187,7 @@ pub fn is_gh_cli_authenticated() -> bool {
 /// Returns issues sorted by updated_at descending (most recently updated first).
 /// Uses `page` and `per_page` to control pagination.
 /// `state` controls which issues to fetch ("open" or "closed").
-/// `has_next_page` is determined by requesting `per_page * page + 1` items
-/// and checking if more exist beyond the current page.
+/// `has_next_page` is derived from API metadata and pagination parameters.
 pub fn fetch_open_issues(
     repo_path: &Path,
     page: u32,
@@ -299,7 +299,7 @@ fn fetch_issues_via_search_api(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut result = parse_search_issues_json(&stdout, per_page)?;
+    let mut result = parse_search_issues_json(&stdout, page, per_page, include_body)?;
 
     if include_body {
         for issue in &mut result.issues {
@@ -338,12 +338,16 @@ fn issue_search_api_endpoint(
     }
 
     let q = query_parts.join("+");
-    let fetch_count = per_page + 1; // +1 to detect hasNextPage
-    format!("search/issues?q={q}&per_page={fetch_count}&page={page}")
+    format!("search/issues?q={q}&per_page={per_page}&page={page}")
 }
 
 /// Parse a GitHub REST Search API response into `FetchIssuesResult`.
-fn parse_search_issues_json(json: &str, per_page: u32) -> Result<FetchIssuesResult, String> {
+fn parse_search_issues_json(
+    json: &str,
+    page: u32,
+    per_page: u32,
+    include_body: bool,
+) -> Result<FetchIssuesResult, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
@@ -352,7 +356,13 @@ fn parse_search_issues_json(json: &str, per_page: u32) -> Result<FetchIssuesResu
         .and_then(|v| v.as_array())
         .ok_or_else(|| "Expected 'items' array in search response".to_string())?;
 
-    let has_next_page = items.len() > per_page as usize;
+    let total_count = parsed
+        .get("total_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(items.len() as u64);
+    let capped_total_count = total_count.min(SEARCH_API_MAX_RESULTS);
+    let shown_count = u64::from(page).saturating_mul(u64::from(per_page));
+    let has_next_page = shown_count < capped_total_count;
 
     let issues: Vec<GitHubIssue> = items
         .iter()
@@ -378,7 +388,11 @@ fn parse_search_issues_json(json: &str, per_page: u32) -> Result<FetchIssuesResu
                         .collect()
                 })
                 .unwrap_or_default();
-            let body = item.get("body").and_then(|v| v.as_str()).map(String::from);
+            let body = if include_body {
+                item.get("body").and_then(|v| v.as_str()).map(String::from)
+            } else {
+                None
+            };
             let state = item
                 .get("state")
                 .and_then(|v| v.as_str())
@@ -2245,7 +2259,7 @@ mod tests {
         let endpoint = issue_search_api_endpoint("owner/repo", 1, 30, "open", IssueCategory::All);
         assert_eq!(
             endpoint,
-            "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc&per_page=31&page=1"
+            "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc&per_page=30&page=1"
         );
     }
 
@@ -2254,7 +2268,7 @@ mod tests {
         let endpoint = issue_search_api_endpoint("owner/repo", 2, 10, "open", IssueCategory::Issues);
         assert_eq!(
             endpoint,
-            "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc+-label:gwt-spec&per_page=11&page=2"
+            "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc+-label:gwt-spec&per_page=10&page=2"
         );
     }
 
@@ -2263,7 +2277,7 @@ mod tests {
         let endpoint = issue_search_api_endpoint("owner/repo", 1, 20, "closed", IssueCategory::Specs);
         assert_eq!(
             endpoint,
-            "search/issues?q=repo:owner/repo+is:issue+state:closed+sort:updated-desc+label:gwt-spec&per_page=21&page=1"
+            "search/issues?q=repo:owner/repo+is:issue+state:closed+sort:updated-desc+label:gwt-spec&per_page=20&page=1"
         );
     }
 
@@ -2308,7 +2322,7 @@ mod tests {
             ]
         }"#;
 
-        let result = parse_search_issues_json(json, 30).unwrap();
+        let result = parse_search_issues_json(json, 1, 30, true).unwrap();
         assert_eq!(result.issues.len(), 2);
         assert!(!result.has_next_page);
 
@@ -2351,7 +2365,7 @@ mod tests {
             ]
         }"#;
 
-        let result = parse_search_issues_json(json, 2).unwrap();
+        let result = parse_search_issues_json(json, 1, 2, true).unwrap();
         assert!(result.has_next_page);
         assert_eq!(result.issues.len(), 2);
         assert_eq!(result.issues[0].number, 1);
@@ -2369,7 +2383,7 @@ mod tests {
             ]
         }"#;
 
-        let result = parse_search_issues_json(json, 5).unwrap();
+        let result = parse_search_issues_json(json, 1, 5, true).unwrap();
         assert!(!result.has_next_page);
         assert_eq!(result.issues.len(), 2);
     }
@@ -2377,21 +2391,21 @@ mod tests {
     #[test]
     fn test_parse_search_issues_json_empty_items() {
         let json = r#"{"total_count": 0, "items": []}"#;
-        let result = parse_search_issues_json(json, 30).unwrap();
+        let result = parse_search_issues_json(json, 1, 30, true).unwrap();
         assert!(result.issues.is_empty());
         assert!(!result.has_next_page);
     }
 
     #[test]
     fn test_parse_search_issues_json_invalid_json() {
-        let result = parse_search_issues_json("not json", 30);
+        let result = parse_search_issues_json("not json", 1, 30, true);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_search_issues_json_missing_items_field() {
         let json = r#"{"total_count": 0}"#;
-        let result = parse_search_issues_json(json, 30);
+        let result = parse_search_issues_json(json, 1, 30, true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("items"));
     }
@@ -2415,7 +2429,58 @@ mod tests {
             ]
         }"#;
 
-        let result = parse_search_issues_json(json, 30).unwrap();
+        let result = parse_search_issues_json(json, 1, 30, true).unwrap();
         assert_eq!(result.issues[0].state, "closed");
+    }
+
+    #[test]
+    fn test_parse_search_issues_json_excludes_body_when_requested() {
+        let json = r#"{
+            "total_count": 1,
+            "items": [
+                {
+                    "number": 1,
+                    "title": "Issue",
+                    "updated_at": "2025-01-01T00:00:00Z",
+                    "state": "open",
+                    "html_url": "https://github.com/user/repo/issues/1",
+                    "labels": [],
+                    "body": "Body content",
+                    "assignees": [],
+                    "comments": 0,
+                    "milestone": null
+                }
+            ]
+        }"#;
+
+        let result = parse_search_issues_json(json, 1, 30, false).unwrap();
+        assert_eq!(result.issues.len(), 1);
+        assert!(result.issues[0].body.is_none());
+    }
+
+    #[test]
+    fn test_parse_search_issues_json_respects_search_api_1000_limit() {
+        let json = r#"{
+            "total_count": 5000,
+            "items": [
+                {
+                    "number": 999,
+                    "title": "Issue",
+                    "updated_at": "2025-01-01T00:00:00Z",
+                    "state": "open",
+                    "html_url": "https://github.com/user/repo/issues/999",
+                    "labels": [],
+                    "assignees": [],
+                    "comments": 0,
+                    "milestone": null
+                }
+            ]
+        }"#;
+
+        let page_33 = parse_search_issues_json(json, 33, 30, false).unwrap();
+        assert!(page_33.has_next_page);
+
+        let page_34 = parse_search_issues_json(json, 34, 30, false).unwrap();
+        assert!(!page_34.has_next_page);
     }
 }

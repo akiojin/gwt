@@ -50,6 +50,7 @@
 
   let issueBranchMap: Map<number, IssueBranchLookupState> = $state(new Map());
   let fetchRequestId = 0;
+  let branchLookupGeneration = 0;
 
   let sentinelRef: HTMLDivElement | null = $state(null);
   let listRef: HTMLDivElement | null = $state(null);
@@ -157,6 +158,9 @@
   async function fetchIssues(pageNum: number, append = false, forceRefresh = false) {
     if (append && loadingMore) return;
     const requestId = ++fetchRequestId;
+    const lookupGeneration = append
+      ? branchLookupGeneration
+      : ++branchLookupGeneration;
     if (append) {
       loadingMore = true;
     } else {
@@ -196,7 +200,7 @@
       queueMicrotask(() => checkSentinelVisibility());
 
       // Fire-and-forget: don't block UI on branch link search
-      void loadBranchLinks(resp.issues, append, requestId);
+      void loadBranchLinks(resp.issues, lookupGeneration);
     } catch (err) {
       if (requestId !== fetchRequestId) return;
       error = toErrorMessage(err);
@@ -207,18 +211,17 @@
 
   async function loadBranchLinks(
     loadedIssues: GitHubIssueInfo[],
-    append: boolean,
-    requestId: number,
+    lookupGeneration: number,
   ) {
-    if (requestId !== fetchRequestId) return;
+    if (lookupGeneration !== branchLookupGeneration) return;
     const issueNumbers = loadedIssues.map((issue) => issue.number);
     if (issueNumbers.length === 0) return;
 
-    const baseline = append ? new Map(issueBranchMap) : new Map<number, IssueBranchLookupState>();
+    const baseline = new Map(issueBranchMap);
     for (const number of issueNumbers) {
       if (!baseline.has(number)) baseline.set(number, null);
     }
-    if (requestId !== fetchRequestId) return;
+    if (lookupGeneration !== branchLookupGeneration) return;
     issueBranchMap = baseline;
 
     try {
@@ -226,21 +229,21 @@
         projectPath,
         issueNumbers,
       });
-      if (requestId !== fetchRequestId) return;
+      if (lookupGeneration !== branchLookupGeneration) return;
 
       const next = new Map(issueBranchMap);
       for (const match of matches) {
         next.set(match.issueNumber, match.branchName);
       }
-      if (requestId !== fetchRequestId) return;
+      if (lookupGeneration !== branchLookupGeneration) return;
       issueBranchMap = next;
     } catch {
-      if (requestId !== fetchRequestId) return;
+      if (lookupGeneration !== branchLookupGeneration) return;
       const next = new Map(issueBranchMap);
       for (const issueNumber of issueNumbers) {
         next.set(issueNumber, ISSUE_BRANCH_LOOKUP_UNKNOWN);
       }
-      if (requestId !== fetchRequestId) return;
+      if (lookupGeneration !== branchLookupGeneration) return;
       issueBranchMap = next;
     }
   }
