@@ -1,28 +1,29 @@
-# TODO: プロジェクト単位の完全分離（PTY・ChromaDB・GitHub Issue）
+# fix: Cleanup — 保護ブランチの事前表示とエラーハンドリング (#1404)
 
 ## 背景
 
-gwt で複数プロジェクト同時利用時に PTY 通信・ChromaDB 検索・GitHub Issue がプロジェクト境界を越える問題を修正する。
+Cleanup処理でリポジトリルールにより保護されたブランチの削除が HTTP 422 でハードエラーになる問題の修正。
+事前表示 + エラーハンドリングの2段階で対応。
 
 ## 実装ステップ
 
-- [x] T001 gwt-spec Issue 作成 (#1395)
-- [x] T002 `TerminalPane`/`PaneConfig` に `project_root` フィールド追加
-- [x] T003 `PaneManager` に `panes_for_project()` メソッド追加
-- [x] T004 `list_terminals` にプロジェクトフィルタ適用
-- [x] T005 `send_keys_to_pane`/`capture_scrollback_tail` にプロジェクト検証追加
-- [x] T006 MCP ハンドラにプロジェクトフィルタ追加
-- [x] T007 `gwt-project-index` SKILL.md 更新
-- [x] T008 `gwt-issue-spec-ops` SKILL.md 更新
-- [x] T009 `gwt-spec-to-issue-migration` SKILL.md 更新
-- [x] T010 `gwt-pty-communication` SKILL.md 更新
-- [x] T011 `.codex/skills/gwt-spec-to-issue-migration/` 削除
-- [x] T012 `cargo test` + `cargo clippy` + markdownlint 検証
+- [x] T001 gwt-spec Issue 作成 (#1404)
+- [x] T002 Rust テスト追加 — classify_delete_branch_error / get_branch_deletion_rules
+- [x] T003 `classify_delete_branch_error` に protected ケース追加
+- [x] T004 `get_branch_deletion_rules()` 追加
+- [x] T005 `get_cleanup_branch_protection` Tauri コマンド追加 + 登録
+- [x] T006 `cleanup_worktrees` の "Protected:" ハンドリング
+- [x] T007 Frontend テスト追加 — branchProtection / badge (4テスト)
+- [x] T008 `CleanupModal.svelte` に保護状態の取得・表示
+- [x] T009 全テスト通過確認
+- [x] T010 clippy 検証
 
 ## 検証結果
 
-- [x] `cargo test` — 534 tests passed (gwt-tauri) + 4 tests passed (voice_eval)
+- [x] `cargo test -p gwt-core` — 全テスト通過
+- [x] `cargo test -p gwt-tauri` — 540テスト通過
 - [x] `cargo clippy --all-targets --all-features -- -D warnings` — 警告なし
+- [x] `cd gwt-gui && pnpm test src/lib/components/CleanupModal.test.ts` — 39テスト通過
 - [x] `npx markdownlint-cli` — 4つの SKILL.md エラーなし
 
 ---
