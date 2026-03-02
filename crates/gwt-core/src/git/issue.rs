@@ -236,14 +236,7 @@ pub fn fetch_issues_with_options(
     }
 
     // Fallback to gh issue list (no repo slug available)
-    let args = issue_list_args_with_options(
-        None,
-        page,
-        per_page,
-        state,
-        include_body,
-        cat,
-    );
+    let args = issue_list_args_with_options(None, page, per_page, state, include_body, cat);
 
     let output = run_gh_output_with_repair(repo_path, args)
         .map_err(|e| format!("Failed to execute gh CLI: {}", e))?;
@@ -2265,7 +2258,8 @@ mod tests {
 
     #[test]
     fn test_issue_search_api_endpoint_issues_category() {
-        let endpoint = issue_search_api_endpoint("owner/repo", 2, 10, "open", IssueCategory::Issues);
+        let endpoint =
+            issue_search_api_endpoint("owner/repo", 2, 10, "open", IssueCategory::Issues);
         assert_eq!(
             endpoint,
             "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc+-label:gwt-spec&per_page=10&page=2"
@@ -2274,7 +2268,8 @@ mod tests {
 
     #[test]
     fn test_issue_search_api_endpoint_specs_category() {
-        let endpoint = issue_search_api_endpoint("owner/repo", 1, 20, "closed", IssueCategory::Specs);
+        let endpoint =
+            issue_search_api_endpoint("owner/repo", 1, 20, "closed", IssueCategory::Specs);
         assert_eq!(
             endpoint,
             "search/issues?q=repo:owner/repo+is:issue+state:closed+sort:updated-desc+label:gwt-spec&per_page=20&page=1"
@@ -2283,7 +2278,8 @@ mod tests {
 
     #[test]
     fn test_issue_search_api_endpoint_defaults_to_open_for_unknown_state() {
-        let endpoint = issue_search_api_endpoint("owner/repo", 1, 10, "unknown", IssueCategory::All);
+        let endpoint =
+            issue_search_api_endpoint("owner/repo", 1, 10, "unknown", IssueCategory::All);
         assert!(endpoint.contains("state:open"));
     }
 
