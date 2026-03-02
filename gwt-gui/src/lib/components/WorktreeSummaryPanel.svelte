@@ -461,11 +461,9 @@
       if (currentBranchKey() !== key) return;
       latestBranchPrCache.set(key, { value: result, fetchedAtMs: Date.now() });
       latestBranchPr = result;
-      latestBranchPrBranch = branch;
     } catch (err) {
       if (currentBranchKey() !== key) return;
       latestBranchPr = null;
-      latestBranchPrBranch = branch;
       latestBranchPrError = `Failed to load PR: ${toErrorMessage(err)}`;
     } finally {
       if (currentBranchKey() === key) {
