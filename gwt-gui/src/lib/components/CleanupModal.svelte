@@ -49,6 +49,9 @@
   let prStatuses: Record<string, PrStatus> = $state({});
   let prLoading: boolean = $state(false);
 
+  // Branch protection (#1404)
+  let branchProtection: Set<string> = $state(new Set());
+
   // Result dialog state (replaces failure-only dialog)
   let results: CleanupResult[] = $state([]);
   let showResults: boolean = $state(false);
@@ -81,6 +84,7 @@
     if (wt.safety_level !== "safe") return wt.safety_level;
     const branch = wt.branch;
     if (!branch) return wt.safety_level;
+    if (branchProtection.has(branch)) return "warning";
     const pr = prStatuses[branch] ?? "none";
     if (pr === "open" || pr === "none") return "warning";
     return "safe";
@@ -168,13 +172,45 @@
     });
   });
 
+  function getRemoteCheckTargetBranches(): string[] {
+    return worktrees
+      .filter((w) => w.branch && w.safety_level !== "disabled" && !w.is_gone)
+      .map((w) => w.branch as string);
+  }
+
   async function handleToggleRemote() {
-    deleteRemote = !deleteRemote;
+    const previousDeleteRemote = deleteRemote;
+    const previousBranchProtection = new Set(branchProtection);
+    const nextDeleteRemote = !deleteRemote;
+    deleteRemote = nextDeleteRemote;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
+      if (nextDeleteRemote) {
+        const nonGoneBranches = getRemoteCheckTargetBranches();
+        if (nonGoneBranches.length > 0) {
+          try {
+            const protectedBranches = await invoke<string[]>("get_cleanup_branch_protection", {
+              projectPath,
+              branches: nonGoneBranches,
+            });
+            if (deleteRemote) {
+              branchProtection = new Set(protectedBranches);
+            }
+          } catch {
+            if (deleteRemote) {
+              branchProtection = new Set();
+            }
+          }
+        } else {
+          branchProtection = new Set();
+        }
+      } else {
+        branchProtection = new Set();
+      }
       await invoke("set_cleanup_settings", { projectPath, settings: { delete_remote_branches: deleteRemote } });
     } catch {
-      // Ignore save errors silently
+      deleteRemote = previousDeleteRemote;
+      branchProtection = previousBranchProtection;
     }
   }
 
@@ -230,21 +266,30 @@
             deleteRemote = false;
           }
           prLoading = true;
-          try {
-            const statuses = await invoke<Record<string, PrStatus>>("get_cleanup_pr_statuses", { projectPath });
-            prStatuses = statuses;
-          } catch {
-            prStatuses = {};
-          } finally {
-            prLoading = false;
-          }
+          const nonGoneBranches = getRemoteCheckTargetBranches();
+
+          // Fetch PR statuses and branch protection in parallel (#1404)
+          const [prResult, protectionResult] = await Promise.allSettled([
+            invoke<Record<string, PrStatus>>("get_cleanup_pr_statuses", { projectPath }),
+            deleteRemote && nonGoneBranches.length > 0
+              ? invoke<string[]>("get_cleanup_branch_protection", { projectPath, branches: nonGoneBranches })
+              : Promise.resolve([] as string[]),
+          ]);
+
+          prStatuses = prResult.status === "fulfilled" ? prResult.value : {};
+          prLoading = false;
+          branchProtection = deleteRemote && protectionResult.status === "fulfilled"
+            ? new Set(protectionResult.value)
+            : new Set();
         } else {
           ghAvailable = false;
           deleteRemote = false;
+          branchProtection = new Set();
         }
       } catch {
         ghAvailable = false;
         deleteRemote = false;
+        branchProtection = new Set();
       }
     }
   }
@@ -519,6 +564,9 @@
                       {:else}
                         <span class="gone-badge">gone</span>
                       {/if}
+                    {/if}
+                    {#if deleteRemote && wt.branch && branchProtection.has(wt.branch)}
+                      <span class="gone-badge gone-badge-emphasized" title="Remote branch cannot be deleted (repository rules)">protected</span>
                     {/if}
                   </td>
                   {#if ghAvailable}

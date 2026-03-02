@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.1.2] - 2026-03-02
+
+### Bug Fixes
+
+- **windows:** Harden normalization boundaries for Issue #1265 (#1403)
+
+### Documentation
+
+- **skills:** Enforce issue comment formatting rules (#1402)
+
 ## [8.1.1] - 2026-03-02
 
 ### Bug Fixes

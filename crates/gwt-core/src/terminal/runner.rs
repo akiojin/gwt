@@ -646,7 +646,6 @@ mod tests {
             PathBuf::from(r#"C:\Program Files\nodejs\npx.cmd"#)
         );
     }
-
     #[test]
     fn resolve_command_path_uses_node_modules_bin_when_no_global_candidate_exists() {
         let dir = tempdir().expect("tempdir");
