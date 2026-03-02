@@ -137,7 +137,9 @@
   }
 
   function isTerminalTabVisible(tabId: string): boolean {
-    return tabId === activeTerminalTabId && tabId === visibleTerminalTabId;
+    if (tabId !== activeTerminalTabId) return false;
+    if (terminalReadyTabIds.has(tabId)) return true;
+    return tabId === visibleTerminalTabId;
   }
 
   function readDraggedTabId(event: DragEvent): string {

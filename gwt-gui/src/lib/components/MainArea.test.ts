@@ -719,6 +719,127 @@ describe("MainArea", () => {
     }
   });
 
+  it("no visibility gap when switching between ready terminal tabs", async () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: "",
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    class ResizeObserverMock {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: ResizeObserverMock,
+    });
+
+    const tabs: Tab[] = [
+      {
+        id: "agent-1",
+        label: "Agent",
+        type: "agent",
+        paneId: "pane-agent",
+        agentId: "codex",
+      },
+      {
+        id: "term-1",
+        label: "Terminal",
+        type: "terminal",
+        cwd: "/tmp/project",
+        paneId: "pane-term",
+      },
+    ];
+
+    try {
+      const rendered = await renderMainArea({
+        tabs,
+        activeTabId: "agent-1",
+      });
+
+      // Step 1: agent-1 becomes ready
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
+
+      // Step 2: switch to term-1, wait for it to become ready
+      await rendered.rerender({
+        projectPath: "/tmp/project",
+        selectedBranch: null,
+        onLaunchAgent: vi.fn(),
+        onQuickLaunch: vi.fn(),
+        onTabSelect: vi.fn(),
+        onTabClose: vi.fn(),
+        onTabReorder: vi.fn(),
+        activeTabId: "term-1",
+        tabs,
+      });
+
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
+
+      // Step 3: switch back to agent-1 — must be immediate (no waitFor)
+      await rendered.rerender({
+        projectPath: "/tmp/project",
+        selectedBranch: null,
+        onLaunchAgent: vi.fn(),
+        onQuickLaunch: vi.fn(),
+        onTabSelect: vi.fn(),
+        onTabClose: vi.fn(),
+        onTabReorder: vi.fn(),
+        activeTabId: "agent-1",
+        tabs,
+      });
+
+      expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(1);
+
+      // Step 4: switch back to term-1 — must ALSO be immediate (no waitFor)
+      // This is the new verification: bidirectional immediate switching
+      await rendered.rerender({
+        projectPath: "/tmp/project",
+        selectedBranch: null,
+        onLaunchAgent: vi.fn(),
+        onQuickLaunch: vi.fn(),
+        onTabSelect: vi.fn(),
+        onTabClose: vi.fn(),
+        onTabReorder: vi.fn(),
+        activeTabId: "term-1",
+        tabs,
+      });
+
+      expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(1);
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      if (originalResizeObserver) {
+        Object.defineProperty(globalThis, "ResizeObserver", {
+          configurable: true,
+          value: originalResizeObserver,
+        });
+      } else {
+        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      }
+    }
+  });
+
   it("supports text/plain drag fallback and ignores dragStart without dataTransfer", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
