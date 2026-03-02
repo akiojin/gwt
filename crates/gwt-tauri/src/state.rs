@@ -54,6 +54,12 @@ pub struct VersionHistoryCacheEntry {
     pub changelog_markdown: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IssueListCacheEntry {
+    pub fetched_at_millis: i64,
+    pub response_json: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTabMenuState {
     pub id: String,
@@ -106,6 +112,8 @@ pub struct AppState {
     pub project_version_history_cache:
         Mutex<HashMap<String, HashMap<String, VersionHistoryCacheEntry>>>,
     pub project_version_history_inflight: Mutex<HashSet<String>>,
+    pub project_issue_list_cache: Mutex<HashMap<String, HashMap<String, IssueListCacheEntry>>>,
+    pub project_issue_list_inflight: Mutex<HashSet<String>>,
     /// Semaphore to limit concurrent AI summary generation (max 3).
     pub version_history_semaphore: Arc<Semaphore>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
@@ -155,6 +163,8 @@ impl AppState {
             session_summary_rebuild_inflight: Mutex::new(HashSet::new()),
             project_version_history_cache: Mutex::new(HashMap::new()),
             project_version_history_inflight: Mutex::new(HashSet::new()),
+            project_issue_list_cache: Mutex::new(HashMap::new()),
+            project_issue_list_inflight: Mutex::new(HashSet::new()),
             version_history_semaphore: Arc::new(Semaphore::new(3)),
             pane_launch_meta: Mutex::new(HashMap::new()),
             window_session_restore_leader: Mutex::new(None),

@@ -4,7 +4,9 @@
     GitHubLabel,
     GhCliStatus,
     FetchIssuesResponse,
+    IssueBranchMatch,
   } from "../types";
+  import { invoke } from "$lib/tauriInvoke";
   import { openExternalUrl } from "../openExternalUrl";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
@@ -23,9 +25,11 @@
 
   type ViewMode = "list" | "detail";
   type StateFilter = "open" | "closed";
+  type IssueCategory = "issues" | "specs";
 
   let viewMode: ViewMode = $state("list");
   let stateFilter: StateFilter = $state("open");
+  let categoryTab: IssueCategory = $state("issues");
   let searchQuery: string = $state("");
   let labelFilter: string | null = $state(null);
 
@@ -138,7 +142,6 @@
 
   async function checkGhCli() {
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
       ghCliStatus = await invoke<GhCliStatus>("check_gh_cli_status", {
         projectPath,
       });
@@ -147,7 +150,7 @@
     }
   }
 
-  async function fetchIssues(pageNum: number, append = false) {
+  async function fetchIssues(pageNum: number, append = false, forceRefresh = false) {
     if (append) {
       loadingMore = true;
     } else {
@@ -158,12 +161,14 @@
     error = null;
 
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
       const resp = await invoke<FetchIssuesResponse>("fetch_github_issues", {
         projectPath,
         page: pageNum,
         perPage: 30,
         state: stateFilter,
+        category: categoryTab,
+        includeBody: false,
+        forceRefresh,
       });
 
       if (append) {
@@ -175,13 +180,7 @@
       hasNextPage = resp.hasNextPage;
 
       onIssueCountChange?.(issues.length);
-
-      // Check branches for loaded issues
-      for (const issue of resp.issues) {
-        if (!append || !issueBranchMap.has(issue.number)) {
-          void checkExistingBranch(issue.number);
-        }
-      }
+      await loadBranchLinks(resp.issues, append);
     } catch (err) {
       error = toErrorMessage(err);
     } finally {
@@ -190,16 +189,29 @@
     }
   }
 
-  async function checkExistingBranch(issueNumber: number) {
+  async function loadBranchLinks(loadedIssues: GitHubIssueInfo[], append: boolean) {
+    const issueNumbers = loadedIssues.map((issue) => issue.number);
+    if (issueNumbers.length === 0) return;
+
+    const baseline = append ? new Map(issueBranchMap) : new Map<number, string | null>();
+    for (const number of issueNumbers) {
+      if (!baseline.has(number)) baseline.set(number, null);
+    }
+    issueBranchMap = baseline;
+
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const branch = await invoke<string | null>("find_existing_issue_branch", {
+      const matches = await invoke<IssueBranchMatch[]>("find_existing_issue_branches_bulk", {
         projectPath,
-        issueNumber,
+        issueNumbers,
       });
-      issueBranchMap = new Map(issueBranchMap).set(issueNumber, branch ?? null);
+
+      const next = new Map(issueBranchMap);
+      for (const match of matches) {
+        next.set(match.issueNumber, match.branchName);
+      }
+      issueBranchMap = next;
     } catch {
-      issueBranchMap = new Map(issueBranchMap).set(issueNumber, null);
+      // Keep optimistic null defaults.
     }
   }
 
@@ -208,7 +220,6 @@
     detailError = null;
 
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
       const detail = await invoke<GitHubIssueInfo>("fetch_github_issue_detail", {
         projectPath,
         issueNumber: issue.number,
@@ -239,6 +250,17 @@
   function handleStateFilterChange(filter: StateFilter) {
     if (stateFilter === filter) return;
     stateFilter = filter;
+    labelFilter = null;
+    issues = [];
+    page = 1;
+    hasNextPage = false;
+    void fetchIssues(1);
+  }
+
+  function handleCategoryTabChange(next: IssueCategory) {
+    if (categoryTab === next) return;
+    categoryTab = next;
+    labelFilter = null;
     issues = [];
     page = 1;
     hasNextPage = false;
@@ -254,7 +276,7 @@
     issueBranchMap = new Map();
     page = 1;
     hasNextPage = false;
-    void fetchIssues(1);
+    void fetchIssues(1, false, true);
   }
 
   async function handleOpenInGitHub(url: string) {
@@ -306,8 +328,24 @@
     <!-- Header -->
     <header class="ilp-header">
       <div class="ilp-header-top">
-        <h2 class="ilp-title">Issues</h2>
+        <h2 class="ilp-title">{categoryTab === "specs" ? "Specs" : "Issues"}</h2>
         <div class="ilp-header-actions">
+          <div class="ilp-category-toggle">
+            <button
+              class="state-btn"
+              class:active={categoryTab === "issues"}
+              onclick={() => handleCategoryTabChange("issues")}
+            >
+              Issues
+            </button>
+            <button
+              class="state-btn"
+              class:active={categoryTab === "specs"}
+              onclick={() => handleCategoryTabChange("specs")}
+            >
+              Specs
+            </button>
+          </div>
           <div class="ilp-state-toggle">
             <button
               class="state-btn"
@@ -602,6 +640,11 @@
   }
 
   .ilp-state-toggle {
+    display: flex;
+    gap: 4px;
+  }
+
+  .ilp-category-toggle {
     display: flex;
     gap: 4px;
   }

@@ -1,21 +1,49 @@
 //! GitHub Issue commands (SPEC-c6ba640a)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::state::{AppState, IssueListCacheEntry};
 use gwt_core::ai::{
     classify_issue_prefix as core_classify_issue_prefix, format_error_for_display, AIClient,
 };
 use gwt_core::config::ProfilesConfig;
 use gwt_core::git::{
-    create_linked_branch, fetch_issue_detail, fetch_open_issues, find_branch_for_issue,
-    get_spec_issue_detail, is_gh_cli_authenticated, is_gh_cli_available,
+    create_linked_branch, fetch_issue_detail, fetch_issues_with_options, find_branch_for_issue,
+    find_branches_for_issues, get_spec_issue_detail, is_gh_cli_authenticated, is_gh_cli_available,
 };
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
-use serde::Serialize;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::State;
+
+const ISSUE_LIST_CACHE_TTL_MS: i64 = 120_000;
+const ISSUE_LIST_CACHE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const ISSUE_LIST_INFLIGHT_WAIT_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueCategory {
+    All,
+    Issues,
+    Specs,
+}
+
+impl IssueCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Issues => "issues",
+            Self::Specs => "specs",
+        }
+    }
+}
 
 /// Response for fetch_github_issues (FR-010a)
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchIssuesResponse {
     pub issues: Vec<IssueInfo>,
@@ -23,7 +51,7 @@ pub struct FetchIssuesResponse {
 }
 
 /// Serializable label info for the frontend
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LabelInfo {
     pub name: String,
@@ -31,7 +59,7 @@ pub struct LabelInfo {
 }
 
 /// Serializable assignee info for the frontend
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssigneeInfo {
     pub login: String,
@@ -39,7 +67,7 @@ pub struct AssigneeInfo {
 }
 
 /// Serializable milestone info for the frontend
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MilestoneInfo {
     pub title: String,
@@ -47,7 +75,7 @@ pub struct MilestoneInfo {
 }
 
 /// Serializable issue info for the frontend
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueInfo {
     pub number: u64,
@@ -87,6 +115,199 @@ pub struct RollbackResult {
     pub local_deleted: bool,
     pub remote_deleted: bool,
     pub error: Option<String>,
+}
+
+/// Branch mapping result for bulk issue lookup.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueBranchMatch {
+    pub issue_number: u64,
+    pub branch_name: String,
+}
+
+fn parse_issue_category(value: Option<String>) -> IssueCategory {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("issues")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "specs" => IssueCategory::Specs,
+        "all" => IssueCategory::All,
+        _ => IssueCategory::Issues,
+    }
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn issue_cache_file_path(repo_path: &Path) -> PathBuf {
+    let canonical = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let hash = format!("{digest:x}");
+    let short_hash = &hash[..16];
+
+    let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    base.join(".gwt")
+        .join("cache")
+        .join("issues")
+        .join(format!("{short_hash}.json"))
+}
+
+fn load_issue_disk_cache(repo_path: &Path) -> Option<HashMap<String, IssueListCacheEntry>> {
+    let path = issue_cache_file_path(repo_path);
+    let data = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<HashMap<String, IssueListCacheEntry>>(&data).ok()
+}
+
+fn save_issue_disk_cache(repo_path: &Path, entries: &HashMap<String, IssueListCacheEntry>) {
+    let path = issue_cache_file_path(repo_path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(entries) {
+        let _ = fs::write(path, json);
+    }
+}
+
+fn prune_issue_cache_entries(
+    entries: &mut HashMap<String, IssueListCacheEntry>,
+    now_ms: i64,
+) -> bool {
+    let before_len = entries.len();
+    entries.retain(|_, entry| now_ms - entry.fetched_at_millis <= ISSUE_LIST_CACHE_RETENTION_MS);
+    entries.len() != before_len
+}
+
+fn issue_cache_key(
+    page: u32,
+    per_page: u32,
+    state: &str,
+    category: IssueCategory,
+    include_body: bool,
+) -> String {
+    format!(
+        "page={page}&per_page={per_page}&state={state}&category={}&include_body={include_body}",
+        category.as_str()
+    )
+}
+
+fn decode_cached_issue_response(entry: &IssueListCacheEntry) -> Option<FetchIssuesResponse> {
+    serde_json::from_str::<FetchIssuesResponse>(&entry.response_json).ok()
+}
+
+fn try_get_issue_cache(
+    state: &AppState,
+    repo_path: &Path,
+    repo_key: &str,
+    cache_key: &str,
+    now_ms: i64,
+) -> Option<FetchIssuesResponse> {
+    {
+        let mut guard = state.project_issue_list_cache.lock().ok()?;
+        if let Some(repo_map) = guard.get_mut(repo_key) {
+            if prune_issue_cache_entries(repo_map, now_ms) {
+                save_issue_disk_cache(repo_path, repo_map);
+            }
+            if let Some(entry) = repo_map.get(cache_key) {
+                if now_ms - entry.fetched_at_millis <= ISSUE_LIST_CACHE_TTL_MS {
+                    return decode_cached_issue_response(entry);
+                }
+            }
+        }
+    }
+
+    let mut disk_map = load_issue_disk_cache(repo_path)?;
+    let changed = prune_issue_cache_entries(&mut disk_map, now_ms);
+    if changed {
+        save_issue_disk_cache(repo_path, &disk_map);
+    }
+
+    if let Ok(mut guard) = state.project_issue_list_cache.lock() {
+        let repo_entry = guard.entry(repo_key.to_string()).or_default();
+        for (k, v) in &disk_map {
+            repo_entry.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+
+    let entry = disk_map.get(cache_key)?;
+    if now_ms - entry.fetched_at_millis > ISSUE_LIST_CACHE_TTL_MS {
+        return None;
+    }
+    decode_cached_issue_response(entry)
+}
+
+fn put_issue_cache(
+    state: &AppState,
+    repo_path: &Path,
+    repo_key: &str,
+    cache_key: &str,
+    response: &FetchIssuesResponse,
+    now_ms: i64,
+) {
+    let Ok(response_json) = serde_json::to_string(response) else {
+        return;
+    };
+    let new_entry = IssueListCacheEntry {
+        fetched_at_millis: now_ms,
+        response_json,
+    };
+    if let Ok(mut guard) = state.project_issue_list_cache.lock() {
+        let repo_entry = guard.entry(repo_key.to_string()).or_default();
+        repo_entry.insert(cache_key.to_string(), new_entry);
+        prune_issue_cache_entries(repo_entry, now_ms);
+        save_issue_disk_cache(repo_path, repo_entry);
+    }
+}
+
+fn invalidate_issue_cache_for_repo(state: &AppState, repo_path: &Path, repo_key: &str) {
+    if let Ok(mut guard) = state.project_issue_list_cache.lock() {
+        guard.remove(repo_key);
+    }
+    let path = issue_cache_file_path(repo_path);
+    let _ = fs::remove_file(path);
+}
+
+fn mark_issue_cache_inflight(state: &AppState, inflight_key: &str) -> bool {
+    if let Ok(mut set) = state.project_issue_list_inflight.lock() {
+        if set.contains(inflight_key) {
+            return false;
+        }
+        set.insert(inflight_key.to_string());
+        return true;
+    }
+    true
+}
+
+fn clear_issue_cache_inflight(state: &AppState, inflight_key: &str) {
+    if let Ok(mut set) = state.project_issue_list_inflight.lock() {
+        set.remove(inflight_key);
+    }
+}
+
+fn wait_for_issue_cache_inflight(state: &AppState, inflight_key: &str) {
+    let mut waited_ms: u64 = 0;
+    while waited_ms < ISSUE_LIST_INFLIGHT_WAIT_MS {
+        let still_inflight = state
+            .project_issue_list_inflight
+            .lock()
+            .map(|set| set.contains(inflight_key))
+            .unwrap_or(false);
+        if !still_inflight {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+        waited_ms += 10;
+    }
 }
 
 /// Convert a core GitHubIssue to the serializable IssueInfo
@@ -137,21 +358,69 @@ pub fn fetch_github_issues(
     page: u32,
     per_page: u32,
     state: Option<String>,
+    category: Option<String>,
+    include_body: Option<bool>,
+    force_refresh: Option<bool>,
+    app_state: State<AppState>,
 ) -> Result<FetchIssuesResponse, StructuredError> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "fetch_github_issues"))?;
     let state = state.unwrap_or_else(|| "open".to_string());
+    let category = parse_issue_category(category);
+    let include_body = include_body.unwrap_or(false);
+    let force_refresh = force_refresh.unwrap_or(false);
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let cache_key = issue_cache_key(page, per_page, &state, category, include_body);
+    let inflight_key = format!("{repo_key}::{cache_key}");
+    let now_ms = now_millis();
 
-    let result = fetch_open_issues(&repo_path, page, per_page, &state)
-        .map_err(|e| StructuredError::internal(&e, "fetch_github_issues"))?;
+    if force_refresh {
+        invalidate_issue_cache_for_repo(&app_state, &repo_path, &repo_key);
+    } else if let Some(hit) =
+        try_get_issue_cache(&app_state, &repo_path, &repo_key, &cache_key, now_ms)
+    {
+        return Ok(hit);
+    }
 
-    let issues = result.issues.into_iter().map(issue_to_info).collect();
+    let fetch_owner = mark_issue_cache_inflight(&app_state, &inflight_key);
+    if !fetch_owner {
+        wait_for_issue_cache_inflight(&app_state, &inflight_key);
+        if let Some(hit) =
+            try_get_issue_cache(&app_state, &repo_path, &repo_key, &cache_key, now_millis())
+        {
+            return Ok(hit);
+        }
+    }
 
-    Ok(FetchIssuesResponse {
-        issues,
+    let fetch_result = fetch_issues_with_options(
+        &repo_path,
+        page,
+        per_page,
+        &state,
+        include_body,
+        category.as_str(),
+    )
+    .map_err(|e| StructuredError::internal(&e, "fetch_github_issues"))
+    .map(|result| FetchIssuesResponse {
+        issues: result.issues.into_iter().map(issue_to_info).collect(),
         has_next_page: result.has_next_page,
-    })
+    });
+
+    if fetch_owner {
+        clear_issue_cache_inflight(&app_state, &inflight_key);
+    }
+
+    let response = fetch_result?;
+    put_issue_cache(
+        &app_state,
+        &repo_path,
+        &repo_key,
+        &cache_key,
+        &response,
+        now_millis(),
+    );
+    Ok(response)
 }
 
 /// Fetch a single GitHub issue detail
@@ -251,6 +520,30 @@ pub fn find_existing_issue_branch(
 
     find_branch_for_issue(&repo_path, issue_number)
         .map_err(|e| StructuredError::internal(&e, "find_existing_issue_branch"))
+}
+
+/// Bulk lookup of existing issue branches for list rendering.
+#[tauri::command]
+pub fn find_existing_issue_branches_bulk(
+    project_path: String,
+    issue_numbers: Vec<u64>,
+) -> Result<Vec<IssueBranchMatch>, StructuredError> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "find_existing_issue_branches_bulk"))?;
+
+    let found = find_branches_for_issues(&repo_path, &issue_numbers)
+        .map_err(|e| StructuredError::internal(&e, "find_existing_issue_branches_bulk"))?;
+
+    let mut matches: Vec<IssueBranchMatch> = found
+        .into_iter()
+        .map(|(issue_number, branch_name)| IssueBranchMatch {
+            issue_number,
+            branch_name,
+        })
+        .collect();
+    matches.sort_by_key(|m| m.issue_number);
+    Ok(matches)
 }
 
 /// Link a branch to a GitHub issue via `gh issue develop` (FR-013)
@@ -640,5 +933,58 @@ mod tests {
             "gh issue view failed: GraphQL: Could not resolve to a Repository with the name 'org/repo'. (repository)"
         ));
         assert!(!is_issue_not_found_error("permission denied"));
+    }
+
+    #[test]
+    fn test_parse_issue_category_defaults_to_issues() {
+        assert_eq!(parse_issue_category(None), IssueCategory::Issues);
+        assert_eq!(
+            parse_issue_category(Some("unknown".to_string())),
+            IssueCategory::Issues
+        );
+    }
+
+    #[test]
+    fn test_parse_issue_category_variants() {
+        assert_eq!(
+            parse_issue_category(Some("specs".to_string())),
+            IssueCategory::Specs
+        );
+        assert_eq!(
+            parse_issue_category(Some("all".to_string())),
+            IssueCategory::All
+        );
+    }
+
+    #[test]
+    fn test_issue_cache_key_contains_category_and_body_flag() {
+        let key = issue_cache_key(1, 30, "open", IssueCategory::Specs, false);
+        assert!(key.contains("category=specs"));
+        assert!(key.contains("include_body=false"));
+    }
+
+    #[test]
+    fn test_prune_issue_cache_entries_removes_stale_rows() {
+        let now = 1_000_000_i64;
+        let mut entries = HashMap::new();
+        entries.insert(
+            "fresh".to_string(),
+            IssueListCacheEntry {
+                fetched_at_millis: now - 1_000,
+                response_json: "{}".to_string(),
+            },
+        );
+        entries.insert(
+            "stale".to_string(),
+            IssueListCacheEntry {
+                fetched_at_millis: now - ISSUE_LIST_CACHE_RETENTION_MS - 1,
+                response_json: "{}".to_string(),
+            },
+        );
+
+        let changed = prune_issue_cache_entries(&mut entries, now);
+        assert!(changed);
+        assert!(entries.contains_key("fresh"));
+        assert!(!entries.contains_key("stale"));
     }
 }

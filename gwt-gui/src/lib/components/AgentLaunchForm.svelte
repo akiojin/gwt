@@ -7,6 +7,7 @@
     DockerContext,
     FetchIssuesResponse,
     GhCliStatus,
+    IssueBranchMatch,
     GitHubIssueInfo,
     LaunchAgentRequest,
     ShellInfo,
@@ -631,6 +632,9 @@
         page,
         perPage: 30,
         state: "open",
+        category: "issues",
+        includeBody: false,
+        forceRefresh: false,
       });
       if (page === 1) {
         issues = resp.issues;
@@ -639,13 +643,7 @@
       }
       issuesPage = page;
       issuesHasNextPage = resp.hasNextPage;
-
-      // Check existing branches for newly loaded issues
-      for (const issue of resp.issues) {
-        if (!issueBranchMap.has(issue.number)) {
-          void checkExistingBranch(issue.number);
-        }
-      }
+      await loadIssueBranches(resp.issues, page === 1);
     } catch (err) {
       const msg = toErrorMessage(err);
       if (msg.toLowerCase().includes("rate limit")) {
@@ -659,25 +657,40 @@
     }
   }
 
-  async function checkExistingBranch(issueNumber: number) {
-    issueBranchChecksInFlight = new Set(issueBranchChecksInFlight).add(issueNumber);
+  async function loadIssueBranches(loadedIssues: GitHubIssueInfo[], reset: boolean) {
+    const issueNumbers = loadedIssues.map((issue) => issue.number);
+    if (issueNumbers.length === 0) return;
+
+    const baseline = reset ? new Map<number, string | null>() : new Map(issueBranchMap);
+    for (const issueNumber of issueNumbers) {
+      if (!baseline.has(issueNumber)) baseline.set(issueNumber, null);
+    }
+    issueBranchMap = baseline;
+
+    const nextInFlight = new Set(issueBranchChecksInFlight);
+    for (const issueNumber of issueNumbers) nextInFlight.add(issueNumber);
+    issueBranchChecksInFlight = nextInFlight;
+
     try {
       const { invoke } = await import("$lib/tauriInvoke");
-      const branch = await invoke<string | null>("find_existing_issue_branch", {
+      const matches = await invoke<IssueBranchMatch[]>("find_existing_issue_branches_bulk", {
         projectPath,
-        issueNumber,
+        issueNumbers,
       });
-      const existingBranch = branch ?? null;
-      issueBranchMap = new Map(issueBranchMap).set(issueNumber, existingBranch);
-      if (existingBranch && selectedIssue?.number === issueNumber) {
+
+      const nextMap = new Map(issueBranchMap);
+      for (const match of matches) {
+        nextMap.set(match.issueNumber, match.branchName);
+      }
+      issueBranchMap = nextMap;
+      if (selectedIssue?.number && nextMap.get(selectedIssue.number)) {
         selectedIssue = null;
       }
     } catch {
-      // Treat as "not found" so the issue is not blocked forever.
-      issueBranchMap = new Map(issueBranchMap).set(issueNumber, null);
+      // Keep optimistic null defaults.
     } finally {
       const next = new Set(issueBranchChecksInFlight);
-      next.delete(issueNumber);
+      for (const issueNumber of issueNumbers) next.delete(issueNumber);
       issueBranchChecksInFlight = next;
     }
   }

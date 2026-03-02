@@ -549,6 +549,11 @@ export interface FetchIssuesResponse {
   hasNextPage: boolean;
 }
 
+export interface IssueBranchMatch {
+  issueNumber: number;
+  branchName: string;
+}
+
 export interface RollbackResult {
   localDeleted: boolean;
   remoteDeleted: boolean;
