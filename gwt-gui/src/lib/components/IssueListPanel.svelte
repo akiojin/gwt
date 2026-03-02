@@ -612,7 +612,7 @@
             {#if resolveExistingBranch(detailIssue.number)}
               <button
                 class="ilp-action-btn ilp-action-switch"
-                onclick={() => handleSwitchToWorktree(resolveExistingBranch(detailIssue.number)!)}
+                onclick={() => handleSwitchToWorktree(resolveExistingBranch(detailIssue!.number)!)}
               >
                 Switch to Worktree
               </button>
