@@ -390,6 +390,78 @@ describe("WorktreeSummaryPanel", () => {
     expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(1);
   });
 
+  it("shows No PR when latestBranchPr is MERGED and no sidebar PR number exists", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr")
+        return {
+          number: 99,
+          title: "Old merged PR",
+          state: "MERGED",
+          url: "https://github.com/test/repo/pull/99",
+        };
+      if (cmd === "fetch_pr_detail") return { ...prDetailFixture, number: 99, state: "MERGED" };
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("No PR")).toBeTruthy();
+    });
+    expect(commandCalls("fetch_pr_detail")).toHaveLength(0);
+  });
+
+  it("prefers sidebar prNumber over latestBranchPr when both are present", async () => {
+    invokeMock.mockImplementation(
+      async (cmd: string, args?: { prNumber?: number }) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr")
+          return {
+            number: 99,
+            title: "Old merged PR",
+            state: "MERGED",
+            url: "https://github.com/test/repo/pull/99",
+          };
+        if (cmd === "fetch_pr_detail") {
+          if (args?.prNumber === 42) return prDetailFixture;
+          return { ...prDetailFixture, number: 99, title: "Old merged PR", state: "MERGED" };
+        }
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      }
+    );
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      prNumber: 42,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("#42 CI Test PR")).toBeTruthy();
+    });
+    expect(
+      commandCalls("fetch_pr_detail").some(([, payload]) => payload?.prNumber === 99)
+    ).toBe(false);
+  });
+
   it("shows GitHub CLI auth warning in PR tab when CLI is unavailable", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",

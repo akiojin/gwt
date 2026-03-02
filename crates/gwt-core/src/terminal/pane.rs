@@ -37,6 +37,8 @@ pub struct PaneConfig {
     pub interactive: bool,
     /// Whether to force UTF-8 terminal initialization on Windows launch.
     pub windows_force_utf8: bool,
+    /// Project root this pane belongs to (for multi-project isolation).
+    pub project_root: PathBuf,
 }
 
 /// A terminal pane integrating PTY and scrollback.
@@ -52,6 +54,8 @@ pub struct TerminalPane {
     started_at: chrono::DateTime<chrono::Utc>,
     /// Whether the frontend has called `terminal_ready` and is listening.
     frontend_ready: bool,
+    /// Project root this pane belongs to (for multi-project isolation).
+    project_root: PathBuf,
 }
 
 impl TerminalPane {
@@ -89,6 +93,7 @@ impl TerminalPane {
             status: PaneStatus::Running,
             started_at: chrono::Utc::now(),
             frontend_ready: false,
+            project_root: config.project_root,
         })
     }
 
@@ -171,6 +176,11 @@ impl TerminalPane {
     /// Get the agent color.
     pub fn agent_color(&self) -> AgentColor {
         self.agent_color
+    }
+
+    /// Get the project root this pane belongs to.
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
     /// Get the current status.
@@ -277,6 +287,7 @@ mod tests {
             terminal_shell: None,
             interactive: false,
             windows_force_utf8: false,
+            project_root: std::env::temp_dir(),
         }
     }
 

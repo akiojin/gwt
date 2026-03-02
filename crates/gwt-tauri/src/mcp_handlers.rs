@@ -153,9 +153,19 @@ pub fn handle_list_tabs(id: Value, _params: &Value, ctx: &WsContext) -> JsonRpcR
         }
     };
 
+    // Project isolation: determine the caller's project root from MCP context.
+    let window_label = get_master_window_label(ctx, &state);
+    let project_filter = state
+        .project_for_window(&window_label)
+        .map(PathBuf::from);
+
     let tabs: Vec<Value> = manager
         .panes_mut()
         .iter_mut()
+        .filter(|pane| match &project_filter {
+            Some(root) => pane.project_root() == root.as_path(),
+            None => true,
+        })
         .map(|pane| {
             let _ = pane.check_status();
             let status = match pane.status() {
@@ -266,6 +276,13 @@ pub fn handle_send_message(id: Value, params: &Value, ctx: &WsContext) -> JsonRp
     let formatted = format!("[gwt msg from {sender}]: {sanitized}\n");
 
     let state = ctx.app_handle.state::<AppState>();
+
+    // Project isolation: determine the caller's project root from MCP context.
+    let window_label = get_master_window_label(ctx, &state);
+    let project_filter = state
+        .project_for_window(&window_label)
+        .map(PathBuf::from);
+
     let mut manager = match state.pane_manager.lock() {
         Ok(m) => m,
         Err(e) => {
@@ -279,6 +296,17 @@ pub fn handle_send_message(id: Value, params: &Value, ctx: &WsContext) -> JsonRp
             return JsonRpcResponse::error(id, -32604, format!("Tab not found: {target_tab_id}"));
         }
     };
+
+    // Reject access to panes belonging to a different project.
+    if let Some(ref root) = project_filter {
+        if pane.project_root() != root.as_path() {
+            return JsonRpcResponse::error(
+                id,
+                -32604,
+                format!("Access denied: tab {} belongs to a different project", target_tab_id),
+            );
+        }
+    }
 
     let _ = pane.check_status();
     if !matches!(pane.status(), PaneStatus::Running) {

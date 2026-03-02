@@ -776,7 +776,14 @@
     prDetailPrNumber = null;
   }
 
-  let resolvedPrNumber = $derived.by(() => latestBranchPr?.number ?? prNumber ?? null);
+  let resolvedPrNumber = $derived.by(() => {
+    if (prNumber !== null && prNumber !== undefined) {
+      return prNumber;
+    }
+    if (!latestBranchPr) return null;
+    if (latestBranchPr.state !== "OPEN") return null;
+    return latestBranchPr.number;
+  });
   let prRetrying = $derived.by(() => {
     const status = selectedPrStatus;
     const prNum = resolvedPrNumber;

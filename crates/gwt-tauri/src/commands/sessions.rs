@@ -1770,7 +1770,7 @@ fn generate_and_cache_scrollback_summary(
     });
 
     let pane_session = pane_session_id(&job.pane_id);
-    let scrollback = match capture_scrollback_tail_from_state(state, &job.pane_id, 0) {
+    let scrollback = match capture_scrollback_tail_from_state(state, &job.pane_id, 0, None) {
         Ok(text) => text,
         Err(err) => {
             if let Some(prev) = previous_any.as_ref() {

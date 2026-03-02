@@ -310,3 +310,5 @@ Phase フィールドでライフサイクルを管理:
 
 - `gh` must be installed and authenticated.
 - Repository must have `gwt-spec` label created.
+- Agent CWD must be inside the target repository (enforced by gwt worktree hooks).
+- `$GWT_PROJECT_ROOT` environment variable is available for explicit repo resolution.

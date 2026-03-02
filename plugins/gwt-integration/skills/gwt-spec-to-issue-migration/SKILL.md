@@ -18,6 +18,7 @@ This skill uses:
 - Run in repository root
 - `gh auth status` is authenticated for target repo
 - Branch policy is respected (no branch creation/switching unless user requests)
+- `$GWT_PROJECT_ROOT` environment variable is available; prefer it over CWD for repo resolution
 
 ## Standard Workflow
 
