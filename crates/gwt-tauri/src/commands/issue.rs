@@ -382,27 +382,33 @@ pub fn fetch_github_issues(
     let state = state.unwrap_or_else(|| "open".to_string());
     let category = parse_issue_category(category);
     let include_body = include_body.unwrap_or(false);
+    let cache_enabled = !include_body;
     let force_refresh = force_refresh.unwrap_or(false);
     let repo_key = repo_path.to_string_lossy().to_string();
     let cache_key = issue_cache_key(page, per_page, &state, category, include_body);
     let inflight_key = format!("{repo_key}::{cache_key}");
     let now_ms = now_millis();
 
-    if force_refresh {
+    if cache_enabled && force_refresh {
         invalidate_issue_cache_for_repo(&app_state, &repo_path, &repo_key);
-    } else if let Some(hit) =
-        try_get_issue_cache(&app_state, &repo_path, &repo_key, &cache_key, now_ms)
-    {
-        return Ok(hit);
-    }
-
-    let fetch_owner = mark_issue_cache_inflight(&app_state, &inflight_key);
-    if !fetch_owner {
-        wait_for_issue_cache_inflight(&app_state, &inflight_key);
+    } else if cache_enabled {
         if let Some(hit) =
-            try_get_issue_cache(&app_state, &repo_path, &repo_key, &cache_key, now_millis())
+            try_get_issue_cache(&app_state, &repo_path, &repo_key, &cache_key, now_ms)
         {
             return Ok(hit);
+        }
+    }
+
+    let mut fetch_owner = false;
+    if cache_enabled {
+        fetch_owner = mark_issue_cache_inflight(&app_state, &inflight_key);
+        if !fetch_owner {
+            wait_for_issue_cache_inflight(&app_state, &inflight_key);
+            if let Some(hit) =
+                try_get_issue_cache(&app_state, &repo_path, &repo_key, &cache_key, now_millis())
+            {
+                return Ok(hit);
+            }
         }
     }
 
@@ -422,20 +428,22 @@ pub fn fetch_github_issues(
 
     let result = match fetch_result {
         Ok(response) => {
-            put_issue_cache(
-                &app_state,
-                &repo_path,
-                &repo_key,
-                &cache_key,
-                &response,
-                now_millis(),
-            );
+            if cache_enabled {
+                put_issue_cache(
+                    &app_state,
+                    &repo_path,
+                    &repo_key,
+                    &cache_key,
+                    &response,
+                    now_millis(),
+                );
+            }
             Ok(response)
         }
         Err(err) => Err(err),
     };
 
-    if fetch_owner {
+    if cache_enabled && fetch_owner {
         clear_issue_cache_inflight(&app_state, &inflight_key);
     }
 

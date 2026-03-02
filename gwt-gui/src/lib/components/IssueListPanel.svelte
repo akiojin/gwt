@@ -185,7 +185,7 @@
       hasNextPage = resp.hasNextPage;
 
       onIssueCountChange?.(issues.length);
-      await loadBranchLinks(resp.issues, append);
+      await loadBranchLinks(resp.issues, append, requestId);
     } catch (err) {
       if (requestId !== fetchRequestId) return;
       error = toErrorMessage(err);
@@ -197,7 +197,12 @@
     }
   }
 
-  async function loadBranchLinks(loadedIssues: GitHubIssueInfo[], append: boolean) {
+  async function loadBranchLinks(
+    loadedIssues: GitHubIssueInfo[],
+    append: boolean,
+    requestId: number,
+  ) {
+    if (requestId !== fetchRequestId) return;
     const issueNumbers = loadedIssues.map((issue) => issue.number);
     if (issueNumbers.length === 0) return;
 
@@ -205,6 +210,7 @@
     for (const number of issueNumbers) {
       if (!baseline.has(number)) baseline.set(number, null);
     }
+    if (requestId !== fetchRequestId) return;
     issueBranchMap = baseline;
 
     try {
@@ -212,17 +218,21 @@
         projectPath,
         issueNumbers,
       });
+      if (requestId !== fetchRequestId) return;
 
       const next = new Map(issueBranchMap);
       for (const match of matches) {
         next.set(match.issueNumber, match.branchName);
       }
+      if (requestId !== fetchRequestId) return;
       issueBranchMap = next;
     } catch {
+      if (requestId !== fetchRequestId) return;
       const next = new Map(issueBranchMap);
       for (const issueNumber of issueNumbers) {
         next.set(issueNumber, ISSUE_BRANCH_LOOKUP_UNKNOWN);
       }
+      if (requestId !== fetchRequestId) return;
       issueBranchMap = next;
     }
   }
