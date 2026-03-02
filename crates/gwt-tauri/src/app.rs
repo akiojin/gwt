@@ -715,6 +715,7 @@ pub fn build_app(
             crate::commands::cleanup::cleanup_single_worktree,
             crate::commands::cleanup::check_gh_available,
             crate::commands::cleanup::get_cleanup_pr_statuses,
+            crate::commands::cleanup::get_cleanup_branch_protection,
             crate::commands::cleanup::get_cleanup_settings,
             crate::commands::cleanup::set_cleanup_settings,
             crate::commands::update::check_app_update,

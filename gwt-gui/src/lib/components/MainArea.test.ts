@@ -58,6 +58,47 @@ function createDataTransferMock(): DataTransfer {
   } as DataTransfer;
 }
 
+function setupTerminalMocks(): () => void {
+  const originalMatchMedia = window.matchMedia;
+  const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn(() => ({
+      matches: false,
+      media: "",
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  class ResizeObserverMock {
+    observe = vi.fn();
+    unobserve = vi.fn();
+    disconnect = vi.fn();
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    value: ResizeObserverMock,
+  });
+  return () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+    if (originalResizeObserver) {
+      Object.defineProperty(globalThis, "ResizeObserver", {
+        configurable: true,
+        value: originalResizeObserver,
+      });
+    } else {
+      delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    }
+  };
+}
+
 function getTabByLabel(container: HTMLElement, label: string): HTMLElement {
   const tab = Array.from(container.querySelectorAll<HTMLElement>(".tab-bar .tab")).find(
     (el) => el.querySelector(".tab-label")?.textContent?.trim() === label,
@@ -455,30 +496,7 @@ describe("MainArea", () => {
   });
 
   it("renders agent/terminal tab dots and terminal wrappers", async () => {
-    const originalMatchMedia = window.matchMedia;
-    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: vi.fn(() => ({
-        matches: false,
-        media: "",
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    });
-    class ResizeObserverMock {
-      observe = vi.fn();
-      unobserve = vi.fn();
-      disconnect = vi.fn();
-    }
-    Object.defineProperty(globalThis, "ResizeObserver", {
-      configurable: true,
-      value: ResizeObserverMock,
-    });
+    const restoreMocks = setupTerminalMocks();
 
     const tabs: Tab[] = [
       {
@@ -512,46 +530,12 @@ describe("MainArea", () => {
         ).toBe(1);
       });
     } finally {
-      Object.defineProperty(window, "matchMedia", {
-        configurable: true,
-        value: originalMatchMedia,
-      });
-      if (originalResizeObserver) {
-        Object.defineProperty(globalThis, "ResizeObserver", {
-          configurable: true,
-          value: originalResizeObserver,
-        });
-      } else {
-        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-      }
+      restoreMocks();
     }
   });
 
   it("keeps terminal hidden until the next tab reports ready", async () => {
-    const originalMatchMedia = window.matchMedia;
-    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: vi.fn(() => ({
-        matches: false,
-        media: "",
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    });
-    class ResizeObserverMock {
-      observe = vi.fn();
-      unobserve = vi.fn();
-      disconnect = vi.fn();
-    }
-    Object.defineProperty(globalThis, "ResizeObserver", {
-      configurable: true,
-      value: ResizeObserverMock,
-    });
+    const restoreMocks = setupTerminalMocks();
 
     const tabs: Tab[] = [
       {
@@ -602,46 +586,12 @@ describe("MainArea", () => {
         ).toBe(1);
       });
     } finally {
-      Object.defineProperty(window, "matchMedia", {
-        configurable: true,
-        value: originalMatchMedia,
-      });
-      if (originalResizeObserver) {
-        Object.defineProperty(globalThis, "ResizeObserver", {
-          configurable: true,
-          value: originalResizeObserver,
-        });
-      } else {
-        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-      }
+      restoreMocks();
     }
   });
 
   it("shows previously-ready terminal tab immediately when switching back", async () => {
-    const originalMatchMedia = window.matchMedia;
-    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: vi.fn(() => ({
-        matches: false,
-        media: "",
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    });
-    class ResizeObserverMock {
-      observe = vi.fn();
-      unobserve = vi.fn();
-      disconnect = vi.fn();
-    }
-    Object.defineProperty(globalThis, "ResizeObserver", {
-      configurable: true,
-      value: ResizeObserverMock,
-    });
+    const restoreMocks = setupTerminalMocks();
 
     const tabs: Tab[] = [
       {
@@ -704,18 +654,73 @@ describe("MainArea", () => {
 
       expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(1);
     } finally {
-      Object.defineProperty(window, "matchMedia", {
-        configurable: true,
-        value: originalMatchMedia,
+      restoreMocks();
+    }
+  });
+
+  it("no visibility gap when switching between ready terminal tabs", async () => {
+    const restoreMocks = setupTerminalMocks();
+
+    const tabs: Tab[] = [
+      {
+        id: "agent-1",
+        label: "Agent",
+        type: "agent",
+        paneId: "pane-agent",
+        agentId: "codex",
+      },
+      {
+        id: "term-1",
+        label: "Terminal",
+        type: "terminal",
+        cwd: "/tmp/project",
+        paneId: "pane-term",
+      },
+    ];
+
+    const baseRerenderProps = {
+      projectPath: "/tmp/project",
+      selectedBranch: null,
+      onLaunchAgent: vi.fn(),
+      onQuickLaunch: vi.fn(),
+      onTabSelect: vi.fn(),
+      onTabClose: vi.fn(),
+      onTabReorder: vi.fn(),
+    };
+
+    try {
+      const rendered = await renderMainArea({
+        tabs,
+        activeTabId: "agent-1",
       });
-      if (originalResizeObserver) {
-        Object.defineProperty(globalThis, "ResizeObserver", {
-          configurable: true,
-          value: originalResizeObserver,
-        });
-      } else {
-        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-      }
+
+      // Step 1: agent-1 becomes ready
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
+
+      // Step 2: switch to term-1, wait for it to become ready
+      await rendered.rerender({ ...baseRerenderProps, activeTabId: "term-1", tabs });
+
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
+
+      // Step 3: switch back to agent-1 — must be immediate (no waitFor)
+      await rendered.rerender({ ...baseRerenderProps, activeTabId: "agent-1", tabs });
+
+      expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(1);
+
+      // Step 4: switch back to term-1 — must ALSO be immediate (no waitFor)
+      await rendered.rerender({ ...baseRerenderProps, activeTabId: "term-1", tabs });
+
+      expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(1);
+    } finally {
+      restoreMocks();
     }
   });
 
@@ -902,30 +907,7 @@ describe("MainArea", () => {
   });
 
   it("renders different agent dot classes (claude, gemini, opencode)", async () => {
-    const originalMatchMedia = window.matchMedia;
-    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: vi.fn(() => ({
-        matches: false,
-        media: "",
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    });
-    class ResizeObserverMock {
-      observe = vi.fn();
-      unobserve = vi.fn();
-      disconnect = vi.fn();
-    }
-    Object.defineProperty(globalThis, "ResizeObserver", {
-      configurable: true,
-      value: ResizeObserverMock,
-    });
+    const restoreMocks = setupTerminalMocks();
 
     const tabs: Tab[] = [
       {
@@ -961,46 +943,12 @@ describe("MainArea", () => {
       expect(rendered.container.querySelector(".tab-dot.gemini")).toBeTruthy();
       expect(rendered.container.querySelector(".tab-dot.opencode")).toBeTruthy();
     } finally {
-      Object.defineProperty(window, "matchMedia", {
-        configurable: true,
-        value: originalMatchMedia,
-      });
-      if (originalResizeObserver) {
-        Object.defineProperty(globalThis, "ResizeObserver", {
-          configurable: true,
-          value: originalResizeObserver,
-        });
-      } else {
-        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-      }
+      restoreMocks();
     }
   });
 
   it("shows terminal tab title with cwd", async () => {
-    const originalMatchMedia = window.matchMedia;
-    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: vi.fn(() => ({
-        matches: false,
-        media: "",
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    });
-    class ResizeObserverMock {
-      observe = vi.fn();
-      unobserve = vi.fn();
-      disconnect = vi.fn();
-    }
-    Object.defineProperty(globalThis, "ResizeObserver", {
-      configurable: true,
-      value: ResizeObserverMock,
-    });
+    const restoreMocks = setupTerminalMocks();
 
     const tabs: Tab[] = [
       {
@@ -1021,46 +969,12 @@ describe("MainArea", () => {
       const termTab = getTabByLabel(rendered.container, "Terminal");
       expect(termTab.getAttribute("title")).toBe("/some/path");
     } finally {
-      Object.defineProperty(window, "matchMedia", {
-        configurable: true,
-        value: originalMatchMedia,
-      });
-      if (originalResizeObserver) {
-        Object.defineProperty(globalThis, "ResizeObserver", {
-          configurable: true,
-          value: originalResizeObserver,
-        });
-      } else {
-        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-      }
+      restoreMocks();
     }
   });
 
   it("shows empty title for terminal tab without cwd", async () => {
-    const originalMatchMedia = window.matchMedia;
-    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: vi.fn(() => ({
-        matches: false,
-        media: "",
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    });
-    class ResizeObserverMock {
-      observe = vi.fn();
-      unobserve = vi.fn();
-      disconnect = vi.fn();
-    }
-    Object.defineProperty(globalThis, "ResizeObserver", {
-      configurable: true,
-      value: ResizeObserverMock,
-    });
+    const restoreMocks = setupTerminalMocks();
 
     const tabs: Tab[] = [
       {
@@ -1080,18 +994,7 @@ describe("MainArea", () => {
       const termTab = getTabByLabel(rendered.container, "Terminal");
       expect(termTab.getAttribute("title")).toBe("");
     } finally {
-      Object.defineProperty(window, "matchMedia", {
-        configurable: true,
-        value: originalMatchMedia,
-      });
-      if (originalResizeObserver) {
-        Object.defineProperty(globalThis, "ResizeObserver", {
-          configurable: true,
-          value: originalResizeObserver,
-        });
-      } else {
-        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-      }
+      restoreMocks();
     }
   });
 

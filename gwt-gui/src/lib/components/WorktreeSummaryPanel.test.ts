@@ -390,7 +390,7 @@ describe("WorktreeSummaryPanel", () => {
     expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(1);
   });
 
-  it("shows No PR when latestBranchPr is MERGED and no sidebar PR number exists", async () => {
+  it("shows merged PR detail when latestBranchPr is MERGED and no sidebar PR number exists", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
       if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
@@ -402,7 +402,7 @@ describe("WorktreeSummaryPanel", () => {
           state: "MERGED",
           url: "https://github.com/test/repo/pull/99",
         };
-      if (cmd === "fetch_pr_detail") return { ...prDetailFixture, number: 99, state: "MERGED" };
+      if (cmd === "fetch_pr_detail") return { ...prDetailFixture, number: 99, title: "Old merged PR", state: "MERGED" };
       if (cmd === "detect_docker_context") return dockerContextFixture;
       return [];
     });
@@ -417,9 +417,9 @@ describe("WorktreeSummaryPanel", () => {
     await fireEvent.click(prTab);
 
     await waitFor(() => {
-      expect(rendered.getByText("No PR")).toBeTruthy();
+      expect(rendered.getByText("#99 Old merged PR")).toBeTruthy();
     });
-    expect(commandCalls("fetch_pr_detail")).toHaveLength(0);
+    expect(commandCalls("fetch_pr_detail").some(([, p]) => p?.prNumber === 99)).toBe(true);
   });
 
   it("prefers sidebar prNumber over latestBranchPr when both are present", async () => {
