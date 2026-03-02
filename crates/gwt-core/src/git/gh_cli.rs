@@ -22,6 +22,10 @@ const GH_FALLBACK_PATHS: &[&str] = &[
 ];
 const BROKEN_GH_MERGE_BASE_KEY: &str = "branch..gh-merge-base";
 
+/// Sentinel prefix for repository-rule-protected branch deletion errors.
+/// Used by `classify_delete_branch_error` (producer) and `cleanup.rs` (consumer).
+pub const PROTECTED_BRANCH_PREFIX: &str = "Protected:";
+
 /// PR status for cleanup safety judgment (SPEC-ad1ac432)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -674,8 +678,8 @@ fn classify_delete_branch_error(combined: &str, branch: &str) -> Option<String> 
         || combined.contains("Repository rule violations")
     {
         Some(format!(
-            "Protected: branch '{}' is protected by repository rules",
-            branch
+            "{} branch '{}' is protected by repository rules",
+            PROTECTED_BRANCH_PREFIX, branch
         ))
     } else {
         Some(format!(
@@ -1306,7 +1310,7 @@ mod tests {
         let msg = r#"{"message":"Cannot delete this branch"}"#;
         let result = classify_delete_branch_error(msg, "main");
         assert!(result.is_some());
-        assert!(result.unwrap().starts_with("Protected:"));
+        assert!(result.unwrap().starts_with(PROTECTED_BRANCH_PREFIX));
     }
 
     #[test]
@@ -1314,7 +1318,7 @@ mod tests {
         let msg = "Repository rule violations found";
         let result = classify_delete_branch_error(msg, "develop");
         assert!(result.is_some());
-        assert!(result.unwrap().starts_with("Protected:"));
+        assert!(result.unwrap().starts_with(PROTECTED_BRANCH_PREFIX));
     }
 
     #[test]

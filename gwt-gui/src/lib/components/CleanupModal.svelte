@@ -234,31 +234,23 @@
             deleteRemote = false;
           }
           prLoading = true;
-          try {
-            const statuses = await invoke<Record<string, PrStatus>>("get_cleanup_pr_statuses", { projectPath });
-            prStatuses = statuses;
-          } catch {
-            prStatuses = {};
-          } finally {
-            prLoading = false;
-          }
-          // Fetch branch protection in parallel (#1404)
-          try {
-            const nonGoneBranches = worktrees
-              .filter(w => w.branch && w.safety_level !== "disabled" && !w.is_gone)
-              .map(w => w.branch!);
-            if (nonGoneBranches.length > 0) {
-              const protectedBranches = await invoke<string[]>(
-                "get_cleanup_branch_protection",
-                { projectPath, branches: nonGoneBranches }
-              );
-              branchProtection = new Set(protectedBranches);
-            } else {
-              branchProtection = new Set();
-            }
-          } catch {
-            branchProtection = new Set();
-          }
+          const nonGoneBranches = worktrees
+            .filter(w => w.branch && w.safety_level !== "disabled" && !w.is_gone)
+            .map(w => w.branch!);
+
+          // Fetch PR statuses and branch protection in parallel (#1404)
+          const [prResult, protectionResult] = await Promise.allSettled([
+            invoke<Record<string, PrStatus>>("get_cleanup_pr_statuses", { projectPath }),
+            nonGoneBranches.length > 0
+              ? invoke<string[]>("get_cleanup_branch_protection", { projectPath, branches: nonGoneBranches })
+              : Promise.resolve([] as string[]),
+          ]);
+
+          prStatuses = prResult.status === "fulfilled" ? prResult.value : {};
+          prLoading = false;
+          branchProtection = protectionResult.status === "fulfilled"
+            ? new Set(protectionResult.value)
+            : new Set();
         } else {
           ghAvailable = false;
           deleteRemote = false;
