@@ -128,6 +128,46 @@ describe("IssueListPanel", () => {
     expect(rendered.queryByText("Regular Issue")).toBeNull();
   });
 
+  it("ignores stale issue-tab response after switching to specs", async () => {
+    const regular = makeIssue({ number: 10, title: "Regular Issue" });
+    const spec = makeIssue({ number: 11, title: "Spec Issue", labels: [{ name: "gwt-spec", color: "0075ca" }] });
+    let resolveIssues!: (value: FetchIssuesResponse) => void;
+    const delayedIssues = new Promise<FetchIssuesResponse>((resolve) => {
+      resolveIssues = resolve;
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true } as GhCliStatus;
+      }
+      if (cmd === "fetch_github_issues") {
+        const category = (args as { category?: string } | undefined)?.category ?? "issues";
+        if (category === "specs") {
+          return { issues: [spec], hasNextPage: false } as FetchIssuesResponse;
+        }
+        return delayedIssues;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Specs" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Spec Issue")).toBeTruthy();
+      expect(rendered.queryByText("Regular Issue")).toBeNull();
+    });
+
+    resolveIssues({ issues: [regular], hasNextPage: false });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Spec Issue")).toBeTruthy();
+      expect(rendered.queryByText("Regular Issue")).toBeNull();
+    });
+  });
+
   it("shows error when gh CLI is not available", async () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") {
@@ -1035,7 +1075,7 @@ describe("IssueListPanel", () => {
     });
   });
 
-  it("handles find_existing_issue_branches_bulk error gracefully", async () => {
+  it("handles find_existing_issue_branches_bulk error as unknown linkage state", async () => {
     const issue = makeIssue({ number: 90, title: "Branch Error Issue" });
 
     mockInvoke.mockImplementation(async (cmd: string) => {
@@ -1044,6 +1084,7 @@ describe("IssueListPanel", () => {
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") throw new Error("Branch lookup failed");
+      if (cmd === "fetch_github_issue_detail") return issue;
       return null;
     });
 
@@ -1053,7 +1094,11 @@ describe("IssueListPanel", () => {
       expect(rendered.getByText("Branch Error Issue")).toBeTruthy();
     });
 
-    // WT button should not be shown (error falls back to null)
-    expect(rendered.queryByText("WT")).toBeNull();
+    await fireEvent.click(rendered.container.querySelector(".ilp-issue-row")!);
+    await waitFor(() => {
+      expect(rendered.getByText(/Back/)).toBeTruthy();
+      expect(rendered.queryByText("Work on this")).toBeNull();
+      expect((rendered.getByText("Switch to Worktree") as HTMLButtonElement).disabled).toBe(true);
+    });
   });
 });

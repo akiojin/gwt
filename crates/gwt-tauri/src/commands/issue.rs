@@ -212,18 +212,26 @@ fn try_get_issue_cache(
     cache_key: &str,
     now_ms: i64,
 ) -> Option<FetchIssuesResponse> {
+    let mut snapshot_to_persist: Option<HashMap<String, IssueListCacheEntry>> = None;
+    let mut memory_hit: Option<FetchIssuesResponse> = None;
     {
         let mut guard = state.project_issue_list_cache.lock().ok()?;
         if let Some(repo_map) = guard.get_mut(repo_key) {
             if prune_issue_cache_entries(repo_map, now_ms) {
-                save_issue_disk_cache(repo_path, repo_map);
+                snapshot_to_persist = Some(repo_map.clone());
             }
             if let Some(entry) = repo_map.get(cache_key) {
                 if now_ms - entry.fetched_at_millis <= ISSUE_LIST_CACHE_TTL_MS {
-                    return decode_cached_issue_response(entry);
+                    memory_hit = decode_cached_issue_response(entry);
                 }
             }
         }
+    }
+    if let Some(entries) = snapshot_to_persist.as_ref() {
+        save_issue_disk_cache(repo_path, entries);
+    }
+    if let Some(hit) = memory_hit {
+        return Some(hit);
     }
 
     let mut disk_map = load_issue_disk_cache(repo_path)?;
@@ -261,11 +269,15 @@ fn put_issue_cache(
         fetched_at_millis: now_ms,
         response_json,
     };
+    let mut snapshot_to_persist: Option<HashMap<String, IssueListCacheEntry>> = None;
     if let Ok(mut guard) = state.project_issue_list_cache.lock() {
         let repo_entry = guard.entry(repo_key.to_string()).or_default();
         repo_entry.insert(cache_key.to_string(), new_entry);
         prune_issue_cache_entries(repo_entry, now_ms);
-        save_issue_disk_cache(repo_path, repo_entry);
+        snapshot_to_persist = Some(repo_entry.clone());
+    }
+    if let Some(entries) = snapshot_to_persist.as_ref() {
+        save_issue_disk_cache(repo_path, entries);
     }
 }
 
@@ -353,6 +365,7 @@ fn normalize_issue_state(state: &str) -> String {
 
 /// Fetch GitHub issues with pagination (FR-010)
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn fetch_github_issues(
     project_path: String,
     page: u32,
@@ -407,20 +420,26 @@ pub fn fetch_github_issues(
         has_next_page: result.has_next_page,
     });
 
+    let result = match fetch_result {
+        Ok(response) => {
+            put_issue_cache(
+                &app_state,
+                &repo_path,
+                &repo_key,
+                &cache_key,
+                &response,
+                now_millis(),
+            );
+            Ok(response)
+        }
+        Err(err) => Err(err),
+    };
+
     if fetch_owner {
         clear_issue_cache_inflight(&app_state, &inflight_key);
     }
 
-    let response = fetch_result?;
-    put_issue_cache(
-        &app_state,
-        &repo_path,
-        &repo_key,
-        &cache_key,
-        &response,
-        now_millis(),
-    );
-    Ok(response)
+    result
 }
 
 /// Fetch a single GitHub issue detail

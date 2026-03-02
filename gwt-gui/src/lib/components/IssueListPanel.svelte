@@ -1,10 +1,12 @@
 <script lang="ts">
-  import type {
-    GitHubIssueInfo,
-    GitHubLabel,
-    GhCliStatus,
-    FetchIssuesResponse,
-    IssueBranchMatch,
+  import {
+    ISSUE_BRANCH_LOOKUP_UNKNOWN,
+    type GitHubIssueInfo,
+    type GitHubLabel,
+    type GhCliStatus,
+    type FetchIssuesResponse,
+    type IssueBranchLookupState,
+    type IssueBranchMatch,
   } from "../types";
   import { invoke } from "$lib/tauriInvoke";
   import { openExternalUrl } from "../openExternalUrl";
@@ -46,7 +48,8 @@
   let detailLoading: boolean = $state(false);
   let detailError: string | null = $state(null);
 
-  let issueBranchMap: Map<number, string | null> = $state(new Map());
+  let issueBranchMap: Map<number, IssueBranchLookupState> = $state(new Map());
+  let fetchRequestId = 0;
 
   let sentinelRef: HTMLDivElement | null = $state(null);
 
@@ -151,6 +154,7 @@
   }
 
   async function fetchIssues(pageNum: number, append = false, forceRefresh = false) {
+    const requestId = ++fetchRequestId;
     if (append) {
       loadingMore = true;
     } else {
@@ -170,6 +174,7 @@
         includeBody: false,
         forceRefresh,
       });
+      if (requestId !== fetchRequestId) return;
 
       if (append) {
         issues = [...issues, ...resp.issues];
@@ -182,10 +187,13 @@
       onIssueCountChange?.(issues.length);
       await loadBranchLinks(resp.issues, append);
     } catch (err) {
+      if (requestId !== fetchRequestId) return;
       error = toErrorMessage(err);
     } finally {
-      loading = false;
-      loadingMore = false;
+      if (requestId === fetchRequestId) {
+        loading = false;
+        loadingMore = false;
+      }
     }
   }
 
@@ -193,7 +201,7 @@
     const issueNumbers = loadedIssues.map((issue) => issue.number);
     if (issueNumbers.length === 0) return;
 
-    const baseline = append ? new Map(issueBranchMap) : new Map<number, string | null>();
+    const baseline = append ? new Map(issueBranchMap) : new Map<number, IssueBranchLookupState>();
     for (const number of issueNumbers) {
       if (!baseline.has(number)) baseline.set(number, null);
     }
@@ -211,7 +219,11 @@
       }
       issueBranchMap = next;
     } catch {
-      // Keep optimistic null defaults.
+      const next = new Map(issueBranchMap);
+      for (const issueNumber of issueNumbers) {
+        next.set(issueNumber, ISSUE_BRANCH_LOOKUP_UNKNOWN);
+      }
+      issueBranchMap = next;
     }
   }
 
@@ -293,6 +305,18 @@
 
   function isSpecIssue(issue: GitHubIssueInfo): boolean {
     return issue.labels.some((l) => l.name.toLowerCase() === "gwt-spec");
+  }
+
+  function resolveExistingBranch(issueNumber: number): string | null {
+    const branchState = issueBranchMap.get(issueNumber);
+    if (typeof branchState !== "string" || branchState === ISSUE_BRANCH_LOOKUP_UNKNOWN) {
+      return null;
+    }
+    return branchState;
+  }
+
+  function isBranchLookupUnknown(issueNumber: number): boolean {
+    return issueBranchMap.get(issueNumber) === ISSUE_BRANCH_LOOKUP_UNKNOWN;
   }
 
   // Setup IntersectionObserver for infinite scroll
@@ -416,7 +440,8 @@
       <!-- Issue List -->
       <div class="ilp-list">
         {#each filteredIssues as issue (issue.number)}
-          {@const existingBranch = issueBranchMap.get(issue.number)}
+          {@const existingBranch = resolveExistingBranch(issue.number)}
+          {@const lookupUnknown = isBranchLookupUnknown(issue.number)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
@@ -472,6 +497,15 @@
                   class="ilp-worktree-btn"
                   title="Switch to worktree: {existingBranch}"
                   onclick={(e) => { e.stopPropagation(); handleSwitchToWorktree(existingBranch); }}
+                >
+                  WT
+                </button>
+              {:else if lookupUnknown}
+                <button
+                  class="ilp-worktree-btn"
+                  disabled
+                  title="Branch lookup failed. Refresh to retry."
+                  onclick={(e) => { e.stopPropagation(); }}
                 >
                   WT
                 </button>
@@ -575,10 +609,18 @@
 
           <!-- Actions -->
           <div class="ilp-detail-actions">
-            {#if issueBranchMap.get(detailIssue.number)}
+            {#if resolveExistingBranch(detailIssue.number)}
               <button
                 class="ilp-action-btn ilp-action-switch"
-                onclick={() => handleSwitchToWorktree(issueBranchMap.get(detailIssue!.number)!)}
+                onclick={() => handleSwitchToWorktree(resolveExistingBranch(detailIssue.number)!)}
+              >
+                Switch to Worktree
+              </button>
+            {:else if isBranchLookupUnknown(detailIssue.number)}
+              <button
+                class="ilp-action-btn ilp-action-switch"
+                disabled
+                title="Branch lookup failed. Refresh to retry."
               >
                 Switch to Worktree
               </button>

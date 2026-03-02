@@ -1,16 +1,18 @@
 <script lang="ts">
-  import type {
-    AgentConfig,
-    AgentInfo,
-    BranchInfo,
-    ClassifyResult,
-    DockerContext,
-    FetchIssuesResponse,
-    GhCliStatus,
-    IssueBranchMatch,
-    GitHubIssueInfo,
-    LaunchAgentRequest,
-    ShellInfo,
+  import {
+    ISSUE_BRANCH_LOOKUP_UNKNOWN,
+    type AgentConfig,
+    type AgentInfo,
+    type BranchInfo,
+    type ClassifyResult,
+    type DockerContext,
+    type FetchIssuesResponse,
+    type GhCliStatus,
+    type IssueBranchLookupState,
+    type IssueBranchMatch,
+    type GitHubIssueInfo,
+    type LaunchAgentRequest,
+    type ShellInfo,
   } from "../types";
   import {
     loadLaunchDefaults,
@@ -162,7 +164,7 @@
   let issuesHasNextPage: boolean = $state(false);
   let issueSearchQuery: string = $state("");
   let selectedIssue: GitHubIssueInfo | null = $state(null as GitHubIssueInfo | null);
-  let issueBranchMap: Map<number, string | null> = $state(new Map());
+  let issueBranchMap: Map<number, IssueBranchLookupState> = $state(new Map());
   let issueBranchChecksInFlight: Set<number> = $state(new Set());
   let issueRateLimited: boolean = $state(false);
   let appliedPrefillIssueNumber: number | null = null;
@@ -661,7 +663,7 @@
     const issueNumbers = loadedIssues.map((issue) => issue.number);
     if (issueNumbers.length === 0) return;
 
-    const baseline = reset ? new Map<number, string | null>() : new Map(issueBranchMap);
+    const baseline = reset ? new Map<number, IssueBranchLookupState>() : new Map(issueBranchMap);
     for (const issueNumber of issueNumbers) {
       if (!baseline.has(issueNumber)) baseline.set(issueNumber, null);
     }
@@ -687,7 +689,14 @@
         selectedIssue = null;
       }
     } catch {
-      // Keep optimistic null defaults.
+      const nextMap = new Map(issueBranchMap);
+      for (const issueNumber of issueNumbers) {
+        nextMap.set(issueNumber, ISSUE_BRANCH_LOOKUP_UNKNOWN);
+      }
+      issueBranchMap = nextMap;
+      if (selectedIssue?.number && nextMap.get(selectedIssue.number) !== null) {
+        selectedIssue = null;
+      }
     } finally {
       const next = new Set(issueBranchChecksInFlight);
       for (const issueNumber of issueNumbers) next.delete(issueNumber);
@@ -1267,9 +1276,11 @@
                 <div class="issue-empty">No issues found.</div>
               {/if}
               {#each filteredIssues as issue (issue.number)}
-                {@const existingBranchName = issueBranchMap.get(issue.number)}
+                {@const branchState = issueBranchMap.get(issue.number)}
+                {@const existingBranchName = typeof branchState === "string" && branchState !== ISSUE_BRANCH_LOOKUP_UNKNOWN ? branchState : null}
+                {@const checkFailed = branchState === ISSUE_BRANCH_LOOKUP_UNKNOWN}
                 {@const isChecking = issueBranchChecksInFlight.has(issue.number) || !issueBranchMap.has(issue.number)}
-                {@const isDisabled = isChecking || !!existingBranchName}
+                {@const isDisabled = isChecking || !!existingBranchName || checkFailed}
                 {@const isSelected = selectedIssue?.number === issue.number}
                 <button
                   class="issue-item"
@@ -1280,7 +1291,9 @@
                   onclick={() => selectIssue(issue)}
                   title={isChecking
                     ? "Checking existing branch..."
-                    : isDisabled
+                    : checkFailed
+                      ? "Branch check failed. Retry from refresh."
+                      : isDisabled
                       ? `Branch exists: ${existingBranchName}`
                       : ""}
                 >
@@ -1295,6 +1308,8 @@
                   {/if}
                   {#if isChecking}
                     <span class="issue-existing">Checking...</span>
+                  {:else if checkFailed}
+                    <span class="issue-existing">Check failed</span>
                   {:else if isDisabled}
                     <span class="issue-existing">Branch exists</span>
                   {/if}

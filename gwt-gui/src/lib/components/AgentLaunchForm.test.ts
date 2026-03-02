@@ -715,6 +715,80 @@ describe("AgentLaunchForm", () => {
     });
   });
 
+  it("keeps issue selection disabled when duplicate-branch check fails", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true };
+      }
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [
+            {
+              number: 42,
+              title: "Issue 42",
+              updatedAt: "2026-02-13T00:00:00Z",
+              labels: [],
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "find_existing_issue_branches_bulk") {
+        throw new Error("Branch lookup failed");
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    const issueTitle = await waitFor(() => rendered.getByText("Issue 42"));
+    const issueButton = issueTitle.closest("button") as HTMLButtonElement;
+
+    await waitFor(() => {
+      expect(issueButton.disabled).toBe(true);
+      expect(rendered.getByText("Check failed")).toBeTruthy();
+      expect((rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement).disabled).toBe(
+        true
+      );
+    });
+  });
+
   it("does not auto-load issue list when opened with prefillIssue", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
