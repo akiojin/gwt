@@ -418,7 +418,7 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String
 
 /// Check which branches have a "deletion" rule preventing remote deletion (#1404).
 ///
-/// Uses `gh api repos/{owner}/{repo}/rules/branches/{branch}` per branch.
+/// Uses `gh api --paginate --jq '.[].type' repos/{owner}/{repo}/rules/branches/{branch}` per branch.
 /// Returns a set of branch names that are delete-protected.
 pub fn get_branch_deletion_rules(repo_path: &Path, branches: &[&str]) -> HashSet<String> {
     let Ok((owner, repo)) = resolve_owner_repo(repo_path) else {
@@ -429,7 +429,7 @@ pub fn get_branch_deletion_rules(repo_path: &Path, branches: &[&str]) -> HashSet
         let endpoint = format!("repos/{}/{}/rules/branches/{}", owner, repo, branch);
         let Ok(output) = run_gh_output_with_timeout_and_repair(
             repo_path,
-            ["api", endpoint.as_str()],
+            ["api", "--paginate", "--jq", ".[].type", endpoint.as_str()],
             Duration::from_secs(10),
         ) else {
             continue;
@@ -438,16 +438,18 @@ pub fn get_branch_deletion_rules(repo_path: &Path, branches: &[&str]) -> HashSet
             continue;
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Ok(rules) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) {
-            if rules
-                .iter()
-                .any(|r| r.get("type").and_then(|t| t.as_str()) == Some("deletion"))
-            {
-                protected.insert(branch.to_string());
-            }
+        if has_deletion_rule(&stdout) {
+            protected.insert(branch.to_string());
         }
     }
     protected
+}
+
+fn has_deletion_rule(rule_types_output: &str) -> bool {
+    rule_types_output
+        .lines()
+        .map(str::trim)
+        .any(|rule_type| rule_type == "deletion")
 }
 
 /// Get PR statuses for all branches (SPEC-ad1ac432 T007-T008).
@@ -1325,6 +1327,18 @@ mod tests {
     fn get_branch_deletion_rules_returns_hashset() {
         // Structural test: function compiles with expected signature
         let _: fn(&Path, &[&str]) -> HashSet<String> = get_branch_deletion_rules;
+    }
+
+    #[test]
+    fn has_deletion_rule_true_for_paginated_multi_line_output() {
+        let output = "required_status_checks\npull_request\nworkflow\ndeletion\n";
+        assert!(has_deletion_rule(output));
+    }
+
+    #[test]
+    fn has_deletion_rule_false_when_deletion_is_missing() {
+        let output = "required_status_checks\npull_request\nworkflow\n";
+        assert!(!has_deletion_rule(output));
     }
 
     #[test]
