@@ -3,7 +3,9 @@
 use crate::commands::terminal::builtin_agent_def;
 use crate::state::{AgentVersionsCache, AppState};
 use gwt_core::agent::{claude, codex, gemini, AgentInfo};
-use gwt_core::terminal::runner::{choose_fallback_runner, resolve_command_path, FallbackRunner};
+use gwt_core::terminal::runner::{
+    choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
+};
 use gwt_core::StructuredError;
 use serde::Serialize;
 use serde_json::Value;
@@ -34,6 +36,16 @@ pub struct AgentVersionsInfo {
     pub versions: Vec<String>,
     /// "cache" | "registry" | "fallback"
     pub source: String,
+}
+
+fn normalize_command_path_for_display(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy().to_string();
+    let normalized = normalize_windows_command_path(&raw);
+    if normalized.is_empty() {
+        raw
+    } else {
+        normalized
+    }
 }
 
 fn encode_npm_package_for_url(package: &str) -> String {
@@ -189,10 +201,8 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
     let npx_path = resolve_command_path("npx");
     let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some());
 
-    let bunx_path_str = bunx_path
-        .as_deref()
-        .map(|p| p.to_string_lossy().to_string());
-    let npx_path_str = npx_path.as_deref().map(|p| p.to_string_lossy().to_string());
+    let bunx_path_str = bunx_path.as_deref().map(normalize_command_path_for_display);
+    let npx_path_str = npx_path.as_deref().map(normalize_command_path_for_display);
 
     fn fallback_version(runner: FallbackRunner) -> &'static str {
         match runner {
@@ -225,7 +235,7 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
                 id: id.to_string(),
                 name: info.name,
                 version: info.version,
-                path: info.path.map(|p| p.to_string_lossy().to_string()),
+                path: info.path.as_deref().map(normalize_command_path_for_display),
                 authenticated: info.authenticated,
                 available: true,
             };
@@ -386,6 +396,7 @@ pub fn list_agent_versions(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::Path;
 
     #[test]
     fn encode_npm_package_for_url_encodes_scoped_package() {
@@ -415,6 +426,14 @@ mod tests {
         assert_eq!(versions[0], "2.0.0");
         assert_eq!(versions[1], "1.1.0");
         assert_eq!(versions[2], "1.0.0");
+    }
+
+    #[test]
+    fn normalize_command_path_for_display_unwraps_issue_1265_pattern() {
+        let normalized = normalize_command_path_for_display(Path::new(
+            r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
+        ));
+        assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
     }
 
     #[test]
