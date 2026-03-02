@@ -83,6 +83,13 @@
     platformName,
     shouldShowAgentPasteHint,
   } from "./lib/terminal/pasteGuidance";
+  import {
+    buildDocsEditorCommand,
+    isTerminalProcessEnded,
+    isWindowsPlatform,
+    shouldAutoCloseDocsEditorTab,
+    type DocsEditorShellId,
+  } from "./lib/docsEditor";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -119,11 +126,7 @@
     'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
   const DEFAULT_TERMINAL_FONT_FAMILY =
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
-  const AGENT_INSTRUCTION_DOC_FILES = [
-    "CLAUDE.md",
-    "AGENTS.md",
-    "GEMINI.md",
-  ] as const;
+  const DOCS_EDITOR_AUTO_CLOSE_POLL_MS = 1200;
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -217,6 +220,7 @@
   let launchProgressOpen: boolean = $state(false);
   let launchJobId: string = $state("");
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+  let docsEditorAutoClosePaneIds: string[] = $state([]);
 
   type LaunchStepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps";
   let launchStep: LaunchStepId = $state("fetch");
@@ -919,6 +923,53 @@
     return () => window.clearInterval(timer);
   });
 
+  // Close docs editor tabs automatically after vi exits.
+  $effect(() => {
+    if (docsEditorAutoClosePaneIds.length === 0) return;
+
+    let polling = false;
+    const timer = window.setInterval(() => {
+      if (polling) return;
+      polling = true;
+
+      void (async () => {
+        const paneIds = [...docsEditorAutoClosePaneIds];
+        if (paneIds.length === 0) return;
+
+        try {
+          const { invoke } = await import("$lib/tauriInvoke");
+          const terminals = await invoke<TerminalInfo[]>("list_terminals");
+          const statusByPane = new Map(
+            terminals.map((terminal) => [terminal.pane_id, terminal.status]),
+          );
+
+          for (const paneId of paneIds) {
+            const status = statusByPane.get(paneId);
+            if (!status) {
+              removeDocsEditorAutoClosePane(paneId);
+              continue;
+            }
+
+            if (!isTerminalProcessEnded(status)) continue;
+
+            try {
+              await invoke("close_terminal", { paneId });
+            } catch {
+              // Ignore if already closed.
+            }
+            removeDocsEditorAutoClosePane(paneId);
+          }
+        } catch {
+          // Ignore polling errors.
+        }
+      })().finally(() => {
+        polling = false;
+      });
+    }, DOCS_EDITOR_AUTO_CLOSE_POLL_MS);
+
+    return () => window.clearInterval(timer);
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -1499,11 +1550,23 @@
     );
   }
 
-  function isWindowsPlatform(platform: string): boolean {
-    return platform.toLowerCase().includes("win");
+  function addDocsEditorAutoClosePane(paneId: string) {
+    const normalized = paneId.trim();
+    if (!normalized) return;
+    if (docsEditorAutoClosePaneIds.includes(normalized)) return;
+    docsEditorAutoClosePaneIds = [...docsEditorAutoClosePaneIds, normalized];
   }
 
-  async function resolveWindowsDocsShellId(): Promise<"wsl" | "powershell" | "cmd"> {
+  function removeDocsEditorAutoClosePane(paneId: string) {
+    const normalized = paneId.trim();
+    if (!normalized) return;
+    if (!docsEditorAutoClosePaneIds.includes(normalized)) return;
+    docsEditorAutoClosePaneIds = docsEditorAutoClosePaneIds.filter(
+      (id) => id !== normalized,
+    );
+  }
+
+  async function resolveWindowsDocsShellId(): Promise<DocsEditorShellId> {
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const settings = await invoke<Pick<SettingsData, "default_shell">>("get_settings");
@@ -1515,33 +1578,6 @@
       // Fall back to cmd when settings are unavailable.
     }
     return "cmd";
-  }
-
-  function buildDocsEditorCommand(
-    platform: string,
-    shellId?: "wsl" | "powershell" | "cmd",
-  ): string {
-    const files = AGENT_INSTRUCTION_DOC_FILES.join(" ");
-    const codeArgs = AGENT_INSTRUCTION_DOC_FILES.map((file) => `-g ${file}`).join(
-      " ",
-    );
-    const powershellNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
-      (file) => `notepad ${file}`,
-    ).join("; ");
-    const cmdNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
-      (file) => `notepad ${file}`,
-    ).join(" & ");
-    if (isWindowsPlatform(platform)) {
-      if (shellId === "wsl") {
-        return `vi ${files}`;
-      }
-      if (shellId === "powershell") {
-        return `if (Get-Command code -ErrorAction SilentlyContinue) { code ${codeArgs} } else { ${powershellNotepadFallback} }`;
-      }
-      return `where code >NUL 2>&1 && (code ${codeArgs}) || (${cmdNotepadFallback})`;
-    }
-
-    return `vi ${files}`;
   }
 
   async function handleOpenDocsEditor(worktreePath: string) {
@@ -1572,6 +1608,9 @@
       const command = `${buildDocsEditorCommand(platform, shellId)}\n`;
       const data = Array.from(new TextEncoder().encode(command));
       await invoke("write_terminal", { paneId, data });
+      if (shouldAutoCloseDocsEditorTab(platform, shellId)) {
+        addDocsEditorAutoClosePane(paneId);
+      }
     } catch (err) {
       showToast(`Failed to open docs editor: ${toErrorMessage(err)}`, 8000);
       console.error("Failed to open docs editor:", err);
@@ -1808,6 +1847,10 @@
   function removeTabLocal(tabId: string) {
     const idx = tabs.findIndex((t) => t.id === tabId);
     if (idx < 0) return;
+    const removed = tabs[idx];
+    if (removed?.paneId) {
+      removeDocsEditorAutoClosePane(removed.paneId);
+    }
 
     const nextTabs = tabs.filter((t) => t.id !== tabId);
     tabs = nextTabs;

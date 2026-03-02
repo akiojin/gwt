@@ -258,7 +258,7 @@ pub fn execute_tool_call(
         TOOL_SEND_KEYS_TO_PANE => {
             let pane_id = get_required_string_any(&args, &["pane_id", "paneId"])?;
             let text = get_required_string_any(&args, &["text"])?;
-            send_keys_to_pane_from_state(state, pane_id, text)?;
+            send_keys_to_pane_from_state(state, pane_id, text, None)?;
             Ok("ok".to_string())
         }
         TOOL_SEND_KEYS_BROADCAST => {
@@ -271,8 +271,8 @@ pub fn execute_tool_call(
             let max_bytes =
                 get_optional_u64_any(&args, &["max_bytes", "maxBytes"]).map(|v| v as usize);
             match max_bytes {
-                Some(limit) => capture_scrollback_tail_from_state(state, pane_id, limit),
-                None => capture_scrollback_tail_from_state(state, pane_id, 0),
+                Some(limit) => capture_scrollback_tail_from_state(state, pane_id, limit, None),
+                None => capture_scrollback_tail_from_state(state, pane_id, 0, None),
             }
         }
         TOOL_UPSERT_SPEC_ISSUE => {
@@ -575,6 +575,7 @@ mod tests {
             terminal_shell: None,
             interactive: false,
             windows_force_utf8: false,
+            project_root: std::env::temp_dir(),
         })
         .expect("failed to create test pane");
 
