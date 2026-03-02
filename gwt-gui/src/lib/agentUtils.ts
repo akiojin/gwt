@@ -11,7 +11,7 @@ export function determinePrefixFromLabels(labels: { name: string }[]): BranchPre
   return null;
 }
 
-export type AgentId = "claude" | "codex" | "gemini" | "opencode";
+export type AgentId = "claude" | "codex" | "gemini" | "opencode" | "copilot";
 
 function normalizeAgentId(raw: string | null | undefined): string {
   return (raw ?? "").trim().toLowerCase();
@@ -23,5 +23,6 @@ export function inferAgentId(raw: string | null | undefined): AgentId | null {
   if (value.includes("codex")) return "codex";
   if (value.includes("gemini")) return "gemini";
   if (value.includes("opencode") || value.includes("open-code")) return "opencode";
+  if (value.includes("copilot")) return "copilot";
   return null;
 }

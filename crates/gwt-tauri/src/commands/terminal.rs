@@ -415,6 +415,11 @@ pub(crate) fn builtin_agent_def(agent_id: &str) -> Result<BuiltinAgentDef, Strin
             local_command: "opencode",
             bunx_package: "opencode-ai",
         }),
+        "copilot" => Ok(BuiltinAgentDef {
+            label: "GitHub Copilot",
+            local_command: "copilot",
+            bunx_package: "@github/copilot",
+        }),
         _ => Err(format!("Unknown agent: {}", agent_id)),
     }
 }
@@ -459,6 +464,7 @@ fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
         "gemini" => vec!["-m".to_string(), model.to_string()],
         // SPEC-3b0ed29b: OpenCode uses `-m provider/model`.
         "opencode" => vec!["-m".to_string(), model.to_string()],
+        "copilot" => vec!["--model".to_string(), model.to_string()],
         _ => Vec::new(),
     }
 }
@@ -729,6 +735,7 @@ fn agent_color_for(agent_id: &str) -> AgentColor {
         "codex" => AgentColor::Cyan,
         "gemini" => AgentColor::Magenta,
         "opencode" => AgentColor::Green,
+        "copilot" => AgentColor::Blue,
         _ => AgentColor::White,
     }
 }
@@ -739,6 +746,7 @@ fn tool_id_for(agent_id: &str) -> String {
         "codex" => "codex-cli".to_string(),
         "gemini" => "gemini-cli".to_string(),
         "opencode" => "opencode".to_string(),
+        "copilot" => "github-copilot".to_string(),
         _ => agent_id.to_string(),
     }
 }
@@ -1646,6 +1654,23 @@ fn build_agent_args(
                 }
             }
 
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+        }
+        "copilot" => {
+            match mode {
+                SessionMode::Normal => {}
+                SessionMode::Continue => {
+                    args.push("--continue".to_string());
+                }
+                SessionMode::Resume => {
+                    // Copilot CLI はセッション ID による resume 未対応。
+                    // --continue で直前セッションを再開する。
+                    args.push("--continue".to_string());
+                }
+            }
+            if skip_permissions {
+                args.push("--allow-all-tools".to_string());
+            }
             args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
         _ => {}
@@ -3709,6 +3734,91 @@ services:
         env.insert("AAA".to_string(), "first".to_string());
         let cmd = build_wsl_inject_command("agent", &[], &env, "/mnt/c");
         assert!(cmd.starts_with("export AAA='first' && export ZZZ='last'"));
+    }
+
+    #[test]
+    fn builtin_agent_def_copilot() {
+        let def = builtin_agent_def("copilot").expect("copilot should be defined");
+        assert_eq!(def.label, "GitHub Copilot");
+        assert_eq!(def.local_command, "copilot");
+        assert_eq!(def.bunx_package, "@github/copilot");
+    }
+
+    #[test]
+    fn build_agent_model_args_copilot() {
+        assert_eq!(
+            build_agent_model_args("copilot", Some("gpt-4.1")),
+            vec!["--model".to_string(), "gpt-4.1".to_string()]
+        );
+        assert!(build_agent_model_args("copilot", None).is_empty());
+    }
+
+    #[test]
+    fn agent_color_for_copilot() {
+        assert_eq!(agent_color_for("copilot"), AgentColor::Blue);
+    }
+
+    #[test]
+    fn tool_id_for_copilot() {
+        assert_eq!(tool_id_for("copilot"), "github-copilot");
+    }
+
+    #[test]
+    fn build_agent_args_copilot_continue() {
+        let request = LaunchAgentRequest {
+            agent_id: "copilot".to_string(),
+            branch: "main".to_string(),
+            mode: Some(SessionMode::Continue),
+            skip_permissions: Some(false),
+            profile: None,
+            model: None,
+            agent_version: None,
+            reasoning_level: None,
+            collaboration_modes: None,
+            extra_args: None,
+            env_overrides: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            resume_session_id: None,
+            create_branch: None,
+            issue_number: None,
+            ai_branch_description: None,
+            terminal_shell: None,
+        };
+        let args = build_agent_args("copilot", &request, None, false).unwrap();
+        assert!(args.contains(&"--continue".to_string()));
+    }
+
+    #[test]
+    fn build_agent_args_copilot_skip_permissions() {
+        let request = LaunchAgentRequest {
+            agent_id: "copilot".to_string(),
+            branch: "main".to_string(),
+            mode: Some(SessionMode::Normal),
+            skip_permissions: Some(true),
+            profile: None,
+            model: None,
+            agent_version: None,
+            reasoning_level: None,
+            collaboration_modes: None,
+            extra_args: None,
+            env_overrides: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            resume_session_id: None,
+            create_branch: None,
+            issue_number: None,
+            ai_branch_description: None,
+            terminal_shell: None,
+        };
+        let args = build_agent_args("copilot", &request, None, false).unwrap();
+        assert!(args.contains(&"--allow-all-tools".to_string()));
     }
 }
 

@@ -242,7 +242,7 @@ export interface ProjectIndexSearchResult {
 export interface Tab {
   id: string;
   label: string;
-  agentId?: "claude" | "codex" | "gemini" | "opencode";
+  agentId?: "claude" | "codex" | "gemini" | "opencode" | "copilot";
   type:
     | "summary"
     | "agent"

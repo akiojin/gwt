@@ -9,6 +9,8 @@ describe("inferAgentId", () => {
     expect(inferAgentId("OpenCode")).toBe("opencode");
     expect(inferAgentId("open-code")).toBe("opencode");
     expect(inferAgentId("Gemini Pro")).toBe("gemini");
+    expect(inferAgentId("copilot")).toBe("copilot");
+    expect(inferAgentId("GitHub Copilot")).toBe("copilot");
   });
 
   it("returns null for unknown agent names", () => {

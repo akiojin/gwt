@@ -1,51 +1,28 @@
-# TODO: プロジェクト単位の完全分離（PTY・ChromaDB・GitHub Issue）
+# TODO: GitHub Copilot CLI 対応
 
 ## 背景
 
-gwt で複数プロジェクト同時利用時に PTY 通信・ChromaDB 検索・GitHub Issue がプロジェクト境界を越える問題を修正する。
+gwt に 5 番目の AI コーディングエージェントとして GitHub Copilot CLI（`copilot` コマンド、npm: `@github/copilot`）を追加する。既存の 4 エージェント（Claude Code / Codex / Gemini / OpenCode）と同じパターンに従い、最小限の変更で統合する。
+
+仕様 Issue: #1411
 
 ## 実装ステップ
 
-- [x] T001 gwt-spec Issue 作成 (#1395)
-- [x] T002 `TerminalPane`/`PaneConfig` に `project_root` フィールド追加
-- [x] T003 `PaneManager` に `panes_for_project()` メソッド追加
-- [x] T004 `list_terminals` にプロジェクトフィルタ適用
-- [x] T005 `send_keys_to_pane`/`capture_scrollback_tail` にプロジェクト検証追加
-- [x] T006 MCP ハンドラにプロジェクトフィルタ追加
-- [x] T007 `gwt-project-index` SKILL.md 更新
-- [x] T008 `gwt-issue-spec-ops` SKILL.md 更新
-- [x] T009 `gwt-spec-to-issue-migration` SKILL.md 更新
-- [x] T010 `gwt-pty-communication` SKILL.md 更新
-- [x] T011 `.codex/skills/gwt-spec-to-issue-migration/` 削除
-- [x] T012 `cargo test` + `cargo clippy` + markdownlint 検証
+- [x] T000 gwt-spec Issue 作成 (#1411)
+- [x] T001 Rust テスト追加（terminal.rs — TDD）
+- [x] T002 フロントエンドテスト追加（TDD）
+- [x] T003 terminal.rs — 5 つの match 関数に copilot アーム追加
+- [x] T004 agents.rs — detect_copilot() 追加 + detect_agents 登録
+- [x] T005 agentUtils.ts — AgentId 型 + inferAgentId に copilot 追加
+- [x] T006 agentLaunchFormHelpers.ts — supportsModelFor() に copilot 追加
+- [x] T007 AgentLaunchForm.svelte — modelOptions に copilot 用モデル一覧追加
+- [x] T008 agentLaunchFormHelpers.test.ts — copilot テストアサーション追加
+- [x] T009 agentUtils.test.ts — copilot テストアサーション追加
+- [x] T010 cargo test 検証
+- [x] T011 フロントエンドテスト検証（pnpm test）
 
 ## 検証結果
 
-- [x] `cargo test` — 534 tests passed (gwt-tauri) + 4 tests passed (voice_eval)
-- [x] `cargo clippy --all-targets --all-features -- -D warnings` — 警告なし
-- [x] `npx markdownlint-cli` — 4つの SKILL.md エラーなし
-
----
-
-## TODO: Issue #1265 再発（v8.1.1）対策の正規化境界強化
-
-## 背景（v8.1.1 再発）
-
-Issue #1265 にて `v8.1.1` でも Windows Launch Agent の `npx.cmd` 起動失敗が報告されたため、コマンド正規化を launch/probe/path-resolve 境界で再統一し、再発検知テストを拡張する。
-
-## 実装ステップ（v8.1.1 再発）
-
-- [x] T001 `runner.rs` で command path resolve 前にトークン正規化を適用
-- [x] T002 `build_fallback_launch` の resolved command を共通正規化
-- [x] T003 `terminal.rs` の launch command 正規化を OS 条件分岐から共通化
-- [x] T004 `terminal.rs` の command probe (`--version`, `features list`) で同一正規化を適用
-- [x] T005 回帰テスト追加（wrapped resolved path / wrapped lookup token / probe normalization）
-- [x] T006 対象テストと `cargo fmt --check` で検証
-
-## 検証結果（v8.1.1 再発）
-
-- [x] `cargo test -p gwt-core terminal::runner -- --test-threads=1`
-- [x] `cargo test -p gwt-core terminal::pty -- --test-threads=1`
-- [x] `cargo test -p gwt-tauri normalize_launch_command_for_platform -- --test-threads=1`
-- [x] `cargo test -p gwt-tauri normalized_process_command -- --test-threads=1`
-- [x] `cargo fmt --all -- --check`
+- [x] `cargo test -p gwt-tauri -- copilot` — 6 テスト全パス（548 テスト中）
+- [x] `cd gwt-gui && pnpm test` — 65 ファイル / 1394 テスト全パス
+- [x] `npx svelte-check` — エラー 0 件
