@@ -1659,10 +1659,19 @@ fn build_agent_args(
         "copilot" => {
             match mode {
                 SessionMode::Normal => {}
-                // Copilot CLI はセッション ID による resume 未対応。
-                // --continue で直前セッションを再開する。
-                SessionMode::Continue | SessionMode::Resume => {
-                    args.push("--continue".to_string());
+                SessionMode::Continue => {
+                    if let Some(id) = resume_session_id {
+                        args.push("--resume".to_string());
+                        args.push(id.to_string());
+                    } else {
+                        args.push("--continue".to_string());
+                    }
+                }
+                SessionMode::Resume => {
+                    args.push("--resume".to_string());
+                    if let Some(id) = resume_session_id {
+                        args.push(id.to_string());
+                    }
                 }
             }
             if skip_permissions {
@@ -3766,6 +3775,32 @@ services:
         req.mode = Some(SessionMode::Continue);
         let args = build_agent_args("copilot", &req, None, false).unwrap();
         assert!(args.contains(&"--continue".to_string()));
+    }
+
+    #[test]
+    fn build_agent_args_copilot_continue_prefers_resume_id_when_provided() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Continue);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string(), "sess-123".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_copilot_resume_without_id_opens_picker() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Resume);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_copilot_resume_with_id() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Resume);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string(), "sess-123".to_string()]);
     }
 
     #[test]

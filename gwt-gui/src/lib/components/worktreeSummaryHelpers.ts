@@ -49,6 +49,7 @@ export function agentIdForToolId(toolId: string): LaunchAgentRequest["agentId"] 
   if (key.includes("codex")) return "codex";
   if (key.includes("gemini")) return "gemini";
   if (key.includes("opencode") || key.includes("open-code")) return "opencode";
+  if (key.includes("copilot")) return "copilot";
   return toolId as LaunchAgentRequest["agentId"];
 }
 

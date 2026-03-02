@@ -266,10 +266,7 @@
             ]
           : selectedAgent === "copilot"
             ? [
-                { value: "claude-sonnet-4-5", label: "Claude Sonnet 4.5 (default)" },
-                { value: "claude-opus-4", label: "Claude Opus 4" },
                 { value: "gpt-4.1", label: "GPT-4.1" },
-                { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
               ]
             : []
   );
@@ -467,6 +464,15 @@
           : storedVersion;
     } else {
       agentVersion = currentAgentNotInstalled ? "latest" : "installed";
+    }
+  });
+
+  $effect(() => {
+    if (selectedAgent !== "copilot") return;
+    const current = model.trim();
+    if (!current) return;
+    if (!modelOptions.some((opt) => opt.value === current)) {
+      model = "";
     }
   });
 

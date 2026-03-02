@@ -79,6 +79,8 @@ describe("worktreeSummaryHelpers", () => {
     expect(agentIdForToolId("gemini-cli")).toBe("gemini");
     expect(agentIdForToolId("opencode-cli")).toBe("opencode");
     expect(agentIdForToolId("open-code-cli")).toBe("opencode");
+    expect(agentIdForToolId("copilot")).toBe("copilot");
+    expect(agentIdForToolId("github-copilot")).toBe("copilot");
     expect(agentIdForToolId("mystery")).toBe("mystery");
 
     expect(toolClass(entry({ tool_id: "claude-code" }))).toBe("claude");
