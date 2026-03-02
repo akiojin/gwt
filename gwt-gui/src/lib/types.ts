@@ -549,6 +549,14 @@ export interface FetchIssuesResponse {
   hasNextPage: boolean;
 }
 
+export interface IssueBranchMatch {
+  issueNumber: number;
+  branchName: string;
+}
+
+export const ISSUE_BRANCH_LOOKUP_UNKNOWN = "__gwt_issue_branch_lookup_unknown__";
+export type IssueBranchLookupState = string | null | typeof ISSUE_BRANCH_LOOKUP_UNKNOWN;
+
 export interface RollbackResult {
   localDeleted: boolean;
   remoteDeleted: boolean;

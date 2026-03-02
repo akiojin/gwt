@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.1.1] - 2026-03-02
+
+### Bug Fixes
+
+- **issue:** Separate spec issues and optimize issue list performance (#1397)
+
 ## [8.1.0] - 2026-03-02
 
 ### Bug Fixes
