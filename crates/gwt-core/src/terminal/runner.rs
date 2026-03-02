@@ -247,7 +247,13 @@ pub fn normalize_windows_command_path(command: &str) -> String {
 }
 
 fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
-    let cmd = command.trim();
+    let normalized = normalize_windows_command_path(command);
+    let cmd_owned = if normalized.is_empty() {
+        command.trim().to_string()
+    } else {
+        normalized
+    };
+    let cmd = cmd_owned.trim();
     if cmd.is_empty() {
         return None;
     }
@@ -333,19 +339,32 @@ pub fn build_fallback_launch(
     bunx_path: Option<&Path>,
     npx_path: Option<&Path>,
 ) -> (String, Vec<String>) {
+    fn normalize_launch_command(command: String) -> String {
+        let normalized = normalize_windows_command_path(&command);
+        if normalized.is_empty() {
+            command
+        } else {
+            normalized
+        }
+    }
+
     match runner {
         FallbackRunner::Bunx => (
-            bunx_path
-                .unwrap_or_else(|| Path::new("bunx"))
-                .to_string_lossy()
-                .to_string(),
+            normalize_launch_command(
+                bunx_path
+                    .unwrap_or_else(|| Path::new("bunx"))
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             vec![package.to_string()],
         ),
         FallbackRunner::Npx => (
-            npx_path
-                .unwrap_or_else(|| Path::new("npx"))
-                .to_string_lossy()
-                .to_string(),
+            normalize_launch_command(
+                npx_path
+                    .unwrap_or_else(|| Path::new("npx"))
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             vec!["--yes".to_string(), package.to_string()],
         ),
     }
@@ -445,6 +464,21 @@ mod tests {
     }
 
     #[test]
+    fn build_fallback_launch_npx_normalizes_wrapped_resolved_path_when_provided() {
+        let (cmd, args) = build_fallback_launch(
+            FallbackRunner::Npx,
+            "@openai/codex@latest",
+            None,
+            Some(Path::new(r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#)),
+        );
+        assert_eq!(cmd, r#"C:\Program Files\nodejs\npx.cmd"#);
+        assert_eq!(
+            args,
+            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+        );
+    }
+
+    #[test]
     fn normalize_windows_command_path_unwraps_issue_1265_pattern() {
         assert_eq!(
             normalize_windows_command_path(r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#),
@@ -526,6 +560,31 @@ mod tests {
         assert_eq!(
             resolve_command_path_with_env(command, &env),
             Some(global_cmd)
+        );
+    }
+
+    #[test]
+    fn resolve_command_path_normalizes_wrapped_command_token_before_lookup() {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+
+        let command = "gwt-resolve-wrapped-test";
+        let command_path = command_path_in_dir(&bin_dir, command);
+        write_stub_command(&command_path);
+
+        let path = std::env::join_paths([&bin_dir])
+            .expect("join PATH")
+            .to_string_lossy()
+            .to_string();
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), path);
+        env.insert("HOME".to_string(), dir.path().to_string_lossy().to_string());
+
+        assert_eq!(
+            resolve_command_path_with_env(&format!(r#"'\"{command}\"'"#), &env),
+            Some(command_path)
         );
     }
 
