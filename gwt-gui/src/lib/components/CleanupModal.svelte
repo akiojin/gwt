@@ -172,13 +172,42 @@
     });
   });
 
+  function getRemoteCheckTargetBranches(): string[] {
+    return worktrees
+      .filter((w) => w.branch && w.safety_level !== "disabled" && !w.is_gone)
+      .map((w) => w.branch as string);
+  }
+
   async function handleToggleRemote() {
-    deleteRemote = !deleteRemote;
+    const nextDeleteRemote = !deleteRemote;
+    deleteRemote = nextDeleteRemote;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
+      if (nextDeleteRemote) {
+        const nonGoneBranches = getRemoteCheckTargetBranches();
+        if (nonGoneBranches.length > 0) {
+          try {
+            const protectedBranches = await invoke<string[]>("get_cleanup_branch_protection", {
+              projectPath,
+              branches: nonGoneBranches,
+            });
+            if (deleteRemote) {
+              branchProtection = new Set(protectedBranches);
+            }
+          } catch {
+            if (deleteRemote) {
+              branchProtection = new Set();
+            }
+          }
+        } else {
+          branchProtection = new Set();
+        }
+      } else {
+        branchProtection = new Set();
+      }
       await invoke("set_cleanup_settings", { projectPath, settings: { delete_remote_branches: deleteRemote } });
     } catch {
-      // Ignore save errors silently
+      branchProtection = new Set();
     }
   }
 
@@ -234,30 +263,30 @@
             deleteRemote = false;
           }
           prLoading = true;
-          const nonGoneBranches = worktrees
-            .filter(w => w.branch && w.safety_level !== "disabled" && !w.is_gone)
-            .map(w => w.branch!);
+          const nonGoneBranches = getRemoteCheckTargetBranches();
 
           // Fetch PR statuses and branch protection in parallel (#1404)
           const [prResult, protectionResult] = await Promise.allSettled([
             invoke<Record<string, PrStatus>>("get_cleanup_pr_statuses", { projectPath }),
-            nonGoneBranches.length > 0
+            deleteRemote && nonGoneBranches.length > 0
               ? invoke<string[]>("get_cleanup_branch_protection", { projectPath, branches: nonGoneBranches })
               : Promise.resolve([] as string[]),
           ]);
 
           prStatuses = prResult.status === "fulfilled" ? prResult.value : {};
           prLoading = false;
-          branchProtection = protectionResult.status === "fulfilled"
+          branchProtection = deleteRemote && protectionResult.status === "fulfilled"
             ? new Set(protectionResult.value)
             : new Set();
         } else {
           ghAvailable = false;
           deleteRemote = false;
+          branchProtection = new Set();
         }
       } catch {
         ghAvailable = false;
         deleteRemote = false;
+        branchProtection = new Set();
       }
     }
   }

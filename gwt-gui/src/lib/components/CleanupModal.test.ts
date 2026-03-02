@@ -677,6 +677,29 @@ describe("CleanupModal", () => {
     });
   });
 
+  it("does not call branch protection API when remote toggle is OFF", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: false };
+      if (command === "get_cleanup_pr_statuses") return {};
+      return [];
+    });
+
+    await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project-no-remote-protection",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await waitFor(() => {
+      const statusesArgs = invokeArgsFor("get_cleanup_pr_statuses")[0];
+      expect(statusesArgs).toEqual({ projectPath: "/tmp/project-no-remote-protection" });
+      expect(invokeArgsFor("get_cleanup_branch_protection")).toHaveLength(0);
+    });
+  });
+
   it("saves remote toggle settings with projectPath", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];
@@ -710,6 +733,45 @@ describe("CleanupModal", () => {
       expect(args).toEqual({
         projectPath: "/tmp/project-toggle",
         settings: { delete_remote_branches: true },
+      });
+    });
+  });
+
+  it("fetches branch protection only after enabling remote toggle", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: false };
+      if (command === "get_cleanup_pr_statuses") return {};
+      if (command === "get_cleanup_branch_protection") return [worktreeFixture.branch];
+      if (command === "set_cleanup_settings") return null;
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project-lazy-protection",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    await waitFor(() => {
+      expect(invokeArgsFor("get_cleanup_branch_protection")).toHaveLength(0);
+    });
+
+    const remoteToggle = rendered.container.querySelector("[data-testid='remote-toggle']");
+    expect(remoteToggle).toBeTruthy();
+    if (!remoteToggle) {
+      throw new Error("remote toggle not found");
+    }
+    await fireEvent.click(remoteToggle);
+
+    await waitFor(() => {
+      const protectionArgs = invokeArgsFor("get_cleanup_branch_protection")[0];
+      expect(protectionArgs).toEqual({
+        projectPath: "/tmp/project-lazy-protection",
+        branches: [worktreeFixture.branch],
       });
     });
   });
