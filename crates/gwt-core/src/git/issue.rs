@@ -2,7 +2,7 @@
 //!
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Output, Stdio};
@@ -16,6 +16,14 @@ use super::repository::{find_bare_repo_in_dir, is_git_repo};
 // `gh issue list --json comments` returns at most this many comments per issue.
 const GH_COMMENTS_PREVIEW_LIMIT: u32 = 100;
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+const SPEC_LABEL: &str = "gwt-spec";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueCategory {
+    All,
+    Issues,
+    Specs,
+}
 
 /// Result of fetching issues with pagination info
 #[derive(Debug, Clone)]
@@ -186,6 +194,20 @@ pub fn fetch_open_issues(
     per_page: u32,
     state: &str,
 ) -> Result<FetchIssuesResult, String> {
+    fetch_issues_with_options(repo_path, page, per_page, state, true, "all")
+}
+
+/// Fetch issues with category/body options.
+///
+/// `category` can be `"all"`, `"issues"` (exclude `gwt-spec`), or `"specs"` (only `gwt-spec`).
+pub fn fetch_issues_with_options(
+    repo_path: &Path,
+    page: u32,
+    per_page: u32,
+    state: &str,
+    include_body: bool,
+    category: &str,
+) -> Result<FetchIssuesResult, String> {
     if page == 0 {
         return Err("page must be greater than 0".to_string());
     }
@@ -194,7 +216,14 @@ pub fn fetch_open_issues(
     }
 
     let repo_slug = resolve_repo_slug(repo_path);
-    let args = issue_list_args(repo_slug.as_deref(), page, per_page, state);
+    let args = issue_list_args_with_options(
+        repo_slug.as_deref(),
+        page,
+        per_page,
+        state,
+        include_body,
+        parse_issue_category(category),
+    );
 
     let output = run_gh_output_with_repair(repo_path, args)
         .map_err(|e| format!("Failed to execute gh CLI: {}", e))?;
@@ -218,7 +247,10 @@ pub fn fetch_open_issues(
     let mut issues: Vec<GitHubIssue> = remaining.into_iter().take(per_page as usize).collect();
 
     for issue in &mut issues {
-        hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), issue);
+        // Keep list retrieval lightweight. Exact comment counts are resolved in detail view.
+        if include_body {
+            hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), issue);
+        }
     }
 
     Ok(FetchIssuesResult {
@@ -227,19 +259,44 @@ pub fn fetch_open_issues(
     })
 }
 
+fn parse_issue_category(category: &str) -> IssueCategory {
+    match category {
+        "issues" => IssueCategory::Issues,
+        "specs" => IssueCategory::Specs,
+        _ => IssueCategory::All,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32, state: &str) -> Vec<String> {
+    issue_list_args_with_options(repo_slug, page, per_page, state, true, IssueCategory::All)
+}
+
+fn issue_list_args_with_options(
+    repo_slug: Option<&str>,
+    page: u32,
+    per_page: u32,
+    state: &str,
+    include_body: bool,
+    category: IssueCategory,
+) -> Vec<String> {
     // Request enough items to cover the current page plus one extra to detect next page
     let limit = u64::from(per_page) * u64::from(page) + 1;
 
     let limit_str = limit.to_string();
     let state_value = if state == "closed" { "closed" } else { "open" };
+    let json_fields = if include_body {
+        "number,title,updatedAt,labels,body,state,url,assignees,comments,milestone"
+    } else {
+        "number,title,updatedAt,labels,state,url,assignees,comments,milestone"
+    };
     let mut args = vec![
         "issue",
         "list",
         "--state",
         state_value,
         "--json",
-        "number,title,updatedAt,labels,body,state,url,assignees,comments,milestone",
+        json_fields,
         "--limit",
         &limit_str,
     ]
@@ -250,6 +307,19 @@ fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32, state: &st
     if let Some(slug) = repo_slug {
         args.push("--repo".to_string());
         args.push(slug.to_string());
+    }
+
+    match category {
+        IssueCategory::Specs => {
+            args.push("--label".to_string());
+            args.push(SPEC_LABEL.to_string());
+        }
+        IssueCategory::Issues => {
+            // Exclude spec-management issues from regular issue lists.
+            args.push("--search".to_string());
+            args.push(format!("-label:{SPEC_LABEL}"));
+        }
+        IssueCategory::All => {}
     }
 
     args
@@ -609,6 +679,108 @@ pub fn find_branch_for_issue(
     }
 
     Ok(None)
+}
+
+fn extract_issue_number_from_branch_name(branch: &str) -> Option<u64> {
+    for segment in branch.trim().split('/') {
+        let lower = segment.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("issue-") else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        if let Ok(number) = digits.parse::<u64>() {
+            return Some(number);
+        }
+    }
+    None
+}
+
+/// Bulk lookup for issue-linked branches.
+///
+/// This is optimized for list UIs while preserving remote existence checks
+/// so stale remote-tracking refs are not treated as real issue branches.
+pub fn find_branches_for_issues(
+    repo_path: &Path,
+    issue_numbers: &[u64],
+) -> Result<HashMap<u64, String>, String> {
+    let mut found = HashMap::new();
+    let targets: HashSet<u64> = issue_numbers.iter().copied().collect();
+    if targets.is_empty() {
+        return Ok(found);
+    }
+
+    let local_output = crate::process::command("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git branch: {}", e))?;
+
+    if local_output.status.success() {
+        let stdout = String::from_utf8_lossy(&local_output.stdout);
+        for branch in stdout
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+        {
+            let Some(number) = extract_issue_number_from_branch_name(branch) else {
+                continue;
+            };
+            if !targets.contains(&number) || found.contains_key(&number) {
+                continue;
+            }
+            found.insert(number, branch.to_string());
+            if found.len() == targets.len() {
+                return Ok(found);
+            }
+        }
+    }
+
+    let remote_output = crate::process::command("git")
+        .args(["branch", "-r", "--format=%(refname:short)"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git branch -r: {}", e))?;
+
+    if !remote_output.status.success() {
+        return Ok(found);
+    }
+
+    let stdout = String::from_utf8_lossy(&remote_output.stdout);
+    let mut checked = HashSet::new();
+    for remote_branch in stdout
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+    {
+        let Some((remote_name, branch_name)) = split_remote_tracking_branch(remote_branch) else {
+            continue;
+        };
+        let Some(number) = extract_issue_number_from_branch_name(branch_name) else {
+            continue;
+        };
+        if !targets.contains(&number) || found.contains_key(&number) {
+            continue;
+        }
+
+        let key = format!("{remote_name}/{branch_name}");
+        if !checked.insert(key) {
+            continue;
+        }
+
+        if !remote_branch_exists_on_remote(repo_path, remote_name, branch_name)? {
+            continue;
+        }
+
+        found.insert(number, strip_remote_prefix(remote_branch).to_string());
+        if found.len() == targets.len() {
+            break;
+        }
+    }
+
+    Ok(found)
 }
 
 /// Strip remote prefix from a remote branch name.
@@ -1519,6 +1691,46 @@ mod tests {
     }
 
     #[test]
+    fn test_issue_list_args_with_options_excludes_body_for_lightweight_list() {
+        let args = issue_list_args_with_options(None, 1, 10, "open", false, IssueCategory::All);
+        let json_index = args.iter().position(|v| v == "--json").unwrap();
+        assert_eq!(
+            args.get(json_index + 1).map(String::as_str),
+            Some("number,title,updatedAt,labels,state,url,assignees,comments,milestone")
+        );
+    }
+
+    #[test]
+    fn test_issue_list_args_with_options_specs_category_uses_label_filter() {
+        let args = issue_list_args_with_options(
+            Some("owner/repo"),
+            1,
+            10,
+            "open",
+            false,
+            IssueCategory::Specs,
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--label" && w[1] == SPEC_LABEL));
+    }
+
+    #[test]
+    fn test_issue_list_args_with_options_issues_category_uses_negative_label_search() {
+        let args = issue_list_args_with_options(
+            Some("owner/repo"),
+            1,
+            10,
+            "open",
+            false,
+            IssueCategory::Issues,
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--search" && w[1] == format!("-label:{SPEC_LABEL}")));
+    }
+
+    #[test]
     fn test_fetch_open_issues_rejects_page_zero() {
         let err = fetch_open_issues(std::path::Path::new("."), 0, 50, "open").unwrap_err();
         assert!(err.contains("page must be greater than 0"));
@@ -1784,5 +1996,65 @@ mod tests {
 
         let found = find_branch_for_issue(repo.path(), 1029).unwrap();
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_find_branches_for_issues_finds_local_and_remote_tracking_entries() {
+        let (repo, _origin) = create_repo_with_origin();
+        let base = current_branch_name(repo.path());
+        run_git(
+            repo.path(),
+            &["checkout", "-b", "feature/issue-1001", &base],
+        );
+        run_git(repo.path(), &["checkout", &base]);
+        create_remote_issue_branch_without_local_copy(repo.path(), "bugfix/issue-1002");
+        run_git(repo.path(), &["fetch", "origin"]);
+
+        let found = find_branches_for_issues(repo.path(), &[1001, 1002, 9999]).unwrap();
+        assert_eq!(
+            found.get(&1001).map(String::as_str),
+            Some("feature/issue-1001")
+        );
+        assert_eq!(
+            found.get(&1002).map(String::as_str),
+            Some("bugfix/issue-1002")
+        );
+        assert!(!found.contains_key(&9999));
+    }
+
+    #[test]
+    fn test_find_branches_for_issues_ignores_stale_remote_tracking_ref() {
+        let (repo, origin) = create_repo_with_origin();
+        create_remote_issue_branch_without_local_copy(repo.path(), "bugfix/issue-1029");
+        run_git(repo.path(), &["fetch", "origin"]);
+
+        let remote_tracking_before =
+            git_stdout(repo.path(), &["branch", "-r", "--list", "*issue-1029*"]);
+        assert!(
+            remote_tracking_before.contains("origin/bugfix/issue-1029"),
+            "expected remote-tracking ref to exist before remote deletion"
+        );
+
+        // Delete directly on remote to leave stale remote-tracking ref in the local clone.
+        run_git(origin.path(), &["branch", "-D", "bugfix/issue-1029"]);
+
+        let found = find_branches_for_issues(repo.path(), &[1029]).unwrap();
+        assert!(!found.contains_key(&1029));
+    }
+
+    #[test]
+    fn test_extract_issue_number_from_branch_name() {
+        assert_eq!(
+            extract_issue_number_from_branch_name("feature/issue-1200"),
+            Some(1200)
+        );
+        assert_eq!(
+            extract_issue_number_from_branch_name("origin/bugfix/issue-77-extra"),
+            Some(77)
+        );
+        assert_eq!(
+            extract_issue_number_from_branch_name("feature/not-an-issue"),
+            None
+        );
     }
 }

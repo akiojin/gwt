@@ -743,6 +743,7 @@ pub fn build_app(
             crate::commands::issue::fetch_branch_linked_issue,
             crate::commands::issue::check_gh_cli_status,
             crate::commands::issue::find_existing_issue_branch,
+            crate::commands::issue::find_existing_issue_branches_bulk,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
             crate::commands::issue::classify_issue_branch_prefix,

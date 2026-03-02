@@ -1,6 +1,28 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.1.1] - 2026-03-02
+
+### Bug Fixes
+
+- **issue:** Separate spec issues and optimize issue list performance (#1397)
+
+## [8.1.0] - 2026-03-02
+
+### Bug Fixes
+
+- **gui:** Auto-close docs editor tab after vi exits (#1396)
+- Harden windows launch normalization and stale PR tab state (#1399)
+
+### Features
+
+- プロジェクト単位の完全分離（PTY・ChromaDB・GitHub Issue） (#1395)
+
+### Miscellaneous Tasks
+
+- **skill:** Remove requirements-spec-kit (#1385)
+- **skill:** Drop deprecated requirements-spec-kit (#1394)
+
 ## [8.0.0] - 2026-03-01
 
 ### Bug Fixes

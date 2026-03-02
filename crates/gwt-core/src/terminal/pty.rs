@@ -253,6 +253,9 @@ where
 {
     if is_windows {
         let normalized_command = crate::terminal::runner::normalize_windows_command_path(command);
+        if normalized_command.is_empty() {
+            return (command.to_string(), args.to_vec());
+        }
 
         if let Some(shell_id) = shell {
             match shell_id {
@@ -976,6 +979,22 @@ mod tests {
                 "\"C:\\Program Files\\nodejs\\npx.cmd\" --yes @openai/codex@latest".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_empty_normalized_command_passthrough() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "''",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(program, "''");
+        assert_eq!(resolved_args, vec!["--version".to_string()]);
     }
 
     #[test]
