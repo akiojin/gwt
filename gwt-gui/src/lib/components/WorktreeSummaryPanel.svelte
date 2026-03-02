@@ -1858,6 +1858,10 @@
     color: var(--green);
   }
 
+  .quick-tool.copilot .quick-tool-name {
+    color: var(--blue);
+  }
+
   .quick-meta {
     display: flex;
     flex-wrap: wrap;

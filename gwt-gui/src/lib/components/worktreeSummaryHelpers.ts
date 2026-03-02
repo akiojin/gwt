@@ -59,6 +59,7 @@ export function toolClass(entry: ToolSessionEntry): string {
   if (id.includes("codex")) return "codex";
   if (id.includes("gemini")) return "gemini";
   if (id.includes("opencode") || id.includes("open-code")) return "opencode";
+  if (id.includes("copilot")) return "copilot";
   return "";
 }
 
@@ -68,6 +69,7 @@ export function displayToolName(entry: ToolSessionEntry): string {
   if (id.includes("codex")) return "Codex";
   if (id.includes("gemini")) return "Gemini";
   if (id.includes("opencode") || id.includes("open-code")) return "OpenCode";
+  if (id.includes("copilot")) return "GitHub Copilot";
   return entry.tool_label || entry.tool_id;
 }
 
