@@ -192,6 +192,28 @@ fn escaped_wrapped_token_len(value: &str) -> Option<usize> {
     None
 }
 
+fn plain_wrapped_token_len(value: &str) -> Option<usize> {
+    let trimmed = value.trim();
+    let bytes = trimmed.as_bytes();
+    let quote = *bytes.first()?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+
+    let mut idx = 1usize;
+    while idx < bytes.len() {
+        if bytes[idx] == quote && !is_escaped_quote(bytes, idx) {
+            let next = idx + 1;
+            if next == bytes.len() || bytes[next].is_ascii_whitespace() {
+                return Some(next);
+            }
+        }
+        idx += 1;
+    }
+
+    None
+}
+
 fn leading_windows_command_token(value: &str) -> &str {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -206,6 +228,12 @@ fn leading_windows_command_token(value: &str) -> &str {
     // Only tokenize when the input starts with an explicit quote wrapper.
     if !starts_with_plain_quote && !starts_with_escaped_quote {
         return trimmed;
+    }
+
+    if starts_with_plain_quote {
+        if let Some(len) = plain_wrapped_token_len(trimmed) {
+            return trimmed[..len].trim_end();
+        }
     }
 
     if let Some(len) = escaped_wrapped_token_len(trimmed) {
@@ -493,6 +521,16 @@ mod tests {
                 r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#
             ),
             r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+    }
+
+    #[test]
+    fn normalize_windows_command_path_handles_single_quoted_path_with_apostrophe() {
+        assert_eq!(
+            normalize_windows_command_path(
+                "'C:\\Tools\\O'Neil Folder\\npx.cmd' --yes @openai/codex@latest"
+            ),
+            "C:\\Tools\\O'Neil Folder\\npx.cmd"
         );
     }
 
