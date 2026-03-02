@@ -464,7 +464,7 @@ fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
 }
 
 fn get_command_version_with_timeout(command: &str) -> Option<String> {
-    let command = command.to_string();
+    let command = normalized_process_command(command);
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let out = gwt_core::process::command(&command)
@@ -521,7 +521,7 @@ fn codex_features_list_contains_feature(raw: &str, feature: &str) -> bool {
 }
 
 fn probe_codex_features_list(command: &str, args: &[String], timeout: Duration) -> Option<String> {
-    let command = command.to_string();
+    let command = normalized_process_command(command);
     let args = args.to_vec();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -599,15 +599,20 @@ struct ResolvedAgentLaunchCommand {
 }
 
 fn normalize_launch_command_for_platform(command: String) -> String {
-    if cfg!(target_os = "windows") {
-        let normalized = normalize_windows_command_path(&command);
-        if normalized.is_empty() {
-            command
-        } else {
-            normalized
-        }
-    } else {
+    let normalized = normalize_windows_command_path(&command);
+    if normalized.is_empty() {
         command
+    } else {
+        normalized
+    }
+}
+
+fn normalized_process_command(command: &str) -> String {
+    let normalized = normalize_windows_command_path(command);
+    if normalized.is_empty() {
+        command.trim().to_string()
+    } else {
+        normalized
     }
 }
 
@@ -2513,23 +2518,27 @@ mod tests {
     #[test]
     fn normalize_launch_command_for_platform_windows_unwraps_wrapped_path() {
         let raw = r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#.to_string();
-        let normalized = normalize_launch_command_for_platform(raw.clone());
-        if cfg!(target_os = "windows") {
-            assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
-        } else {
-            assert_eq!(normalized, raw);
-        }
+        let normalized = normalize_launch_command_for_platform(raw);
+        assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
     }
 
     #[test]
     fn normalize_launch_command_for_platform_windows_extracts_leading_command_token() {
         let raw = r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#.to_string();
-        let normalized = normalize_launch_command_for_platform(raw.clone());
-        if cfg!(target_os = "windows") {
-            assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
-        } else {
-            assert_eq!(normalized, raw);
-        }
+        let normalized = normalize_launch_command_for_platform(raw);
+        assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
+    }
+
+    #[test]
+    fn normalized_process_command_unwraps_issue_1265_pattern() {
+        let normalized = normalized_process_command(r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#);
+        assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
+    }
+
+    #[test]
+    fn normalized_process_command_trims_plain_commands() {
+        let normalized = normalized_process_command("  codex  ");
+        assert_eq!(normalized, "codex");
     }
 
     #[test]

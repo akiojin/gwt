@@ -12,6 +12,31 @@ Use gh to locate merge conflicts, detect base-branch updates that require "Updat
 
 Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), then run `gh auth status` with escalated permissions (include workflow/repo scopes) so `gh` commands succeed. If sandboxing blocks `gh auth status`, rerun it with `sandbox_permissions=require_escalated`.
 
+## Issue/PR Comment Formatting (must follow)
+
+- Final comment text must not contain escaped newline literals such as `\n`.
+- Use real line breaks in comment bodies. Do not rely on escaped sequences for formatting.
+- Before posting (`--add-comment` or manual `gh issue/pr comment`), verify the final body does not accidentally include escaped control sequences (`\n`, `\t`).
+- If a raw escape sequence must be shown for explanation, include it only inside a fenced code block and clarify it is intentional.
+
+## Issue Progress Comment Template (required for issue-based work)
+
+When work is tracked in GitHub Issues, progress updates must use this template:
+
+```markdown
+Progress
+- ...
+
+Done
+- ...
+
+Next
+- ...
+```
+
+- Post updates at least when starting work, after meaningful progress, and when blocked/unblocked.
+- In `Next`, explicitly state blockers or the immediate next action.
+
 ## Inputs
 
 - `repo`: path inside the repo (default `.`)
