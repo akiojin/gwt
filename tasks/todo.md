@@ -65,6 +65,10 @@ Windows 環境でタブ切り替え時に `$derived`（同期）と `$effect`（
 - [x] T003 `isTerminalTabVisible()` 修正（GREEN 化）
 - [x] T004 テスト GREEN 確認（33/33 pass）
 - [x] T005 型チェック・lint 確認（svelte-check 0 errors）
-- [ ] T006 コミット＆プッシュ
+- [x] T006 コミット＆プッシュ（e637213f）
 
 ## 検証結果
+
+- [x] `pnpm test src/lib/components/MainArea.test.ts` — 33 tests passed
+- [x] `npx svelte-check --tsconfig ./tsconfig.json` — 0 errors, 1 warning（既存・変更対象外）
+- [x] `bunx commitlint --from HEAD~1 --to HEAD` — 通過
