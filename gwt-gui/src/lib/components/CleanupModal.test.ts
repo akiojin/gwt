@@ -677,6 +677,29 @@ describe("CleanupModal", () => {
     });
   });
 
+  it("does not call branch protection API when remote toggle is OFF", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: false };
+      if (command === "get_cleanup_pr_statuses") return {};
+      return [];
+    });
+
+    await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project-no-remote-protection",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await waitFor(() => {
+      const statusesArgs = invokeArgsFor("get_cleanup_pr_statuses")[0];
+      expect(statusesArgs).toEqual({ projectPath: "/tmp/project-no-remote-protection" });
+      expect(invokeArgsFor("get_cleanup_branch_protection")).toHaveLength(0);
+    });
+  });
+
   it("saves remote toggle settings with projectPath", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];
@@ -710,6 +733,86 @@ describe("CleanupModal", () => {
       expect(args).toEqual({
         projectPath: "/tmp/project-toggle",
         settings: { delete_remote_branches: true },
+      });
+    });
+  });
+
+  it("rolls back remote toggle when saving settings fails", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: false };
+      if (command === "get_cleanup_pr_statuses") return {};
+      if (command === "get_cleanup_branch_protection") return [worktreeFixture.branch];
+      if (command === "set_cleanup_settings") throw new Error("save failed");
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project-toggle-fail",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    await waitFor(() => {
+      expect(rendered.container.querySelector("[data-testid='remote-toggle']")).toBeTruthy();
+    });
+    const remoteToggle = rendered.container.querySelector("[data-testid='remote-toggle']");
+    if (!remoteToggle) {
+      throw new Error("remote toggle not found");
+    }
+
+    const remoteSwitch = remoteToggle.querySelector(".toggle-switch");
+    expect(remoteSwitch?.classList.contains("toggle-on")).toBe(false);
+    await fireEvent.click(remoteToggle);
+
+    await waitFor(() => {
+      const args = invokeArgsFor("set_cleanup_settings")[0];
+      expect(args).toEqual({
+        projectPath: "/tmp/project-toggle-fail",
+        settings: { delete_remote_branches: true },
+      });
+      expect(remoteSwitch?.classList.contains("toggle-on")).toBe(false);
+    });
+  });
+
+  it("fetches branch protection only after enabling remote toggle", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: false };
+      if (command === "get_cleanup_pr_statuses") return {};
+      if (command === "get_cleanup_branch_protection") return [worktreeFixture.branch];
+      if (command === "set_cleanup_settings") return null;
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project-lazy-protection",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    await waitFor(() => {
+      expect(invokeArgsFor("get_cleanup_branch_protection")).toHaveLength(0);
+    });
+
+    const remoteToggle = rendered.container.querySelector("[data-testid='remote-toggle']");
+    expect(remoteToggle).toBeTruthy();
+    if (!remoteToggle) {
+      throw new Error("remote toggle not found");
+    }
+    await fireEvent.click(remoteToggle);
+
+    await waitFor(() => {
+      const protectionArgs = invokeArgsFor("get_cleanup_branch_protection")[0];
+      expect(protectionArgs).toEqual({
+        projectPath: "/tmp/project-lazy-protection",
+        branches: [worktreeFixture.branch],
       });
     });
   });
@@ -1227,6 +1330,145 @@ describe("CleanupModal", () => {
 
     await rendered.findByText("Unsafe Worktrees Selected");
     expect(rendered.queryByText("Remote branches will also be deleted.")).toBeTruthy();
+  });
+
+  // --- #1404: Branch protection ---
+
+  it("downgrades safe to warning when branch is protected and toggle ON", async () => {
+    const safeWorktree = { ...worktreeFixture, safety_level: "safe" };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [safeWorktree];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: true };
+      if (command === "get_cleanup_pr_statuses") return { [safeWorktree.branch!]: "merged" };
+      if (command === "get_cleanup_branch_protection") return [safeWorktree.branch];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(safeWorktree.branch);
+    await waitFor(() => {
+      const dot = rendered.container.querySelector(".safety-dot");
+      expect(dot?.classList.contains("dot-warning")).toBe(true);
+    });
+  });
+
+  it("shows protected badge when branch is protected and toggle ON", async () => {
+    const safeWorktree = { ...worktreeFixture, safety_level: "safe" };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [safeWorktree];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: true };
+      if (command === "get_cleanup_pr_statuses") return { [safeWorktree.branch!]: "merged" };
+      if (command === "get_cleanup_branch_protection") return [safeWorktree.branch];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(safeWorktree.branch);
+    await waitFor(() => {
+      const badge = rendered.container.querySelector(".gone-badge-emphasized");
+      expect(badge).toBeTruthy();
+      expect(badge?.textContent).toContain("protected");
+    });
+  });
+
+  it("does not show protected badge when toggle is OFF", async () => {
+    const safeWorktree = { ...worktreeFixture, safety_level: "safe" };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [safeWorktree];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: false };
+      if (command === "get_cleanup_pr_statuses") return {};
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(safeWorktree.branch);
+    await waitFor(() => {
+      expect(rendered.queryByTitle("Remote branch cannot be deleted (repository rules)")).toBeNull();
+    });
+  });
+
+  it("shows protected result as non-error in result dialog", async () => {
+    listenMock.mockResolvedValue(() => {});
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: true };
+      if (command === "get_cleanup_pr_statuses") return { [worktreeFixture.branch!]: "merged" };
+      if (command === "get_cleanup_branch_protection") return [];
+      if (command === "cleanup_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    const checkbox = rendered.container.querySelector(
+      "tbody input[type=\"checkbox\"]"
+    ) as HTMLInputElement;
+    await fireEvent.click(checkbox);
+    await fireEvent.click(rendered.getByRole("button", { name: "Cleanup (1)" }));
+
+    await waitFor(() => {
+      expect(
+        listenMock.mock.calls.some(
+          (call) => call[0] === "cleanup-completed" && typeof call[1] === "function"
+        )
+      ).toBe(true);
+    });
+
+    const handler = listenMock.mock.calls.find(
+      (call) => call[0] === "cleanup-completed"
+    )?.[1] as ((event: { payload: { results: any[] } }) => void);
+
+    handler({
+      payload: {
+        results: [{
+          branch: worktreeFixture.branch,
+          success: true,
+          error: null,
+          remote_success: true,
+          remote_error: "Protected: branch 'feature/active' is protected by repository rules",
+        }],
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Cleanup Results")).toBeTruthy();
+      const resultItems = rendered.container.querySelectorAll(".result-item");
+      expect(resultItems.length).toBe(1);
+      // remote_success is true, so it should NOT have the error styling
+      expect(resultItems[0].classList.contains("result-item-error")).toBe(false);
+    });
   });
 
   it("hides remote warning in confirm dialog when toggle is OFF", async () => {
