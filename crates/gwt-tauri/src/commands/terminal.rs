@@ -13,7 +13,8 @@ use gwt_core::docker::{
 use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::runner::{
-    build_fallback_launch, choose_fallback_runner, resolve_command_path,
+    build_fallback_launch, choose_fallback_runner, normalize_windows_command_path,
+    resolve_command_path,
 };
 use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
@@ -597,6 +598,19 @@ struct ResolvedAgentLaunchCommand {
     version_for_gates: Option<String>, // best-effort raw version string (may be "latest")
 }
 
+fn normalize_launch_command_for_platform(command: String) -> String {
+    if cfg!(target_os = "windows") {
+        let normalized = normalize_windows_command_path(&command);
+        if normalized.is_empty() {
+            command
+        } else {
+            normalized
+        }
+    } else {
+        command
+    }
+}
+
 fn resolve_agent_launch_command(
     agent_id: &str,
     requested_version: Option<&str>,
@@ -622,7 +636,7 @@ fn resolve_agent_launch_command(
             let (cmd, args) =
                 build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
             return Ok(ResolvedAgentLaunchCommand {
-                command: cmd.clone(),
+                command: normalize_launch_command_for_platform(cmd),
                 args,
                 label: def.label,
                 tool_version: v.to_string(),
@@ -635,7 +649,7 @@ fn resolve_agent_launch_command(
     if local_available {
         let version_raw = get_command_version_with_timeout(def.local_command);
         return Ok(ResolvedAgentLaunchCommand {
-            command: def.local_command.to_string(),
+            command: normalize_launch_command_for_platform(def.local_command.to_string()),
             args: Vec::new(),
             label: def.label,
             tool_version: "installed".to_string(),
@@ -660,7 +674,7 @@ fn resolve_agent_launch_command(
         "latest".to_string()
     };
     Ok(ResolvedAgentLaunchCommand {
-        command: cmd,
+        command: normalize_launch_command_for_platform(cmd),
         args,
         label: def.label,
         tool_version,
@@ -682,7 +696,7 @@ fn resolve_agent_launch_command_for_container(
 
     if requested_is_installed {
         return Ok(ResolvedAgentLaunchCommand {
-            command: def.local_command.to_string(),
+            command: normalize_launch_command_for_platform(def.local_command.to_string()),
             args: Vec::new(),
             label: def.label,
             tool_version: "installed".to_string(),
@@ -696,7 +710,7 @@ fn resolve_agent_launch_command_for_container(
     let package = build_bunx_package_spec(def.bunx_package, Some(version.as_str()));
 
     Ok(ResolvedAgentLaunchCommand {
-        command: "npx".to_string(),
+        command: normalize_launch_command_for_platform("npx".to_string()),
         args: vec!["--yes".to_string(), package],
         label: def.label,
         tool_version: version.clone(),
@@ -2494,6 +2508,28 @@ mod tests {
             args,
             vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
         );
+    }
+
+    #[test]
+    fn normalize_launch_command_for_platform_windows_unwraps_wrapped_path() {
+        let raw = r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#.to_string();
+        let normalized = normalize_launch_command_for_platform(raw.clone());
+        if cfg!(target_os = "windows") {
+            assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
+        } else {
+            assert_eq!(normalized, raw);
+        }
+    }
+
+    #[test]
+    fn normalize_launch_command_for_platform_windows_extracts_leading_command_token() {
+        let raw = r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#.to_string();
+        let normalized = normalize_launch_command_for_platform(raw.clone());
+        if cfg!(target_os = "windows") {
+            assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
+        } else {
+            assert_eq!(normalized, raw);
+        }
     }
 
     #[test]

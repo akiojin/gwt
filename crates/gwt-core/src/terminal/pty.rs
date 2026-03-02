@@ -92,6 +92,7 @@ fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
+#[cfg(test)]
 fn strip_wrapping_quotes(value: &str) -> Option<&str> {
     if value.len() < 2 {
         return None;
@@ -108,6 +109,7 @@ fn strip_wrapping_quotes(value: &str) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
 fn escaped_wrapping_quote_prefix(value: &str) -> Option<(usize, u8)> {
     let bytes = value.as_bytes();
     let mut slash_count = 0;
@@ -127,6 +129,7 @@ fn escaped_wrapping_quote_prefix(value: &str) -> Option<(usize, u8)> {
     Some((slash_count, quote))
 }
 
+#[cfg(test)]
 fn escaped_wrapping_quote_suffix(value: &str, quote: u8) -> Option<usize> {
     let bytes = value.as_bytes();
     if bytes.last().copied()? != quote || bytes.len() < 2 {
@@ -147,6 +150,7 @@ fn escaped_wrapping_quote_suffix(value: &str, quote: u8) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
 fn strip_wrapping_escaped_quotes(value: &str) -> Option<&str> {
     if value.len() < 4 {
         return None;
@@ -167,6 +171,7 @@ fn strip_wrapping_escaped_quotes(value: &str) -> Option<&str> {
     Some(value[prefix_len..value.len() - suffix_len].trim())
 }
 
+#[cfg(test)]
 fn strip_wrapping_quotes_recursive(value: &str) -> String {
     let mut current = value.trim();
     loop {
@@ -184,7 +189,7 @@ fn strip_wrapping_quotes_recursive(value: &str) -> String {
 }
 
 fn has_windows_batch_extension(command: &str) -> bool {
-    let normalized = strip_wrapping_quotes_recursive(command);
+    let normalized = crate::terminal::runner::normalize_windows_command_path(command);
     Path::new(&normalized)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -196,7 +201,10 @@ fn is_windows_batch_command_for_platform<F>(command: &str, mut resolve_command_p
 where
     F: FnMut(&str) -> Option<PathBuf>,
 {
-    let normalized_command = strip_wrapping_quotes_recursive(command);
+    let normalized_command = crate::terminal::runner::normalize_windows_command_path(command);
+    if normalized_command.is_empty() {
+        return false;
+    }
 
     if has_windows_batch_extension(&normalized_command) {
         return true;
@@ -244,7 +252,7 @@ where
     G: FnMut(&str) -> Option<PathBuf>,
 {
     if is_windows {
-        let normalized_command = strip_wrapping_quotes_recursive(command);
+        let normalized_command = crate::terminal::runner::normalize_windows_command_path(command);
 
         if let Some(shell_id) = shell {
             match shell_id {
@@ -419,6 +427,11 @@ impl PtyHandle {
             config.interactive,
             config.windows_force_utf8,
         );
+        let normalized_command = if cfg!(windows) {
+            crate::terminal::runner::normalize_windows_command_path(&config.command)
+        } else {
+            config.command.clone()
+        };
         let launch_mode = if cfg!(windows) {
             if spawn_command.eq_ignore_ascii_case("cmd.exe")
                 && spawn_args
@@ -437,6 +450,7 @@ impl PtyHandle {
 
         tracing::debug!(
             command = %config.command,
+            normalized_command = %normalized_command,
             args = ?config.args,
             resolved_command = %spawn_command,
             resolved_args = ?spawn_args,
@@ -851,6 +865,14 @@ mod tests {
     }
 
     #[test]
+    fn is_windows_batch_command_for_platform_detects_wrapped_cmd_with_trailing_args() {
+        assert!(is_windows_batch_command_for_platform(
+            r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#,
+            |_| None
+        ));
+    }
+
+    #[test]
     fn is_windows_batch_command_for_platform_detects_resolved_cmd_for_bare_command() {
         assert!(is_windows_batch_command_for_platform("claude", |name| {
             assert_eq!(name, "claude");
@@ -917,6 +939,28 @@ mod tests {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             r#"'\\\"C:\Program Files\nodejs\npx.cmd\\\"'"#,
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "\"C:\\Program Files\\nodejs\\npx.cmd\" --yes @openai/codex@latest".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_normalizes_wrapped_batch_path_with_trailing_args_in_command() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#,
             &args,
             true,
             || "pwsh".to_string(),

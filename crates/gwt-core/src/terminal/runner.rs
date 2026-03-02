@@ -65,6 +65,187 @@ fn env_get<'a>(env: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
     }
 }
 
+fn strip_wrapping_quotes(value: &str) -> Option<&str> {
+    if value.len() < 2 {
+        return None;
+    }
+
+    let bytes = value.as_bytes();
+    let first = bytes[0];
+    let last = bytes[value.len() - 1];
+    let wrapped = (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'');
+    if wrapped {
+        Some(value[1..value.len() - 1].trim())
+    } else {
+        None
+    }
+}
+
+fn escaped_wrapping_quote_prefix(value: &str) -> Option<(usize, u8)> {
+    let bytes = value.as_bytes();
+    let mut slash_count = 0;
+    while slash_count < bytes.len() && bytes[slash_count] == b'\\' {
+        slash_count += 1;
+    }
+
+    if slash_count == 0 || slash_count >= bytes.len() {
+        return None;
+    }
+
+    let quote = bytes[slash_count];
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+
+    Some((slash_count, quote))
+}
+
+fn escaped_wrapping_quote_suffix(value: &str, quote: u8) -> Option<usize> {
+    let bytes = value.as_bytes();
+    if bytes.last().copied()? != quote || bytes.len() < 2 {
+        return None;
+    }
+
+    let mut slash_count = 0usize;
+    let mut idx = bytes.len() - 1;
+    while idx > 0 && bytes[idx - 1] == b'\\' {
+        slash_count += 1;
+        idx -= 1;
+    }
+
+    if slash_count == 0 {
+        None
+    } else {
+        Some(slash_count)
+    }
+}
+
+fn strip_wrapping_escaped_quotes(value: &str) -> Option<&str> {
+    if value.len() < 4 {
+        return None;
+    }
+
+    let (prefix_slashes, quote) = escaped_wrapping_quote_prefix(value)?;
+    let suffix_slashes = escaped_wrapping_quote_suffix(value, quote)?;
+    if prefix_slashes != suffix_slashes {
+        return None;
+    }
+
+    let prefix_len = prefix_slashes + 1;
+    let suffix_len = suffix_slashes + 1;
+    if value.len() < prefix_len + suffix_len {
+        return None;
+    }
+
+    Some(value[prefix_len..value.len() - suffix_len].trim())
+}
+
+fn strip_wrapping_quotes_recursive(value: &str) -> String {
+    let mut current = value.trim();
+    loop {
+        if let Some(next) = strip_wrapping_quotes(current) {
+            current = next;
+            continue;
+        }
+        if let Some(next) = strip_wrapping_escaped_quotes(current) {
+            current = next;
+            continue;
+        }
+        break;
+    }
+    current.to_string()
+}
+
+fn count_preceding_backslashes(bytes: &[u8], quote_index: usize) -> usize {
+    let mut slash_count = 0usize;
+    let mut idx = quote_index;
+    while idx > 0 && bytes[idx - 1] == b'\\' {
+        slash_count += 1;
+        idx -= 1;
+    }
+    slash_count
+}
+
+fn is_escaped_quote(bytes: &[u8], quote_index: usize) -> bool {
+    count_preceding_backslashes(bytes, quote_index) % 2 == 1
+}
+
+fn escaped_wrapped_token_len(value: &str) -> Option<usize> {
+    let trimmed = value.trim();
+    let bytes = trimmed.as_bytes();
+    let (prefix_slashes, quote) = escaped_wrapping_quote_prefix(trimmed)?;
+    let mut idx = prefix_slashes + 1;
+
+    while idx < bytes.len() {
+        if bytes[idx] == quote {
+            let slash_count = count_preceding_backslashes(bytes, idx);
+            if slash_count == prefix_slashes {
+                let next = idx + 1;
+                if next == bytes.len() || bytes[next].is_ascii_whitespace() {
+                    return Some(next);
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn leading_windows_command_token(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return trimmed;
+    }
+
+    let bytes = trimmed.as_bytes();
+    let starts_with_plain_quote = bytes.first().is_some_and(|b| *b == b'\'' || *b == b'"');
+    let starts_with_escaped_quote = escaped_wrapping_quote_prefix(trimmed).is_some();
+
+    // Unquoted command strings can legitimately contain spaces in Windows paths.
+    // Only tokenize when the input starts with an explicit quote wrapper.
+    if !starts_with_plain_quote && !starts_with_escaped_quote {
+        return trimmed;
+    }
+
+    if let Some(len) = escaped_wrapped_token_len(trimmed) {
+        return trimmed[..len].trim_end();
+    }
+
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for (idx, byte) in bytes.iter().enumerate() {
+        match *byte {
+            b'\'' if !in_double && !is_escaped_quote(bytes, idx) => {
+                in_single = !in_single;
+            }
+            b'"' if !in_single && !is_escaped_quote(bytes, idx) => {
+                in_double = !in_double;
+            }
+            b if b.is_ascii_whitespace() && !in_single && !in_double => {
+                return trimmed[..idx].trim_end();
+            }
+            _ => {}
+        }
+    }
+
+    trimmed
+}
+
+/// Normalize a potentially wrapped/escaped Windows command path.
+///
+/// This helper is intentionally defensive because command strings can arrive with
+/// quoting artifacts (`'\"...\"'`, `\\\"...\\\"`) from environment snapshots.
+/// It extracts only the executable token and removes nested wrapping quotes.
+pub fn normalize_windows_command_path(command: &str) -> String {
+    let token = leading_windows_command_token(command);
+    if token.is_empty() {
+        return String::new();
+    }
+    strip_wrapping_quotes_recursive(token)
+}
+
 fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
     let cmd = command.trim();
     if cmd.is_empty() {
@@ -260,6 +441,42 @@ mod tests {
         assert_eq!(
             args,
             vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_windows_command_path_unwraps_issue_1265_pattern() {
+        assert_eq!(
+            normalize_windows_command_path(r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#),
+            r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+    }
+
+    #[test]
+    fn normalize_windows_command_path_ignores_trailing_arguments() {
+        assert_eq!(
+            normalize_windows_command_path(
+                r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#
+            ),
+            r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+    }
+
+    #[test]
+    fn normalize_windows_command_path_handles_double_escaped_prefix_without_outer_quotes() {
+        assert_eq!(
+            normalize_windows_command_path(
+                r#"\\\"C:\Program Files\nodejs\npx.cmd\\\" --yes @openai/codex@latest"#
+            ),
+            r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+    }
+
+    #[test]
+    fn normalize_windows_command_path_keeps_mismatched_escape_sequences() {
+        assert_eq!(
+            normalize_windows_command_path(r#"\\\"C:\Tools\npx.cmd\""#),
+            r#"\\\"C:\Tools\npx.cmd\""#
         );
     }
 
