@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -412,6 +412,40 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String
     }
 }
 
+/// Check which branches have a "deletion" rule preventing remote deletion (#1404).
+///
+/// Uses `gh api repos/{owner}/{repo}/rules/branches/{branch}` per branch.
+/// Returns a set of branch names that are delete-protected.
+pub fn get_branch_deletion_rules(repo_path: &Path, branches: &[&str]) -> HashSet<String> {
+    let Ok((owner, repo)) = resolve_owner_repo(repo_path) else {
+        return HashSet::new();
+    };
+    let mut protected = HashSet::new();
+    for branch in branches {
+        let endpoint = format!("repos/{}/{}/rules/branches/{}", owner, repo, branch);
+        let Ok(output) = run_gh_output_with_timeout_and_repair(
+            repo_path,
+            ["api", endpoint.as_str()],
+            Duration::from_secs(10),
+        ) else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Ok(rules) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) {
+            if rules
+                .iter()
+                .any(|r| r.get("type").and_then(|t| t.as_str()) == Some("deletion"))
+            {
+                protected.insert(branch.to_string());
+            }
+        }
+    }
+    protected
+}
+
 /// Get PR statuses for all branches (SPEC-ad1ac432 T007-T008).
 ///
 /// Runs `gh pr list --state all --json headRefName,state,mergedAt --limit 200`.
@@ -634,6 +668,13 @@ fn classify_delete_branch_error(combined: &str, branch: &str) -> Option<String> 
     } else if combined.contains("403") || combined.contains("Forbidden") {
         Some(format!(
             "Permission denied: cannot delete remote branch '{}'",
+            branch
+        ))
+    } else if combined.contains("Cannot delete this branch")
+        || combined.contains("Repository rule violations")
+    {
+        Some(format!(
+            "Protected: branch '{}' is protected by repository rules",
             branch
         ))
     } else {
@@ -1258,6 +1299,28 @@ mod tests {
         // 422 but different message should NOT be treated as success
         let result = classify_delete_branch_error("422 Validation Failed", "feat/v");
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn classify_delete_error_422_cannot_delete_protected() {
+        let msg = r#"{"message":"Cannot delete this branch"}"#;
+        let result = classify_delete_branch_error(msg, "main");
+        assert!(result.is_some());
+        assert!(result.unwrap().starts_with("Protected:"));
+    }
+
+    #[test]
+    fn classify_delete_error_repository_rule_violations() {
+        let msg = "Repository rule violations found";
+        let result = classify_delete_branch_error(msg, "develop");
+        assert!(result.is_some());
+        assert!(result.unwrap().starts_with("Protected:"));
+    }
+
+    #[test]
+    fn get_branch_deletion_rules_returns_hashset() {
+        // Structural test: function compiles with expected signature
+        let _: fn(&Path, &[&str]) -> HashSet<String> = get_branch_deletion_rules;
     }
 
     #[test]

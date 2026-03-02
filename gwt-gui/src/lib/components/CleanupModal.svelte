@@ -49,6 +49,9 @@
   let prStatuses: Record<string, PrStatus> = $state({});
   let prLoading: boolean = $state(false);
 
+  // Branch protection (#1404)
+  let branchProtection: Set<string> = $state(new Set());
+
   // Result dialog state (replaces failure-only dialog)
   let results: CleanupResult[] = $state([]);
   let showResults: boolean = $state(false);
@@ -81,6 +84,7 @@
     if (wt.safety_level !== "safe") return wt.safety_level;
     const branch = wt.branch;
     if (!branch) return wt.safety_level;
+    if (branchProtection.has(branch)) return "warning";
     const pr = prStatuses[branch] ?? "none";
     if (pr === "open" || pr === "none") return "warning";
     return "safe";
@@ -237,6 +241,23 @@
             prStatuses = {};
           } finally {
             prLoading = false;
+          }
+          // Fetch branch protection in parallel (#1404)
+          try {
+            const nonGoneBranches = worktrees
+              .filter(w => w.branch && w.safety_level !== "disabled" && !w.is_gone)
+              .map(w => w.branch!);
+            if (nonGoneBranches.length > 0) {
+              const protectedBranches = await invoke<string[]>(
+                "get_cleanup_branch_protection",
+                { projectPath, branches: nonGoneBranches }
+              );
+              branchProtection = new Set(protectedBranches);
+            } else {
+              branchProtection = new Set();
+            }
+          } catch {
+            branchProtection = new Set();
           }
         } else {
           ghAvailable = false;
@@ -519,6 +540,9 @@
                       {:else}
                         <span class="gone-badge">gone</span>
                       {/if}
+                    {/if}
+                    {#if deleteRemote && wt.branch && branchProtection.has(wt.branch)}
+                      <span class="gone-badge gone-badge-emphasized" title="Remote branch cannot be deleted (repository rules)">protected</span>
                     {/if}
                   </td>
                   {#if ghAvailable}

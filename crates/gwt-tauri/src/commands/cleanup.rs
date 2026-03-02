@@ -382,6 +382,33 @@ pub async fn get_cleanup_pr_statuses(
         .collect())
 }
 
+/// Get branch deletion protection info for cleanup (#1404).
+///
+/// Returns branch names that cannot be deleted remotely due to repository rules.
+#[tauri::command]
+pub async fn get_cleanup_branch_protection(
+    project_path: String,
+    branches: Vec<String>,
+) -> Result<Vec<String>, StructuredError> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_cleanup_branch_protection"))?;
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
+        gwt_core::git::gh_cli::get_branch_deletion_rules(&repo_path, &branch_refs)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to get branch protection: {e}"),
+            "get_cleanup_branch_protection",
+        )
+    })?;
+
+    Ok(result.into_iter().collect())
+}
+
 /// Get cleanup settings for a project (SPEC-ad1ac432 T019)
 #[tauri::command]
 pub async fn get_cleanup_settings(
@@ -466,6 +493,9 @@ pub async fn cleanup_worktrees(
 
                             match gwt_core::git::gh_cli::delete_remote_branch(&repo_path, branch) {
                                 Ok(()) => (Some(true), None, Some("deleted".to_string())),
+                                Err(e) if e.starts_with("Protected:") => {
+                                    (Some(true), Some(e), Some("skipped".to_string()))
+                                }
                                 Err(e) => (Some(false), Some(e), Some("failed".to_string())),
                             }
                         } else if delete_remote && gone_branches.contains(branch.as_str()) {
