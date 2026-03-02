@@ -74,8 +74,8 @@ describe("IssueListPanel", () => {
       if (cmd === "fetch_github_issues") {
         return { issues, hasNextPage: false } as FetchIssuesResponse;
       }
-      if (cmd === "find_existing_issue_branch") {
-        return null;
+      if (cmd === "find_existing_issue_branches_bulk") {
+        return [];
       }
       return null;
     });
@@ -91,6 +91,81 @@ describe("IssueListPanel", () => {
     expect(rendered.getByText("#20")).toBeTruthy();
     // "bug" label appears in both issue row and filter chips
     expect(rendered.getAllByText("bug").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("separates regular issues and specs into dedicated tabs", async () => {
+    const regular = makeIssue({ number: 10, title: "Regular Issue", labels: [{ name: "bug", color: "d73a4a" }] });
+    const spec = makeIssue({ number: 11, title: "Spec Issue", labels: [{ name: "gwt-spec", color: "0075ca" }] });
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true } as GhCliStatus;
+      }
+      if (cmd === "fetch_github_issues") {
+        const category = (args as { category?: string } | undefined)?.category;
+        if (category === "specs") {
+          return { issues: [spec], hasNextPage: false } as FetchIssuesResponse;
+        }
+        return { issues: [regular], hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
+      if (cmd === "fetch_github_issue_detail") return regular;
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Regular Issue")).toBeTruthy();
+    });
+    expect(rendered.queryByText("Spec Issue")).toBeNull();
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Specs" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Spec Issue")).toBeTruthy();
+    });
+    expect(rendered.queryByText("Regular Issue")).toBeNull();
+  });
+
+  it("ignores stale issue-tab response after switching to specs", async () => {
+    const regular = makeIssue({ number: 10, title: "Regular Issue" });
+    const spec = makeIssue({ number: 11, title: "Spec Issue", labels: [{ name: "gwt-spec", color: "0075ca" }] });
+    let resolveIssues!: (value: FetchIssuesResponse) => void;
+    const delayedIssues = new Promise<FetchIssuesResponse>((resolve) => {
+      resolveIssues = resolve;
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true } as GhCliStatus;
+      }
+      if (cmd === "fetch_github_issues") {
+        const category = (args as { category?: string } | undefined)?.category ?? "issues";
+        if (category === "specs") {
+          return { issues: [spec], hasNextPage: false } as FetchIssuesResponse;
+        }
+        return delayedIssues;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Specs" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Spec Issue")).toBeTruthy();
+      expect(rendered.queryByText("Regular Issue")).toBeNull();
+    });
+
+    resolveIssues({ issues: [regular], hasNextPage: false });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Spec Issue")).toBeTruthy();
+      expect(rendered.queryByText("Regular Issue")).toBeNull();
+    });
   });
 
   it("shows error when gh CLI is not available", async () => {
@@ -157,7 +232,7 @@ describe("IssueListPanel", () => {
       if (cmd === "fetch_github_issues") {
         return { issues, hasNextPage: false } as FetchIssuesResponse;
       }
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -187,7 +262,7 @@ describe("IssueListPanel", () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -224,7 +299,7 @@ describe("IssueListPanel", () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -250,13 +325,13 @@ describe("IssueListPanel", () => {
     });
   });
 
-  it("clears issue list on refresh button click", async () => {
+  it("refreshes issue list with forceRefresh flag", async () => {
     const issues = [makeIssue({ number: 1, title: "Issue A" })];
 
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -270,13 +345,22 @@ describe("IssueListPanel", () => {
     const refreshBtn = rendered.container.querySelector(".ilp-refresh-btn");
     expect(refreshBtn).toBeTruthy();
 
-    // handleRefresh sets issues=[] then calls fetchIssues(1).
-    // The fetchIssues re-import may fail in JSDOM, but handleRefresh
-    // immediately clears the list, so "Issue A" should disappear.
     await fireEvent.click(refreshBtn!);
 
     await waitFor(() => {
-      expect(rendered.queryByText("Issue A")).toBeNull();
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "fetch_github_issues",
+        expect.objectContaining({
+          projectPath: "/tmp/project",
+          page: 1,
+          perPage: 30,
+          state: "open",
+          category: "issues",
+          includeBody: false,
+          forceRefresh: true,
+        }),
+      );
+      expect(rendered.getByText("Issue A")).toBeTruthy();
     });
   });
 
@@ -287,9 +371,11 @@ describe("IssueListPanel", () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") {
+      if (cmd === "find_existing_issue_branches_bulk") {
         branchLookupCount += 1;
-        return branchLookupCount === 1 ? null : "feature/issue-5";
+        return branchLookupCount === 1
+          ? []
+          : [{ issueNumber: 5, branchName: "feature/issue-5" }];
       }
       return null;
     });
@@ -318,7 +404,7 @@ describe("IssueListPanel", () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
     });
@@ -358,7 +444,7 @@ describe("IssueListPanel", () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issues[0];
       return null;
     });
@@ -408,7 +494,7 @@ describe("IssueListPanel", () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
     });
@@ -440,9 +526,9 @@ describe("IssueListPanel", () => {
     mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") {
-        const issueNum = (args as { issueNumber?: number })?.issueNumber;
-        return issueNum === 5 ? "feature/issue-5" : null;
+      if (cmd === "find_existing_issue_branches_bulk") {
+        const nums = (args as { issueNumbers?: number[] })?.issueNumbers ?? [];
+        return nums.includes(5) ? [{ issueNumber: 5, branchName: "feature/issue-5" }] : [];
       }
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
@@ -483,7 +569,7 @@ describe("IssueListPanel", () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -512,7 +598,7 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -554,7 +640,7 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
     });
@@ -608,7 +694,7 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
     });
@@ -634,7 +720,7 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") throw new Error("Detail fetch failed");
       return null;
     });
@@ -670,7 +756,7 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
     });
@@ -752,7 +838,7 @@ describe("IssueListPanel", () => {
         fetchCallCount++;
         return { issues, hasNextPage: false } as FetchIssuesResponse;
       }
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -783,7 +869,7 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues, hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -824,9 +910,9 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") {
-        const issueNum = (args as { issueNumber?: number })?.issueNumber;
-        return issueNum === 5 ? "feature/issue-5" : null;
+      if (cmd === "find_existing_issue_branches_bulk") {
+        const nums = (args as { issueNumbers?: number[] })?.issueNumbers ?? [];
+        return nums.includes(5) ? [{ issueNumber: 5, branchName: "feature/issue-5" }] : [];
       }
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
@@ -859,7 +945,7 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
 
@@ -885,18 +971,47 @@ describe("IssueListPanel", () => {
       labels: [{ name: "gwt-spec", color: "0075ca" }],
     });
 
-    mockInvoke.mockImplementation(async (cmd: string) => {
+    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "check_gh_cli_status")
         return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues")
-        return { issues: [specIssue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "fetch_github_issues") {
+        const category = (args as { category?: string } | undefined)?.category;
+        if (category === "specs") {
+          return { issues: [specIssue], hasNextPage: false } as FetchIssuesResponse;
+        }
+        return { issues: [], hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return specIssue;
-      if (cmd === "fetch_issue_spec") return { markdown: "# Spec content", error: null };
+      if (cmd === "get_spec_issue_detail_cmd") {
+        return {
+          number: 70,
+          title: "Spec Issue",
+          url: "https://github.com/test/repo/issues/70",
+          updatedAt: "2026-01-01T00:00:00Z",
+          specId: "SPEC-70",
+          etag: "etag-70",
+          body: "body",
+          sections: {
+            spec: "s",
+            plan: "p",
+            tasks: "t",
+            tdd: "d",
+            research: "",
+            dataModel: "",
+            quickstart: "",
+            contracts: "",
+            checklists: "",
+          },
+        };
+      }
       return null;
     });
 
     const rendered = await renderIssueListPanel();
+
+    expect(rendered.queryByText("Spec Issue")).toBeNull();
+    await fireEvent.click(rendered.getByRole("button", { name: "Specs" }));
 
     await waitFor(() => {
       expect(rendered.getByText("Spec Issue")).toBeTruthy();
@@ -939,7 +1054,7 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") {
         // Never resolve - keeps detail loading state
         return new Promise<GitHubIssueInfo>(() => {});
@@ -960,7 +1075,7 @@ describe("IssueListPanel", () => {
     });
   });
 
-  it("handles find_existing_issue_branch error gracefully", async () => {
+  it("handles find_existing_issue_branches_bulk error as unknown linkage state", async () => {
     const issue = makeIssue({ number: 90, title: "Branch Error Issue" });
 
     mockInvoke.mockImplementation(async (cmd: string) => {
@@ -968,7 +1083,8 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branch") throw new Error("Branch lookup failed");
+      if (cmd === "find_existing_issue_branches_bulk") throw new Error("Branch lookup failed");
+      if (cmd === "fetch_github_issue_detail") return issue;
       return null;
     });
 
@@ -978,7 +1094,11 @@ describe("IssueListPanel", () => {
       expect(rendered.getByText("Branch Error Issue")).toBeTruthy();
     });
 
-    // WT button should not be shown (error falls back to null)
-    expect(rendered.queryByText("WT")).toBeNull();
+    await fireEvent.click(rendered.container.querySelector(".ilp-issue-row")!);
+    await waitFor(() => {
+      expect(rendered.getByText(/Back/)).toBeTruthy();
+      expect(rendered.queryByText("Work on this")).toBeNull();
+      expect((rendered.getByText("Switch to Worktree") as HTMLButtonElement).disabled).toBe(true);
+    });
   });
 });

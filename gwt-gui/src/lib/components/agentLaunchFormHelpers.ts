@@ -1,4 +1,8 @@
-import type { ClassifyResult, DockerContext } from "../types";
+import {
+  type ClassifyResult,
+  type DockerContext,
+  type IssueBranchLookupState,
+} from "../types";
 
 export type RuntimeTarget = "host" | "docker";
 export type BranchPrefix = "feature/" | "bugfix/" | "hotfix/" | "release/" | "";
@@ -185,17 +189,17 @@ export function resolveDockerContextSelection(
 export function isIssueSelectable(
   issueNumber: number,
   issueBranchChecksInFlight: ReadonlySet<number>,
-  issueBranchMap: ReadonlyMap<number, string | null>,
+  issueBranchMap: ReadonlyMap<number, IssueBranchLookupState>,
 ): boolean {
   if (issueBranchChecksInFlight.has(issueNumber)) return false;
   if (!issueBranchMap.has(issueNumber)) return false;
-  return !issueBranchMap.get(issueNumber);
+  return issueBranchMap.get(issueNumber) === null;
 }
 
 export function canLaunchFromIssue(
   issueNumber: number | null | undefined,
   issueBranchChecksInFlight: ReadonlySet<number>,
-  issueBranchMap: ReadonlyMap<number, string | null>,
+  issueBranchMap: ReadonlyMap<number, IssueBranchLookupState>,
 ): boolean {
   if (issueNumber == null) return false;
   return isIssueSelectable(issueNumber, issueBranchChecksInFlight, issueBranchMap);
