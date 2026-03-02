@@ -274,6 +274,16 @@ pub fn normalize_windows_command_path(command: &str) -> String {
     strip_wrapping_quotes_recursive(token)
 }
 
+fn normalize_resolved_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    let normalized = normalize_windows_command_path(raw.as_ref());
+    if normalized.is_empty() {
+        path.to_path_buf()
+    } else {
+        PathBuf::from(normalized)
+    }
+}
+
 fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
     let normalized = normalize_windows_command_path(command);
     let cmd_owned = if normalized.is_empty() {
@@ -292,16 +302,17 @@ fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -
     let mut weak_path: Option<PathBuf> = None;
     if let Ok(iter) = which::which_in_all(cmd, paths, &cwd) {
         for found in iter {
+            let normalized_found = normalize_resolved_path(&found);
             // PATH may contain project-local shims (e.g. node_modules/.bin) when running under
             // temporary executors (bunx/npx). Prefer global installs when available.
-            if is_node_modules_bin(&found) {
+            if is_node_modules_bin(&normalized_found) {
                 if weak_path.is_none() {
-                    weak_path = Some(found);
+                    weak_path = Some(normalized_found);
                 }
                 continue;
             }
 
-            return Some(found);
+            return Some(normalized_found);
         }
     }
 
@@ -626,6 +637,15 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn normalize_resolved_path_unwraps_issue_1265_pattern() {
+        let raw = Path::new(r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#);
+        assert_eq!(
+            normalize_resolved_path(raw),
+            PathBuf::from(r#"C:\Program Files\nodejs\npx.cmd"#)
+        );
+    }
     #[test]
     fn resolve_command_path_uses_node_modules_bin_when_no_global_candidate_exists() {
         let dir = tempdir().expect("tempdir");

@@ -1,6 +1,15 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.1.3] - 2026-03-02
+
+### Bug Fixes
+
+- Paginate branch deletion-rule precheck (#1406)
+- **gui:** Show merged/closed PR details in worktree view (#1409)
+- **gui:** Eliminate terminal tab switch flicker (#1413)
+- **windows:** Normalize wrapped npx path at resolve/display boundaries (#1265) (#1412)
+
 ## [8.1.2] - 2026-03-02
 
 ### Bug Fixes
