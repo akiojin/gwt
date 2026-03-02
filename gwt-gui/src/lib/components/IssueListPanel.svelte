@@ -155,6 +155,7 @@
   }
 
   async function fetchIssues(pageNum: number, append = false, forceRefresh = false) {
+    if (append && loadingMore) return;
     const requestId = ++fetchRequestId;
     if (append) {
       loadingMore = true;

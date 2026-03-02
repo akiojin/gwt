@@ -220,6 +220,8 @@ pub fn fetch_issues_with_options(
 
     let repo_slug = resolve_repo_slug(repo_path);
 
+    let cat = parse_issue_category(category);
+
     // Use Search API when repo slug is available (O(1) pagination)
     if let Some(ref slug) = repo_slug {
         return fetch_issues_via_search_api(
@@ -229,7 +231,7 @@ pub fn fetch_issues_with_options(
             per_page,
             state,
             include_body,
-            category,
+            cat,
         );
     }
 
@@ -240,7 +242,7 @@ pub fn fetch_issues_with_options(
         per_page,
         state,
         include_body,
-        parse_issue_category(category),
+        cat,
     );
 
     let output = run_gh_output_with_repair(repo_path, args)
@@ -285,7 +287,7 @@ fn fetch_issues_via_search_api(
     per_page: u32,
     state: &str,
     include_body: bool,
-    category: &str,
+    category: IssueCategory,
 ) -> Result<FetchIssuesResult, String> {
     let endpoint = issue_search_api_endpoint(repo_slug, page, per_page, state, category);
     let output = run_gh_output_with_repair(repo_path, ["api", &endpoint])
@@ -314,10 +316,9 @@ fn issue_search_api_endpoint(
     page: u32,
     per_page: u32,
     state: &str,
-    category: &str,
+    category: IssueCategory,
 ) -> String {
     let state_value = if state == "closed" { "closed" } else { "open" };
-    let category_parsed = parse_issue_category(category);
 
     let mut query_parts = vec![
         format!("repo:{}", repo_slug),
@@ -326,7 +327,7 @@ fn issue_search_api_endpoint(
         "sort:updated-desc".to_string(),
     ];
 
-    match category_parsed {
+    match category {
         IssueCategory::Specs => {
             query_parts.push(format!("label:{}", SPEC_LABEL));
         }
@@ -2241,7 +2242,7 @@ mod tests {
 
     #[test]
     fn test_issue_search_api_endpoint_all_category() {
-        let endpoint = issue_search_api_endpoint("owner/repo", 1, 30, "open", "all");
+        let endpoint = issue_search_api_endpoint("owner/repo", 1, 30, "open", IssueCategory::All);
         assert_eq!(
             endpoint,
             "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc&per_page=31&page=1"
@@ -2250,7 +2251,7 @@ mod tests {
 
     #[test]
     fn test_issue_search_api_endpoint_issues_category() {
-        let endpoint = issue_search_api_endpoint("owner/repo", 2, 10, "open", "issues");
+        let endpoint = issue_search_api_endpoint("owner/repo", 2, 10, "open", IssueCategory::Issues);
         assert_eq!(
             endpoint,
             "search/issues?q=repo:owner/repo+is:issue+state:open+sort:updated-desc+-label:gwt-spec&per_page=11&page=2"
@@ -2259,7 +2260,7 @@ mod tests {
 
     #[test]
     fn test_issue_search_api_endpoint_specs_category() {
-        let endpoint = issue_search_api_endpoint("owner/repo", 1, 20, "closed", "specs");
+        let endpoint = issue_search_api_endpoint("owner/repo", 1, 20, "closed", IssueCategory::Specs);
         assert_eq!(
             endpoint,
             "search/issues?q=repo:owner/repo+is:issue+state:closed+sort:updated-desc+label:gwt-spec&per_page=21&page=1"
@@ -2268,7 +2269,7 @@ mod tests {
 
     #[test]
     fn test_issue_search_api_endpoint_defaults_to_open_for_unknown_state() {
-        let endpoint = issue_search_api_endpoint("owner/repo", 1, 10, "unknown", "all");
+        let endpoint = issue_search_api_endpoint("owner/repo", 1, 10, "unknown", IssueCategory::All);
         assert!(endpoint.contains("state:open"));
     }
 
