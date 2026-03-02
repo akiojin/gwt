@@ -756,11 +756,10 @@ describe("CleanupModal", () => {
     });
 
     await rendered.findByText(worktreeFixture.branch);
-    let remoteToggle: Element | null = null;
     await waitFor(() => {
-      remoteToggle = rendered.container.querySelector("[data-testid='remote-toggle']");
-      expect(remoteToggle).toBeTruthy();
+      expect(rendered.container.querySelector("[data-testid='remote-toggle']")).toBeTruthy();
     });
+    const remoteToggle = rendered.container.querySelector("[data-testid='remote-toggle']");
     if (!remoteToggle) {
       throw new Error("remote toggle not found");
     }
