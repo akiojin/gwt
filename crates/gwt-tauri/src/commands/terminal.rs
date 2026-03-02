@@ -1659,12 +1659,9 @@ fn build_agent_args(
         "copilot" => {
             match mode {
                 SessionMode::Normal => {}
-                SessionMode::Continue => {
-                    args.push("--continue".to_string());
-                }
-                SessionMode::Resume => {
-                    // Copilot CLI はセッション ID による resume 未対応。
-                    // --continue で直前セッションを再開する。
+                // Copilot CLI はセッション ID による resume 未対応。
+                // --continue で直前セッションを再開する。
+                SessionMode::Continue | SessionMode::Resume => {
                     args.push("--continue".to_string());
                 }
             }
@@ -3765,59 +3762,17 @@ services:
 
     #[test]
     fn build_agent_args_copilot_continue() {
-        let request = LaunchAgentRequest {
-            agent_id: "copilot".to_string(),
-            branch: "main".to_string(),
-            mode: Some(SessionMode::Continue),
-            skip_permissions: Some(false),
-            profile: None,
-            model: None,
-            agent_version: None,
-            reasoning_level: None,
-            collaboration_modes: None,
-            extra_args: None,
-            env_overrides: None,
-            docker_service: None,
-            docker_force_host: None,
-            docker_recreate: None,
-            docker_build: None,
-            docker_keep: None,
-            resume_session_id: None,
-            create_branch: None,
-            issue_number: None,
-            ai_branch_description: None,
-            terminal_shell: None,
-        };
-        let args = build_agent_args("copilot", &request, None, false).unwrap();
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Continue);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
         assert!(args.contains(&"--continue".to_string()));
     }
 
     #[test]
     fn build_agent_args_copilot_skip_permissions() {
-        let request = LaunchAgentRequest {
-            agent_id: "copilot".to_string(),
-            branch: "main".to_string(),
-            mode: Some(SessionMode::Normal),
-            skip_permissions: Some(true),
-            profile: None,
-            model: None,
-            agent_version: None,
-            reasoning_level: None,
-            collaboration_modes: None,
-            extra_args: None,
-            env_overrides: None,
-            docker_service: None,
-            docker_force_host: None,
-            docker_recreate: None,
-            docker_build: None,
-            docker_keep: None,
-            resume_session_id: None,
-            create_branch: None,
-            issue_number: None,
-            ai_branch_description: None,
-            terminal_shell: None,
-        };
-        let args = build_agent_args("copilot", &request, None, false).unwrap();
+        let mut req = make_request("copilot");
+        req.skip_permissions = Some(true);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
         assert!(args.contains(&"--allow-all-tools".to_string()));
     }
 }
