@@ -12,7 +12,9 @@ use gwt_core::docker::{
 };
 use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
 use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::terminal::runner::normalize_windows_command_path;
+use gwt_core::terminal::runner::{
+    choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
+};
 use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
@@ -608,7 +610,19 @@ enum LaunchRunner {
 }
 
 fn preferred_launch_runner() -> LaunchRunner {
-    LaunchRunner::Bunx
+    let bunx_path = resolve_command_path("bunx");
+    let npx_available = resolve_command_path("npx").is_some();
+    preferred_launch_runner_with_availability(bunx_path.as_deref(), npx_available)
+}
+
+fn preferred_launch_runner_with_availability(
+    bunx_path: Option<&std::path::Path>,
+    npx_available: bool,
+) -> LaunchRunner {
+    match choose_fallback_runner(bunx_path, npx_available) {
+        Some(FallbackRunner::Npx) => LaunchRunner::Npx,
+        Some(FallbackRunner::Bunx) | None => LaunchRunner::Bunx,
+    }
 }
 
 fn build_runner_launch(
@@ -2505,8 +2519,23 @@ mod tests {
     }
 
     #[test]
-    fn preferred_launch_runner_is_bunx() {
-        assert!(matches!(preferred_launch_runner(), LaunchRunner::Bunx));
+    fn preferred_launch_runner_with_availability_prefers_npx_when_available() {
+        assert!(matches!(
+            preferred_launch_runner_with_availability(Some(Path::new("/usr/bin/bunx")), true),
+            LaunchRunner::Npx
+        ));
+    }
+
+    #[test]
+    fn preferred_launch_runner_with_availability_falls_back_to_bunx() {
+        assert!(matches!(
+            preferred_launch_runner_with_availability(Some(Path::new("/usr/bin/bunx")), false),
+            LaunchRunner::Bunx
+        ));
+        assert!(matches!(
+            preferred_launch_runner_with_availability(None, false),
+            LaunchRunner::Bunx
+        ));
     }
 
     #[test]

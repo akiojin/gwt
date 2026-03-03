@@ -1,3 +1,4 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/svelte";
 import { renderBar, usageColorClass, formatMemory } from "../statusBarHelpers";
 

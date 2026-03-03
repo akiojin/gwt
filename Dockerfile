@@ -5,6 +5,8 @@ ARG ZIG_VERSION=0.15.2
 ARG ZIG_SHA256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
 ARG PNPM_VERSION=10.29.2
 
+COPY scripts/install-linux-deps.sh /tmp/install-linux-deps.sh
+
 # 開発/CIで必要になる基盤ツール + Tauri/Linux 依存をイメージに同梱
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -12,17 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg \
     jq \
-    patchelf \
     pkg-config \
     python3 \
     ripgrep \
     vim \
     libgtk-3-dev \
-    libwebkit2gtk-4.1-dev \
     libjavascriptcoregtk-4.1-dev \
     libsoup-3.0-dev \
-    libayatana-appindicator3-dev \
-    librsvg2-dev \
+    && SKIP_APT_UPDATE=1 NO_INSTALL_RECOMMENDS=1 bash /tmp/install-linux-deps.sh \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

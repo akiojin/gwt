@@ -1,5 +1,6 @@
 # Git
 .git/
+gwt.git/
 .gitignore
 
 # Dependencies
