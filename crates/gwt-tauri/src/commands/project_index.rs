@@ -440,7 +440,7 @@ pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssues
         let resp = run_chroma_runner(
             &python,
             "index-issues",
-            None,
+            Some(&project_root),
             Some(&db.to_string_lossy()),
             None,
             None,

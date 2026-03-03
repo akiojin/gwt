@@ -410,10 +410,11 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
     return {"ok": True, "results": items}
 
 
-def action_index_issues(db_path: str) -> dict:
+def action_index_issues(project_root: str, db_path: str) -> dict:
     """Index GitHub Issues (gwt-spec label) into ChromaDB collection 'issues'."""
     import chromadb  # type: ignore
 
+    root = Path(project_root).resolve()
     db = Path(db_path).resolve()
     db.mkdir(parents=True, exist_ok=True)
 
@@ -428,6 +429,7 @@ def action_index_issues(db_path: str) -> dict:
                 "--limit", "200",
                 "--json", "number,title,body,labels,state,url",
             ],
+            cwd=str(root),
             capture_output=True,
             text=True,
             check=True,
@@ -610,10 +612,13 @@ def main() -> int:
             return 0
 
         if args.action == "index-issues":
+            if not args.project_root:
+                emit({"ok": False, "error": "--project-root is required for index-issues"})
+                return 2
             if not args.db_path:
                 emit({"ok": False, "error": "--db-path is required for index-issues"})
                 return 2
-            emit(action_index_issues(args.db_path))
+            emit(action_index_issues(args.project_root, args.db_path))
             return 0
 
         if args.action == "search-issues":
