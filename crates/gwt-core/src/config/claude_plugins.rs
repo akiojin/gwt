@@ -1,7 +1,7 @@
 //! Claude Code Plugin marketplace registration (SPEC-f8dab6e2)
 //!
 //! This module provides functionality to register gwt-plugins marketplace and
-//! enable gwt-integration plugin in Claude Code settings.
+//! enable gwt plugin in Claude Code settings.
 //!
 //! Marketplace registration format in `~/.claude/plugins/known_marketplaces.json`:
 //! ```json
@@ -50,9 +50,11 @@ pub type KnownMarketplaces = HashMap<String, MarketplaceEntry>;
 pub const GWT_MARKETPLACE_NAME: &str = "gwt-plugins";
 pub const GWT_MARKETPLACE_SOURCE: &str = "github";
 pub const GWT_MARKETPLACE_REPO: &str = "akiojin/gwt";
-pub const GWT_PLUGIN_NAME: &str = "gwt-integration";
-pub const GWT_PLUGIN_FULL_NAME: &str = "gwt-integration@gwt-plugins";
-pub const LEGACY_GWT_PLUGIN_FULL_NAME: &str = "worktree-protection-hooks@gwt-plugins";
+pub const GWT_PLUGIN_NAME: &str = "gwt";
+pub const GWT_PLUGIN_FULL_NAME: &str = "gwt@gwt-plugins";
+pub const LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME: &str = "gwt-integration@gwt-plugins";
+pub const LEGACY_WORKTREE_PROTECTION_PLUGIN_FULL_NAME: &str =
+    "worktree-protection-hooks@gwt-plugins";
 
 /// Get the path to known_marketplaces.json
 pub fn get_known_marketplaces_path() -> Option<PathBuf> {
@@ -224,9 +226,16 @@ fn migrate_legacy_plugin_key(settings: &mut serde_json::Value) -> bool {
         return false;
     };
 
-    let legacy = enabled_plugins.remove(LEGACY_GWT_PLUGIN_FULL_NAME);
-    let mut changed = legacy.is_some();
-    let should_enable_new = matches!(legacy, Some(serde_json::Value::Bool(true)));
+    let mut changed = false;
+    let mut should_enable_new = false;
+    for legacy_key in [
+        LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME,
+        LEGACY_WORKTREE_PROTECTION_PLUGIN_FULL_NAME,
+    ] {
+        let legacy_value = enabled_plugins.remove(legacy_key);
+        changed |= legacy_value.is_some();
+        should_enable_new |= matches!(legacy_value, Some(serde_json::Value::Bool(true)));
+    }
 
     if should_enable_new && !enabled_plugins.contains_key(GWT_PLUGIN_FULL_NAME) {
         enabled_plugins.insert(GWT_PLUGIN_FULL_NAME.to_string(), serde_json::json!(true));
@@ -236,7 +245,7 @@ fn migrate_legacy_plugin_key(settings: &mut serde_json::Value) -> bool {
     changed
 }
 
-/// Check if gwt-integration plugin is enabled in settings
+/// Check if gwt plugin is enabled in settings
 pub fn is_plugin_enabled_in_settings(settings_path: &Path) -> bool {
     if !settings_path.exists() {
         return false;
@@ -275,7 +284,7 @@ pub fn is_plugin_explicitly_disabled(settings_path: &Path) -> bool {
     is_plugin_explicitly_disabled_in_value(&settings)
 }
 
-/// Enable gwt-integration plugin in settings (FR-004)
+/// Enable gwt plugin in settings (FR-004)
 pub fn enable_worktree_protection_plugin(settings_path: &Path) -> Result<(), GwtError> {
     // Create parent directory if needed (FR-005)
     if let Some(parent) = settings_path.parent() {
@@ -556,7 +565,7 @@ mod tests {
 
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": true}}}}"#,
-            LEGACY_GWT_PLUGIN_FULL_NAME
+            LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME
         );
         std::fs::write(&path, content).unwrap();
 
@@ -573,7 +582,34 @@ mod tests {
             enabled_plugins.get(GWT_PLUGIN_FULL_NAME),
             Some(&serde_json::json!(true))
         );
-        assert!(!enabled_plugins.contains_key(LEGACY_GWT_PLUGIN_FULL_NAME));
+        assert!(!enabled_plugins.contains_key(LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME));
+    }
+
+    #[test]
+    fn test_enable_worktree_protection_plugin_migrates_worktree_hooks_legacy_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+
+        let content = format!(
+            r#"{{"enabledPlugins": {{"{}": true}}}}"#,
+            LEGACY_WORKTREE_PROTECTION_PLUGIN_FULL_NAME
+        );
+        std::fs::write(&path, content).unwrap();
+
+        enable_worktree_protection_plugin(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let enabled_plugins = settings
+            .get("enabledPlugins")
+            .and_then(|value| value.as_object())
+            .unwrap();
+
+        assert_eq!(
+            enabled_plugins.get(GWT_PLUGIN_FULL_NAME),
+            Some(&serde_json::json!(true))
+        );
+        assert!(!enabled_plugins.contains_key(LEGACY_WORKTREE_PROTECTION_PLUGIN_FULL_NAME));
     }
 
     #[test]
@@ -583,7 +619,7 @@ mod tests {
 
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": false, "{}": true}}}}"#,
-            GWT_PLUGIN_FULL_NAME, LEGACY_GWT_PLUGIN_FULL_NAME
+            GWT_PLUGIN_FULL_NAME, LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME
         );
         std::fs::write(&path, content).unwrap();
 
@@ -600,7 +636,7 @@ mod tests {
             enabled_plugins.get(GWT_PLUGIN_FULL_NAME),
             Some(&serde_json::json!(false))
         );
-        assert!(!enabled_plugins.contains_key(LEGACY_GWT_PLUGIN_FULL_NAME));
+        assert!(!enabled_plugins.contains_key(LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME));
     }
 
     // FR-006: Directory auto-creation

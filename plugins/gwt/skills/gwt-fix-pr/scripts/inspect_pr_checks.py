@@ -508,36 +508,61 @@ def check_conflicts(pr_value: str, repo_root: Path) -> dict[str, Any]:
 # =============================================================================
 
 def fetch_change_requests(pr_value: str, repo_root: Path) -> list[dict[str, Any]]:
-    """Fetch reviews with CHANGES_REQUESTED state."""
+    """Fetch active change requests based on each reviewer's latest decision state."""
     repo_slug = fetch_repo_slug(repo_root)
     if not repo_slug:
         return []
 
-    result = run_gh_command(
-        ["api", f"repos/{repo_slug}/pulls/{pr_value}/reviews"],
-        cwd=repo_root,
-    )
-    if result.returncode != 0:
-        return []
+    reviews: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        result = run_gh_command(
+            ["api", f"repos/{repo_slug}/pulls/{pr_value}/reviews?per_page=100&page={page}"],
+            cwd=repo_root,
+        )
+        if result.returncode != 0:
+            return []
 
-    try:
-        reviews = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
+        try:
+            page_reviews = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            return []
 
-    if not isinstance(reviews, list):
-        return []
+        if not isinstance(page_reviews, list):
+            return []
+
+        reviews.extend(review for review in page_reviews if isinstance(review, dict))
+        if len(page_reviews) < 100:
+            break
+        page += 1
+
+    latest_by_reviewer: dict[str, dict[str, Any]] = {}
+    decision_states = {"approved", "changes_requested", "dismissed"}
+    for review in reviews:
+        reviewer = str(review.get("user", {}).get("login") or "").strip()
+        if not reviewer:
+            continue
+        state = normalize_field(review.get("state"))
+        if state not in decision_states:
+            continue
+        reviewer_key = reviewer.lower()
+        current = latest_by_reviewer.get(reviewer_key)
+        if current is None or is_review_newer(review, current):
+            latest_by_reviewer[reviewer_key] = review
 
     change_requests = []
-    for review in reviews:
-        if review.get("state") == "CHANGES_REQUESTED":
-            change_requests.append({
+    for review in latest_by_reviewer.values():
+        if normalize_field(review.get("state")) != "changes_requested":
+            continue
+        change_requests.append(
+            {
                 "id": review.get("id"),
                 "reviewer": review.get("user", {}).get("login", "unknown"),
                 "body": review.get("body", ""),
                 "submittedAt": review.get("submitted_at", ""),
                 "htmlUrl": review.get("html_url", ""),
-            })
+            }
+        )
 
     return change_requests
 
@@ -721,17 +746,21 @@ def fetch_unresolved_threads(pr_value: str, repo_root: Path) -> list[dict[str, A
     owner, repo = parsed
 
     query = """
-    query($owner: String!, $repo: String!, $number: Int!) {
+    query($owner: String!, $repo: String!, $number: Int!, $after: String) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
-          reviewThreads(first: 100) {
+          reviewThreads(first: 100, after: $after) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
             nodes {
               id
               isResolved
               isOutdated
               path
               line
-              comments(first: 10) {
+              comments(first: 100) {
                 nodes {
                   author { login }
                   body
@@ -745,32 +774,46 @@ def fetch_unresolved_threads(pr_value: str, repo_root: Path) -> list[dict[str, A
     }
     """
 
-    result = run_gh_command(
-        [
+    threads: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        args = [
             "api", "graphql",
             "-f", f"query={query}",
             "-f", f"owner={owner}",
             "-f", f"repo={repo}",
             "-F", f"number={pr_value}",
-        ],
-        cwd=repo_root,
-    )
+        ]
+        if cursor:
+            args.extend(["-f", f"after={cursor}"])
 
-    if result.returncode != 0:
-        return []
+        result = run_gh_command(args, cwd=repo_root)
+        if result.returncode != 0:
+            return []
 
-    try:
-        data = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        return []
+        try:
+            data = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return []
 
-    threads = (
-        data.get("data", {})
-        .get("repository", {})
-        .get("pullRequest", {})
-        .get("reviewThreads", {})
-        .get("nodes", [])
-    )
+        review_threads = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+        )
+
+        nodes = review_threads.get("nodes", []) if isinstance(review_threads, dict) else []
+        if not isinstance(nodes, list):
+            return []
+        threads.extend(thread for thread in nodes if isinstance(thread, dict))
+
+        page_info = review_threads.get("pageInfo", {}) if isinstance(review_threads, dict) else {}
+        has_next_page = bool(page_info.get("hasNextPage")) if isinstance(page_info, dict) else False
+        end_cursor = page_info.get("endCursor") if isinstance(page_info, dict) else None
+        cursor = str(end_cursor) if end_cursor else None
+        if not has_next_page or not cursor:
+            break
 
     unresolved = []
     for thread in threads:
@@ -792,6 +835,22 @@ def fetch_unresolved_threads(pr_value: str, repo_root: Path) -> list[dict[str, A
             })
 
     return unresolved
+
+
+def review_sort_key(review: dict[str, Any]) -> tuple[str, int]:
+    submitted_at = str(review.get("submitted_at") or "")
+    created_at = str(review.get("created_at") or "")
+    timestamp = submitted_at or created_at
+    review_id = review.get("id")
+    try:
+        numeric_id = int(review_id)
+    except (TypeError, ValueError):
+        numeric_id = -1
+    return timestamp, numeric_id
+
+
+def is_review_newer(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
+    return review_sort_key(candidate) > review_sort_key(current)
 
 
 # =============================================================================
