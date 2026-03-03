@@ -116,6 +116,34 @@ If automatic apply is not possible, the update dialog tells you to download from
   - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
 - `bunx` or `npx` for local agent launch fallback.
 
+### GitHub Token (PAT) requirements
+
+gwt uses `gh` CLI for GitHub operations. Authenticate with:
+
+```bash
+gh auth login
+```
+
+#### Fine-grained PAT recommended permissions
+
+| Permission | Access | Used for |
+|---|---|---|
+| **Contents** | Read and Write | Repository browsing, branch operations, releases |
+| **Pull requests** | Read and Write | PR create / edit / merge / review |
+| **Issues** | Read and Write | Issue create / edit / comment |
+| **Metadata** | Read | Implicitly granted |
+
+#### Read-only minimum
+
+For browse-only usage (no PR creation or branch management):
+
+| Permission | Access |
+|---|---|
+| **Contents** | Read |
+| **Pull requests** | Read |
+| **Issues** | Read |
+| **Metadata** | Read |
+
 ### Voice Accuracy Evaluation
 
 You can measure WER/CER with a local speech dataset.
