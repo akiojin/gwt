@@ -548,6 +548,26 @@ mod tests {
     }
 
     #[test]
+    fn chroma_collection_names_are_files_and_issues() {
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("\"files\""),
+            "files collection name must be 'files'"
+        );
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("\"issues\""),
+            "issues collection name must be 'issues'"
+        );
+        assert!(
+            !CHROMA_HELPER_SCRIPT.contains("\"project_files\""),
+            "old collection name 'project_files' must not exist"
+        );
+        assert!(
+            !CHROMA_HELPER_SCRIPT.contains("\"github_issues\""),
+            "old collection name 'github_issues' must not exist"
+        );
+    }
+
+    #[test]
     fn chroma_runner_response_deserializes_camel_case_metrics() {
         let json = r#"{
             "ok": true,
