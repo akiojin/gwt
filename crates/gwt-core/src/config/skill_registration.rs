@@ -24,7 +24,7 @@ const PTY_COMMUNICATION_SKILL: ManagedSkill = ManagedSkill {
     name: "gwt-pty-communication",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/gwt-integration/skills/gwt-pty-communication/SKILL.md"
+        "/../../plugins/gwt/skills/gwt-pty-communication/SKILL.md"
     )),
 };
 
@@ -32,7 +32,7 @@ const ISSUE_SPEC_SKILL: ManagedSkill = ManagedSkill {
     name: "gwt-issue-spec-ops",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/gwt-integration/skills/gwt-issue-spec-ops/SKILL.md"
+        "/../../plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md"
     )),
 };
 
@@ -40,7 +40,7 @@ const PROJECT_INDEX_SKILL: ManagedSkill = ManagedSkill {
     name: "gwt-project-index",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/gwt-integration/skills/gwt-project-index/SKILL.md"
+        "/../../plugins/gwt/skills/gwt-project-index/SKILL.md"
     )),
 };
 
@@ -48,7 +48,7 @@ const SPEC_TO_ISSUE_MIGRATION_SKILL: ManagedSkill = ManagedSkill {
     name: "gwt-spec-to-issue-migration",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/gwt-integration/skills/gwt-spec-to-issue-migration/SKILL.md"
+        "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/SKILL.md"
     )),
 };
 
