@@ -900,6 +900,10 @@ fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
         return true;
     }
 
+    if message.contains("does not exist") {
+        return true;
+    }
+
     message.contains("failed to delete") && message.contains("directory not empty")
 }
 
@@ -1211,6 +1215,14 @@ mod tests {
     fn manual_worktree_removal_fallback_for_directory_not_empty_error() {
         let err_msg =
             "worktree remove: error: failed to delete '/tmp/wt': Directory not empty".to_string();
+        assert!(should_fallback_to_manual_worktree_removal(&err_msg));
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_for_does_not_exist_error() {
+        let err_msg =
+            "fatal: validation failed, cannot remove working tree: '/gwt/.git' does not exist"
+                .to_string();
         assert!(should_fallback_to_manual_worktree_removal(&err_msg));
     }
 
