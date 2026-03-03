@@ -377,6 +377,10 @@
     // Close the toast
     toastMessage = null;
     toastAction = null;
+    // Bring window to front so the report dialog is visible (#1256)
+    import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().setFocus())
+      .catch(() => {});
   }
 
   // Subscribe to toast bus for success/info notifications (SPEC-merge-pr FR-006)
