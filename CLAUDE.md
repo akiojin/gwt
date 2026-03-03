@@ -145,7 +145,6 @@
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
 - 仕様・要件は GitHub Issue（`gwt-spec` ラベル）に記載する。Issue の close で管理
-- `specs/archive/` には現在利用しない仕様（TUI版など）のみを保管する
 
 ### README.md / README.ja.md に必ず記載する内容
 
