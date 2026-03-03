@@ -23,7 +23,7 @@ pub use bare_project::BareProjectConfig;
 pub use claude_hook_events::process_claude_hook_event;
 pub use claude_hooks::is_gwt_hooks_registered;
 pub use claude_plugins::{
-    enable_worktree_protection_plugin, get_global_claude_settings_path,
+    disable_gwt_plugin_at, enable_worktree_protection_plugin, get_global_claude_settings_path,
     get_known_marketplaces_path, get_local_claude_settings_path, is_gwt_marketplace_registered,
     is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings, is_plugin_explicitly_disabled,
     register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, setup_gwt_plugin_at,
@@ -44,13 +44,14 @@ pub use session::{
     agent_has_hook_support, get_session_for_branch, infer_agent_status,
     load_sessions_from_worktrees, AgentStatus, Session,
 };
-pub use settings::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
+pub use settings::{Settings, SkillRegistrationPreferences};
 pub use skill_registration::{
     get_skill_registration_status, get_skill_registration_status_with_settings_at_project_root,
     register_agent_skills, register_agent_skills_with_settings_at_project_root,
     register_all_skills, register_all_skills_with_settings_at_project_root,
     repair_skill_registration, repair_skill_registration_with_settings_at_project_root,
-    SkillAgentRegistrationStatus, SkillAgentType, SkillRegistrationStatus,
+    unregister_all_skills, SkillAgentRegistrationStatus, SkillAgentType,
+    SkillRegistrationStatus,
 };
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{

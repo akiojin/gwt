@@ -1013,6 +1013,13 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         }
         tauri::RunEvent::Exit => {
             info!(category = "tauri", event = "Exit", "App exiting");
+
+            // Unregister all skills/plugins on exit
+            #[cfg(not(test))]
+            {
+                info!(category = "skills", "Unregistering skills on app exit");
+                skill_registration::unregister_all_skills();
+            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {

@@ -355,6 +355,50 @@ pub fn enable_worktree_protection_plugin(settings_path: &Path) -> Result<(), Gwt
     Ok(())
 }
 
+/// Disable gwt plugin at a specific settings path (FR-UNREG-001).
+///
+/// Sets `enabledPlugins.gwt@gwt-plugins` to `false`.
+/// No-op if the file, section, or key does not exist.
+/// Does NOT touch `known_marketplaces.json`.
+pub fn disable_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
+    if !settings_path.exists() {
+        return Ok(());
+    }
+
+    let content = match std::fs::read_to_string(settings_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
+    let mut settings: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    let Some(enabled_plugins) = settings
+        .get_mut("enabledPlugins")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return Ok(());
+    };
+
+    if !enabled_plugins.contains_key(GWT_PLUGIN_FULL_NAME) {
+        return Ok(());
+    }
+
+    enabled_plugins.insert(GWT_PLUGIN_FULL_NAME.to_string(), serde_json::json!(false));
+
+    let output = serde_json::to_string_pretty(&settings).map_err(|e| GwtError::ConfigWriteError {
+        reason: e.to_string(),
+    })?;
+
+    if std::fs::write(settings_path, output).is_err() {
+        return Ok(()); // Silent continue
+    }
+
+    Ok(())
+}
+
 /// Get the path to global Claude settings
 pub fn get_global_claude_settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude").join("settings.json"))
@@ -902,6 +946,90 @@ mod tests {
 
         let known_marketplaces = get_known_marketplaces_path().unwrap();
         assert!(known_marketplaces.exists());
+    }
+
+    // --- disable_gwt_plugin_at tests ---
+
+    #[test]
+    fn test_disable_gwt_plugin_at_sets_false() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+        let content = format!(
+            r#"{{"enabledPlugins": {{"{}": true}}}}"#,
+            GWT_PLUGIN_FULL_NAME
+        );
+        std::fs::write(&path, content).unwrap();
+
+        disable_gwt_plugin_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            settings["enabledPlugins"][GWT_PLUGIN_FULL_NAME],
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn test_disable_gwt_plugin_at_noop_no_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("nonexistent.json");
+        assert!(disable_gwt_plugin_at(&path).is_ok());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_disable_gwt_plugin_at_noop_no_section() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
+
+        disable_gwt_plugin_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(settings.get("enabledPlugins").is_none());
+    }
+
+    #[test]
+    fn test_disable_gwt_plugin_at_noop_key_absent() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"enabledPlugins": {"other@other": true}}"#).unwrap();
+
+        disable_gwt_plugin_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(settings["enabledPlugins"].get(GWT_PLUGIN_FULL_NAME).is_none());
+        assert_eq!(
+            settings["enabledPlugins"]["other@other"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn test_disable_gwt_plugin_at_preserves_others() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+        let content = format!(
+            r#"{{"enabledPlugins": {{"{}": true, "other@other": true}}}}"#,
+            GWT_PLUGIN_FULL_NAME
+        );
+        std::fs::write(&path, content).unwrap();
+
+        disable_gwt_plugin_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            settings["enabledPlugins"][GWT_PLUGIN_FULL_NAME],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            settings["enabledPlugins"]["other@other"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

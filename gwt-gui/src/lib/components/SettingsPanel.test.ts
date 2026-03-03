@@ -8,6 +8,7 @@ import type {
   ShellInfo,
 } from "../types";
 
+
 const invokeMock = vi.fn();
 
 vi.mock("$lib/tauriInvoke", () => ({
@@ -28,10 +29,7 @@ const settingsFixture: SettingsData = {
   log_retention_days: 30,
   agent_default: "codex",
   agent_auto_install_deps: true,
-  agent_skill_registration_default_scope: "user",
-  agent_skill_registration_codex_scope: null,
-  agent_skill_registration_claude_scope: null,
-  agent_skill_registration_gemini_scope: null,
+  agent_skill_registration_enabled: true,
   docker_force_host: true,
   ui_font_size: 13,
   terminal_font_size: 13,
@@ -417,79 +415,6 @@ describe("SettingsPanel", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("edits and saves skill registration scope settings", async () => {
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    const defaultScope = rendered.container.querySelector(
-      "#skill-scope-default"
-    ) as HTMLSelectElement;
-    const codexScope = rendered.container.querySelector(
-      "#skill-scope-codex"
-    ) as HTMLSelectElement;
-    const claudeScope = rendered.container.querySelector(
-      "#skill-scope-claude"
-    ) as HTMLSelectElement;
-    const geminiScope = rendered.container.querySelector(
-      "#skill-scope-gemini"
-    ) as HTMLSelectElement;
-
-    await fireEvent.change(defaultScope, { target: { value: "project" } });
-    await fireEvent.change(codexScope, { target: { value: "user" } });
-    await fireEvent.change(claudeScope, { target: { value: "project" } });
-    await fireEvent.change(geminiScope, { target: { value: "local" } });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("save_settings", {
-        settings: expect.objectContaining({
-          agent_skill_registration_default_scope: "project",
-          agent_skill_registration_codex_scope: "user",
-          agent_skill_registration_claude_scope: "project",
-          agent_skill_registration_gemini_scope: "local",
-        }),
-      });
-    });
-  });
-
-  it("rejects scope override save when default scope is missing", async () => {
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    const defaultScope = rendered.container.querySelector(
-      "#skill-scope-default"
-    ) as HTMLSelectElement;
-    const codexScope = rendered.container.querySelector(
-      "#skill-scope-codex"
-    ) as HTMLSelectElement;
-
-    await fireEvent.change(defaultScope, { target: { value: "" } });
-    await fireEvent.change(codexScope, { target: { value: "user" } });
-    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(
-        rendered.getByText("Choose default skill registration scope before setting agent overrides.")
-      ).toBeTruthy();
-    });
-    expect(invokeMock).not.toHaveBeenCalledWith("save_settings", {
-      settings: expect.objectContaining({
-        agent_skill_registration_codex_scope: "user",
-      }),
-    });
   });
 
   it("shows load failure when settings retrieval fails", async () => {
@@ -2344,10 +2269,7 @@ describe("SettingsPanel", () => {
       quality: "ultra" as any,
       model: "",
     } as SettingsData["voice_input"];
-    malformedSettings.agent_skill_registration_default_scope = "invalid" as any;
-    malformedSettings.agent_skill_registration_codex_scope = "user";
-    malformedSettings.agent_skill_registration_claude_scope = "project";
-    malformedSettings.agent_skill_registration_gemini_scope = "local";
+    malformedSettings.agent_skill_registration_enabled = true;
 
     const malformedProfiles: ProfilesConfig = {
       version: 1,

@@ -160,18 +160,14 @@ export async function setMockCommandResponses(
   }, commandResponses);
 }
 
+/**
+ * No-op: the startup skill registration scope dialog has been removed.
+ * This function is kept for backward compatibility with existing E2E tests.
+ */
 export async function dismissSkillRegistrationScopeDialogIfPresent(
-  page: Page,
+  _page: Page,
 ): Promise<void> {
-  const dialog = page.getByRole("dialog", {
-    name: "Skill registration scope",
-  });
-  const visible = await dialog
-    .isVisible({ timeout: 500 })
-    .catch(() => false);
-  if (!visible) return;
-  await dialog.getByRole("button", { name: "Skip for now" }).click();
-  await expect(dialog).toBeHidden();
+  // Dialog no longer exists after scope simplification.
 }
 
 export async function openRecentProject(page: Page): Promise<void> {
