@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 ### Bug Fixes
 
 - Complete issue #1265 runtime runner handling and spec sync (#1419)
+- **e2e:** Remove stale StatusBar agent detection tests
 
 ## [8.1.4] - 2026-03-02
 
