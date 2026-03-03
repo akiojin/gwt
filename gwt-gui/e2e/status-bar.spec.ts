@@ -39,6 +39,7 @@ test("StatusBar does not render legacy agent indicators", async ({ page }) => {
   await expect(page.locator(".statusbar .agents")).toHaveCount(0);
   await expect(page.locator(".statusbar .agent")).toHaveCount(0);
 });
+
 test("StatusBar shows terminal count when terminals open", async ({
   page,
 }) => {
