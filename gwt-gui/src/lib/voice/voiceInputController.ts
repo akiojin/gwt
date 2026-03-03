@@ -305,7 +305,7 @@ export class VoiceInputController {
   };
 
   private startInFlight = false;
-  private runtimeBootstrapAttempted = false;
+  private runtimeBootstrapSucceeded = false;
   private pttPressed = false;
   private activeMode: CaptureMode | null = null;
 
@@ -476,8 +476,7 @@ export class VoiceInputController {
   }
 
   private async ensureRuntimeIfNeeded() {
-    if (this.runtimeBootstrapAttempted) return;
-    this.runtimeBootstrapAttempted = true;
+    if (this.runtimeBootstrapSucceeded) return;
 
     const reason = (this.state.availabilityReason ?? "").toLowerCase();
     if (
@@ -496,10 +495,11 @@ export class VoiceInputController {
         "ensure_voice_runtime"
       );
       if (setupResult.ready) {
+        this.runtimeBootstrapSucceeded = true;
         await this.refreshCapability();
       }
-    } catch {
-      // Fall through to normal unavailable handling.
+    } catch (err) {
+      console.warn("Voice runtime bootstrap failed:", err);
     } finally {
       this.state.preparing = false;
       this.emitState();
@@ -722,9 +722,8 @@ export class VoiceInputController {
   }
 
   private async sendToTerminal(paneId: string, text: string) {
-    const bytes = Array.from(new TextEncoder().encode(text));
     try {
-      await invokeTauri("write_terminal", { paneId, data: bytes });
+      await invokeTauri("send_keys_to_pane", { paneId, text });
     } catch (err) {
       this.setError(`Failed to send transcript to terminal: ${String(err)}`);
     }

@@ -162,13 +162,22 @@ fn find_python_override() -> Result<Option<PathBuf>, String> {
 }
 
 fn find_system_python_binary() -> Result<PathBuf, String> {
-    for candidate in ["python3.12", "python3.11", "python3", "python"] {
+    for candidate in [
+        "python3.13",
+        "python3.12",
+        "python3.11",
+        "python3",
+        "python",
+    ] {
         if let Ok(path) = which::which(candidate) {
             return Ok(path);
         }
     }
 
-    Err("Python runtime not found (checked python3.12/python3.11/python3/python)".to_string())
+    Err(
+        "Python runtime not found (checked python3.13/python3.12/python3.11/python3/python)"
+            .to_string(),
+    )
 }
 
 fn find_managed_python_binary() -> Result<PathBuf, String> {
@@ -199,6 +208,44 @@ fn find_bootstrap_python_binary() -> Result<PathBuf, String> {
         return Ok(path);
     }
     find_system_python_binary()
+}
+
+fn validate_python_version(python: &Path) -> Result<(), String> {
+    let output = command_os(python)
+        .arg("-c")
+        .arg("import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        .output()
+        .map_err(|e| format!("Failed to check Python version: {e}"))?;
+
+    if !output.status.success() {
+        return Err("Failed to determine Python version".to_string());
+    }
+
+    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let parts: Vec<&str> = version_str.split('.').collect();
+    if parts.len() < 2 {
+        return Err(format!("Unexpected Python version format: {version_str}"));
+    }
+
+    let major: u32 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid Python major version: {}", parts[0]))?;
+    let minor: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid Python minor version: {}", parts[1]))?;
+
+    if major != 3 || minor < 11 {
+        return Err(format!(
+            "Python {version_str} is too old; 3.11 or newer is required"
+        ));
+    }
+    if minor >= 14 {
+        return Err(format!(
+            "Python {version_str} is not yet supported by PyTorch; use 3.11–3.13"
+        ));
+    }
+
+    Ok(())
 }
 
 fn gwt_runtime_dir() -> Result<PathBuf, String> {
@@ -381,6 +428,7 @@ fn ensure_managed_voice_runtime_sync() -> Result<VoiceRuntimeSetupResult, String
 
     if !managed_python.is_file() {
         let bootstrap_python = find_bootstrap_python_binary()?;
+        validate_python_version(&bootstrap_python)?;
         let mut cmd = command_os(&bootstrap_python);
         cmd.arg("-m").arg("venv").arg(&venv_dir);
         run_command_with_output(cmd, "Failed to create voice runtime virtual environment")?;
@@ -636,7 +684,7 @@ pub async fn get_voice_capability(
             } else if let Some(runtime_error) = runtime_result {
                 (
                     false,
-                    Some(format!("Voice runtime is unavailable: {runtime_error}")),
+                    Some(format!("Voice runtime is not ready: {runtime_error}")),
                 )
             } else {
                 (true, None)

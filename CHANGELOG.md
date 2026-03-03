@@ -1,6 +1,20 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.2.0] - 2026-03-04
+
+### Bug Fixes
+
+- **project-index:** Scope GitHub issue indexing to target repo (#1430)
+- Narrow worktree remove fallback for missing metadata errors (#1431)
+- **worktree:** Auto-repair unregistered valid worktree in create_for_branch (#1424) (#1425)
+- Stabilize voice runtime setup and python probe (#1432)
+- **core:** Align plugin rename and pr inspection logic (#1435)
+
+### Features
+
+- Add API key peek/copy controls in settings (#1434)
+
 ## [8.1.6] - 2026-03-03
 
 ### Bug Fixes

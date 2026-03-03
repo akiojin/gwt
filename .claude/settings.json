@@ -11,11 +11,10 @@
     "pr-review-toolkit@claude-plugins-official": true,
     "playwright@claude-plugins-official": true,
     "cli-design@akiojin-skills": true,
-    "github@akiojin-skills": true,
     "typescript-lsp@claude-plugins-official": true,
     "ralph-loop@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true,
     "plugin-dev@claude-plugins-official": true,
-    "worktree-protection-hooks@gwt-plugins": true
+    "gwt@gwt-plugins": true
   }
 }

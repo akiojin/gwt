@@ -318,6 +318,22 @@ impl WorktreeManager {
         Ok(true)
     }
 
+    fn colliding_local_branches_for_path(
+        &self,
+        branch_name: &str,
+        path: &Path,
+    ) -> Result<Vec<String>> {
+        let branches = Branch::list_basic(&self.repo_root)?;
+        Ok(branches
+            .into_iter()
+            .map(|b| b.name)
+            .filter(|name| name != branch_name)
+            .filter(|name| {
+                WorktreePath::generate_with_location(&self.repo_root, name, self.location) == path
+            })
+            .collect())
+    }
+
     /// Create a new worktree for an existing branch
     pub fn create_for_branch(&self, branch_name: &str) -> Result<Worktree> {
         debug!(
@@ -491,6 +507,49 @@ impl WorktreeManager {
 
         // FR-038-040: Handle existing path (auto-recovery disabled)
         if path.exists() {
+            // Exception: if the directory holds a valid git worktree gitfile,
+            // recreate the lost metadata so git recognises the worktree again.
+            // This is safe (no files deleted) and fixes the common case where
+            // `git worktree prune` removed metadata while the directory survived.
+            if is_valid_worktree_gitfile(&path) {
+                let collisions =
+                    self.colliding_local_branches_for_path(resolved_branch.as_str(), &path)?;
+                if collisions.is_empty() {
+                    if let Err(err) = self
+                        .repo
+                        .restore_worktree_metadata(&path, resolved_branch.as_str())
+                    {
+                        warn!(
+                            category = "worktree",
+                            path = %path.display(),
+                            branch = resolved_branch.as_str(),
+                            error = %err,
+                            "Failed to restore unregistered worktree metadata"
+                        );
+                    }
+                    if let Ok(Some(wt)) = self.get_registered_worktree_by_path_basic(&path) {
+                        if wt.status == WorktreeStatus::Active
+                            && wt.branch.as_deref() == Some(resolved_branch.as_str())
+                        {
+                            info!(
+                                category = "worktree",
+                                path = %path.display(),
+                                branch = resolved_branch.as_str(),
+                                "Auto-repaired unregistered worktree"
+                            );
+                            return Ok(wt);
+                        }
+                    }
+                } else {
+                    warn!(
+                        category = "worktree",
+                        path = %path.display(),
+                        branch = resolved_branch.as_str(),
+                        colliding_branches = ?collisions,
+                        "Skipping auto-repair for ambiguous worktree path"
+                    );
+                }
+            }
             self.handle_existing_path(&path)?;
         }
 
@@ -967,6 +1026,7 @@ impl WorktreeManager {
                     || message.contains("not a worktree")
                     || message.contains("not a work tree")
                     || message.contains("no such file or directory")
+                    || message.contains("does not exist")
             }
             _ => false,
         }
@@ -1220,6 +1280,19 @@ fn ordered_remote_names(remotes: &[Remote]) -> Vec<String> {
         }
     });
     names
+}
+
+/// Returns true if `path` contains a valid git worktree gitfile (`.git` file with `gitdir:`).
+/// This indicates the directory is a linked worktree, possibly with lost registration.
+fn is_valid_worktree_gitfile(path: &Path) -> bool {
+    let git_file = path.join(".git");
+    if !git_file.is_file() {
+        return false;
+    }
+    match std::fs::read_to_string(&git_file) {
+        Ok(content) => content.trim_start().starts_with("gitdir:"),
+        Err(_) => false,
+    }
 }
 
 fn resolve_remote_branch(
@@ -2234,5 +2307,88 @@ mod tests {
         };
         let wt_head = git_stdout(&wt.path, &["rev-parse", "HEAD"]);
         assert_eq!(wt_head, extra_branch_commit);
+    }
+
+    #[test]
+    fn test_create_for_branch_repairs_unregistered_valid_worktree() {
+        // FR-001/FR-002: path.exists() AND valid gitfile → git worktree repair → return wt
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        // 1. Create a worktree normally
+        let branch = "feature/orphan";
+        let wt = manager.create_new_branch(branch, None).unwrap();
+        let wt_path = wt.path.clone();
+        assert!(wt_path.exists(), "Worktree directory must exist");
+
+        // 2. Simulate metadata loss: delete .git/worktrees/<name>/ while keeping the directory
+        let worktrees_meta = temp.path().join(".git").join("worktrees");
+        std::fs::remove_dir_all(&worktrees_meta).unwrap();
+
+        // 3. Verify git no longer lists the worktree (only main worktree remains)
+        let list_out = crate::process::command("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let list_str = String::from_utf8_lossy(&list_out.stdout);
+        assert!(
+            !list_str.contains(branch),
+            "Branch should not be listed after metadata deletion"
+        );
+
+        // 4. Verify the directory and gitfile still exist
+        assert!(wt_path.exists(), "Worktree directory must still exist");
+        assert!(
+            is_valid_worktree_gitfile(&wt_path),
+            "Gitfile must be valid (starts with 'gitdir:')"
+        );
+
+        // 5. create_for_branch should succeed via auto-repair
+        let repaired = manager.create_for_branch(branch).unwrap();
+        assert_eq!(repaired.branch.as_deref(), Some(branch));
+        assert!(repaired.path.exists());
+    }
+
+    #[test]
+    fn test_create_for_branch_skips_ambiguous_auto_repair_for_colliding_branch_paths() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        Branch::create(temp.path(), "feature-foo", "HEAD").unwrap();
+        Branch::create(temp.path(), "feature/foo", "HEAD").unwrap();
+
+        let wt = manager.create_for_branch("feature-foo").unwrap();
+        assert_eq!(wt.branch.as_deref(), Some("feature-foo"));
+        assert!(wt.path.exists());
+
+        // Simulate metadata loss while keeping the worktree directory and gitfile.
+        let worktrees_meta = temp.path().join(".git").join("worktrees");
+        std::fs::remove_dir_all(&worktrees_meta).unwrap();
+
+        let result = manager.create_for_branch("feature/foo");
+        assert!(matches!(result, Err(GwtError::WorktreePathConflict { .. })));
+
+        let list_out = crate::process::command("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let list_str = String::from_utf8_lossy(&list_out.stdout);
+        assert!(
+            !list_str.contains("feature/foo"),
+            "Ambiguous auto-repair must not rewrite metadata to requested branch"
+        );
+    }
+
+    #[test]
+    fn test_is_missing_worktree_error_does_not_exist() {
+        let err = GwtError::GitOperationFailed {
+            operation: "worktree remove".to_string(),
+            details:
+                "fatal: validation failed, cannot remove working tree: '/gwt/.git' does not exist"
+                    .to_string(),
+        };
+        assert!(WorktreeManager::is_missing_worktree_error(&err));
     }
 }
