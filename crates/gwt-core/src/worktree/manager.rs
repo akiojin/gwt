@@ -318,6 +318,22 @@ impl WorktreeManager {
         Ok(true)
     }
 
+    fn colliding_local_branches_for_path(
+        &self,
+        branch_name: &str,
+        path: &Path,
+    ) -> Result<Vec<String>> {
+        let branches = Branch::list_basic(&self.repo_root)?;
+        Ok(branches
+            .into_iter()
+            .map(|b| b.name)
+            .filter(|name| name != branch_name)
+            .filter(|name| {
+                WorktreePath::generate_with_location(&self.repo_root, name, self.location) == path
+            })
+            .collect())
+    }
+
     /// Create a new worktree for an existing branch
     pub fn create_for_branch(&self, branch_name: &str) -> Result<Worktree> {
         debug!(
@@ -496,21 +512,33 @@ impl WorktreeManager {
             // This is safe (no files deleted) and fixes the common case where
             // `git worktree prune` removed metadata while the directory survived.
             if is_valid_worktree_gitfile(&path) {
-                let _ = self
-                    .repo
-                    .restore_worktree_metadata(&path, resolved_branch.as_str());
-                if let Ok(Some(wt)) = self.get_registered_worktree_by_path_basic(&path) {
-                    if wt.status == WorktreeStatus::Active
-                        && wt.branch.as_deref() == Some(resolved_branch.as_str())
-                    {
-                        info!(
-                            category = "worktree",
-                            path = %path.display(),
-                            branch = resolved_branch.as_str(),
-                            "Auto-repaired unregistered worktree"
-                        );
-                        return Ok(wt);
+                let collisions =
+                    self.colliding_local_branches_for_path(resolved_branch.as_str(), &path)?;
+                if collisions.is_empty() {
+                    let _ = self
+                        .repo
+                        .restore_worktree_metadata(&path, resolved_branch.as_str());
+                    if let Ok(Some(wt)) = self.get_registered_worktree_by_path_basic(&path) {
+                        if wt.status == WorktreeStatus::Active
+                            && wt.branch.as_deref() == Some(resolved_branch.as_str())
+                        {
+                            info!(
+                                category = "worktree",
+                                path = %path.display(),
+                                branch = resolved_branch.as_str(),
+                                "Auto-repaired unregistered worktree"
+                            );
+                            return Ok(wt);
+                        }
                     }
+                } else {
+                    warn!(
+                        category = "worktree",
+                        path = %path.display(),
+                        branch = resolved_branch.as_str(),
+                        colliding_branches = ?collisions,
+                        "Skipping auto-repair for ambiguous worktree path"
+                    );
                 }
             }
             self.handle_existing_path(&path)?;
@@ -2310,5 +2338,36 @@ mod tests {
         let repaired = manager.create_for_branch(branch).unwrap();
         assert_eq!(repaired.branch.as_deref(), Some(branch));
         assert!(repaired.path.exists());
+    }
+
+    #[test]
+    fn test_create_for_branch_skips_ambiguous_auto_repair_for_colliding_branch_paths() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        Branch::create(temp.path(), "feature-foo", "HEAD").unwrap();
+        Branch::create(temp.path(), "feature/foo", "HEAD").unwrap();
+
+        let wt = manager.create_for_branch("feature-foo").unwrap();
+        assert_eq!(wt.branch.as_deref(), Some("feature-foo"));
+        assert!(wt.path.exists());
+
+        // Simulate metadata loss while keeping the worktree directory and gitfile.
+        let worktrees_meta = temp.path().join(".git").join("worktrees");
+        std::fs::remove_dir_all(&worktrees_meta).unwrap();
+
+        let result = manager.create_for_branch("feature/foo");
+        assert!(matches!(result, Err(GwtError::WorktreePathConflict { .. })));
+
+        let list_out = crate::process::command("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let list_str = String::from_utf8_lossy(&list_out.stdout);
+        assert!(
+            !list_str.contains("feature/foo"),
+            "Ambiguous auto-repair must not rewrite metadata to requested branch"
+        );
     }
 }

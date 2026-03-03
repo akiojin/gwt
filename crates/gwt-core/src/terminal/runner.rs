@@ -267,14 +267,15 @@ fn strip_windows_invocation_prefix(value: &str) -> &str {
     loop {
         let next = if let Some(rest) = current.strip_prefix('&') {
             Some(rest.trim_start())
-        } else if current.len() >= 4
-            && current[..4].eq_ignore_ascii_case("call")
+        } else if current
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("call"))
             && current
                 .as_bytes()
                 .get(4)
                 .is_some_and(|b| b.is_ascii_whitespace())
         {
-            Some(current[4..].trim_start())
+            current.get(4..).map(|rest| rest.trim_start())
         } else {
             None
         };
@@ -608,6 +609,14 @@ mod tests {
                 r#"call '\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#
             ),
             r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+    }
+
+    #[test]
+    fn normalize_windows_command_path_handles_multibyte_prefix_without_panic() {
+        assert_eq!(
+            normalize_windows_command_path("あ¢call npx.cmd --yes @openai/codex@latest"),
+            "あ¢call npx.cmd --yes @openai/codex@latest"
         );
     }
 
