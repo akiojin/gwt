@@ -1,5 +1,18 @@
 # Docker環境での利用
 
+## 依存関係について
+
+`Dockerfile` には、開発/CIで必要になる以下の依存関係を同梱しています。
+
+- `pnpm@10.29.2`（`corepack` で有効化）
+- Tauri/Linuxビルド依存（`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libsoup-3.0-dev`, `libjavascriptcoregtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `patchelf` など）
+
+依存定義を変更した場合は、必ずイメージを再ビルドしてください。
+
+```bash
+docker compose build --no-cache
+```
+
 ## エラー対応
 
 ### `exec /entrypoint.sh: no such file or directory` エラーが発生した場合

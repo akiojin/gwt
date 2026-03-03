@@ -12,7 +12,8 @@ export function supportsModelFor(agentId: string): boolean {
     agentId === "codex" ||
     agentId === "claude" ||
     agentId === "gemini" ||
-    agentId === "opencode"
+    agentId === "opencode" ||
+    agentId === "copilot"
   );
 }
 

@@ -147,6 +147,9 @@ fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
     if id_lower.contains("opencode") || id_lower.contains("open-code") {
         return "OpenCode".to_string();
     }
+    if id_lower.contains("copilot") {
+        return "GitHub Copilot".to_string();
+    }
 
     let label_lower = tool_label.to_lowercase();
     if label_lower.contains("claude") {
@@ -160,6 +163,9 @@ fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
     }
     if label_lower.contains("opencode") || label_lower.contains("open-code") {
         return "OpenCode".to_string();
+    }
+    if label_lower.contains("copilot") {
+        return "GitHub Copilot".to_string();
     }
 
     tool_label.to_string()
@@ -176,6 +182,7 @@ fn canonical_tool_id(tool_id: &str) -> String {
         "codex" | "codex-cli" => return "codex-cli".to_string(),
         "gemini" | "gemini-cli" => return "gemini-cli".to_string(),
         "opencode" | "open-code" => return "opencode".to_string(),
+        "copilot" | "github-copilot" => return "github-copilot".to_string(),
         _ => {}
     }
 
@@ -188,6 +195,7 @@ fn canonical_tool_id(tool_id: &str) -> String {
         "codex" | "codexcli" => "codex-cli".to_string(),
         "gemini" | "geminicli" => "gemini-cli".to_string(),
         "opencode" => "opencode".to_string(),
+        "copilot" | "githubcopilot" => "github-copilot".to_string(),
         _ => trimmed.to_string(),
     }
 }
@@ -994,6 +1002,9 @@ mod tests {
         assert_eq!(canonical_tool_id("Claude Code"), "claude-code");
         assert_eq!(canonical_tool_id("claude code"), "claude-code");
         assert_eq!(canonical_tool_id("Gemini CLI"), "gemini-cli");
+        assert_eq!(canonical_tool_id("copilot"), "github-copilot");
+        assert_eq!(canonical_tool_id("GitHub Copilot"), "github-copilot");
+        assert_eq!(canonical_tool_id("github copilot"), "github-copilot");
     }
 
     #[test]
@@ -1116,6 +1127,33 @@ mod tests {
         };
         let result = entry.format_tool_usage();
         assert_eq!(result, "Codex@latest");
+    }
+
+    #[test]
+    fn test_format_tool_usage_copilot() {
+        let entry = ToolSessionEntry {
+            branch: "main".to_string(),
+            worktree_path: None,
+            tool_id: "github-copilot".to_string(),
+            tool_label: "Copilot".to_string(),
+            session_id: None,
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: Some("latest".to_string()),
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
+            timestamp: 1704067200000,
+        };
+        let result = entry.format_tool_usage();
+        assert_eq!(result, "GitHub Copilot@latest");
     }
 
     #[test]

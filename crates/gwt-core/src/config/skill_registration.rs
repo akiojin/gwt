@@ -44,10 +44,19 @@ const PROJECT_INDEX_SKILL: ManagedSkill = ManagedSkill {
     )),
 };
 
+const SPEC_TO_ISSUE_MIGRATION_SKILL: ManagedSkill = ManagedSkill {
+    name: "gwt-spec-to-issue-migration",
+    body: include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/gwt-integration/skills/gwt-spec-to-issue-migration/SKILL.md"
+    )),
+};
+
 const MANAGED_SKILLS: &[ManagedSkill] = &[
     PTY_COMMUNICATION_SKILL,
     ISSUE_SPEC_SKILL,
     PROJECT_INDEX_SKILL,
+    SPEC_TO_ISSUE_MIGRATION_SKILL,
 ];
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
 const SETTINGS_LOAD_FAILED_CODE: &str = "SETTINGS_LOAD_FAILED";
@@ -634,6 +643,16 @@ mod tests {
             let path = tmp.path().join(skill.name).join("SKILL.md");
             assert!(path.exists(), "{} should exist", path.display());
         }
+    }
+
+    #[test]
+    fn managed_skills_include_spec_to_issue_migration() {
+        assert!(
+            MANAGED_SKILLS
+                .iter()
+                .any(|skill| skill.name == "gwt-spec-to-issue-migration"),
+            "managed skills must include gwt-spec-to-issue-migration"
+        );
     }
 
     #[test]
