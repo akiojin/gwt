@@ -1049,7 +1049,20 @@ fn is_valid_worktree_meta_dir(meta_dir: &Path, worktrees_root: &Path) -> bool {
     let meta = normalize_absolute_path(meta_dir);
     let root = normalize_absolute_path(worktrees_root);
 
-    meta.starts_with(&root) && meta.parent().is_some_and(|parent| parent == root.as_path())
+    if !(meta.starts_with(&root) && meta.parent().is_some_and(|parent| parent == root.as_path())) {
+        return false;
+    }
+
+    // Reject pre-existing symlink children such as
+    // "<worktrees_root>/<name> -> /outside/path".
+    if std::fs::symlink_metadata(&meta)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    true
 }
 
 fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
@@ -1059,7 +1072,15 @@ fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
         return true;
     }
 
-    message.contains("failed to delete") && message.contains("directory not empty")
+    if message.contains("failed to delete") && message.contains("directory not empty") {
+        return true;
+    }
+
+    message.contains("validation failed")
+        && message.contains("does not exist")
+        && (message.contains("cannot remove working tree")
+            || message.contains("cannot remove worktree")
+            || message.contains("cannot remove work tree"))
 }
 
 /// Information about a worktree from git worktree list
@@ -1155,6 +1176,23 @@ mod tests {
             let escaped = PathBuf::from("/repo/.git/worktrees/../hooks/feature-foo");
             assert!(!is_valid_worktree_meta_dir(&escaped, &root));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_valid_worktree_meta_dir_rejects_symlink_child() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join(".git").join("worktrees");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).expect("worktrees root");
+        std::fs::create_dir_all(&outside).expect("outside");
+
+        let meta = root.join("feature-foo");
+        symlink(&outside, &meta).expect("symlink");
+
+        assert!(!is_valid_worktree_meta_dir(&meta, &root));
     }
 
     fn create_test_repo() -> (TempDir, Repository) {
@@ -1403,6 +1441,22 @@ mod tests {
         let err_msg =
             "worktree remove: error: failed to delete '/tmp/wt': Directory not empty".to_string();
         assert!(should_fallback_to_manual_worktree_removal(&err_msg));
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_for_missing_metadata_validation_error() {
+        let err_msg =
+            "fatal: validation failed, cannot remove working tree: '/gwt/.git' does not exist"
+                .to_string();
+        assert!(should_fallback_to_manual_worktree_removal(&err_msg));
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_disabled_for_generic_does_not_exist_error() {
+        let err_msg =
+            "fatal: cannot remove worktree '/tmp/wt': worktree is locked: reason: '/tmp/path' does not exist"
+                .to_string();
+        assert!(!should_fallback_to_manual_worktree_removal(&err_msg));
     }
 
     #[test]
