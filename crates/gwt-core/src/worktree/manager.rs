@@ -515,9 +515,18 @@ impl WorktreeManager {
                 let collisions =
                     self.colliding_local_branches_for_path(resolved_branch.as_str(), &path)?;
                 if collisions.is_empty() {
-                    let _ = self
+                    if let Err(err) = self
                         .repo
-                        .restore_worktree_metadata(&path, resolved_branch.as_str());
+                        .restore_worktree_metadata(&path, resolved_branch.as_str())
+                    {
+                        warn!(
+                            category = "worktree",
+                            path = %path.display(),
+                            branch = resolved_branch.as_str(),
+                            error = %err,
+                            "Failed to restore unregistered worktree metadata"
+                        );
+                    }
                     if let Ok(Some(wt)) = self.get_registered_worktree_by_path_basic(&path) {
                         if wt.status == WorktreeStatus::Active
                             && wt.branch.as_deref() == Some(resolved_branch.as_str())

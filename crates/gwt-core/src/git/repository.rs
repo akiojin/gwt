@@ -1,7 +1,8 @@
 //! Repository operations
 
 use crate::error::{GwtError, Result};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
 /// Repository type classification (SPEC-a70a1ece)
@@ -918,11 +919,23 @@ impl Repository {
             .trim();
 
         // Resolve to an absolute path
-        let meta_dir = if Path::new(gitdir_str).is_absolute() {
+        let resolved_meta_dir = if Path::new(gitdir_str).is_absolute() {
             PathBuf::from(gitdir_str)
         } else {
             worktree_path.join(gitdir_str)
         };
+        let worktrees_root = resolve_git_worktrees_root(&self.root)?;
+        if !is_valid_worktree_meta_dir(&resolved_meta_dir, &worktrees_root) {
+            return Err(GwtError::GitOperationFailed {
+                operation: "validate worktree metadata dir".to_string(),
+                details: format!(
+                    "Refusing to restore metadata outside worktrees root: meta_dir={} worktrees_root={}",
+                    resolved_meta_dir.display(),
+                    worktrees_root.display()
+                ),
+            });
+        }
+        let meta_dir = normalize_absolute_path(&resolved_meta_dir);
 
         // Create the metadata directory (including parent .git/worktrees/ if absent)
         std::fs::create_dir_all(&meta_dir).map_err(|e| GwtError::GitOperationFailed {
@@ -967,6 +980,76 @@ impl Repository {
         );
         Ok(())
     }
+}
+
+fn resolve_git_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
+    let output = crate::process::command("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "worktrees",
+        ])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| GwtError::GitOperationFailed {
+            operation: "rev-parse --git-path worktrees".to_string(),
+            details: e.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(GwtError::GitOperationFailed {
+            operation: "rev-parse --git-path worktrees".to_string(),
+            details: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return Err(GwtError::GitOperationFailed {
+            operation: "rev-parse --git-path worktrees".to_string(),
+            details: "empty worktrees path".to_string(),
+        });
+    }
+
+    Ok(PathBuf::from(raw))
+}
+
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut prefix: Option<OsString> = None;
+    let mut has_root = false;
+    let mut normals: Vec<OsString> = Vec::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(p) => prefix = Some(p.as_os_str().to_os_string()),
+            Component::RootDir => has_root = true,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = normals.pop();
+            }
+            Component::Normal(part) => normals.push(part.to_os_string()),
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    if let Some(p) = prefix {
+        normalized.push(p);
+    }
+    if has_root {
+        normalized.push(std::path::MAIN_SEPARATOR.to_string());
+    }
+    for part in normals {
+        normalized.push(part);
+    }
+
+    normalized
+}
+
+fn is_valid_worktree_meta_dir(meta_dir: &Path, worktrees_root: &Path) -> bool {
+    let meta = normalize_absolute_path(meta_dir);
+    let root = normalize_absolute_path(worktrees_root);
+
+    meta.starts_with(&root) && meta.parent().is_some_and(|parent| parent == root.as_path())
 }
 
 fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
@@ -1041,6 +1124,38 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn is_valid_worktree_meta_dir_accepts_direct_child() {
+        #[cfg(windows)]
+        {
+            let root = PathBuf::from(r"C:\repo\.git\worktrees");
+            let meta = PathBuf::from(r"C:\repo\.git\worktrees\feature-foo");
+            assert!(is_valid_worktree_meta_dir(&meta, &root));
+        }
+        #[cfg(not(windows))]
+        {
+            let root = PathBuf::from("/repo/.git/worktrees");
+            let meta = PathBuf::from("/repo/.git/worktrees/feature-foo");
+            assert!(is_valid_worktree_meta_dir(&meta, &root));
+        }
+    }
+
+    #[test]
+    fn is_valid_worktree_meta_dir_rejects_escape_paths() {
+        #[cfg(windows)]
+        {
+            let root = PathBuf::from(r"C:\repo\.git\worktrees");
+            let escaped = PathBuf::from(r"C:\repo\.git\worktrees\..\hooks\feature-foo");
+            assert!(!is_valid_worktree_meta_dir(&escaped, &root));
+        }
+        #[cfg(not(windows))]
+        {
+            let root = PathBuf::from("/repo/.git/worktrees");
+            let escaped = PathBuf::from("/repo/.git/worktrees/../hooks/feature-foo");
+            assert!(!is_valid_worktree_meta_dir(&escaped, &root));
+        }
+    }
 
     fn create_test_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
