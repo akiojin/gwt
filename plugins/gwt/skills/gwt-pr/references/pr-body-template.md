@@ -1,13 +1,13 @@
 <!-- ============================================================
-  PR Body Template — gwt-pr skill
+PR Body Template — gwt-pr skill
 
-  Rules:
-  - REQUIRED sections: Summary, Changes, Testing, Related Issues, Checklist
-  - CONDITIONAL sections: Context, Risk/Impact, Screenshots, Deployment
-  - OPTIONAL sections: Notes
-  - Remove CONDITIONAL sections entirely if not applicable
-  - Remove all <!-- GUIDE: ... --> comments before creating the PR
-  - No "TODO" may remain in REQUIRED sections
+Rules:
+- REQUIRED sections: Summary, Changes, Testing, Related Issues, Checklist
+- CONDITIONAL sections: Context, Risk/Impact, Screenshots, Deployment
+- OPTIONAL sections: Notes
+- Remove CONDITIONAL sections entirely if not applicable
+- Remove all <!-- GUIDE: ... --> comments before creating the PR
+- No "TODO" may remain in REQUIRED sections
 ============================================================ -->
 
 ## Summary
@@ -43,7 +43,7 @@
 - [ ] CHANGELOG impact considered (breaking change flagged in commit)
 
 <!-- ============================================================
-  CONDITIONAL SECTIONS — Delete entire section if not applicable
+CONDITIONAL SECTIONS — Delete entire section if not applicable
 ============================================================ -->
 
 ## Context
@@ -74,7 +74,7 @@
 - {deployment steps or "Standard deploy — no special steps"}
 
 <!-- ============================================================
-  OPTIONAL SECTIONS — Delete if nothing to add
+OPTIONAL SECTIONS — Delete if nothing to add
 ============================================================ -->
 
 ## Notes

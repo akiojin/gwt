@@ -129,7 +129,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --
 
    Output MUST use this exact structure:
 
-   ```text
+   ````text
    ## Issue Analysis Report: #<number>
 
    **Issue Type:** BUG | FEATURE | ENHANCEMENT | DOCUMENTATION | QUESTION | UNCLASSIFIED
@@ -148,9 +148,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --
    - `<error message 2>`
 
    #### Stack Traces
-   ```
+   ~~~
    <stack trace>
-   ```
+   ~~~
 
    #### File References
    - `path/to/file.ext:42` [EXISTS]
@@ -213,7 +213,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --
    ---
 
    **Summary:** <N> actionable items, <M> informational items, <K> codebase matches.
-   ```
+   ````
 
    **Category labels:** `CODE-FIX`, `CONFIG-FIX`, `TEST-FIX`, `DEPENDENCY`, `DOCUMENTATION`, `DESIGN-DECISION`, `INVESTIGATION`
 
@@ -275,7 +275,7 @@ Fetches comprehensive issue data:
 Parses issue body and comments for:
 
 - Error messages (`Error:`, `TypeError:`, `panicked at`, etc.)
-- Stack traces (`at `, `Traceback`, `thread '...' panicked`, etc.)
+- Stack traces (`at`, `Traceback`, `thread '...' panicked`, etc.)
 - File path references (`path/to/file.ext:123` format)
 - Fenced code blocks
 - Well-known sections (Steps to Reproduce, Expected Behavior, Actual Behavior)

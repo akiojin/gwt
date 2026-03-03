@@ -195,10 +195,9 @@ def main() -> int:
             "issueComments": len(issue_comments),
         }
 
-        review_action_required = bool(
-            change_requests or unresolved_threads or review_summaries or review_comments or issue_comments
-        )
+        review_action_required = bool(change_requests or unresolved_threads)
         results["reviewActionRequired"] = review_action_required
+        results["reviewFeedbackPresent"] = bool(review_summaries or review_comments or issue_comments)
         if review_action_required:
             has_issues = True
 

@@ -141,26 +141,24 @@ Next
    - Optional: labels, reviewers, assignees, draft
 
 8. **Build PR body from template**
-  - Read the template from the gwt-pr skill path (not the current project path):
-    - `PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"`
-  - Read `${PR_BODY_TEMPLATE}` and fill all required placeholders.
-  - **Conditional セクションが該当しない場合はセクションごと削除する。**
-  - **テンプレート内の `<!-- GUIDE: ... -->` コメントは最終出力から削除する。**
-  - **Required セクションに TODO が残っている場合は PR を作成せず、ユーザーに不足情報を確認する。**
+   - Read the template from the gwt-pr skill path (not the current project path):
+     - `PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"`
+   - Read `${PR_BODY_TEMPLATE}` and fill all required placeholders.
+   - **Conditional セクションが該当しない場合はセクションごと削除する。**
+   - **テンプレート内の `<!-- GUIDE: ... -->` コメントは最終出力から削除する。**
+   - **Required セクションに TODO が残っている場合は PR を作成せず、ユーザーに不足情報を確認する。**
 
 9. **Create or update the PR**
    - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
    - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
 
 10. **Return PR URL**
-   - `gh pr view <number> --json url -q .url`
+    - `gh pr view <number> --json url -q .url`
 
 11. **Post-PR CI/merge check (automatic).**
-   - After PR creation or push, load `skills/gwt-fix-pr/SKILL.md` and
-     follow its workflow to inspect CI status, merge state, and review feedback.
-   - If all CI checks are still pending, poll (30s interval) until complete.
-   - If conflicts, review issues, or CI failures are detected, proceed with
-     the gwt-fix-pr workflow to diagnose and fix.
+    - After PR creation or push, load `skills/gwt-fix-pr/SKILL.md` and follow its workflow to inspect CI status, merge state, and review feedback.
+    - If all CI checks are still pending, poll (30s interval) until complete.
+    - If conflicts, review issues, or CI failures are detected, proceed with the gwt-fix-pr workflow to diagnose and fix.
 
 ## Command snippets (bash)
 
