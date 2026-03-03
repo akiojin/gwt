@@ -70,6 +70,9 @@
   let skillStatusRepairing: boolean = $state(false);
   let skillStatusMessage: string = $state("");
 
+  let peekingApiKey: boolean = $state(false);
+  let apiKeyCopied: boolean = $state(false);
+
   type AIModelInfo = {
     id: string;
   };
@@ -601,6 +604,16 @@
       ...profiles,
       profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
+  }
+
+  async function handleCopyApiKey() {
+    const key = currentProfile?.ai?.api_key ?? "";
+    if (!key) return;
+    try {
+      await navigator.clipboard.writeText(key);
+      apiKeyCopied = true;
+      setTimeout(() => { apiKeyCopied = false; }, 1500);
+    } catch { /* silently fail */ }
   }
 
   function updateVoiceInputField(
@@ -1319,15 +1332,36 @@
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">API Key</span>
-                    <input
-                      type="password"
-                      autocapitalize="off"
-                      autocorrect="off"
-                      autocomplete="off"
-                      spellcheck="false"
-                      value={currentAi?.api_key ?? ""}
-                      oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
-                    />
+                    <div class="row ai-apikey-row">
+                      <input
+                        type={peekingApiKey ? "text" : "password"}
+                        readonly={peekingApiKey}
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
+                        spellcheck="false"
+                        value={currentAi?.api_key ?? ""}
+                        oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
+                      />
+                      {#if (currentAi?.api_key ?? "").length > 0}
+                        <button
+                          class="btn btn-ghost btn-icon btn-peek-apikey"
+                          class:peeking={peekingApiKey}
+                          onmousedown={() => { peekingApiKey = true; }}
+                          onmouseup={() => { peekingApiKey = false; }}
+                          onmouseleave={() => { peekingApiKey = false; }}
+                          title="Peek API Key"
+                          aria-label="Peek API Key"
+                        ></button>
+                        <button
+                          class="btn btn-ghost btn-icon btn-copy-apikey"
+                          class:copied={apiKeyCopied}
+                          onclick={handleCopyApiKey}
+                          title={apiKeyCopied ? "Copied!" : "Copy API Key"}
+                          aria-label={apiKeyCopied ? "Copied!" : "Copy API Key"}
+                        ></button>
+                      {/if}
+                    </div>
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">Model</span>
@@ -1695,6 +1729,83 @@
     outline: none;
     max-width: none;
   }
+
+  .ai-apikey-row input { flex: 1; min-width: 0; }
+
+  .btn-icon {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+
+  /* Eye icon (peek) */
+  .btn-peek-apikey::before {
+    content: "";
+    display: block;
+    width: 16px;
+    height: 10px;
+    border: 2px solid var(--text-secondary);
+    border-radius: 75% / 100%;
+  }
+  .btn-peek-apikey::after {
+    content: "";
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    background: var(--text-secondary);
+    border-radius: 50%;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  .btn-peek-apikey:not(.peeking)::before {
+    background: linear-gradient(
+      to top right,
+      transparent calc(50% - 1px),
+      var(--text-secondary) calc(50% - 1px),
+      var(--text-secondary) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    );
+  }
+  .btn-peek-apikey.peeking::before {
+    border-color: var(--accent);
+    background: none;
+  }
+  .btn-peek-apikey.peeking::after { background: var(--accent); }
+
+  /* Copy icon */
+  .btn-copy-apikey::before {
+    content: "";
+    display: block;
+    width: 10px;
+    height: 12px;
+    border: 2px solid var(--text-secondary);
+    border-radius: 2px;
+  }
+  .btn-copy-apikey::after {
+    content: "";
+    position: absolute;
+    width: 10px;
+    height: 12px;
+    border: 2px solid var(--text-secondary);
+    border-radius: 2px;
+    top: calc(50% - 8px);
+    left: calc(50% - 2px);
+  }
+  .btn-copy-apikey.copied::before,
+  .btn-copy-apikey.copied::after { border-color: var(--green); }
+
+  /* Hover states */
+  .btn-peek-apikey:hover::before { border-color: var(--text-primary); }
+  .btn-peek-apikey:hover::after { background: var(--text-primary); }
+  .btn-copy-apikey:hover::before,
+  .btn-copy-apikey:hover::after { border-color: var(--text-primary); }
 
   .ai-model-row {
     align-items: center;
