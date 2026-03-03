@@ -278,11 +278,9 @@
 
       const seen = new Set<string>();
 
-      if (!agentNotInstalled) {
-        const ver = selectedAgentInfo?.version?.trim() || "installed";
-        opts.push({ value: "installed", label: `Installed (${ver})` });
-        seen.add("installed");
-      }
+      const ver = selectedAgentInfo?.version?.trim() || "installed";
+      opts.push({ value: "installed", label: `Installed (${ver})` });
+      seen.add("installed");
 
       opts.push({ value: "latest", label: "latest" });
       seen.add("latest");
@@ -458,12 +456,9 @@
 
     const storedVersion = agentVersionByAgent[currentAgent];
     if (storedVersion) {
-      agentVersion =
-        storedVersion === "installed" && currentAgentNotInstalled
-          ? "latest"
-          : storedVersion;
+      agentVersion = storedVersion;
     } else {
-      agentVersion = currentAgentNotInstalled ? "latest" : "installed";
+      agentVersion = "installed";
     }
   });
 
