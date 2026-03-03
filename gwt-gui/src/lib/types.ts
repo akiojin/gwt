@@ -239,6 +239,15 @@ export interface ProjectIndexSearchResult {
   size: number | null;
 }
 
+export interface GitHubIssueSearchResult {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  labels: string[];
+  distance: number | null;
+}
+
 export interface Tab {
   id: string;
   label: string;

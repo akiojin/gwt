@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -409,6 +410,126 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
     return {"ok": True, "results": items}
 
 
+def action_index_issues(db_path: str) -> dict:
+    """Index GitHub Issues (gwt-spec label) into ChromaDB collection 'github_issues'."""
+    import chromadb  # type: ignore
+
+    db = Path(db_path).resolve()
+    db.mkdir(parents=True, exist_ok=True)
+
+    start = time.monotonic()
+
+    try:
+        result = subprocess.run(
+            [
+                "gh", "issue", "list",
+                "--label", "gwt-spec",
+                "--state", "all",
+                "--limit", "200",
+                "--json", "number,title,body,labels,state,url",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        issues = json.loads(result.stdout)
+    except subprocess.CalledProcessError as exc:
+        return {"ok": False, "error": f"gh issue list failed: {exc.stderr.strip()}"}
+    except (json.JSONDecodeError, ValueError) as exc:
+        return {"ok": False, "error": f"Failed to parse gh output: {exc}"}
+
+    client = chromadb.PersistentClient(path=str(db))
+    collection = client.get_or_create_collection(
+        name="github_issues",
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    # Clear existing entries before re-indexing
+    try:
+        existing = collection.get()
+        if existing["ids"]:
+            collection.delete(ids=existing["ids"])
+    except Exception:
+        pass
+
+    if not issues:
+        elapsed = int((time.monotonic() - start) * 1000)
+        return {"ok": True, "issuesIndexed": 0, "durationMs": elapsed}
+
+    ids = []
+    documents = []
+    metadatas = []
+
+    for issue in issues:
+        number = issue.get("number", 0)
+        title = issue.get("title", "")
+        body = (issue.get("body") or "")[:500]
+        state = issue.get("state", "")
+        url = issue.get("url", "")
+        labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
+
+        ids.append(str(number))
+        documents.append(f"{title}\n{body}")
+        metadatas.append({
+            "number": number,
+            "title": title,
+            "url": url,
+            "state": state,
+            "labels": ",".join(labels),
+        })
+
+    batch_size = 100
+    for i in range(0, len(ids), batch_size):
+        collection.upsert(
+            ids=ids[i : i + batch_size],
+            documents=documents[i : i + batch_size],
+            metadatas=metadatas[i : i + batch_size],
+        )
+
+    elapsed = int((time.monotonic() - start) * 1000)
+    return {"ok": True, "issuesIndexed": len(ids), "durationMs": elapsed}
+
+
+def action_search_issues(db_path: str, query: str, n_results: int = 10) -> dict:
+    """Search the GitHub Issues index."""
+    import chromadb  # type: ignore
+
+    db = Path(db_path).resolve()
+    if not db.is_dir():
+        return {"ok": False, "error": f"Index not found at {db}"}
+
+    client = chromadb.PersistentClient(path=str(db))
+    try:
+        collection = client.get_collection("github_issues")
+    except Exception:
+        return {"ok": False, "error": "Collection 'github_issues' not found. Run index-issues first."}
+
+    count = collection.count()
+    if count == 0:
+        return {"ok": True, "issueResults": []}
+
+    actual_n = min(n_results, count)
+    results = collection.query(query_texts=[query], n_results=actual_n)
+
+    items = []
+    if results and results["ids"] and results["ids"][0]:
+        for idx, issue_id in enumerate(results["ids"][0]):
+            meta = results["metadatas"][0][idx] if results["metadatas"] else {}
+            distance = results["distances"][0][idx] if results["distances"] else None
+            labels_raw = meta.get("labels", "")
+            labels = [lb for lb in labels_raw.split(",") if lb] if labels_raw else []
+            items.append({
+                "number": meta.get("number", int(issue_id)),
+                "title": meta.get("title", ""),
+                "url": meta.get("url", ""),
+                "state": meta.get("state", ""),
+                "labels": labels,
+                "distance": round(distance, 4) if distance is not None else None,
+            })
+
+    return {"ok": True, "issueResults": items}
+
+
 def action_status(db_path: str) -> dict:
     """Get index status."""
     import chromadb  # type: ignore
@@ -444,7 +565,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--action",
         required=True,
-        choices=["probe", "index", "search", "status"],
+        choices=["probe", "index", "search", "status", "index-issues", "search-issues"],
     )
     parser.add_argument("--project-root", default="")
     parser.add_argument("--db-path", default="")
@@ -486,6 +607,23 @@ def main() -> int:
                 emit({"ok": False, "error": "--db-path is required for status"})
                 return 2
             emit(action_status(args.db_path))
+            return 0
+
+        if args.action == "index-issues":
+            if not args.db_path:
+                emit({"ok": False, "error": "--db-path is required for index-issues"})
+                return 2
+            emit(action_index_issues(args.db_path))
+            return 0
+
+        if args.action == "search-issues":
+            if not args.db_path:
+                emit({"ok": False, "error": "--db-path is required for search-issues"})
+                return 2
+            if not args.query:
+                emit({"ok": False, "error": "--query is required for search-issues"})
+                return 2
+            emit(action_search_issues(args.db_path, args.query, args.n_results))
             return 0
 
         emit({"ok": False, "error": f"Unsupported action: {args.action}"})

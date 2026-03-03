@@ -26,9 +26,13 @@ struct ChromaRunnerResponse {
     #[serde(default)]
     files_indexed: Option<u64>,
     #[serde(default)]
+    issues_indexed: Option<u64>,
+    #[serde(default)]
     duration_ms: Option<u64>,
     #[serde(default)]
     results: Option<Vec<SearchResultItem>>,
+    #[serde(default)]
+    issue_results: Option<Vec<GitHubIssueSearchResult>>,
     #[serde(default)]
     indexed: Option<bool>,
     #[serde(default)]
@@ -68,6 +72,24 @@ pub struct IndexStatusResult {
     pub indexed: bool,
     pub total_files: u64,
     pub db_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubIssueSearchResult {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+    pub labels: Vec<String>,
+    pub distance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexIssuesResult {
+    pub issues_indexed: u64,
+    pub duration_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +430,51 @@ pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusRes
     })
     .await
     .map_err(|e| format!("Get index status task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssuesResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let python = find_python_binary()?;
+        let db = db_path_for_project(&project_root);
+        let resp = run_chroma_runner(
+            &python,
+            "index-issues",
+            None,
+            Some(&db.to_string_lossy()),
+            None,
+            None,
+        )?;
+        Ok(IndexIssuesResult {
+            issues_indexed: resp.issues_indexed.unwrap_or(0),
+            duration_ms: resp.duration_ms.unwrap_or(0),
+        })
+    })
+    .await
+    .map_err(|e| format!("Index GitHub issues task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn search_github_issues_cmd(
+    project_root: String,
+    query: String,
+    n_results: Option<u32>,
+) -> Result<Vec<GitHubIssueSearchResult>, String> {
+    tokio::task::spawn_blocking(move || {
+        let python = find_python_binary()?;
+        let db = db_path_for_project(&project_root);
+        let resp = run_chroma_runner(
+            &python,
+            "search-issues",
+            None,
+            Some(&db.to_string_lossy()),
+            Some(&query),
+            n_results,
+        )?;
+        Ok(resp.issue_results.unwrap_or_default())
+    })
+    .await
+    .map_err(|e| format!("Search GitHub issues task failed: {e}"))?
 }
 
 /// Build index for a project in the background. Non-fatal on errors.
