@@ -1381,7 +1381,7 @@ describe("AgentLaunchForm", () => {
     expect(reopened.queryByLabelText("Session ID")).toBeNull();
   });
 
-  it("re-evaluates installed fallback when preferred agent stays the same", async () => {
+  it("keeps installed selection when preferred agent stays the same", async () => {
     saveLaunchDefaults({
       selectedAgent: "codex",
       sessionMode: "normal",
@@ -1453,7 +1453,7 @@ describe("AgentLaunchForm", () => {
 
     await waitFor(() => {
       expect((rendered.getByLabelText("Agent Version") as HTMLSelectElement).value).toBe(
-        "latest"
+        "installed"
       );
     });
 
@@ -1462,7 +1462,7 @@ describe("AgentLaunchForm", () => {
     await waitFor(() => {
       expect(onLaunch).toHaveBeenCalledTimes(1);
     });
-    expect((onLaunch.mock.calls[0][0] as any).agentVersion).toBe("latest");
+    expect((onLaunch.mock.calls[0][0] as any).agentVersion).toBe("installed");
   });
 
   it("falls back when saved defaults contain unavailable agent or invalid runtime/version", async () => {

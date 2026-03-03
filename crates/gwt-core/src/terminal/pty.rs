@@ -31,13 +31,23 @@ fn escape_powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+fn normalize_spawn_command_token(command: &str) -> String {
+    let normalized = crate::terminal::runner::normalize_windows_command_path(command);
+    if normalized.is_empty() {
+        command.trim().to_string()
+    } else {
+        normalized
+    }
+}
+
 fn build_windows_powershell_command_expression(
     command: &str,
     args: &[String],
     windows_force_utf8: bool,
 ) -> String {
+    let command = normalize_spawn_command_token(command);
     let mut parts = Vec::with_capacity(args.len() + 1);
-    parts.push(format!("'{}'", escape_powershell_single_quoted(command)));
+    parts.push(format!("'{}'", escape_powershell_single_quoted(&command)));
     parts.extend(
         args.iter()
             .map(|arg| format!("'{}'", escape_powershell_single_quoted(arg))),
@@ -86,8 +96,9 @@ fn quote_cmd_token_if_needed(value: &str) -> String {
 }
 
 fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
+    let command = normalize_spawn_command_token(command);
     let mut parts = Vec::with_capacity(args.len() + 1);
-    parts.push(quote_cmd_token_if_needed(command));
+    parts.push(quote_cmd_token_if_needed(&command));
     parts.extend(args.iter().map(|arg| quote_cmd_token_if_needed(arg)));
     parts.join(" ")
 }
@@ -804,6 +815,31 @@ mod tests {
     }
 
     #[test]
+    fn build_cmd_command_expression_normalizes_wrapped_npx_path() {
+        let expression = build_cmd_command_expression(
+            r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
+            &["--yes".to_string(), "@openai/codex@latest".to_string()],
+        );
+        assert_eq!(
+            expression,
+            r#""C:\Program Files\nodejs\npx.cmd" --yes @openai/codex@latest"#
+        );
+    }
+
+    #[test]
+    fn build_windows_powershell_command_expression_normalizes_wrapped_npx_path() {
+        let expression = build_windows_powershell_command_expression(
+            r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
+            &["--yes".to_string(), "@openai/codex@latest".to_string()],
+            false,
+        );
+        assert_eq!(
+            expression,
+            "& 'C:\\Program Files\\nodejs\\npx.cmd' '--yes' '@openai/codex@latest'"
+        );
+    }
+
+    #[test]
     fn strip_wrapping_quotes_recursive_unwraps_nested_quotes() {
         assert_eq!(
             strip_wrapping_quotes_recursive("'\"C:\\Program Files\\nodejs\\npx.cmd\"'"),
@@ -871,6 +907,14 @@ mod tests {
     fn is_windows_batch_command_for_platform_detects_wrapped_cmd_with_trailing_args() {
         assert!(is_windows_batch_command_for_platform(
             r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#,
+            |_| None
+        ));
+    }
+
+    #[test]
+    fn is_windows_batch_command_for_platform_detects_powershell_operator_prefixed_wrapped_cmd() {
+        assert!(is_windows_batch_command_for_platform(
+            r#"& '\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#,
             |_| None
         ));
     }
@@ -964,6 +1008,28 @@ mod tests {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#,
+            &args,
+            true,
+            || "pwsh".to_string(),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "\"C:\\Program Files\\nodejs\\npx.cmd\" --yes @openai/codex@latest".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_windows_normalizes_powershell_operator_prefixed_batch_path() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            r#"& '\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#,
             &args,
             true,
             || "pwsh".to_string(),

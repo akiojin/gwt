@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.1.5] - 2026-03-03
+
+### Bug Fixes
+
+- Complete issue #1265 runtime runner handling and spec sync (#1419)
+
 ## [8.1.4] - 2026-03-02
 
 ### Bug Fixes
