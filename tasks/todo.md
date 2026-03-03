@@ -180,3 +180,35 @@ Windows 環境でタブ切り替え時に `$derived`（同期）と `$effect`（
 - [x] `pnpm test src/lib/components/MainArea.test.ts` — 33 tests passed
 - [x] `npx svelte-check --tsconfig ./tsconfig.json` — 0 errors, 1 warning（既存・変更対象外）
 - [x] `bunx commitlint --from HEAD~1 --to HEAD` — 通過
+
+---
+
+## fix: 音声入力が動作しない（ランタイムセットアップ・リトライ・Python互換性）
+
+## 背景
+
+音声設定画面で「Voice input runtime unavailable: Voice runtime is unavailable: Missing Python package(s)」と表示され、
+音声入力が使えない。根本原因は5つ（設定UIにセットアップ手段なし、リトライ不可、メッセージ冗長、Python 3.13 未対応、API 不統一）。
+
+仕様 Issue: #1429
+
+## 実装ステップ
+
+- [x] T001 gwt-spec Issue 作成 (#1429)
+- [x] T002 SettingsPanel.svelte — Setup ボタン追加 + 警告メッセージ改善
+- [x] T003 voiceInputController.ts — リトライロジック修正（runtimeBootstrapSucceeded）+ sendToTerminal API 統一
+- [x] T004 voiceInputController.test.ts — テスト更新（write_terminal→send_keys_to_pane 15箇所）+ リトライテスト2件追加
+- [x] T005 voice.rs — python3.13 追加 + validate_python_version() + メッセージ改善
+- [x] T006 全検証
+
+## 検証結果
+
+- [x] `cd gwt-gui && pnpm test src/lib/voice/voiceInputController.test.ts` — 79 tests passed
+- [x] `cargo test -p gwt-tauri -- commands::voice::tests` — 6 tests passed
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` — 警告なし
+- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` — 0 errors, 1 warning（既存・変更対象外）
+
+## TDD 逸脱の記録
+
+本修正ではプランに基づきテストと実装を同時に書いた（RED → GREEN サイクルを経ていない）。
+既存テストの更新（write_terminal→send_keys_to_pane）とリトライ動作テスト2件の追加は実施済み。

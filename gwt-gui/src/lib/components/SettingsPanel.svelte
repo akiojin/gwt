@@ -51,6 +51,8 @@
   let voiceCapabilityLoading: boolean = $state(false);
   let voiceAvailable: boolean = $state(true);
   let voiceUnavailableReason: string | null = $state(null);
+  let voiceRuntimeSettingUp: boolean = $state(false);
+  let voiceSetupMessage: string | null = $state(null);
 
   let selectedProfileKey: string = $state("");
   let newProfileName: string = $state("");
@@ -165,6 +167,39 @@
       cancelled = true;
     };
   });
+
+  async function handleSetupVoiceRuntime() {
+    voiceRuntimeSettingUp = true;
+    voiceSetupMessage = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("ensure_voice_runtime");
+      voiceSetupMessage = "Voice runtime setup completed.";
+      // Refresh capability status
+      voiceCapabilityLoading = true;
+      try {
+        const cap = await invoke<{
+          available: boolean;
+          reason?: string | null;
+          modelReady: boolean;
+        }>("get_voice_capability", {
+          gpuAvailable: detectGpuAvailability(),
+          quality: settings?.voice_input?.quality ?? "balanced",
+        });
+        voiceAvailable = cap.available;
+        voiceUnavailableReason = cap.reason ?? null;
+      } finally {
+        voiceCapabilityLoading = false;
+      }
+    } catch (err) {
+      voiceSetupMessage = `Setup failed: ${toErrorMessage(err)}`;
+    } finally {
+      voiceRuntimeSettingUp = false;
+      setTimeout(() => {
+        voiceSetupMessage = null;
+      }, 5000);
+    }
+  }
 
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
@@ -994,8 +1029,20 @@
             {:else if !voiceAvailable}
               <div class="field">
                 <span class="field-hint" style="color: var(--warning-color, #e6a700);">
-                  Voice input runtime unavailable: {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
+                  {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
                 </span>
+                {#if voiceUnavailableReason && (voiceUnavailableReason.toLowerCase().includes("runtime") || voiceUnavailableReason.toLowerCase().includes("python") || voiceUnavailableReason.toLowerCase().includes("package"))}
+                  <button
+                    class="btn btn-sm"
+                    onclick={handleSetupVoiceRuntime}
+                    disabled={voiceRuntimeSettingUp}
+                  >
+                    {voiceRuntimeSettingUp ? "Setting up..." : "Setup Voice Runtime"}
+                  </button>
+                {/if}
+                {#if voiceSetupMessage}
+                  <span class="field-hint">{voiceSetupMessage}</span>
+                {/if}
                 <span class="field-hint">
                   Settings can still be configured and will take effect once the runtime is available.
                 </span>
