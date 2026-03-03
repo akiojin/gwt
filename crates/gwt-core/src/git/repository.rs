@@ -891,6 +891,82 @@ impl Repository {
             })
         }
     }
+
+    /// Restore lost worktree administrative files by recreating them from the gitfile.
+    ///
+    /// When `git worktree prune` or similar removes `.git/worktrees/<name>/` but the
+    /// worktree directory survives, this recreates the minimal metadata (HEAD, gitdir,
+    /// commondir) so that `git worktree list` recognises the worktree again.
+    ///
+    /// Safe: only creates directories and files; nothing is deleted.
+    pub fn restore_worktree_metadata(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        // Read the gitfile to locate the metadata directory
+        let git_file = worktree_path.join(".git");
+        let content =
+            std::fs::read_to_string(&git_file).map_err(|e| GwtError::GitOperationFailed {
+                operation: "read gitfile".to_string(),
+                details: e.to_string(),
+            })?;
+
+        let gitdir_str = content
+            .trim_start()
+            .strip_prefix("gitdir:")
+            .ok_or_else(|| GwtError::GitOperationFailed {
+                operation: "parse gitfile".to_string(),
+                details: "missing gitdir: prefix".to_string(),
+            })?
+            .trim();
+
+        // Resolve to an absolute path
+        let meta_dir = if Path::new(gitdir_str).is_absolute() {
+            PathBuf::from(gitdir_str)
+        } else {
+            worktree_path.join(gitdir_str)
+        };
+
+        // Create the metadata directory (including parent .git/worktrees/ if absent)
+        std::fs::create_dir_all(&meta_dir).map_err(|e| GwtError::GitOperationFailed {
+            operation: "create worktree metadata dir".to_string(),
+            details: e.to_string(),
+        })?;
+
+        // HEAD — branch ref that git worktree list reads
+        std::fs::write(
+            meta_dir.join("HEAD"),
+            format!("ref: refs/heads/{}\n", branch),
+        )
+        .map_err(|e| GwtError::GitOperationFailed {
+            operation: "write worktree HEAD".to_string(),
+            details: e.to_string(),
+        })?;
+
+        // gitdir — absolute path to the worktree's .git file (forward slashes for git)
+        let abs_git_file = std::fs::canonicalize(&git_file).unwrap_or_else(|_| git_file.clone());
+        let gitdir_content = abs_git_file.to_string_lossy().replace('\\', "/");
+        std::fs::write(meta_dir.join("gitdir"), format!("{}\n", gitdir_content)).map_err(|e| {
+            GwtError::GitOperationFailed {
+                operation: "write worktree gitdir".to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        // commondir — relative path from meta_dir to the main .git directory
+        // meta_dir is <git-dir>/worktrees/<name>/ so ../.. reaches <git-dir>/
+        std::fs::write(meta_dir.join("commondir"), "../..\n").map_err(|e| {
+            GwtError::GitOperationFailed {
+                operation: "write worktree commondir".to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        info!(
+            category = "git",
+            path = %worktree_path.display(),
+            branch = branch,
+            "Worktree metadata restored"
+        );
+        Ok(())
+    }
 }
 
 fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
