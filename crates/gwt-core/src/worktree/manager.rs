@@ -967,6 +967,7 @@ impl WorktreeManager {
                     || message.contains("not a worktree")
                     || message.contains("not a work tree")
                     || message.contains("no such file or directory")
+                    || message.contains("does not exist")
             }
             _ => false,
         }
@@ -2234,5 +2235,16 @@ mod tests {
         };
         let wt_head = git_stdout(&wt.path, &["rev-parse", "HEAD"]);
         assert_eq!(wt_head, extra_branch_commit);
+    }
+
+    #[test]
+    fn test_is_missing_worktree_error_does_not_exist() {
+        let err = GwtError::GitOperationFailed {
+            operation: "worktree remove".to_string(),
+            details:
+                "fatal: validation failed, cannot remove working tree: '/gwt/.git' does not exist"
+                    .to_string(),
+        };
+        assert!(WorktreeManager::is_missing_worktree_error(&err));
     }
 }
