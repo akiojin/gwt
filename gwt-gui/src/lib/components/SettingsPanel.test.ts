@@ -2530,6 +2530,34 @@ describe("SettingsPanel", () => {
     expect(apiKeyInput.readOnly).toBe(false);
   });
 
+  it("toggles API key visibility on keyboard/assistive click activation", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+
+    expect(apiKeyInput.type).toBe("password");
+    expect(apiKeyInput.readOnly).toBe(false);
+
+    await fireEvent.click(peekBtn, { detail: 0 });
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.readOnly).toBe(true);
+
+    await fireEvent.click(peekBtn, { detail: 0 });
+    expect(apiKeyInput.type).toBe("password");
+    expect(apiKeyInput.readOnly).toBe(false);
+  });
+
   it("hides API key on mouseleave from peek button", async () => {
     const rendered = await renderSettingsPanel();
 

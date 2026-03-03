@@ -72,6 +72,7 @@
 
   let peekingApiKey: boolean = $state(false);
   let apiKeyCopied: boolean = $state(false);
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
   type AIModelInfo = {
     id: string;
@@ -173,6 +174,11 @@
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
 
+    // Reset peek/copy state on profile switch
+    peekingApiKey = false;
+    apiKeyCopied = false;
+    if (copyTimer !== null) { clearTimeout(copyTimer); copyTimer = null; }
+
     if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
       if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
         resetAiModelsState();
@@ -209,6 +215,7 @@
   });
 
   onDestroy(() => {
+    if (copyTimer !== null) clearTimeout(copyTimer);
     applyUiFontSize(savedUiFontSize);
     applyTerminalFontSize(savedTerminalFontSize);
     applyUiFontFamily(savedUiFontFamily);
@@ -612,8 +619,23 @@
     try {
       await navigator.clipboard.writeText(key);
       apiKeyCopied = true;
-      setTimeout(() => { apiKeyCopied = false; }, 1500);
-    } catch { /* silently fail */ }
+      if (copyTimer !== null) clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => { apiKeyCopied = false; copyTimer = null; }, 1500);
+    } catch (e) { console.warn("Failed to copy API key:", e); }
+  }
+
+  function startApiKeyPeek() {
+    peekingApiKey = true;
+  }
+
+  function stopApiKeyPeek() {
+    peekingApiKey = false;
+  }
+
+  function toggleApiKeyPeekFromNonPointerClick(event: MouseEvent) {
+    // Keyboard and assistive activation can dispatch click without pointer down/up.
+    if (event.detail !== 0) return;
+    peekingApiKey = !peekingApiKey;
   }
 
   function updateVoiceInputField(
@@ -1317,6 +1339,7 @@
                   summary_enabled: true,
                 }}
                 {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
+                {@const hasApiKey = (currentAi?.api_key ?? "").length > 0}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
@@ -1343,13 +1366,15 @@
                         value={currentAi?.api_key ?? ""}
                         oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                       />
-                      {#if (currentAi?.api_key ?? "").length > 0}
+                      {#if hasApiKey}
                         <button
                           class="btn btn-ghost btn-icon btn-peek-apikey"
                           class:peeking={peekingApiKey}
-                          onmousedown={() => { peekingApiKey = true; }}
-                          onmouseup={() => { peekingApiKey = false; }}
-                          onmouseleave={() => { peekingApiKey = false; }}
+                          onmousedown={startApiKeyPeek}
+                          onmouseup={stopApiKeyPeek}
+                          onmouseleave={stopApiKeyPeek}
+                          onblur={stopApiKeyPeek}
+                          onclick={toggleApiKeyPeekFromNonPointerClick}
                           title="Peek API Key"
                           aria-label="Peek API Key"
                         ></button>
