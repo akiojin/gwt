@@ -781,6 +781,8 @@ pub fn build_app(
             crate::commands::project_index::index_project_cmd,
             crate::commands::project_index::search_project_index_cmd,
             crate::commands::project_index::get_index_status_cmd,
+            crate::commands::project_index::index_github_issues_cmd,
+            crate::commands::project_index::search_github_issues_cmd,
         ])
 }
 

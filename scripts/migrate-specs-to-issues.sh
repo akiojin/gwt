@@ -3,11 +3,12 @@
 # Migrate local specs/SPEC-*/ directories to GitHub Issues with gwt-spec label.
 #
 # Usage:
-#   ./scripts/migrate-specs-to-issues.sh [--dry-run] [--specs-dir DIR]
+#   ./scripts/migrate-specs-to-issues.sh [--dry-run] [--specs-dir DIR] [--label LABEL]...
 #
 # Options:
 #   --dry-run       Show what would be done without creating issues
 #   --specs-dir     Path to specs/ directory (default: auto-detect from develop worktree)
+#   --label LABEL   Additional label to apply (can be repeated; gwt-spec is always applied)
 
 set -euo pipefail
 
@@ -16,6 +17,7 @@ SPECS_DIR=""
 REPORT_FILE="migration-report.json"
 RATE_LIMIT_BATCH=10
 RATE_LIMIT_SLEEP=3
+EXTRA_LABELS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +27,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --specs-dir)
       SPECS_DIR="$2"
+      shift 2
+      ;;
+    --label)
+      EXTRA_LABELS+=("$2")
       shift 2
       ;;
     *)
@@ -258,8 +264,13 @@ for dir in "${SPEC_DIRS[@]}"; do
 
     body=$(build_issue_body "$dir" "$spec_name")
 
+    label_args=(--label gwt-spec)
+    for lbl in "${EXTRA_LABELS[@]}"; do
+      label_args+=(--label "$lbl")
+    done
+
     issue_url=$(gh issue create \
-      --label gwt-spec \
+      "${label_args[@]}" \
       --title "$title" \
       --body "$body" 2>&1) || {
       echo "FAILED"

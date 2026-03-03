@@ -744,13 +744,11 @@ fn resolve_agent_launch_command_for_container(
         });
     }
 
-    // Container execution is resolved without host-side command detection.
+    // Container execution must stay independent from host-side command detection.
+    // Use npx consistently so launches rely on the container runtime environment.
     let version = requested.unwrap_or_else(|| "latest".to_string());
-    let (command, args) = build_runner_launch(
-        preferred_launch_runner(),
-        def.bunx_package,
-        Some(version.as_str()),
-    );
+    let (command, args) =
+        build_runner_launch(LaunchRunner::Npx, def.bunx_package, Some(version.as_str()));
 
     Ok(ResolvedAgentLaunchCommand {
         command: normalize_launch_command_for_platform(command),
@@ -2553,6 +2551,30 @@ mod tests {
             args,
             vec!["--yes".to_string(), "@openai/codex@1.2.3".to_string()]
         );
+    }
+
+    #[test]
+    fn resolve_agent_launch_command_for_container_uses_npx_for_latest() {
+        let resolved =
+            resolve_agent_launch_command_for_container("codex", None).expect("container launch");
+        assert_eq!(resolved.command, "npx");
+        assert_eq!(
+            resolved.args,
+            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+        );
+        assert_eq!(resolved.tool_version, "latest");
+    }
+
+    #[test]
+    fn resolve_agent_launch_command_for_container_uses_npx_for_pinned_version() {
+        let resolved = resolve_agent_launch_command_for_container("codex", Some("1.2.3"))
+            .expect("container launch");
+        assert_eq!(resolved.command, "npx");
+        assert_eq!(
+            resolved.args,
+            vec!["--yes".to_string(), "@openai/codex@1.2.3".to_string()]
+        );
+        assert_eq!(resolved.tool_version, "1.2.3");
     }
 
     #[test]
