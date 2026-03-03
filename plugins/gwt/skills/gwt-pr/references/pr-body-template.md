@@ -1,5 +1,5 @@
 <!-- ============================================================
-  PR Body Template — gh-pr skill
+  PR Body Template — gwt-pr skill
 
   Rules:
   - REQUIRED sections: Summary, Changes, Testing, Related Issues, Checklist

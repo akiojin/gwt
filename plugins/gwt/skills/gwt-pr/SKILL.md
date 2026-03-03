@@ -142,8 +142,7 @@ Next
 
 8. **Build PR body from template**
   - Read the template from the gwt-pr skill path (not the current project path):
-    - `GWT_PR_SKILL_DIR="${GWT_PR_SKILL_DIR:-${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr}"`
-    - `PR_BODY_TEMPLATE="${GWT_PR_SKILL_DIR}/references/pr-body-template.md"`
+    - `PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"`
   - Read `${PR_BODY_TEMPLATE}` and fill all required placeholders.
   - **Conditional セクションが該当しない場合はセクションごと削除する。**
   - **テンプレート内の `<!-- GUIDE: ... -->` コメントは最終出力から削除する。**
@@ -168,8 +167,7 @@ Next
 ```bash
 head=$(git rev-parse --abbrev-ref HEAD)
 base=develop
-GWT_PR_SKILL_DIR="${GWT_PR_SKILL_DIR:-${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr}"
-PR_BODY_TEMPLATE="${GWT_PR_SKILL_DIR}/references/pr-body-template.md"
+PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"
 
 if [ ! -f "$PR_BODY_TEMPLATE" ]; then
   echo "PR template not found: $PR_BODY_TEMPLATE" >&2
@@ -245,4 +243,4 @@ esac
 
 ## References
 
-- `${GWT_PR_SKILL_DIR}/references/pr-body-template.md`: PR body template
+- `${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md`: PR body template
