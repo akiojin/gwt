@@ -317,7 +317,7 @@ def action_index(project_root: str, db_path: str) -> dict:
 
     client = chromadb.PersistentClient(path=str(db))
     collection = client.get_or_create_collection(
-        name="project_files",
+        name="files",
         metadata={"hnsw:space": "cosine"},
     )
 
@@ -383,9 +383,9 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
 
     client = chromadb.PersistentClient(path=str(db))
     try:
-        collection = client.get_collection("project_files")
+        collection = client.get_collection("files")
     except Exception:
-        return {"ok": False, "error": "Collection 'project_files' not found. Run index first."}
+        return {"ok": False, "error": "Collection 'files' not found. Run index first."}
 
     count = collection.count()
     if count == 0:
@@ -411,7 +411,7 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
 
 
 def action_index_issues(db_path: str) -> dict:
-    """Index GitHub Issues (gwt-spec label) into ChromaDB collection 'github_issues'."""
+    """Index GitHub Issues (gwt-spec label) into ChromaDB collection 'issues'."""
     import chromadb  # type: ignore
 
     db = Path(db_path).resolve()
@@ -440,7 +440,7 @@ def action_index_issues(db_path: str) -> dict:
 
     client = chromadb.PersistentClient(path=str(db))
     collection = client.get_or_create_collection(
-        name="github_issues",
+        name="issues",
         metadata={"hnsw:space": "cosine"},
     )
 
@@ -500,9 +500,9 @@ def action_search_issues(db_path: str, query: str, n_results: int = 10) -> dict:
 
     client = chromadb.PersistentClient(path=str(db))
     try:
-        collection = client.get_collection("github_issues")
+        collection = client.get_collection("issues")
     except Exception:
-        return {"ok": False, "error": "Collection 'github_issues' not found. Run index-issues first."}
+        return {"ok": False, "error": "Collection 'issues' not found. Run index-issues first."}
 
     count = collection.count()
     if count == 0:
@@ -540,7 +540,7 @@ def action_status(db_path: str) -> dict:
 
     client = chromadb.PersistentClient(path=str(db))
     try:
-        collection = client.get_collection("project_files")
+        collection = client.get_collection("files")
         total = collection.count()
     except Exception:
         return {"ok": True, "indexed": False, "totalFiles": 0}
