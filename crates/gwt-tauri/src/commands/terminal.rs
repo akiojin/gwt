@@ -13,8 +13,7 @@ use gwt_core::docker::{
 use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::runner::{
-    build_fallback_launch, choose_fallback_runner, normalize_windows_command_path,
-    resolve_command_path,
+    choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
 };
 use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
@@ -124,9 +123,9 @@ pub struct LaunchAgentRequest {
     pub model: Option<String>,
     /// Optional tool version selection.
     ///
-    /// - `None`: auto (prefer installed command when present, else bunx/npx)
-    /// - `"installed"`: force installed command (falls back to bunx/npx when missing)
-    /// - other: force bunx/npx package `@...@{version}` (e.g. "latest", "1.2.3")
+    /// - `None`: auto (prefer installed command when present, else package runner)
+    /// - `"installed"`: force installed command (missing command fails at runtime)
+    /// - other: force package runner `@...@{version}` (e.g. "latest", "1.2.3")
     pub agent_version: Option<String>,
     /// Optional session mode override (default: normal).
     pub mode: Option<SessionMode>,
@@ -415,6 +414,11 @@ pub(crate) fn builtin_agent_def(agent_id: &str) -> Result<BuiltinAgentDef, Strin
             local_command: "opencode",
             bunx_package: "opencode-ai",
         }),
+        "copilot" => Ok(BuiltinAgentDef {
+            label: "GitHub Copilot",
+            local_command: "copilot",
+            bunx_package: "@github/copilot",
+        }),
         _ => Err(format!("Unknown agent: {}", agent_id)),
     }
 }
@@ -459,6 +463,7 @@ fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
         "gemini" => vec!["-m".to_string(), model.to_string()],
         // SPEC-3b0ed29b: OpenCode uses `-m provider/model`.
         "opencode" => vec!["-m".to_string(), model.to_string()],
+        "copilot" => vec!["--model".to_string(), model.to_string()],
         _ => Vec::new(),
     }
 }
@@ -598,6 +603,40 @@ struct ResolvedAgentLaunchCommand {
     version_for_gates: Option<String>, // best-effort raw version string (may be "latest")
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LaunchRunner {
+    Bunx,
+    Npx,
+}
+
+fn preferred_launch_runner() -> LaunchRunner {
+    let bunx_path = resolve_command_path("bunx");
+    let npx_available = resolve_command_path("npx").is_some();
+    preferred_launch_runner_with_availability(bunx_path.as_deref(), npx_available)
+}
+
+fn preferred_launch_runner_with_availability(
+    bunx_path: Option<&std::path::Path>,
+    npx_available: bool,
+) -> LaunchRunner {
+    match choose_fallback_runner(bunx_path, npx_available) {
+        Some(FallbackRunner::Npx) => LaunchRunner::Npx,
+        Some(FallbackRunner::Bunx) | None => LaunchRunner::Bunx,
+    }
+}
+
+fn build_runner_launch(
+    runner: LaunchRunner,
+    package: &str,
+    version: Option<&str>,
+) -> (String, Vec<String>) {
+    let package_spec = build_bunx_package_spec(package, version);
+    match runner {
+        LaunchRunner::Bunx => ("bunx".to_string(), vec![package_spec]),
+        LaunchRunner::Npx => ("npx".to_string(), vec!["--yes".to_string(), package_spec]),
+    }
+}
+
 fn normalize_launch_command_for_platform(command: String) -> String {
     let normalized = normalize_windows_command_path(&command);
     if normalized.is_empty() {
@@ -629,17 +668,11 @@ fn resolve_agent_launch_command(
 
     let local_available = which(def.local_command).is_ok();
 
-    // Force npm runner when a specific version/dist-tag is provided.
+    // Force package runner when a specific version/dist-tag is provided.
     if let Some(v) = requested.as_deref() {
         if !requested_is_installed {
-            let bunx_path = resolve_command_path("bunx");
-            let npx_path = resolve_command_path("npx");
-
-            let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some())
-                .ok_or_else(|| "bunx/npx is not available".to_string())?;
-            let package = build_bunx_package_spec(def.bunx_package, Some(v));
             let (cmd, args) =
-                build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
+                build_runner_launch(preferred_launch_runner(), def.bunx_package, Some(v));
             return Ok(ResolvedAgentLaunchCommand {
                 command: normalize_launch_command_for_platform(cmd),
                 args,
@@ -662,17 +695,19 @@ fn resolve_agent_launch_command(
         });
     }
 
-    // Installed was requested but missing: fall back to npm runner with latest.
-    // Auto mode also lands here when installed is missing.
-    let bunx_path = resolve_command_path("bunx");
-    let npx_path = resolve_command_path("npx");
+    // Explicit installed mode: launch directly and let runtime report command-not-found.
+    if requested_is_installed {
+        return Ok(ResolvedAgentLaunchCommand {
+            command: normalize_launch_command_for_platform(def.local_command.to_string()),
+            args: Vec::new(),
+            label: def.label,
+            tool_version: "installed".to_string(),
+            version_for_gates: None,
+        });
+    }
 
-    let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some())
-        .ok_or_else(|| "Agent is not installed and bunx/npx is not available".to_string())?;
-
-    let package = build_bunx_package_spec(def.bunx_package, None);
-    let (cmd, args) =
-        build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
+    // Auto mode fallback: use preferred package runner and resolve in the runtime environment.
+    let (cmd, args) = build_runner_launch(preferred_launch_runner(), def.bunx_package, None);
     let tool_version = if requested_is_installed {
         "installed".to_string()
     } else {
@@ -710,13 +745,16 @@ fn resolve_agent_launch_command_for_container(
     }
 
     // Container execution is resolved without host-side command detection.
-    // Prefer `npx --yes` for portability (bun is not guaranteed in containers).
     let version = requested.unwrap_or_else(|| "latest".to_string());
-    let package = build_bunx_package_spec(def.bunx_package, Some(version.as_str()));
+    let (command, args) = build_runner_launch(
+        preferred_launch_runner(),
+        def.bunx_package,
+        Some(version.as_str()),
+    );
 
     Ok(ResolvedAgentLaunchCommand {
-        command: normalize_launch_command_for_platform("npx".to_string()),
-        args: vec!["--yes".to_string(), package],
+        command: normalize_launch_command_for_platform(command),
+        args,
         label: def.label,
         tool_version: version.clone(),
         version_for_gates: Some(version),
@@ -729,6 +767,7 @@ fn agent_color_for(agent_id: &str) -> AgentColor {
         "codex" => AgentColor::Cyan,
         "gemini" => AgentColor::Magenta,
         "opencode" => AgentColor::Green,
+        "copilot" => AgentColor::Blue,
         _ => AgentColor::White,
     }
 }
@@ -739,6 +778,7 @@ fn tool_id_for(agent_id: &str) -> String {
         "codex" => "codex-cli".to_string(),
         "gemini" => "gemini-cli".to_string(),
         "opencode" => "opencode".to_string(),
+        "copilot" => "github-copilot".to_string(),
         _ => agent_id.to_string(),
     }
 }
@@ -1648,6 +1688,29 @@ fn build_agent_args(
 
             args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
+        "copilot" => {
+            match mode {
+                SessionMode::Normal => {}
+                SessionMode::Continue => {
+                    if let Some(id) = resume_session_id {
+                        args.push("--resume".to_string());
+                        args.push(id.to_string());
+                    } else {
+                        args.push("--continue".to_string());
+                    }
+                }
+                SessionMode::Resume => {
+                    args.push("--resume".to_string());
+                    if let Some(id) = resume_session_id {
+                        args.push(id.to_string());
+                    }
+                }
+            }
+            if skip_permissions {
+                args.push("--allow-all-tools".to_string());
+            }
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+        }
         _ => {}
     }
 
@@ -2279,7 +2342,6 @@ pub fn spawn_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::terminal::runner::FallbackRunner;
     use std::cell::Cell;
     use std::ffi::OsString;
     use std::path::Path;
@@ -2457,61 +2519,39 @@ mod tests {
     }
 
     #[test]
-    fn choose_fallback_runner_prefers_npx_when_both_available() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), true),
-            Some(FallbackRunner::Npx)
-        );
+    fn preferred_launch_runner_with_availability_prefers_npx_when_available() {
+        assert!(matches!(
+            preferred_launch_runner_with_availability(Some(Path::new("/usr/bin/bunx")), true),
+            LaunchRunner::Npx
+        ));
     }
 
     #[test]
-    fn choose_fallback_runner_uses_bunx_when_npx_unavailable() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), false),
-            Some(FallbackRunner::Bunx)
-        );
+    fn preferred_launch_runner_with_availability_falls_back_to_bunx() {
+        assert!(matches!(
+            preferred_launch_runner_with_availability(Some(Path::new("/usr/bin/bunx")), false),
+            LaunchRunner::Bunx
+        ));
+        assert!(matches!(
+            preferred_launch_runner_with_availability(None, false),
+            LaunchRunner::Bunx
+        ));
     }
 
     #[test]
-    fn choose_fallback_runner_none_when_only_local_bunx_and_no_npx() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), false),
-            None
-        );
-    }
-
-    #[test]
-    fn choose_fallback_runner_uses_npx_when_bunx_is_missing() {
-        assert_eq!(
-            choose_fallback_runner(None, true),
-            Some(FallbackRunner::Npx)
-        );
-    }
-
-    #[test]
-    fn build_fallback_launch_bunx_uses_package_as_first_arg() {
-        let (cmd, args) = build_fallback_launch(
-            FallbackRunner::Bunx,
-            "@openai/codex@latest",
-            Some(Path::new("/usr/local/bin/bunx")),
-            None,
-        );
-        assert_eq!(cmd, "/usr/local/bin/bunx");
+    fn build_runner_launch_bunx_uses_package_as_first_arg() {
+        let (cmd, args) = build_runner_launch(LaunchRunner::Bunx, "@openai/codex", Some("latest"));
+        assert_eq!(cmd, "bunx");
         assert_eq!(args, vec!["@openai/codex@latest".to_string()]);
     }
 
     #[test]
-    fn build_fallback_launch_npx_uses_yes_flag() {
-        let (cmd, args) = build_fallback_launch(
-            FallbackRunner::Npx,
-            "@openai/codex@latest",
-            None,
-            Some(Path::new("/usr/bin/npx")),
-        );
-        assert_eq!(cmd, "/usr/bin/npx");
+    fn build_runner_launch_npx_uses_yes_flag() {
+        let (cmd, args) = build_runner_launch(LaunchRunner::Npx, "@openai/codex", Some("1.2.3"));
+        assert_eq!(cmd, "npx");
         assert_eq!(
             args,
-            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+            vec!["--yes".to_string(), "@openai/codex@1.2.3".to_string()]
         );
     }
 
@@ -3709,6 +3749,75 @@ services:
         env.insert("AAA".to_string(), "first".to_string());
         let cmd = build_wsl_inject_command("agent", &[], &env, "/mnt/c");
         assert!(cmd.starts_with("export AAA='first' && export ZZZ='last'"));
+    }
+
+    #[test]
+    fn builtin_agent_def_copilot() {
+        let def = builtin_agent_def("copilot").expect("copilot should be defined");
+        assert_eq!(def.label, "GitHub Copilot");
+        assert_eq!(def.local_command, "copilot");
+        assert_eq!(def.bunx_package, "@github/copilot");
+    }
+
+    #[test]
+    fn build_agent_model_args_copilot() {
+        assert_eq!(
+            build_agent_model_args("copilot", Some("gpt-4.1")),
+            vec!["--model".to_string(), "gpt-4.1".to_string()]
+        );
+        assert!(build_agent_model_args("copilot", None).is_empty());
+    }
+
+    #[test]
+    fn agent_color_for_copilot() {
+        assert_eq!(agent_color_for("copilot"), AgentColor::Blue);
+    }
+
+    #[test]
+    fn tool_id_for_copilot() {
+        assert_eq!(tool_id_for("copilot"), "github-copilot");
+    }
+
+    #[test]
+    fn build_agent_args_copilot_continue() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Continue);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert!(args.contains(&"--continue".to_string()));
+    }
+
+    #[test]
+    fn build_agent_args_copilot_continue_prefers_resume_id_when_provided() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Continue);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string(), "sess-123".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_copilot_resume_without_id_opens_picker() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Resume);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_copilot_resume_with_id() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Resume);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string(), "sess-123".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_copilot_skip_permissions() {
+        let mut req = make_request("copilot");
+        req.skip_permissions = Some(true);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert!(args.contains(&"--allow-all-tools".to_string()));
     }
 }
 

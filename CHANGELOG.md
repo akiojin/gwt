@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.1.6] - 2026-03-03
+
+### Bug Fixes
+
+- **e2e:** Remove stale StatusBar agent detection tests
+- Bring window to front when report dialog opens (#1256) (#1422)
+
+### Testing
+
+- **e2e:** Align status bar spec with current UI (#1421)
+
+## [8.1.5] - 2026-03-03
+
+### Bug Fixes
+
+- Complete issue #1265 runtime runner handling and spec sync (#1419)
+- **e2e:** Remove stale StatusBar agent detection tests
+
+## [8.1.4] - 2026-03-02
+
+### Bug Fixes
+
+- Prevent issue list loading-more regressions (#1414)
+- Resolve Copilot resume/model/quick-launch regressions (#1416)
+
 ## [8.1.3] - 2026-03-02
 
 ### Bug Fixes

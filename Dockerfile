@@ -3,11 +3,25 @@ FROM node:22-bookworm
 
 ARG ZIG_VERSION=0.15.2
 ARG ZIG_SHA256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+ARG PNPM_VERSION=10.29.2
 
-RUN apt-get update && apt-get install -y \
+COPY scripts/install-linux-deps.sh /tmp/install-linux-deps.sh
+
+# 開発/CIで必要になる基盤ツール + Tauri/Linux 依存をイメージに同梱
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    gnupg \
     jq \
-    vim \
+    pkg-config \
+    python3 \
     ripgrep \
+    vim \
+    libgtk-3-dev \
+    libjavascriptcoregtk-4.1-dev \
+    libsoup-3.0-dev \
+    && SKIP_APT_UPDATE=1 NO_INSTALL_RECOMMENDS=1 bash /tmp/install-linux-deps.sh \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -20,6 +34,7 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
 
 # Global tools (minimal - other tools are in devDependencies)
 RUN npm add -g bun@latest
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
 # Install Rust
 RUN /bin/bash -c "set -o pipefail && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"

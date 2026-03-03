@@ -261,13 +261,41 @@ fn leading_windows_command_token(value: &str) -> &str {
     trimmed
 }
 
+fn strip_windows_invocation_prefix(value: &str) -> &str {
+    let mut current = value.trim();
+
+    loop {
+        let next = if let Some(rest) = current.strip_prefix('&') {
+            Some(rest.trim_start())
+        } else if current.len() >= 4
+            && current[..4].eq_ignore_ascii_case("call")
+            && current
+                .as_bytes()
+                .get(4)
+                .is_some_and(|b| b.is_ascii_whitespace())
+        {
+            Some(current[4..].trim_start())
+        } else {
+            None
+        };
+
+        match next {
+            Some(rest) if !rest.is_empty() => current = rest,
+            _ => break,
+        }
+    }
+
+    current
+}
+
 /// Normalize a potentially wrapped/escaped Windows command path.
 ///
 /// This helper is intentionally defensive because command strings can arrive with
 /// quoting artifacts (`'\"...\"'`, `\\\"...\\\"`) from environment snapshots.
 /// It extracts only the executable token and removes nested wrapping quotes.
 pub fn normalize_windows_command_path(command: &str) -> String {
-    let token = leading_windows_command_token(command);
+    let candidate = strip_windows_invocation_prefix(command);
+    let token = leading_windows_command_token(candidate);
     if token.is_empty() {
         return String::new();
     }
@@ -560,6 +588,26 @@ mod tests {
         assert_eq!(
             normalize_windows_command_path(r#"\\\"C:\Tools\npx.cmd\""#),
             r#"\\\"C:\Tools\npx.cmd\""#
+        );
+    }
+
+    #[test]
+    fn normalize_windows_command_path_handles_leading_powershell_call_operator() {
+        assert_eq!(
+            normalize_windows_command_path(
+                r#"& '\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#
+            ),
+            r#"C:\Program Files\nodejs\npx.cmd"#
+        );
+    }
+
+    #[test]
+    fn normalize_windows_command_path_handles_leading_call_keyword() {
+        assert_eq!(
+            normalize_windows_command_path(
+                r#"call '\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#
+            ),
+            r#"C:\Program Files\nodejs\npx.cmd"#
         );
     }
 

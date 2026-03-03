@@ -2511,6 +2511,51 @@ describe("WorktreeSummaryPanel", () => {
     );
   });
 
+  it("maps github-copilot tool id to quick launch agentId", async () => {
+    const copilotEntry = {
+      ...quickStartDockerEntry,
+      tool_id: "github-copilot",
+      tool_label: "GitHub Copilot",
+      session_id: "session-copilot-launch",
+      timestamp: quickStartDockerEntry.timestamp + 21,
+    };
+
+    const onQuickLaunch = vi.fn(async () => {});
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [copilotEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch,
+    });
+
+    await waitFor(() => {
+      const continueBtn = rendered.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
+      expect(continueBtn.disabled).toBe(false);
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => {
+      expect(onQuickLaunch).toHaveBeenCalled();
+    });
+
+    expect(onQuickLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "copilot",
+        mode: "continue",
+        resumeSessionId: "session-copilot-launch",
+      }),
+    );
+  });
+
   it("maps open-code tool id to opencode and keeps docker history entries with compose args", async () => {
     const openCodeComposeOnly = {
       ...quickStartDockerEntry,
