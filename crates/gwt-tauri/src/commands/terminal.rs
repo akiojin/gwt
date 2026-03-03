@@ -12,10 +12,7 @@ use gwt_core::docker::{
 };
 use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
 use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::terminal::runner::{
-    build_fallback_launch, choose_fallback_runner, normalize_windows_command_path,
-    resolve_command_path,
-};
+use gwt_core::terminal::runner::normalize_windows_command_path;
 use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
@@ -124,9 +121,9 @@ pub struct LaunchAgentRequest {
     pub model: Option<String>,
     /// Optional tool version selection.
     ///
-    /// - `None`: auto (prefer installed command when present, else bunx/npx)
-    /// - `"installed"`: force installed command (falls back to bunx/npx when missing)
-    /// - other: force bunx/npx package `@...@{version}` (e.g. "latest", "1.2.3")
+    /// - `None`: auto (prefer installed command when present, else package runner)
+    /// - `"installed"`: force installed command (missing command fails at runtime)
+    /// - other: force package runner `@...@{version}` (e.g. "latest", "1.2.3")
     pub agent_version: Option<String>,
     /// Optional session mode override (default: normal).
     pub mode: Option<SessionMode>,
@@ -598,6 +595,28 @@ struct ResolvedAgentLaunchCommand {
     version_for_gates: Option<String>, // best-effort raw version string (may be "latest")
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LaunchRunner {
+    Bunx,
+    Npx,
+}
+
+fn preferred_launch_runner() -> LaunchRunner {
+    LaunchRunner::Bunx
+}
+
+fn build_runner_launch(
+    runner: LaunchRunner,
+    package: &str,
+    version: Option<&str>,
+) -> (String, Vec<String>) {
+    let package_spec = build_bunx_package_spec(package, version);
+    match runner {
+        LaunchRunner::Bunx => ("bunx".to_string(), vec![package_spec]),
+        LaunchRunner::Npx => ("npx".to_string(), vec!["--yes".to_string(), package_spec]),
+    }
+}
+
 fn normalize_launch_command_for_platform(command: String) -> String {
     let normalized = normalize_windows_command_path(&command);
     if normalized.is_empty() {
@@ -629,17 +648,11 @@ fn resolve_agent_launch_command(
 
     let local_available = which(def.local_command).is_ok();
 
-    // Force npm runner when a specific version/dist-tag is provided.
+    // Force package runner when a specific version/dist-tag is provided.
     if let Some(v) = requested.as_deref() {
         if !requested_is_installed {
-            let bunx_path = resolve_command_path("bunx");
-            let npx_path = resolve_command_path("npx");
-
-            let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some())
-                .ok_or_else(|| "bunx/npx is not available".to_string())?;
-            let package = build_bunx_package_spec(def.bunx_package, Some(v));
             let (cmd, args) =
-                build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
+                build_runner_launch(preferred_launch_runner(), def.bunx_package, Some(v));
             return Ok(ResolvedAgentLaunchCommand {
                 command: normalize_launch_command_for_platform(cmd),
                 args,
@@ -662,17 +675,19 @@ fn resolve_agent_launch_command(
         });
     }
 
-    // Installed was requested but missing: fall back to npm runner with latest.
-    // Auto mode also lands here when installed is missing.
-    let bunx_path = resolve_command_path("bunx");
-    let npx_path = resolve_command_path("npx");
+    // Explicit installed mode: launch directly and let runtime report command-not-found.
+    if requested_is_installed {
+        return Ok(ResolvedAgentLaunchCommand {
+            command: normalize_launch_command_for_platform(def.local_command.to_string()),
+            args: Vec::new(),
+            label: def.label,
+            tool_version: "installed".to_string(),
+            version_for_gates: None,
+        });
+    }
 
-    let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some())
-        .ok_or_else(|| "Agent is not installed and bunx/npx is not available".to_string())?;
-
-    let package = build_bunx_package_spec(def.bunx_package, None);
-    let (cmd, args) =
-        build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
+    // Auto mode fallback: use preferred package runner and resolve in the runtime environment.
+    let (cmd, args) = build_runner_launch(preferred_launch_runner(), def.bunx_package, None);
     let tool_version = if requested_is_installed {
         "installed".to_string()
     } else {
@@ -710,13 +725,16 @@ fn resolve_agent_launch_command_for_container(
     }
 
     // Container execution is resolved without host-side command detection.
-    // Prefer `npx --yes` for portability (bun is not guaranteed in containers).
     let version = requested.unwrap_or_else(|| "latest".to_string());
-    let package = build_bunx_package_spec(def.bunx_package, Some(version.as_str()));
+    let (command, args) = build_runner_launch(
+        preferred_launch_runner(),
+        def.bunx_package,
+        Some(version.as_str()),
+    );
 
     Ok(ResolvedAgentLaunchCommand {
-        command: normalize_launch_command_for_platform("npx".to_string()),
-        args: vec!["--yes".to_string(), package],
+        command: normalize_launch_command_for_platform(command),
+        args,
         label: def.label,
         tool_version: version.clone(),
         version_for_gates: Some(version),
@@ -2279,7 +2297,6 @@ pub fn spawn_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::terminal::runner::FallbackRunner;
     use std::cell::Cell;
     use std::ffi::OsString;
     use std::path::Path;
@@ -2457,61 +2474,24 @@ mod tests {
     }
 
     #[test]
-    fn choose_fallback_runner_prefers_npx_when_both_available() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), true),
-            Some(FallbackRunner::Npx)
-        );
+    fn preferred_launch_runner_is_bunx() {
+        assert!(matches!(preferred_launch_runner(), LaunchRunner::Bunx));
     }
 
     #[test]
-    fn choose_fallback_runner_uses_bunx_when_npx_unavailable() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), false),
-            Some(FallbackRunner::Bunx)
-        );
-    }
-
-    #[test]
-    fn choose_fallback_runner_none_when_only_local_bunx_and_no_npx() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), false),
-            None
-        );
-    }
-
-    #[test]
-    fn choose_fallback_runner_uses_npx_when_bunx_is_missing() {
-        assert_eq!(
-            choose_fallback_runner(None, true),
-            Some(FallbackRunner::Npx)
-        );
-    }
-
-    #[test]
-    fn build_fallback_launch_bunx_uses_package_as_first_arg() {
-        let (cmd, args) = build_fallback_launch(
-            FallbackRunner::Bunx,
-            "@openai/codex@latest",
-            Some(Path::new("/usr/local/bin/bunx")),
-            None,
-        );
-        assert_eq!(cmd, "/usr/local/bin/bunx");
+    fn build_runner_launch_bunx_uses_package_as_first_arg() {
+        let (cmd, args) = build_runner_launch(LaunchRunner::Bunx, "@openai/codex", Some("latest"));
+        assert_eq!(cmd, "bunx");
         assert_eq!(args, vec!["@openai/codex@latest".to_string()]);
     }
 
     #[test]
-    fn build_fallback_launch_npx_uses_yes_flag() {
-        let (cmd, args) = build_fallback_launch(
-            FallbackRunner::Npx,
-            "@openai/codex@latest",
-            None,
-            Some(Path::new("/usr/bin/npx")),
-        );
-        assert_eq!(cmd, "/usr/bin/npx");
+    fn build_runner_launch_npx_uses_yes_flag() {
+        let (cmd, args) = build_runner_launch(LaunchRunner::Npx, "@openai/codex", Some("1.2.3"));
+        assert_eq!(cmd, "npx");
         assert_eq!(
             args,
-            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+            vec!["--yes".to_string(), "@openai/codex@1.2.3".to_string()]
         );
     }
 
