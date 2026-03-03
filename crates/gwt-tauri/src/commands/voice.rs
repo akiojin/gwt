@@ -162,13 +162,22 @@ fn find_python_override() -> Result<Option<PathBuf>, String> {
 }
 
 fn find_system_python_binary() -> Result<PathBuf, String> {
-    for candidate in ["python3.13", "python3.12", "python3.11", "python3", "python"] {
+    for candidate in [
+        "python3.13",
+        "python3.12",
+        "python3.11",
+        "python3",
+        "python",
+    ] {
         if let Ok(path) = which::which(candidate) {
             return Ok(path);
         }
     }
 
-    Err("Python runtime not found (checked python3.13/python3.12/python3.11/python3/python)".to_string())
+    Err(
+        "Python runtime not found (checked python3.13/python3.12/python3.11/python3/python)"
+            .to_string(),
+    )
 }
 
 fn find_managed_python_binary() -> Result<PathBuf, String> {
