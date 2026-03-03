@@ -900,11 +900,15 @@ fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
         return true;
     }
 
-    if message.contains("does not exist") {
+    if message.contains("failed to delete") && message.contains("directory not empty") {
         return true;
     }
 
-    message.contains("failed to delete") && message.contains("directory not empty")
+    message.contains("validation failed")
+        && message.contains("does not exist")
+        && (message.contains("cannot remove working tree")
+            || message.contains("cannot remove worktree")
+            || message.contains("cannot remove work tree"))
 }
 
 /// Information about a worktree from git worktree list
@@ -1219,11 +1223,19 @@ mod tests {
     }
 
     #[test]
-    fn manual_worktree_removal_fallback_for_does_not_exist_error() {
+    fn manual_worktree_removal_fallback_for_missing_metadata_validation_error() {
         let err_msg =
             "fatal: validation failed, cannot remove working tree: '/gwt/.git' does not exist"
                 .to_string();
         assert!(should_fallback_to_manual_worktree_removal(&err_msg));
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_disabled_for_generic_does_not_exist_error() {
+        let err_msg =
+            "fatal: cannot remove worktree '/tmp/wt': worktree is locked: reason: '/tmp/path' does not exist"
+                .to_string();
+        assert!(!should_fallback_to_manual_worktree_removal(&err_msg));
     }
 
     #[test]
