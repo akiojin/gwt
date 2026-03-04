@@ -247,6 +247,69 @@ fn build_powershell_wrapped_args(expression: String) -> Vec<String> {
     ]
 }
 
+fn is_cmd_executable(command: &str) -> bool {
+    let normalized = normalize_spawn_command_token(command);
+    let lower = normalized.to_ascii_lowercase();
+    lower == "cmd" || lower == "cmd.exe"
+}
+
+fn is_powershell_executable(command: &str) -> bool {
+    let normalized = normalize_spawn_command_token(command);
+    let lower = normalized.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe"
+    )
+}
+
+fn cmd_cd_expression(working_dir: &Path) -> String {
+    format!(
+        "cd /D \"{}\"",
+        escape_cmd_double_quoted(working_dir.to_string_lossy().as_ref())
+    )
+}
+
+fn powershell_set_location_expression(working_dir: &Path) -> String {
+    format!(
+        "Set-Location -LiteralPath '{}'",
+        escape_powershell_single_quoted(working_dir.to_string_lossy().as_ref())
+    )
+}
+
+fn inject_windows_working_dir_into_spawn_args(
+    spawn_command: &str,
+    spawn_args: &mut [String],
+    working_dir: &Path,
+) {
+    if is_cmd_executable(spawn_command) {
+        let c_index = spawn_args
+            .iter()
+            .position(|arg| arg.eq_ignore_ascii_case("/c"));
+        if let Some(idx) = c_index.and_then(|i| i.checked_add(1)) {
+            if let Some(expression) = spawn_args.get_mut(idx) {
+                let cd = cmd_cd_expression(working_dir);
+                let utf8_prefix = "chcp 65001 > nul && ";
+                if let Some(rest) = expression.strip_prefix(utf8_prefix) {
+                    *expression = format!("{utf8_prefix}{cd} && {rest}");
+                } else {
+                    *expression = format!("{cd} && {expression}");
+                }
+            }
+        }
+        return;
+    }
+
+    if is_powershell_executable(spawn_command) {
+        let command_index = spawn_args.iter().position(|arg| arg == "-Command");
+        if let Some(idx) = command_index.and_then(|i| i.checked_add(1)) {
+            if let Some(expression) = spawn_args.get_mut(idx) {
+                let set_location = powershell_set_location_expression(working_dir);
+                *expression = format!("{set_location}; {expression}");
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_spawn_command_for_platform_with<F, G>(
     command: &str,
@@ -441,6 +504,14 @@ impl PtyHandle {
             config.interactive,
             config.windows_force_utf8,
         );
+        let mut spawn_args = spawn_args;
+        if cfg!(windows) {
+            inject_windows_working_dir_into_spawn_args(
+                &spawn_command,
+                &mut spawn_args,
+                &config.working_dir,
+            );
+        }
         let normalized_command = if cfg!(windows) {
             crate::terminal::runner::normalize_windows_command_path(&config.command)
         } else {
@@ -1115,6 +1186,63 @@ mod tests {
                 "& 'codex' '--version'".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn inject_windows_working_dir_into_spawn_args_cmd_inserts_cd_prefix() {
+        let mut args = vec!["/C".to_string(), "codex --version".to_string()];
+        inject_windows_working_dir_into_spawn_args(
+            "cmd.exe",
+            &mut args,
+            Path::new("C:\\Users\\Test User\\repo"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "/C".to_string(),
+                "cd /D \"C:\\Users\\Test User\\repo\" && codex --version".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn inject_windows_working_dir_into_spawn_args_cmd_keeps_utf8_prefix() {
+        let mut args = vec![
+            "/D".to_string(),
+            "/S".to_string(),
+            "/C".to_string(),
+            "chcp 65001 > nul && codex --version".to_string(),
+        ];
+        inject_windows_working_dir_into_spawn_args("cmd.exe", &mut args, Path::new("C:\\repo"));
+        assert_eq!(
+            args[3],
+            "chcp 65001 > nul && cd /D \"C:\\repo\" && codex --version".to_string()
+        );
+    }
+
+    #[test]
+    fn inject_windows_working_dir_into_spawn_args_powershell_prefixes_set_location() {
+        let mut args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-Command".to_string(),
+            "& 'codex' '--version'".to_string(),
+        ];
+        inject_windows_working_dir_into_spawn_args("pwsh", &mut args, Path::new("C:\\repo\\it's"));
+        assert_eq!(
+            args[6],
+            "Set-Location -LiteralPath 'C:\\repo\\it''s'; & 'codex' '--version'".to_string()
+        );
+    }
+
+    #[test]
+    fn inject_windows_working_dir_into_spawn_args_ignores_non_wrapped_command() {
+        let mut args = vec!["--version".to_string()];
+        inject_windows_working_dir_into_spawn_args("codex", &mut args, Path::new("C:\\repo"));
+        assert_eq!(args, vec!["--version".to_string()]);
     }
 
     /// Helper: read from PTY reader in a separate thread with timeout.
