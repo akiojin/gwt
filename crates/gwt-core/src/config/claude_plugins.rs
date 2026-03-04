@@ -388,9 +388,10 @@ pub fn disable_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
 
     enabled_plugins.insert(GWT_PLUGIN_FULL_NAME.to_string(), serde_json::json!(false));
 
-    let output = serde_json::to_string_pretty(&settings).map_err(|e| GwtError::ConfigWriteError {
-        reason: e.to_string(),
-    })?;
+    let output =
+        serde_json::to_string_pretty(&settings).map_err(|e| GwtError::ConfigWriteError {
+            reason: e.to_string(),
+        })?;
 
     if std::fs::write(settings_path, output).is_err() {
         return Ok(()); // Silent continue
@@ -1001,7 +1002,9 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(settings["enabledPlugins"].get(GWT_PLUGIN_FULL_NAME).is_none());
+        assert!(settings["enabledPlugins"]
+            .get(GWT_PLUGIN_FULL_NAME)
+            .is_none());
         assert_eq!(
             settings["enabledPlugins"]["other@other"],
             serde_json::json!(true)

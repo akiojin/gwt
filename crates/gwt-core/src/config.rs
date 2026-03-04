@@ -50,8 +50,7 @@ pub use skill_registration::{
     register_agent_skills, register_agent_skills_with_settings_at_project_root,
     register_all_skills, register_all_skills_with_settings_at_project_root,
     repair_skill_registration, repair_skill_registration_with_settings_at_project_root,
-    unregister_all_skills, SkillAgentRegistrationStatus, SkillAgentType,
-    SkillRegistrationStatus,
+    unregister_all_skills, SkillAgentRegistrationStatus, SkillAgentType, SkillRegistrationStatus,
 };
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{

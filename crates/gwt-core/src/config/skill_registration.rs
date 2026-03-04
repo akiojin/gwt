@@ -318,10 +318,7 @@ pub fn register_agent_skills_with_settings_at_project_root(
         SkillAgentType::Codex | SkillAgentType::Gemini => {
             let Some(root) = skills_root_for(agent) else {
                 return Err(GwtError::ConfigWriteError {
-                    reason: format!(
-                        "{} skills path could not be resolved.",
-                        agent.label()
-                    ),
+                    reason: format!("{} skills path could not be resolved.", agent.label()),
                 });
             };
             register_agent_skills_at(&root)
@@ -382,10 +379,7 @@ pub fn register_all_skills() -> Result<(), GwtError> {
     register_all_skills_with_settings(&settings)
 }
 
-fn status_for(
-    agent: SkillAgentType,
-    settings: &Settings,
-) -> SkillAgentRegistrationStatus {
+fn status_for(agent: SkillAgentType, settings: &Settings) -> SkillAgentRegistrationStatus {
     if settings.agent.skill_registration.is_none() {
         return scope_unconfigured_status(agent);
     }
@@ -398,11 +392,7 @@ fn status_for(
     let skills_path = root.as_ref().map(|p| p.to_string_lossy().to_string());
 
     let Some(root) = root else {
-        return path_unavailable_status(
-            agent,
-            "Skills path could not be resolved.",
-            skills_path,
-        );
+        return path_unavailable_status(agent, "Skills path could not be resolved.", skills_path);
     };
 
     let mut missing = Vec::new();

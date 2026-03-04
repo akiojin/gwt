@@ -136,11 +136,7 @@ impl From<&Settings> for SettingsData {
                 .map(|p| p.to_string_lossy().to_string()),
             agent_auto_install_deps: s.agent.auto_install_deps,
             agent_github_project_id: s.agent.github_project_id.clone(),
-            agent_skill_registration_enabled: s
-                .agent
-                .skill_registration
-                .as_ref()
-                .map(|_| true),
+            agent_skill_registration_enabled: s.agent.skill_registration.as_ref().map(|_| true),
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
