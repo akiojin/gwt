@@ -19,7 +19,8 @@ from typing import List, Optional
 
 
 def emit(payload: dict) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+    # Keep stdout JSON ASCII-only so Windows locale encodings never corrupt output bytes.
+    sys.stdout.write(json.dumps(payload, ensure_ascii=True))
     sys.stdout.flush()
 
 

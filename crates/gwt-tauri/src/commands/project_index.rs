@@ -575,6 +575,18 @@ mod tests {
     }
 
     #[test]
+    fn chroma_helper_script_emits_ascii_safe_json() {
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("ensure_ascii=True"),
+            "chroma helper must serialize stdout JSON with ensure_ascii=True"
+        );
+        assert!(
+            !CHROMA_HELPER_SCRIPT.contains("ensure_ascii=False"),
+            "chroma helper must not emit locale-dependent non-ASCII JSON bytes"
+        );
+    }
+
+    #[test]
     fn chroma_search_has_substring_fallback_for_empty_semantic_results() {
         assert!(
             CHROMA_HELPER_SCRIPT.contains("def fallback_substring_search("),
