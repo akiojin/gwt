@@ -232,13 +232,15 @@ else
 fi
 ```
 
-#### 9.1 リリース範囲内の PR 番号を収集
+#### 9.1 リリース範囲内の参照番号を収集
 
-squash マージとマージコミットの両方から PR 番号を抽出：
+コミットメッセージ末尾の `(#N)` から参照番号を抽出する。
+
+**注意**: `(#N)` は PR 番号の場合も Issue 番号の場合もある（GitHub のスカッシュマージは PR 番号を付与するが、手動で Issue 番号を付けるケースもある）。そのため、PR / Issue の両方として処理する。
 
 ```bash
-# squash マージ: コミットメッセージ末尾の (#N) から PR 番号を抽出
-SQUASH_PRS=$(git log --pretty=%s "$RANGE" --no-merges \
+# squash マージ: コミットメッセージ末尾の (#N) から番号を抽出
+SQUASH_REFS=$(git log --pretty=%s "$RANGE" --no-merges \
   | grep -Eo '\(#[0-9]+\)$' \
   | grep -Eo '[0-9]+' \
   | sort -u)
@@ -249,45 +251,39 @@ MERGE_PRS=$(git log --merges --pretty=%s "$RANGE" \
   | sort -u)
 
 # 結合・重複排除
-ALL_PRS=$(printf '%s\n%s\n' "$SQUASH_PRS" "$MERGE_PRS" | awk 'NF' | sort -nu)
+ALL_REFS=$(printf '%s\n%s\n' "$SQUASH_REFS" "$MERGE_PRS" | awk 'NF' | sort -nu)
 ```
 
-#### 9.2 各 PR の本文から Closing Issue 番号を抽出
+#### 9.2 各番号を分類し、Closing Issue を収集
 
-**重要**: コミットメッセージからは抽出しないこと。コミットタイトルの `(#N)` は PR 番号であり Issue 番号ではない。
-
-```bash
-CANDIDATE_ISSUES=""
-for PR_NUMBER in $ALL_PRS; do
-  PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || true)
-  if [ -n "$PR_BODY" ]; then
-    FOUND=$(printf '%s\n' "$PR_BODY" \
-      | grep -Eio '(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#[0-9]+' \
-      | grep -Eo '#[0-9]+' \
-      | tr -d '#' || true)
-    if [ -n "$FOUND" ]; then
-      CANDIDATE_ISSUES="${CANDIDATE_ISSUES}\n${FOUND}"
-    fi
-  fi
-done
-
-CANDIDATE_ISSUES=$(printf '%b\n' "$CANDIDATE_ISSUES" | awk 'NF' | sort -nu)
-```
-
-#### 9.3 Issue であることを検証（PR 番号を除外）
-
-収集した番号には PR 番号が含まれる可能性があるため、GitHub API で Issue であることを確認する。`pull_request` フィールドが存在すれば PR なので除外：
+各番号について GitHub API で PR か Issue かを判定し、それぞれ適切に処理する：
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 ISSUE_NUMBERS=""
-for NUM in $CANDIDATE_ISSUES; do
+
+for NUM in $ALL_REFS; do
   IS_PR=$(gh api "repos/$REPO/issues/$NUM" --jq '.pull_request // empty' 2>/dev/null || true)
-  if [ -z "$IS_PR" ]; then
-    ISSUE_NUMBERS="${ISSUE_NUMBERS} ${NUM}"
+
+  if [ -n "$IS_PR" ]; then
+    # PR の場合: PR body から Closing Issue 番号を抽出
+    PR_BODY=$(gh pr view "$NUM" --json body --jq '.body' 2>/dev/null || true)
+    if [ -n "$PR_BODY" ]; then
+      FOUND=$(printf '%s\n' "$PR_BODY" \
+        | grep -Eio '(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#[0-9]+' \
+        | grep -Eo '#[0-9]+' \
+        | tr -d '#' || true)
+      if [ -n "$FOUND" ]; then
+        ISSUE_NUMBERS="${ISSUE_NUMBERS}\n${FOUND}"
+      fi
+    fi
+  else
+    # Issue の場合: その番号自体を Closing Issue として追加
+    ISSUE_NUMBERS="${ISSUE_NUMBERS}\n${NUM}"
   fi
 done
-ISSUE_NUMBERS=$(echo "$ISSUE_NUMBERS" | tr ' ' '\n' | awk 'NF' | sort -nu)
+
+ISSUE_NUMBERS=$(printf '%b\n' "$ISSUE_NUMBERS" | awk 'NF' | sort -nu)
 ```
 
 `ISSUE_NUMBERS` が空でなければ、PR 本文の `## Closing Issues` セクションに **1行ずつ** 以下を追加：
