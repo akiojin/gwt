@@ -159,7 +159,7 @@ describe("AgentLaunchForm", () => {
     expect(optionLabels.some((label) => label.includes("Unavailable"))).toBe(false);
   });
 
-  it("does not show bunx/npx in fallback hints", async () => {
+  it("shows fallback hint only in Agent Version field", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
         return [
@@ -192,16 +192,14 @@ describe("AgentLaunchForm", () => {
       expect(invokeMock).toHaveBeenCalledWith("detect_agents");
     });
 
-    const fallbackNotice = rendered.getByText("Not installed. Launch will use a fallback runner.");
-    expect(fallbackNotice).toBeTruthy();
+    expect(
+      rendered.queryByText("Not installed. Launch will use a fallback runner.")
+    ).toBeNull();
 
     const binaryFallbackNotice = rendered.getByText(
       "Installed binary not found. Launch will use fallback runner."
     );
     expect(binaryFallbackNotice).toBeTruthy();
-
-    expect(rendered.queryByText(/bunx/)).toBeNull();
-    expect(rendered.queryByText(/npx/)).toBeNull();
   });
 
 

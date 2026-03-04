@@ -1371,10 +1371,6 @@
           {#if selectedAgentInfo}
             {#if !selectedAgentInfo.available}
               <span class="field-hint warn">Unavailable</span>
-            {:else if selectedAgentInfo.version === "bunx" || selectedAgentInfo.version === "npx"}
-              <span class="field-hint warn">
-                Not installed. Launch will use a fallback runner.
-              </span>
             {:else if !selectedAgentInfo.authenticated}
               <span class="field-hint warn">Not authenticated</span>
             {/if}
