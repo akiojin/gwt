@@ -97,20 +97,17 @@ fn has_non_empty(value: &str) -> bool {
 /// Check whether Codex can authenticate with the current runtime/profile configuration.
 ///
 /// Priority:
-/// 1. Process env `OPENAI_API_KEY` (non-empty)
-/// 2. Active profile `env.OPENAI_API_KEY` (non-empty)
+/// 1. Active profile `env.OPENAI_API_KEY` (non-empty)
+/// 2. Process env `OPENAI_API_KEY` (non-empty, unless disabled by profile)
 /// 3. Active profile `ai.api_key` (non-empty)
 /// 4. `default_ai.api_key` fallback when active profile has no `ai` block
 pub fn is_codex_authenticated() -> bool {
-    if std::env::var(OPENAI_API_KEY_ENV)
+    let process_env_key = std::env::var(OPENAI_API_KEY_ENV)
         .ok()
-        .is_some_and(|value| has_non_empty(&value))
-    {
-        return true;
-    }
+        .filter(|value| has_non_empty(value));
 
     let Ok(profiles) = crate::config::ProfilesConfig::load() else {
-        return false;
+        return process_env_key.is_some();
     };
 
     if let Some(profile) = profiles.active_profile() {
@@ -121,9 +118,20 @@ pub fn is_codex_authenticated() -> bool {
         {
             return true;
         }
+
+        let process_key_allowed = !profile
+            .disabled_env
+            .iter()
+            .any(|key| key == OPENAI_API_KEY_ENV);
+        if process_key_allowed && process_env_key.is_some() {
+            return true;
+        }
+
         if let Some(ai) = profile.ai.as_ref() {
             return has_non_empty(&ai.api_key);
         }
+    } else if process_env_key.is_some() {
+        return true;
     }
 
     profiles
@@ -520,6 +528,26 @@ mod tests {
         let _openai_key = EnvVarGuard::remove("OPENAI_API_KEY");
 
         let profiles = ProfilesConfig::default();
+        profiles.save().unwrap();
+
+        assert!(!is_codex_authenticated());
+    }
+
+    #[test]
+    fn codex_authentication_ignores_process_env_when_disabled_by_profile() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+        let _openai_key = EnvVarGuard::remove("OPENAI_API_KEY");
+        std::env::set_var("OPENAI_API_KEY", "sk_test_process_key");
+
+        let mut profiles = ProfilesConfig::default();
+        let mut default_profile = Profile::new("default");
+        default_profile.disabled_env = vec!["OPENAI_API_KEY".to_string()];
+        default_profile.ai = None;
+        profiles.profiles = HashMap::from([(String::from("default"), default_profile)]);
+        profiles.active = Some("default".to_string());
+        profiles.default_ai = None;
         profiles.save().unwrap();
 
         assert!(!is_codex_authenticated());

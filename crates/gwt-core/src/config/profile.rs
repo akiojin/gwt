@@ -985,14 +985,16 @@ profiles:
         let temp = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::new(temp.path());
 
-        let mut config = ProfilesConfig::default();
-        config.default_ai = Some(AISettings {
-            endpoint: "https://api.openai.com/v1".to_string(),
-            api_key: String::new(),
-            model: "gpt-4o-mini".to_string(),
-            language: "en".to_string(),
-            summary_enabled: true,
-        });
+        let config = ProfilesConfig {
+            default_ai: Some(AISettings {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                api_key: String::new(),
+                model: "gpt-4o-mini".to_string(),
+                language: "en".to_string(),
+                summary_enabled: true,
+            }),
+            ..ProfilesConfig::default()
+        };
         config.save().unwrap();
 
         let loaded = ProfilesConfig::load().unwrap();
