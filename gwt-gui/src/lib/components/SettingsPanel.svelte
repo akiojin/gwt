@@ -19,7 +19,6 @@
     normalizeAppLanguage,
     normalizeUiFontFamily,
     normalizeTerminalFontFamily,
-    normalizeSkillScope,
     normalizeSkillStatus,
     skillStatusClass,
     skillStatusText,
@@ -367,18 +366,6 @@
       loadedSettings.terminal_font_family = normalizeTerminalFontFamily(
         loadedSettings.terminal_font_family
       );
-      loadedSettings.agent_skill_registration_default_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_default_scope
-      );
-      loadedSettings.agent_skill_registration_codex_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_codex_scope
-      );
-      loadedSettings.agent_skill_registration_claude_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_claude_scope
-      );
-      loadedSettings.agent_skill_registration_gemini_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_gemini_scope
-      );
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -410,34 +397,10 @@
     saving = true;
     saveMessage = "";
     try {
-      const normalizedDefaultScope = normalizeSkillScope(
-        settings.agent_skill_registration_default_scope
-      );
-      const normalizedCodexScope = normalizeSkillScope(
-        settings.agent_skill_registration_codex_scope
-      );
-      const normalizedClaudeScope = normalizeSkillScope(
-        settings.agent_skill_registration_claude_scope
-      );
-      const normalizedGeminiScope = normalizeSkillScope(
-        settings.agent_skill_registration_gemini_scope
-      );
-      if (
-        !normalizedDefaultScope &&
-        (normalizedCodexScope || normalizedClaudeScope || normalizedGeminiScope)
-      ) {
-        saveMessage = "Choose default skill registration scope before setting agent overrides.";
-        saving = false;
-        return;
-      }
       settings = {
         ...settings,
         ui_font_family: normalizeUiFontFamily(settings.ui_font_family),
         terminal_font_family: normalizeTerminalFontFamily(settings.terminal_font_family),
-        agent_skill_registration_default_scope: normalizedDefaultScope,
-        agent_skill_registration_codex_scope: normalizedCodexScope,
-        agent_skill_registration_claude_scope: normalizedClaudeScope,
-        agent_skill_registration_gemini_scope: normalizedGeminiScope,
       };
 
       const { invoke } = await import("$lib/tauriInvoke");
@@ -691,17 +654,6 @@
     settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
   }
 
-  function updateSkillScopeField(
-    field:
-      | "agent_skill_registration_default_scope"
-      | "agent_skill_registration_codex_scope"
-      | "agent_skill_registration_claude_scope"
-      | "agent_skill_registration_gemini_scope",
-    value: string
-  ) {
-    if (!settings) return;
-    settings = { ...settings, [field]: normalizeSkillScope(value) };
-  }
 </script>
 
 <div class="settings-panel">
@@ -1086,91 +1038,6 @@
           </div>
         {:else if activeSettingsTab === "githubIntegration"}
           <div class="section-content">
-            <div class="field">
-              <label for="skill-scope-default">Skill Registration Scope (Default)</label>
-              <select
-                id="skill-scope-default"
-                class="select"
-                value={settings.agent_skill_registration_default_scope ?? ""}
-                onchange={(e) =>
-                  updateSkillScopeField(
-                    "agent_skill_registration_default_scope",
-                    (e.target as HTMLSelectElement).value
-                  )}
-              >
-                <option value="">Not selected (prompt on startup)</option>
-                <option value="user">User (~/.xxx)</option>
-                <option value="project">Project (&lt;repo&gt;/.xxx)</option>
-                <option value="local">Local (&lt;repo&gt;/.xxx.local)</option>
-              </select>
-              <span class="field-hint">
-                Controls where managed skills/plugins are auto-registered.
-              </span>
-            </div>
-
-            <div class="field">
-              <!-- svelte-ignore a11y_label_has_associated_control -->
-              <label>Agent Scope Overrides</label>
-              <div class="row">
-                <div class="scope-select">
-                  <label for="skill-scope-codex">Codex</label>
-                  <select
-                    id="skill-scope-codex"
-                    class="select"
-                    value={settings.agent_skill_registration_codex_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_codex_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-                <div class="scope-select">
-                  <label for="skill-scope-claude">Claude Code</label>
-                  <select
-                    id="skill-scope-claude"
-                    class="select"
-                    value={settings.agent_skill_registration_claude_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_claude_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-                <div class="scope-select">
-                  <label for="skill-scope-gemini">Gemini</label>
-                  <select
-                    id="skill-scope-gemini"
-                    class="select"
-                    value={settings.agent_skill_registration_gemini_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_gemini_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <div class="divider"></div>
-
             <div class="skill-overview">
               <span class={`skill-badge ${skillStatusClass(skillStatus?.overall ?? "failed")}`}>
                 Overall: {skillStatusText(skillStatus?.overall)}
@@ -1673,24 +1540,6 @@
     gap: 8px;
     align-items: center;
     flex-wrap: wrap;
-  }
-
-  .scope-select {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 180px;
-  }
-
-  .scope-select label {
-    font-size: var(--ui-font-sm);
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-  }
-
-  .scope-select .select {
-    max-width: none;
   }
 
   .env-table {

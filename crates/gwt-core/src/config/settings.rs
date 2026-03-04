@@ -90,38 +90,15 @@ pub struct AgentSettings {
     pub skill_registration: Option<SkillRegistrationPreferences>,
 }
 
-/// Scope for skill / plugin registration paths.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SkillRegistrationScope {
-    #[default]
-    User,
-    Project,
-    Local,
-}
-
-/// Scope preferences for managed skill / plugin registration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Preferences for managed skill / plugin registration.
+///
+/// Registration always targets the User scope (home directory).
+/// This struct exists as a marker so we can distinguish
+/// "not configured" (None) from "configured" (Some).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct SkillRegistrationPreferences {
-    pub default_scope: SkillRegistrationScope,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub codex_scope: Option<SkillRegistrationScope>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claude_scope: Option<SkillRegistrationScope>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gemini_scope: Option<SkillRegistrationScope>,
-}
-
-impl Default for SkillRegistrationPreferences {
-    fn default() -> Self {
-        Self {
-            default_scope: SkillRegistrationScope::User,
-            codex_scope: None,
-            claude_scope: None,
-            gemini_scope: None,
-        }
-    }
+    // Currently a marker struct. Future fields (e.g. disabled agents) can be added here.
 }
 
 /// Docker settings

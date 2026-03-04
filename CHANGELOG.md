@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.3.0] - 2026-03-04
+
+### Documentation
+
+- GitHub Token (PAT) 要件を README に追記 (#1439)
+
+### Features
+
+- **core:** スキル終了時解除 + スコープ User 固定簡素化 (#1438)
+
 ## [8.2.0] - 2026-03-04
 
 ### Bug Fixes

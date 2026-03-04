@@ -2,7 +2,6 @@ import type {
   Profile,
   ProfilesConfig,
   SettingsData,
-  SkillRegistrationScope,
   SkillRegistrationStatus,
   VoiceInputSettings,
 } from "../types";
@@ -174,16 +173,6 @@ export function normalizeTerminalFontFamily(value: string | null | undefined): s
   if (family.length === 0) return DEFAULT_TERMINAL_FONT_FAMILY;
   const match = TERMINAL_FONT_PRESETS.find((preset) => preset.value === family);
   return match ? match.value : family;
-}
-
-export function normalizeSkillScope(
-  value: string | null | undefined,
-): SkillRegistrationScope | null {
-  const normalized = (value ?? "").trim().toLowerCase();
-  if (normalized === "user" || normalized === "project" || normalized === "local") {
-    return normalized as SkillRegistrationScope;
-  }
-  return null;
 }
 
 export function normalizeSkillStatus(
