@@ -4114,6 +4114,16 @@ pub(crate) fn launch_agent_for_project_root(
         (path, name, created)
     };
 
+    tracing::debug!(
+        category = "terminal",
+        requested_branch = request.branch.as_str(),
+        resolved_branch = branch_name.as_str(),
+        working_dir = %working_dir.display(),
+        repo_path = %repo_path.display(),
+        worktree_created,
+        "Resolved launch worktree path"
+    );
+
     let launch_result: Result<String, String> = (|| {
         if is_launch_cancelled(cancelled) {
             return Err("Cancelled".to_string());
