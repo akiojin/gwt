@@ -159,7 +159,7 @@ describe("AgentLaunchForm", () => {
     expect(optionLabels.some((label) => label.includes("Unavailable"))).toBe(false);
   });
 
-  it("does not show bunx/npx in fallback hints", async () => {
+  it("shows fallback hint only in Agent Version field", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
         return [
@@ -192,16 +192,14 @@ describe("AgentLaunchForm", () => {
       expect(invokeMock).toHaveBeenCalledWith("detect_agents");
     });
 
-    const fallbackNotice = rendered.getByText("Not installed. Launch will use a fallback runner.");
-    expect(fallbackNotice).toBeTruthy();
+    expect(
+      rendered.queryByText("Not installed. Launch will use a fallback runner.")
+    ).toBeNull();
 
     const binaryFallbackNotice = rendered.getByText(
       "Installed binary not found. Launch will use fallback runner."
     );
     expect(binaryFallbackNotice).toBeTruthy();
-
-    expect(rendered.queryByText(/bunx/)).toBeNull();
-    expect(rendered.queryByText(/npx/)).toBeNull();
   });
 
 
@@ -1885,6 +1883,141 @@ describe("AgentLaunchForm", () => {
       });
       expect(rendered.getByText("Second issue")).toBeTruthy();
       expect(issuePageCalls).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("filters from-issue list by number tokens and mixed AND query", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true };
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [
+            {
+              number: 312,
+              title: "Refactor module",
+              updatedAt: "2026-02-10T00:00:00Z",
+              labels: [],
+            },
+            {
+              number: 120,
+              title: "Bug in parser",
+              updatedAt: "2026-02-11T00:00:00Z",
+              labels: [],
+            },
+            {
+              number: 12,
+              title: "Bug docs",
+              updatedAt: "2026-02-12T00:00:00Z",
+              labels: [],
+            },
+            {
+              number: 45,
+              title: "Bug cleanup",
+              updatedAt: "2026-02-13T00:00:00Z",
+              labels: [],
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      if (cmd === "fetch_github_issue_detail") {
+        return {
+          number: args?.issueNumber ?? 0,
+          title: "Issue detail",
+          body: "",
+          state: "open",
+          updatedAt: "2026-02-13T00:00:00Z",
+          htmlUrl: "https://example.com/issues/1",
+          labels: [],
+          assignees: [],
+          commentsCount: 0,
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
+    });
+
+    const searchInput = rendered.getByLabelText("Search Issues");
+
+    await fireEvent.input(searchInput, {
+      target: { value: "12" },
+    });
+    await waitFor(() => {
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
+    });
+
+    await fireEvent.input(searchInput, {
+      target: { value: "bug 12" },
+    });
+    await waitFor(() => {
+      expect(rendered.queryByText("Refactor module")).toBeNull();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
+    });
+
+    await fireEvent.input(searchInput, {
+      target: { value: "#12" },
+    });
+    await waitFor(() => {
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
     });
   });
 

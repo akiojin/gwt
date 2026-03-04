@@ -1,4 +1,56 @@
+## TODO: Issue検索フィルターでIssue番号を対象化（Issue #1453 / 2026-03-04）
+
+## 背景（Issue #1453）
+
+Issue検索フィルターがタイトル一致のみで、Issue番号入力（例: `12`, `#12`）がヒットしない。
+検索体験を改善するため、番号部分一致と混在クエリAND条件を導入する。
+
+## 実装ステップ（Issue #1453）
+
+- [x] T001 gwt-spec Issue 作成（#1453）
+- [x] T002 RED: `IssueListPanel.test.ts` に番号部分一致/混在AND/#付き検索を追加
+- [x] T003 RED: `AgentLaunchForm.test.ts` に番号部分一致/混在AND/#付き検索を追加
+- [x] T004 RED: `crates/gwt-core/src/git/issue.rs` に番号検索テストを追加
+- [x] T005 GUI共通検索ユーティリティ `gwt-gui/src/lib/issueSearch.ts` 追加
+- [x] T006 `IssueListPanel.svelte` / `AgentLaunchForm.svelte` に共通ロジック適用
+- [x] T007 Rust `filter_issues_by_title` をトークンAND + 番号部分一致に拡張
+- [x] T008 検証（対象テスト実行・結果記録）
+
+## 検証結果（Issue #1453）
+
+- [x] `cargo test -p gwt-core filter_issues_by_title -- --test-threads=1`（7 passed）
+- [x] `cd gwt-gui && pnpm test src/lib/components/IssueListPanel.test.ts -t \"filters issues by number tokens and mixed AND query\"`（1 passed）
+- [x] `cd gwt-gui && pnpm test src/lib/components/AgentLaunchForm.test.ts -t \"filters from-issue list by number tokens and mixed AND query\"`（1 passed）
+- [x] `cd gwt-gui && pnpm test src/lib/components/IssueListPanel.test.ts src/lib/components/AgentLaunchForm.test.ts`（IssueListPanelは全件成功、AgentLaunchForm既存失敗2件: bunx/npx fallback期待）
+
+---
+
 # TODO: GitHub Copilot CLI 対応
+
+---
+
+## TODO: Issue #1441 Project Index Files 検索結果 0 件表示の修正（2026-03-04）
+
+## 背景（Issue #1441）
+
+Project Index の Files タブで `Git` を検索した際に「No results found」と見える不具合。
+根本原因として、未検索状態でも入力文字列があるだけで 0 件表示文言が出る UI 条件と、
+semantic 検索結果が空のときのフォールバック不在を修正する。
+
+## 実装ステップ（Issue #1441）
+
+- [x] T001 フロントエンド回帰テスト追加（未検索時 0 件文言を表示しない）
+- [x] T002 RED 確認（追加テスト失敗を確認）
+- [x] T003 UI 実装修正（検索実行後のみ 0 件文言表示）
+- [x] T004 Python 検索フォールバック追加（semantic 0 件時の部分一致）
+- [x] T005 GREEN 確認（対象テスト実行）
+- [x] T006 追加検証（svelte-check + Rust unit test）
+
+## 検証結果（Issue #1441）
+
+- [x] `cd gwt-gui && pnpm test src/lib/components/ProjectIndexPanel.test.ts`（3 tests passed）
+- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`（0 errors / 1 warning: 既存 `MergeDialog.svelte`）
+- [x] `cargo test -p gwt-tauri project_index -- --test-threads=1`（5 tests passed）
 
 ## 背景（Copilot CLI 対応）
 

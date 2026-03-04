@@ -9,6 +9,7 @@
     type IssueBranchMatch,
   } from "../types";
   import { invoke } from "$lib/tauriInvoke";
+  import { issueMatchesSearchQuery } from "$lib/issueSearch";
   import { openExternalUrl } from "../openExternalUrl";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
@@ -59,9 +60,9 @@
     (() => {
       let result = issues;
 
-      const q = searchQuery.trim().toLowerCase();
+      const q = searchQuery.trim();
       if (q) {
-        result = result.filter((i) => i.title.toLowerCase().includes(q));
+        result = result.filter((i) => issueMatchesSearchQuery(i, q));
       }
 
       if (labelFilter) {
