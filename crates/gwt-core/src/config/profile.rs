@@ -172,6 +172,14 @@ fn default_profile() -> Profile {
     profile
 }
 
+fn is_default_profile_ai_placeholder(settings: &AISettings) -> bool {
+    settings.endpoint.trim() == default_endpoint()
+        && settings.api_key.trim().is_empty()
+        && settings.model.trim().is_empty()
+        && normalize_ai_language(&settings.language) == default_ai_language()
+        && settings.summary_enabled == default_summary_enabled()
+}
+
 fn normalize_ai_language(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "ja" => "ja".to_string(),
@@ -440,7 +448,17 @@ impl ProfilesConfig {
 
         if let Some(default) = self.profiles.get_mut("default") {
             if default.ai.is_none() {
-                default.ai = Some(default_profile_ai_settings());
+                default.ai = Some(
+                    self.default_ai
+                        .clone()
+                        .unwrap_or_else(default_profile_ai_settings),
+                );
+            } else if let (Some(profile_ai), Some(default_ai)) =
+                (default.ai.as_ref(), self.default_ai.as_ref())
+            {
+                if is_default_profile_ai_placeholder(profile_ai) {
+                    default.ai = Some(default_ai.clone());
+                }
             }
         }
 
@@ -959,5 +977,27 @@ profiles:
         let default = loaded.profiles.get("default").unwrap();
         let ai = default.ai.as_ref().unwrap();
         assert_eq!(ai.api_key, "");
+    }
+
+    #[test]
+    fn save_and_load_keeps_default_ai_only_configuration_effective() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let mut config = ProfilesConfig::default();
+        config.default_ai = Some(AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: String::new(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
+        });
+        config.save().unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        let resolved = loaded.resolve_active_ai_settings();
+        assert!(resolved.ai_enabled);
+        assert_eq!(resolved.resolved.unwrap().model, "gpt-4o-mini");
     }
 }
