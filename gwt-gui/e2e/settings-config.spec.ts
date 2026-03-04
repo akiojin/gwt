@@ -276,6 +276,34 @@ test("copy API key button writes plaintext value and shows copied feedback", asy
   expect(copiedValue).toBe("sk_test_ab_cd");
 });
 
+test("Profiles API key value with underscores is persisted on save_profiles", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses());
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyValue = "sk_test_ab_cd";
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+  await apiKeyInput.fill(apiKeyValue);
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await waitForInvokeCommand(page, "save_profiles");
+
+  const args = await getInvokeArgs(page, "save_profiles");
+  const config = (args as Record<string, unknown>)
+    ?.config as Record<string, unknown>;
+  const profiles = config?.profiles as Record<string, unknown>;
+  const defaultProfile = profiles?.default as Record<string, unknown>;
+  const ai = defaultProfile?.ai as Record<string, unknown>;
+
+  expect(ai?.api_key).toBe(apiKeyValue);
+});
+
 test("UI Font Family selector shows presets", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());

@@ -19,6 +19,7 @@ const CODEX_COLLABORATION_MODES_MIN_VERSION: &str = "0.91.0";
 const CODEX_SKIP_FLAG_LEGACY: &str = "--yolo";
 const CODEX_SKIP_FLAG_DANGEROUS: &str = "--dangerously-bypass-approvals-and-sandbox";
 const MODEL_FLAG_PREFIX: &str = "--model=";
+const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedVersion {
@@ -57,8 +58,7 @@ impl CodexAgent {
         let version =
             get_command_version("codex", "--version").unwrap_or_else(|| "unknown".to_string());
 
-        // Check if authenticated (Codex uses API key from env)
-        let authenticated = std::env::var("OPENAI_API_KEY").is_ok();
+        let authenticated = is_codex_authenticated();
 
         Some(AgentInfo {
             name: "Codex".to_string(),
@@ -88,6 +88,48 @@ impl CodexAgent {
             .stderr(Stdio::piped());
         cmd
     }
+}
+
+fn has_non_empty(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
+/// Check whether Codex can authenticate with the current runtime/profile configuration.
+///
+/// Priority:
+/// 1. Process env `OPENAI_API_KEY` (non-empty)
+/// 2. Active profile `env.OPENAI_API_KEY` (non-empty)
+/// 3. Active profile `ai.api_key` (non-empty)
+/// 4. `default_ai.api_key` fallback when active profile has no `ai` block
+pub fn is_codex_authenticated() -> bool {
+    if std::env::var(OPENAI_API_KEY_ENV)
+        .ok()
+        .is_some_and(|value| has_non_empty(&value))
+    {
+        return true;
+    }
+
+    let Ok(profiles) = crate::config::ProfilesConfig::load() else {
+        return false;
+    };
+
+    if let Some(profile) = profiles.active_profile() {
+        if profile
+            .env
+            .get(OPENAI_API_KEY_ENV)
+            .is_some_and(|value| has_non_empty(value))
+        {
+            return true;
+        }
+        if let Some(ai) = profile.ai.as_ref() {
+            return has_non_empty(&ai.api_key);
+        }
+    }
+
+    profiles
+        .default_ai
+        .as_ref()
+        .is_some_and(|ai| has_non_empty(&ai.api_key))
 }
 
 fn normalize_version(value: Option<&str>) -> Option<String> {
@@ -406,6 +448,31 @@ impl AgentTrait for CodexAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AISettings, Profile, ProfilesConfig};
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn test_codex_agent_creation() {
@@ -420,6 +487,42 @@ mod tests {
         assert!(caps.can_execute);
         assert!(caps.can_read_files);
         assert!(!caps.can_use_mcp);
+    }
+
+    #[test]
+    fn codex_authentication_uses_active_profile_ai_api_key() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+        let _openai_key = EnvVarGuard::remove("OPENAI_API_KEY");
+
+        let mut profiles = ProfilesConfig::default();
+        let mut default_profile = Profile::new("default");
+        default_profile.ai = Some(AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "sk_test_profile_key".to_string(),
+            model: String::new(),
+            language: "en".to_string(),
+            summary_enabled: true,
+        });
+        profiles.profiles = HashMap::from([(String::from("default"), default_profile)]);
+        profiles.active = Some("default".to_string());
+        profiles.save().unwrap();
+
+        assert!(is_codex_authenticated());
+    }
+
+    #[test]
+    fn codex_authentication_is_false_when_env_and_profile_keys_are_empty() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+        let _openai_key = EnvVarGuard::remove("OPENAI_API_KEY");
+
+        let profiles = ProfilesConfig::default();
+        profiles.save().unwrap();
+
+        assert!(!is_codex_authenticated());
     }
 
     #[test]
