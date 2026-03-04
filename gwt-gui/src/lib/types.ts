@@ -1,3 +1,5 @@
+import type { AgentId } from "./agentUtils";
+
 export type AgentStatusValue = "unknown" | "running" | "waiting_input" | "stopped";
 
 export interface StructuredError {
@@ -163,10 +165,7 @@ export interface SettingsData {
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
   agent_github_project_id?: string | null;
-  agent_skill_registration_default_scope?: SkillRegistrationScope | null;
-  agent_skill_registration_codex_scope?: SkillRegistrationScope | null;
-  agent_skill_registration_claude_scope?: SkillRegistrationScope | null;
-  agent_skill_registration_gemini_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_enabled?: boolean | null;
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
@@ -187,8 +186,6 @@ export interface VoiceInputSettings {
   quality: "fast" | "balanced" | "accurate" | (string & {});
   model: string;
 }
-
-export type SkillRegistrationScope = "user" | "project" | "local";
 
 export interface SkillAgentRegistrationStatus {
   agent_id: string;
@@ -239,10 +236,19 @@ export interface ProjectIndexSearchResult {
   size: number | null;
 }
 
+export interface GitHubIssueSearchResult {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  labels: string[];
+  distance: number | null;
+}
+
 export interface Tab {
   id: string;
   label: string;
-  agentId?: "claude" | "codex" | "gemini" | "opencode";
+  agentId?: AgentId;
   type:
     | "summary"
     | "agent"
@@ -548,6 +554,14 @@ export interface FetchIssuesResponse {
   issues: GitHubIssueInfo[];
   hasNextPage: boolean;
 }
+
+export interface IssueBranchMatch {
+  issueNumber: number;
+  branchName: string;
+}
+
+export const ISSUE_BRANCH_LOOKUP_UNKNOWN = "__gwt_issue_branch_lookup_unknown__";
+export type IssueBranchLookupState = string | null | typeof ISSUE_BRANCH_LOOKUP_UNKNOWN;
 
 export interface RollbackResult {
   localDeleted: boolean;

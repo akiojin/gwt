@@ -8,6 +8,7 @@ import type {
   ShellInfo,
 } from "../types";
 
+
 const invokeMock = vi.fn();
 
 vi.mock("$lib/tauriInvoke", () => ({
@@ -28,10 +29,7 @@ const settingsFixture: SettingsData = {
   log_retention_days: 30,
   agent_default: "codex",
   agent_auto_install_deps: true,
-  agent_skill_registration_default_scope: "user",
-  agent_skill_registration_codex_scope: null,
-  agent_skill_registration_claude_scope: null,
-  agent_skill_registration_gemini_scope: null,
+  agent_skill_registration_enabled: true,
   docker_force_host: true,
   ui_font_size: 13,
   terminal_font_size: 13,
@@ -417,79 +415,6 @@ describe("SettingsPanel", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("edits and saves skill registration scope settings", async () => {
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    const defaultScope = rendered.container.querySelector(
-      "#skill-scope-default"
-    ) as HTMLSelectElement;
-    const codexScope = rendered.container.querySelector(
-      "#skill-scope-codex"
-    ) as HTMLSelectElement;
-    const claudeScope = rendered.container.querySelector(
-      "#skill-scope-claude"
-    ) as HTMLSelectElement;
-    const geminiScope = rendered.container.querySelector(
-      "#skill-scope-gemini"
-    ) as HTMLSelectElement;
-
-    await fireEvent.change(defaultScope, { target: { value: "project" } });
-    await fireEvent.change(codexScope, { target: { value: "user" } });
-    await fireEvent.change(claudeScope, { target: { value: "project" } });
-    await fireEvent.change(geminiScope, { target: { value: "local" } });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("save_settings", {
-        settings: expect.objectContaining({
-          agent_skill_registration_default_scope: "project",
-          agent_skill_registration_codex_scope: "user",
-          agent_skill_registration_claude_scope: "project",
-          agent_skill_registration_gemini_scope: "local",
-        }),
-      });
-    });
-  });
-
-  it("rejects scope override save when default scope is missing", async () => {
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    const defaultScope = rendered.container.querySelector(
-      "#skill-scope-default"
-    ) as HTMLSelectElement;
-    const codexScope = rendered.container.querySelector(
-      "#skill-scope-codex"
-    ) as HTMLSelectElement;
-
-    await fireEvent.change(defaultScope, { target: { value: "" } });
-    await fireEvent.change(codexScope, { target: { value: "user" } });
-    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(
-        rendered.getByText("Choose default skill registration scope before setting agent overrides.")
-      ).toBeTruthy();
-    });
-    expect(invokeMock).not.toHaveBeenCalledWith("save_settings", {
-      settings: expect.objectContaining({
-        agent_skill_registration_codex_scope: "user",
-      }),
-    });
   });
 
   it("shows load failure when settings retrieval fails", async () => {
@@ -2344,10 +2269,7 @@ describe("SettingsPanel", () => {
       quality: "ultra" as any,
       model: "",
     } as SettingsData["voice_input"];
-    malformedSettings.agent_skill_registration_default_scope = "invalid" as any;
-    malformedSettings.agent_skill_registration_codex_scope = "user";
-    malformedSettings.agent_skill_registration_claude_scope = "project";
-    malformedSettings.agent_skill_registration_gemini_scope = "local";
+    malformedSettings.agent_skill_registration_enabled = true;
 
     const malformedProfiles: ProfilesConfig = {
       version: 1,
@@ -2449,5 +2371,226 @@ describe("SettingsPanel", () => {
       expect(rendered.getByText("Create a profile to edit environment variables.")).toBeTruthy();
       expect(rendered.getByText("Create a profile to configure AI settings.")).toBeTruthy();
     });
+  });
+
+  // --- API Key peek / copy (Issue #1433) ---
+
+  it("hides peek and copy buttons when API key is empty", async () => {
+    const emptyKeyProfiles = structuredClone(profilesFixture);
+    emptyKeyProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(emptyKeyProfiles);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    expect(rendered.container.querySelector(".btn-peek-apikey")).toBeNull();
+    expect(rendered.container.querySelector(".btn-copy-apikey")).toBeNull();
+  });
+
+  it("shows peek and copy buttons when API key is non-empty", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
+    expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
+  });
+
+  it("reveals API key on mousedown and hides on mouseup", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+
+    // Initial state
+    expect(apiKeyInput.type).toBe("password");
+    expect(apiKeyInput.readOnly).toBe(false);
+
+    // mousedown → peek
+    await fireEvent.mouseDown(peekBtn);
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.readOnly).toBe(true);
+
+    // mouseup → hide
+    await fireEvent.mouseUp(peekBtn);
+    expect(apiKeyInput.type).toBe("password");
+    expect(apiKeyInput.readOnly).toBe(false);
+  });
+
+  it("toggles API key visibility on keyboard/assistive click activation", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+
+    expect(apiKeyInput.type).toBe("password");
+    expect(apiKeyInput.readOnly).toBe(false);
+
+    await fireEvent.click(peekBtn, { detail: 0 });
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.readOnly).toBe(true);
+
+    await fireEvent.click(peekBtn, { detail: 0 });
+    expect(apiKeyInput.type).toBe("password");
+    expect(apiKeyInput.readOnly).toBe(false);
+  });
+
+  it("hides API key on mouseleave from peek button", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+
+    await fireEvent.mouseDown(peekBtn);
+    expect(apiKeyInput.type).toBe("text");
+
+    await fireEvent.mouseLeave(peekBtn);
+    expect(apiKeyInput.type).toBe("password");
+    expect(apiKeyInput.readOnly).toBe(false);
+  });
+
+  it("copies API key to clipboard on copy button click", async () => {
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+    await fireEvent.click(copyBtn);
+
+    expect(writeTextMock).toHaveBeenCalledWith("test-key");
+  });
+
+  it("shows Copied! feedback and reverts after timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const writeTextMock = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: writeTextMock },
+      });
+
+      const rendered = await renderSettingsPanel();
+
+      await waitFor(() => {
+        expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      });
+
+      await switchToTab(rendered, "Profiles");
+      await rendered.findByText("API Key");
+
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      await fireEvent.click(copyBtn);
+
+      await waitFor(() => {
+        expect(copyBtn.getAttribute("title")).toBe("Copied!");
+        expect(copyBtn.classList.contains("copied")).toBe(true);
+      });
+
+      await vi.advanceTimersByTimeAsync(1500);
+
+      await waitFor(() => {
+        expect(copyBtn.getAttribute("title")).toBe("Copy API Key");
+        expect(copyBtn.classList.contains("copied")).toBe(false);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("copies plaintext API key even when masked", async () => {
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+
+    // Confirm it's masked
+    expect(apiKeyInput.type).toBe("password");
+
+    const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+    await fireEvent.click(copyBtn);
+
+    // Should copy the plaintext value despite being masked
+    expect(writeTextMock).toHaveBeenCalledWith("test-key");
   });
 });

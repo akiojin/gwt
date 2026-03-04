@@ -79,3 +79,7 @@ tests/voice_eval/samples/*.m4a
 # Local Python virtual environments
 .venv/
 .venv-*/
+
+# Python cache
+__pycache__/
+*.py[cod]

@@ -481,6 +481,9 @@ fn display_tool_name(entry: &ToolSessionEntry) -> String {
     if id == "opencode" {
         return "OpenCode".to_string();
     }
+    if id == "github-copilot" {
+        return "GitHub Copilot".to_string();
+    }
     entry.tool_label.clone()
 }
 
@@ -491,6 +494,7 @@ fn normalize_tool_id(tool_id: &str) -> String {
         "codex" | "codex-cli" => "codex-cli".to_string(),
         "gemini" | "gemini-cli" => "gemini-cli".to_string(),
         "opencode" | "open-code" => "opencode".to_string(),
+        "copilot" | "github-copilot" => "github-copilot".to_string(),
         _ => id,
     }
 }
@@ -644,12 +648,21 @@ fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
     }
 }
 
+fn unsupported_session_status(tool_id: &str) -> &'static str {
+    if normalize_tool_id(tool_id) == "github-copilot" {
+        "no-session"
+    } else {
+        "error"
+    }
+}
+
 fn tool_id_for_agent(agent_id: &str) -> String {
     match agent_id {
         "claude" => "claude-code".to_string(),
         "codex" => "codex-cli".to_string(),
         "gemini" => "gemini-cli".to_string(),
         "opencode" => "opencode".to_string(),
+        "copilot" => "github-copilot".to_string(),
         _ => agent_id.to_string(),
     }
 }
@@ -1206,15 +1219,20 @@ fn get_branch_session_summary_immediate(
     let parser = match session_parser_for_tool(&tool_id) {
         Some(p) => p,
         None => {
+            let status = unsupported_session_status(&tool_id);
             return Ok((
                 summary_status(
-                    "error",
+                    status,
                     Some(tool_id),
                     Some(session_id),
-                    Some("Unsupported agent session".to_string()),
+                    if status == "error" {
+                        Some("Unsupported agent session".to_string())
+                    } else {
+                        None
+                    },
                 ),
                 None,
-            ))
+            ));
         }
     };
 
@@ -1652,11 +1670,16 @@ fn generate_and_cache_session_summary(
                 out.warning = Some("Unsupported agent session; keeping previous".to_string());
                 return out;
             }
+            let status = unsupported_session_status(&job.tool_id);
             return summary_status(
-                "error",
+                status,
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
-                Some("Unsupported agent session".to_string()),
+                if status == "error" {
+                    Some("Unsupported agent session".to_string())
+                } else {
+                    None
+                },
             );
         }
     };
@@ -1770,7 +1793,7 @@ fn generate_and_cache_scrollback_summary(
     });
 
     let pane_session = pane_session_id(&job.pane_id);
-    let scrollback = match capture_scrollback_tail_from_state(state, &job.pane_id, 0) {
+    let scrollback = match capture_scrollback_tail_from_state(state, &job.pane_id, 0, None) {
         Ok(text) => text,
         Err(err) => {
             if let Some(prev) = previous_any.as_ref() {
@@ -2146,6 +2169,43 @@ mod tests {
     }
 
     #[test]
+    fn normalize_tool_id_maps_copilot_aliases() {
+        assert_eq!(normalize_tool_id("copilot"), "github-copilot");
+        assert_eq!(normalize_tool_id("github-copilot"), "github-copilot");
+    }
+
+    #[test]
+    fn tool_id_for_agent_maps_copilot() {
+        assert_eq!(tool_id_for_agent("copilot"), "github-copilot");
+    }
+
+    #[test]
+    fn display_tool_name_maps_copilot() {
+        let entry = ToolSessionEntry {
+            branch: "main".to_string(),
+            worktree_path: None,
+            tool_id: "github-copilot".to_string(),
+            tool_label: "Custom".to_string(),
+            session_id: None,
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: None,
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
+            timestamp: 0,
+        };
+        assert_eq!(display_tool_name(&entry), "GitHub Copilot");
+    }
+
+    #[test]
     fn session_summary_returns_no_session_when_history_missing() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
@@ -2190,6 +2250,43 @@ mod tests {
         assert!(job.is_none());
         assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
         assert_eq!(out.session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn session_summary_returns_no_session_for_copilot_without_parser() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let mut config = ProfilesConfig::default();
+        config.default_ai = Some(gwt_core::config::AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
+        });
+        config.save().unwrap();
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        write_session_entry(repo.path(), "main", "copilot", "copilot-session-1");
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(out.status, "no-session");
+        assert!(!out.generating);
+        assert!(job.is_none());
+        assert_eq!(out.tool_id.as_deref(), Some("github-copilot"));
+        assert_eq!(out.session_id.as_deref(), Some("copilot-session-1"));
+        assert!(out.error.is_none());
     }
 
     #[test]

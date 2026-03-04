@@ -1,6 +1,136 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.3.0] - 2026-03-04
+
+### Documentation
+
+- GitHub Token (PAT) 要件を README に追記 (#1439)
+
+### Features
+
+- **core:** スキル終了時解除 + スコープ User 固定簡素化 (#1438)
+
+## [8.2.0] - 2026-03-04
+
+### Bug Fixes
+
+- **project-index:** Scope GitHub issue indexing to target repo (#1430)
+- Narrow worktree remove fallback for missing metadata errors (#1431)
+- **worktree:** Auto-repair unregistered valid worktree in create_for_branch (#1424) (#1425)
+- Stabilize voice runtime setup and python probe (#1432)
+- **core:** Align plugin rename and pr inspection logic (#1435)
+
+### Features
+
+- Add API key peek/copy controls in settings (#1434)
+
+## [8.1.6] - 2026-03-03
+
+### Bug Fixes
+
+- **e2e:** Remove stale StatusBar agent detection tests
+- Bring window to front when report dialog opens (#1256) (#1422)
+
+### Testing
+
+- **e2e:** Align status bar spec with current UI (#1421)
+
+## [8.1.5] - 2026-03-03
+
+### Bug Fixes
+
+- Complete issue #1265 runtime runner handling and spec sync (#1419)
+- **e2e:** Remove stale StatusBar agent detection tests
+
+## [8.1.4] - 2026-03-02
+
+### Bug Fixes
+
+- Prevent issue list loading-more regressions (#1414)
+- Resolve Copilot resume/model/quick-launch regressions (#1416)
+
+## [8.1.3] - 2026-03-02
+
+### Bug Fixes
+
+- Paginate branch deletion-rule precheck (#1406)
+- **gui:** Show merged/closed PR details in worktree view (#1409)
+- **gui:** Eliminate terminal tab switch flicker (#1413)
+- **windows:** Normalize wrapped npx path at resolve/display boundaries (#1265) (#1412)
+
+## [8.1.2] - 2026-03-02
+
+### Bug Fixes
+
+- **windows:** Harden normalization boundaries for Issue #1265 (#1403)
+
+### Documentation
+
+- **skills:** Enforce issue comment formatting rules (#1402)
+
+## [8.1.1] - 2026-03-02
+
+### Bug Fixes
+
+- **issue:** Separate spec issues and optimize issue list performance (#1397)
+
+## [8.1.0] - 2026-03-02
+
+### Bug Fixes
+
+- **gui:** Auto-close docs editor tab after vi exits (#1396)
+- Harden windows launch normalization and stale PR tab state (#1399)
+
+### Features
+
+- プロジェクト単位の完全分離（PTY・ChromaDB・GitHub Issue） (#1395)
+
+### Miscellaneous Tasks
+
+- **skill:** Remove requirements-spec-kit (#1385)
+- **skill:** Drop deprecated requirements-spec-kit (#1394)
+
+## [8.0.0] - 2026-03-01
+
+### Bug Fixes
+
+- Harden Windows batch quote normalization and CI coverage (#1265) (#1287)
+- **gui:** Keep report dialog topmost across modal stacks (#1256) (#1290)
+- **gui:** Resolve duplicated prefix display in from issue branch name (#1288) (#1292)
+- **pr:** Unify merge state badges and remove unknown UI (#1293)
+- **pr:** Unify merge state badges and remove unknown UI (#1295)
+- Harden migration evacuation data safety for issue #1235 (#1291)
+- **test:** Stabilize windows pty regression commands (#1294)
+- **test:** Stabilize windows pty and retrying badge checks (#1375)
+- **pr:** Unify merge state badges and remove unknown UI (#1374)
+- Harden migration evacuation data safety for issue #1235 (follow-up) (#1373)
+- **test:** Stabilize windows pty and retrying checks follow-up (#1376)
+- **pr:** Follow up merge-state review feedback (#1378)
+- Preserve evacuation data until migration completion (issue #1235 follow-up) (#1379)
+
+### Documentation
+
+- **spec:** Refresh project mode persona design and agent precedence (#1382)
+
+### Features
+
+- **gui:** Add check/fix docs action for agent instruction files (#1285)
+- Add ChromaDB project structure index with semantic search (#1377)
+- Migrate spec management from local files to GitHub Issues (#1372)
+- Add ChromaDB project structure index with semantic search (#1380)
+- **skill:** Add spec-to-issue migration workflow (#1383)
+
+### Miscellaneous Tasks
+
+- Sync feature/update-clause-docs with develop (#1289)
+- Sync feature/worktree-detail-merge-logic with develop (follow-up) (#1381)
+
+### Testing
+
+- Improve coverage to 90% target (#1284)
+- Fix e2e CI failures after coverage update (#1286)
+
 ## [7.13.3] - 2026-02-27
 
 ### Bug Fixes

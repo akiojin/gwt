@@ -110,19 +110,8 @@ async function setMockCommandResponses(
   }, commandResponses);
 }
 
-async function dismissSkillRegistrationScopeDialogIfPresent(page: Page) {
-  const dialog = page.getByRole("dialog", {
-    name: "Skill registration scope",
-  });
-  const visible = await dialog
-    .isVisible({ timeout: 500 })
-    .catch(() => false);
-  if (!visible) {
-    return;
-  }
-
-  await dialog.getByRole("button", { name: "Skip for now" }).click();
-  await expect(dialog).toBeHidden();
+async function dismissSkillRegistrationScopeDialogIfPresent(_page: Page) {
+  // No-op: scope dialog removed after scope simplification.
 }
 
 async function openProjectAndSelectBranch(

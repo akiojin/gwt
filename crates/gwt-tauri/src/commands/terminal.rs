@@ -13,7 +13,7 @@ use gwt_core::docker::{
 use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::runner::{
-    build_fallback_launch, choose_fallback_runner, resolve_command_path,
+    choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
 };
 use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
@@ -123,9 +123,9 @@ pub struct LaunchAgentRequest {
     pub model: Option<String>,
     /// Optional tool version selection.
     ///
-    /// - `None`: auto (prefer installed command when present, else bunx/npx)
-    /// - `"installed"`: force installed command (falls back to bunx/npx when missing)
-    /// - other: force bunx/npx package `@...@{version}` (e.g. "latest", "1.2.3")
+    /// - `None`: auto (prefer installed command when present, else package runner)
+    /// - `"installed"`: force installed command (missing command fails at runtime)
+    /// - other: force package runner `@...@{version}` (e.g. "latest", "1.2.3")
     pub agent_version: Option<String>,
     /// Optional session mode override (default: normal).
     pub mode: Option<SessionMode>,
@@ -414,6 +414,11 @@ pub(crate) fn builtin_agent_def(agent_id: &str) -> Result<BuiltinAgentDef, Strin
             local_command: "opencode",
             bunx_package: "opencode-ai",
         }),
+        "copilot" => Ok(BuiltinAgentDef {
+            label: "GitHub Copilot",
+            local_command: "copilot",
+            bunx_package: "@github/copilot",
+        }),
         _ => Err(format!("Unknown agent: {}", agent_id)),
     }
 }
@@ -458,12 +463,13 @@ fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
         "gemini" => vec!["-m".to_string(), model.to_string()],
         // SPEC-3b0ed29b: OpenCode uses `-m provider/model`.
         "opencode" => vec!["-m".to_string(), model.to_string()],
+        "copilot" => vec!["--model".to_string(), model.to_string()],
         _ => Vec::new(),
     }
 }
 
 fn get_command_version_with_timeout(command: &str) -> Option<String> {
-    let command = command.to_string();
+    let command = normalized_process_command(command);
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let out = gwt_core::process::command(&command)
@@ -520,7 +526,7 @@ fn codex_features_list_contains_feature(raw: &str, feature: &str) -> bool {
 }
 
 fn probe_codex_features_list(command: &str, args: &[String], timeout: Duration) -> Option<String> {
-    let command = command.to_string();
+    let command = normalized_process_command(command);
     let args = args.to_vec();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -597,6 +603,58 @@ struct ResolvedAgentLaunchCommand {
     version_for_gates: Option<String>, // best-effort raw version string (may be "latest")
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LaunchRunner {
+    Bunx,
+    Npx,
+}
+
+fn preferred_launch_runner() -> LaunchRunner {
+    let bunx_path = resolve_command_path("bunx");
+    let npx_available = resolve_command_path("npx").is_some();
+    preferred_launch_runner_with_availability(bunx_path.as_deref(), npx_available)
+}
+
+fn preferred_launch_runner_with_availability(
+    bunx_path: Option<&std::path::Path>,
+    npx_available: bool,
+) -> LaunchRunner {
+    match choose_fallback_runner(bunx_path, npx_available) {
+        Some(FallbackRunner::Npx) => LaunchRunner::Npx,
+        Some(FallbackRunner::Bunx) | None => LaunchRunner::Bunx,
+    }
+}
+
+fn build_runner_launch(
+    runner: LaunchRunner,
+    package: &str,
+    version: Option<&str>,
+) -> (String, Vec<String>) {
+    let package_spec = build_bunx_package_spec(package, version);
+    match runner {
+        LaunchRunner::Bunx => ("bunx".to_string(), vec![package_spec]),
+        LaunchRunner::Npx => ("npx".to_string(), vec!["--yes".to_string(), package_spec]),
+    }
+}
+
+fn normalize_launch_command_for_platform(command: String) -> String {
+    let normalized = normalize_windows_command_path(&command);
+    if normalized.is_empty() {
+        command
+    } else {
+        normalized
+    }
+}
+
+fn normalized_process_command(command: &str) -> String {
+    let normalized = normalize_windows_command_path(command);
+    if normalized.is_empty() {
+        command.trim().to_string()
+    } else {
+        normalized
+    }
+}
+
 fn resolve_agent_launch_command(
     agent_id: &str,
     requested_version: Option<&str>,
@@ -610,19 +668,13 @@ fn resolve_agent_launch_command(
 
     let local_available = which(def.local_command).is_ok();
 
-    // Force npm runner when a specific version/dist-tag is provided.
+    // Force package runner when a specific version/dist-tag is provided.
     if let Some(v) = requested.as_deref() {
         if !requested_is_installed {
-            let bunx_path = resolve_command_path("bunx");
-            let npx_path = resolve_command_path("npx");
-
-            let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some())
-                .ok_or_else(|| "bunx/npx is not available".to_string())?;
-            let package = build_bunx_package_spec(def.bunx_package, Some(v));
             let (cmd, args) =
-                build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
+                build_runner_launch(preferred_launch_runner(), def.bunx_package, Some(v));
             return Ok(ResolvedAgentLaunchCommand {
-                command: cmd.clone(),
+                command: normalize_launch_command_for_platform(cmd),
                 args,
                 label: def.label,
                 tool_version: v.to_string(),
@@ -635,7 +687,7 @@ fn resolve_agent_launch_command(
     if local_available {
         let version_raw = get_command_version_with_timeout(def.local_command);
         return Ok(ResolvedAgentLaunchCommand {
-            command: def.local_command.to_string(),
+            command: normalize_launch_command_for_platform(def.local_command.to_string()),
             args: Vec::new(),
             label: def.label,
             tool_version: "installed".to_string(),
@@ -643,24 +695,26 @@ fn resolve_agent_launch_command(
         });
     }
 
-    // Installed was requested but missing: fall back to npm runner with latest.
-    // Auto mode also lands here when installed is missing.
-    let bunx_path = resolve_command_path("bunx");
-    let npx_path = resolve_command_path("npx");
+    // Explicit installed mode: launch directly and let runtime report command-not-found.
+    if requested_is_installed {
+        return Ok(ResolvedAgentLaunchCommand {
+            command: normalize_launch_command_for_platform(def.local_command.to_string()),
+            args: Vec::new(),
+            label: def.label,
+            tool_version: "installed".to_string(),
+            version_for_gates: None,
+        });
+    }
 
-    let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some())
-        .ok_or_else(|| "Agent is not installed and bunx/npx is not available".to_string())?;
-
-    let package = build_bunx_package_spec(def.bunx_package, None);
-    let (cmd, args) =
-        build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
+    // Auto mode fallback: use preferred package runner and resolve in the runtime environment.
+    let (cmd, args) = build_runner_launch(preferred_launch_runner(), def.bunx_package, None);
     let tool_version = if requested_is_installed {
         "installed".to_string()
     } else {
         "latest".to_string()
     };
     Ok(ResolvedAgentLaunchCommand {
-        command: cmd,
+        command: normalize_launch_command_for_platform(cmd),
         args,
         label: def.label,
         tool_version,
@@ -682,7 +736,7 @@ fn resolve_agent_launch_command_for_container(
 
     if requested_is_installed {
         return Ok(ResolvedAgentLaunchCommand {
-            command: def.local_command.to_string(),
+            command: normalize_launch_command_for_platform(def.local_command.to_string()),
             args: Vec::new(),
             label: def.label,
             tool_version: "installed".to_string(),
@@ -690,14 +744,15 @@ fn resolve_agent_launch_command_for_container(
         });
     }
 
-    // Container execution is resolved without host-side command detection.
-    // Prefer `npx --yes` for portability (bun is not guaranteed in containers).
+    // Container execution must stay independent from host-side command detection.
+    // Use npx consistently so launches rely on the container runtime environment.
     let version = requested.unwrap_or_else(|| "latest".to_string());
-    let package = build_bunx_package_spec(def.bunx_package, Some(version.as_str()));
+    let (command, args) =
+        build_runner_launch(LaunchRunner::Npx, def.bunx_package, Some(version.as_str()));
 
     Ok(ResolvedAgentLaunchCommand {
-        command: "npx".to_string(),
-        args: vec!["--yes".to_string(), package],
+        command: normalize_launch_command_for_platform(command),
+        args,
         label: def.label,
         tool_version: version.clone(),
         version_for_gates: Some(version),
@@ -710,6 +765,7 @@ fn agent_color_for(agent_id: &str) -> AgentColor {
         "codex" => AgentColor::Cyan,
         "gemini" => AgentColor::Magenta,
         "opencode" => AgentColor::Green,
+        "copilot" => AgentColor::Blue,
         _ => AgentColor::White,
     }
 }
@@ -720,6 +776,7 @@ fn tool_id_for(agent_id: &str) -> String {
         "codex" => "codex-cli".to_string(),
         "gemini" => "gemini-cli".to_string(),
         "opencode" => "opencode".to_string(),
+        "copilot" => "github-copilot".to_string(),
         _ => agent_id.to_string(),
     }
 }
@@ -1629,6 +1686,29 @@ fn build_agent_args(
 
             args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
+        "copilot" => {
+            match mode {
+                SessionMode::Normal => {}
+                SessionMode::Continue => {
+                    if let Some(id) = resume_session_id {
+                        args.push("--resume".to_string());
+                        args.push(id.to_string());
+                    } else {
+                        args.push("--continue".to_string());
+                    }
+                }
+                SessionMode::Resume => {
+                    args.push("--resume".to_string());
+                    if let Some(id) = resume_session_id {
+                        args.push(id.to_string());
+                    }
+                }
+            }
+            if skip_permissions {
+                args.push("--allow-all-tools".to_string());
+            }
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+        }
         _ => {}
     }
 
@@ -2206,7 +2286,7 @@ pub fn spawn_shell(
     let config = BuiltinLaunchConfig {
         command: final_cmd,
         args: final_args,
-        working_dir: resolved_dir,
+        working_dir: resolved_dir.clone(),
         branch_name: "terminal".to_string(),
         agent_name: "terminal".to_string(),
         agent_color: AgentColor::White,
@@ -2223,9 +2303,11 @@ pub fn spawn_shell(
                 "spawn_shell",
             )
         })?;
-        manager.spawn_shell(config, 24, 80).map_err(|e| {
-            StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
-        })?
+        manager
+            .spawn_shell(&resolved_dir, config, 24, 80)
+            .map_err(|e| {
+                StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
+            })?
     };
 
     let reader = {
@@ -2258,7 +2340,6 @@ pub fn spawn_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::terminal::runner::FallbackRunner;
     use std::cell::Cell;
     use std::ffi::OsString;
     use std::path::Path;
@@ -2436,62 +2517,90 @@ mod tests {
     }
 
     #[test]
-    fn choose_fallback_runner_prefers_npx_when_both_available() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), true),
-            Some(FallbackRunner::Npx)
-        );
+    fn preferred_launch_runner_with_availability_prefers_npx_when_available() {
+        assert!(matches!(
+            preferred_launch_runner_with_availability(Some(Path::new("/usr/bin/bunx")), true),
+            LaunchRunner::Npx
+        ));
     }
 
     #[test]
-    fn choose_fallback_runner_uses_bunx_when_npx_unavailable() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), false),
-            Some(FallbackRunner::Bunx)
-        );
+    fn preferred_launch_runner_with_availability_falls_back_to_bunx() {
+        assert!(matches!(
+            preferred_launch_runner_with_availability(Some(Path::new("/usr/bin/bunx")), false),
+            LaunchRunner::Bunx
+        ));
+        assert!(matches!(
+            preferred_launch_runner_with_availability(None, false),
+            LaunchRunner::Bunx
+        ));
     }
 
     #[test]
-    fn choose_fallback_runner_none_when_only_local_bunx_and_no_npx() {
-        assert_eq!(
-            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), false),
-            None
-        );
-    }
-
-    #[test]
-    fn choose_fallback_runner_uses_npx_when_bunx_is_missing() {
-        assert_eq!(
-            choose_fallback_runner(None, true),
-            Some(FallbackRunner::Npx)
-        );
-    }
-
-    #[test]
-    fn build_fallback_launch_bunx_uses_package_as_first_arg() {
-        let (cmd, args) = build_fallback_launch(
-            FallbackRunner::Bunx,
-            "@openai/codex@latest",
-            Some(Path::new("/usr/local/bin/bunx")),
-            None,
-        );
-        assert_eq!(cmd, "/usr/local/bin/bunx");
+    fn build_runner_launch_bunx_uses_package_as_first_arg() {
+        let (cmd, args) = build_runner_launch(LaunchRunner::Bunx, "@openai/codex", Some("latest"));
+        assert_eq!(cmd, "bunx");
         assert_eq!(args, vec!["@openai/codex@latest".to_string()]);
     }
 
     #[test]
-    fn build_fallback_launch_npx_uses_yes_flag() {
-        let (cmd, args) = build_fallback_launch(
-            FallbackRunner::Npx,
-            "@openai/codex@latest",
-            None,
-            Some(Path::new("/usr/bin/npx")),
-        );
-        assert_eq!(cmd, "/usr/bin/npx");
+    fn build_runner_launch_npx_uses_yes_flag() {
+        let (cmd, args) = build_runner_launch(LaunchRunner::Npx, "@openai/codex", Some("1.2.3"));
+        assert_eq!(cmd, "npx");
         assert_eq!(
             args,
+            vec!["--yes".to_string(), "@openai/codex@1.2.3".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_agent_launch_command_for_container_uses_npx_for_latest() {
+        let resolved =
+            resolve_agent_launch_command_for_container("codex", None).expect("container launch");
+        assert_eq!(resolved.command, "npx");
+        assert_eq!(
+            resolved.args,
             vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
         );
+        assert_eq!(resolved.tool_version, "latest");
+    }
+
+    #[test]
+    fn resolve_agent_launch_command_for_container_uses_npx_for_pinned_version() {
+        let resolved = resolve_agent_launch_command_for_container("codex", Some("1.2.3"))
+            .expect("container launch");
+        assert_eq!(resolved.command, "npx");
+        assert_eq!(
+            resolved.args,
+            vec!["--yes".to_string(), "@openai/codex@1.2.3".to_string()]
+        );
+        assert_eq!(resolved.tool_version, "1.2.3");
+    }
+
+    #[test]
+    fn normalize_launch_command_for_platform_windows_unwraps_wrapped_path() {
+        let raw = r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#.to_string();
+        let normalized = normalize_launch_command_for_platform(raw);
+        assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
+    }
+
+    #[test]
+    fn normalize_launch_command_for_platform_windows_extracts_leading_command_token() {
+        let raw = r#"'\"C:\Program Files\nodejs\npx.cmd\"' --yes @openai/codex@latest"#.to_string();
+        let normalized = normalize_launch_command_for_platform(raw);
+        assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
+    }
+
+    #[test]
+    fn normalized_process_command_unwraps_issue_1265_pattern() {
+        let normalized = normalized_process_command(r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#);
+        assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
+    }
+
+    #[test]
+    fn normalized_process_command_trims_plain_commands() {
+        let normalized = normalized_process_command("  codex  ");
+        assert_eq!(normalized, "codex");
     }
 
     #[test]
@@ -2593,6 +2702,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -2623,7 +2733,7 @@ mod tests {
             }
         }
 
-        let result = send_keys_to_pane_from_state(&state, pane_id, "hello\n");
+        let result = send_keys_to_pane_from_state(&state, pane_id, "hello\n", None);
         assert!(result.is_err());
 
         let mut mgr = state.pane_manager.lock().unwrap();
@@ -2655,6 +2765,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create running pane");
 
@@ -2673,6 +2784,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create done pane");
 
@@ -2730,6 +2842,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -2741,7 +2854,7 @@ mod tests {
                 .expect("failed to write test bytes");
         }
 
-        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024, None)
             .expect("capture should succeed");
         assert!(captured.contains("hi red"));
         assert!(!captured.contains("\x1b"));
@@ -2773,6 +2886,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -2794,7 +2908,7 @@ mod tests {
             );
         }
 
-        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024, None)
             .expect("capture should succeed");
         assert!(captured.contains("[PTY stream error: mock read failure]"));
 
@@ -2825,6 +2939,7 @@ mod tests {
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -2837,7 +2952,7 @@ mod tests {
         let output = String::from_utf8_lossy(&bytes);
         assert_eq!(output, "\r\nPress Enter to close this tab.\r\n");
 
-        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024, None)
             .expect("capture should succeed");
         assert!(captured.contains("Press Enter to close this tab."));
 
@@ -3474,6 +3589,7 @@ services:
                 terminal_shell: None,
                 interactive: false,
                 windows_force_utf8: false,
+                project_root: std::env::temp_dir(),
             })
             .expect("failed to create test pane");
 
@@ -3655,6 +3771,75 @@ services:
         env.insert("AAA".to_string(), "first".to_string());
         let cmd = build_wsl_inject_command("agent", &[], &env, "/mnt/c");
         assert!(cmd.starts_with("export AAA='first' && export ZZZ='last'"));
+    }
+
+    #[test]
+    fn builtin_agent_def_copilot() {
+        let def = builtin_agent_def("copilot").expect("copilot should be defined");
+        assert_eq!(def.label, "GitHub Copilot");
+        assert_eq!(def.local_command, "copilot");
+        assert_eq!(def.bunx_package, "@github/copilot");
+    }
+
+    #[test]
+    fn build_agent_model_args_copilot() {
+        assert_eq!(
+            build_agent_model_args("copilot", Some("gpt-4.1")),
+            vec!["--model".to_string(), "gpt-4.1".to_string()]
+        );
+        assert!(build_agent_model_args("copilot", None).is_empty());
+    }
+
+    #[test]
+    fn agent_color_for_copilot() {
+        assert_eq!(agent_color_for("copilot"), AgentColor::Blue);
+    }
+
+    #[test]
+    fn tool_id_for_copilot() {
+        assert_eq!(tool_id_for("copilot"), "github-copilot");
+    }
+
+    #[test]
+    fn build_agent_args_copilot_continue() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Continue);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert!(args.contains(&"--continue".to_string()));
+    }
+
+    #[test]
+    fn build_agent_args_copilot_continue_prefers_resume_id_when_provided() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Continue);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string(), "sess-123".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_copilot_resume_without_id_opens_picker() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Resume);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_copilot_resume_with_id() {
+        let mut req = make_request("copilot");
+        req.mode = Some(SessionMode::Resume);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert_eq!(args, vec!["--resume".to_string(), "sess-123".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_copilot_skip_permissions() {
+        let mut req = make_request("copilot");
+        req.skip_permissions = Some(true);
+        let args = build_agent_args("copilot", &req, None, false).unwrap();
+        assert!(args.contains(&"--allow-all-tools".to_string()));
     }
 }
 
@@ -5255,6 +5440,7 @@ pub(crate) fn send_keys_to_pane_from_state(
     state: &AppState,
     pane_id: &str,
     text: &str,
+    project_root: Option<&std::path::Path>,
 ) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
@@ -5268,6 +5454,16 @@ pub(crate) fn send_keys_to_pane_from_state(
     let pane = manager
         .pane_mut_by_id(pane_id)
         .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+
+    // Project isolation: reject access to panes belonging to a different project.
+    if let Some(root) = project_root {
+        if pane.project_root() != root {
+            return Err(format!(
+                "Access denied: pane {} belongs to a different project",
+                pane_id
+            ));
+        }
+    }
 
     let _ = pane.check_status();
     match pane.status() {
@@ -5320,13 +5516,18 @@ pub(crate) fn send_keys_broadcast_from_state(
 }
 
 /// Send text to a terminal pane (pane_id required).
+///
+/// When `project_root` is provided, access is restricted to panes belonging
+/// to that project (multi-project isolation).
 #[tauri::command]
 pub fn send_keys_to_pane(
     pane_id: String,
     text: String,
+    project_root: Option<String>,
     state: State<AppState>,
 ) -> Result<(), StructuredError> {
-    send_keys_to_pane_from_state(&state, &pane_id, &text)
+    let root = project_root.map(PathBuf::from);
+    send_keys_to_pane_from_state(&state, &pane_id, &text, root.as_deref())
         .map_err(|e| StructuredError::internal(&e, "send_keys_to_pane"))
 }
 
@@ -5394,17 +5595,26 @@ pub fn close_terminal(
     Ok(())
 }
 
-/// List all active terminal panes
+/// List terminal panes scoped to the given project root.
+///
+/// When `project_root` is provided, only panes belonging to that project are
+/// returned (multi-project isolation). When omitted, all panes are listed
+/// (backwards-compatible).
 #[tauri::command]
-pub fn list_terminals(state: State<AppState>) -> Vec<TerminalInfo> {
+pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> Vec<TerminalInfo> {
     let manager = match state.pane_manager.lock() {
         Ok(m) => m,
         Err(_) => return Vec::new(),
     };
 
+    let project_filter = project_root.map(PathBuf::from);
     manager
         .panes()
         .iter()
+        .filter(|pane| match &project_filter {
+            Some(root) => pane.project_root() == root.as_path(),
+            None => true,
+        })
         .map(|pane| {
             let status = match pane.status() {
                 PaneStatus::Running => "running".to_string(),
@@ -5425,6 +5635,7 @@ pub(crate) fn capture_scrollback_tail_from_state(
     state: &AppState,
     pane_id: &str,
     max_bytes: usize,
+    project_root: Option<&std::path::Path>,
 ) -> Result<String, String> {
     let max_bytes = match max_bytes {
         0 => DEFAULT_SCROLLBACK_TAIL_BYTES,
@@ -5439,6 +5650,15 @@ pub(crate) fn capture_scrollback_tail_from_state(
             .lock()
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         if let Some(pane) = mgr.pane_mut_by_id(pane_id) {
+            // Project isolation: reject access to panes belonging to a different project.
+            if let Some(root) = project_root {
+                if pane.project_root() != root {
+                    return Err(format!(
+                        "Access denied: pane {} belongs to a different project",
+                        pane_id
+                    ));
+                }
+            }
             pane.flush_scrollback().map_err(|e| e.to_string())?;
         }
     }
@@ -5570,14 +5790,19 @@ pub fn probe_terminal_ansi(
 }
 
 /// Capture the scrollback tail for a pane as plain text (ANSI stripped).
+///
+/// When `project_root` is provided, access is restricted to panes belonging
+/// to that project (multi-project isolation).
 #[tauri::command]
 pub fn capture_scrollback_tail(
     state: State<AppState>,
     pane_id: String,
     max_bytes: Option<usize>,
+    project_root: Option<String>,
 ) -> Result<String, StructuredError> {
     let max_bytes = max_bytes.unwrap_or(DEFAULT_SCROLLBACK_TAIL_BYTES);
-    capture_scrollback_tail_from_state(&state, &pane_id, max_bytes)
+    let root = project_root.map(PathBuf::from);
+    capture_scrollback_tail_from_state(&state, &pane_id, max_bytes, root.as_deref())
         .map_err(|e| StructuredError::internal(&e, "capture_scrollback_tail"))
 }
 

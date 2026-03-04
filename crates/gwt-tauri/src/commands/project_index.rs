@@ -1,5 +1,6 @@
 //! Project structure index commands backed by ChromaDB (Python runtime).
 
+use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::process::command_os;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -26,9 +27,13 @@ struct ChromaRunnerResponse {
     #[serde(default)]
     files_indexed: Option<u64>,
     #[serde(default)]
+    issues_indexed: Option<u64>,
+    #[serde(default)]
     duration_ms: Option<u64>,
     #[serde(default)]
     results: Option<Vec<SearchResultItem>>,
+    #[serde(default)]
+    issue_results: Option<Vec<GitHubIssueSearchResult>>,
     #[serde(default)]
     indexed: Option<bool>,
     #[serde(default)]
@@ -68,6 +73,24 @@ pub struct IndexStatusResult {
     pub indexed: bool,
     pub total_files: u64,
     pub db_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubIssueSearchResult {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+    pub labels: Vec<String>,
+    pub distance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexIssuesResult {
+    pub issues_indexed: u64,
+    pub duration_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +354,10 @@ fn db_path_for_project(project_root: &str) -> PathBuf {
     Path::new(project_root).join(".gwt").join("index")
 }
 
+fn repo_path_for_issue_index(project_root: &str) -> Result<PathBuf, String> {
+    resolve_repo_path_for_project_root(Path::new(project_root))
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -410,6 +437,52 @@ pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusRes
     .map_err(|e| format!("Get index status task failed: {e}"))?
 }
 
+#[tauri::command]
+pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssuesResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let python = find_python_binary()?;
+        let db = db_path_for_project(&project_root);
+        let repo_path = repo_path_for_issue_index(&project_root)?;
+        let resp = run_chroma_runner(
+            &python,
+            "index-issues",
+            Some(&repo_path.to_string_lossy()),
+            Some(&db.to_string_lossy()),
+            None,
+            None,
+        )?;
+        Ok(IndexIssuesResult {
+            issues_indexed: resp.issues_indexed.unwrap_or(0),
+            duration_ms: resp.duration_ms.unwrap_or(0),
+        })
+    })
+    .await
+    .map_err(|e| format!("Index GitHub issues task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn search_github_issues_cmd(
+    project_root: String,
+    query: String,
+    n_results: Option<u32>,
+) -> Result<Vec<GitHubIssueSearchResult>, String> {
+    tokio::task::spawn_blocking(move || {
+        let python = find_python_binary()?;
+        let db = db_path_for_project(&project_root);
+        let resp = run_chroma_runner(
+            &python,
+            "search-issues",
+            None,
+            Some(&db.to_string_lossy()),
+            Some(&query),
+            n_results,
+        )?;
+        Ok(resp.issue_results.unwrap_or_default())
+    })
+    .await
+    .map_err(|e| format!("Search GitHub issues task failed: {e}"))?
+}
+
 /// Build index for a project in the background. Non-fatal on errors.
 pub fn spawn_background_index(project_root: String) {
     tauri::async_runtime::spawn_blocking(move || {
@@ -467,6 +540,7 @@ pub fn spawn_background_index(project_root: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn db_path_uses_gwt_index_dir() {
@@ -478,6 +552,43 @@ mod tests {
     fn chroma_venv_dir_is_under_runtime() {
         let dir = chroma_venv_dir().unwrap();
         assert!(dir.to_string_lossy().contains("chroma-venv"));
+    }
+
+    #[test]
+    fn chroma_collection_names_are_files_and_issues() {
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("\"files\""),
+            "files collection name must be 'files'"
+        );
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("\"issues\""),
+            "issues collection name must be 'issues'"
+        );
+        assert!(
+            !CHROMA_HELPER_SCRIPT.contains("\"project_files\""),
+            "old collection name 'project_files' must not exist"
+        );
+        assert!(
+            !CHROMA_HELPER_SCRIPT.contains("\"github_issues\""),
+            "old collection name 'github_issues' must not exist"
+        );
+    }
+
+    #[test]
+    fn chroma_search_has_substring_fallback_for_empty_semantic_results() {
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("def fallback_substring_search("),
+            "fallback_substring_search helper must exist"
+        );
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("if not items:"),
+            "search path must branch on empty semantic results"
+        );
+        assert!(
+            CHROMA_HELPER_SCRIPT
+                .contains("items = fallback_substring_search(collection, query, actual_n)"),
+            "search path must invoke fallback_substring_search"
+        );
     }
 
     #[test]
@@ -498,5 +609,35 @@ mod tests {
         assert_eq!(parsed.indexed, Some(true));
         assert_eq!(parsed.total_files, Some(42));
         assert_eq!(parsed.db_size_bytes, Some(2048));
+    }
+
+    #[test]
+    fn repo_path_for_issue_index_resolves_bare_repo_from_project_config() {
+        let temp = tempdir().expect("create tempdir");
+        let root = temp.path();
+
+        fs::create_dir_all(root.join(".gwt")).expect("create .gwt");
+        fs::write(
+            root.join(".gwt/project.json"),
+            r#"{"bare_repo_name":"repo.git","migrated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .expect("write project.json");
+
+        let bare = root.join("repo.git");
+        let output = command_os("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&bare)
+            .output()
+            .expect("run git init --bare");
+        assert!(
+            output.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let resolved =
+            repo_path_for_issue_index(&root.to_string_lossy()).expect("resolve issue index repo");
+        assert_eq!(resolved, bare);
     }
 }

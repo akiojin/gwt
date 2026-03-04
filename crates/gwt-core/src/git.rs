@@ -28,10 +28,11 @@ pub use diff::{
 };
 pub use gh_cli::{create_remote_branch, resolve_remote_branch_sha, PrStatus};
 pub use issue::{
-    create_linked_branch, create_or_verify_linked_branch, fetch_issue_detail, fetch_open_issues,
-    filter_issues_by_title, find_branch_for_issue, generate_branch_name, is_gh_cli_authenticated,
-    is_gh_cli_available, parse_gh_issues_json, resolve_repo_slug, FetchIssuesResult,
-    GitHubAssignee, GitHubIssue, GitHubLabel, GitHubMilestone, IssueLinkedBranchStatus,
+    create_linked_branch, create_or_verify_linked_branch, fetch_issue_detail,
+    fetch_issues_with_options, fetch_open_issues, filter_issues_by_title, find_branch_for_issue,
+    find_branches_for_issues, generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available,
+    parse_gh_issues_json, resolve_repo_slug, FetchIssuesResult, GitHubAssignee, GitHubIssue,
+    GitHubLabel, GitHubMilestone, IssueLinkedBranchStatus,
 };
 pub use issue_spec::{
     append_contract_comment, close_spec_issue, create_spec_issue,

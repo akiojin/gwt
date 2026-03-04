@@ -1,15 +1,18 @@
 <script lang="ts">
-  import type {
-    AgentConfig,
-    AgentInfo,
-    BranchInfo,
-    ClassifyResult,
-    DockerContext,
-    FetchIssuesResponse,
-    GhCliStatus,
-    GitHubIssueInfo,
-    LaunchAgentRequest,
-    ShellInfo,
+  import {
+    ISSUE_BRANCH_LOOKUP_UNKNOWN,
+    type AgentConfig,
+    type AgentInfo,
+    type BranchInfo,
+    type ClassifyResult,
+    type DockerContext,
+    type FetchIssuesResponse,
+    type GhCliStatus,
+    type IssueBranchLookupState,
+    type IssueBranchMatch,
+    type GitHubIssueInfo,
+    type LaunchAgentRequest,
+    type ShellInfo,
   } from "../types";
   import {
     loadLaunchDefaults,
@@ -161,7 +164,7 @@
   let issuesHasNextPage: boolean = $state(false);
   let issueSearchQuery: string = $state("");
   let selectedIssue: GitHubIssueInfo | null = $state(null as GitHubIssueInfo | null);
-  let issueBranchMap: Map<number, string | null> = $state(new Map());
+  let issueBranchMap: Map<number, IssueBranchLookupState> = $state(new Map());
   let issueBranchChecksInFlight: Set<number> = $state(new Set());
   let issueRateLimited: boolean = $state(false);
   let appliedPrefillIssueNumber: number | null = null;
@@ -261,7 +264,11 @@
               { value: "gemini-2.5-flash", label: "gemini-2.5-flash" },
               { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite" },
             ]
-          : []
+          : selectedAgent === "copilot"
+            ? [
+                { value: "gpt-4.1", label: "GPT-4.1" },
+              ]
+            : []
   );
 
   let versionSelectOptions = $derived(
@@ -271,11 +278,9 @@
 
       const seen = new Set<string>();
 
-      if (!agentNotInstalled) {
-        const ver = selectedAgentInfo?.version?.trim() || "installed";
-        opts.push({ value: "installed", label: `Installed (${ver})` });
-        seen.add("installed");
-      }
+      const ver = selectedAgentInfo?.version?.trim() || "installed";
+      opts.push({ value: "installed", label: `Installed (${ver})` });
+      seen.add("installed");
 
       opts.push({ value: "latest", label: "latest" });
       seen.add("latest");
@@ -451,12 +456,18 @@
 
     const storedVersion = agentVersionByAgent[currentAgent];
     if (storedVersion) {
-      agentVersion =
-        storedVersion === "installed" && currentAgentNotInstalled
-          ? "latest"
-          : storedVersion;
+      agentVersion = storedVersion;
     } else {
-      agentVersion = currentAgentNotInstalled ? "latest" : "installed";
+      agentVersion = "installed";
+    }
+  });
+
+  $effect(() => {
+    if (selectedAgent !== "copilot") return;
+    const current = model.trim();
+    if (!current) return;
+    if (!modelOptions.some((opt) => opt.value === current)) {
+      model = "";
     }
   });
 
@@ -631,6 +642,9 @@
         page,
         perPage: 30,
         state: "open",
+        category: "issues",
+        includeBody: false,
+        forceRefresh: false,
       });
       if (page === 1) {
         issues = resp.issues;
@@ -639,13 +653,7 @@
       }
       issuesPage = page;
       issuesHasNextPage = resp.hasNextPage;
-
-      // Check existing branches for newly loaded issues
-      for (const issue of resp.issues) {
-        if (!issueBranchMap.has(issue.number)) {
-          void checkExistingBranch(issue.number);
-        }
-      }
+      await loadIssueBranches(resp.issues, page === 1);
     } catch (err) {
       const msg = toErrorMessage(err);
       if (msg.toLowerCase().includes("rate limit")) {
@@ -659,25 +667,47 @@
     }
   }
 
-  async function checkExistingBranch(issueNumber: number) {
-    issueBranchChecksInFlight = new Set(issueBranchChecksInFlight).add(issueNumber);
+  async function loadIssueBranches(loadedIssues: GitHubIssueInfo[], reset: boolean) {
+    const issueNumbers = loadedIssues.map((issue) => issue.number);
+    if (issueNumbers.length === 0) return;
+
+    const baseline = reset ? new Map<number, IssueBranchLookupState>() : new Map(issueBranchMap);
+    for (const issueNumber of issueNumbers) {
+      if (!baseline.has(issueNumber)) baseline.set(issueNumber, null);
+    }
+    issueBranchMap = baseline;
+
+    const nextInFlight = new Set(issueBranchChecksInFlight);
+    for (const issueNumber of issueNumbers) nextInFlight.add(issueNumber);
+    issueBranchChecksInFlight = nextInFlight;
+
     try {
       const { invoke } = await import("$lib/tauriInvoke");
-      const branch = await invoke<string | null>("find_existing_issue_branch", {
+      const matches = await invoke<IssueBranchMatch[]>("find_existing_issue_branches_bulk", {
         projectPath,
-        issueNumber,
+        issueNumbers,
       });
-      const existingBranch = branch ?? null;
-      issueBranchMap = new Map(issueBranchMap).set(issueNumber, existingBranch);
-      if (existingBranch && selectedIssue?.number === issueNumber) {
+
+      const nextMap = new Map(issueBranchMap);
+      for (const match of matches) {
+        nextMap.set(match.issueNumber, match.branchName);
+      }
+      issueBranchMap = nextMap;
+      if (selectedIssue?.number && nextMap.get(selectedIssue.number)) {
         selectedIssue = null;
       }
     } catch {
-      // Treat as "not found" so the issue is not blocked forever.
-      issueBranchMap = new Map(issueBranchMap).set(issueNumber, null);
+      const nextMap = new Map(issueBranchMap);
+      for (const issueNumber of issueNumbers) {
+        nextMap.set(issueNumber, ISSUE_BRANCH_LOOKUP_UNKNOWN);
+      }
+      issueBranchMap = nextMap;
+      if (selectedIssue?.number && nextMap.get(selectedIssue.number) !== null) {
+        selectedIssue = null;
+      }
     } finally {
       const next = new Set(issueBranchChecksInFlight);
-      next.delete(issueNumber);
+      for (const issueNumber of issueNumbers) next.delete(issueNumber);
       issueBranchChecksInFlight = next;
     }
   }
@@ -1254,9 +1284,11 @@
                 <div class="issue-empty">No issues found.</div>
               {/if}
               {#each filteredIssues as issue (issue.number)}
-                {@const existingBranchName = issueBranchMap.get(issue.number)}
+                {@const branchState = issueBranchMap.get(issue.number)}
+                {@const existingBranchName = typeof branchState === "string" && branchState !== ISSUE_BRANCH_LOOKUP_UNKNOWN ? branchState : null}
+                {@const checkFailed = branchState === ISSUE_BRANCH_LOOKUP_UNKNOWN}
                 {@const isChecking = issueBranchChecksInFlight.has(issue.number) || !issueBranchMap.has(issue.number)}
-                {@const isDisabled = isChecking || !!existingBranchName}
+                {@const isDisabled = isChecking || !!existingBranchName || checkFailed}
                 {@const isSelected = selectedIssue?.number === issue.number}
                 <button
                   class="issue-item"
@@ -1267,7 +1299,9 @@
                   onclick={() => selectIssue(issue)}
                   title={isChecking
                     ? "Checking existing branch..."
-                    : isDisabled
+                    : checkFailed
+                      ? "Branch check failed. Retry from refresh."
+                      : isDisabled
                       ? `Branch exists: ${existingBranchName}`
                       : ""}
                 >
@@ -1282,6 +1316,8 @@
                   {/if}
                   {#if isChecking}
                     <span class="issue-existing">Checking...</span>
+                  {:else if checkFailed}
+                    <span class="issue-existing">Check failed</span>
                   {:else if isDisabled}
                     <span class="issue-existing">Branch exists</span>
                   {/if}

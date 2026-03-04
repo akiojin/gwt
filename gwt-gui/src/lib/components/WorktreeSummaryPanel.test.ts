@@ -390,6 +390,78 @@ describe("WorktreeSummaryPanel", () => {
     expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(1);
   });
 
+  it("shows merged PR detail when latestBranchPr is MERGED and no sidebar PR number exists", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr")
+        return {
+          number: 99,
+          title: "Old merged PR",
+          state: "MERGED",
+          url: "https://github.com/test/repo/pull/99",
+        };
+      if (cmd === "fetch_pr_detail") return { ...prDetailFixture, number: 99, title: "Old merged PR", state: "MERGED" };
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("#99 Old merged PR")).toBeTruthy();
+    });
+    expect(commandCalls("fetch_pr_detail").some(([, p]) => p?.prNumber === 99)).toBe(true);
+  });
+
+  it("prefers sidebar prNumber over latestBranchPr when both are present", async () => {
+    invokeMock.mockImplementation(
+      async (cmd: string, args?: { prNumber?: number }) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr")
+          return {
+            number: 99,
+            title: "Old merged PR",
+            state: "MERGED",
+            url: "https://github.com/test/repo/pull/99",
+          };
+        if (cmd === "fetch_pr_detail") {
+          if (args?.prNumber === 42) return prDetailFixture;
+          return { ...prDetailFixture, number: 99, title: "Old merged PR", state: "MERGED" };
+        }
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      }
+    );
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      prNumber: 42,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("#42 CI Test PR")).toBeTruthy();
+    });
+    expect(
+      commandCalls("fetch_pr_detail").some(([, payload]) => payload?.prNumber === 99)
+    ).toBe(false);
+  });
+
   it("shows GitHub CLI auth warning in PR tab when CLI is unavailable", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
@@ -2435,6 +2507,51 @@ describe("WorktreeSummaryPanel", () => {
         agentId: "gemini",
         mode: "continue",
         resumeSessionId: "session-gemini-launch",
+      }),
+    );
+  });
+
+  it("maps github-copilot tool id to quick launch agentId", async () => {
+    const copilotEntry = {
+      ...quickStartDockerEntry,
+      tool_id: "github-copilot",
+      tool_label: "GitHub Copilot",
+      session_id: "session-copilot-launch",
+      timestamp: quickStartDockerEntry.timestamp + 21,
+    };
+
+    const onQuickLaunch = vi.fn(async () => {});
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [copilotEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch,
+    });
+
+    await waitFor(() => {
+      const continueBtn = rendered.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
+      expect(continueBtn.disabled).toBe(false);
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => {
+      expect(onQuickLaunch).toHaveBeenCalled();
+    });
+
+    expect(onQuickLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "copilot",
+        mode: "continue",
+        resumeSessionId: "session-copilot-launch",
       }),
     );
   });

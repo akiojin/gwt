@@ -1,7 +1,8 @@
 //! Repository operations
 
 use crate::error::{GwtError, Result};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
 /// Repository type classification (SPEC-a70a1ece)
@@ -891,6 +892,177 @@ impl Repository {
             })
         }
     }
+
+    /// Restore lost worktree administrative files by recreating them from the gitfile.
+    ///
+    /// When `git worktree prune` or similar removes `.git/worktrees/<name>/` but the
+    /// worktree directory survives, this recreates the minimal metadata (HEAD, gitdir,
+    /// commondir) so that `git worktree list` recognises the worktree again.
+    ///
+    /// Safe: only creates directories and files; nothing is deleted.
+    pub fn restore_worktree_metadata(&self, worktree_path: &Path, branch: &str) -> Result<()> {
+        // Read the gitfile to locate the metadata directory
+        let git_file = worktree_path.join(".git");
+        let content =
+            std::fs::read_to_string(&git_file).map_err(|e| GwtError::GitOperationFailed {
+                operation: "read gitfile".to_string(),
+                details: e.to_string(),
+            })?;
+
+        let gitdir_str = content
+            .trim_start()
+            .strip_prefix("gitdir:")
+            .ok_or_else(|| GwtError::GitOperationFailed {
+                operation: "parse gitfile".to_string(),
+                details: "missing gitdir: prefix".to_string(),
+            })?
+            .trim();
+
+        // Resolve to an absolute path
+        let resolved_meta_dir = if Path::new(gitdir_str).is_absolute() {
+            PathBuf::from(gitdir_str)
+        } else {
+            worktree_path.join(gitdir_str)
+        };
+        let worktrees_root = resolve_git_worktrees_root(&self.root)?;
+        if !is_valid_worktree_meta_dir(&resolved_meta_dir, &worktrees_root) {
+            return Err(GwtError::GitOperationFailed {
+                operation: "validate worktree metadata dir".to_string(),
+                details: format!(
+                    "Refusing to restore metadata outside worktrees root: meta_dir={} worktrees_root={}",
+                    resolved_meta_dir.display(),
+                    worktrees_root.display()
+                ),
+            });
+        }
+        let meta_dir = normalize_absolute_path(&resolved_meta_dir);
+
+        // Create the metadata directory (including parent .git/worktrees/ if absent)
+        std::fs::create_dir_all(&meta_dir).map_err(|e| GwtError::GitOperationFailed {
+            operation: "create worktree metadata dir".to_string(),
+            details: e.to_string(),
+        })?;
+
+        // HEAD — branch ref that git worktree list reads
+        std::fs::write(
+            meta_dir.join("HEAD"),
+            format!("ref: refs/heads/{}\n", branch),
+        )
+        .map_err(|e| GwtError::GitOperationFailed {
+            operation: "write worktree HEAD".to_string(),
+            details: e.to_string(),
+        })?;
+
+        // gitdir — absolute path to the worktree's .git file (forward slashes for git)
+        let abs_git_file = std::fs::canonicalize(&git_file).unwrap_or_else(|_| git_file.clone());
+        let gitdir_content = abs_git_file.to_string_lossy().replace('\\', "/");
+        std::fs::write(meta_dir.join("gitdir"), format!("{}\n", gitdir_content)).map_err(|e| {
+            GwtError::GitOperationFailed {
+                operation: "write worktree gitdir".to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        // commondir — relative path from meta_dir to the main .git directory
+        // meta_dir is <git-dir>/worktrees/<name>/ so ../.. reaches <git-dir>/
+        std::fs::write(meta_dir.join("commondir"), "../..\n").map_err(|e| {
+            GwtError::GitOperationFailed {
+                operation: "write worktree commondir".to_string(),
+                details: e.to_string(),
+            }
+        })?;
+
+        info!(
+            category = "git",
+            path = %worktree_path.display(),
+            branch = branch,
+            "Worktree metadata restored"
+        );
+        Ok(())
+    }
+}
+
+fn resolve_git_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
+    let output = crate::process::command("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "worktrees",
+        ])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| GwtError::GitOperationFailed {
+            operation: "rev-parse --git-path worktrees".to_string(),
+            details: e.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(GwtError::GitOperationFailed {
+            operation: "rev-parse --git-path worktrees".to_string(),
+            details: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return Err(GwtError::GitOperationFailed {
+            operation: "rev-parse --git-path worktrees".to_string(),
+            details: "empty worktrees path".to_string(),
+        });
+    }
+
+    Ok(PathBuf::from(raw))
+}
+
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut prefix: Option<OsString> = None;
+    let mut has_root = false;
+    let mut normals: Vec<OsString> = Vec::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(p) => prefix = Some(p.as_os_str().to_os_string()),
+            Component::RootDir => has_root = true,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = normals.pop();
+            }
+            Component::Normal(part) => normals.push(part.to_os_string()),
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    if let Some(p) = prefix {
+        normalized.push(p);
+    }
+    if has_root {
+        normalized.push(std::path::MAIN_SEPARATOR.to_string());
+    }
+    for part in normals {
+        normalized.push(part);
+    }
+
+    normalized
+}
+
+fn is_valid_worktree_meta_dir(meta_dir: &Path, worktrees_root: &Path) -> bool {
+    let meta = normalize_absolute_path(meta_dir);
+    let root = normalize_absolute_path(worktrees_root);
+
+    if !(meta.starts_with(&root) && meta.parent().is_some_and(|parent| parent == root.as_path())) {
+        return false;
+    }
+
+    // Reject pre-existing symlink children such as
+    // "<worktrees_root>/<name> -> /outside/path".
+    if std::fs::symlink_metadata(&meta)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    true
 }
 
 fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
@@ -900,7 +1072,15 @@ fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
         return true;
     }
 
-    message.contains("failed to delete") && message.contains("directory not empty")
+    if message.contains("failed to delete") && message.contains("directory not empty") {
+        return true;
+    }
+
+    message.contains("validation failed")
+        && message.contains("does not exist")
+        && (message.contains("cannot remove working tree")
+            || message.contains("cannot remove worktree")
+            || message.contains("cannot remove work tree"))
 }
 
 /// Information about a worktree from git worktree list
@@ -965,6 +1145,55 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn is_valid_worktree_meta_dir_accepts_direct_child() {
+        #[cfg(windows)]
+        {
+            let root = PathBuf::from(r"C:\repo\.git\worktrees");
+            let meta = PathBuf::from(r"C:\repo\.git\worktrees\feature-foo");
+            assert!(is_valid_worktree_meta_dir(&meta, &root));
+        }
+        #[cfg(not(windows))]
+        {
+            let root = PathBuf::from("/repo/.git/worktrees");
+            let meta = PathBuf::from("/repo/.git/worktrees/feature-foo");
+            assert!(is_valid_worktree_meta_dir(&meta, &root));
+        }
+    }
+
+    #[test]
+    fn is_valid_worktree_meta_dir_rejects_escape_paths() {
+        #[cfg(windows)]
+        {
+            let root = PathBuf::from(r"C:\repo\.git\worktrees");
+            let escaped = PathBuf::from(r"C:\repo\.git\worktrees\..\hooks\feature-foo");
+            assert!(!is_valid_worktree_meta_dir(&escaped, &root));
+        }
+        #[cfg(not(windows))]
+        {
+            let root = PathBuf::from("/repo/.git/worktrees");
+            let escaped = PathBuf::from("/repo/.git/worktrees/../hooks/feature-foo");
+            assert!(!is_valid_worktree_meta_dir(&escaped, &root));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_valid_worktree_meta_dir_rejects_symlink_child() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join(".git").join("worktrees");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).expect("worktrees root");
+        std::fs::create_dir_all(&outside).expect("outside");
+
+        let meta = root.join("feature-foo");
+        symlink(&outside, &meta).expect("symlink");
+
+        assert!(!is_valid_worktree_meta_dir(&meta, &root));
+    }
 
     fn create_test_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
@@ -1212,6 +1441,22 @@ mod tests {
         let err_msg =
             "worktree remove: error: failed to delete '/tmp/wt': Directory not empty".to_string();
         assert!(should_fallback_to_manual_worktree_removal(&err_msg));
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_for_missing_metadata_validation_error() {
+        let err_msg =
+            "fatal: validation failed, cannot remove working tree: '/gwt/.git' does not exist"
+                .to_string();
+        assert!(should_fallback_to_manual_worktree_removal(&err_msg));
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_disabled_for_generic_does_not_exist_error() {
+        let err_msg =
+            "fatal: cannot remove worktree '/tmp/wt': worktree is locked: reason: '/tmp/path' does not exist"
+                .to_string();
+        assert!(!should_fallback_to_manual_worktree_removal(&err_msg));
     }
 
     #[test]

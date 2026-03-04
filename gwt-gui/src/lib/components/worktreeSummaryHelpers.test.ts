@@ -79,6 +79,8 @@ describe("worktreeSummaryHelpers", () => {
     expect(agentIdForToolId("gemini-cli")).toBe("gemini");
     expect(agentIdForToolId("opencode-cli")).toBe("opencode");
     expect(agentIdForToolId("open-code-cli")).toBe("opencode");
+    expect(agentIdForToolId("copilot")).toBe("copilot");
+    expect(agentIdForToolId("github-copilot")).toBe("copilot");
     expect(agentIdForToolId("mystery")).toBe("mystery");
 
     expect(toolClass(entry({ tool_id: "claude-code" }))).toBe("claude");
@@ -86,6 +88,7 @@ describe("worktreeSummaryHelpers", () => {
     expect(toolClass(entry({ tool_id: "gemini-cli" }))).toBe("gemini");
     expect(toolClass(entry({ tool_id: "opencode-cli" }))).toBe("opencode");
     expect(toolClass(entry({ tool_id: "open-code-cli" }))).toBe("opencode");
+    expect(toolClass(entry({ tool_id: "github-copilot" }))).toBe("copilot");
     expect(toolClass(entry({ tool_id: "mystery" }))).toBe("");
     expect(toolClass(entry({ tool_id: undefined as unknown as string }))).toBe("");
   });
@@ -96,6 +99,7 @@ describe("worktreeSummaryHelpers", () => {
     expect(displayToolName(entry({ tool_id: "gemini-cli" }))).toBe("Gemini");
     expect(displayToolName(entry({ tool_id: "opencode-cli" }))).toBe("OpenCode");
     expect(displayToolName(entry({ tool_id: "open-code-cli" }))).toBe("OpenCode");
+    expect(displayToolName(entry({ tool_id: "github-copilot" }))).toBe("GitHub Copilot");
     expect(displayToolName(entry({ tool_id: "mystery", tool_label: "Mystery Label" }))).toBe(
       "Mystery Label",
     );

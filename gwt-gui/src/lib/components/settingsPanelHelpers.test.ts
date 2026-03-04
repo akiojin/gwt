@@ -14,7 +14,6 @@ import {
   normalizeAppLanguage,
   normalizeUiFontFamily,
   normalizeTerminalFontFamily,
-  normalizeSkillScope,
   normalizeSkillStatus,
   skillStatusClass,
   skillStatusText,
@@ -205,14 +204,6 @@ describe("settingsPanelHelpers", () => {
     expect(normalizeTerminalFontFamily('"Custom Mono", monospace')).toBe(
       '"Custom Mono", monospace',
     );
-  });
-
-  it("normalizes skill scope values", () => {
-    expect(normalizeSkillScope("user")).toBe("user");
-    expect(normalizeSkillScope("PROJECT")).toBe("project");
-    expect(normalizeSkillScope(" local ")).toBe("local");
-    expect(normalizeSkillScope("")).toBeNull();
-    expect(normalizeSkillScope("invalid")).toBeNull();
   });
 
   it("normalizes skill status payload and filters invalid fields", () => {

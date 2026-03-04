@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ClassifyResult, DockerContext } from "../types";
+import {
+  ISSUE_BRANCH_LOOKUP_UNKNOWN,
+  type ClassifyResult,
+  type DockerContext,
+} from "../types";
 import {
   buildNewBranchName,
   canLaunchFromIssue,
@@ -38,6 +42,7 @@ describe("agentLaunchFormHelpers", () => {
     expect(supportsModelFor("claude")).toBe(true);
     expect(supportsModelFor("gemini")).toBe(true);
     expect(supportsModelFor("opencode")).toBe(true);
+    expect(supportsModelFor("copilot")).toBe(true);
     expect(supportsModelFor("custom")).toBe(false);
   });
 
@@ -201,12 +206,14 @@ describe("agentLaunchFormHelpers", () => {
       [1, null],
       [2, "feature/2"],
       [3, null],
+      [4, ISSUE_BRANCH_LOOKUP_UNKNOWN],
     ]);
 
     expect(isIssueSelectable(1, inFlight, branchMap)).toBe(false);
     expect(isIssueSelectable(2, new Set(), branchMap)).toBe(false);
     expect(isIssueSelectable(3, new Set(), branchMap)).toBe(true);
     expect(isIssueSelectable(4, new Set(), branchMap)).toBe(false);
+    expect(isIssueSelectable(5, new Set(), branchMap)).toBe(false);
 
     expect(canLaunchFromIssue(null, new Set(), branchMap)).toBe(false);
     expect(canLaunchFromIssue(3, new Set(), branchMap)).toBe(true);

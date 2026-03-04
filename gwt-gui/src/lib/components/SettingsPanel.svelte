@@ -19,7 +19,6 @@
     normalizeAppLanguage,
     normalizeUiFontFamily,
     normalizeTerminalFontFamily,
-    normalizeSkillScope,
     normalizeSkillStatus,
     skillStatusClass,
     skillStatusText,
@@ -51,6 +50,8 @@
   let voiceCapabilityLoading: boolean = $state(false);
   let voiceAvailable: boolean = $state(true);
   let voiceUnavailableReason: string | null = $state(null);
+  let voiceRuntimeSettingUp: boolean = $state(false);
+  let voiceSetupMessage: string | null = $state(null);
 
   let selectedProfileKey: string = $state("");
   let newProfileName: string = $state("");
@@ -69,6 +70,10 @@
   let skillStatusLoading: boolean = $state(false);
   let skillStatusRepairing: boolean = $state(false);
   let skillStatusMessage: string = $state("");
+
+  let peekingApiKey: boolean = $state(false);
+  let apiKeyCopied: boolean = $state(false);
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
   type AIModelInfo = {
     id: string;
@@ -166,9 +171,47 @@
     };
   });
 
+  async function handleSetupVoiceRuntime() {
+    voiceRuntimeSettingUp = true;
+    voiceSetupMessage = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("ensure_voice_runtime");
+      voiceSetupMessage = "Voice runtime setup completed.";
+      // Refresh capability status
+      voiceCapabilityLoading = true;
+      try {
+        const cap = await invoke<{
+          available: boolean;
+          reason?: string | null;
+          modelReady: boolean;
+        }>("get_voice_capability", {
+          gpuAvailable: detectGpuAvailability(),
+          quality: settings?.voice_input?.quality ?? "balanced",
+        });
+        voiceAvailable = cap.available;
+        voiceUnavailableReason = cap.reason ?? null;
+      } finally {
+        voiceCapabilityLoading = false;
+      }
+    } catch (err) {
+      voiceSetupMessage = `Setup failed: ${toErrorMessage(err)}`;
+    } finally {
+      voiceRuntimeSettingUp = false;
+      setTimeout(() => {
+        voiceSetupMessage = null;
+      }, 5000);
+    }
+  }
+
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
+
+    // Reset peek/copy state on profile switch
+    peekingApiKey = false;
+    apiKeyCopied = false;
+    if (copyTimer !== null) { clearTimeout(copyTimer); copyTimer = null; }
 
     if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
       if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
@@ -206,6 +249,7 @@
   });
 
   onDestroy(() => {
+    if (copyTimer !== null) clearTimeout(copyTimer);
     applyUiFontSize(savedUiFontSize);
     applyTerminalFontSize(savedTerminalFontSize);
     applyUiFontFamily(savedUiFontFamily);
@@ -322,18 +366,6 @@
       loadedSettings.terminal_font_family = normalizeTerminalFontFamily(
         loadedSettings.terminal_font_family
       );
-      loadedSettings.agent_skill_registration_default_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_default_scope
-      );
-      loadedSettings.agent_skill_registration_codex_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_codex_scope
-      );
-      loadedSettings.agent_skill_registration_claude_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_claude_scope
-      );
-      loadedSettings.agent_skill_registration_gemini_scope = normalizeSkillScope(
-        loadedSettings.agent_skill_registration_gemini_scope
-      );
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -365,34 +397,10 @@
     saving = true;
     saveMessage = "";
     try {
-      const normalizedDefaultScope = normalizeSkillScope(
-        settings.agent_skill_registration_default_scope
-      );
-      const normalizedCodexScope = normalizeSkillScope(
-        settings.agent_skill_registration_codex_scope
-      );
-      const normalizedClaudeScope = normalizeSkillScope(
-        settings.agent_skill_registration_claude_scope
-      );
-      const normalizedGeminiScope = normalizeSkillScope(
-        settings.agent_skill_registration_gemini_scope
-      );
-      if (
-        !normalizedDefaultScope &&
-        (normalizedCodexScope || normalizedClaudeScope || normalizedGeminiScope)
-      ) {
-        saveMessage = "Choose default skill registration scope before setting agent overrides.";
-        saving = false;
-        return;
-      }
       settings = {
         ...settings,
         ui_font_family: normalizeUiFontFamily(settings.ui_font_family),
         terminal_font_family: normalizeTerminalFontFamily(settings.terminal_font_family),
-        agent_skill_registration_default_scope: normalizedDefaultScope,
-        agent_skill_registration_codex_scope: normalizedCodexScope,
-        agent_skill_registration_claude_scope: normalizedClaudeScope,
-        agent_skill_registration_gemini_scope: normalizedGeminiScope,
       };
 
       const { invoke } = await import("$lib/tauriInvoke");
@@ -603,6 +611,31 @@
     };
   }
 
+  async function handleCopyApiKey() {
+    const key = currentProfile?.ai?.api_key ?? "";
+    if (!key) return;
+    try {
+      await navigator.clipboard.writeText(key);
+      apiKeyCopied = true;
+      if (copyTimer !== null) clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => { apiKeyCopied = false; copyTimer = null; }, 1500);
+    } catch (e) { console.warn("Failed to copy API key:", e); }
+  }
+
+  function startApiKeyPeek() {
+    peekingApiKey = true;
+  }
+
+  function stopApiKeyPeek() {
+    peekingApiKey = false;
+  }
+
+  function toggleApiKeyPeekFromNonPointerClick(event: MouseEvent) {
+    // Keyboard and assistive activation can dispatch click without pointer down/up.
+    if (event.detail !== 0) return;
+    peekingApiKey = !peekingApiKey;
+  }
+
   function updateVoiceInputField(
     field: keyof VoiceInputSettings,
     value: VoiceInputSettings[keyof VoiceInputSettings]
@@ -621,17 +654,6 @@
     settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
   }
 
-  function updateSkillScopeField(
-    field:
-      | "agent_skill_registration_default_scope"
-      | "agent_skill_registration_codex_scope"
-      | "agent_skill_registration_claude_scope"
-      | "agent_skill_registration_gemini_scope",
-    value: string
-  ) {
-    if (!settings) return;
-    settings = { ...settings, [field]: normalizeSkillScope(value) };
-  }
 </script>
 
 <div class="settings-panel">
@@ -994,8 +1016,20 @@
             {:else if !voiceAvailable}
               <div class="field">
                 <span class="field-hint" style="color: var(--warning-color, #e6a700);">
-                  Voice input runtime unavailable: {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
+                  {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
                 </span>
+                {#if voiceUnavailableReason && (voiceUnavailableReason.toLowerCase().includes("runtime") || voiceUnavailableReason.toLowerCase().includes("python") || voiceUnavailableReason.toLowerCase().includes("package"))}
+                  <button
+                    class="btn btn-sm"
+                    onclick={handleSetupVoiceRuntime}
+                    disabled={voiceRuntimeSettingUp}
+                  >
+                    {voiceRuntimeSettingUp ? "Setting up..." : "Setup Voice Runtime"}
+                  </button>
+                {/if}
+                {#if voiceSetupMessage}
+                  <span class="field-hint">{voiceSetupMessage}</span>
+                {/if}
                 <span class="field-hint">
                   Settings can still be configured and will take effect once the runtime is available.
                 </span>
@@ -1004,91 +1038,6 @@
           </div>
         {:else if activeSettingsTab === "githubIntegration"}
           <div class="section-content">
-            <div class="field">
-              <label for="skill-scope-default">Skill Registration Scope (Default)</label>
-              <select
-                id="skill-scope-default"
-                class="select"
-                value={settings.agent_skill_registration_default_scope ?? ""}
-                onchange={(e) =>
-                  updateSkillScopeField(
-                    "agent_skill_registration_default_scope",
-                    (e.target as HTMLSelectElement).value
-                  )}
-              >
-                <option value="">Not selected (prompt on startup)</option>
-                <option value="user">User (~/.xxx)</option>
-                <option value="project">Project (&lt;repo&gt;/.xxx)</option>
-                <option value="local">Local (&lt;repo&gt;/.xxx.local)</option>
-              </select>
-              <span class="field-hint">
-                Controls where managed skills/plugins are auto-registered.
-              </span>
-            </div>
-
-            <div class="field">
-              <!-- svelte-ignore a11y_label_has_associated_control -->
-              <label>Agent Scope Overrides</label>
-              <div class="row">
-                <div class="scope-select">
-                  <label for="skill-scope-codex">Codex</label>
-                  <select
-                    id="skill-scope-codex"
-                    class="select"
-                    value={settings.agent_skill_registration_codex_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_codex_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-                <div class="scope-select">
-                  <label for="skill-scope-claude">Claude Code</label>
-                  <select
-                    id="skill-scope-claude"
-                    class="select"
-                    value={settings.agent_skill_registration_claude_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_claude_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-                <div class="scope-select">
-                  <label for="skill-scope-gemini">Gemini</label>
-                  <select
-                    id="skill-scope-gemini"
-                    class="select"
-                    value={settings.agent_skill_registration_gemini_scope ?? ""}
-                    onchange={(e) =>
-                      updateSkillScopeField(
-                        "agent_skill_registration_gemini_scope",
-                        (e.target as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">Use default</option>
-                    <option value="user">User</option>
-                    <option value="project">Project</option>
-                    <option value="local">Local</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <div class="divider"></div>
-
             <div class="skill-overview">
               <span class={`skill-badge ${skillStatusClass(skillStatus?.overall ?? "failed")}`}>
                 Overall: {skillStatusText(skillStatus?.overall)}
@@ -1304,6 +1253,7 @@
                   summary_enabled: true,
                 }}
                 {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
+                {@const hasApiKey = (currentAi?.api_key ?? "").length > 0}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
@@ -1319,15 +1269,38 @@
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">API Key</span>
-                    <input
-                      type="password"
-                      autocapitalize="off"
-                      autocorrect="off"
-                      autocomplete="off"
-                      spellcheck="false"
-                      value={currentAi?.api_key ?? ""}
-                      oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
-                    />
+                    <div class="row ai-apikey-row">
+                      <input
+                        type={peekingApiKey ? "text" : "password"}
+                        readonly={peekingApiKey}
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
+                        spellcheck="false"
+                        value={currentAi?.api_key ?? ""}
+                        oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
+                      />
+                      {#if hasApiKey}
+                        <button
+                          class="btn btn-ghost btn-icon btn-peek-apikey"
+                          class:peeking={peekingApiKey}
+                          onmousedown={startApiKeyPeek}
+                          onmouseup={stopApiKeyPeek}
+                          onmouseleave={stopApiKeyPeek}
+                          onblur={stopApiKeyPeek}
+                          onclick={toggleApiKeyPeekFromNonPointerClick}
+                          title="Peek API Key"
+                          aria-label="Peek API Key"
+                        ></button>
+                        <button
+                          class="btn btn-ghost btn-icon btn-copy-apikey"
+                          class:copied={apiKeyCopied}
+                          onclick={handleCopyApiKey}
+                          title={apiKeyCopied ? "Copied!" : "Copy API Key"}
+                          aria-label={apiKeyCopied ? "Copied!" : "Copy API Key"}
+                        ></button>
+                      {/if}
+                    </div>
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">Model</span>
@@ -1569,24 +1542,6 @@
     flex-wrap: wrap;
   }
 
-  .scope-select {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 180px;
-  }
-
-  .scope-select label {
-    font-size: var(--ui-font-sm);
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-  }
-
-  .scope-select .select {
-    max-width: none;
-  }
-
   .env-table {
     display: flex;
     flex-direction: column;
@@ -1695,6 +1650,83 @@
     outline: none;
     max-width: none;
   }
+
+  .ai-apikey-row input { flex: 1; min-width: 0; }
+
+  .btn-icon {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+
+  /* Eye icon (peek) */
+  .btn-peek-apikey::before {
+    content: "";
+    display: block;
+    width: 16px;
+    height: 10px;
+    border: 2px solid var(--text-secondary);
+    border-radius: 75% / 100%;
+  }
+  .btn-peek-apikey::after {
+    content: "";
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    background: var(--text-secondary);
+    border-radius: 50%;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  .btn-peek-apikey:not(.peeking)::before {
+    background: linear-gradient(
+      to top right,
+      transparent calc(50% - 1px),
+      var(--text-secondary) calc(50% - 1px),
+      var(--text-secondary) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    );
+  }
+  .btn-peek-apikey.peeking::before {
+    border-color: var(--accent);
+    background: none;
+  }
+  .btn-peek-apikey.peeking::after { background: var(--accent); }
+
+  /* Copy icon */
+  .btn-copy-apikey::before {
+    content: "";
+    display: block;
+    width: 10px;
+    height: 12px;
+    border: 2px solid var(--text-secondary);
+    border-radius: 2px;
+  }
+  .btn-copy-apikey::after {
+    content: "";
+    position: absolute;
+    width: 10px;
+    height: 12px;
+    border: 2px solid var(--text-secondary);
+    border-radius: 2px;
+    top: calc(50% - 8px);
+    left: calc(50% - 2px);
+  }
+  .btn-copy-apikey.copied::before,
+  .btn-copy-apikey.copied::after { border-color: var(--green); }
+
+  /* Hover states */
+  .btn-peek-apikey:hover::before { border-color: var(--text-primary); }
+  .btn-peek-apikey:hover::after { background: var(--text-primary); }
+  .btn-copy-apikey:hover::before,
+  .btn-copy-apikey:hover::after { border-color: var(--text-primary); }
 
   .ai-model-row {
     align-items: center;

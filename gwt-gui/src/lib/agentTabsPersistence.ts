@@ -119,7 +119,8 @@ function normalizeAgentId(value: unknown): Tab["agentId"] | undefined {
     id === "claude" ||
     id === "codex" ||
     id === "gemini" ||
-    id === "opencode"
+    id === "opencode" ||
+    id === "copilot"
   ) {
     return id;
   }

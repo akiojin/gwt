@@ -308,6 +308,43 @@ describe("AgentLaunchForm", () => {
     ]);
   });
 
+  it("displays only supported copilot model options", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "copilot",
+            name: "GitHub Copilot",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
+    const values = Array.from(modelSelect.options).map((o) => o.value);
+    const labels = Array.from(modelSelect.options).map((o) => o.textContent);
+    expect(values).toEqual(["", "gpt-4.1"]);
+    expect(labels).toEqual(["Default", "GPT-4.1"]);
+  });
+
   it("passes selected codex model to launch request", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
@@ -627,8 +664,8 @@ describe("AgentLaunchForm", () => {
   });
 
   it("keeps issue selection disabled while duplicate-branch check is pending", async () => {
-    let resolveBranchCheck!: (value: string | null) => void;
-    const branchCheck = new Promise<string | null>((resolve) => {
+    let resolveBranchCheck!: (value: { issueNumber: number; branchName: string }[]) => void;
+    const branchCheck = new Promise<{ issueNumber: number; branchName: string }[]>((resolve) => {
       resolveBranchCheck = resolve;
     });
 
@@ -660,7 +697,7 @@ describe("AgentLaunchForm", () => {
           hasNextPage: false,
         };
       }
-      if (cmd === "find_existing_issue_branch") {
+      if (cmd === "find_existing_issue_branches_bulk") {
         return branchCheck;
       }
       if (cmd === "list_worktree_branches") return [];
@@ -706,11 +743,85 @@ describe("AgentLaunchForm", () => {
       true
     );
 
-    resolveBranchCheck(null);
+    resolveBranchCheck([]);
 
     await waitFor(() => {
       expect((rendered.getByRole("button", { name: /#42/i }) as HTMLButtonElement).disabled).toBe(
         false
+      );
+    });
+  });
+
+  it("keeps issue selection disabled when duplicate-branch check fails", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true };
+      }
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [
+            {
+              number: 42,
+              title: "Issue 42",
+              updatedAt: "2026-02-13T00:00:00Z",
+              labels: [],
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "find_existing_issue_branches_bulk") {
+        throw new Error("Branch lookup failed");
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    const issueTitle = await waitFor(() => rendered.getByText("Issue 42"));
+    const issueButton = issueTitle.closest("button") as HTMLButtonElement;
+
+    await waitFor(() => {
+      expect(issueButton.disabled).toBe(true);
+      expect(rendered.getByText("Check failed")).toBeTruthy();
+      expect((rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement).disabled).toBe(
+        true
       );
     });
   });
@@ -758,8 +869,8 @@ describe("AgentLaunchForm", () => {
       if (cmd === "fetch_github_issues") {
         throw new Error("fetch_github_issues should not be called in prefill flow");
       }
-      if (cmd === "find_existing_issue_branch") {
-        throw new Error("find_existing_issue_branch should not be called in prefill flow");
+      if (cmd === "find_existing_issue_branches_bulk") {
+        throw new Error("find_existing_issue_branches_bulk should not be called in prefill flow");
       }
       return [];
     });
@@ -792,7 +903,7 @@ describe("AgentLaunchForm", () => {
 
     const issueFetchCalls = invokeMock.mock.calls.filter((c: any[]) => c[0] === "fetch_github_issues");
     const issueBranchCalls = invokeMock.mock.calls.filter(
-      (c: any[]) => c[0] === "find_existing_issue_branch"
+      (c: any[]) => c[0] === "find_existing_issue_branches_bulk"
     );
     expect(issueFetchCalls).toHaveLength(0);
     expect(issueBranchCalls).toHaveLength(0);
@@ -830,7 +941,7 @@ describe("AgentLaunchForm", () => {
       if (cmd === "classify_issue_branch_prefix") {
         return { status: "error", error: "classification failed" };
       }
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
       if (cmd === "detect_docker_context") {
@@ -911,7 +1022,7 @@ describe("AgentLaunchForm", () => {
       if (cmd === "classify_issue_branch_prefix") {
         return { status: "ok", prefix: "feature" };
       }
-      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
       if (cmd === "detect_docker_context") {
@@ -1270,7 +1381,7 @@ describe("AgentLaunchForm", () => {
     expect(reopened.queryByLabelText("Session ID")).toBeNull();
   });
 
-  it("re-evaluates installed fallback when preferred agent stays the same", async () => {
+  it("keeps installed selection when preferred agent stays the same", async () => {
     saveLaunchDefaults({
       selectedAgent: "codex",
       sessionMode: "normal",
@@ -1342,7 +1453,7 @@ describe("AgentLaunchForm", () => {
 
     await waitFor(() => {
       expect((rendered.getByLabelText("Agent Version") as HTMLSelectElement).value).toBe(
-        "latest"
+        "installed"
       );
     });
 
@@ -1351,7 +1462,7 @@ describe("AgentLaunchForm", () => {
     await waitFor(() => {
       expect(onLaunch).toHaveBeenCalledTimes(1);
     });
-    expect((onLaunch.mock.calls[0][0] as any).agentVersion).toBe("latest");
+    expect((onLaunch.mock.calls[0][0] as any).agentVersion).toBe("installed");
   });
 
   it("falls back when saved defaults contain unavailable agent or invalid runtime/version", async () => {
@@ -1687,9 +1798,12 @@ describe("AgentLaunchForm", () => {
           hasNextPage: false,
         };
       }
-      if (cmd === "find_existing_issue_branch") {
-        if (args?.issueNumber === 1) return "feature/issue-1";
-        return null;
+      if (cmd === "find_existing_issue_branches_bulk") {
+        const nums = args?.issueNumbers ?? [];
+        if (Array.isArray(nums) && nums.includes(1)) {
+          return [{ issueNumber: 1, branchName: "feature/issue-1" }];
+        }
+        return [];
       }
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
@@ -1765,6 +1879,9 @@ describe("AgentLaunchForm", () => {
         page: 2,
         perPage: 30,
         state: "open",
+        category: "issues",
+        includeBody: false,
+        forceRefresh: false,
       });
       expect(rendered.getByText("Second issue")).toBeTruthy();
       expect(issuePageCalls).toBeGreaterThanOrEqual(2);

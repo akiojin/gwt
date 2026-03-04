@@ -3,11 +3,12 @@
 # Migrate local specs/SPEC-*/ directories to GitHub Issues with gwt-spec label.
 #
 # Usage:
-#   ./scripts/migrate-specs-to-issues.sh [--dry-run] [--specs-dir DIR]
+#   ./scripts/migrate-specs-to-issues.sh [--dry-run] [--specs-dir DIR] [--label LABEL]...
 #
 # Options:
 #   --dry-run       Show what would be done without creating issues
 #   --specs-dir     Path to specs/ directory (default: auto-detect from develop worktree)
+#   --label LABEL   Additional label to apply (can be repeated; gwt-spec is always applied)
 
 set -euo pipefail
 
@@ -16,6 +17,7 @@ SPECS_DIR=""
 REPORT_FILE="migration-report.json"
 RATE_LIMIT_BATCH=10
 RATE_LIMIT_SLEEP=3
+EXTRA_LABELS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +27,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --specs-dir)
       SPECS_DIR="$2"
+      shift 2
+      ;;
+    --label)
+      EXTRA_LABELS+=("$2")
       shift 2
       ;;
     *)
@@ -96,8 +102,14 @@ read_section() {
 # Extract title from spec.md (first line starting with #)
 extract_title() {
   local spec_file="$1"
+  local title=""
   if [[ -f "$spec_file" ]]; then
-    grep -m1 '^#' "$spec_file" | sed 's/^[#]*//' | sed 's/^ *//' | head -c 200
+    title=$(awk '/^#/ {sub(/^#+[[:space:]]*/, ""); print; exit}' "$spec_file" || true)
+    if [[ -n "$title" ]]; then
+      echo "$title" | head -c 200
+    else
+      echo "Untitled spec"
+    fi
   else
     echo "Untitled spec"
   fi
@@ -252,8 +264,13 @@ for dir in "${SPEC_DIRS[@]}"; do
 
     body=$(build_issue_body "$dir" "$spec_name")
 
+    label_args=(--label gwt-spec)
+    for lbl in "${EXTRA_LABELS[@]}"; do
+      label_args+=(--label "$lbl")
+    done
+
     issue_url=$(gh issue create \
-      --label gwt-spec \
+      "${label_args[@]}" \
       --title "$title" \
       --body "$body" 2>&1) || {
       echo "FAILED"
@@ -263,7 +280,7 @@ for dir in "${SPEC_DIRS[@]}"; do
     }
 
     # Extract issue number from URL
-    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$')
+    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$' || true)
 
     if [[ -n "$issue_number" ]]; then
       # Update GWT_SPEC_ID marker with actual issue number

@@ -41,7 +41,7 @@ describe("VoiceInputController", () => {
       if (command === "transcribe_voice_audio") {
         return { transcript: "voice transcript" };
       }
-      if (command === "write_terminal") {
+      if (command === "send_keys_to_pane") {
         return null;
       }
       return null;
@@ -119,9 +119,9 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", {
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", {
         paneId: "pane-test",
-        data: Array.from(new TextEncoder().encode("voice transcript")),
+        text: "voice transcript",
       });
     });
 
@@ -222,7 +222,7 @@ describe("VoiceInputController", () => {
     await vi.waitFor(() => {
       expect(input.value).toBe("unchanged");
     });
-    expect(invokeMock).not.toHaveBeenCalledWith("write_terminal", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("send_keys_to_pane", expect.anything());
 
     input.remove();
     controller.dispose();
@@ -265,7 +265,7 @@ describe("VoiceInputController", () => {
       if (command === "transcribe_voice_audio") {
         return { transcript: "voice transcript" };
       }
-      if (command === "write_terminal") {
+      if (command === "send_keys_to_pane") {
         return null;
       }
       return null;
@@ -458,9 +458,9 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", {
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", {
         paneId: "pane-fallback",
-        data: Array.from(new TextEncoder().encode("voice transcript")),
+        text: "voice transcript",
       });
     });
 
@@ -537,13 +537,13 @@ describe("VoiceInputController", () => {
     controller.dispose();
   });
 
-  it("does not call ensure_voice_runtime a second time", async () => {
+  it("retries ensure_voice_runtime when previous attempt returned not ready", async () => {
     let runtimeCalls = 0;
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_voice_capability") {
         return {
           available: false,
-          reason: "Voice runtime is unavailable",
+          reason: "Voice runtime is not ready",
           modelReady: false,
         };
       }
@@ -567,12 +567,65 @@ describe("VoiceInputController", () => {
       expect(runtimeCalls).toBe(1);
     });
 
-    // Second attempt - should not call again
+    // Second attempt - should retry because previous attempt did not succeed
     (controller as any).startInFlight = false;
     (controller as any).state.listening = false;
     await (controller as any).startListening("toggle");
 
-    // Still only 1 call
+    // Should have called again
+    expect(runtimeCalls).toBe(2);
+
+    controller.dispose();
+  });
+
+  it("does not retry ensure_voice_runtime after successful setup", async () => {
+    let runtimeCalls = 0;
+    let capabilityCallCount = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_voice_capability") {
+        capabilityCallCount++;
+        // After successful runtime setup, capability becomes available
+        if (capabilityCallCount > 2) {
+          return { available: true, reason: null, modelReady: true };
+        }
+        return {
+          available: false,
+          reason: "Voice runtime is not ready",
+          modelReady: false,
+        };
+      }
+      if (command === "ensure_voice_runtime") {
+        runtimeCalls++;
+        return { ready: true, installed: true, pythonPath: "/usr/bin/python3" };
+      }
+      if (command === "prepare_voice_model") {
+        return { ready: true };
+      }
+      if (command === "send_keys_to_pane") {
+        return null;
+      }
+      return null;
+    });
+
+    const controller = new VoiceInputController({
+      getSettings: () => settings,
+      getFallbackTerminalPaneId: () => null,
+    });
+
+    (controller as any).beginCapture = vi.fn(async () => {});
+
+    // First attempt - triggers runtime setup
+    await (controller as any).startListening("toggle");
+    await vi.waitFor(() => {
+      expect(runtimeCalls).toBe(1);
+    });
+
+    // Second attempt - should NOT call ensure_voice_runtime again
+    (controller as any).startInFlight = false;
+    (controller as any).state.listening = false;
+    await (controller as any).startListening("toggle");
+
+    // Still only 1 call because first attempt succeeded
     expect(runtimeCalls).toBe(1);
 
     controller.dispose();
@@ -795,7 +848,7 @@ describe("VoiceInputController", () => {
     controller.dispose();
   });
 
-  it("handles write_terminal error gracefully", async () => {
+  it("handles send_keys_to_pane error gracefully", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_voice_capability") {
         return { available: true, reason: null, modelReady: true };
@@ -806,7 +859,7 @@ describe("VoiceInputController", () => {
       if (command === "transcribe_voice_audio") {
         return { transcript: "hello" };
       }
-      if (command === "write_terminal") {
+      if (command === "send_keys_to_pane") {
         throw new Error("Terminal write failed");
       }
       return null;
@@ -1549,7 +1602,7 @@ describe("VoiceInputController", () => {
     // Input should be unchanged because it's disabled
     // Transcript should go to fallback terminal
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", expect.objectContaining({
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
         paneId: "pane-fb",
       }));
     });
@@ -1583,7 +1636,7 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", expect.objectContaining({
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
         paneId: "pane-fb2",
       }));
     });
@@ -1616,7 +1669,7 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", expect.objectContaining({
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
         paneId: "pane-ta",
       }));
     });
@@ -1648,7 +1701,7 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", expect.objectContaining({
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
         paneId: "pane-non-input",
       }));
     });
@@ -1679,7 +1732,7 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", expect.objectContaining({
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
         paneId: "pane-check",
       }));
     });
@@ -1813,7 +1866,7 @@ describe("VoiceInputController", () => {
 
     // Should fall through to terminal
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", expect.objectContaining({
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
         paneId: "pane-no-edit",
       }));
     });
@@ -2308,7 +2361,7 @@ describe("VoiceInputController", () => {
     await (controller as any).insertTranscript("voice transcript");
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", expect.objectContaining({
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
         paneId: "pane-ta-ro",
       }));
     });
@@ -2341,7 +2394,7 @@ describe("VoiceInputController", () => {
 
     // Should fall through to terminal
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("write_terminal", expect.objectContaining({
+      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
         paneId: "pane-sel-null",
       }));
     });

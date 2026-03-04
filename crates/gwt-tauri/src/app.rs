@@ -712,6 +712,7 @@ pub fn build_app(
             crate::commands::cleanup::cleanup_single_worktree,
             crate::commands::cleanup::check_gh_available,
             crate::commands::cleanup::get_cleanup_pr_statuses,
+            crate::commands::cleanup::get_cleanup_branch_protection,
             crate::commands::cleanup::get_cleanup_settings,
             crate::commands::cleanup::set_cleanup_settings,
             crate::commands::update::check_app_update,
@@ -740,6 +741,7 @@ pub fn build_app(
             crate::commands::issue::fetch_branch_linked_issue,
             crate::commands::issue::check_gh_cli_status,
             crate::commands::issue::find_existing_issue_branch,
+            crate::commands::issue::find_existing_issue_branches_bulk,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
             crate::commands::issue::classify_issue_branch_prefix,
@@ -776,6 +778,8 @@ pub fn build_app(
             crate::commands::project_index::index_project_cmd,
             crate::commands::project_index::search_project_index_cmd,
             crate::commands::project_index::get_index_status_cmd,
+            crate::commands::project_index::index_github_issues_cmd,
+            crate::commands::project_index::search_github_issues_cmd,
         ])
 }
 
@@ -1006,6 +1010,13 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         }
         tauri::RunEvent::Exit => {
             info!(category = "tauri", event = "Exit", "App exiting");
+
+            // Unregister all skills/plugins on exit
+            #[cfg(not(test))]
+            {
+                info!(category = "skills", "Unregistering skills on app exit");
+                skill_registration::unregister_all_skills();
+            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {

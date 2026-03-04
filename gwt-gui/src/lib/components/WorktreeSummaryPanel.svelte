@@ -103,6 +103,7 @@
   let latestBranchPrLoading: boolean = $state(false);
   let latestBranchPrError: string | null = $state(null);
   let latestBranchPr: BranchPrReference | null = $state(null);
+  let latestBranchPrBranch: string | null = $state(null);
 
   let dockerContextLoading: boolean = $state(false);
   let dockerContextError: string | null = $state(null);
@@ -430,6 +431,7 @@
     if (!branch) {
       latestBranchPrLoading = false;
       latestBranchPr = null;
+      latestBranchPrBranch = null;
       return;
     }
 
@@ -437,11 +439,13 @@
     const cached = latestBranchPrCache.get(key);
     if (!force && isCacheFresh(cached, LATEST_BRANCH_PR_CACHE_TTL_MS)) {
       latestBranchPr = cached.value;
+      latestBranchPrBranch = branch;
       latestBranchPrLoading = false;
       return;
     }
 
     latestBranchPr = null;
+    latestBranchPrBranch = branch;
     latestBranchPrLoading = true;
     try {
       if (defer) {
@@ -620,6 +624,7 @@
       latestBranchPrLoading = false;
       latestBranchPrError = null;
       latestBranchPr = null;
+      latestBranchPrBranch = null;
       dockerContextLoading = false;
       dockerContextError = null;
       dockerContext = null;
@@ -776,7 +781,15 @@
     prDetailPrNumber = null;
   }
 
-  let resolvedPrNumber = $derived.by(() => latestBranchPr?.number ?? prNumber ?? null);
+  let resolvedPrNumber = $derived.by(() => {
+    if (prNumber !== null && prNumber !== undefined) {
+      return prNumber;
+    }
+    if (!latestBranchPr) return null;
+    const branch = currentBranchName();
+    if (branch && latestBranchPrBranch !== branch) return null;
+    return latestBranchPr.number;
+  });
   let prRetrying = $derived.by(() => {
     const status = selectedPrStatus;
     const prNum = resolvedPrNumber;
@@ -792,6 +805,8 @@
     quickStartCache.clear();
     linkedIssueCache.clear();
     latestBranchPrCache.clear();
+    latestBranchPr = null;
+    latestBranchPrBranch = null;
     dockerContextCache.clear();
     clearPrDetailState(currentBranchName());
   });
@@ -1849,6 +1864,10 @@
 
   .quick-tool.opencode .quick-tool-name {
     color: var(--green);
+  }
+
+  .quick-tool.copilot .quick-tool-name {
+    color: var(--blue);
   }
 
   .quick-meta {

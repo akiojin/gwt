@@ -3,7 +3,10 @@
 use crate::commands::terminal::builtin_agent_def;
 use crate::state::{AgentVersionsCache, AppState};
 use gwt_core::agent::{claude, codex, gemini, AgentInfo};
-use gwt_core::terminal::runner::{choose_fallback_runner, resolve_command_path, FallbackRunner};
+use gwt_core::git::is_gh_cli_authenticated;
+use gwt_core::terminal::runner::{
+    choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
+};
 use gwt_core::StructuredError;
 use serde::Serialize;
 use serde_json::Value;
@@ -34,6 +37,16 @@ pub struct AgentVersionsInfo {
     pub versions: Vec<String>,
     /// "cache" | "registry" | "fallback"
     pub source: String,
+}
+
+fn normalize_command_path_for_display(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy().to_string();
+    let normalized = normalize_windows_command_path(&raw);
+    if normalized.is_empty() {
+        raw
+    } else {
+        normalized
+    }
 }
 
 fn encode_npm_package_for_url(package: &str) -> String {
@@ -189,10 +202,8 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
     let npx_path = resolve_command_path("npx");
     let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some());
 
-    let bunx_path_str = bunx_path
-        .as_deref()
-        .map(|p| p.to_string_lossy().to_string());
-    let npx_path_str = npx_path.as_deref().map(|p| p.to_string_lossy().to_string());
+    let bunx_path_str = bunx_path.as_deref().map(normalize_command_path_for_display);
+    let npx_path_str = npx_path.as_deref().map(normalize_command_path_for_display);
 
     fn fallback_version(runner: FallbackRunner) -> &'static str {
         match runner {
@@ -225,7 +236,7 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
                 id: id.to_string(),
                 name: info.name,
                 version: info.version,
-                path: info.path.map(|p| p.to_string_lossy().to_string()),
+                path: info.path.as_deref().map(normalize_command_path_for_display),
                 authenticated: info.authenticated,
                 available: true,
             };
@@ -246,6 +257,7 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
                     std::env::var("GOOGLE_API_KEY").is_ok()
                         || std::env::var("GEMINI_API_KEY").is_ok()
                 }
+                "copilot" => is_gh_cli_authenticated(),
                 _ => false,
             };
 
@@ -284,6 +296,20 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
         })
     }
 
+    fn detect_copilot() -> Option<AgentInfo> {
+        let path = which("copilot").ok()?;
+        let version = gwt_core::agent::get_command_version("copilot", "--version")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        let authenticated = is_gh_cli_authenticated();
+        Some(AgentInfo {
+            name: "GitHub Copilot".to_string(),
+            version,
+            path: Some(path),
+            authenticated,
+        })
+    }
+
     vec![
         map_with_fallback(
             "claude",
@@ -313,6 +339,14 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
             "opencode",
             "OpenCode",
             detect_opencode(),
+            runner,
+            bunx_path_str.as_deref(),
+            npx_path_str.as_deref(),
+        ),
+        map_with_fallback(
+            "copilot",
+            "GitHub Copilot",
+            detect_copilot(),
             runner,
             bunx_path_str.as_deref(),
             npx_path_str.as_deref(),
@@ -386,6 +420,7 @@ pub fn list_agent_versions(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::Path;
 
     #[test]
     fn encode_npm_package_for_url_encodes_scoped_package() {
@@ -415,6 +450,14 @@ mod tests {
         assert_eq!(versions[0], "2.0.0");
         assert_eq!(versions[1], "1.1.0");
         assert_eq!(versions[2], "1.0.0");
+    }
+
+    #[test]
+    fn normalize_command_path_for_display_unwraps_issue_1265_pattern() {
+        let normalized = normalize_command_path_for_display(Path::new(
+            r#"'\"C:\Program Files\nodejs\npx.cmd\"'"#,
+        ));
+        assert_eq!(normalized, r#"C:\Program Files\nodejs\npx.cmd"#);
     }
 
     #[test]

@@ -52,8 +52,9 @@ pub const GWT_MARKETPLACE_SOURCE: &str = "github";
 pub const GWT_MARKETPLACE_REPO: &str = "akiojin/gwt";
 pub const GWT_PLUGIN_NAME: &str = "gwt";
 pub const GWT_PLUGIN_FULL_NAME: &str = "gwt@gwt-plugins";
-pub const LEGACY_GWT_PLUGIN_FULL_NAME: &str = "gwt-integration@gwt-plugins";
-pub const LEGACY_GWT_HOOKS_PLUGIN_FULL_NAME: &str = "worktree-protection-hooks@gwt-plugins";
+pub const LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME: &str = "gwt-integration@gwt-plugins";
+pub const LEGACY_WORKTREE_PROTECTION_PLUGIN_FULL_NAME: &str =
+    "worktree-protection-hooks@gwt-plugins";
 
 /// Get the path to known_marketplaces.json
 pub fn get_known_marketplaces_path() -> Option<PathBuf> {
@@ -227,21 +228,29 @@ fn migrate_legacy_plugin_key(settings: &mut serde_json::Value) -> bool {
 
     let mut changed = false;
     let mut should_enable_new = false;
-    for key in [
-        LEGACY_GWT_PLUGIN_FULL_NAME,
-        LEGACY_GWT_HOOKS_PLUGIN_FULL_NAME,
+    let mut should_disable_new = false;
+    for legacy_key in [
+        LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME,
+        LEGACY_WORKTREE_PROTECTION_PLUGIN_FULL_NAME,
     ] {
-        if let Some(value) = enabled_plugins.remove(key) {
-            changed = true;
-            if value.as_bool() == Some(true) {
-                should_enable_new = true;
-            }
+        let legacy_value = enabled_plugins.remove(legacy_key);
+        changed |= legacy_value.is_some();
+        match legacy_value {
+            Some(serde_json::Value::Bool(true)) => should_enable_new = true,
+            Some(serde_json::Value::Bool(false)) => should_disable_new = true,
+            _ => {}
         }
     }
 
-    if should_enable_new && !enabled_plugins.contains_key(GWT_PLUGIN_FULL_NAME) {
-        enabled_plugins.insert(GWT_PLUGIN_FULL_NAME.to_string(), serde_json::json!(true));
-        changed = true;
+    if !enabled_plugins.contains_key(GWT_PLUGIN_FULL_NAME) {
+        // Preserve explicit disable from legacy keys to avoid silently re-enabling the plugin.
+        if should_disable_new {
+            enabled_plugins.insert(GWT_PLUGIN_FULL_NAME.to_string(), serde_json::json!(false));
+            changed = true;
+        } else if should_enable_new {
+            enabled_plugins.insert(GWT_PLUGIN_FULL_NAME.to_string(), serde_json::json!(true));
+            changed = true;
+        }
     }
 
     changed
@@ -341,6 +350,51 @@ pub fn enable_worktree_protection_plugin(settings_path: &Path) -> Result<(), Gwt
         if std::fs::write(settings_path, content).is_err() {
             return Ok(()); // Silent continue (FR-009)
         }
+    }
+
+    Ok(())
+}
+
+/// Disable gwt plugin at a specific settings path (FR-UNREG-001).
+///
+/// Sets `enabledPlugins.gwt@gwt-plugins` to `false`.
+/// No-op if the file, section, or key does not exist.
+/// Does NOT touch `known_marketplaces.json`.
+pub fn disable_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
+    if !settings_path.exists() {
+        return Ok(());
+    }
+
+    let content = match std::fs::read_to_string(settings_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
+    let mut settings: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    let Some(enabled_plugins) = settings
+        .get_mut("enabledPlugins")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return Ok(());
+    };
+
+    if !enabled_plugins.contains_key(GWT_PLUGIN_FULL_NAME) {
+        return Ok(());
+    }
+
+    enabled_plugins.insert(GWT_PLUGIN_FULL_NAME.to_string(), serde_json::json!(false));
+
+    let output =
+        serde_json::to_string_pretty(&settings).map_err(|e| GwtError::ConfigWriteError {
+            reason: e.to_string(),
+        })?;
+
+    if std::fs::write(settings_path, output).is_err() {
+        return Ok(()); // Silent continue
     }
 
     Ok(())
@@ -567,7 +621,7 @@ mod tests {
 
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": true}}}}"#,
-            LEGACY_GWT_PLUGIN_FULL_NAME
+            LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME
         );
         std::fs::write(&path, content).unwrap();
 
@@ -584,44 +638,17 @@ mod tests {
             enabled_plugins.get(GWT_PLUGIN_FULL_NAME),
             Some(&serde_json::json!(true))
         );
-        assert!(!enabled_plugins.contains_key(LEGACY_GWT_PLUGIN_FULL_NAME));
+        assert!(!enabled_plugins.contains_key(LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME));
     }
 
     #[test]
-    fn test_enable_worktree_protection_plugin_migrates_legacy_hooks_key() {
+    fn test_enable_worktree_protection_plugin_preserves_legacy_disable_state() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("settings.json");
 
         let content = format!(
-            r#"{{"enabledPlugins": {{"{}": true}}}}"#,
-            LEGACY_GWT_HOOKS_PLUGIN_FULL_NAME
-        );
-        std::fs::write(&path, content).unwrap();
-
-        enable_worktree_protection_plugin(&path).unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let enabled_plugins = settings
-            .get("enabledPlugins")
-            .and_then(|value| value.as_object())
-            .unwrap();
-
-        assert_eq!(
-            enabled_plugins.get(GWT_PLUGIN_FULL_NAME),
-            Some(&serde_json::json!(true))
-        );
-        assert!(!enabled_plugins.contains_key(LEGACY_GWT_HOOKS_PLUGIN_FULL_NAME));
-    }
-
-    #[test]
-    fn test_enable_worktree_protection_plugin_removes_legacy_key_when_new_exists() {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
-
-        let content = format!(
-            r#"{{"enabledPlugins": {{"{}": false, "{}": true}}}}"#,
-            GWT_PLUGIN_FULL_NAME, LEGACY_GWT_PLUGIN_FULL_NAME
+            r#"{{"enabledPlugins": {{"{}": false}}}}"#,
+            LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME
         );
         std::fs::write(&path, content).unwrap();
 
@@ -638,7 +665,61 @@ mod tests {
             enabled_plugins.get(GWT_PLUGIN_FULL_NAME),
             Some(&serde_json::json!(false))
         );
-        assert!(!enabled_plugins.contains_key(LEGACY_GWT_PLUGIN_FULL_NAME));
+        assert!(!enabled_plugins.contains_key(LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME));
+    }
+
+    #[test]
+    fn test_enable_worktree_protection_plugin_migrates_worktree_hooks_legacy_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+
+        let content = format!(
+            r#"{{"enabledPlugins": {{"{}": true}}}}"#,
+            LEGACY_WORKTREE_PROTECTION_PLUGIN_FULL_NAME
+        );
+        std::fs::write(&path, content).unwrap();
+
+        enable_worktree_protection_plugin(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let enabled_plugins = settings
+            .get("enabledPlugins")
+            .and_then(|value| value.as_object())
+            .unwrap();
+
+        assert_eq!(
+            enabled_plugins.get(GWT_PLUGIN_FULL_NAME),
+            Some(&serde_json::json!(true))
+        );
+        assert!(!enabled_plugins.contains_key(LEGACY_WORKTREE_PROTECTION_PLUGIN_FULL_NAME));
+    }
+
+    #[test]
+    fn test_enable_worktree_protection_plugin_removes_legacy_key_when_new_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+
+        let content = format!(
+            r#"{{"enabledPlugins": {{"{}": false, "{}": true}}}}"#,
+            GWT_PLUGIN_FULL_NAME, LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME
+        );
+        std::fs::write(&path, content).unwrap();
+
+        enable_worktree_protection_plugin(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let enabled_plugins = settings
+            .get("enabledPlugins")
+            .and_then(|value| value.as_object())
+            .unwrap();
+
+        assert_eq!(
+            enabled_plugins.get(GWT_PLUGIN_FULL_NAME),
+            Some(&serde_json::json!(false))
+        );
+        assert!(!enabled_plugins.contains_key(LEGACY_GWT_INTEGRATION_PLUGIN_FULL_NAME));
     }
 
     // FR-006: Directory auto-creation
@@ -866,6 +947,92 @@ mod tests {
 
         let known_marketplaces = get_known_marketplaces_path().unwrap();
         assert!(known_marketplaces.exists());
+    }
+
+    // --- disable_gwt_plugin_at tests ---
+
+    #[test]
+    fn test_disable_gwt_plugin_at_sets_false() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+        let content = format!(
+            r#"{{"enabledPlugins": {{"{}": true}}}}"#,
+            GWT_PLUGIN_FULL_NAME
+        );
+        std::fs::write(&path, content).unwrap();
+
+        disable_gwt_plugin_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            settings["enabledPlugins"][GWT_PLUGIN_FULL_NAME],
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn test_disable_gwt_plugin_at_noop_no_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("nonexistent.json");
+        assert!(disable_gwt_plugin_at(&path).is_ok());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_disable_gwt_plugin_at_noop_no_section() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
+
+        disable_gwt_plugin_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(settings.get("enabledPlugins").is_none());
+    }
+
+    #[test]
+    fn test_disable_gwt_plugin_at_noop_key_absent() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"enabledPlugins": {"other@other": true}}"#).unwrap();
+
+        disable_gwt_plugin_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(settings["enabledPlugins"]
+            .get(GWT_PLUGIN_FULL_NAME)
+            .is_none());
+        assert_eq!(
+            settings["enabledPlugins"]["other@other"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn test_disable_gwt_plugin_at_preserves_others() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+        let content = format!(
+            r#"{{"enabledPlugins": {{"{}": true, "other@other": true}}}}"#,
+            GWT_PLUGIN_FULL_NAME
+        );
+        std::fs::write(&path, content).unwrap();
+
+        disable_gwt_plugin_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            settings["enabledPlugins"][GWT_PLUGIN_FULL_NAME],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            settings["enabledPlugins"]["other@other"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

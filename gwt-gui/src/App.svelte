@@ -13,7 +13,6 @@
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
-    SkillRegistrationScope,
     UpdateState,
     VoiceInputSettings,
   } from "./lib/types";
@@ -83,6 +82,13 @@
     platformName,
     shouldShowAgentPasteHint,
   } from "./lib/terminal/pasteGuidance";
+  import {
+    buildDocsEditorCommand,
+    isTerminalProcessEnded,
+    isWindowsPlatform,
+    shouldAutoCloseDocsEditorTab,
+    type DocsEditorShellId,
+  } from "./lib/docsEditor";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -119,11 +125,7 @@
     'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
   const DEFAULT_TERMINAL_FONT_FAMILY =
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
-  const AGENT_INSTRUCTION_DOC_FILES = [
-    "CLAUDE.md",
-    "AGENTS.md",
-    "GEMINI.md",
-  ] as const;
+  const DOCS_EDITOR_AUTO_CLOSE_POLL_MS = 1200;
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -217,6 +219,7 @@
   let launchProgressOpen: boolean = $state(false);
   let launchJobId: string = $state("");
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+  let docsEditorAutoClosePaneIds: string[] = $state([]);
 
   type LaunchStepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps";
   let launchStep: LaunchStepId = $state("fetch");
@@ -304,11 +307,6 @@
   let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
-  let startupSkillScopeChecked = false;
-  let skillScopePromptOpen = $state(false);
-  let skillScopeSelection = $state<SkillRegistrationScope>("user");
-  let skillScopePromptBusy = $state(false);
-  let skillScopePromptError = $state<string | null>(null);
   type AvailableUpdateState = Extract<UpdateState, { state: "available" }>;
 
   function showToast(
@@ -373,6 +371,10 @@
     // Close the toast
     toastMessage = null;
     toastAction = null;
+    // Bring window to front so the report dialog is visible (#1256)
+    import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().setFocus())
+      .catch(() => {});
   }
 
   // Subscribe to toast bus for success/info notifications (SPEC-merge-pr FR-006)
@@ -611,13 +613,6 @@
     if (startupOsEnvCaptureChecked) return;
     startupOsEnvCaptureChecked = true;
     void checkOsEnvCaptureOnStartup();
-  });
-
-  $effect(() => {
-    if (!startupOsEnvCaptureResolved) return;
-    if (startupSkillScopeChecked) return;
-    startupSkillScopeChecked = true;
-    void checkSkillScopePromptOnStartup();
   });
 
   $effect(() => {
@@ -919,6 +914,53 @@
     return () => window.clearInterval(timer);
   });
 
+  // Close docs editor tabs automatically after vi exits.
+  $effect(() => {
+    if (docsEditorAutoClosePaneIds.length === 0) return;
+
+    let polling = false;
+    const timer = window.setInterval(() => {
+      if (polling) return;
+      polling = true;
+
+      void (async () => {
+        const paneIds = [...docsEditorAutoClosePaneIds];
+        if (paneIds.length === 0) return;
+
+        try {
+          const { invoke } = await import("$lib/tauriInvoke");
+          const terminals = await invoke<TerminalInfo[]>("list_terminals");
+          const statusByPane = new Map(
+            terminals.map((terminal) => [terminal.pane_id, terminal.status]),
+          );
+
+          for (const paneId of paneIds) {
+            const status = statusByPane.get(paneId);
+            if (!status) {
+              removeDocsEditorAutoClosePane(paneId);
+              continue;
+            }
+
+            if (!isTerminalProcessEnded(status)) continue;
+
+            try {
+              await invoke("close_terminal", { paneId });
+            } catch {
+              // Ignore if already closed.
+            }
+            removeDocsEditorAutoClosePane(paneId);
+          }
+        } catch {
+          // Ignore polling errors.
+        }
+      })().finally(() => {
+        polling = false;
+      });
+    }, DOCS_EDITOR_AUTO_CLOSE_POLL_MS);
+
+    return () => window.clearInterval(timer);
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -1016,28 +1058,6 @@
     return family.length > 0 ? family : DEFAULT_TERMINAL_FONT_FAMILY;
   }
 
-  function normalizeSkillScope(
-    value: string | null | undefined,
-  ): SkillRegistrationScope | null {
-    const normalized = (value ?? "").trim().toLowerCase();
-    if (
-      normalized === "user" ||
-      normalized === "project" ||
-      normalized === "local"
-    ) {
-      return normalized as SkillRegistrationScope;
-    }
-    return null;
-  }
-
-  function hasSkillScopeConfigured(
-    settings: Partial<SettingsData> | null | undefined,
-  ): boolean {
-    return normalizeSkillScope(
-      settings?.agent_skill_registration_default_scope ?? null,
-    ) !== null;
-  }
-
   function applyUiFontSize(size: number) {
     document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
   }
@@ -1091,51 +1111,6 @@
     } catch (err) {
       startupOsEnvCaptureResolved = true;
       console.error("Failed to check os env capture status:", err);
-    }
-  }
-
-  async function checkSkillScopePromptOnStartup() {
-    if (!isTauriRuntimeAvailable()) return;
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const settings = await invoke<SettingsData>("get_settings");
-      if (hasSkillScopeConfigured(settings)) {
-        skillScopePromptOpen = false;
-        return;
-      }
-
-      skillScopeSelection = "user";
-      skillScopePromptError = null;
-      skillScopePromptOpen = true;
-    } catch (err) {
-      skillScopePromptOpen = false;
-      skillScopePromptError = null;
-      console.error("Failed to check startup skill scope setting:", err);
-    }
-  }
-
-  async function applyStartupSkillScopeSelection() {
-    if (skillScopePromptBusy) return;
-    skillScopePromptBusy = true;
-    skillScopePromptError = null;
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const currentSettings = await invoke<SettingsData>("get_settings");
-      const nextSettings: SettingsData = {
-        ...currentSettings,
-        agent_skill_registration_default_scope: skillScopeSelection,
-        agent_skill_registration_codex_scope: null,
-        agent_skill_registration_claude_scope: null,
-        agent_skill_registration_gemini_scope: null,
-      };
-
-      await invoke("save_settings", { settings: nextSettings });
-      await invoke("repair_skill_registration_cmd");
-      skillScopePromptOpen = false;
-    } catch (err) {
-      skillScopePromptError = toErrorMessage(err);
-    } finally {
-      skillScopePromptBusy = false;
     }
   }
 
@@ -1499,11 +1474,23 @@
     );
   }
 
-  function isWindowsPlatform(platform: string): boolean {
-    return platform.toLowerCase().includes("win");
+  function addDocsEditorAutoClosePane(paneId: string) {
+    const normalized = paneId.trim();
+    if (!normalized) return;
+    if (docsEditorAutoClosePaneIds.includes(normalized)) return;
+    docsEditorAutoClosePaneIds = [...docsEditorAutoClosePaneIds, normalized];
   }
 
-  async function resolveWindowsDocsShellId(): Promise<"wsl" | "powershell" | "cmd"> {
+  function removeDocsEditorAutoClosePane(paneId: string) {
+    const normalized = paneId.trim();
+    if (!normalized) return;
+    if (!docsEditorAutoClosePaneIds.includes(normalized)) return;
+    docsEditorAutoClosePaneIds = docsEditorAutoClosePaneIds.filter(
+      (id) => id !== normalized,
+    );
+  }
+
+  async function resolveWindowsDocsShellId(): Promise<DocsEditorShellId> {
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const settings = await invoke<Pick<SettingsData, "default_shell">>("get_settings");
@@ -1515,33 +1502,6 @@
       // Fall back to cmd when settings are unavailable.
     }
     return "cmd";
-  }
-
-  function buildDocsEditorCommand(
-    platform: string,
-    shellId?: "wsl" | "powershell" | "cmd",
-  ): string {
-    const files = AGENT_INSTRUCTION_DOC_FILES.join(" ");
-    const codeArgs = AGENT_INSTRUCTION_DOC_FILES.map((file) => `-g ${file}`).join(
-      " ",
-    );
-    const powershellNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
-      (file) => `notepad ${file}`,
-    ).join("; ");
-    const cmdNotepadFallback = AGENT_INSTRUCTION_DOC_FILES.map(
-      (file) => `notepad ${file}`,
-    ).join(" & ");
-    if (isWindowsPlatform(platform)) {
-      if (shellId === "wsl") {
-        return `vi ${files}`;
-      }
-      if (shellId === "powershell") {
-        return `if (Get-Command code -ErrorAction SilentlyContinue) { code ${codeArgs} } else { ${powershellNotepadFallback} }`;
-      }
-      return `where code >NUL 2>&1 && (code ${codeArgs}) || (${cmdNotepadFallback})`;
-    }
-
-    return `vi ${files}`;
   }
 
   async function handleOpenDocsEditor(worktreePath: string) {
@@ -1572,6 +1532,9 @@
       const command = `${buildDocsEditorCommand(platform, shellId)}\n`;
       const data = Array.from(new TextEncoder().encode(command));
       await invoke("write_terminal", { paneId, data });
+      if (shouldAutoCloseDocsEditorTab(platform, shellId)) {
+        addDocsEditorAutoClosePane(paneId);
+      }
     } catch (err) {
       showToast(`Failed to open docs editor: ${toErrorMessage(err)}`, 8000);
       console.error("Failed to open docs editor:", err);
@@ -1808,6 +1771,10 @@
   function removeTabLocal(tabId: string) {
     const idx = tabs.findIndex((t) => t.id === tabId);
     if (idx < 0) return;
+    const removed = tabs[idx];
+    if (removed?.paneId) {
+      removeDocsEditorAutoClosePane(removed.paneId);
+    }
 
     const nextTabs = tabs.filter((t) => t.id !== tabId);
     tabs = nextTabs;
@@ -3056,61 +3023,6 @@
   onClose={handleLaunchModalClose}
   onUseExisting={handleUseExistingBranch}
 />
-{#if skillScopePromptOpen}
-  <div class="overlay modal-overlay">
-    <div class="scope-dialog modal-dialog-shell" role="dialog" aria-modal="true" aria-label="Skill registration scope">
-      <h2>Skill Registration Scope</h2>
-      <p class="scope-dialog-text">
-        Select where managed skills and plugins are auto-registered. You can change this later in
-        Settings.
-      </p>
-      <div class="scope-choice-grid">
-        <button
-          class={`scope-choice ${skillScopeSelection === "user" ? "active" : ""}`}
-          onclick={() => (skillScopeSelection = "user")}
-          disabled={skillScopePromptBusy}
-        >
-          <strong>User</strong>
-          <span>~/.codex, ~/.gemini, ~/.claude</span>
-        </button>
-        <button
-          class={`scope-choice ${skillScopeSelection === "project" ? "active" : ""}`}
-          onclick={() => (skillScopeSelection = "project")}
-          disabled={skillScopePromptBusy}
-        >
-          <strong>Project</strong>
-          <span>&lt;repo&gt;/.codex, .gemini, .claude</span>
-        </button>
-        <button
-          class={`scope-choice ${skillScopeSelection === "local" ? "active" : ""}`}
-          onclick={() => (skillScopeSelection = "local")}
-          disabled={skillScopePromptBusy}
-        >
-          <strong>Local</strong>
-          <span>&lt;repo&gt;/.codex/skills.local etc.</span>
-        </button>
-      </div>
-      {#if skillScopePromptError}
-        <p class="scope-dialog-error">{skillScopePromptError}</p>
-      {/if}
-      <div class="scope-dialog-actions">
-        <button
-          class="about-close"
-          onclick={() => {
-            skillScopePromptOpen = false;
-            skillScopePromptError = null;
-          }}
-          disabled={skillScopePromptBusy}
-        >
-          Skip for now
-        </button>
-        <button class="about-close" onclick={() => void applyStartupSkillScopeSelection()} disabled={skillScopePromptBusy}>
-          {skillScopePromptBusy ? "Applying..." : "Apply and Continue"}
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
 {#if showOsEnvDebug}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -3337,94 +3249,6 @@
     overflow-x: auto;
     white-space: pre;
     font-size: var(--ui-font-md);
-  }
-
-  .scope-dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 24px 26px;
-    max-width: 680px;
-    width: min(680px, 92vw);
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .scope-dialog h2 {
-    font-size: var(--ui-font-xl);
-    font-weight: 800;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
-  .scope-dialog-text {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: var(--ui-font-md);
-    line-height: 1.5;
-  }
-
-  .scope-choice-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
-  }
-
-  .scope-choice {
-    text-align: left;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    color: var(--text-secondary);
-    padding: 12px;
-    cursor: pointer;
-    font-family: inherit;
-    font-size: var(--ui-font-md);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .scope-choice strong {
-    color: var(--text-primary);
-    font-size: var(--ui-font-md);
-  }
-
-  .scope-choice span {
-    font-family: monospace;
-    font-size: var(--ui-font-sm);
-    color: var(--text-muted);
-    line-height: 1.3;
-  }
-
-  .scope-choice:hover:not(:disabled),
-  .scope-choice.active {
-    border-color: var(--accent);
-    background: var(--bg-surface);
-  }
-
-  .scope-choice:disabled {
-    opacity: 0.7;
-    cursor: default;
-  }
-
-  .scope-dialog-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .scope-dialog-error {
-    margin: 0;
-    color: rgb(255, 160, 160);
-    font-size: var(--ui-font-sm);
-  }
-
-  @media (max-width: 860px) {
-    .scope-choice-grid {
-      grid-template-columns: 1fr;
-    }
   }
 
   .error-dialog {
