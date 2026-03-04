@@ -1,5 +1,6 @@
 //! Project structure index commands backed by ChromaDB (Python runtime).
 
+use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::process::command_os;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -353,6 +354,10 @@ fn db_path_for_project(project_root: &str) -> PathBuf {
     Path::new(project_root).join(".gwt").join("index")
 }
 
+fn repo_path_for_issue_index(project_root: &str) -> Result<PathBuf, String> {
+    resolve_repo_path_for_project_root(Path::new(project_root))
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -437,10 +442,11 @@ pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssues
     tokio::task::spawn_blocking(move || {
         let python = find_python_binary()?;
         let db = db_path_for_project(&project_root);
+        let repo_path = repo_path_for_issue_index(&project_root)?;
         let resp = run_chroma_runner(
             &python,
             "index-issues",
-            Some(&project_root),
+            Some(&repo_path.to_string_lossy()),
             Some(&db.to_string_lossy()),
             None,
             None,
@@ -534,6 +540,7 @@ pub fn spawn_background_index(project_root: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn db_path_uses_gwt_index_dir() {
@@ -585,5 +592,35 @@ mod tests {
         assert_eq!(parsed.indexed, Some(true));
         assert_eq!(parsed.total_files, Some(42));
         assert_eq!(parsed.db_size_bytes, Some(2048));
+    }
+
+    #[test]
+    fn repo_path_for_issue_index_resolves_bare_repo_from_project_config() {
+        let temp = tempdir().expect("create tempdir");
+        let root = temp.path();
+
+        fs::create_dir_all(root.join(".gwt")).expect("create .gwt");
+        fs::write(
+            root.join(".gwt/project.json"),
+            r#"{"bare_repo_name":"repo.git","migrated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .expect("write project.json");
+
+        let bare = root.join("repo.git");
+        let output = command_os("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&bare)
+            .output()
+            .expect("run git init --bare");
+        assert!(
+            output.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let resolved =
+            repo_path_for_issue_index(&root.to_string_lossy()).expect("resolve issue index repo");
+        assert_eq!(resolved, bare);
     }
 }
