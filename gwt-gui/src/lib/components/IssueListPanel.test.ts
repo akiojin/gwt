@@ -267,10 +267,12 @@ describe("IssueListPanel", () => {
     });
   });
 
-  it("filters issues by issue number tokens (#n / n / mixed terms)", async () => {
+  it("filters issues by number tokens and mixed AND query", async () => {
     const issues: GitHubIssueInfo[] = [
-      makeIssue({ number: 12, title: "Fix login bug" }),
-      makeIssue({ number: 42, title: "Add feature" }),
+      makeIssue({ number: 312, title: "Refactor module" }),
+      makeIssue({ number: 120, title: "Bug in parser" }),
+      makeIssue({ number: 12, title: "Bug docs" }),
+      makeIssue({ number: 45, title: "Bug cleanup" }),
     ];
 
     mockInvoke.mockImplementation(async (cmd: string) => {
@@ -285,31 +287,36 @@ describe("IssueListPanel", () => {
     });
 
     const rendered = await renderIssueListPanel();
+
     await waitFor(() => {
-      expect(rendered.getByText("Fix login bug")).toBeTruthy();
-      expect(rendered.getByText("Add feature")).toBeTruthy();
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
     });
 
-    const searchInput = rendered.container.querySelector(
-      'input[placeholder*="Search"]',
-    ) as HTMLInputElement;
-
-    await fireEvent.input(searchInput, { target: { value: "#12" } });
-    await waitFor(() => {
-      expect(rendered.getByText("Fix login bug")).toBeTruthy();
-      expect(rendered.queryByText("Add feature")).toBeNull();
-    });
+    const searchInput = rendered.container.querySelector('input[placeholder*="Search"]') as HTMLInputElement;
+    expect(searchInput).toBeTruthy();
 
     await fireEvent.input(searchInput, { target: { value: "12" } });
     await waitFor(() => {
-      expect(rendered.getByText("Fix login bug")).toBeTruthy();
-      expect(rendered.queryByText("Add feature")).toBeNull();
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
     });
 
     await fireEvent.input(searchInput, { target: { value: "bug 12" } });
     await waitFor(() => {
-      expect(rendered.getByText("Fix login bug")).toBeTruthy();
-      expect(rendered.queryByText("Add feature")).toBeNull();
+      expect(rendered.queryByText("Refactor module")).toBeNull();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
+    });
+
+    await fireEvent.input(searchInput, { target: { value: "#12" } });
+    await waitFor(() => {
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
     });
   });
 

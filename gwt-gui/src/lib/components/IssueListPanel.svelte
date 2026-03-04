@@ -9,6 +9,7 @@
     type IssueBranchMatch,
   } from "../types";
   import { invoke } from "$lib/tauriInvoke";
+  import { issueMatchesSearchQuery } from "$lib/issueSearch";
   import { openExternalUrl } from "../openExternalUrl";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
@@ -55,38 +56,13 @@
   let sentinelRef: HTMLDivElement | null = $state(null);
   let listRef: HTMLDivElement | null = $state(null);
 
-  function issueMatchesSearch(issue: GitHubIssueInfo, query: string): boolean {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return true;
-
-    const title = issue.title.toLowerCase();
-    const issueNumber = String(issue.number);
-    const normalizedNoHash = normalized.replace(/^#/, "");
-
-    if (title.includes(normalized)) return true;
-    if (/^\d+$/.test(normalizedNoHash) && issueNumber.includes(normalizedNoHash)) {
-      return true;
-    }
-
-    const tokens = normalized.split(/\s+/).filter(Boolean);
-    if (tokens.length <= 1) return false;
-
-    return tokens.every((token) => {
-      const tokenNoHash = token.replace(/^#/, "");
-      if (/^\d+$/.test(tokenNoHash)) {
-        return issueNumber.includes(tokenNoHash);
-      }
-      return title.includes(token);
-    });
-  }
-
   let filteredIssues = $derived(
     (() => {
       let result = issues;
 
-      const q = searchQuery.trim().toLowerCase();
+      const q = searchQuery.trim();
       if (q) {
-        result = result.filter((issue) => issueMatchesSearch(issue, q));
+        result = result.filter((i) => issueMatchesSearchQuery(i, q));
       }
 
       if (labelFilter) {

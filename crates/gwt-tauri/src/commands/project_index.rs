@@ -354,9 +354,8 @@ fn db_path_for_project(project_root: &str) -> PathBuf {
     Path::new(project_root).join(".gwt").join("index")
 }
 
-fn issue_index_git_context_path(project_root: &str) -> Result<PathBuf, String> {
+fn repo_path_for_issue_index(project_root: &str) -> Result<PathBuf, String> {
     resolve_repo_path_for_project_root(Path::new(project_root))
-        .map_err(|e| format!("Failed to resolve repository path for issue indexing: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -443,12 +442,11 @@ pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssues
     tokio::task::spawn_blocking(move || {
         let python = find_python_binary()?;
         let db = db_path_for_project(&project_root);
-        let repo_path = issue_index_git_context_path(&project_root)?;
-        let repo_path_str = repo_path.to_string_lossy().to_string();
+        let repo_path = repo_path_for_issue_index(&project_root)?;
         let resp = run_chroma_runner(
             &python,
             "index-issues",
-            Some(&repo_path_str),
+            Some(&repo_path.to_string_lossy()),
             Some(&db.to_string_lossy()),
             None,
             None,
@@ -542,6 +540,7 @@ pub fn spawn_background_index(project_root: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn db_path_uses_gwt_index_dir() {
@@ -572,6 +571,18 @@ mod tests {
         assert!(
             !CHROMA_HELPER_SCRIPT.contains("\"github_issues\""),
             "old collection name 'github_issues' must not exist"
+        );
+    }
+
+    #[test]
+    fn chroma_helper_script_emits_ascii_safe_json() {
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("ensure_ascii=True"),
+            "chroma helper must serialize stdout JSON with ensure_ascii=True"
+        );
+        assert!(
+            !CHROMA_HELPER_SCRIPT.contains("ensure_ascii=False"),
+            "chroma helper must not emit locale-dependent non-ASCII JSON bytes"
         );
     }
 
@@ -613,35 +624,32 @@ mod tests {
     }
 
     #[test]
-    fn chroma_helper_emits_ascii_json() {
-        assert!(
-            CHROMA_HELPER_SCRIPT.contains("ensure_ascii=True"),
-            "helper emit() must use ensure_ascii=True to avoid locale-dependent stdout encoding"
-        );
-    }
+    fn repo_path_for_issue_index_resolves_bare_repo_from_project_config() {
+        let temp = tempdir().expect("create tempdir");
+        let root = temp.path();
 
-    #[test]
-    fn issue_index_git_context_resolves_bare_repo_inside_project_root() {
-        let temp = tempfile::tempdir().expect("create tempdir");
-        let project_root = temp.path().join("project");
-        std::fs::create_dir_all(&project_root).expect("create project root");
+        fs::create_dir_all(root.join(".gwt")).expect("create .gwt");
+        fs::write(
+            root.join(".gwt/project.json"),
+            r#"{"bare_repo_name":"repo.git","migrated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .expect("write project.json");
 
-        let bare_repo = project_root.join("repo.git");
-        let status = command_os("git")
+        let bare = root.join("repo.git");
+        let output = command_os("git")
             .arg("init")
             .arg("--bare")
-            .arg(&bare_repo)
-            .status()
+            .arg(&bare)
+            .output()
             .expect("run git init --bare");
-        assert!(status.success(), "git init --bare must succeed");
+        assert!(
+            output.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-        let resolved = issue_index_git_context_path(
-            &project_root
-                .to_str()
-                .expect("temp path must be valid unicode for this test"),
-        )
-        .expect("resolve bare repo context");
-
-        assert_eq!(resolved, bare_repo);
+        let resolved =
+            repo_path_for_issue_index(&root.to_string_lossy()).expect("resolve issue index repo");
+        assert_eq!(resolved, bare);
     }
 }
