@@ -19,6 +19,7 @@
     saveLaunchDefaults,
     type LaunchDefaults,
   } from "../agentLaunchDefaults";
+  import { issueMatchesSearchQuery } from "$lib/issueSearch";
   import { determinePrefixFromLabels } from "../agentUtils";
   import {
     buildNewBranchName,
@@ -176,9 +177,9 @@
 
   let filteredIssues = $derived(
     (() => {
-      const q = issueSearchQuery.trim().toLowerCase();
+      const q = issueSearchQuery.trim();
       if (!q) return issues;
-      return issues.filter((i) => i.title.toLowerCase().includes(q));
+      return issues.filter((i) => issueMatchesSearchQuery(i, q));
     })()
   );
 

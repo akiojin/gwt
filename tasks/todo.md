@@ -1,3 +1,30 @@
+## TODO: Issue検索フィルターでIssue番号を対象化（Issue #1453 / 2026-03-04）
+
+## 背景（Issue #1453）
+
+Issue検索フィルターがタイトル一致のみで、Issue番号入力（例: `12`, `#12`）がヒットしない。
+検索体験を改善するため、番号部分一致と混在クエリAND条件を導入する。
+
+## 実装ステップ（Issue #1453）
+
+- [x] T001 gwt-spec Issue 作成（#1453）
+- [x] T002 RED: `IssueListPanel.test.ts` に番号部分一致/混在AND/#付き検索を追加
+- [x] T003 RED: `AgentLaunchForm.test.ts` に番号部分一致/混在AND/#付き検索を追加
+- [x] T004 RED: `crates/gwt-core/src/git/issue.rs` に番号検索テストを追加
+- [x] T005 GUI共通検索ユーティリティ `gwt-gui/src/lib/issueSearch.ts` 追加
+- [x] T006 `IssueListPanel.svelte` / `AgentLaunchForm.svelte` に共通ロジック適用
+- [x] T007 Rust `filter_issues_by_title` をトークンAND + 番号部分一致に拡張
+- [x] T008 検証（対象テスト実行・結果記録）
+
+## 検証結果（Issue #1453）
+
+- [x] `cargo test -p gwt-core filter_issues_by_title -- --test-threads=1`（7 passed）
+- [x] `cd gwt-gui && pnpm test src/lib/components/IssueListPanel.test.ts -t \"filters issues by number tokens and mixed AND query\"`（1 passed）
+- [x] `cd gwt-gui && pnpm test src/lib/components/AgentLaunchForm.test.ts -t \"filters from-issue list by number tokens and mixed AND query\"`（1 passed）
+- [x] `cd gwt-gui && pnpm test src/lib/components/IssueListPanel.test.ts src/lib/components/AgentLaunchForm.test.ts`（IssueListPanelは全件成功、AgentLaunchForm既存失敗2件: bunx/npx fallback期待）
+
+---
+
 # TODO: GitHub Copilot CLI 対応
 
 ---
