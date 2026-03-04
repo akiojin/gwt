@@ -1,7 +1,6 @@
 //! Native menubar wiring (Tauri menu).
 
 use crate::state::AppState;
-use gwt_core::config::ProfilesConfig;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -368,19 +367,8 @@ fn build_open_recent_submenu(app: &AppHandle<Wry>) -> tauri::Result<tauri::menu:
 }
 
 fn should_show_version_history_menu(app: &AppHandle<Wry>, state: &AppState) -> bool {
-    // Only show when there is an open project in the currently focused window
-    // and AI settings are configured.
     let focused_label = focused_window_label(app);
-
-    if state.project_for_window(&focused_label).is_none() {
-        return false;
-    }
-
-    let Ok(profiles) = ProfilesConfig::load() else {
-        return false;
-    };
-    let ai = profiles.resolve_active_ai_settings();
-    ai.resolved.is_some()
+    state.project_for_window(&focused_label).is_some()
 }
 
 fn build_window_submenu(
