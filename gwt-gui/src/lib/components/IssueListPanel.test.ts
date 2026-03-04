@@ -267,6 +267,59 @@ describe("IssueListPanel", () => {
     });
   });
 
+  it("filters issues by number tokens and mixed AND query", async () => {
+    const issues: GitHubIssueInfo[] = [
+      makeIssue({ number: 312, title: "Refactor module" }),
+      makeIssue({ number: 120, title: "Bug in parser" }),
+      makeIssue({ number: 12, title: "Bug docs" }),
+      makeIssue({ number: 45, title: "Bug cleanup" }),
+    ];
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true } as GhCliStatus;
+      }
+      if (cmd === "fetch_github_issues") {
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
+    });
+
+    const searchInput = rendered.container.querySelector('input[placeholder*="Search"]') as HTMLInputElement;
+    expect(searchInput).toBeTruthy();
+
+    await fireEvent.input(searchInput, { target: { value: "12" } });
+    await waitFor(() => {
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
+    });
+
+    await fireEvent.input(searchInput, { target: { value: "bug 12" } });
+    await waitFor(() => {
+      expect(rendered.queryByText("Refactor module")).toBeNull();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
+    });
+
+    await fireEvent.input(searchInput, { target: { value: "#12" } });
+    await waitFor(() => {
+      expect(rendered.getByText("Refactor module")).toBeTruthy();
+      expect(rendered.getByText("Bug in parser")).toBeTruthy();
+      expect(rendered.getByText("Bug docs")).toBeTruthy();
+      expect(rendered.queryByText("Bug cleanup")).toBeNull();
+    });
+  });
+
   it("filters issues by label click and clears on re-click", async () => {
     const issues: GitHubIssueInfo[] = [
       makeIssue({ number: 1, title: "Bug report", labels: [{ name: "bug", color: "d73a4a" }] }),

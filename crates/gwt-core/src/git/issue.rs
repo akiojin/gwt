@@ -788,16 +788,46 @@ pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubI
     Ok(issue)
 }
 
-/// Filter issues by title (case-insensitive substring match)
+enum IssueSearchToken {
+    Title(String),
+    Number(String),
+}
+
+fn parse_issue_search_tokens(query: &str) -> Vec<IssueSearchToken> {
+    query
+        .split_whitespace()
+        .map(|token| {
+            let stripped = token.strip_prefix('#').unwrap_or(token);
+            if !stripped.is_empty() && stripped.chars().all(|ch| ch.is_ascii_digit()) {
+                return IssueSearchToken::Number(stripped.to_string());
+            }
+            IssueSearchToken::Title(token.to_lowercase())
+        })
+        .collect()
+}
+
+/// Filter issues by search query.
+///
+/// Search is evaluated as token-based AND:
+/// - non-numeric token: case-insensitive title substring match
+/// - numeric token (`123` or `#123`): issue number substring match
 pub fn filter_issues_by_title<'a>(issues: &'a [GitHubIssue], query: &str) -> Vec<&'a GitHubIssue> {
-    if query.is_empty() {
+    let tokens = parse_issue_search_tokens(query);
+    if tokens.is_empty() {
         return issues.iter().collect();
     }
 
-    let query_lower = query.to_lowercase();
     issues
         .iter()
-        .filter(|issue| issue.title.to_lowercase().contains(&query_lower))
+        .filter(|issue| {
+            let issue_number = issue.number.to_string();
+            let title_lower = issue.title.to_lowercase();
+
+            tokens.iter().all(|token| match token {
+                IssueSearchToken::Title(title_token) => title_lower.contains(title_token),
+                IssueSearchToken::Number(number_token) => issue_number.contains(number_token),
+            })
+        })
         .collect()
 }
 
@@ -1708,6 +1738,71 @@ mod tests {
 
         let filtered = filter_issues_by_title(&issues, "nonexistent");
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_issues_by_title_matches_issue_number_substring() {
+        let issues = vec![
+            GitHubIssue::new(
+                312,
+                "Refactor module".to_string(),
+                "2025-01-25T10:00:00Z".to_string(),
+            ),
+            GitHubIssue::new(
+                45,
+                "Bug cleanup".to_string(),
+                "2025-01-24T08:00:00Z".to_string(),
+            ),
+        ];
+
+        let filtered = filter_issues_by_title(&issues, "12");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].number, 312);
+    }
+
+    #[test]
+    fn test_filter_issues_by_title_matches_hashtag_number() {
+        let issues = vec![
+            GitHubIssue::new(
+                120,
+                "Bug in parser".to_string(),
+                "2025-01-25T10:00:00Z".to_string(),
+            ),
+            GitHubIssue::new(
+                45,
+                "Bug cleanup".to_string(),
+                "2025-01-24T08:00:00Z".to_string(),
+            ),
+        ];
+
+        let filtered = filter_issues_by_title(&issues, "#12");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].number, 120);
+    }
+
+    #[test]
+    fn test_filter_issues_by_title_mixed_tokens_use_and_condition() {
+        let issues = vec![
+            GitHubIssue::new(
+                120,
+                "Bug in parser".to_string(),
+                "2025-01-25T10:00:00Z".to_string(),
+            ),
+            GitHubIssue::new(
+                312,
+                "Refactor module".to_string(),
+                "2025-01-24T08:00:00Z".to_string(),
+            ),
+            GitHubIssue::new(
+                45,
+                "Bug cleanup".to_string(),
+                "2025-01-23T06:00:00Z".to_string(),
+            ),
+        ];
+
+        let filtered = filter_issues_by_title(&issues, "bug 12");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].number, 120);
     }
 
     #[test]
