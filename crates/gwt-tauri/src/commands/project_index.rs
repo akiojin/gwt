@@ -1,5 +1,6 @@
 //! Project structure index commands backed by ChromaDB (Python runtime).
 
+use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::process::command_os;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -353,6 +354,11 @@ fn db_path_for_project(project_root: &str) -> PathBuf {
     Path::new(project_root).join(".gwt").join("index")
 }
 
+fn issue_index_git_context_path(project_root: &str) -> Result<PathBuf, String> {
+    resolve_repo_path_for_project_root(Path::new(project_root))
+        .map_err(|e| format!("Failed to resolve repository path for issue indexing: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -437,10 +443,12 @@ pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssues
     tokio::task::spawn_blocking(move || {
         let python = find_python_binary()?;
         let db = db_path_for_project(&project_root);
+        let repo_path = issue_index_git_context_path(&project_root)?;
+        let repo_path_str = repo_path.to_string_lossy().to_string();
         let resp = run_chroma_runner(
             &python,
             "index-issues",
-            Some(&project_root),
+            Some(&repo_path_str),
             Some(&db.to_string_lossy()),
             None,
             None,
@@ -602,5 +610,38 @@ mod tests {
         assert_eq!(parsed.indexed, Some(true));
         assert_eq!(parsed.total_files, Some(42));
         assert_eq!(parsed.db_size_bytes, Some(2048));
+    }
+
+    #[test]
+    fn chroma_helper_emits_ascii_json() {
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("ensure_ascii=True"),
+            "helper emit() must use ensure_ascii=True to avoid locale-dependent stdout encoding"
+        );
+    }
+
+    #[test]
+    fn issue_index_git_context_resolves_bare_repo_inside_project_root() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("create project root");
+
+        let bare_repo = project_root.join("repo.git");
+        let status = command_os("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&bare_repo)
+            .status()
+            .expect("run git init --bare");
+        assert!(status.success(), "git init --bare must succeed");
+
+        let resolved = issue_index_git_context_path(
+            &project_root
+                .to_str()
+                .expect("temp path must be valid unicode for this test"),
+        )
+        .expect("resolve bare repo context");
+
+        assert_eq!(resolved, bare_repo);
     }
 }

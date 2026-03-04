@@ -45,29 +45,46 @@ fn is_log_file_candidate(path: &Path) -> bool {
     name.ends_with(".jsonl") || name.contains(".jsonl.")
 }
 
+fn collect_log_candidates(log_base: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let Ok(entries) = fs::read_dir(log_base) else {
+        return candidates;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if is_log_file_candidate(&path) {
+                candidates.push(path);
+            }
+            continue;
+        }
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        if let Ok(files) = fs::read_dir(&path) {
+            for file_entry in files.flatten() {
+                let file_path = file_entry.path();
+                if file_path.is_file() && is_log_file_candidate(&file_path) {
+                    candidates.push(file_path);
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
 /// Read the last `max_lines` lines from the most recent log file.
 #[tauri::command]
 pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredError> {
     let max = max_lines.unwrap_or(100) as usize;
     let log_base = log_dir();
 
-    // Find the most recent .jsonl file across workspace dirs
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&log_base) {
-        for entry in entries.flatten() {
-            let ws_dir = entry.path();
-            if ws_dir.is_dir() {
-                if let Ok(files) = fs::read_dir(&ws_dir) {
-                    for f in files.flatten() {
-                        let p = f.path();
-                        if is_log_file_candidate(&p) {
-                            candidates.push(p);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Find the most recent .jsonl file across workspace dirs and root-level files.
+    let mut candidates = collect_log_candidates(&log_base);
 
     if candidates.is_empty() {
         return Ok("(No log files found)".to_string());
@@ -395,5 +412,29 @@ mod tests {
     #[test]
     fn log_file_candidate_rejects_non_jsonl() {
         assert!(!is_log_file_candidate(Path::new("gwt.log")));
+    }
+
+    #[test]
+    fn collect_log_candidates_includes_root_and_workspace_dirs() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let base = tmp.path();
+
+        let root_log = base.join("root.jsonl");
+        std::fs::write(&root_log, "{\"msg\":\"root\"}\n").expect("write root log");
+
+        let workspace_dir = base.join("workspace-a");
+        std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
+        let nested_log = workspace_dir.join("nested.jsonl");
+        std::fs::write(&nested_log, "{\"msg\":\"nested\"}\n").expect("write nested log");
+
+        let ignored = workspace_dir.join("ignored.log");
+        std::fs::write(&ignored, "ignored\n").expect("write ignored");
+
+        let mut collected = collect_log_candidates(base);
+        collected.sort();
+
+        assert!(collected.contains(&root_log));
+        assert!(collected.contains(&nested_log));
+        assert!(!collected.contains(&ignored));
     }
 }

@@ -267,6 +267,52 @@ describe("IssueListPanel", () => {
     });
   });
 
+  it("filters issues by issue number tokens (#n / n / mixed terms)", async () => {
+    const issues: GitHubIssueInfo[] = [
+      makeIssue({ number: 12, title: "Fix login bug" }),
+      makeIssue({ number: 42, title: "Add feature" }),
+    ];
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true } as GhCliStatus;
+      }
+      if (cmd === "fetch_github_issues") {
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+    await waitFor(() => {
+      expect(rendered.getByText("Fix login bug")).toBeTruthy();
+      expect(rendered.getByText("Add feature")).toBeTruthy();
+    });
+
+    const searchInput = rendered.container.querySelector(
+      'input[placeholder*="Search"]',
+    ) as HTMLInputElement;
+
+    await fireEvent.input(searchInput, { target: { value: "#12" } });
+    await waitFor(() => {
+      expect(rendered.getByText("Fix login bug")).toBeTruthy();
+      expect(rendered.queryByText("Add feature")).toBeNull();
+    });
+
+    await fireEvent.input(searchInput, { target: { value: "12" } });
+    await waitFor(() => {
+      expect(rendered.getByText("Fix login bug")).toBeTruthy();
+      expect(rendered.queryByText("Add feature")).toBeNull();
+    });
+
+    await fireEvent.input(searchInput, { target: { value: "bug 12" } });
+    await waitFor(() => {
+      expect(rendered.getByText("Fix login bug")).toBeTruthy();
+      expect(rendered.queryByText("Add feature")).toBeNull();
+    });
+  });
+
   it("filters issues by label click and clears on re-click", async () => {
     const issues: GitHubIssueInfo[] = [
       makeIssue({ number: 1, title: "Bug report", labels: [{ name: "bug", color: "d73a4a" }] }),

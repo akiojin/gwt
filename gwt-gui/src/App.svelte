@@ -30,6 +30,11 @@
   import {
     formatWindowTitle,
   } from "./lib/windowTitle";
+  import {
+    buildWindowMenuTabsSignature,
+    buildWindowMenuVisibleTabs,
+    resolveActiveWindowMenuTabId,
+  } from "./lib/windowMenuSync";
   import { inferAgentId } from "./lib/agentUtils";
   import {
     AGENT_TAB_RESTORE_MAX_RETRIES,
@@ -244,6 +249,8 @@
 
   let tabs: Tab[] = $state(defaultAppTabs());
   let activeTabId: string = $state("projectMode");
+  let lastWindowMenuTabsSignature: string | null = null;
+  let lastWindowMenuActiveTabId: string | null = null;
   let agentPasteHintDismissed = loadAgentPasteHintDismissed();
   let agentPasteHintShownInSession = false;
 
@@ -2101,21 +2108,46 @@
     );
   }
 
-  async function syncWindowAgentTabs() {
+  async function syncWindowAgentTabsSnapshot() {
     try {
       const { invoke } = await import("$lib/tauriInvoke");
-      const visibleTabs = tabs
-        .filter((t) => t.type === "agent" || t.type === "terminal")
-        .map((t) => ({ id: t.id, label: t.label, tab_type: t.type }));
-      const activeVisibleTabId = visibleTabs.some((t) => t.id === activeTabId)
-        ? activeTabId
-        : null;
+      const visibleTabs = buildWindowMenuVisibleTabs(tabs);
+      const tabsSignature = buildWindowMenuTabsSignature(visibleTabs);
+      if (tabsSignature === lastWindowMenuTabsSignature) {
+        return;
+      }
+      const activeVisibleTabId = resolveActiveWindowMenuTabId(
+        visibleTabs,
+        activeTabId,
+      );
       await invoke("sync_window_agent_tabs", {
         request: {
           tabs: visibleTabs,
           activeTabId: activeVisibleTabId,
         },
       });
+      lastWindowMenuTabsSignature = tabsSignature;
+      lastWindowMenuActiveTabId = activeVisibleTabId;
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+  }
+
+  async function syncWindowActiveTabOnly() {
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const visibleTabs = buildWindowMenuVisibleTabs(tabs);
+      const activeVisibleTabId = resolveActiveWindowMenuTabId(
+        visibleTabs,
+        activeTabId,
+      );
+      if (activeVisibleTabId === lastWindowMenuActiveTabId) {
+        return;
+      }
+      await invoke("sync_window_active_tab", {
+        activeTabId: activeVisibleTabId,
+      });
+      lastWindowMenuActiveTabId = activeVisibleTabId;
     } catch {
       // Ignore: not available outside Tauri runtime.
     }
@@ -2413,8 +2445,13 @@
 
   $effect(() => {
     void tabs;
+    void syncWindowAgentTabsSnapshot();
+  });
+
+  $effect(() => {
+    void tabs;
     void activeTabId;
-    void syncWindowAgentTabs();
+    void syncWindowActiveTabOnly();
   });
 
   $effect(() => {

@@ -55,13 +55,38 @@
   let sentinelRef: HTMLDivElement | null = $state(null);
   let listRef: HTMLDivElement | null = $state(null);
 
+  function issueMatchesSearch(issue: GitHubIssueInfo, query: string): boolean {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return true;
+
+    const title = issue.title.toLowerCase();
+    const issueNumber = String(issue.number);
+    const normalizedNoHash = normalized.replace(/^#/, "");
+
+    if (title.includes(normalized)) return true;
+    if (/^\d+$/.test(normalizedNoHash) && issueNumber.includes(normalizedNoHash)) {
+      return true;
+    }
+
+    const tokens = normalized.split(/\s+/).filter(Boolean);
+    if (tokens.length <= 1) return false;
+
+    return tokens.every((token) => {
+      const tokenNoHash = token.replace(/^#/, "");
+      if (/^\d+$/.test(tokenNoHash)) {
+        return issueNumber.includes(tokenNoHash);
+      }
+      return title.includes(token);
+    });
+  }
+
   let filteredIssues = $derived(
     (() => {
       let result = issues;
 
       const q = searchQuery.trim().toLowerCase();
       if (q) {
-        result = result.filter((i) => i.title.toLowerCase().includes(q));
+        result = result.filter((issue) => issueMatchesSearch(issue, q));
       }
 
       if (labelFilter) {

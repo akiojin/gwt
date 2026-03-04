@@ -19,7 +19,7 @@ from typing import List, Optional
 
 
 def emit(payload: dict) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+    sys.stdout.write(json.dumps(payload, ensure_ascii=True))
     sys.stdout.flush()
 
 
