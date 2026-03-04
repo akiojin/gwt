@@ -3,6 +3,7 @@
 use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::StructuredError;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -31,10 +32,63 @@ pub struct CreateIssueResult {
     pub number: u64,
 }
 
-fn log_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "gwt")
-        .map(|p| p.data_dir().join("logs"))
-        .unwrap_or_else(|| PathBuf::from(".gwt/logs"))
+fn candidate_log_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".gwt").join("logs"));
+    }
+
+    if let Some(project_dirs) = directories::ProjectDirs::from("", "", "gwt") {
+        roots.push(project_dirs.data_dir().join("logs"));
+    }
+
+    roots.push(PathBuf::from(".gwt/logs"));
+
+    let mut seen = HashSet::new();
+    roots
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+fn collect_log_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    let mut collect_from_dir = |dir: &Path| {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && is_log_file_candidate(&path) {
+                    candidates.push(path);
+                }
+            }
+        }
+    };
+
+    // Support logs written directly under the root path.
+    collect_from_dir(root);
+
+    // Support logs written under workspace subdirectories.
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_from_dir(&path);
+            }
+        }
+    }
+
+    candidates
+}
+
+fn select_most_recent_log(mut candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates.sort_by(|a, b| {
+        let ma = a.metadata().and_then(|m| m.modified()).ok();
+        let mb = b.metadata().and_then(|m| m.modified()).ok();
+        mb.cmp(&ma)
+    });
+    candidates.into_iter().next()
 }
 
 fn is_log_file_candidate(path: &Path) -> bool {
@@ -49,38 +103,17 @@ fn is_log_file_candidate(path: &Path) -> bool {
 #[tauri::command]
 pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredError> {
     let max = max_lines.unwrap_or(100) as usize;
-    let log_base = log_dir();
-
-    // Find the most recent .jsonl file across workspace dirs
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&log_base) {
-        for entry in entries.flatten() {
-            let ws_dir = entry.path();
-            if ws_dir.is_dir() {
-                if let Ok(files) = fs::read_dir(&ws_dir) {
-                    for f in files.flatten() {
-                        let p = f.path();
-                        if is_log_file_candidate(&p) {
-                            candidates.push(p);
-                        }
-                    }
-                }
-            }
-        }
+
+    for root in candidate_log_roots() {
+        candidates.extend(collect_log_candidates(&root));
     }
 
-    if candidates.is_empty() {
+    let Some(latest_log_path) = select_most_recent_log(candidates) else {
         return Ok("(No log files found)".to_string());
-    }
+    };
 
-    // Sort by modification time (most recent first)
-    candidates.sort_by(|a, b| {
-        let ma = a.metadata().and_then(|m| m.modified()).ok();
-        let mb = b.metadata().and_then(|m| m.modified()).ok();
-        mb.cmp(&ma)
-    });
-
-    let content = fs::read_to_string(&candidates[0])
+    let content = fs::read_to_string(&latest_log_path)
         .map_err(|e| StructuredError::internal(&e.to_string(), "read_recent_logs"))?;
 
     let lines: Vec<&str> = content.lines().collect();
@@ -314,6 +347,10 @@ pub fn capture_screen_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_ssh_remote() {
@@ -395,5 +432,69 @@ mod tests {
     #[test]
     fn log_file_candidate_rejects_non_jsonl() {
         assert!(!is_log_file_candidate(Path::new("gwt.log")));
+    }
+
+    #[test]
+    fn candidate_log_roots_include_relative_fallback_and_have_no_duplicates() {
+        let roots = candidate_log_roots();
+
+        assert!(roots.contains(&PathBuf::from(".gwt/logs")));
+
+        if let Some(home) = dirs::home_dir() {
+            assert!(roots.contains(&home.join(".gwt").join("logs")));
+        }
+
+        let unique: HashSet<PathBuf> = roots.iter().cloned().collect();
+        assert_eq!(unique.len(), roots.len());
+    }
+
+    #[test]
+    fn collect_log_candidates_includes_files_under_root() {
+        let temp = tempdir().unwrap();
+        let root_log = temp.path().join("gwt.jsonl");
+        fs::write(&root_log, "line-1\nline-2\n").unwrap();
+
+        let candidates = collect_log_candidates(temp.path());
+
+        assert!(candidates.contains(&root_log));
+    }
+
+    #[test]
+    fn collect_log_candidates_includes_files_under_workspace_directories() {
+        let temp = tempdir().unwrap();
+        let workspace_dir = temp.path().join("workspace-a");
+        fs::create_dir_all(&workspace_dir).unwrap();
+        let workspace_log = workspace_dir.join("gwt.jsonl.2026-03-04");
+        fs::write(&workspace_log, "line\n").unwrap();
+
+        let candidates = collect_log_candidates(temp.path());
+
+        assert!(candidates.contains(&workspace_log));
+    }
+
+    #[test]
+    fn collect_log_candidates_rejects_non_jsonl_files() {
+        let temp = tempdir().unwrap();
+        let non_log_file = temp.path().join("gwt.log");
+        fs::write(&non_log_file, "not a jsonl log").unwrap();
+
+        let candidates = collect_log_candidates(temp.path());
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn select_most_recent_log_prefers_newest_file() {
+        let temp = tempdir().unwrap();
+        let older = temp.path().join("gwt.jsonl.2026-03-03");
+        let newer = temp.path().join("gwt.jsonl.2026-03-04");
+
+        fs::write(&older, "older log\n").unwrap();
+        thread::sleep(Duration::from_millis(1200));
+        fs::write(&newer, "newer log\n").unwrap();
+
+        let selected = select_most_recent_log(vec![older, newer.clone()]).unwrap();
+
+        assert_eq!(selected, newer);
     }
 }
