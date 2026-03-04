@@ -34,6 +34,7 @@
     buildWindowMenuTabsSignature,
     buildWindowMenuVisibleTabs,
     resolveActiveWindowMenuTabId,
+    shouldKeepSnapshotActiveTabCache,
   } from "./lib/windowMenuSync";
   import { inferAgentId } from "./lib/agentUtils";
   import {
@@ -2127,7 +2128,9 @@
         },
       });
       lastWindowMenuTabsSignature = tabsSignature;
-      lastWindowMenuActiveTabId = activeVisibleTabId;
+      if (shouldKeepSnapshotActiveTabCache(activeVisibleTabId, tabs, activeTabId)) {
+        lastWindowMenuActiveTabId = activeVisibleTabId;
+      }
     } catch {
       // Ignore: not available outside Tauri runtime.
     }

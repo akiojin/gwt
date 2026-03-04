@@ -4,6 +4,7 @@ import {
   buildWindowMenuTabsSignature,
   buildWindowMenuVisibleTabs,
   resolveActiveWindowMenuTabId,
+  shouldKeepSnapshotActiveTabCache,
 } from "./windowMenuSync";
 
 describe("windowMenuSync", () => {
@@ -65,5 +66,50 @@ describe("windowMenuSync", () => {
     expect(resolveActiveWindowMenuTabId(visibleTabs, "agent-1")).toBe("agent-1");
     expect(resolveActiveWindowMenuTabId(visibleTabs, "settings")).toBeNull();
   });
-});
 
+  it("shouldKeepSnapshotActiveTabCache returns true when active tab did not change", () => {
+    const tabs: Tab[] = [
+      {
+        id: "agent-a",
+        label: "A",
+        type: "agent",
+        paneId: "pane-a",
+        agentId: "codex",
+      },
+      {
+        id: "agent-b",
+        label: "B",
+        type: "agent",
+        paneId: "pane-b",
+        agentId: "codex",
+      },
+    ];
+
+    expect(
+      shouldKeepSnapshotActiveTabCache("agent-a", tabs, "agent-a"),
+    ).toBe(true);
+  });
+
+  it("shouldKeepSnapshotActiveTabCache returns false when active tab changed", () => {
+    const tabs: Tab[] = [
+      {
+        id: "agent-a",
+        label: "A",
+        type: "agent",
+        paneId: "pane-a",
+        agentId: "codex",
+      },
+      {
+        id: "agent-b",
+        label: "B",
+        type: "agent",
+        paneId: "pane-b",
+        agentId: "codex",
+      },
+    ];
+
+    expect(
+      shouldKeepSnapshotActiveTabCache("agent-a", tabs, "agent-b"),
+    ).toBe(false);
+  });
+});

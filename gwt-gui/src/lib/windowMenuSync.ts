@@ -36,3 +36,15 @@ export function resolveActiveWindowMenuTabId(
   return visibleTabs.some((tab) => tab.id === activeTabId) ? activeTabId : null;
 }
 
+export function shouldKeepSnapshotActiveTabCache(
+  requestedActiveTabId: string | null,
+  tabs: Tab[],
+  activeTabId: string,
+): boolean {
+  const currentVisibleTabs = buildWindowMenuVisibleTabs(tabs);
+  const currentActiveTabId = resolveActiveWindowMenuTabId(
+    currentVisibleTabs,
+    activeTabId,
+  );
+  return currentActiveTabId === requestedActiveTabId;
+}
