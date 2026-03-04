@@ -568,6 +568,18 @@ mod tests {
     }
 
     #[test]
+    fn chroma_helper_script_emits_ascii_safe_json() {
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("ensure_ascii=True"),
+            "chroma helper must serialize stdout JSON with ensure_ascii=True"
+        );
+        assert!(
+            !CHROMA_HELPER_SCRIPT.contains("ensure_ascii=False"),
+            "chroma helper must not emit locale-dependent non-ASCII JSON bytes"
+        );
+    }
+
+    #[test]
     fn chroma_runner_response_deserializes_camel_case_metrics() {
         let json = r#"{
             "ok": true,
