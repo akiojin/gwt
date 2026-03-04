@@ -1,5 +1,30 @@
 # TODO: GitHub Copilot CLI 対応
 
+---
+
+## TODO: Issue #1441 Project Index Files 検索結果 0 件表示の修正（2026-03-04）
+
+## 背景（Issue #1441）
+
+Project Index の Files タブで `Git` を検索した際に「No results found」と見える不具合。
+根本原因として、未検索状態でも入力文字列があるだけで 0 件表示文言が出る UI 条件と、
+semantic 検索結果が空のときのフォールバック不在を修正する。
+
+## 実装ステップ（Issue #1441）
+
+- [x] T001 フロントエンド回帰テスト追加（未検索時 0 件文言を表示しない）
+- [x] T002 RED 確認（追加テスト失敗を確認）
+- [x] T003 UI 実装修正（検索実行後のみ 0 件文言表示）
+- [x] T004 Python 検索フォールバック追加（semantic 0 件時の部分一致）
+- [x] T005 GREEN 確認（対象テスト実行）
+- [x] T006 追加検証（svelte-check + Rust unit test）
+
+## 検証結果（Issue #1441）
+
+- [x] `cd gwt-gui && pnpm test src/lib/components/ProjectIndexPanel.test.ts`（3 tests passed）
+- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`（0 errors / 1 warning: 既存 `MergeDialog.svelte`）
+- [x] `cargo test -p gwt-tauri project_index -- --test-threads=1`（5 tests passed）
+
 ## 背景（Copilot CLI 対応）
 
 gwt に 5 番目の AI コーディングエージェントとして GitHub Copilot CLI（`copilot` コマンド、npm: `@github/copilot`）を追加する。既存の 4 エージェント（Claude Code / Codex / Gemini / OpenCode）と同じパターンに従い、最小限の変更で統合する。

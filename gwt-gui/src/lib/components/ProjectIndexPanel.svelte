@@ -12,6 +12,8 @@
   let query = $state("");
   let results = $state<ProjectIndexSearchResult[]>([]);
   let searching = $state(false);
+  let hasSearched = $state(false);
+  let lastSearchedQuery = $state("");
   let error = $state<string | null>(null);
   let statusError = $state<string | null>(null);
   let indexStatus = $state<{
@@ -46,7 +48,12 @@
 
   async function handleSearch() {
     const q = query.trim();
-    if (!q) return;
+    if (!q) {
+      hasSearched = false;
+      lastSearchedQuery = "";
+      results = [];
+      return;
+    }
 
     searching = true;
     error = null;
@@ -60,6 +67,8 @@
       error = String(e);
       results = [];
     } finally {
+      hasSearched = true;
+      lastSearchedQuery = q;
       searching = false;
     }
   }
@@ -199,7 +208,7 @@
             {/if}
           </div>
         {/each}
-      {:else if !searching && !error && query.trim()}
+      {:else if !searching && !error && hasSearched && lastSearchedQuery === query.trim()}
         <div class="no-results">No results found</div>
       {/if}
     </div>

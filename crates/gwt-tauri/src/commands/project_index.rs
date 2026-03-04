@@ -575,6 +575,23 @@ mod tests {
     }
 
     #[test]
+    fn chroma_search_has_substring_fallback_for_empty_semantic_results() {
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("def fallback_substring_search("),
+            "fallback_substring_search helper must exist"
+        );
+        assert!(
+            CHROMA_HELPER_SCRIPT.contains("if not items:"),
+            "search path must branch on empty semantic results"
+        );
+        assert!(
+            CHROMA_HELPER_SCRIPT
+                .contains("items = fallback_substring_search(collection, query, actual_n)"),
+            "search path must invoke fallback_substring_search"
+        );
+    }
+
+    #[test]
     fn chroma_runner_response_deserializes_camel_case_metrics() {
         let json = r#"{
             "ok": true,
