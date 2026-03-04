@@ -408,7 +408,57 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
                 "size": meta.get("size", 0),
             })
 
+    if not items:
+        items = fallback_substring_search(collection, query, actual_n)
+
     return {"ok": True, "results": items}
+
+
+def fallback_substring_search(collection, query: str, n_results: int) -> List[dict]:
+    """Fallback search using case-insensitive substring matching on path/description."""
+    normalized = query.strip().lower()
+    if not normalized or n_results <= 0:
+        return []
+
+    try:
+        snapshot = collection.get(include=["metadatas"])
+    except Exception:
+        return []
+
+    ids = snapshot.get("ids") or []
+    metadatas = snapshot.get("metadatas") or []
+    matches = []
+
+    for idx, file_id in enumerate(ids):
+        meta = metadatas[idx] if idx < len(metadatas) and metadatas[idx] else {}
+        path = str(meta.get("path", file_id))
+        description = str(meta.get("description", ""))
+
+        path_pos = path.lower().find(normalized)
+        desc_pos = description.lower().find(normalized)
+
+        positions = [pos for pos in (path_pos, desc_pos) if pos >= 0]
+        if not positions:
+            continue
+
+        rank = 0 if path_pos >= 0 else 1
+        best_pos = min(positions)
+
+        matches.append((
+            rank,
+            best_pos,
+            path,
+            {
+                "path": path,
+                "description": description,
+                "distance": None,
+                "fileType": meta.get("file_type", ""),
+                "size": meta.get("size", 0),
+            },
+        ))
+
+    matches.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in matches[:n_results]]
 
 
 def action_index_issues(project_root: str, db_path: str) -> dict:
