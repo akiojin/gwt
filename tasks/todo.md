@@ -1,3 +1,28 @@
+## TODO: default profile 必須化 + default.ai 必須化（Issue #1464 / 2026-03-04）
+
+## 背景（Issue #1464）
+
+OpenAI互換API設定で `default` profile 不在や `profiles.default.ai` 未設定が混在し、
+設定解決ロジックが不安定になるため、保存/読込時に shape を自動正規化する。
+
+## 実装ステップ（Issue #1464）
+
+- [x] T001 gwt-spec Issue 作成（#1464）
+- [x] T002 RED: `save_and_load_inserts_default_profile_when_missing` 追加
+- [x] T003 RED: `save_and_load_fills_default_profile_ai_when_missing` 追加
+- [x] T004 `ensure_defaults` を拡張（default 補完 + default.ai 補完）
+- [x] T005 `save()` にも正規化適用
+- [x] T006 GREEN: `config::profile::tests` 実行
+- [x] T007 `cargo fmt --all -- --check` 実行
+
+## 検証結果（Issue #1464）
+
+- [x] `cargo test -p gwt-core save_and_load_inserts_default_profile_when_missing`
+- [x] `cargo test -p gwt-core save_and_load_fills_default_profile_ai_when_missing`
+- [x] `cargo test -p gwt-core save_and_load_keeps_default_profile_api_key_optional`
+- [x] `cargo test -p gwt-core config::profile::tests:: -- --test-threads=1`
+- [x] `cargo fmt --all -- --check`
+
 ## TODO: macOS で API キー設定後に Codex が未認証になる不具合修正（Issue #1463 / 2026-03-04）
 
 ## 背景（Issue #1463）
