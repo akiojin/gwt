@@ -1,3 +1,30 @@
+## TODO: macOS で API キー設定後に Codex が未認証になる不具合修正（Issue #1463 / 2026-03-04）
+
+## 背景（Issue #1463）
+
+Settings > Profiles に `ai.api_key` を保存しても、Codex の認証判定と Launch 時環境が
+`OPENAI_API_KEY` のプロセス環境変数のみ参照していたため、macOS で未認証扱いになる。
+
+## 実装ステップ（Issue #1463）
+
+- [x] T001 gwt-spec Issue 作成・Spec/Plan/Tasks/TDD 作成（#1463）
+- [x] T002 RED: `gwt-core` に Codex 認証判定テストを追加
+- [x] T003 RED: `gwt-tauri` に Launch env 注入テストを追加
+- [x] T004 `gwt-core/src/agent/codex.rs` に `is_codex_authenticated()` を追加（env + profile.ai）
+- [x] T005 `gwt-tauri/src/commands/agents.rs` の fallback 判定を共通関数へ統一
+- [x] T006 `gwt-tauri/src/commands/terminal.rs` に `OPENAI_API_KEY` フォールバック注入を追加
+- [x] T007 `gwt-gui/e2e/settings-config.spec.ts` に API キー保存回帰シナリオを追加
+- [x] T008 GREEN 検証と PR/Issue 更新
+
+## 検証結果（Issue #1463）
+
+- [x] `cargo test -p gwt-core agent::codex::tests:: -- --test-threads=1`
+- [x] `cargo test -p gwt-tauri commands::agents::tests:: -- --test-threads=1`
+- [x] `cargo test -p gwt-tauri commands::terminal::tests::inject_openai_api_key_from_profile_ai -- --test-threads=1`
+- [x] `cargo fmt --all -- --check`
+- [x] `cd gwt-gui && pnpm exec svelte-check --tsconfig ./tsconfig.json`
+- [x] `cd gwt-gui && pnpm exec playwright test e2e/settings-config.spec.ts`
+
 ## TODO: Issue検索フィルターでIssue番号を対象化（Issue #1453 / 2026-03-04）
 
 ## 背景（Issue #1453）
