@@ -388,6 +388,19 @@ impl AppState {
         }
     }
 
+    pub fn set_window_agent_active_tab(&self, window_label: &str, active_tab_id: Option<String>) {
+        if let Ok(mut map) = self.window_agent_tabs.lock() {
+            let Some(state) = map.get_mut(window_label) else {
+                return;
+            };
+            let normalized_active = active_tab_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .filter(|id| state.tabs.iter().any(|tab| tab.id == *id));
+            state.active_tab_id = normalized_active;
+        }
+    }
+
     pub fn window_agent_tabs_for_window(&self, window_label: &str) -> WindowAgentTabsState {
         let map = match self.window_agent_tabs.lock() {
             Ok(m) => m,
@@ -652,6 +665,49 @@ mod tests {
             }],
             Some("agent-pane-999".to_string()),
         );
+
+        let tabs = state.window_agent_tabs_for_window("main");
+        assert_eq!(tabs.active_tab_id, None);
+    }
+
+    #[test]
+    fn window_agent_tabs_active_can_be_updated_without_replacing_tabs() {
+        let state = AppState::new();
+        state.set_window_agent_tabs(
+            "main",
+            vec![
+                AgentTabMenuState {
+                    id: "agent-pane-1".to_string(),
+                    label: "feature/one".to_string(),
+                },
+                AgentTabMenuState {
+                    id: "agent-pane-2".to_string(),
+                    label: "feature/two".to_string(),
+                },
+            ],
+            Some("agent-pane-1".to_string()),
+        );
+
+        state.set_window_agent_active_tab("main", Some("agent-pane-2".to_string()));
+
+        let tabs = state.window_agent_tabs_for_window("main");
+        assert_eq!(tabs.tabs.len(), 2);
+        assert_eq!(tabs.active_tab_id, Some("agent-pane-2".to_string()));
+    }
+
+    #[test]
+    fn window_agent_tabs_active_update_ignores_unknown_id() {
+        let state = AppState::new();
+        state.set_window_agent_tabs(
+            "main",
+            vec![AgentTabMenuState {
+                id: "agent-pane-1".to_string(),
+                label: "feature/one".to_string(),
+            }],
+            Some("agent-pane-1".to_string()),
+        );
+
+        state.set_window_agent_active_tab("main", Some("agent-pane-999".to_string()));
 
         let tabs = state.window_agent_tabs_for_window("main");
         assert_eq!(tabs.active_tab_id, None);
