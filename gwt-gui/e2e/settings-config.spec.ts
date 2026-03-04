@@ -3,6 +3,7 @@ import { installTauriMock } from "./support/tauri-mock";
 import {
   defaultRecentProject,
   settingsFixture,
+  profilesFixture,
   openRecentProject,
   setMockCommandResponses,
   waitForInvokeCommand,
@@ -166,6 +167,141 @@ test("Profiles tab shows default profile", async ({ page }) => {
     .click();
 
   await expect(page.locator("#active-profile")).toHaveValue("default");
+});
+
+test("Profiles tab shows API key peek/copy controls and preserves underscore key on peek", async ({
+  page,
+}) => {
+  const profilesWithApiKey = {
+    ...profilesFixture,
+    profiles: {
+      ...profilesFixture.profiles,
+      default: {
+        ...profilesFixture.profiles.default,
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "sk_test_ab_cd",
+          model: "gpt-4o-mini",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithApiKey }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+  const peekButton = apiKeyField.locator(".btn-peek-apikey");
+  const copyButton = apiKeyField.locator(".btn-copy-apikey");
+
+  await expect(peekButton).toBeVisible();
+  await expect(copyButton).toBeVisible();
+  await expect(peekButton.locator("svg")).toBeVisible();
+  await expect(copyButton.locator("svg")).toBeVisible();
+  await expect(apiKeyInput).toHaveAttribute("type", "password");
+
+  await peekButton.dispatchEvent("mousedown");
+  await expect(apiKeyInput).toHaveAttribute("type", "text");
+  await expect(apiKeyInput).toHaveValue("sk_test_ab_cd");
+
+  await peekButton.dispatchEvent("mouseup");
+  await expect(apiKeyInput).toHaveAttribute("type", "password");
+});
+
+test("copy API key button writes plaintext value and shows copied feedback", async ({
+  page,
+}) => {
+  const profilesWithApiKey = {
+    ...profilesFixture,
+    profiles: {
+      ...profilesFixture.profiles,
+      default: {
+        ...profilesFixture.profiles.default,
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "sk_test_ab_cd",
+          model: "gpt-4o-mini",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.addInitScript(() => {
+    const globalWindow = window as unknown as {
+      __GWT_E2E_COPIED_API_KEY__?: string;
+    };
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          globalWindow.__GWT_E2E_COPIED_API_KEY__ = text;
+        },
+      },
+    });
+  });
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithApiKey }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const copyButton = apiKeyField.locator(".btn-copy-apikey");
+
+  await expect(copyButton).toBeVisible();
+  await copyButton.click();
+
+  await expect(copyButton).toHaveAttribute("title", "Copied!");
+  await expect(copyButton).toHaveClass(/copied/);
+
+  const copiedValue = await page.evaluate(() => {
+    const globalWindow = window as unknown as {
+      __GWT_E2E_COPIED_API_KEY__?: string;
+    };
+    return globalWindow.__GWT_E2E_COPIED_API_KEY__ ?? null;
+  });
+  expect(copiedValue).toBe("sk_test_ab_cd");
+});
+
+test("Profiles API key value with underscores is persisted on save_profiles", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses());
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyValue = "sk_test_ab_cd";
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+  await apiKeyInput.fill(apiKeyValue);
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await waitForInvokeCommand(page, "save_profiles");
+
+  const args = await getInvokeArgs(page, "save_profiles");
+  const config = (args as Record<string, unknown>)
+    ?.config as Record<string, unknown>;
+  const profiles = config?.profiles as Record<string, unknown>;
+  const defaultProfile = profiles?.default as Record<string, unknown>;
+  const ai = defaultProfile?.ai as Record<string, unknown>;
+
+  expect(ai?.api_key).toBe(apiKeyValue);
 });
 
 test("UI Font Family selector shows presets", async ({ page }) => {

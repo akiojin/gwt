@@ -252,7 +252,7 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
                             .map(|c| !c.claude.glm.auth_token.trim().is_empty())
                             .unwrap_or(false)
                 }
-                "codex" => std::env::var("OPENAI_API_KEY").is_ok(),
+                "codex" => codex::is_codex_authenticated(),
                 "gemini" => {
                     std::env::var("GOOGLE_API_KEY").is_ok()
                         || std::env::var("GEMINI_API_KEY").is_ok()
