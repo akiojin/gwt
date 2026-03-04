@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.3.1] - 2026-03-04
+
+### Bug Fixes
+
+- **release:** Closing Issue 収集ロジックで Issue 番号直接参照に対応
+- **project-index:** Avoid premature no-results in files search (#1444)
+- **project-index:** Resolve repo path for issue indexing (#1447)
+- **gui:** Remove duplicate fallback notice in launch agent form (#1449)
+- Resolve Application Logs retrieval in issue reports (#1448) (#1451)
+- Stabilize project index flow and unify gwt command naming (#1450)
+- **project-index:** Avoid Windows encoding breakage in chroma helper output (#1452)
+- **issue:** Support issue number matching in search filters (#1454)
+
 ## [8.3.0] - 2026-03-04
 
 ### Documentation
