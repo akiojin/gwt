@@ -1,5 +1,5 @@
 {
-  "name": "gwt-integration",
+  "name": "gwt",
   "version": "0.4.0",
   "description": "Worktree protection, gwt hook forwarding, Issue-first SPEC ops, and Project Mode skills"
 }

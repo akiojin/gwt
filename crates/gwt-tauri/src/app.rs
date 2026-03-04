@@ -397,10 +397,7 @@ pub fn build_app(
                             }
                         };
                         let status =
-                            skill_registration::repair_skill_registration_with_settings_at_project_root(
-                                &settings,
-                                None,
-                            );
+                            skill_registration::repair_skill_registration_with_settings(&settings);
                         let state = app_handle.state::<AppState>();
                         state.set_skill_registration_status(status.clone());
                         match status.overall.as_str() {

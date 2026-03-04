@@ -8,8 +8,8 @@
   },
   "plugins": [
     {
-      "name": "gwt-integration",
-      "description": "GWT integration hooks and managed skills for Claude Code",
+      "name": "gwt",
+      "description": "GWT integration hooks, managed skills, and GitHub management for Claude Code",
       "version": "0.3.0",
       "source": "./plugins/gwt-integration",
       "category": "security"
