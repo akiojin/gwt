@@ -104,6 +104,30 @@ pub fn rebuild_menu(app: &AppHandle<Wry>) -> tauri::Result<()> {
     Ok(())
 }
 
+pub fn refresh_window_tab_checkmarks(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else {
+        return Ok(());
+    };
+
+    let focused_label = focused_window_label(app);
+    let window_tabs = state.window_agent_tabs_for_window(&focused_label);
+    let active_tab_id = window_tabs.active_tab_id;
+
+    for tab in window_tabs.tabs {
+        let item_id = window_tab_focus_menu_id(&tab.id);
+        let Some(item) = menu.get(&item_id) else {
+            continue;
+        };
+        let Some(check_item) = item.as_check_menuitem() else {
+            continue;
+        };
+        let checked = active_tab_id.as_deref() == Some(tab.id.as_str());
+        check_item.set_checked(checked)?;
+    }
+
+    Ok(())
+}
+
 pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<Wry>> {
     let menu = Menu::new(app)?;
 
