@@ -1282,6 +1282,7 @@
                       />
                       {#if hasApiKey}
                         <button
+                          type="button"
                           class="btn btn-ghost btn-icon btn-peek-apikey"
                           class:peeking={peekingApiKey}
                           onmousedown={startApiKeyPeek}
@@ -1291,14 +1292,28 @@
                           onclick={toggleApiKeyPeekFromNonPointerClick}
                           title="Peek API Key"
                           aria-label="Peek API Key"
-                        ></button>
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path class="eye-outline" d="M2 12C4.5 8 7.5 6 12 6s7.5 2 10 6c-2.5 4-5.5 6-10 6s-7.5-2-10-6Z" />
+                            <circle class="eye-pupil" cx="12" cy="12" r="2.2"></circle>
+                            {#if !peekingApiKey}
+                              <path class="eye-slash" d="M4 20L20 4" />
+                            {/if}
+                          </svg>
+                        </button>
                         <button
+                          type="button"
                           class="btn btn-ghost btn-icon btn-copy-apikey"
                           class:copied={apiKeyCopied}
                           onclick={handleCopyApiKey}
                           title={apiKeyCopied ? "Copied!" : "Copy API Key"}
                           aria-label={apiKeyCopied ? "Copied!" : "Copy API Key"}
-                        ></button>
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <rect class="copy-back" x="6" y="4" width="10" height="12" rx="1.8"></rect>
+                            <rect class="copy-front" x="9" y="8" width="10" height="12" rx="1.8"></rect>
+                          </svg>
+                        </button>
                       {/if}
                     </div>
                   </div>
@@ -1647,6 +1662,7 @@
     color: var(--text-primary);
     font-size: var(--ui-font-md);
     font-family: monospace;
+    line-height: 1.35;
     outline: none;
     max-width: none;
   }
@@ -1663,70 +1679,51 @@
     position: relative;
     flex-shrink: 0;
     cursor: pointer;
+    line-height: 0;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+
+  .btn-icon svg {
+    display: block;
+    width: 18px;
+    height: 18px;
   }
 
   /* Eye icon (peek) */
-  .btn-peek-apikey::before {
-    content: "";
-    display: block;
-    width: 16px;
-    height: 10px;
-    border: 2px solid var(--text-secondary);
-    border-radius: 75% / 100%;
+  .btn-peek-apikey .eye-outline,
+  .btn-peek-apikey .eye-slash {
+    fill: none;
+    stroke: var(--text-secondary);
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
-  .btn-peek-apikey::after {
-    content: "";
-    position: absolute;
-    width: 6px;
-    height: 6px;
-    background: var(--text-secondary);
-    border-radius: 50%;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+  .btn-peek-apikey .eye-pupil {
+    fill: var(--text-secondary);
   }
-  .btn-peek-apikey:not(.peeking)::before {
-    background: linear-gradient(
-      to top right,
-      transparent calc(50% - 1px),
-      var(--text-secondary) calc(50% - 1px),
-      var(--text-secondary) calc(50% + 1px),
-      transparent calc(50% + 1px)
-    );
-  }
-  .btn-peek-apikey.peeking::before {
-    border-color: var(--accent);
-    background: none;
-  }
-  .btn-peek-apikey.peeking::after { background: var(--accent); }
+  .btn-peek-apikey.peeking .eye-outline,
+  .btn-peek-apikey.peeking .eye-slash { stroke: var(--accent); }
+  .btn-peek-apikey.peeking .eye-pupil { fill: var(--accent); }
 
   /* Copy icon */
-  .btn-copy-apikey::before {
-    content: "";
-    display: block;
-    width: 10px;
-    height: 12px;
-    border: 2px solid var(--text-secondary);
-    border-radius: 2px;
+  .btn-copy-apikey .copy-front,
+  .btn-copy-apikey .copy-back {
+    fill: none;
+    stroke: var(--text-secondary);
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
-  .btn-copy-apikey::after {
-    content: "";
-    position: absolute;
-    width: 10px;
-    height: 12px;
-    border: 2px solid var(--text-secondary);
-    border-radius: 2px;
-    top: calc(50% - 8px);
-    left: calc(50% - 2px);
-  }
-  .btn-copy-apikey.copied::before,
-  .btn-copy-apikey.copied::after { border-color: var(--green); }
+  .btn-copy-apikey.copied .copy-front,
+  .btn-copy-apikey.copied .copy-back { stroke: var(--green); }
 
   /* Hover states */
-  .btn-peek-apikey:hover::before { border-color: var(--text-primary); }
-  .btn-peek-apikey:hover::after { background: var(--text-primary); }
-  .btn-copy-apikey:hover::before,
-  .btn-copy-apikey:hover::after { border-color: var(--text-primary); }
+  .btn-peek-apikey:hover .eye-outline,
+  .btn-peek-apikey:hover .eye-slash { stroke: var(--text-primary); }
+  .btn-peek-apikey:hover .eye-pupil { fill: var(--text-primary); }
+  .btn-copy-apikey:hover .copy-front,
+  .btn-copy-apikey:hover .copy-back { stroke: var(--text-primary); }
 
   .ai-model-row {
     align-items: center;

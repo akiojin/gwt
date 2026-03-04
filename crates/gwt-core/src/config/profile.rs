@@ -156,6 +156,30 @@ fn default_summary_enabled() -> bool {
     true
 }
 
+fn default_profile_ai_settings() -> AISettings {
+    AISettings {
+        endpoint: default_endpoint(),
+        api_key: String::new(),
+        model: default_model(),
+        language: default_ai_language(),
+        summary_enabled: default_summary_enabled(),
+    }
+}
+
+fn default_profile() -> Profile {
+    let mut profile = Profile::new("default");
+    profile.ai = Some(default_profile_ai_settings());
+    profile
+}
+
+fn is_default_profile_ai_placeholder(settings: &AISettings) -> bool {
+    settings.endpoint.trim() == default_endpoint()
+        && settings.api_key.trim().is_empty()
+        && settings.model.trim().is_empty()
+        && normalize_ai_language(&settings.language) == default_ai_language()
+        && settings.summary_enabled == default_summary_enabled()
+}
+
 fn normalize_ai_language(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "ja" => "ja".to_string(),
@@ -306,6 +330,8 @@ impl ProfilesConfig {
     /// Always saves to profiles.toml regardless of source format.
     /// Uses atomic write (temp file + rename) for data safety.
     pub fn save(&self) -> Result<()> {
+        let mut normalized = self.clone();
+        normalized.ensure_defaults();
         let path = Self::toml_path();
 
         // Ensure ~/.gwt directory exists
@@ -313,9 +339,10 @@ impl ProfilesConfig {
             ensure_config_dir(parent)?;
         }
 
-        let content = toml::to_string_pretty(self).map_err(|e| GwtError::ConfigWriteError {
-            reason: format!("Failed to serialize to TOML: {}", e),
-        })?;
+        let content =
+            toml::to_string_pretty(&normalized).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!("Failed to serialize to TOML: {}", e),
+            })?;
 
         write_atomic(&path, &content)?;
 
@@ -410,24 +437,43 @@ impl ProfilesConfig {
 
     /// Ensure default profile exists
     fn ensure_defaults(&mut self) {
-        if self.profiles.is_empty() {
+        if self.version == 0 {
+            self.version = 1;
+        }
+
+        if !self.profiles.contains_key("default") {
             self.profiles
-                .insert("default".to_string(), Profile::new("default"));
-            if self.active.is_none() {
-                self.active = Some("default".to_string());
-            }
-            if self.version == 0 {
-                self.version = 1;
+                .insert("default".to_string(), default_profile());
+        }
+
+        if let Some(default) = self.profiles.get_mut("default") {
+            if default.ai.is_none() {
+                default.ai = Some(
+                    self.default_ai
+                        .clone()
+                        .unwrap_or_else(default_profile_ai_settings),
+                );
+            } else if let (Some(profile_ai), Some(default_ai)) =
+                (default.ai.as_ref(), self.default_ai.as_ref())
+            {
+                if is_default_profile_ai_placeholder(profile_ai) {
+                    default.ai = Some(default_ai.clone());
+                }
             }
         }
-        if self.active.is_none() && self.profiles.contains_key("default") {
+
+        if self
+            .active
+            .as_ref()
+            .is_none_or(|name| !self.profiles.contains_key(name))
+        {
             self.active = Some("default".to_string());
         }
     }
 
     fn default_with_profile() -> Self {
         let mut profiles = HashMap::new();
-        profiles.insert("default".to_string(), Profile::new("default"));
+        profiles.insert("default".to_string(), default_profile());
         Self {
             version: 1,
             active: Some("default".to_string()),
@@ -879,5 +925,81 @@ profiles:
         assert!(!resolved.ai_enabled);
         assert!(!resolved.summary_enabled);
         assert!(resolved.resolved.is_none());
+    }
+
+    #[test]
+    fn save_and_load_inserts_default_profile_when_missing() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let mut config = ProfilesConfig::default();
+        config.profiles.remove("default");
+        config
+            .profiles
+            .insert("dev".to_string(), Profile::new("dev"));
+        config.active = Some("dev".to_string());
+        config.save().unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        assert!(loaded.profiles.contains_key("default"));
+        assert_eq!(loaded.active.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn save_and_load_fills_default_profile_ai_when_missing() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let mut config = ProfilesConfig::default();
+        let default = config.profiles.get_mut("default").unwrap();
+        default.ai = None;
+        config.save().unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        let default = loaded.profiles.get("default").unwrap();
+        assert!(default.ai.is_some());
+    }
+
+    #[test]
+    fn save_and_load_keeps_default_profile_api_key_optional() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let mut config = ProfilesConfig::default();
+        let default = config.profiles.get_mut("default").unwrap();
+        default.ai = None;
+        config.save().unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        let default = loaded.profiles.get("default").unwrap();
+        let ai = default.ai.as_ref().unwrap();
+        assert_eq!(ai.api_key, "");
+    }
+
+    #[test]
+    fn save_and_load_keeps_default_ai_only_configuration_effective() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let config = ProfilesConfig {
+            default_ai: Some(AISettings {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                api_key: String::new(),
+                model: "gpt-4o-mini".to_string(),
+                language: "en".to_string(),
+                summary_enabled: true,
+            }),
+            ..ProfilesConfig::default()
+        };
+        config.save().unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        let resolved = loaded.resolve_active_ai_settings();
+        assert!(resolved.ai_enabled);
+        assert_eq!(resolved.resolved.unwrap().model, "gpt-4o-mini");
     }
 }

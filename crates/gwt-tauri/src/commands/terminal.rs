@@ -377,6 +377,46 @@ fn merge_profile_env(
     env_vars
 }
 
+fn resolve_profile_ai_api_key(profile_override: Option<&str>) -> Option<String> {
+    let Ok(config) = ProfilesConfig::load() else {
+        return None;
+    };
+
+    let profile_name = profile_override
+        .map(|s| s.to_string())
+        .or_else(|| config.active.clone());
+
+    if let Some(profile) = profile_name
+        .as_deref()
+        .and_then(|name| config.profiles.get(name))
+    {
+        if let Some(ai) = profile.ai.as_ref() {
+            let key = ai.api_key.trim();
+            return (!key.is_empty()).then(|| key.to_string());
+        }
+    }
+
+    config.default_ai.as_ref().and_then(|ai| {
+        let key = ai.api_key.trim();
+        (!key.is_empty()).then(|| key.to_string())
+    })
+}
+
+fn inject_openai_api_key_from_profile_ai(
+    env_vars: &mut HashMap<String, String>,
+    profile_override: Option<&str>,
+) {
+    let has_openai_api_key = env_vars
+        .get("OPENAI_API_KEY")
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_openai_api_key {
+        return;
+    }
+    if let Some(api_key) = resolve_profile_ai_api_key(profile_override) {
+        env_vars.insert("OPENAI_API_KEY".to_string(), api_key);
+    }
+}
+
 fn ensure_terminal_env_defaults(env_vars: &mut HashMap<String, String>) {
     env_vars
         .entry("TERM".to_string())
@@ -3566,6 +3606,65 @@ services:
     }
 
     #[test]
+    fn inject_openai_api_key_from_profile_ai_when_env_missing() {
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let mut config = gwt_core::config::ProfilesConfig::default();
+        if let Some(profile) = config.profiles.get_mut("default") {
+            profile.ai = Some(gwt_core::config::AISettings {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                api_key: "sk_test_profile_key".to_string(),
+                model: String::new(),
+                language: "en".to_string(),
+                summary_enabled: true,
+            });
+        }
+        config.save().unwrap();
+
+        let mut env_vars = HashMap::new();
+        inject_openai_api_key_from_profile_ai(&mut env_vars, None);
+
+        assert_eq!(
+            env_vars.get("OPENAI_API_KEY"),
+            Some(&"sk_test_profile_key".to_string())
+        );
+    }
+
+    #[test]
+    fn inject_openai_api_key_from_profile_ai_does_not_override_existing_env_value() {
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let mut config = gwt_core::config::ProfilesConfig::default();
+        if let Some(profile) = config.profiles.get_mut("default") {
+            profile.ai = Some(gwt_core::config::AISettings {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                api_key: "sk_test_profile_key".to_string(),
+                model: String::new(),
+                language: "en".to_string(),
+                summary_enabled: true,
+            });
+        }
+        config.save().unwrap();
+
+        let mut env_vars =
+            HashMap::from([(String::from("OPENAI_API_KEY"), String::from("sk_env_key"))]);
+        inject_openai_api_key_from_profile_ai(&mut env_vars, None);
+
+        assert_eq!(
+            env_vars.get("OPENAI_API_KEY"),
+            Some(&"sk_env_key".to_string())
+        );
+    }
+
+    #[test]
     fn probe_terminal_ansi_flushes_scrollback_before_reading() {
         let state = AppState::new();
         let nonce = SystemTime::now()
@@ -4015,6 +4114,16 @@ pub(crate) fn launch_agent_for_project_root(
         (path, name, created)
     };
 
+    tracing::debug!(
+        category = "terminal",
+        requested_branch = request.branch.as_str(),
+        resolved_branch = branch_name.as_str(),
+        working_dir = %working_dir.display(),
+        repo_path = %repo_path.display(),
+        worktree_created,
+        "Resolved launch worktree path"
+    );
+
     let launch_result: Result<String, String> = (|| {
         if is_launch_cancelled(cancelled) {
             return Err("Cancelled".to_string());
@@ -4073,6 +4182,7 @@ pub(crate) fn launch_agent_for_project_root(
         tracing::debug!(job_id = ?job_id, "launch step: deps (resolved)");
         report_launch_progress(job_id, &app_handle, "deps", None);
         let mut env_vars = merge_profile_env(&os_env, request.profile.as_deref());
+        inject_openai_api_key_from_profile_ai(&mut env_vars, request.profile.as_deref());
         // Useful for debugging and for agents that want to introspect gwt context.
         env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),

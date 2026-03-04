@@ -2421,6 +2421,23 @@ describe("SettingsPanel", () => {
     expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
   });
 
+  it("renders SVG icons inside API key peek and copy buttons", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+    const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+
+    expect(peekBtn.querySelector("svg")).not.toBeNull();
+    expect(copyBtn.querySelector("svg")).not.toBeNull();
+  });
+
   it("reveals API key on mousedown and hides on mouseup", async () => {
     const rendered = await renderSettingsPanel();
 
@@ -2592,5 +2609,46 @@ describe("SettingsPanel", () => {
 
     // Should copy the plaintext value despite being masked
     expect(writeTextMock).toHaveBeenCalledWith("test-key");
+  });
+
+  it("keeps API key value with underscores while peeking", async () => {
+    const underscoreProfiles = structuredClone(profilesFixture);
+    underscoreProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "sk_test_ab_cd",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(underscoreProfiles);
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+
+    await fireEvent.mouseDown(peekBtn);
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.value).toBe("sk_test_ab_cd");
+    expect(apiKeyInput.value.includes("_")).toBe(true);
   });
 });

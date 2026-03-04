@@ -1,7 +1,6 @@
 //! Native menubar wiring (Tauri menu).
 
 use crate::state::AppState;
-use gwt_core::config::ProfilesConfig;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -101,6 +100,30 @@ pub fn rebuild_menu(app: &AppHandle<Wry>) -> tauri::Result<()> {
     let state = app.state::<AppState>();
     let menu = build_menu(app, &state)?;
     let _ = app.set_menu(menu)?;
+    Ok(())
+}
+
+pub fn refresh_window_tab_checkmarks(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else {
+        return Ok(());
+    };
+
+    let focused_label = focused_window_label(app);
+    let window_tabs = state.window_agent_tabs_for_window(&focused_label);
+    let active_tab_id = window_tabs.active_tab_id;
+
+    for tab in window_tabs.tabs {
+        let item_id = window_tab_focus_menu_id(&tab.id);
+        let Some(item) = menu.get(&item_id) else {
+            continue;
+        };
+        let Some(check_item) = item.as_check_menuitem() else {
+            continue;
+        };
+        let checked = active_tab_id.as_deref() == Some(tab.id.as_str());
+        check_item.set_checked(checked)?;
+    }
+
     Ok(())
 }
 
@@ -344,19 +367,8 @@ fn build_open_recent_submenu(app: &AppHandle<Wry>) -> tauri::Result<tauri::menu:
 }
 
 fn should_show_version_history_menu(app: &AppHandle<Wry>, state: &AppState) -> bool {
-    // Only show when there is an open project in the currently focused window
-    // and AI settings are configured.
     let focused_label = focused_window_label(app);
-
-    if state.project_for_window(&focused_label).is_none() {
-        return false;
-    }
-
-    let Ok(profiles) = ProfilesConfig::load() else {
-        return false;
-    };
-    let ai = profiles.resolve_active_ai_settings();
-    ai.resolved.is_some()
+    state.project_for_window(&focused_label).is_some()
 }
 
 fn build_window_submenu(

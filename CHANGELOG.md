@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.3.2] - 2026-03-04
+
+### Bug Fixes
+
+- **gui:** Prevent Windows tab-switch jitter and restore regressions (#1315) (#1456)
+- **menu:** Version Historyメニューを常に表示する
+- **ci:** Speed up tauri cli install in release workflow (#1460)
+- **terminal:** Enforce Windows launch cwd for existing branch (#1458) (#1461)
+- Restore API key controls and add regression e2e tests (#1462)
+- **gui:** Reset stored agent version on fallback to prevent stale selection
+
+### Miscellaneous Tasks
+
+- **ci:** Parallelize CI jobs and enable concurrent Rust test execution
+
 ## [8.3.1] - 2026-03-04
 
 ### Bug Fixes
