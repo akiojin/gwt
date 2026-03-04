@@ -120,8 +120,34 @@ jobs:
           bash scripts/install-linux-deps.sh
       - name: Install frontend dependencies
         run: cd gwt-gui && pnpm install --frozen-lockfile
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@cargo-binstall
+      - name: Install Tauri CLI (prebuilt-first)
+        id: install_tauri_cli
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          start_time="$(date +%s)"
+          install_method="cargo-binstall"
+
+          if ! cargo binstall --no-confirm --disable-strategies compile tauri-cli@2; then
+            install_method="cargo-install-fallback"
+            cargo install tauri-cli --locked --version "^2"
+          fi
+
+          elapsed_seconds="$(( $(date +%s) - start_time ))"
+          echo "install_method=${install_method}" >> "$GITHUB_OUTPUT"
+          echo "elapsed_seconds=${elapsed_seconds}" >> "$GITHUB_OUTPUT"
+          echo "Installed Tauri CLI via ${install_method} in ${elapsed_seconds}s"
+      - name: Summarize Tauri CLI install
+        shell: bash
+        run: |
+          {
+            echo "### Tauri CLI install"
+            echo "- Method: ${{ steps.install_tauri_cli.outputs.install_method }}"
+            echo "- Elapsed: ${{ steps.install_tauri_cli.outputs.elapsed_seconds }}s"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Build Tauri (Linux/Windows)
         if: matrix.platform != 'macos'
         run: cargo tauri build -- --bin gwt-tauri
