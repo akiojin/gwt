@@ -1,10 +1,8 @@
 //! Settings management (SPEC-a3f4c9df)
 //!
-//! Manages application settings with automatic migration and path unification.
+//! Manages application settings.
 //!
-//! Global config locations (priority):
-//! 1. ~/.gwt/config.toml (new, preferred)
-//! 2. ~/.config/gwt/config.toml (legacy, fallback)
+//! Global config: `~/.gwt/config.toml`
 
 use super::migration::{auto_migrate, ensure_config_dir, write_atomic};
 use super::profile::ProfilesConfig;
@@ -15,7 +13,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,27 +191,6 @@ impl Settings {
 
         auto_migrate(repo_root)?;
 
-        // Auto-migrate global path if needed (SPEC-a3f4c9df)
-        if Self::needs_global_path_migration() {
-            match Self::migrate_global_path_if_needed() {
-                Ok(true) => {
-                    info!(
-                        category = "config",
-                        operation = "auto_migrate",
-                        "Auto-migrated global config from ~/.config/gwt/ to ~/.gwt/"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        category = "config",
-                        error = %e,
-                        "Failed to auto-migrate global config path"
-                    );
-                }
-                _ => {}
-            }
-        }
-
         let config_path = Self::find_config_file(repo_root);
 
         let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
@@ -265,39 +242,13 @@ impl Settings {
         Ok(settings)
     }
 
-    /// Load settings from global configuration files and environment.
+    /// Load settings from global configuration file and environment.
     ///
-    /// Priority (highest to lowest):
-    /// 1. ~/.gwt/config.toml (new location)
-    /// 2. ~/.config/gwt/config.toml (legacy fallback)
-    /// 3. Defaults (when no global file exists)
+    /// Reads `~/.gwt/config.toml`. Falls back to defaults when the file does not exist.
     pub fn load_global() -> Result<Self> {
         debug!(category = "config", "Loading global settings");
 
-        // Auto-migrate global path if needed (SPEC-a3f4c9df)
-        if Self::needs_global_path_migration() {
-            match Self::migrate_global_path_if_needed() {
-                Ok(true) => {
-                    info!(
-                        category = "config",
-                        operation = "auto_migrate",
-                        "Auto-migrated global config from ~/.config/gwt/ to ~/.gwt/"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        category = "config",
-                        error = %e,
-                        "Failed to auto-migrate global config path"
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        let config_path = Self::new_global_config_path()
-            .filter(|p| p.exists())
-            .or_else(|| Self::legacy_global_config_path().filter(|p| p.exists()));
+        let config_path = Self::global_config_path().filter(|p| p.exists());
 
         let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
 
@@ -358,8 +309,7 @@ impl Settings {
     /// Priority (highest to lowest):
     /// 1. .gwt.toml (local, highest priority)
     /// 2. .gwt/config.toml (local)
-    /// 3. ~/.gwt/config.toml (global, new location)
-    /// 4. ~/.config/gwt/config.toml (global, legacy fallback)
+    /// 3. ~/.gwt/config.toml (global)
     pub fn find_config_file(repo_root: &Path) -> Option<PathBuf> {
         debug!(
             category = "config",
@@ -384,27 +334,15 @@ impl Settings {
             }
         }
 
-        // Check new global config location (~/.gwt/config.toml)
-        if let Some(new_global) = Self::new_global_config_path() {
-            if new_global.exists() {
+        // Check global config (~/.gwt/config.toml)
+        if let Some(global) = Self::global_config_path() {
+            if global.exists() {
                 debug!(
                     category = "config",
-                    config_path = %new_global.display(),
-                    "Found global config file (new location)"
+                    config_path = %global.display(),
+                    "Found global config file"
                 );
-                return Some(new_global);
-            }
-        }
-
-        // Check legacy global config (~/.config/gwt/config.toml)
-        if let Some(legacy_global) = Self::legacy_global_config_path() {
-            if legacy_global.exists() {
-                debug!(
-                    category = "config",
-                    config_path = %legacy_global.display(),
-                    "Found global config file (legacy location)"
-                );
-                return Some(legacy_global);
+                return Some(global);
             }
         }
 
@@ -417,98 +355,8 @@ impl Settings {
     }
 
     /// Get the new global config path (~/.gwt/config.toml)
-    pub fn new_global_config_path() -> Option<PathBuf> {
+    pub fn global_config_path() -> Option<PathBuf> {
         dirs::home_dir().map(|home| home.join(".gwt").join("config.toml"))
-    }
-
-    /// Get the legacy global config path (~/.config/gwt/config.toml)
-    pub fn legacy_global_config_path() -> Option<PathBuf> {
-        // Prefer XDG override for deterministic behavior (especially in tests and CI).
-        // On macOS, `ProjectDirs::config_dir()` points to ~/Library/Application Support,
-        // which is a reasonable default but doesn't follow XDG semantics.
-        if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-            return Some(
-                PathBuf::from(xdg_config_home)
-                    .join("gwt")
-                    .join("config.toml"),
-            );
-        }
-
-        directories::ProjectDirs::from("", "", "gwt")
-            .map(|dirs| dirs.config_dir().join("config.toml"))
-    }
-
-    /// Get global config directory (deprecated - use new_global_config_dir)
-    #[deprecated(note = "Use new_global_config_dir() for new code")]
-    pub fn global_config_dir() -> Option<PathBuf> {
-        Self::legacy_global_config_dir()
-    }
-
-    /// Get the new global config directory (~/.gwt/)
-    pub fn new_global_config_dir() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| home.join(".gwt"))
-    }
-
-    /// Get the legacy global config directory (~/.config/gwt/)
-    pub fn legacy_global_config_dir() -> Option<PathBuf> {
-        if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-            return Some(PathBuf::from(xdg_config_home).join("gwt"));
-        }
-
-        directories::ProjectDirs::from("", "", "gwt").map(|dirs| dirs.config_dir().to_path_buf())
-    }
-
-    /// Check if migration from legacy to new global config path is needed
-    pub fn needs_global_path_migration() -> bool {
-        let new_path = Self::new_global_config_path();
-        let legacy_path = Self::legacy_global_config_path();
-
-        match (new_path, legacy_path) {
-            (Some(new), Some(legacy)) => legacy.exists() && !new.exists(),
-            _ => false,
-        }
-    }
-
-    /// Migrate global config from legacy to new path if needed
-    pub fn migrate_global_path_if_needed() -> Result<bool> {
-        if !Self::needs_global_path_migration() {
-            return Ok(false);
-        }
-
-        info!(
-            category = "config",
-            operation = "migration",
-            "Migrating global config from legacy to new path"
-        );
-
-        let legacy_path =
-            Self::legacy_global_config_path().ok_or_else(|| GwtError::ConfigParseError {
-                reason: "Could not determine legacy config path".to_string(),
-            })?;
-
-        let new_path =
-            Self::new_global_config_path().ok_or_else(|| GwtError::ConfigParseError {
-                reason: "Could not determine new config path".to_string(),
-            })?;
-
-        // Read from legacy
-        let content = std::fs::read_to_string(&legacy_path)?;
-
-        // Write to new location
-        if let Some(parent) = new_path.parent() {
-            ensure_config_dir(parent)?;
-        }
-        write_atomic(&new_path, &content)?;
-
-        info!(
-            category = "config",
-            operation = "migration",
-            legacy_path = %legacy_path.display(),
-            new_path = %new_path.display(),
-            "Global config path migration completed"
-        );
-
-        Ok(true)
     }
 
     /// Get log directory path
@@ -571,7 +419,7 @@ impl Settings {
 
     /// Save settings to the new global config path (~/.gwt/config.toml)
     pub fn save_global(&self) -> Result<()> {
-        let path = Self::new_global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
+        let path = Self::global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
             reason: "Could not determine global config path".to_string(),
         })?;
         self.save(&path)
@@ -720,22 +568,12 @@ mod tests {
     }
 
     #[test]
-    fn test_new_global_config_path() {
-        let path = Settings::new_global_config_path();
+    fn test_global_config_path() {
+        let path = Settings::global_config_path();
         assert!(path.is_some());
         let path = path.unwrap();
         assert!(path.to_string_lossy().contains(".gwt"));
         assert!(path.to_string_lossy().ends_with("config.toml"));
-    }
-
-    #[test]
-    fn test_legacy_global_config_path() {
-        let path = Settings::legacy_global_config_path();
-        // This may be None on some systems without XDG_CONFIG_HOME
-        if let Some(path) = path {
-            assert!(path.to_string_lossy().contains("gwt"));
-            assert!(path.to_string_lossy().ends_with("config.toml"));
-        }
     }
 
     #[test]
@@ -763,55 +601,6 @@ default_base_branch = "new-global"
         let settings = Settings::load(&repo).unwrap();
         assert!(settings.debug);
         assert_eq!(settings.default_base_branch, "new-global");
-    }
-
-    #[test]
-    fn test_legacy_global_config_fallback() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::with_xdg(temp.path(), &temp.path().join(".config"));
-
-        // Only create legacy global config (no new global)
-        let legacy_config = temp.path().join(".config").join("gwt");
-        std::fs::create_dir_all(&legacy_config).unwrap();
-        std::fs::write(
-            legacy_config.join("config.toml"),
-            r#"
-debug = true
-default_base_branch = "legacy-global"
-"#,
-        )
-        .unwrap();
-
-        // Create a repo without local config
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-
-        let settings = Settings::load(&repo).unwrap();
-        assert!(settings.debug);
-        assert_eq!(settings.default_base_branch, "legacy-global");
-    }
-
-    #[test]
-    fn test_needs_global_path_migration() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::with_xdg(temp.path(), &temp.path().join(".config"));
-
-        // No files - no migration needed
-        assert!(!Settings::needs_global_path_migration());
-
-        // Create legacy config only
-        let legacy_config = temp.path().join(".config").join("gwt");
-        std::fs::create_dir_all(&legacy_config).unwrap();
-        std::fs::write(legacy_config.join("config.toml"), "debug = true").unwrap();
-        assert!(Settings::needs_global_path_migration());
-
-        // Create new config - no longer needs migration
-        let new_gwt = temp.path().join(".gwt");
-        std::fs::create_dir_all(&new_gwt).unwrap();
-        std::fs::write(new_gwt.join("config.toml"), "debug = false").unwrap();
-        assert!(!Settings::needs_global_path_migration());
     }
 
     #[test]
