@@ -4801,12 +4801,7 @@ pub(crate) fn launch_agent_for_project_root(
                 }
             }
             DockerExecMode::None => {
-                let terminal_shell = request
-                    .terminal_shell
-                    .as_deref()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
+                let terminal_shell = resolve_shell_id_for_spawn(request.terminal_shell.as_deref());
 
                 // WSL agent launch uses the PTY-write approach (FR-007).
                 if terminal_shell.as_deref() == Some("wsl") {
