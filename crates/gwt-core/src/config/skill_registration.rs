@@ -4,8 +4,8 @@
 //! for supported agents.
 
 use super::claude_plugins::{
-    is_gwt_marketplace_registered, is_plugin_enabled_in_settings, setup_gwt_plugin_at,
-    GWT_PLUGIN_FULL_NAME,
+    force_setup_gwt_plugin_at, is_gwt_marketplace_registered, is_plugin_enabled_in_settings,
+    setup_gwt_plugin_at, GWT_PLUGIN_FULL_NAME,
 };
 use super::Settings;
 use crate::error::GwtError;
@@ -214,7 +214,7 @@ fn unregister_agent_skills_at(root: &Path) {
 /// Errors are logged but never propagated; this function is designed to be called
 /// at application exit without blocking the shutdown sequence.
 pub fn unregister_all_skills() {
-    // Claude: disable plugin
+    // Claude: disable plugin key while preserving explicit user choice (`false`).
     if let Some(settings_path) = super::claude_plugins::get_global_claude_settings_path() {
         if let Err(e) = super::claude_plugins::disable_gwt_plugin_at(&settings_path) {
             warn!(
@@ -298,7 +298,25 @@ pub fn register_agent_skills_with_settings(
 pub fn register_agent_skills_with_settings_at_project_root(
     agent: SkillAgentType,
     settings: &Settings,
+    project_root: Option<&Path>,
+) -> Result<(), GwtError> {
+    register_agent_skills_with_settings_at_project_root_inner(agent, settings, project_root, false)
+}
+
+/// Force-register managed skills for one agent (bypasses FR-010 for Claude).
+pub fn force_register_agent_skills_with_settings_at_project_root(
+    agent: SkillAgentType,
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> Result<(), GwtError> {
+    register_agent_skills_with_settings_at_project_root_inner(agent, settings, project_root, true)
+}
+
+fn register_agent_skills_with_settings_at_project_root_inner(
+    agent: SkillAgentType,
+    settings: &Settings,
     _project_root: Option<&Path>,
+    force: bool,
 ) -> Result<(), GwtError> {
     if settings.agent.skill_registration.is_none() {
         return Err(GwtError::ConfigWriteError {
@@ -313,7 +331,11 @@ pub fn register_agent_skills_with_settings_at_project_root(
                     reason: "Claude settings path could not be resolved.".to_string(),
                 });
             };
-            setup_gwt_plugin_at(&path)
+            if force {
+                force_setup_gwt_plugin_at(&path)
+            } else {
+                setup_gwt_plugin_at(&path)
+            }
         }
         SkillAgentType::Codex | SkillAgentType::Gemini => {
             let Some(root) = skills_root_for(agent) else {
@@ -343,13 +365,32 @@ pub fn register_all_skills_with_settings(settings: &Settings) -> Result<(), GwtE
 /// used; registration always targets the User scope (home directory).
 pub fn register_all_skills_with_settings_at_project_root(
     settings: &Settings,
+    project_root: Option<&Path>,
+) -> Result<(), GwtError> {
+    register_all_skills_with_settings_at_project_root_inner(settings, project_root, false)
+}
+
+/// Force-register managed skills for all agents (bypasses FR-010 for Claude).
+pub fn force_register_all_skills_with_settings_at_project_root(
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> Result<(), GwtError> {
+    register_all_skills_with_settings_at_project_root_inner(settings, project_root, true)
+}
+
+fn register_all_skills_with_settings_at_project_root_inner(
+    settings: &Settings,
     _project_root: Option<&Path>,
+    force: bool,
 ) -> Result<(), GwtError> {
     let mut failures = Vec::new();
     for agent in SkillAgentType::all() {
-        if let Err(err) =
+        let result = if force {
+            force_register_agent_skills_with_settings_at_project_root(*agent, settings, None)
+        } else {
             register_agent_skills_with_settings_at_project_root(*agent, settings, None)
-        {
+        };
+        if let Err(err) = result {
             warn!(
                 category = "skills",
                 agent = agent.id(),
@@ -561,7 +602,8 @@ pub fn repair_skill_registration_with_settings_at_project_root(
     _project_root: Option<&Path>,
 ) -> SkillRegistrationStatus {
     if settings.agent.skill_registration.is_some() {
-        if let Err(err) = register_all_skills_with_settings(settings) {
+        // Keep FR-010 behavior: do not override explicit `false` in Claude settings.
+        if let Err(err) = register_all_skills_with_settings_at_project_root(settings, None) {
             warn!(
                 category = "skills",
                 error = %err,
@@ -710,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unregister_claude_disables_plugin() {
+    fn test_unregister_claude_sets_plugin_false() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvGuard::new(temp.path());
@@ -727,9 +769,57 @@ mod tests {
 
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            settings["enabledPlugins"][super::super::claude_plugins::GWT_PLUGIN_FULL_NAME],
-            serde_json::json!(false)
+        assert!(
+            settings["enabledPlugins"][super::super::claude_plugins::GWT_PLUGIN_FULL_NAME]
+                == serde_json::json!(false),
+            "plugin key should be set to false after unregister"
+        );
+    }
+
+    #[test]
+    fn test_repair_preserves_explicit_disable_after_exit() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let settings_path = temp.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+
+        // Step 1: Register (simulate initial setup)
+        let content = format!(
+            r#"{{"enabledPlugins": {{"{}": true}}}}"#,
+            super::super::claude_plugins::GWT_PLUGIN_FULL_NAME
+        );
+        std::fs::write(&settings_path, content).unwrap();
+
+        // Step 2: Unregister (simulate app exit)
+        unregister_all_skills();
+
+        // Verify key is disabled (explicit false)
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            settings["enabledPlugins"][super::super::claude_plugins::GWT_PLUGIN_FULL_NAME]
+                == serde_json::json!(false),
+            "key should be false after unregister"
+        );
+
+        // Step 3: Repair (simulate user clicking "Repair Skill Registration")
+        let mut repair_settings = Settings::default();
+        repair_settings.agent.skill_registration =
+            Some(crate::config::SkillRegistrationPreferences {});
+        let status = repair_skill_registration_with_settings(&repair_settings);
+
+        // Claude agent should remain disabled (FR-010), not force-reenabled.
+        let claude_status = status
+            .agents
+            .iter()
+            .find(|a| a.agent_id == "claude")
+            .unwrap();
+        assert!(
+            !claude_status.registered,
+            "Claude plugin should remain disabled after repair when explicitly false: {:?}",
+            claude_status
         );
     }
 

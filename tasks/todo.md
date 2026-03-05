@@ -1,3 +1,40 @@
+## TODO: Review 指摘対応（Claude 明示無効化の尊重）2026-03-05
+
+## 背景
+
+レビューで「repair が明示 `false` を強制上書きする」「終了時に `false` を消す」が指摘されたため、
+FR-010（明示無効化を尊重）を維持する方向へ修正。
+
+## 実装ステップ
+
+- [x] R001 `skill_registration.rs`: `repair_*` を通常 register 経路へ戻し `force` を使わない
+- [x] R002 `skill_registration.rs`: 終了時 unregister はキー削除ではなく `false` 設定を維持
+- [x] R003 `skill_registration.rs`: 回帰テストを `false` 維持前提へ更新
+- [x] R004 `cargo test -p gwt-core skill_registration::tests:: -- --nocapture` 実行
+
+---
+
+## TODO: Skill Migration Repair が Claude プラグインを再有効化できない（2026-03-05）
+
+## 背景
+
+GWT 終了時に `unregister_all_skills()` が `disable_gwt_plugin_at()` で `gwt@gwt-plugins` を `false` に設定。
+次回起動・修復時に FR-010 が「ユーザー明示無効化」と誤判断し再有効化をスキップする。
+
+## 実装ステップ
+
+- [x] T001 `claude_plugins.rs`: `enable_worktree_protection_plugin` を inner 関数化 + force 版追加
+- [x] T002 `claude_plugins.rs`: `force_setup_gwt_plugin_at` 追加
+- [x] T003 `claude_plugins.rs`: `remove_gwt_plugin_key_at` 追加
+- [x] T004 `skill_registration.rs`: `unregister_all_skills` で `remove_gwt_plugin_key_at` 使用
+- [x] T005 `skill_registration.rs`: register 関数に force 版追加 + repair で使用
+- [x] T006 `config.rs`: 新規公開関数のエクスポート追加
+- [x] T007 テスト追加（claude_plugins.rs: force_enable / remove_key 計6件）
+- [x] T008 テスト更新（skill_registration.rs: unregister→キー不在検証 + repair フロー）
+- [x] T009 `cargo test` 全パス + `cargo clippy` 警告なし + `cargo fmt` 済み
+
+---
+
 ## TODO: Windows ターミナル表示崩れ修正（Issue #1457 / 2026-03-05）
 
 ## 背景（Issue #1457）
