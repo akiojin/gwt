@@ -395,11 +395,7 @@ fn resolve_profile_ai_api_key(profile_override: Option<&str>) -> Option<String> 
             return (!key.is_empty()).then(|| key.to_string());
         }
     }
-
-    config.default_ai.as_ref().and_then(|ai| {
-        let key = ai.api_key.trim();
-        (!key.is_empty()).then(|| key.to_string())
-    })
+    None
 }
 
 fn inject_openai_api_key_from_profile_ai(
@@ -3666,6 +3662,12 @@ services:
 
     #[test]
     fn probe_terminal_ansi_flushes_scrollback_before_reading() {
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
         let state = AppState::new();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

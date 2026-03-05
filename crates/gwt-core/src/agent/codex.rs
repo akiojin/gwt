@@ -100,7 +100,6 @@ fn has_non_empty(value: &str) -> bool {
 /// 1. Active profile `env.OPENAI_API_KEY` (non-empty)
 /// 2. Process env `OPENAI_API_KEY` (non-empty, unless disabled by profile)
 /// 3. Active profile `ai.api_key` (non-empty)
-/// 4. `default_ai.api_key` fallback when active profile has no `ai` block
 pub fn is_codex_authenticated() -> bool {
     let process_env_key = std::env::var(OPENAI_API_KEY_ENV)
         .ok()
@@ -134,10 +133,7 @@ pub fn is_codex_authenticated() -> bool {
         return true;
     }
 
-    profiles
-        .default_ai
-        .as_ref()
-        .is_some_and(|ai| has_non_empty(&ai.api_key))
+    false
 }
 
 fn normalize_version(value: Option<&str>) -> Option<String> {
