@@ -121,7 +121,6 @@ export interface AgentInfo {
   name: string;
   version: string;
   path?: string;
-  authenticated: boolean;
   available: boolean;
 }
 
