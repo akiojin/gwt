@@ -2,6 +2,8 @@
   import type { ProjectIssue } from '$lib/types';
   import AgentAvatar from './AgentAvatar.svelte';
   import TaskBar from './TaskBar.svelte';
+  import PixelSprite from './PixelSprite.svelte';
+  import { getBuildingSprite } from './sprites';
 
   interface Props {
     issue: ProjectIssue;
@@ -11,6 +13,8 @@
   }
 
   let { issue, expanded = false, onToggle, onAgentClick }: Props = $props();
+
+  let buildingSprite = $derived(getBuildingSprite(issue.status));
 
   let completedTasks = $derived(issue.tasks.filter(t => t.status === 'completed').length);
   let totalTasks = $derived(issue.tasks.length);
@@ -39,6 +43,7 @@
   aria-label={`Issue: ${issue.title}`}
 >
   <button class="plot-header" onclick={onToggle} type="button" aria-expanded={expanded}>
+    <PixelSprite sprite={buildingSprite} scale={1} class="plot-building" />
     <span class="plot-title" title={issue.title}>
       <span class="issue-num">#{issue.githubIssueNumber}</span>
       {issue.title}
@@ -161,7 +166,6 @@
   .plot-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 8px;
     width: 100%;
     padding: 10px 12px;
@@ -171,6 +175,10 @@
     cursor: pointer;
     text-align: left;
     color: inherit;
+  }
+
+  .plot-header :global(.plot-building) {
+    flex-shrink: 0;
   }
 
   .plot-header:hover {

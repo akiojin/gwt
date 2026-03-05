@@ -250,13 +250,44 @@ describe("ProjectModePanel", () => {
     expect(rendered.getByPlaceholderText("Decree something...")).toBeTruthy();
   });
 
-  it("shows empty world message when no issues", async () => {
+  it("shows mock issues instead of empty world in dev mode", async () => {
     const rendered = await renderPanel();
 
     await waitFor(() => {
-      expect(
-        rendered.getByText("The world is quiet. Issue a decree to begin.")
-      ).toBeTruthy();
+      // In dev mode, mock data is shown
+      expect(rendered.getByText("Login UI Redesign")).toBeTruthy();
     });
+
+    // Empty message should not appear
+    expect(
+      rendered.queryByText("The world is quiet. Issue a decree to begin.")
+    ).toBeNull();
+  });
+
+  it("shows mock issues in dev mode", async () => {
+    const rendered = await renderPanel();
+
+    await waitFor(() => {
+      expect(countInvokeCalls("get_project_mode_state_cmd")).toBe(1);
+    });
+
+    // Mock issues should be rendered (3 issues from mockData)
+    expect(rendered.getByText("Login UI Redesign")).toBeTruthy();
+    expect(rendered.getByText("API Refactor to REST v2")).toBeTruthy();
+    expect(rendered.getByText("Integration Test Suite")).toBeTruthy();
+  });
+
+  it("shows issue progress and agent avatars in mock data", async () => {
+    const rendered = await renderPanel();
+
+    await waitFor(() => {
+      expect(countInvokeCalls("get_project_mode_state_cmd")).toBe(1);
+    });
+
+    // First issue (in_progress) should show progress
+    expect(rendered.getByText("Login UI Redesign")).toBeTruthy();
+
+    // Should NOT show empty world message anymore
+    expect(rendered.queryByText("The world is quiet. Issue a decree to begin.")).toBeNull();
   });
 });

@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PixelSprite from './PixelSprite.svelte';
+  import { LEAD_SPRITE, type LeadSpriteFrame } from './sprites';
+
   interface Props {
     status: 'idle' | 'thinking' | 'waiting_approval' | 'orchestrating' | 'error';
     onclick?: () => void;
@@ -13,6 +16,16 @@
     orchestrating: 'Orchestrating agents',
     error: 'Lead error',
   };
+
+  const frameMap: Record<string, LeadSpriteFrame> = {
+    idle: 0,
+    thinking: 1,
+    orchestrating: 2,
+    waiting_approval: 1,
+    error: 0,
+  };
+
+  let leadFrame = $derived(frameMap[status] ?? 0);
 </script>
 
 <button
@@ -38,6 +51,7 @@
     {#if status === 'waiting_approval'}
       <span class="approval-badge">!</span>
     {/if}
+    <PixelSprite sprite={LEAD_SPRITE} scale={2} frameIndex={leadFrame} class="lead-sprite" />
   </div>
   <span class="orb-label">Lead</span>
 </button>
@@ -75,6 +89,14 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    overflow: hidden;
+  }
+
+  .orb :global(.lead-sprite) {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
   }
 
   .orb-label {

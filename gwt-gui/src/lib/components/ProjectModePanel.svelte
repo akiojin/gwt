@@ -5,6 +5,7 @@
   import IssuePlot from './godgame/IssuePlot.svelte';
   import DecreeInput from './godgame/DecreeInput.svelte';
   import LeadTimeline from './godgame/LeadTimeline.svelte';
+  import { getMockIssues } from './godgame/mockData';
 
   type LeadOrbStatus = 'idle' | 'thinking' | 'waiting_approval' | 'orchestrating' | 'error';
 
@@ -25,7 +26,7 @@
   let expandedIssues = $state(new Set<string>());
 
   // Prototype: issues derived from state (empty until backend returns workspace data)
-  let issues: ProjectIssue[] = $derived([] as ProjectIssue[]);
+  let issues: ProjectIssue[] = $derived(import.meta.env.DEV ? getMockIssues() : ([] as ProjectIssue[]));
 
   let displaySessionName = $derived(
     pmState.session_name && pmState.session_name !== 'Project Mode'

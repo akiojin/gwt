@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PixelSprite from './PixelSprite.svelte';
+  import { getAgentSprite } from './sprites';
+
   interface Props {
     agentType: 'claude' | 'codex' | 'gemini';
     status: 'starting' | 'running' | 'completed' | 'error';
@@ -8,19 +11,8 @@
 
   let { agentType, status, name, onclick }: Props = $props();
 
-  const colors: Record<string, string> = {
-    claude: '#f9e2af',
-    codex: '#94e2d5',
-    gemini: '#cba6f7',
-  };
-
-  const statusIcons: Record<string, string> = {
-    completed: '\u2713',
-    error: '!',
-  };
-
-  let color = $derived(colors[agentType] ?? '#b4befe');
-  let icon = $derived(statusIcons[status] ?? '');
+  let sprite = $derived(getAgentSprite(agentType));
+  let isAnimated = $derived(status === 'running' || status === 'starting');
   let label = $derived(name ?? `${agentType} agent`);
 </script>
 
@@ -30,31 +22,28 @@
   class:running={status === 'running'}
   class:completed={status === 'completed'}
   class:error={status === 'error'}
-  style:--agent-color={color}
   onclick={onclick}
   title={`${label} (${status})`}
   aria-label={`${label}: ${status}`}
   type="button"
 >
-  {#if icon}
-    <span class="icon">{icon}</span>
+  <PixelSprite {sprite} scale={2} animate={isAnimated} frameIndex={0} />
+  {#if status === 'completed'}
+    <span class="check-overlay">{'\u2713'}</span>
   {/if}
 </button>
 
 <style>
   .agent-avatar {
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    background: var(--agent-color);
-    border: 2px solid transparent;
+    position: relative;
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: none;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 11px;
-    font-weight: 700;
-    color: #1e1e2e;
     padding: 0;
     transition: transform 0.15s ease;
     flex-shrink: 0;
@@ -65,11 +54,24 @@
   }
 
   .agent-avatar:focus-visible {
-    outline: 2px solid var(--agent-color);
+    outline: 2px solid #b4befe;
     outline-offset: 2px;
   }
 
-  .icon {
+  .check-overlay {
+    position: absolute;
+    bottom: -2px;
+    right: -2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #a6e3a1;
+    color: #1e1e2e;
+    font-size: 9px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     line-height: 1;
   }
 
@@ -93,10 +95,10 @@
     100% { transform: translateX(2px); }
   }
 
-  /* error: shake + red ring */
+  /* error: shake + red filter */
   .error {
-    border-color: #f38ba8;
     animation: shake 0.4s ease infinite;
+    filter: saturate(0.5) brightness(0.8) sepia(0.5) hue-rotate(-30deg);
   }
 
   @keyframes shake {
