@@ -4273,7 +4273,7 @@ pub(crate) fn launch_agent_for_project_root(
         // (PTY sets these for the host process, but docker exec only receives vars passed via -e.)
         ensure_terminal_env_defaults(&mut env_vars);
 
-        let settings = Settings::load(&project_root).unwrap_or_default();
+        let settings = Settings::load_global().unwrap_or_default();
         let force_host_settings = settings.docker.force_host;
         let force_host_request = request.docker_force_host.unwrap_or(false);
         let docker_force_host = force_host_settings || force_host_request;

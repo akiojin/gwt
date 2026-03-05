@@ -117,45 +117,7 @@ impl TestEnvGuard {
             prev_homepath,
         }
     }
-
-    /// Create a guard with explicit XDG_CONFIG_HOME setting
-    pub fn with_xdg(home_path: &std::path::Path, xdg_config_home: &std::path::Path) -> Self {
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        let prev_homedrive = std::env::var_os("HOMEDRIVE");
-        let prev_homepath = std::env::var_os("HOMEPATH");
-
-        std::env::set_var("HOME", home_path);
-        std::env::set_var("XDG_CONFIG_HOME", xdg_config_home);
-        std::env::set_var("USERPROFILE", home_path);
-        if let Some(home_str) = home_path.to_str() {
-            if home_str.len() >= 2 && home_str.as_bytes()[1] == b':' {
-                std::env::set_var("HOMEDRIVE", &home_str[..2]);
-                let rest = if home_str.len() > 2 {
-                    home_str[2..].replace('/', "\\")
-                } else {
-                    "\\".to_string()
-                };
-                let homepath = if rest.starts_with('\\') {
-                    rest
-                } else {
-                    format!("\\{rest}")
-                };
-                std::env::set_var("HOMEPATH", homepath);
-            }
-        }
-
-        Self {
-            prev_home,
-            prev_xdg_config,
-            prev_userprofile,
-            prev_homedrive,
-            prev_homepath,
-        }
-    }
 }
-
 #[cfg(test)]
 impl Drop for TestEnvGuard {
     fn drop(&mut self) {

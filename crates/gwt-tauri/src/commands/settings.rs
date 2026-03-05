@@ -1,12 +1,10 @@
 //! Settings management commands
 
-use crate::state::AppState;
 use gwt_core::config::{Settings, SkillRegistrationPreferences};
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
-use tauri::State;
+use std::path::PathBuf;
 use tracing::error;
 
 fn with_panic_guard<T>(
@@ -297,55 +295,28 @@ fn normalize_voice_input(value: &VoiceInputSettingsData) -> Result<NormalizedVoi
 
 /// Get current settings
 #[tauri::command]
-pub fn get_settings(
-    window: tauri::Window,
-    state: State<AppState>,
-) -> Result<SettingsData, StructuredError> {
+pub fn get_settings() -> Result<SettingsData, StructuredError> {
     with_panic_guard("loading settings", "get_settings", || {
-        let settings = if let Some(project_path) = state.project_for_window(window.label()) {
-            Settings::load(Path::new(&project_path))
-                .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?
-        } else {
-            Settings::load_global()
-                .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?
-        };
+        let settings = Settings::load_global()
+            .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?;
         Ok(SettingsData::from(&settings))
     })
 }
 
 /// Save settings
 #[tauri::command]
-pub fn save_settings(
-    window: tauri::Window,
-    settings: SettingsData,
-    state: State<AppState>,
-) -> Result<(), StructuredError> {
+pub fn save_settings(settings: SettingsData) -> Result<(), StructuredError> {
     with_panic_guard("saving settings", "save_settings", || {
-        let project_path = state.project_for_window(window.label());
-        let mut core_settings = match project_path.as_ref() {
-            Some(path) => Settings::load(Path::new(path))
-                .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?,
-            None => Settings::load_global()
-                .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?,
-        };
+        let mut core_settings = Settings::load_global()
+            .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
 
         settings
             .apply_to_settings(&mut core_settings)
             .map_err(|e| StructuredError::internal(&e, "save_settings"))?;
 
-        match project_path {
-            Some(path) => {
-                let config_path = Path::new(&path).join(".gwt.toml");
-                core_settings
-                    .save(&config_path)
-                    .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
-            }
-            None => {
-                core_settings
-                    .save_global()
-                    .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
-            }
-        }
+        core_settings
+            .save_global()
+            .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
 
         Ok(())
     })
