@@ -3662,6 +3662,12 @@ services:
 
     #[test]
     fn probe_terminal_ansi_flushes_scrollback_before_reading() {
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
         let state = AppState::new();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
