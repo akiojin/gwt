@@ -242,7 +242,7 @@ impl Settings {
     pub fn load_global() -> Result<Self> {
         debug!(category = "config", "Loading global settings");
 
-        let config_path = Self::new_global_config_path().filter(|p| p.exists());
+        let config_path = Self::global_config_path().filter(|p| p.exists());
 
         let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
 
@@ -327,15 +327,15 @@ impl Settings {
             }
         }
 
-        // Check new global config location (~/.gwt/config.toml)
-        if let Some(new_global) = Self::new_global_config_path() {
-            if new_global.exists() {
+        // Check global config (~/.gwt/config.toml)
+        if let Some(global) = Self::global_config_path() {
+            if global.exists() {
                 debug!(
                     category = "config",
-                    config_path = %new_global.display(),
-                    "Found global config file (new location)"
+                    config_path = %global.display(),
+                    "Found global config file"
                 );
-                return Some(new_global);
+                return Some(global);
             }
         }
 
@@ -348,13 +348,8 @@ impl Settings {
     }
 
     /// Get the new global config path (~/.gwt/config.toml)
-    pub fn new_global_config_path() -> Option<PathBuf> {
+    pub fn global_config_path() -> Option<PathBuf> {
         dirs::home_dir().map(|home| home.join(".gwt").join("config.toml"))
-    }
-
-    /// Get the global config directory (~/.gwt/)
-    pub fn new_global_config_dir() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| home.join(".gwt"))
     }
 
     /// Get log directory path
@@ -417,7 +412,7 @@ impl Settings {
 
     /// Save settings to the new global config path (~/.gwt/config.toml)
     pub fn save_global(&self) -> Result<()> {
-        let path = Self::new_global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
+        let path = Self::global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
             reason: "Could not determine global config path".to_string(),
         })?;
         self.save(&path)
@@ -566,8 +561,8 @@ mod tests {
     }
 
     #[test]
-    fn test_new_global_config_path() {
-        let path = Settings::new_global_config_path();
+    fn test_global_config_path() {
+        let path = Settings::global_config_path();
         assert!(path.is_some());
         let path = path.unwrap();
         assert!(path.to_string_lossy().contains(".gwt"));
