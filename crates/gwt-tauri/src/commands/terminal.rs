@@ -77,7 +77,7 @@ pub struct TerminalAnsiProbe {
 #[serde(rename_all = "camelCase")]
 pub struct LaunchProgressPayload {
     pub job_id: String,
-    /// "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps"
+    /// "fetch" | "validate" | "paths" | "conflicts" | "create" | "skills" | "deps"
     pub step: String,
     pub detail: Option<String>,
 }
@@ -4156,6 +4156,27 @@ pub(crate) fn launch_agent_for_project_root(
                     tracing::warn!(error = %e, "Failed to record stats");
                 }
             });
+        }
+
+        // --- Skill registration ---
+        tracing::debug!(job_id = ?job_id, "launch step: skills");
+        report_launch_progress(job_id, &app_handle, "skills", None);
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
+        }
+        {
+            let registration_root = project_root.clone();
+            if let Ok(settings) = gwt_core::config::Settings::load_global() {
+                let status =
+                    gwt_core::config::repair_skill_registration_with_settings_at_project_root(
+                        &settings,
+                        Some(registration_root.as_path()),
+                    );
+                state.set_skill_registration_status(status);
+            }
+        }
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
         }
 
         tracing::debug!(job_id = ?job_id, "launch step: deps (waiting for environment)");

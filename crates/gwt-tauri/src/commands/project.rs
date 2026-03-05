@@ -292,25 +292,6 @@ pub fn open_project(
                     crate::commands::project_index::spawn_background_index(index_path);
                 }
 
-                // Repair managed skill/plugin registration using the opened project root.
-                // This ensures Project/Local scopes can resolve correct paths for Codex/Gemini.
-                {
-                    let app_handle = window.app_handle().clone();
-                    let registration_root = project_root.clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let Ok(settings) = gwt_core::config::Settings::load_global() else {
-                            return;
-                        };
-                        let status =
-                            gwt_core::config::repair_skill_registration_with_settings_at_project_root(
-                                &settings,
-                                Some(registration_root.as_path()),
-                            );
-                        let state = app_handle.state::<AppState>();
-                        state.set_skill_registration_status(status);
-                    });
-                }
-
                 return Ok(OpenProjectResult {
                     info,
                     action: OpenProjectAction::Opened,
