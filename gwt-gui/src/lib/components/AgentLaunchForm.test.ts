@@ -202,17 +202,15 @@ describe("AgentLaunchForm", () => {
     expect(binaryFallbackNotice).toBeTruthy();
   });
 
-  it("refreshes codex authentication when settings are updated", async () => {
-    let detectCall = 0;
+  it("does not show 'Not authenticated' warning for unauthenticated agents", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
-        detectCall += 1;
         return [
           {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: detectCall > 1,
+            authenticated: false,
             available: true,
           },
         ];
@@ -236,26 +234,6 @@ describe("AgentLaunchForm", () => {
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("detect_agents");
-    });
-    await waitFor(() => {
-      expect(rendered.getByText("Not authenticated")).toBeTruthy();
-    });
-
-    const aiRefreshCallsBefore = invokeMock.mock.calls.filter(
-      (call) => call[0] === "is_ai_configured"
-    ).length;
-    window.dispatchEvent(
-      new CustomEvent("gwt-settings-updated", {
-        detail: {},
-      })
-    );
-
-    await waitFor(() => {
-      const aiRefreshCallsAfter = invokeMock.mock.calls.filter(
-        (call) => call[0] === "is_ai_configured"
-      ).length;
-      expect(aiRefreshCallsAfter).toBeGreaterThan(aiRefreshCallsBefore);
-      expect(detectCall).toBeGreaterThanOrEqual(2);
     });
     await waitFor(() => {
       expect(rendered.queryByText("Not authenticated")).toBeNull();

@@ -1398,8 +1398,6 @@
           {#if selectedAgentInfo}
             {#if !selectedAgentInfo.available}
               <span class="field-hint warn">Unavailable</span>
-            {:else if !selectedAgentInfo.authenticated}
-              <span class="field-hint warn">Not authenticated</span>
             {/if}
           {/if}
         </div>

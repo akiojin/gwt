@@ -1,3 +1,27 @@
+## TODO: Issue #1475 — Launch Agent で "Not authenticated" 警告を削除（2026-03-05）
+
+### 背景
+
+Launch Agent ダイアログのエージェント選択で `authenticated: false` のエージェントを選択すると
+"Not authenticated" 警告が表示されるが、Launch ボタンは認証未チェックで起動可能。
+認証はランタイムで処理されるため、選択UIでの警告は不要。
+
+### 実装ステップ
+
+- [x] Issue #1475 に gwt-spec ラベルとスペックを追記
+- [x] TDD: テスト修正（"Not authenticated" アサーション削除）→ RED 確認
+- [x] `AgentLaunchForm.svelte` L1401-1402 を削除
+- [x] テスト実行で GREEN 確認
+- [x] svelte-check 通過確認
+- [x] コミット＆プッシュ
+
+### 検証結果
+
+- [x] `pnpm test src/lib/components/AgentLaunchForm.test.ts` — 43 tests passed
+- [x] `npx svelte-check --tsconfig ./tsconfig.json` — 0 errors, 1 warning（既存 MergeDialog.svelte）
+
+---
+
 ## TODO: Review 指摘対応（Claude 明示無効化の尊重）2026-03-05
 
 ## 背景（Review対応）
