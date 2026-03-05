@@ -39,15 +39,10 @@ impl GeminiAgent {
         let version =
             get_command_version("gemini", "--version").unwrap_or_else(|| "unknown".to_string());
 
-        // Check if authenticated (Gemini uses API key from env or config)
-        let authenticated =
-            std::env::var("GOOGLE_API_KEY").is_ok() || std::env::var("GEMINI_API_KEY").is_ok();
-
         Some(AgentInfo {
             name: "Gemini".to_string(),
             version,
             path: which::which("gemini").ok(),
-            authenticated,
         })
     }
 
@@ -71,7 +66,6 @@ impl AgentTrait for GeminiAgent {
             name: "Gemini".to_string(),
             version: "unknown".to_string(),
             path: None,
-            authenticated: false,
         })
     }
 

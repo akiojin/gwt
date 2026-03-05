@@ -71,7 +71,7 @@ describe("AgentLaunchForm (Claude GLM)", () => {
               id: "claude",
               name: "Claude Code",
               version: "1.0.0",
-              authenticated: true,
+  
               available: true,
             },
           ]);

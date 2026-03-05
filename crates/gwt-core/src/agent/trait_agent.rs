@@ -13,8 +13,6 @@ pub struct AgentInfo {
     pub version: String,
     /// Agent path
     pub path: Option<std::path::PathBuf>,
-    /// Is authenticated
-    pub authenticated: bool,
 }
 
 /// Agent capabilities

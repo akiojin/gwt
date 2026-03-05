@@ -39,18 +39,10 @@ impl ClaudeAgent {
         let version =
             get_command_version("claude", "--version").unwrap_or_else(|| "unknown".to_string());
 
-        // Check if authenticated
-        let authenticated = crate::process::command("claude")
-            .arg("--help")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
         Some(AgentInfo {
             name: "Claude Code".to_string(),
             version,
             path: which::which("claude").ok(),
-            authenticated,
         })
     }
 
@@ -80,7 +72,6 @@ impl AgentTrait for ClaudeAgent {
             name: "Claude Code".to_string(),
             version: "unknown".to_string(),
             path: None,
-            authenticated: false,
         })
     }
 
