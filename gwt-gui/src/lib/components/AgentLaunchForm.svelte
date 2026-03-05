@@ -169,6 +169,8 @@
   let issueBranchChecksInFlight: Set<number> = $state(new Set());
   let issueRateLimited: boolean = $state(false);
   let appliedPrefillIssueNumber: number | null = null;
+  let detectAgentsRequestSeq = 0;
+  let refreshAiConfiguredRequestSeq = 0;
 
   // AI prefix classification state (SPEC-a2f8e3b1)
   let prefixClassifying: boolean = $state(false);
@@ -867,10 +869,13 @@
   }
 
   async function detectAgents() {
+    const requestSeq = ++detectAgentsRequestSeq;
     loading = true;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
-      agents = await invoke<AgentInfo[]>("detect_agents");
+      const detectedAgents = await invoke<AgentInfo[]>("detect_agents");
+      if (requestSeq !== detectAgentsRequestSeq) return;
+      agents = detectedAgents;
       const preferred = selectedAgent.trim();
       if (preferred && agents.some((a) => a.id === preferred && a.available)) {
         selectedAgent = preferred;
@@ -884,23 +889,30 @@
         selectedAgent = fallbackId;
       }
     } catch (err) {
+      if (requestSeq !== detectAgentsRequestSeq) return;
       console.error("Failed to detect agents:", err);
       agents = [];
       selectedAgent = "";
     } finally {
-      loading = false;
+      if (requestSeq === detectAgentsRequestSeq) {
+        loading = false;
+      }
     }
   }
 
   async function refreshAiConfigured() {
+    const requestSeq = ++refreshAiConfiguredRequestSeq;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const configured = await invoke<boolean>("is_ai_configured");
+      if (requestSeq !== refreshAiConfiguredRequestSeq) return;
       aiConfigured = configured;
       if (!configured && branchNamingMode === "ai-suggest") {
         branchNamingMode = "direct";
       }
-    } catch {
+    } catch (err) {
+      if (requestSeq !== refreshAiConfiguredRequestSeq) return;
+      console.warn("Failed to refresh AI configuration", err);
       // AI config check failed - keep current mode.
     }
   }

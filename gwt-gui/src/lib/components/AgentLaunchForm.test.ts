@@ -241,6 +241,9 @@ describe("AgentLaunchForm", () => {
       expect(rendered.getByText("Not authenticated")).toBeTruthy();
     });
 
+    const aiRefreshCallsBefore = invokeMock.mock.calls.filter(
+      (call) => call[0] === "is_ai_configured"
+    ).length;
     window.dispatchEvent(
       new CustomEvent("gwt-settings-updated", {
         detail: {},
@@ -248,6 +251,10 @@ describe("AgentLaunchForm", () => {
     );
 
     await waitFor(() => {
+      const aiRefreshCallsAfter = invokeMock.mock.calls.filter(
+        (call) => call[0] === "is_ai_configured"
+      ).length;
+      expect(aiRefreshCallsAfter).toBeGreaterThan(aiRefreshCallsBefore);
       expect(detectCall).toBeGreaterThanOrEqual(2);
     });
     await waitFor(() => {
