@@ -369,6 +369,17 @@
   });
 
   $effect(() => {
+    const onSettingsUpdated = () => {
+      void detectAgents();
+      void refreshAiConfigured();
+    };
+    window.addEventListener("gwt-settings-updated", onSettingsUpdated);
+    return () => {
+      window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
+    };
+  });
+
+  $effect(() => {
     (async () => {
       try {
         const { invoke } = await import("$lib/tauriInvoke");
@@ -381,21 +392,7 @@
 
   // Check AI configuration (SPEC-9cd50c7c T043-T044)
   $effect(() => {
-    (async () => {
-      try {
-        const { invoke } = await import("$lib/tauriInvoke");
-        const configured = await invoke<boolean>("is_ai_configured");
-        aiConfigured = configured;
-        if (!configured) {
-          aiConfigured = false;
-          if (branchNamingMode === "ai-suggest") {
-            branchNamingMode = "direct";
-          }
-        }
-      } catch {
-        // AI config check failed - keep default mode.
-      }
-    })();
+    void refreshAiConfigured();
   });
 
   $effect(() => {
@@ -892,6 +889,19 @@
       selectedAgent = "";
     } finally {
       loading = false;
+    }
+  }
+
+  async function refreshAiConfigured() {
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const configured = await invoke<boolean>("is_ai_configured");
+      aiConfigured = configured;
+      if (!configured && branchNamingMode === "ai-suggest") {
+        branchNamingMode = "direct";
+      }
+    } catch {
+      // AI config check failed - keep current mode.
     }
   }
 
