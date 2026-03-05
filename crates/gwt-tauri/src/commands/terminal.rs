@@ -395,11 +395,7 @@ fn resolve_profile_ai_api_key(profile_override: Option<&str>) -> Option<String> 
             return (!key.is_empty()).then(|| key.to_string());
         }
     }
-
-    config.default_ai.as_ref().and_then(|ai| {
-        let key = ai.api_key.trim();
-        (!key.is_empty()).then(|| key.to_string())
-    })
+    None
 }
 
 fn inject_openai_api_key_from_profile_ai(

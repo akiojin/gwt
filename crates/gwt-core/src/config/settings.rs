@@ -7,6 +7,7 @@
 //! 2. ~/.config/gwt/config.toml (legacy, fallback)
 
 use super::migration::{auto_migrate, ensure_config_dir, write_atomic};
+use super::profile::ProfilesConfig;
 use crate::error::{GwtError, Result};
 use figment::{
     providers::{Env, Format, Toml},
@@ -44,6 +45,9 @@ pub struct Settings {
     pub voice_input: VoiceInputSettings,
     /// Terminal settings
     pub terminal: TerminalSettings,
+    /// Global profiles configuration.
+    #[serde(default)]
+    pub profiles: ProfilesConfig,
 }
 
 impl Default for Settings {
@@ -65,6 +69,7 @@ impl Default for Settings {
             app_language: "auto".to_string(),
             voice_input: VoiceInputSettings::default(),
             terminal: TerminalSettings::default(),
+            profiles: ProfilesConfig::default(),
         }
     }
 }
@@ -246,6 +251,7 @@ impl Settings {
                 settings.docker.force_host = parsed;
             }
         }
+        settings.profiles.normalize_loaded();
 
         info!(
             category = "config",
@@ -328,6 +334,7 @@ impl Settings {
                 settings.docker.force_host = parsed;
             }
         }
+        settings.profiles.normalize_loaded();
 
         info!(
             category = "config",

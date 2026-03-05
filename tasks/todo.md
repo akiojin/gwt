@@ -1,3 +1,32 @@
+## TODO: profiles を config.toml へ統合 + Active Profile 単一編集化（Issue #1464 / 2026-03-05）
+
+## 背景（Issue #1464）
+
+`profiles.toml` / `default_ai` フォールバック / Active Profile と Edit Profile の二重UIが混在し、
+macOS と Windows で設定解決の挙動差や認証失敗の温床になっていた。  
+Profiles を `~/.gwt/config.toml` の `[profiles]` に統合し、UIは Active Profile だけで切り替えと編集を行う。
+
+## 実装ステップ（Issue #1464）
+
+- [x] T001 `ProfilesConfig::load/save` を `config.toml [profiles]` 基準に変更（legacy profiles.* は移行のみ）
+- [x] T002 `default_ai` を legacy input のみに限定し、実行時フォールバックを廃止
+- [x] T003 `resolve_active_ai_settings()` / terminal env 注入 / codex auth 判定を active profile のみで解決
+- [x] T004 `SettingsPanel` を Active Profile 単一セレクタUIへ統合（Edit Profile を削除）
+- [x] T005 RED→GREEN: `SettingsPanel.test.ts` の旧 `#profile-edit` 前提ケースを更新
+- [x] T006 E2E: `settings-config.spec.ts` に Active Profile 単一セレクタの回帰シナリオを追加
+- [x] T007 検証（Rust unit / Frontend unit / E2E / format / typecheck）と記録
+
+## 検証結果（Issue #1464）
+
+- [x] `cargo test -p gwt-core config::profile::tests:: -- --test-threads=1`
+- [x] `cargo test -p gwt-tauri commands::terminal::tests::inject_openai_api_key_from_profile_ai -- --test-threads=1`
+- [x] `cargo test -p gwt-tauri resolve_version_history_ai_settings -- --test-threads=1`
+- [x] `cargo test -p gwt-tauri session_summary_returns_ -- --test-threads=1`
+- [x] `cd gwt-gui && pnpm test src/lib/components/SettingsPanel.test.ts`
+- [x] `cd gwt-gui && pnpm exec playwright test e2e/settings-config.spec.ts`
+- [x] `cargo fmt --all -- --check`
+- [x] `cd gwt-gui && pnpm exec svelte-check --tsconfig ./tsconfig.json`
+
 ## TODO: default profile 必須化 + default.ai 必須化（Issue #1464 / 2026-03-04）
 
 ## 背景（Issue #1464）
