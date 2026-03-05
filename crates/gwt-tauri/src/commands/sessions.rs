@@ -2259,13 +2259,15 @@ mod tests {
         let _env = TestEnvGuard::new(home.path());
 
         let mut config = ProfilesConfig::default();
-        config.default_ai = Some(gwt_core::config::AISettings {
-            endpoint: "https://api.openai.com/v1".to_string(),
-            api_key: "".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            language: "en".to_string(),
-            summary_enabled: true,
-        });
+        if let Some(profile) = config.profiles.get_mut("default") {
+            profile.ai = Some(gwt_core::config::AISettings {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                api_key: "".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                language: "en".to_string(),
+                summary_enabled: true,
+            });
+        }
         config.save().unwrap();
 
         let repo = TempDir::new().unwrap();
@@ -2296,13 +2298,15 @@ mod tests {
         let _env = TestEnvGuard::new(home.path());
 
         let mut config = ProfilesConfig::default();
-        config.default_ai = Some(gwt_core::config::AISettings {
-            endpoint: "https://api.openai.com/v1".to_string(),
-            api_key: "".to_string(),
-            model: "gpt-5.2-codex".to_string(),
-            language: "en".to_string(),
-            summary_enabled: false,
-        });
+        if let Some(profile) = config.profiles.get_mut("default") {
+            profile.ai = Some(gwt_core::config::AISettings {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                api_key: "".to_string(),
+                model: "gpt-5.2-codex".to_string(),
+                language: "en".to_string(),
+                summary_enabled: false,
+            });
+        }
         config.save().unwrap();
 
         let repo = TempDir::new().unwrap();
@@ -2331,13 +2335,15 @@ mod tests {
         let _env = TestEnvGuard::new(home.path());
 
         let mut config = ProfilesConfig::default();
-        config.default_ai = Some(gwt_core::config::AISettings {
-            endpoint: "https://api.openai.com/v1".to_string(),
-            api_key: "".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            language: "en".to_string(),
-            summary_enabled: true,
-        });
+        if let Some(profile) = config.profiles.get_mut("default") {
+            profile.ai = Some(gwt_core::config::AISettings {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                api_key: "".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                language: "en".to_string(),
+                summary_enabled: true,
+            });
+        }
         config.save().unwrap();
 
         let repo = TempDir::new().unwrap();
@@ -2376,13 +2382,15 @@ mod tests {
         let _env = TestEnvGuard::new(home.path());
 
         let mut config = ProfilesConfig::default();
-        config.default_ai = Some(gwt_core::config::AISettings {
-            endpoint: "https://api.openai.com/v1".to_string(),
-            api_key: "".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            language: "en".to_string(),
-            summary_enabled: true,
-        });
+        if let Some(profile) = config.profiles.get_mut("default") {
+            profile.ai = Some(gwt_core::config::AISettings {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                api_key: "".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                language: "en".to_string(),
+                summary_enabled: true,
+            });
+        }
         config.save().unwrap();
 
         let repo = TempDir::new().unwrap();

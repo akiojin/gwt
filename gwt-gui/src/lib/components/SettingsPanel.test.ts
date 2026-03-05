@@ -303,20 +303,24 @@ describe("SettingsPanel", () => {
     await fireEvent.click(createButton);
 
     await waitFor(() => {
+      const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
       const options = Array.from(
-        rendered.container.querySelectorAll("#profile-edit option")
+        rendered.container.querySelectorAll("#active-profile option")
       ).map((o) => o.textContent?.trim());
       expect(options).toContain("staging");
+      expect(activeProfile.value).toBe("staging");
     });
 
-    const deleteButton = rendered.getByRole("button", { name: "Delete" });
+    const deleteButton = rendered.getByRole("button", { name: "Delete Active Profile" });
     await fireEvent.click(deleteButton);
 
     await waitFor(() => {
+      const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
       const options = Array.from(
-        rendered.container.querySelectorAll("#profile-edit option")
+        rendered.container.querySelectorAll("#active-profile option")
       ).map((o) => o.textContent?.trim());
       expect(options).not.toContain("staging");
+      expect(activeProfile.value).toBe("default");
     });
   });
 
@@ -840,13 +844,11 @@ describe("SettingsPanel", () => {
       expect(activeProfile.value).toBe("dev");
     });
 
-    const profileEdit = rendered.container.querySelector("#profile-edit") as HTMLSelectElement;
-    await fireEvent.change(profileEdit, { target: { value: "dev" } });
-    await fireEvent.click(rendered.getByRole("button", { name: "Delete" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "Delete Active Profile" }));
 
     await waitFor(() => {
-      const editOptions = Array.from(profileEdit.options).map((opt) => opt.value);
-      expect(editOptions).not.toContain("dev");
+      const activeOptions = Array.from(activeProfile.options).map((opt) => opt.value);
+      expect(activeOptions).not.toContain("dev");
       expect(activeProfile.value).toBe("default");
     });
   });
@@ -1316,7 +1318,7 @@ describe("SettingsPanel", () => {
     });
   });
 
-  it("switches profile edit dropdown and shows different profile's env", async () => {
+  it("switches active profile dropdown and shows different profile's env", async () => {
     const twoProfiles = structuredClone(profilesFixture);
     twoProfiles.profiles.staging = {
       name: "staging",
@@ -1351,10 +1353,11 @@ describe("SettingsPanel", () => {
 
     await rendered.findByText("Environment Variables");
 
-    const profileEdit = rendered.container.querySelector("#profile-edit") as HTMLSelectElement;
-    await fireEvent.change(profileEdit, { target: { value: "staging" } });
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    await fireEvent.change(activeProfile, { target: { value: "staging" } });
 
     await waitFor(() => {
+      expect(activeProfile.value).toBe("staging");
       expect(rendered.container.textContent).toContain("STAGE_KEY");
     });
   });

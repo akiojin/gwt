@@ -488,7 +488,7 @@ pub fn setup_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
 
 /// Setup gwt plugin with force-enable (bypasses FR-010).
 ///
-/// Used by the repair path to override a `false` value left by `unregister_all_skills`.
+/// Used by explicit force-registration flows when re-enabling is intentionally requested.
 pub fn force_setup_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
     register_gwt_marketplace()?;
 
