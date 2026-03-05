@@ -13,8 +13,6 @@ use tracing::{info, warn};
 use gwt_core::config::os_env;
 
 #[cfg(not(test))]
-use gwt_core::config::{skill_registration, Settings};
-#[cfg(not(test))]
 use tokio::io::AsyncReadExt;
 
 #[cfg(not(test))]
@@ -381,46 +379,7 @@ pub fn build_app(
                     }
                 }
 
-                // Skill bundles: ensure managed skills are registered for supported agents.
-                {
-                    let app_handle = _app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        let settings = match Settings::load_global() {
-                            Ok(settings) => settings,
-                            Err(err) => {
-                                warn!(
-                                    category = "skills",
-                                    error = %err,
-                                    "Failed to load settings before startup skill repair; using defaults"
-                                );
-                                Settings::default()
-                            }
-                        };
-                        let status =
-                            skill_registration::repair_skill_registration_with_settings(&settings);
-                        let state = app_handle.state::<AppState>();
-                        state.set_skill_registration_status(status.clone());
-                        match status.overall.as_str() {
-                            "ok" => {
-                                info!(
-                                    category = "skills",
-                                    "Managed skills are registered for all supported agents"
-                                );
-                            }
-                            _ => {
-                                warn!(
-                                    category = "skills",
-                                    overall = %status.overall,
-                                    error = %status
-                                        .last_error_message
-                                        .clone()
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                    "Skill registration is degraded"
-                                );
-                            }
-                        }
-                    });
-                }
+                // Project-scoped registration is executed when a project is opened.
 
                 // Background task: check gh CLI authentication (SPEC-ad1ac432 T009)
                 {
@@ -1011,13 +970,6 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         }
         tauri::RunEvent::Exit => {
             info!(category = "tauri", event = "Exit", "App exiting");
-
-            // Unregister all skills/plugins on exit
-            #[cfg(not(test))]
-            {
-                info!(category = "skills", "Unregistering skills on app exit");
-                skill_registration::unregister_all_skills();
-            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {
