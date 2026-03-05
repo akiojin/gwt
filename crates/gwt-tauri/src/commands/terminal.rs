@@ -4174,6 +4174,9 @@ pub(crate) fn launch_agent_for_project_root(
                         &settings,
                         Some(project_root.as_path()),
                     );
+                if is_launch_cancelled(cancelled) {
+                    return Err("Cancelled".to_string());
+                }
                 state.set_skill_registration_status(status);
             }
             Err(error) => {
@@ -4181,6 +4184,9 @@ pub(crate) fn launch_agent_for_project_root(
                     error = %error,
                     "skills step skipped: failed to load global settings"
                 );
+                if is_launch_cancelled(cancelled) {
+                    return Err("Cancelled".to_string());
+                }
                 state.set_skill_registration_status(Default::default());
             }
         }
