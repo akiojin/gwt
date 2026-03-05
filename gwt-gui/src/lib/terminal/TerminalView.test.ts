@@ -323,6 +323,52 @@ describe("TerminalView", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("runs fit when viewport resize observer fires while active", async () => {
+    await renderTerminalView({
+      paneId: "pane-viewport-active",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+      expect(resizeObserverInstances.length).toBeGreaterThanOrEqual(2);
+    });
+
+    const fit = fitAddonInstances[0].fit;
+    const beforeFitCalls = fit.mock.calls.length;
+
+    triggerResizeObserver(1);
+
+    await waitFor(() => {
+      expect(fit.mock.calls.length).toBeGreaterThan(beforeFitCalls);
+    });
+  });
+
+  it("ignores viewport resize observer while inactive", async () => {
+    await renderTerminalView({
+      paneId: "pane-viewport-inactive",
+      active: false,
+    });
+
+    await waitFor(() => {
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+      expect(resizeObserverInstances.length).toBeGreaterThanOrEqual(2);
+    });
+
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+
+    triggerResizeObserver(1);
+    await Promise.resolve();
+
+    expect(fit).not.toHaveBeenCalled();
+    expect(
+      invokeMock.mock.calls.filter((call) => call[0] === "resize_terminal")
+        .length,
+    ).toBe(0);
+  });
+
   it("deduplicates resize_terminal calls when dimensions do not change", async () => {
     await renderTerminalView({ paneId: "pane-dedupe", active: true });
 

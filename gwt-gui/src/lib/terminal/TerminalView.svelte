@@ -530,7 +530,7 @@
       }
     })();
 
-    // ResizeObserver for auto-fitting
+    // ResizeObserver for auto-fitting when root size changes.
     const observer = new ResizeObserver(() => {
       if (!active) return;
       requestAnimationFrame(() => {
@@ -539,6 +539,20 @@
       });
     });
     observer.observe(rootEl);
+
+    // On Windows, viewport width can change when scrollbar visibility toggles
+    // even if the root container size stays the same.
+    const viewportObserver = new ResizeObserver(() => {
+      if (!active) return;
+      requestAnimationFrame(() => {
+        if (!active) return;
+        void fitAndNotifyCurrent();
+      });
+    });
+    const viewportEl = rootEl.querySelector<HTMLElement>(".xterm-viewport");
+    if (viewportEl) {
+      viewportObserver.observe(viewportEl);
+    }
 
     terminal = term;
     fitAddon = fit;
@@ -584,6 +598,7 @@
       window.removeEventListener("gwt-terminal-font-family", handleFontFamilyChange);
       delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
+      viewportObserver.disconnect();
       term.dispose();
       unregisterVoiceInputTarget();
     };

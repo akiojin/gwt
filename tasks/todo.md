@@ -1,3 +1,21 @@
+## TODO: Windows ターミナル表示崩れ修正（Issue #1457 / 2026-03-05）
+
+## 背景（Issue #1457）
+
+Windows 環境で Launch Agent 実行中にターミナル表示が崩れる。  
+タブ切替で復帰することから、表示幅変化時の `fit/resize` 再同期不足を修正する。
+
+## 実装ステップ（Issue #1457）
+
+- [x] T001 `TerminalView.svelte` に viewport 幅変化検知を追加
+- [x] T002 `TerminalView.test.ts` に回帰テストを追加
+- [x] T003 対象テスト/型チェックを実行して結果を記録
+
+## 検証結果（Issue #1457）
+
+- [x] `cd gwt-gui && pnpm test src/lib/terminal/TerminalView.test.ts`
+- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
+
 ## TODO: default profile 必須化 + default.ai 必須化（Issue #1464 / 2026-03-04）
 
 ## 背景（Issue #1464）
