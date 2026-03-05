@@ -2,7 +2,6 @@ import type {
   Profile,
   ProfilesConfig,
   SettingsData,
-  SkillRegistrationStatus,
   VoiceInputSettings,
 } from "../types";
 
@@ -61,13 +60,6 @@ export const TERMINAL_FONT_PRESETS: FontPreset[] = [
 ];
 
 export const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
-
-export const DEFAULT_SKILL_STATUS: SkillRegistrationStatus = {
-  overall: "failed",
-  agents: [],
-  last_checked_at: 0,
-  last_error_message: null,
-};
 
 export function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
   if (!cfg) return null;
@@ -173,53 +165,6 @@ export function normalizeTerminalFontFamily(value: string | null | undefined): s
   if (family.length === 0) return DEFAULT_TERMINAL_FONT_FAMILY;
   const match = TERMINAL_FONT_PRESETS.find((preset) => preset.value === family);
   return match ? match.value : family;
-}
-
-export function normalizeSkillStatus(
-  value: Partial<SkillRegistrationStatus> | null | undefined,
-): SkillRegistrationStatus {
-  const agents = Array.isArray(value?.agents)
-    ? value.agents.map((agent) => ({
-        agent_id: agent.agent_id ?? "unknown",
-        label: agent.label ?? "Unknown",
-        skills_path: agent.skills_path ?? null,
-        registered: !!agent.registered,
-        missing_skills: Array.isArray(agent.missing_skills)
-          ? agent.missing_skills.filter((skill) => typeof skill === "string")
-          : [],
-        error_code: agent.error_code ?? null,
-        error_message: agent.error_message ?? null,
-      }))
-    : [];
-
-  return {
-    overall: value?.overall ?? DEFAULT_SKILL_STATUS.overall,
-    agents,
-    last_checked_at:
-      typeof value?.last_checked_at === "number" ? value.last_checked_at : Date.now(),
-    last_error_message: value?.last_error_message ?? null,
-  };
-}
-
-export function skillStatusClass(status: string): "status-ok" | "status-degraded" | "status-failed" {
-  if (status === "ok") return "status-ok";
-  if (status === "degraded") return "status-degraded";
-  return "status-failed";
-}
-
-export function skillStatusText(status: string | null | undefined): string {
-  return (status ?? "unknown").toUpperCase();
-}
-
-export function formatRegistrationCheckedAt(millis: number | null | undefined): string {
-  if (typeof millis !== "number" || millis <= 0) {
-    return "-";
-  }
-  try {
-    return new Date(millis).toLocaleString();
-  } catch {
-    return "-";
-  }
 }
 
 export function clampFontSize(v: number): number {

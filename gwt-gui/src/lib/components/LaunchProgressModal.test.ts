@@ -25,7 +25,7 @@ describe("LaunchProgressModal", () => {
     });
 
     const marks = container.querySelectorAll(".mark");
-    expect(marks.length).toBe(6);
+    expect(marks.length).toBe(7);
     // "fetch" (idx 0) is before "validate" (idx 1) -> [x]
     expect(marks[0].textContent).toBe("[x]");
     // "validate" (idx 1) is the current step -> [>]
@@ -228,5 +228,28 @@ describe("LaunchProgressModal", () => {
       b.textContent?.includes("Use Existing Branch"),
     );
     expect(useExistingBtn).toBeUndefined();
+  });
+
+  it("includes 'Registering skills' step in step list", async () => {
+    const { container } = await renderModal({
+      open: true,
+      step: "skills",
+      detail: "",
+      status: "running",
+      error: null,
+      onCancel: vi.fn(),
+      onClose: vi.fn(),
+    });
+
+    const texts = Array.from(container.querySelectorAll(".text")).map(
+      (el) => el.textContent,
+    );
+    expect(texts).toContain("Registering skills");
+
+    const marks = container.querySelectorAll(".mark");
+    // skills is at index 5 (after create at 4), so steps 0-4 should be [x] and 5 should be [>]
+    expect(marks[4].textContent).toBe("[x]");
+    expect(marks[5].textContent).toBe("[>]");
+    expect(marks[6].textContent).toBe("[ ]");
   });
 });
