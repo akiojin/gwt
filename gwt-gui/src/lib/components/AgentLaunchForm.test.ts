@@ -68,14 +68,14 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: false,
           },
           {
             id: "claude",
             name: "Claude Code",
             version: "0.0.0",
-            authenticated: true,
+
             available: false,
           },
         ];
@@ -115,14 +115,14 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
           {
             id: "claude",
             name: "Claude Code",
             version: "bunx",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -167,7 +167,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "bunx",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -202,45 +202,6 @@ describe("AgentLaunchForm", () => {
     expect(binaryFallbackNotice).toBeTruthy();
   });
 
-  it("does not show 'Not authenticated' warning for unauthenticated agents", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "detect_agents") {
-        return [
-          {
-            id: "codex",
-            name: "Codex",
-            version: "0.0.0",
-            authenticated: false,
-            available: true,
-          },
-        ];
-      }
-      if (cmd === "get_agent_config") {
-        return { version: 1, claude: { provider: "anthropic", glm: {} } };
-      }
-      if (cmd === "is_ai_configured") return true;
-      return [];
-    });
-
-    const onLaunch = vi.fn().mockResolvedValue(undefined);
-    const onClose = vi.fn();
-
-    const rendered = await renderLaunchForm({
-      projectPath: "/tmp/project",
-      selectedBranch: "",
-      onLaunch,
-      onClose,
-    });
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
-    });
-    await waitFor(() => {
-      expect(rendered.queryByText("Not authenticated")).toBeNull();
-    });
-  });
-
-
   it("displays new codex model options including gpt-5.3-codex-spark", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
@@ -249,7 +210,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -295,7 +256,7 @@ describe("AgentLaunchForm", () => {
             id: "claude",
             name: "Claude Code",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -352,7 +313,7 @@ describe("AgentLaunchForm", () => {
             id: "copilot",
             name: "GitHub Copilot",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -389,7 +350,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -437,7 +398,7 @@ describe("AgentLaunchForm", () => {
             id: "opencode",
             name: "OpenCode",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -510,7 +471,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -580,7 +541,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -646,7 +607,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -712,7 +673,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -796,7 +757,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -870,7 +831,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -953,7 +914,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1034,7 +995,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.0.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1141,7 +1102,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1278,7 +1239,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1349,7 +1310,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1445,7 +1406,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "bunx",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1529,7 +1490,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "bunx",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1586,7 +1547,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1666,7 +1627,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1737,7 +1698,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1801,7 +1762,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -1932,7 +1893,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2067,7 +2028,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2126,7 +2087,7 @@ describe("AgentLaunchForm", () => {
             id: "claude",
             name: "Claude Code",
             version: "1.2.3",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2171,7 +2132,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2232,7 +2193,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2303,7 +2264,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2368,7 +2329,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2412,7 +2373,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2466,7 +2427,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2727,7 +2688,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2779,7 +2740,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];
@@ -2835,7 +2796,7 @@ describe("AgentLaunchForm", () => {
             id: "codex",
             name: "Codex",
             version: "0.90.0",
-            authenticated: true,
+
             available: true,
           },
         ];

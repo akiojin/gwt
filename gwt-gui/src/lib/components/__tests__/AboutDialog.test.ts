@@ -176,8 +176,8 @@ describe("AboutDialog", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "detect_agents") {
         return [
-          { id: "codex", name: "Codex", available: true, authenticated: true, version: "1.2.3" },
-          { id: "claude", name: "Claude", available: false, authenticated: false, version: "" },
+          { id: "codex", name: "Codex", available: true, version: "1.2.3" },
+          { id: "claude", name: "Claude", available: false, version: "" },
         ];
       }
       if (command === "get_stats") {
@@ -207,7 +207,7 @@ describe("AboutDialog", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "detect_agents") {
         return [
-          { id: "codex", name: "Codex", available: true, authenticated: true, version: "" },
+          { id: "codex", name: "Codex", available: true, version: "" },
         ];
       }
       if (command === "get_stats") {
