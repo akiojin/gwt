@@ -202,6 +202,66 @@ describe("AgentLaunchForm", () => {
     expect(binaryFallbackNotice).toBeTruthy();
   });
 
+  it("refreshes codex authentication when settings are updated", async () => {
+    let detectCall = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        detectCall += 1;
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: detectCall > 1,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      if (cmd === "is_ai_configured") return true;
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+    await waitFor(() => {
+      expect(rendered.getByText("Not authenticated")).toBeTruthy();
+    });
+
+    const aiRefreshCallsBefore = invokeMock.mock.calls.filter(
+      (call) => call[0] === "is_ai_configured"
+    ).length;
+    window.dispatchEvent(
+      new CustomEvent("gwt-settings-updated", {
+        detail: {},
+      })
+    );
+
+    await waitFor(() => {
+      const aiRefreshCallsAfter = invokeMock.mock.calls.filter(
+        (call) => call[0] === "is_ai_configured"
+      ).length;
+      expect(aiRefreshCallsAfter).toBeGreaterThan(aiRefreshCallsBefore);
+      expect(detectCall).toBeGreaterThanOrEqual(2);
+    });
+    await waitFor(() => {
+      expect(rendered.queryByText("Not authenticated")).toBeNull();
+    });
+  });
+
 
   it("displays new codex model options including gpt-5.3-codex-spark", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
