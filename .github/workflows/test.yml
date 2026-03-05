@@ -28,7 +28,7 @@ jobs:
         run: |
           bash scripts/install-linux-deps.sh
       - name: Run tests
-        run: cargo test -p gwt-core -p gwt-tauri --all-features -- --test-threads=1
+        run: cargo test -p gwt-core -p gwt-tauri --all-features
         timeout-minutes: 10
       - name: Voice accuracy regression (optional local dataset)
         run: |
@@ -47,13 +47,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run Windows PTY regression tests
-        run: cargo test -p gwt-core terminal::pty -- --test-threads=1
+        run: cargo test -p gwt-core terminal::pty
         timeout-minutes: 15
+
+  test-frontend:
+    name: Test (Frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: gwt-gui/pnpm-lock.yaml
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
+      - name: Install frontend dependencies
+        run: cd gwt-gui && pnpm install --frozen-lockfile
+      - name: Run vitest
+        run: cd gwt-gui && pnpm test
+        timeout-minutes: 10
 
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [test, test-windows-rust]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -88,7 +112,6 @@ jobs:
   e2e:
     name: E2E (Playwright, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: build
     strategy:
       fail-fast: false
       matrix:

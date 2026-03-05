@@ -671,7 +671,9 @@ mod tests {
 
     #[test]
     fn test_env_override() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         // Set environment variable
         std::env::set_var("GWT_DEBUG", "true");
@@ -686,7 +688,9 @@ mod tests {
 
     #[test]
     fn test_env_override_docker_force_host_accepts_numeric_bool() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
         let settings = Settings::load(temp.path()).unwrap();
@@ -697,7 +701,9 @@ mod tests {
 
     #[test]
     fn test_env_override_auto_install_deps() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
         let settings = Settings::load(temp.path()).unwrap();
@@ -914,7 +920,9 @@ model = "Qwen/Qwen3-ASR-1.7B"
 
     #[test]
     fn test_load_ignores_runtime_gwt_agent_env() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
         let config_path = temp.path().join(".gwt.toml");
         std::fs::write(&config_path, "debug = true\n").unwrap();
 

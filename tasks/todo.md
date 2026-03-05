@@ -15,7 +15,6 @@ Windows 環境で Launch Agent 実行中にターミナル表示が崩れる。
 
 - [x] `cd gwt-gui && pnpm test src/lib/terminal/TerminalView.test.ts`
 - [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
-
 ## TODO: default profile 必須化 + default.ai 必須化（Issue #1464 / 2026-03-04）
 
 ## 背景（Issue #1464）

@@ -1,12 +1,16 @@
 {
   "name": "gwt",
-  "version": "8.3.1",
+  "version": "8.3.3",
   "private": true,
   "description": "Tauri desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
   "scripts": {
     "dev": "cargo tauri dev",
     "build": "cargo tauri build",
+    "test": "cargo test -p gwt-core -p gwt-tauri --all-features",
+    "test:frontend": "cd gwt-gui && pnpm test",
+    "test:e2e": "cd gwt-gui && pnpm test:e2e",
+    "test:all": "bash scripts/test-all.sh",
     "installer:macos": "bash installers/macos/build-installer.sh",
     "installer:windows": "powershell -ExecutionPolicy Bypass -File installers/windows/build-msi.ps1",
     "prepare": "test -n \"$CI\" || bunx husky install",
