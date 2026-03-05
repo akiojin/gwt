@@ -1,11 +1,11 @@
 ## TODO: Review 指摘対応（Claude 明示無効化の尊重）2026-03-05
 
-## 背景
+## 背景（Review対応）
 
 レビューで「repair が明示 `false` を強制上書きする」「終了時に `false` を消す」が指摘されたため、
 FR-010（明示無効化を尊重）を維持する方向へ修正。
 
-## 実装ステップ
+## 実装ステップ（Review対応）
 
 - [x] R001 `skill_registration.rs`: `repair_*` を通常 register 経路へ戻し `force` を使わない
 - [x] R002 `skill_registration.rs`: 終了時 unregister はキー削除ではなく `false` 設定を維持
