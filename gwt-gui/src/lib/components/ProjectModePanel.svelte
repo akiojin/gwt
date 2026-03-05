@@ -1,391 +1,218 @@
-<svelte:options runes={false} />
-
 <script lang="ts">
-  import type { ProjectModeState } from "../types";
-  import { afterUpdate, onMount } from "svelte";
+  import type { ProjectModeState, ProjectIssue } from '../types';
+  import GodBar from './godgame/GodBar.svelte';
+  import LeadOrb from './godgame/LeadOrb.svelte';
+  import IssuePlot from './godgame/IssuePlot.svelte';
+  import DecreeInput from './godgame/DecreeInput.svelte';
+  import LeadTimeline from './godgame/LeadTimeline.svelte';
 
-  let state: ProjectModeState = {
+  type LeadOrbStatus = 'idle' | 'thinking' | 'waiting_approval' | 'orchestrating' | 'error';
+
+  let pmState: ProjectModeState = $state({
     messages: [],
     ai_ready: false,
     ai_error: null,
     last_error: null,
     is_waiting: false,
-    session_name: "Project Mode",
+    session_name: 'Project Mode',
     llm_call_count: 0,
     estimated_tokens: 0,
-  };
+  });
 
-  let input = "";
-  let sending = false;
-  let isComposing = false;
-  let ignoreEnterAfterComposition = false;
-  let chatEl: HTMLDivElement | null = null;
-  let lastMessageCount = 0;
-  let lastOpenedIssueNumber: number | null = null;
-  let displaySessionName = "Project Mode";
+  let sending = $state(false);
+  let timelineVisible = $state(false);
+  let lastOpenedIssueNumber: number | null = $state(null);
+  let expandedIssues = $state(new Set<string>());
+
+  // Prototype: issues derived from state (empty until backend returns workspace data)
+  let issues: ProjectIssue[] = $derived([] as ProjectIssue[]);
+
+  let displaySessionName = $derived(
+    pmState.session_name && pmState.session_name !== 'Project Mode'
+      ? pmState.session_name
+      : 'Project Mode',
+  );
+
+  let leadOrbStatus: LeadOrbStatus = $derived.by(() => {
+    const s = pmState.lead_status;
+    if (!s) return 'idle';
+    if (s === 'thinking' || s === 'running') return 'thinking';
+    if (s === 'waiting_approval') return 'waiting_approval';
+    if (s === 'orchestrating') return 'orchestrating';
+    if (s === 'error') return 'error';
+    return 'idle';
+  });
 
   function toErrorMessage(err: unknown): string {
-    if (!err) return "Unknown error";
-    if (typeof err === "string") return err;
-    if (typeof err === "object" && "message" in err) {
+    if (!err) return 'Unknown error';
+    if (typeof err === 'string') return err;
+    if (typeof err === 'object' && 'message' in err) {
       const msg = (err as { message?: unknown }).message;
-      if (typeof msg === "string") return msg;
+      if (typeof msg === 'string') return msg;
     }
     return String(err);
   }
 
   async function refreshState() {
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      state = await invoke<ProjectModeState>("get_project_mode_state_cmd");
+      const { invoke } = await import('$lib/tauriInvoke');
+      pmState = await invoke<ProjectModeState>('get_project_mode_state_cmd');
     } catch (err) {
-      state = {
-        ...state,
-        last_error: toErrorMessage(err),
-      };
+      pmState = { ...pmState, last_error: toErrorMessage(err) };
     }
   }
 
-  async function sendMessage() {
-    if (sending || state.is_waiting) return;
-    const text = input.trim();
-    if (!text) return;
+  async function handleSend(text: string) {
+    if (sending || pmState.is_waiting) return;
     sending = true;
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      state = await invoke<ProjectModeState>("send_project_mode_message_cmd", {
+      const { invoke } = await import('$lib/tauriInvoke');
+      pmState = await invoke<ProjectModeState>('send_project_mode_message_cmd', {
         input: text,
       });
-      input = "";
     } catch (err) {
-      state = {
-        ...state,
-        last_error: toErrorMessage(err),
-      };
+      pmState = { ...pmState, last_error: toErrorMessage(err) };
     } finally {
       sending = false;
     }
   }
 
-  function onKeydown(event: KeyboardEvent) {
-    if (event.key === "Enter") {
-      if (isComposing || ignoreEnterAfterComposition || event.isComposing) {
-        event.preventDefault();
-        return;
-      }
-      if (!event.shiftKey) {
-        event.preventDefault();
-        void sendMessage();
-      }
-      return;
-    }
+  function toggleIssue(id: string) {
+    const next = new Set(expandedIssues);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    expandedIssues = next;
   }
 
-  function onCompositionStart() {
-    isComposing = true;
-    ignoreEnterAfterComposition = false;
-  }
-
-  function onCompositionEnd() {
-    isComposing = false;
-    ignoreEnterAfterComposition = true;
-    setTimeout(() => {
-      ignoreEnterAfterComposition = false;
-    }, 0);
-  }
-
-  afterUpdate(() => {
-    const count = state.messages.length;
-    if (!chatEl) return;
-    if (count !== lastMessageCount) {
-      chatEl.scrollTop = chatEl.scrollHeight;
-      lastMessageCount = count;
+  // Spec issue dispatch
+  $effect(() => {
+    const issueNumber = pmState.active_spec_issue_number ?? null;
+    if (!issueNumber || issueNumber === lastOpenedIssueNumber) return;
+    lastOpenedIssueNumber = issueNumber;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('gwt-project-mode-open-spec-issue', {
+          detail: {
+            issueNumber,
+            specId: pmState.active_spec_id ?? null,
+            issueUrl: pmState.active_spec_issue_url ?? null,
+          },
+        }),
+      );
     }
   });
 
-  onMount(() => {
+  // Initial state load
+  $effect(() => {
     void refreshState();
   });
-
-  $: displaySessionName =
-    state.session_name && state.session_name !== "Project Mode"
-      ? state.session_name
-      : "Project Mode";
-
-  $: {
-    const issueNumber = state.active_spec_issue_number ?? null;
-    if (!issueNumber || issueNumber === lastOpenedIssueNumber) {
-      // no-op
-    } else {
-      lastOpenedIssueNumber = issueNumber;
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(
-          new CustomEvent("gwt-project-mode-open-spec-issue", {
-            detail: {
-              issueNumber,
-              specId: state.active_spec_id ?? null,
-              issueUrl: state.active_spec_issue_url ?? null,
-            },
-          })
-        );
-      }
-    }
-  }
 </script>
 
-<section class="project-mode">
-  <header class="agent-header">
-    <div class="agent-title">{displaySessionName}</div>
-    <div class="agent-stats">
-      {#if state.lead_status}
-        <span>Lead: {state.lead_status}</span>
-      {/if}
-      <span>LLM: {state.llm_call_count}</span>
-      <span>Tokens: {state.estimated_tokens}</span>
-      {#if state.project_mode_session_id}
-        <span>Session: {state.project_mode_session_id}</span>
-      {/if}
-    </div>
-  </header>
+<section class="god-world" data-testid="god-world">
+  <GodBar
+    sessionName={displaySessionName}
+    leadStatus={pmState.lead_status ?? ''}
+    llmCallCount={pmState.llm_call_count}
+    estimatedTokens={pmState.estimated_tokens}
+    sessionId={pmState.project_mode_session_id}
+  />
 
-  <div class="agent-chat" bind:this={chatEl}>
-    {#if state.last_error}
-      <div class="agent-alert warn">{state.last_error}</div>
-    {/if}
-    {#if !state.ai_ready}
-      <div class="agent-alert warn">
-        {state.ai_error ?? "AI settings are required."}
+  {#if pmState.last_error}
+    <div class="world-alert warn" role="alert">{pmState.last_error}</div>
+  {/if}
+  {#if !pmState.ai_ready}
+    <div class="world-alert warn" role="alert">
+      {pmState.ai_error ?? 'AI settings are required.'}
+    </div>
+  {/if}
+
+  <div class="world-canvas">
+    <div class="orb-area">
+      <LeadOrb status={leadOrbStatus} onclick={() => (timelineVisible = !timelineVisible)} />
+    </div>
+
+    {#if issues.length === 0}
+      <div class="world-empty">
+        <p class="empty-text">The world is quiet. Issue a decree to begin.</p>
       </div>
-    {/if}
-    {#if state.messages.length === 0}
-      <div class="agent-empty">Describe your task to start.</div>
     {:else}
-      {#each state.messages as msg}
-        <div
-          class={`agent-message ${msg.role} ${msg.kind ?? "message"} ${msg.role === "assistant" && (msg.kind === null || msg.kind === "message" || typeof msg.kind === "undefined") ? "meta-hidden" : ""}`}
-        >
-          <div class="agent-bubble">
-            <div class="agent-meta">{msg.kind ?? msg.role}</div>
-            <div class="agent-content">{msg.content}</div>
-          </div>
-        </div>
-      {/each}
+      <div class="issue-grid">
+        {#each issues as issue (issue.id)}
+          <IssuePlot
+            {issue}
+            expanded={expandedIssues.has(issue.id)}
+            onToggle={() => toggleIssue(issue.id)}
+          />
+        {/each}
+      </div>
     {/if}
   </div>
 
-  <footer class="agent-input">
-    <textarea
-      placeholder="Type a task and press Enter..."
-      bind:value={input}
-      onkeydown={onKeydown}
-      oncompositionstart={onCompositionStart}
-      oncompositionend={onCompositionEnd}
-      disabled={sending || state.is_waiting}
-      rows="3"
-    ></textarea>
-    <button
-      class="send-btn"
-      onclick={sendMessage}
-      disabled={sending || state.is_waiting || !input.trim()}
-    >
-      {#if sending || state.is_waiting}
-        <span class="spinner" aria-hidden="true"></span>
-      {/if}
-      <span>{state.is_waiting ? "Working..." : "Send"}</span>
-    </button>
-  </footer>
+  <DecreeInput
+    disabled={sending}
+    isWaiting={pmState.is_waiting}
+    onSend={handleSend}
+  />
+
+  <LeadTimeline
+    messages={pmState.messages}
+    visible={timelineVisible}
+    onClose={() => (timelineVisible = false)}
+  />
 </section>
 
 <style>
-  .project-mode {
+  .god-world {
     display: flex;
     flex-direction: column;
     height: 100%;
-    gap: 12px;
+    background: #2d2b55;
+    color: #cdd6f4;
+    overflow: hidden;
   }
 
-  .agent-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
+  .world-alert {
+    padding: 6px 16px;
+    font-size: var(--ui-font-sm, 11px);
+    background: rgba(250, 179, 135, 0.12);
+    color: #fab387;
+    border-bottom: 1px solid rgba(250, 179, 135, 0.2);
+    flex-shrink: 0;
   }
 
-  .agent-title {
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .agent-stats {
-    display: flex;
-    gap: 12px;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  .agent-chat {
+  .world-canvas {
     flex: 1;
     overflow-y: auto;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 12px;
+    padding: 24px 16px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    align-items: center;
+    gap: 32px;
   }
 
-  .agent-empty {
-    color: var(--text-muted);
-    font-size: 14px;
+  .orb-area {
+    flex-shrink: 0;
   }
 
-  .agent-alert {
-    padding: 8px 10px;
-    border-radius: 6px;
-    background: rgba(255, 201, 71, 0.15);
-    color: #b08300;
-    font-size: 13px;
-  }
-
-  .agent-message {
+  .world-empty {
+    flex: 1;
     display: flex;
-    width: 100%;
-  }
-
-  .agent-message.user {
-    justify-content: flex-end;
-  }
-
-  .agent-message.assistant {
-    justify-content: flex-start;
-  }
-
-  .agent-message.system,
-  .agent-message.tool,
-  .agent-message.thought,
-  .agent-message.action,
-  .agent-message.observation,
-  .agent-message.error {
+    align-items: center;
     justify-content: center;
   }
 
-  .agent-bubble {
-    max-width: 72%;
-    padding: 8px 10px;
-    border-radius: 12px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
+  .empty-text {
+    color: rgba(180, 190, 254, 0.4);
+    font-size: var(--ui-font-md, 12px);
+    font-style: italic;
   }
 
-  .agent-message.user .agent-bubble {
-    background: rgba(64, 160, 255, 0.12);
-    border-color: rgba(64, 160, 255, 0.4);
-  }
-
-  .agent-message.assistant .agent-bubble {
-    background: rgba(46, 196, 182, 0.12);
-    border-color: rgba(46, 196, 182, 0.4);
-  }
-
-  .agent-message.system .agent-bubble {
-    background: rgba(240, 200, 90, 0.12);
-    border-color: rgba(240, 200, 90, 0.4);
-  }
-
-  .agent-message.tool .agent-bubble {
-    background: rgba(166, 227, 161, 0.12);
-    border-color: rgba(166, 227, 161, 0.4);
-  }
-
-  .agent-message.thought .agent-bubble {
-    background: rgba(137, 180, 250, 0.12);
-    border-color: rgba(137, 180, 250, 0.4);
-  }
-
-  .agent-message.action .agent-bubble {
-    background: rgba(250, 227, 175, 0.12);
-    border-color: rgba(250, 227, 175, 0.4);
-  }
-
-  .agent-message.observation .agent-bubble {
-    background: rgba(166, 227, 161, 0.12);
-    border-color: rgba(166, 227, 161, 0.4);
-  }
-
-  .agent-message.error .agent-bubble {
-    background: rgba(243, 139, 168, 0.12);
-    border-color: rgba(243, 139, 168, 0.4);
-  }
-
-  .agent-meta {
-    text-transform: uppercase;
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-    margin-bottom: 4px;
-  }
-
-  .agent-message.user .agent-meta,
-  .agent-message.meta-hidden .agent-meta {
-    display: none;
-  }
-
-  .agent-content {
-    white-space: pre-wrap;
-    color: var(--text-primary);
-    font-size: 13px;
-  }
-
-  .agent-input {
+  .issue-grid {
     display: flex;
-    gap: 12px;
-  }
-
-  .agent-input textarea {
-    flex: 1;
-    resize: none;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    padding: 10px;
-    font-size: 13px;
-    font-family: "JetBrains Mono", "Fira Code", "SF Mono", "Menlo", monospace;
-  }
-
-  .send-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 16px;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
-    background: var(--accent);
-    color: var(--text-primary);
-    font-weight: 600;
-  }
-
-  .spinner {
-    width: 12px;
-    height: 12px;
-    border: 2px solid rgba(255, 255, 255, 0.4);
-    border-top-color: var(--text-primary);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-
-  .send-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
+    flex-wrap: wrap;
+    gap: 16px;
+    justify-content: center;
+    width: 100%;
+    max-width: 1080px;
   }
 </style>

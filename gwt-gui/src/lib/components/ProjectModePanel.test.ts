@@ -54,23 +54,23 @@ describe("ProjectModePanel", () => {
       expect(countInvokeCalls("get_project_mode_state_cmd")).toBe(1);
     });
 
-    const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
-    ) as HTMLTextAreaElement;
+    const input = rendered.getByPlaceholderText(
+      "Decree something..."
+    ) as HTMLInputElement;
 
-    await fireEvent.input(textarea, { target: { value: "日本語入力" } });
-    await fireEvent.compositionStart(textarea);
-    await fireEvent.keyDown(textarea, { key: "Enter", isComposing: true });
+    await fireEvent.input(input, { target: { value: "日本語入力" } });
+    await fireEvent.compositionStart(input);
+    await fireEvent.keyDown(input, { key: "Enter", isComposing: true });
 
     expect(countInvokeCalls("send_project_mode_message_cmd")).toBe(0);
 
-    await fireEvent.compositionEnd(textarea);
-    await fireEvent.keyDown(textarea, { key: "Enter" });
+    await fireEvent.compositionEnd(input);
+    await fireEvent.keyDown(input, { key: "Enter" });
 
     expect(countInvokeCalls("send_project_mode_message_cmd")).toBe(0);
 
     await new Promise((r) => setTimeout(r, 0));
-    await fireEvent.keyDown(textarea, { key: "Enter" });
+    await fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
       expect(countInvokeCalls("send_project_mode_message_cmd")).toBe(1);
@@ -84,11 +84,11 @@ describe("ProjectModePanel", () => {
       expect(countInvokeCalls("get_project_mode_state_cmd")).toBe(1);
     });
 
-    const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
-    ) as HTMLTextAreaElement;
+    const input = rendered.getByPlaceholderText(
+      "Decree something..."
+    ) as HTMLInputElement;
 
-    await fireEvent.input(textarea, { target: { value: "status" } });
+    await fireEvent.input(input, { target: { value: "status" } });
 
     const button = rendered.getByRole("button", { name: "Send" });
     await fireEvent.click(button);
@@ -100,82 +100,7 @@ describe("ProjectModePanel", () => {
     expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("renders chat bubbles for messages", async () => {
-    const rendered = await renderPanel({
-      messages: [
-        {
-          role: "user",
-          content: "hello",
-          timestamp: Date.now(),
-        },
-        {
-          role: "assistant",
-          content: "hi",
-          timestamp: Date.now() + 1,
-        },
-      ],
-    });
-
-    await waitFor(() => {
-      expect(rendered.getByText("hello")).toBeTruthy();
-    });
-
-    expect(
-      rendered.container.querySelector(".agent-message.user .agent-bubble")
-    ).toBeTruthy();
-    expect(
-      rendered.container.querySelector(".agent-message.assistant .agent-bubble")
-    ).toBeTruthy();
-  });
-
-  it("auto-scrolls to latest message", async () => {
-    const rendered = await renderPanel(
-      {},
-      {
-        messages: [
-          {
-            role: "assistant",
-            content: "latest",
-            timestamp: Date.now(),
-          },
-        ],
-      }
-    );
-
-    await waitFor(() => {
-      expect(countInvokeCalls("get_project_mode_state_cmd")).toBe(1);
-    });
-
-    const chat = rendered.container.querySelector(".agent-chat") as HTMLDivElement;
-    let lastScrollTop = 0;
-    Object.defineProperty(chat, "scrollHeight", {
-      value: 200,
-      configurable: true,
-    });
-    Object.defineProperty(chat, "scrollTop", {
-      get() {
-        return lastScrollTop;
-      },
-      set(value) {
-        lastScrollTop = value;
-      },
-      configurable: true,
-    });
-
-    const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
-    ) as HTMLTextAreaElement;
-    await fireEvent.input(textarea, { target: { value: "scroll" } });
-
-    const button = rendered.getByRole("button", { name: "Send" });
-    await fireEvent.click(button);
-
-    await waitFor(() => {
-      expect(lastScrollTop).toBe(200);
-    });
-  });
-
-  it("shows custom session/lead metadata in header", async () => {
+  it("shows custom session/lead metadata in GodBar", async () => {
     const rendered = await renderPanel({
       session_name: "Sprint Planning",
       lead_status: "running",
@@ -187,9 +112,8 @@ describe("ProjectModePanel", () => {
     await waitFor(() => {
       expect(rendered.getByText("Sprint Planning")).toBeTruthy();
       expect(rendered.getByText("Lead: running")).toBeTruthy();
-      expect(rendered.getByText("Session: pm-123")).toBeTruthy();
+      expect(rendered.getByText("pm-123")).toBeTruthy();
       expect(rendered.getByText("LLM: 7")).toBeTruthy();
-      expect(rendered.getByText("Tokens: 2048")).toBeTruthy();
     });
   });
 
@@ -200,16 +124,16 @@ describe("ProjectModePanel", () => {
       expect(countInvokeCalls("get_project_mode_state_cmd")).toBe(1);
     });
 
-    const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
-    ) as HTMLTextAreaElement;
+    const input = rendered.getByPlaceholderText(
+      "Decree something..."
+    ) as HTMLInputElement;
 
-    await fireEvent.input(textarea, { target: { value: "   " } });
-    await fireEvent.keyDown(textarea, { key: "Enter" });
+    await fireEvent.input(input, { target: { value: "   " } });
+    await fireEvent.keyDown(input, { key: "Enter" });
     expect(countInvokeCalls("send_project_mode_message_cmd")).toBe(0);
 
-    await fireEvent.input(textarea, { target: { value: "keep newline" } });
-    await fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
+    await fireEvent.input(input, { target: { value: "keep newline" } });
+    await fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
     expect(countInvokeCalls("send_project_mode_message_cmd")).toBe(0);
   });
 
@@ -235,10 +159,10 @@ describe("ProjectModePanel", () => {
       expect(rendered.getByText("AI settings are required.")).toBeTruthy();
     });
 
-    const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
-    ) as HTMLTextAreaElement;
-    await fireEvent.input(textarea, { target: { value: "send" } });
+    const input = rendered.getByPlaceholderText(
+      "Decree something..."
+    ) as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "send" } });
     await fireEvent.click(rendered.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
@@ -293,15 +217,46 @@ describe("ProjectModePanel", () => {
       issueUrl: null,
     });
 
-    const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
-    ) as HTMLTextAreaElement;
-    await fireEvent.input(textarea, { target: { value: "trigger refresh" } });
+    const input = rendered.getByPlaceholderText(
+      "Decree something..."
+    ) as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "trigger refresh" } });
     await fireEvent.click(rendered.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
       expect(countInvokeCalls("send_project_mode_message_cmd")).toBe(1);
     });
     expect(dispatchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows Lead Orb with correct status", async () => {
+    const rendered = await renderPanel({
+      lead_status: "thinking",
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByLabelText("Lead is thinking...")).toBeTruthy();
+    });
+  });
+
+  it("renders god-world layout structure", async () => {
+    const rendered = await renderPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector("[data-testid='god-world']")).toBeTruthy();
+    });
+
+    expect(rendered.container.querySelector(".world-canvas")).toBeTruthy();
+    expect(rendered.getByPlaceholderText("Decree something...")).toBeTruthy();
+  });
+
+  it("shows empty world message when no issues", async () => {
+    const rendered = await renderPanel();
+
+    await waitFor(() => {
+      expect(
+        rendered.getByText("The world is quiet. Issue a decree to begin.")
+      ).toBeTruthy();
+    });
   });
 });
