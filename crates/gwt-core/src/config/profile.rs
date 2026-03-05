@@ -240,7 +240,7 @@ impl ProfilesConfig {
                 settings.save_global()?;
                 info!(
                     category = "config",
-                    path = %Settings::new_global_config_path()
+                    path = %Settings::global_config_path()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "<unknown>".to_string()),
                     "Migrated legacy profiles into global config"
@@ -275,9 +275,7 @@ impl ProfilesConfig {
     }
 
     fn global_config_path() -> Option<PathBuf> {
-        Settings::new_global_config_path()
-            .filter(|p| p.exists())
-            .or_else(|| Settings::legacy_global_config_path().filter(|p| p.exists()))
+        Settings::global_config_path().filter(|p| p.exists())
     }
 
     fn global_config_has_profiles_section() -> bool {
@@ -352,7 +350,7 @@ impl ProfilesConfig {
         settings.profiles = normalized;
         settings.save_global()?;
 
-        let path = Settings::new_global_config_path()
+        let path = Settings::global_config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
         info!(category = "config", path = %path, "Saved profiles in config.toml");
@@ -362,8 +360,7 @@ impl ProfilesConfig {
     /// Check if migration from YAML to TOML is needed
     pub fn needs_migration() -> bool {
         let has_profiles_in_global = Self::global_config_has_profiles_section();
-        let has_global_config = Settings::new_global_config_path().is_some_and(|p| p.exists())
-            || Settings::legacy_global_config_path().is_some_and(|p| p.exists());
+        let has_global_config = Settings::global_config_path().is_some_and(|p| p.exists());
         let yaml_path = Self::yaml_path();
         yaml_path.exists() && !has_profiles_in_global && !has_global_config
     }
@@ -569,7 +566,7 @@ mod tests {
         config.save().unwrap();
 
         // Should save into global config TOML
-        let config_path = Settings::new_global_config_path().unwrap();
+        let config_path = Settings::global_config_path().unwrap();
         assert!(config_path.exists());
         assert!(config_path.to_string_lossy().ends_with("config.toml"));
 
@@ -1049,7 +1046,7 @@ profiles:
         assert_eq!(resolved.resolved.unwrap().model, "gpt-4o-mini");
         assert!(loaded.default_ai.is_none());
 
-        let config_path = Settings::new_global_config_path().unwrap();
+        let config_path = Settings::global_config_path().unwrap();
         let saved = std::fs::read_to_string(config_path).unwrap();
         assert!(!saved.contains("default_ai"));
     }

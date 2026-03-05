@@ -17,13 +17,17 @@ fn resolve_window_project_root(state: &AppState, window: &Window) -> Option<Path
     Some(path.canonicalize().unwrap_or(path))
 }
 
+fn load_skill_registration_settings(command: &str) -> Result<Settings, StructuredError> {
+    Settings::load_global().map_err(|e| StructuredError::from_gwt_error(&e, command))
+}
+
 #[tauri::command]
 pub fn get_skill_registration_status_cmd(
     window: Window,
     state: State<AppState>,
 ) -> Result<SkillRegistrationStatus, StructuredError> {
     let project_root = resolve_window_project_root(&state, &window);
-    let settings = Settings::load_global().unwrap_or_else(|_| Settings::default());
+    let settings = load_skill_registration_settings("get_skill_registration_status")?;
     let status = get_skill_registration_status_with_settings_at_project_root(
         &settings,
         project_root.as_deref(),
@@ -38,7 +42,7 @@ pub fn repair_skill_registration_cmd(
     state: State<AppState>,
 ) -> Result<SkillRegistrationStatus, StructuredError> {
     let project_root = resolve_window_project_root(&state, &window);
-    let settings = Settings::load_global().unwrap_or_else(|_| Settings::default());
+    let settings = load_skill_registration_settings("repair_skill_registration")?;
     let status =
         repair_skill_registration_with_settings_at_project_root(&settings, project_root.as_deref());
     state.set_skill_registration_status(status);

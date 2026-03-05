@@ -75,6 +75,22 @@ const CLAUDE_HOOKS_JSON_TEMPLATE: &str = include_str!(concat!(
     "/../../plugins/gwt/hooks/hooks.json"
 ));
 
+const LEGACY_MANAGED_GWT_HOOK_COMMANDS: &[&str] = &[
+    "gwt hook UserPromptSubmit",
+    "gwt hook PreToolUse",
+    "gwt hook PostToolUse",
+    "gwt hook Notification",
+    "gwt hook Stop",
+];
+
+const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
+    "forward-gwt-hook.sh",
+    "block-git-branch-ops.sh",
+    "block-cd-command.sh",
+    "block-file-ops.sh",
+    "block-git-dir-override.sh",
+];
+
 const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
         relative_path: "commands/gwt-fix-issue.md",
@@ -555,6 +571,7 @@ fn merge_managed_claude_hooks_into_settings(claude_root: &Path) -> Result<(), Gw
             reason: "Managed Claude hooks template must have a hooks object".to_string(),
         });
     };
+    let managed_hook_commands = managed_hook_commands_from_map(managed_hooks_map);
 
     let hooks_value = settings
         .as_object_mut()
@@ -572,7 +589,7 @@ fn merge_managed_claude_hooks_into_settings(claude_root: &Path) -> Result<(), Gw
 
     // Remove stale managed entries before re-adding the latest definitions.
     for value in hooks_map.values_mut() {
-        prune_managed_hook_entries(value);
+        prune_managed_hook_entries(value, &managed_hook_commands);
     }
 
     for (event, managed_event_entries) in managed_hooks_map {
@@ -609,9 +626,13 @@ fn merge_managed_claude_hooks_into_settings(claude_root: &Path) -> Result<(), Gw
     Ok(())
 }
 
-fn prune_managed_hook_entries(value: &mut Value) {
+fn prune_managed_hook_entries(value: &mut Value, managed_hook_commands: &[String]) {
     let Some(entries) = value.as_array_mut() else {
-        if value.as_str().map(is_managed_hook_command).unwrap_or(false) {
+        if value
+            .as_str()
+            .map(|command| is_managed_hook_command(command, managed_hook_commands))
+            .unwrap_or(false)
+        {
             *value = Value::Array(vec![]);
         }
         return;
@@ -627,7 +648,7 @@ fn prune_managed_hook_entries(value: &mut Value) {
                         .get("command")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
-                    !is_managed_hook_command(command)
+                    !is_managed_hook_command(command, managed_hook_commands)
                 });
 
                 if hooks.is_empty() {
@@ -640,7 +661,7 @@ fn prune_managed_hook_entries(value: &mut Value) {
         }
 
         if let Some(command) = entry.as_str() {
-            if is_managed_hook_command(command) {
+            if is_managed_hook_command(command, managed_hook_commands) {
                 continue;
             }
         }
@@ -651,24 +672,36 @@ fn prune_managed_hook_entries(value: &mut Value) {
     *entries = retained_entries;
 }
 
-fn is_managed_hook_command(command: &str) -> bool {
-    command.contains("gwt hook ")
-        || command.contains("forward-gwt-hook.sh")
-        || command.contains("block-git-branch-ops.sh")
-        || command.contains("block-cd-command.sh")
-        || command.contains("block-file-ops.sh")
-        || command.contains("block-git-dir-override.sh")
+fn is_managed_hook_command(command: &str, managed_hook_commands: &[String]) -> bool {
+    managed_hook_commands
+        .iter()
+        .any(|managed_command| managed_command == command)
+        || LEGACY_MANAGED_GWT_HOOK_COMMANDS.contains(&command)
+        || command_script_basename(command)
+            .map(|basename| LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES.contains(&basename))
+            .unwrap_or(false)
 }
 
-fn required_managed_hook_commands() -> Vec<(String, String)> {
-    let Ok(definition) = managed_hooks_definition() else {
-        return Vec::new();
-    };
+fn command_script_basename(command: &str) -> Option<&str> {
+    let executable = command.split_whitespace().next().unwrap_or(command);
+    Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+}
 
-    let Some(hooks_obj) = definition.get("hooks").and_then(|v| v.as_object()) else {
-        return Vec::new();
-    };
+fn managed_hook_commands_from_map(hooks_obj: &Map<String, Value>) -> Vec<String> {
+    let mut commands = managed_hook_commands_with_events_from_map(hooks_obj)
+        .into_iter()
+        .map(|(_, command)| command)
+        .collect::<Vec<_>>();
+    commands.sort();
+    commands.dedup();
+    commands
+}
 
+fn managed_hook_commands_with_events_from_map(
+    hooks_obj: &Map<String, Value>,
+) -> Vec<(String, String)> {
     let mut out = Vec::new();
 
     for (event, entries) in hooks_obj {
@@ -689,6 +722,18 @@ fn required_managed_hook_commands() -> Vec<(String, String)> {
     }
 
     out
+}
+
+fn required_managed_hook_commands() -> Vec<(String, String)> {
+    let Ok(definition) = managed_hooks_definition() else {
+        return Vec::new();
+    };
+
+    let Some(hooks_obj) = definition.get("hooks").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    managed_hook_commands_with_events_from_map(hooks_obj)
 }
 
 fn missing_managed_hook_events(settings_path: &Path) -> Vec<String> {
@@ -1089,6 +1134,50 @@ mod tests {
                 .any(|skill| skill.name == "gwt-spec-to-issue-migration"),
             "managed skills must include gwt-spec-to-issue-migration"
         );
+    }
+
+    #[test]
+    fn managed_hook_detection_uses_exact_template_commands() {
+        let managed_hook_commands =
+            vec![".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit".to_string()];
+
+        assert!(is_managed_hook_command(
+            ".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit",
+            &managed_hook_commands
+        ));
+        assert!(!is_managed_hook_command(
+            "echo gwt hook UserPromptSubmit",
+            &managed_hook_commands
+        ));
+    }
+
+    #[test]
+    fn managed_hook_detection_accepts_legacy_commands_and_script_basenames() {
+        let managed_hook_commands = Vec::new();
+
+        assert!(is_managed_hook_command(
+            "gwt hook UserPromptSubmit",
+            &managed_hook_commands
+        ));
+        assert!(is_managed_hook_command(
+            "/tmp/.claude/hooks/scripts/block-file-ops.sh",
+            &managed_hook_commands
+        ));
+        assert!(is_managed_hook_command(
+            "/tmp/.claude/hooks/scripts/forward-gwt-hook.sh Stop",
+            &managed_hook_commands
+        ));
+    }
+
+    #[test]
+    fn prune_managed_hook_entries_preserves_user_hook_that_mentions_gwt_hook() {
+        let managed_hook_commands =
+            vec![".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit".to_string()];
+        let mut value = serde_json::json!(["echo gwt hook UserPromptSubmit"]);
+
+        prune_managed_hook_entries(&mut value, &managed_hook_commands);
+
+        assert_eq!(value, serde_json::json!(["echo gwt hook UserPromptSubmit"]));
     }
 
     #[test]
