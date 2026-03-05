@@ -459,7 +459,7 @@
     if (storedVersion) {
       agentVersion = storedVersion;
     } else {
-      agentVersion = "installed";
+      agentVersion = currentAgentNotInstalled ? "latest" : "installed";
     }
   });
 
@@ -879,7 +879,12 @@
         selectedAgent = preferred;
       } else {
         const available = agents.find((a) => a.available);
-        selectedAgent = available?.id ?? "";
+        const fallbackId = available?.id ?? "";
+        if (fallbackId) {
+          const { [fallbackId]: _, ...rest } = agentVersionByAgent;
+          agentVersionByAgent = rest;
+        }
+        selectedAgent = fallbackId;
       }
     } catch (err) {
       console.error("Failed to detect agents:", err);
