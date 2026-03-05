@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.3.3] - 2026-03-05
+
+### Bug Fixes
+
+- **gui:** Refresh codex auth state after settings save (#1469)
+- **gui:** Serialize settings-triggered auth refresh (#1470)
+
 ## [8.3.2] - 2026-03-04
 
 ### Bug Fixes
