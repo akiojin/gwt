@@ -7,7 +7,7 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, VersionHistoryCacheEntry};
 use gwt_core::ai::{format_error_for_display, AIClient, AIError, ChatMessage};
-use gwt_core::config::{Profile, ProfilesConfig};
+use gwt_core::config::ProfilesConfig;
 use gwt_core::git::Remote;
 use gwt_core::StructuredError;
 use serde::Serialize;
@@ -1164,7 +1164,7 @@ fn is_unborn_head(repo_path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::commands::{TestEnvGuard, ENV_LOCK};
-    use gwt_core::config::AISettings;
+    use gwt_core::config::{AISettings, Profile};
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
