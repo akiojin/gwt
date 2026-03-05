@@ -2485,7 +2485,7 @@ describe("AgentLaunchForm", () => {
 
   it("shows prefix and suffix inputs when Direct mode is selected", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
+      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", available: true }];
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
       return [];
@@ -2542,7 +2542,7 @@ describe("AgentLaunchForm", () => {
     });
 
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
+      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", available: true }];
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
       return [];
@@ -2570,7 +2570,7 @@ describe("AgentLaunchForm", () => {
 
   it("submits AI description to launch request without pre-calling suggest_branch_name", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
+      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", available: true }];
       if (cmd === "list_worktree_branches") return [{ name: "main" }];
       if (cmd === "list_remote_branches") return [];
       return [];
@@ -2614,7 +2614,7 @@ describe("AgentLaunchForm", () => {
 
   it("disables AI Suggest segment when AI is not configured", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
+      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", available: true }];
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
       if (cmd === "is_ai_configured") return false;
@@ -2647,7 +2647,7 @@ describe("AgentLaunchForm", () => {
 
   it("does not show branch naming toggle in fromIssue tab", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", authenticated: true, available: true }];
+      if (cmd === "detect_agents") return [{ id: "codex", name: "Codex", version: "0.0.0", available: true }];
       if (cmd === "list_worktree_branches") return [];
       if (cmd === "list_remote_branches") return [];
       if (cmd === "check_gh_cli_status") return { available: true, authenticated: true };
