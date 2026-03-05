@@ -18,7 +18,7 @@ api_key (`type="password"`) だけ機能しない。macOS WKWebView の `<input 
 - [x] T003 `SettingsPanel.svelte`: スタイルセクション更新（`.ai-field input[type="password"]` 削除、`.api-key-masked` 追加）
 - [x] T004 テスト実行 → GREEN 確認（81 tests passed）
 - [x] T005 svelte-check / clippy 検証（0 errors / 0 warnings）
-- [ ] T006 コミット＆プッシュ
+- [x] T006 コミット＆プッシュ（657f3189）
 
 ### 検証結果
 
