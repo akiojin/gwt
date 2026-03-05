@@ -534,7 +534,7 @@ describe("SettingsPanel", () => {
 
     const apiKeyLabel = rendered.getByText("API Key");
     const apiKeyInput = apiKeyLabel.parentElement?.querySelector("input") as HTMLInputElement;
-    expect(apiKeyInput.type).toBe("password");
+    expect(apiKeyInput.type).toBe("text");
   });
 
   it("adjusts font sizes and clamps numeric inputs", async () => {
@@ -2457,19 +2457,19 @@ describe("SettingsPanel", () => {
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
 
-    // Initial state
-    expect(apiKeyInput.type).toBe("password");
-    expect(apiKeyInput.readOnly).toBe(false);
+    // Initial state: always type="text", masked via CSS class
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(true);
 
-    // mousedown → peek
+    // mousedown → peek (unmask)
     await fireEvent.mouseDown(peekBtn);
     expect(apiKeyInput.type).toBe("text");
-    expect(apiKeyInput.readOnly).toBe(true);
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(false);
 
-    // mouseup → hide
+    // mouseup → hide (mask again)
     await fireEvent.mouseUp(peekBtn);
-    expect(apiKeyInput.type).toBe("password");
-    expect(apiKeyInput.readOnly).toBe(false);
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(true);
   });
 
   it("toggles API key visibility on keyboard/assistive click activation", async () => {
@@ -2488,16 +2488,16 @@ describe("SettingsPanel", () => {
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
 
-    expect(apiKeyInput.type).toBe("password");
-    expect(apiKeyInput.readOnly).toBe(false);
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(true);
 
     await fireEvent.click(peekBtn, { detail: 0 });
     expect(apiKeyInput.type).toBe("text");
-    expect(apiKeyInput.readOnly).toBe(true);
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(false);
 
     await fireEvent.click(peekBtn, { detail: 0 });
-    expect(apiKeyInput.type).toBe("password");
-    expect(apiKeyInput.readOnly).toBe(false);
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(true);
   });
 
   it("hides API key on mouseleave from peek button", async () => {
@@ -2517,11 +2517,11 @@ describe("SettingsPanel", () => {
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
 
     await fireEvent.mouseDown(peekBtn);
-    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(false);
 
     await fireEvent.mouseLeave(peekBtn);
-    expect(apiKeyInput.type).toBe("password");
-    expect(apiKeyInput.readOnly).toBe(false);
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(true);
   });
 
   it("copies API key to clipboard on copy button click", async () => {
@@ -2604,14 +2604,75 @@ describe("SettingsPanel", () => {
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
 
-    // Confirm it's masked
-    expect(apiKeyInput.type).toBe("password");
+    // Confirm it's masked via CSS class (type is always "text")
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.classList.contains("api-key-masked")).toBe(true);
 
     const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
     await fireEvent.click(copyBtn);
 
     // Should copy the plaintext value despite being masked
     expect(writeTextMock).toHaveBeenCalledWith("test-key");
+  });
+
+  it("updates profile state when API key is typed (issue #1480)", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+
+    // type is always "text" (never "password") to avoid WKWebView issues
+    expect(apiKeyInput.type).toBe("text");
+
+    await fireEvent.input(apiKeyInput, { target: { value: "sk-new-key-123" } });
+
+    // Refresh should send the updated key to list_ai_models
+    const refreshBtn = rendered.getByRole("button", { name: "Refresh" }) as HTMLButtonElement;
+    await fireEvent.click(refreshBtn);
+
+    await waitFor(() => {
+      const listCall = invokeMock.mock.calls.find(([cmd]) => cmd === "list_ai_models");
+      expect(listCall).toBeTruthy();
+      expect(listCall![1]).toMatchObject({ apiKey: "sk-new-key-123" });
+    });
+  });
+
+  it("persists API key to save_profiles on Save (issue #1480)", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+
+    await fireEvent.input(apiKeyInput, { target: { value: "sk-saved-key" } });
+
+    // Click Save
+    const saveBtn = rendered.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    await fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      const saveCall = invokeMock.mock.calls.find(([cmd]) => cmd === "save_profiles");
+      expect(saveCall).toBeTruthy();
+      const savedConfig = saveCall![1].config as ProfilesConfig;
+      expect(savedConfig.profiles.default.ai?.api_key).toBe("sk-saved-key");
+    });
   });
 
   it("keeps API key value with underscores while peeking", async () => {
