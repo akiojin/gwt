@@ -244,7 +244,6 @@ describe("AgentLaunchForm", () => {
     const aiRefreshCallsBefore = invokeMock.mock.calls.filter(
       (call) => call[0] === "is_ai_configured"
     ).length;
-
     window.dispatchEvent(
       new CustomEvent("gwt-settings-updated", {
         detail: {},
@@ -256,8 +255,6 @@ describe("AgentLaunchForm", () => {
         (call) => call[0] === "is_ai_configured"
       ).length;
       expect(aiRefreshCallsAfter).toBeGreaterThan(aiRefreshCallsBefore);
-    });
-    await waitFor(() => {
       expect(detectCall).toBeGreaterThanOrEqual(2);
     });
     await waitFor(() => {
