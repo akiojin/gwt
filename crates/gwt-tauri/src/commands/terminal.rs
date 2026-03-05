@@ -4164,16 +4164,13 @@ pub(crate) fn launch_agent_for_project_root(
         if is_launch_cancelled(cancelled) {
             return Err("Cancelled".to_string());
         }
-        {
-            let registration_root = project_root.clone();
-            if let Ok(settings) = gwt_core::config::Settings::load_global() {
-                let status =
-                    gwt_core::config::repair_skill_registration_with_settings_at_project_root(
-                        &settings,
-                        Some(registration_root.as_path()),
-                    );
-                state.set_skill_registration_status(status);
-            }
+        if let Ok(settings) = gwt_core::config::Settings::load_global() {
+            let status =
+                gwt_core::config::repair_skill_registration_with_settings_at_project_root(
+                    &settings,
+                    Some(project_root.as_path()),
+                );
+            state.set_skill_registration_status(status);
         }
         if is_launch_cancelled(cancelled) {
             return Err("Cancelled".to_string());
