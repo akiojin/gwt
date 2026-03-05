@@ -169,6 +169,99 @@ test("Profiles tab shows default profile", async ({ page }) => {
   await expect(page.locator("#active-profile")).toHaveValue("default");
 });
 
+test("Profiles tab uses Active Profile selector only and shows config.toml hint", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses());
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  await expect(page.locator("#active-profile")).toBeVisible();
+  await expect(page.locator("#profile-edit")).toHaveCount(0);
+  await expect(
+    page.getByText("Saved in ~/.gwt/config.toml ([profiles])."),
+  ).toBeVisible();
+});
+
+test("creating a profile makes it active and save_profiles persists active profile edits", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses());
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  await page.locator("#new-profile").fill("staging");
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.locator("#active-profile")).toHaveValue("staging");
+
+  await page.locator(".env-add-row .env-key-input").fill("STAGE_KEY");
+  await page.locator(".env-add-row .env-value-input").fill("stage-value");
+  await page.locator(".env-add-row .btn-add").click();
+
+  await expect(
+    page.locator(".env-row").filter({ hasText: "STAGE_KEY" }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await waitForInvokeCommand(page, "save_profiles");
+
+  const args = await getInvokeArgs(page, "save_profiles");
+  const config = (args as Record<string, unknown>)
+    ?.config as Record<string, unknown>;
+  const profiles = config?.profiles as Record<string, unknown>;
+  const staging = profiles?.staging as Record<string, unknown>;
+  const stagingEnv = staging?.env as Record<string, unknown>;
+
+  expect(config?.active).toBe("staging");
+  expect(profiles?.default).toBeTruthy();
+  expect(stagingEnv?.STAGE_KEY).toBe("stage-value");
+});
+
+test("deleting active non-default profile falls back to default", async ({
+  page,
+}) => {
+  const twoProfiles = {
+    ...profilesFixture,
+    active: "dev",
+    profiles: {
+      ...profilesFixture.profiles,
+      dev: {
+        name: "dev",
+        description: "",
+        env: { DEV_KEY: "dev-value" },
+        disabled_env: [],
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "dev-key",
+          model: "gpt-4o-mini",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: twoProfiles }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  await expect(page.locator("#active-profile")).toHaveValue("dev");
+  await page.getByRole("button", { name: "Delete Active Profile" }).click();
+
+  await expect(page.locator("#active-profile")).toHaveValue("default");
+  await expect(page.locator("#active-profile option[value='dev']")).toHaveCount(0);
+});
+
 test("Profiles tab shows API key peek/copy controls and preserves underscore key on peek", async ({
   page,
 }) => {

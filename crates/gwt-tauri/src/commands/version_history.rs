@@ -1164,7 +1164,7 @@ fn is_unborn_head(repo_path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::commands::{TestEnvGuard, ENV_LOCK};
-    use gwt_core::config::AISettings;
+    use gwt_core::config::{AISettings, Profile};
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
@@ -1685,11 +1685,15 @@ mod tests {
 
     #[test]
     fn resolve_version_history_ai_settings_returns_disabled_when_summary_disabled() {
+        let mut profiles = HashMap::new();
+        let mut default = Profile::new("default");
+        default.ai = Some(ai_settings(false));
+        profiles.insert("default".to_string(), default);
         let config = ProfilesConfig {
             version: 1,
-            active: None,
-            default_ai: Some(ai_settings(false)),
-            profiles: HashMap::new(),
+            active: Some("default".to_string()),
+            default_ai: None,
+            profiles,
         };
 
         let out = resolve_version_history_ai_settings(&config);
@@ -1698,11 +1702,13 @@ mod tests {
 
     #[test]
     fn resolve_version_history_ai_settings_returns_disabled_when_ai_not_configured() {
+        let mut profiles = HashMap::new();
+        profiles.insert("default".to_string(), Profile::new("default"));
         let config = ProfilesConfig {
             version: 1,
-            active: None,
+            active: Some("default".to_string()),
             default_ai: None,
-            profiles: HashMap::new(),
+            profiles,
         };
 
         let out = resolve_version_history_ai_settings(&config);
@@ -1711,11 +1717,15 @@ mod tests {
 
     #[test]
     fn resolve_version_history_ai_settings_returns_settings_when_enabled() {
+        let mut profiles = HashMap::new();
+        let mut default = Profile::new("default");
+        default.ai = Some(ai_settings(true));
+        profiles.insert("default".to_string(), default);
         let config = ProfilesConfig {
             version: 1,
-            active: None,
-            default_ai: Some(ai_settings(true)),
-            profiles: HashMap::new(),
+            active: Some("default".to_string()),
+            default_ai: None,
+            profiles,
         };
 
         let settings = resolve_version_history_ai_settings(&config)
