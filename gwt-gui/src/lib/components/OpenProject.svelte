@@ -4,6 +4,9 @@
     OpenProjectResult,
     ProbePathResult,
   } from "../types";
+  import { listen } from "@tauri-apps/api/event";
+  import { open } from "@tauri-apps/plugin-dialog";
+  import { invoke } from "$lib/tauriInvoke";
   import MigrationModal from "./MigrationModal.svelte";
 
   interface RecentProject {
@@ -61,7 +64,6 @@
 
   async function loadRecentProjects() {
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
       const projects = await invoke<RecentProject[]>("get_recent_projects");
       recentProjects = projects;
     } catch (err) {
@@ -74,7 +76,6 @@
     opening = true;
     errorMessage = null;
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
       if (selected) {
         await probeAndOpen(selected as string, false);
@@ -89,7 +90,6 @@
     opening = true;
     errorMessage = null;
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<OpenProjectResult>("open_project", {
         path: projectPath,
       });
@@ -107,7 +107,6 @@
     opening = true;
     errorMessage = null;
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
       const probe = await invoke<ProbePathResult>("probe_path", { path });
 
       if (probe.kind === "gwtProject" && probe.projectPath) {
@@ -137,7 +136,6 @@
 
   async function chooseParentDir() {
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
       if (selected) {
         parentDir = selected as string;
@@ -163,12 +161,10 @@
 
     let unlisten: null | (() => void) = null;
     try {
-      const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<CloneProgress>("clone-progress", (event) => {
         cloneProgress = event.payload;
       });
 
-      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<OpenProjectResult>("create_project", {
         request: { repoUrl, parentDir, shallow: shallowClone },
       });

@@ -28,7 +28,7 @@ fn with_panic_guard<T>(
     }
 }
 
-/// Get current profiles config (global: ~/.gwt/profiles.{toml,yaml})
+/// Get current profiles config (global: ~/.gwt/config.toml [profiles]).
 #[tauri::command]
 pub fn get_profiles() -> Result<ProfilesConfig, StructuredError> {
     with_panic_guard("loading profiles", "get_profiles", || {
@@ -36,7 +36,7 @@ pub fn get_profiles() -> Result<ProfilesConfig, StructuredError> {
     })
 }
 
-/// Save profiles config (always writes TOML: ~/.gwt/profiles.toml)
+/// Save profiles config (writes into ~/.gwt/config.toml [profiles]).
 #[tauri::command]
 pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<(), StructuredError> {
     with_panic_guard("saving profiles", "save_profiles", || {

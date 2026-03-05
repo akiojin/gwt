@@ -407,7 +407,7 @@ pub fn detect_docker_context(
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "detect_docker_context"))?;
 
-    let settings = Settings::load(project_root).unwrap_or_default();
+    let settings = Settings::load_global().unwrap_or_default();
     let force_host = settings.docker.force_host;
 
     let docker_ok = docker_available();

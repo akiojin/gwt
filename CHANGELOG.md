@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.3.4] - 2026-03-05
+
+### Bug Fixes
+
+- **gui:** Refit terminal when viewport width changes (#1468)
+- **settings:** Unify profile config storage and active profile flow (#1474)
+- **core:** Preserve claude plugin explicit-disable setting (#1473)
+- **core:** Unify global settings path resolution (#1476)
+- **core:** Remove authenticated field and detection logic from AgentInfo (#1475) (#1477)
+- **core:** Scope agent skill registration to project root (#1478)
+
 ## [8.3.3] - 2026-03-05
 
 ### Bug Fixes

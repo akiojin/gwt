@@ -3,7 +3,6 @@
 use crate::commands::terminal::builtin_agent_def;
 use crate::state::{AgentVersionsCache, AppState};
 use gwt_core::agent::{claude, codex, gemini, AgentInfo};
-use gwt_core::git::is_gh_cli_authenticated;
 use gwt_core::terminal::runner::{
     choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
 };
@@ -24,7 +23,6 @@ pub struct DetectedAgentInfo {
     pub name: String,
     pub version: String,
     pub path: Option<String>,
-    pub authenticated: bool,
     pub available: bool,
 }
 
@@ -237,36 +235,16 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
                 name: info.name,
                 version: info.version,
                 path: info.path.as_deref().map(normalize_command_path_for_display),
-                authenticated: info.authenticated,
                 available: true,
             };
         }
 
         if let Some(runner) = runner {
-            let authenticated = match id {
-                "claude" => {
-                    std::env::var("ANTHROPIC_API_KEY").is_ok()
-                        || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
-                        || gwt_core::config::AgentConfig::load()
-                            .ok()
-                            .map(|c| !c.claude.glm.auth_token.trim().is_empty())
-                            .unwrap_or(false)
-                }
-                "codex" => codex::is_codex_authenticated(),
-                "gemini" => {
-                    std::env::var("GOOGLE_API_KEY").is_ok()
-                        || std::env::var("GEMINI_API_KEY").is_ok()
-                }
-                "copilot" => is_gh_cli_authenticated(),
-                _ => false,
-            };
-
             return DetectedAgentInfo {
                 id: id.to_string(),
                 name: fallback_name.to_string(),
                 version: fallback_version(runner).to_string(),
                 path: fallback_path(runner, bunx_path, npx_path),
-                authenticated,
                 available: true,
             };
         }
@@ -276,7 +254,6 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
             name: fallback_name.to_string(),
             version: "not installed".to_string(),
             path: None,
-            authenticated: false,
             available: false,
         }
     }
@@ -291,8 +268,6 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
             name: "OpenCode".to_string(),
             version,
             path: Some(path),
-            // OpenCode can use multiple providers; we avoid false negatives here.
-            authenticated: true,
         })
     }
 
@@ -301,12 +276,10 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
         let version = gwt_core::agent::get_command_version("copilot", "--version")
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "unknown".to_string());
-        let authenticated = is_gh_cli_authenticated();
         Some(AgentInfo {
             name: "GitHub Copilot".to_string(),
             version,
             path: Some(path),
-            authenticated,
         })
     }
 

@@ -503,15 +503,16 @@
     onClose();
   }
 
-  function setActiveProfile(name: string | null) {
+  function setActiveProfile(name: string) {
     if (!profiles) return;
+    if (!name || !profiles.profiles?.[name]) return;
     profiles = { ...profiles, active: name };
-    selectedProfileKey = name ?? "";
+    selectedProfileKey = name;
   }
 
   function createProfile() {
     if (!profiles) return;
-    const name = newProfileName.trim();
+    const name = newProfileName.trim().toLowerCase();
     if (!name) return;
     if (!/^[a-z0-9-]+$/.test(name)) {
       saveMessage = "Profile name must be lowercase letters, numbers, or hyphens.";
@@ -533,7 +534,7 @@
     profiles = {
       ...profiles,
       profiles: { ...profiles.profiles, [name]: next },
-      active: profiles.active ?? name,
+      active: name,
     };
     selectedProfileKey = name;
     newProfileName = "";
@@ -1131,35 +1132,18 @@
                 id="active-profile"
                 class="select"
                 value={profiles?.active ?? ""}
-                onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value || null)}
+                onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value)}
               >
-                <option value="">(none)</option>
                 {#if profiles}
                   {#each sortedProfileKeys(profiles) as key}
                     <option value={key}>{key}</option>
                   {/each}
                 {/if}
               </select>
-              <span class="field-hint">Saved in ~/.gwt/profiles.toml</span>
-            </div>
-
-            <div class="field">
-              <label for="profile-edit">Edit Profile</label>
+              <span class="field-hint">Saved in ~/.gwt/config.toml ([profiles]).</span>
               <div class="row">
-                <select
-                  id="profile-edit"
-                  class="select"
-                  bind:value={selectedProfileKey}
-                  disabled={!profiles}
-                >
-                  {#if profiles}
-                    {#each sortedProfileKeys(profiles) as key}
-                      <option value={key}>{key}</option>
-                    {/each}
-                  {/if}
-                </select>
                 <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
-                  Delete
+                  Delete Active Profile
                 </button>
               </div>
             </div>

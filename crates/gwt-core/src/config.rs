@@ -23,12 +23,13 @@ pub use bare_project::BareProjectConfig;
 pub use claude_hook_events::process_claude_hook_event;
 pub use claude_hooks::is_gwt_hooks_registered;
 pub use claude_plugins::{
-    disable_gwt_plugin_at, enable_worktree_protection_plugin, get_global_claude_settings_path,
-    get_known_marketplaces_path, get_local_claude_settings_path, is_gwt_marketplace_registered,
-    is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings, is_plugin_explicitly_disabled,
-    register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, setup_gwt_plugin_at,
-    GWT_MARKETPLACE_NAME, GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME,
-    GWT_PLUGIN_NAME,
+    disable_gwt_plugin_at, enable_worktree_protection_plugin,
+    force_enable_worktree_protection_plugin, force_setup_gwt_plugin_at,
+    get_global_claude_settings_path, get_known_marketplaces_path, get_local_claude_settings_path,
+    is_gwt_marketplace_registered, is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings,
+    is_plugin_explicitly_disabled, register_gwt_marketplace, register_gwt_marketplace_at,
+    remove_gwt_plugin_key_at, setup_gwt_plugin, setup_gwt_plugin_at, GWT_MARKETPLACE_NAME,
+    GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
 };
 pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
@@ -46,11 +47,11 @@ pub use session::{
 };
 pub use settings::{Settings, SkillRegistrationPreferences};
 pub use skill_registration::{
-    get_skill_registration_status, get_skill_registration_status_with_settings_at_project_root,
-    register_agent_skills, register_agent_skills_with_settings_at_project_root,
-    register_all_skills, register_all_skills_with_settings_at_project_root,
-    repair_skill_registration, repair_skill_registration_with_settings_at_project_root,
-    unregister_all_skills, SkillAgentRegistrationStatus, SkillAgentType, SkillRegistrationStatus,
+    get_skill_registration_status_with_settings_at_project_root,
+    register_agent_skills_with_settings_at_project_root,
+    register_all_skills_with_settings_at_project_root,
+    repair_skill_registration_with_settings_at_project_root, SkillAgentRegistrationStatus,
+    SkillAgentType, SkillRegistrationStatus,
 };
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
@@ -88,43 +89,6 @@ impl TestEnvGuard {
 
         std::env::set_var("HOME", home_path);
         std::env::set_var("XDG_CONFIG_HOME", home_path.join(".config"));
-        std::env::set_var("USERPROFILE", home_path);
-        if let Some(home_str) = home_path.to_str() {
-            if home_str.len() >= 2 && home_str.as_bytes()[1] == b':' {
-                std::env::set_var("HOMEDRIVE", &home_str[..2]);
-                let rest = if home_str.len() > 2 {
-                    home_str[2..].replace('/', "\\")
-                } else {
-                    "\\".to_string()
-                };
-                let homepath = if rest.starts_with('\\') {
-                    rest
-                } else {
-                    format!("\\{rest}")
-                };
-                std::env::set_var("HOMEPATH", homepath);
-            }
-        }
-
-        Self {
-            prev_home,
-            prev_xdg_config,
-            prev_userprofile,
-            prev_homedrive,
-            prev_homepath,
-        }
-    }
-
-    /// Create a guard with explicit XDG_CONFIG_HOME setting
-    pub fn with_xdg(home_path: &std::path::Path, xdg_config_home: &std::path::Path) -> Self {
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        let prev_homedrive = std::env::var_os("HOMEDRIVE");
-        let prev_homepath = std::env::var_os("HOMEPATH");
-
-        std::env::set_var("HOME", home_path);
-        std::env::set_var("XDG_CONFIG_HOME", xdg_config_home);
         std::env::set_var("USERPROFILE", home_path);
         if let Some(home_str) = home_path.to_str() {
             if home_str.len() >= 2 && home_str.as_bytes()[1] == b':' {
