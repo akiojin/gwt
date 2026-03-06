@@ -41,7 +41,7 @@ Codex CLI の対応モデル更新に対して、gwt 側のモデル一覧と既
 - [x] R003 `terminal.rs` に起動引数の version gate 回帰テストを追加
 - [x] R004 Issue #1489 の FR / SC / Tasks を version gate 仕様へ更新
 - [x] R005 対象 Rust テストを実行して GREEN を確認
-- [ ] R006 Issue / worktree / commit を更新
+- [x] R006 Issue / worktree / commit を更新
 
 ### 調査メモ
 
