@@ -202,7 +202,7 @@ describe("AgentLaunchForm", () => {
     expect(binaryFallbackNotice).toBeTruthy();
   });
 
-  it("displays new codex model options including gpt-5.3-codex-spark", async () => {
+  it("displays codex model options including gpt-5.4", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
         return [
@@ -240,6 +240,7 @@ describe("AgentLaunchForm", () => {
     expect(options).toEqual([
       "",
       "gpt-5.3-codex",
+      "gpt-5.4",
       "gpt-5.3-codex-spark",
       "gpt-5.2-codex",
       "gpt-5.1-codex-max",
@@ -376,7 +377,7 @@ describe("AgentLaunchForm", () => {
     });
 
     const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
-    await fireEvent.change(modelSelect, { target: { value: "gpt-5.3-codex-spark" } });
+    await fireEvent.change(modelSelect, { target: { value: "gpt-5.4" } });
 
     const launchBtn = rendered.getByRole("button", { name: "Launch" });
     await fireEvent.click(launchBtn);
@@ -387,7 +388,7 @@ describe("AgentLaunchForm", () => {
 
     const request = onLaunch.mock.calls[0][0] as any;
     expect(request.agentId).toBe("codex");
-    expect(request.model).toBe("gpt-5.3-codex-spark");
+    expect(request.model).toBe("gpt-5.4");
   });
 
   it("disables capitalization and completion helpers for text and textarea inputs", async () => {

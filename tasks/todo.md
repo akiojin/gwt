@@ -1,3 +1,32 @@
+## TODO: Codex 新モデル対応（Issue #1489 / 2026-03-06）
+
+### 背景
+
+Codex CLI の対応モデル更新に対して、gwt 側のモデル一覧と既定モデルを追従させる必要がある。
+今回は `gpt-5.4` を追加し、今後の新モデル追加も同じ `gwt-spec` Issue #1489 を親仕様として更新し続ける。
+
+### 実装ステップ
+
+- [x] T001 `gwt-spec` Issue #1489 を作成し、Spec / Plan / Tasks / TDD を記載
+- [x] T002 RED: `AgentLaunchForm.test.ts` の Codex モデル一覧期待値を `gpt-5.4` 含みに更新
+- [x] T003 RED: `AgentLaunchForm.test.ts` の選択モデル送信テストを `gpt-5.4` 前提へ更新
+- [x] T004 RED: `crates/gwt-core/src/agent/codex.rs` の既定モデル期待値を `gpt-5.4` に更新
+- [x] T005 `AgentLaunchForm.svelte` の Codex モデル一覧へ `gpt-5.4` を追加
+- [x] T006 `crates/gwt-core/src/agent/codex.rs` の既定モデルを `gpt-5.4` に更新
+- [x] T007 既存の `agentLaunchDefaults` テストは後方互換確認として現状維持
+- [x] T008 対象テストと `svelte-check` / `cargo fmt --check` を実行して GREEN を確認
+- [x] T009 Issue #1489 / `tasks/todo.md` を最終状態へ更新
+
+### 検証結果
+
+- [x] `cd gwt-gui && pnpm install`
+- [x] `cd gwt-gui && pnpm test src/lib/components/AgentLaunchForm.test.ts src/lib/agentLaunchDefaults.test.ts`
+- [x] `cargo test -p gwt-core agent::codex::tests:: -- --test-threads=1`
+- [x] `cd gwt-gui && pnpm exec svelte-check --tsconfig ./tsconfig.json` — 0 errors, 1 warning（既存 `MergeDialog.svelte`）
+- [x] `cargo fmt --all -- --check` — success（rustfmt 設定の nightly 向け warning は既存）
+
+---
+
 ## TODO: Issue #1475 — Launch Agent で "Not authenticated" 警告を削除（2026-03-05）
 
 ### 背景
