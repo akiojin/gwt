@@ -122,25 +122,32 @@ Next
 3. **Fetch latest remote state**
    - `git fetch origin` to ensure accurate comparison
 
-4. **Check existing PR for head branch**
+4. **Check branch sync against base (critical)**
+   - Run `git rev-list --left-right --count "HEAD...origin/$base"`.
+   - Parse the result as `ahead behind`.
+   - If `behind > 0` and `ahead == 0` → stop and report `Branch update required before creating a PR.`
+   - If `behind > 0` and `ahead > 0` → stop and report `Branch has diverged from base. Sync it before creating a PR.`
+   - Continue only when `behind == 0`.
+
+5. **Check existing PR for head branch**
    - Use decision rules above to pick action.
    - Treat `mergedAt` as the source of truth for "merged".
 
-5. **If all PRs are merged, perform post-merge commit check**
+6. **If all PRs are merged, perform post-merge commit check**
    - Get merge commit: `gh pr list --head <head> --state merged --json mergeCommit -q '.[0].mergeCommit.oid'`
    - Count new commits: `git rev-list --count <merge_commit>..HEAD`
    - If 0 → finish with message "No new changes since merge"
    - If >0 → proceed to create new PR
 
-6. **Ensure the head branch is pushed**
+7. **Ensure the head branch is pushed**
    - If no upstream: `git push -u origin <head>`
    - Otherwise: `git push`
 
-7. **Collect PR inputs (for new PR or explicit update)**
+8. **Collect PR inputs (for new PR or explicit update)**
    - Title, Summary, Context, Changes, Testing, Risk/Impact, Deployment, Screenshots, Related Links, Notes
    - Optional: labels, reviewers, assignees, draft
 
-8. **Build PR body from template**
+9. **Build PR body from template**
    - Read the template from the gwt-pr skill path (not the current project path):
      - `PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"`
    - Read `${PR_BODY_TEMPLATE}` and fill all required placeholders.
@@ -148,14 +155,14 @@ Next
    - **テンプレート内の `<!-- GUIDE: ... -->` コメントは最終出力から削除する。**
    - **Required セクションに TODO が残っている場合は PR を作成せず、ユーザーに不足情報を確認する。**
 
-9. **Create or update the PR**
+10. **Create or update the PR**
    - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
    - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
 
-10. **Return PR URL**
+11. **Return PR URL**
     - `gh pr view <number> --json url -q .url`
 
-11. **Post-PR CI/merge check (automatic).**
+12. **Post-PR CI/merge check (automatic).**
     - After PR creation or push, load `skills/gwt-fix-pr/SKILL.md` and follow its workflow to inspect CI status, merge state, and review feedback.
     - If all CI checks are still pending, poll (30s interval) until complete.
     - If conflicts, review issues, or CI failures are detected, proceed with the gwt-fix-pr workflow to diagnose and fix.
@@ -184,6 +191,24 @@ fi
 
 # Fetch latest remote state
 git fetch origin
+
+# Check branch sync against base before PR creation
+divergence=$(git rev-list --left-right --count "HEAD...origin/$base" 2>/dev/null) || {
+  echo "Failed to compare HEAD with origin/$base" >&2
+  exit 1
+}
+ahead_count=$(echo "$divergence" | awk '{print $1}')
+behind_count=$(echo "$divergence" | awk '{print $2}')
+
+if [ "${behind_count:-0}" -gt 0 ] && [ "${ahead_count:-0}" -gt 0 ]; then
+  echo "Branch has diverged from base. Sync it before creating a PR." >&2
+  exit 1
+fi
+
+if [ "${behind_count:-0}" -gt 0 ]; then
+  echo "Branch update required before creating a PR." >&2
+  exit 1
+fi
 
 # Check existing PRs for the head branch
 pr_json=$(gh pr list --head "$head" --state all --json number,state,mergedAt,mergeCommit)

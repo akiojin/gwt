@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use gwt_core::git::gh_cli::{run_gh_output_with_repair, run_gh_output_with_timeout_and_repair};
 use gwt_core::git::graphql;
 use gwt_core::git::{
-    is_gh_cli_authenticated, is_gh_cli_available, PrCache, PrListItem, PrStatusInfo, Remote,
-    ReviewComment, ReviewInfo, WorkflowRunInfo,
+    detect_base_branch, is_gh_cli_authenticated, is_gh_cli_available, Branch, PrCache, PrListItem,
+    PrStatusInfo, Remote, ReviewComment, ReviewInfo, WorkflowRunInfo,
 };
 use gwt_core::StructuredError;
 use serde::Serialize;
@@ -121,6 +121,17 @@ pub struct BranchPrReference {
     pub url: Option<String>,
 }
 
+/// Preflight status for PR creation on a branch.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchPrPreflightResponse {
+    pub base_branch: String,
+    pub ahead_by: usize,
+    pub behind_by: usize,
+    pub status: String,
+    pub blocking_reason: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct LatestBranchPrCacheEntry {
     value: Option<BranchPrReference>,
@@ -135,6 +146,7 @@ const RETRY_INITIAL_INTERVAL: Duration = Duration::from_secs(2);
 const PR_UPDATE_BRANCH_TIMEOUT: Duration = Duration::from_secs(8);
 const PR_MERGE_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_PR_STATUS_WARN_THRESHOLD: Duration = Duration::from_millis(1000);
+const DEFAULT_PR_BASE_BRANCH: &str = "develop";
 
 /// Per-PR retry state for UNKNOWN merge status resolution.
 #[derive(Debug, Clone)]
@@ -192,6 +204,47 @@ fn write_latest_branch_pr_cache(cache_key: String, value: Option<BranchPrReferen
             fetched_at: Instant::now(),
         },
     );
+}
+
+fn resolve_pr_base_branch(repo_path: &Path, branch: &str, base_branch: Option<String>) -> String {
+    let explicit = base_branch
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(value) = explicit {
+        return value;
+    }
+
+    detect_base_branch(repo_path, branch)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_PR_BASE_BRANCH.to_string())
+}
+
+fn to_branch_pr_preflight(
+    base_branch: String,
+    ahead_by: usize,
+    behind_by: usize,
+) -> BranchPrPreflightResponse {
+    let (status, blocking_reason) = match (ahead_by, behind_by) {
+        (0, 0) => ("up_to_date".to_string(), None),
+        (_, 0) => ("ahead".to_string(), None),
+        (0, _) => (
+            "behind".to_string(),
+            Some("Branch update required before creating a PR.".to_string()),
+        ),
+        (_, _) => (
+            "diverged".to_string(),
+            Some("Branch has diverged from base. Sync it before creating a PR.".to_string()),
+        ),
+    };
+
+    BranchPrPreflightResponse {
+        base_branch,
+        ahead_by,
+        behind_by,
+        status,
+        blocking_reason,
+    }
 }
 
 fn pr_status_cache() -> &'static Mutex<PrStatusCommandCache> {
@@ -1034,6 +1087,50 @@ pub async fn update_pr_branch(project_path: String, pr_number: u64) -> Result<St
         .map_err(|e| format!("Task join failed: {e}"))?
 }
 
+fn fetch_branch_pr_preflight_impl(
+    project_path: String,
+    branch: String,
+    base_branch: Option<String>,
+) -> Result<BranchPrPreflightResponse, StructuredError> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "fetch_branch_pr_preflight"))?;
+    let remotes = Remote::list(&repo_path).unwrap_or_default();
+
+    let normalized_branch = strip_known_remote_prefix(branch.trim(), &remotes);
+    if normalized_branch.is_empty() {
+        return Err(StructuredError::internal(
+            "Branch name is required",
+            "fetch_branch_pr_preflight",
+        ));
+    }
+
+    let base_ref = resolve_pr_base_branch(&repo_path, normalized_branch, base_branch);
+    let (ahead_by, behind_by) =
+        Branch::divergence_between(&repo_path, normalized_branch, &base_ref)
+            .map_err(|e| StructuredError::internal(&e.to_string(), "fetch_branch_pr_preflight"))?;
+
+    Ok(to_branch_pr_preflight(base_ref, ahead_by, behind_by))
+}
+
+#[tauri::command]
+pub async fn fetch_branch_pr_preflight(
+    project_path: String,
+    branch: String,
+    base_branch: Option<String>,
+) -> Result<BranchPrPreflightResponse, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fetch_branch_pr_preflight_impl(project_path, branch, base_branch)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "fetch_branch_pr_preflight",
+        )
+    })?
+}
+
 /// Merge a pull request via GitHub REST API (SPEC-merge-pr FR-004)
 fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<String, String> {
     use gwt_core::git::resolve_repo_slug;
@@ -1726,6 +1823,42 @@ mod tests {
         assert!(json.contains("\"number\":123"));
         assert!(json.contains("\"state\":\"OPEN\""));
         assert!(json.contains("\"url\":\"https://github.com/example/repo/pull/123\""));
+    }
+
+    #[test]
+    fn test_to_branch_pr_preflight_reports_behind_as_blocking() {
+        let response = to_branch_pr_preflight("develop".to_string(), 0, 2);
+
+        assert_eq!(response.base_branch, "develop");
+        assert_eq!(response.ahead_by, 0);
+        assert_eq!(response.behind_by, 2);
+        assert_eq!(response.status, "behind");
+        assert_eq!(
+            response.blocking_reason.as_deref(),
+            Some("Branch update required before creating a PR.")
+        );
+    }
+
+    #[test]
+    fn test_to_branch_pr_preflight_reports_diverged_as_blocking() {
+        let response = to_branch_pr_preflight("develop".to_string(), 3, 1);
+
+        assert_eq!(response.base_branch, "develop");
+        assert_eq!(response.ahead_by, 3);
+        assert_eq!(response.behind_by, 1);
+        assert_eq!(response.status, "diverged");
+        assert_eq!(
+            response.blocking_reason.as_deref(),
+            Some("Branch has diverged from base. Sync it before creating a PR.")
+        );
+    }
+
+    #[test]
+    fn test_to_branch_pr_preflight_reports_ahead_without_blocking() {
+        let response = to_branch_pr_preflight("develop".to_string(), 4, 0);
+
+        assert_eq!(response.status, "ahead");
+        assert_eq!(response.blocking_reason, None);
     }
 
     #[test]
