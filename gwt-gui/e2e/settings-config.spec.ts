@@ -181,6 +181,9 @@ test("default profile delete button is disabled", async ({ page }) => {
   const deleteButton = page.getByRole("button", { name: "Delete Active Profile" });
   await expect(page.locator("#active-profile")).toHaveValue("default");
   await expect(deleteButton).toBeDisabled();
+  await expect(deleteButton).toHaveCSS("background-color", "rgb(49, 50, 68)");
+  await expect(deleteButton).toHaveCSS("color", "rgb(108, 112, 134)");
+  await expect(deleteButton).toHaveCSS("cursor", "not-allowed");
 
   const invokeLog = await getInvokeLog(page);
   expect(invokeLog).not.toContain("save_profiles");

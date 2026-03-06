@@ -1811,6 +1811,13 @@
     filter: brightness(1.05);
   }
 
+  .btn-danger:disabled {
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    cursor: not-allowed;
+    filter: none;
+  }
+
   .btn-ghost {
     background: none;
     border: 1px solid var(--border-color);
