@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor, cleanup } from "@testing-library/svelte";
 
 import type {
-  SkillRegistrationStatus,
   ProfilesConfig,
   SettingsData,
   ShellInfo,
@@ -68,32 +67,6 @@ const profilesFixture: ProfilesConfig = {
   },
 };
 
-const skillStatusFixture: SkillRegistrationStatus = {
-  overall: "ok",
-  agents: [
-    {
-      agent_id: "claude",
-      label: "Claude Code",
-      skills_path: "/tmp/.claude/skills",
-      registered: true,
-      missing_skills: [],
-      error_code: null,
-      error_message: null,
-    },
-    {
-      agent_id: "codex",
-      label: "Codex",
-      skills_path: "/tmp/.codex/skills",
-      registered: true,
-      missing_skills: [],
-      error_code: null,
-      error_message: null,
-    },
-  ],
-  last_checked_at: 1_739_763_600_000,
-  last_error_message: null,
-};
-
 const shellsFixture: ShellInfo[] = [
   { id: "powershell", name: "PowerShell", version: "7.4.1" },
   { id: "cmd", name: "Command Prompt" },
@@ -138,8 +111,6 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
-      if (command === "repair_skill_registration_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -158,12 +129,10 @@ describe("SettingsPanel", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("get_settings");
       expect(invokeMock).toHaveBeenCalledWith("get_profiles");
-      expect(invokeMock).toHaveBeenCalledWith("get_skill_registration_status_cmd");
+      const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+      const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
+      expect(tabNames).toEqual(["Appearance", "Voice Input", "Profiles"]);
     });
-
-    const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
-    const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
-    expect(tabNames).toEqual(["Appearance", "Voice Input", "GitHub Integration", "Profiles"]);
   });
 
   it("shows Appearance tab content by default", async () => {
@@ -191,18 +160,10 @@ describe("SettingsPanel", () => {
       expect(rendered.queryByText("Terminal Font Size")).toBeNull();
     });
 
-    // Switch to GitHub Integration
-    await switchToTab(rendered, "GitHub Integration");
-    await waitFor(() => {
-      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
-      expect(rendered.queryByText("Enable Voice Input")).toBeNull();
-    });
-
     // Switch to Profiles
     await switchToTab(rendered, "Profiles");
     await waitFor(() => {
       expect(rendered.getByText("Active Profile")).toBeTruthy();
-      expect(rendered.container.querySelector(".skill-overview")).toBeNull();
     });
 
     // Switch back to Appearance
@@ -210,64 +171,6 @@ describe("SettingsPanel", () => {
     await waitFor(() => {
       expect(rendered.getByText("Terminal Font Size")).toBeTruthy();
       expect(rendered.queryByText("Active Profile")).toBeNull();
-    });
-  });
-
-  it("repairs skill registration status", async () => {
-    const degradedStatus: SkillRegistrationStatus = {
-      ...skillStatusFixture,
-      overall: "degraded",
-      agents: skillStatusFixture.agents.map((agent) =>
-        agent.agent_id === "codex"
-          ? {
-              ...agent,
-              registered: false,
-              missing_skills: ["gwt-pty-communication", "gwt-issue-spec-ops"],
-            }
-          : agent
-      ),
-      last_error_message: "Missing skills: gwt-pty-communication, gwt-issue-spec-ops",
-    };
-    const repairedStatus: SkillRegistrationStatus = {
-      ...skillStatusFixture,
-      overall: "ok",
-      agents: skillStatusFixture.agents.map((agent) => ({
-        ...agent,
-        registered: true,
-        missing_skills: [],
-      })),
-      last_error_message: null,
-    };
-
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
-      if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_skill_registration_status_cmd") return structuredClone(degradedStatus);
-      if (command === "repair_skill_registration_cmd") return structuredClone(repairedStatus);
-      if (command === "save_settings") return null;
-      if (command === "save_profiles") return null;
-      return null;
-    });
-
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    await waitFor(() => {
-      expect(rendered.getByText("Overall: DEGRADED")).toBeTruthy();
-    });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Repair Skill Registration" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("repair_skill_registration_cmd");
-      expect(rendered.getByText("Overall: OK")).toBeTruthy();
-      expect(rendered.getByText("Skill registration repaired.")).toBeTruthy();
     });
   });
 
@@ -288,7 +191,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -328,7 +231,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -353,7 +256,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -370,7 +273,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -459,7 +362,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -482,7 +385,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -519,7 +422,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -640,8 +543,6 @@ describe("SettingsPanel", () => {
       }
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
-      if (command === "repair_skill_registration_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -729,7 +630,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -765,7 +666,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -831,7 +732,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -871,7 +772,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -912,7 +813,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -942,7 +843,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -979,7 +880,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1036,7 +937,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1075,7 +976,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
@@ -1088,7 +989,6 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_mcp_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return structuredClone(shellsFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -1108,7 +1008,6 @@ describe("SettingsPanel", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") throw new Error("shell list failed");
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -1129,7 +1028,6 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_mcp_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return structuredClone(shellsFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -1179,7 +1077,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1220,7 +1118,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1269,7 +1167,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1284,7 +1182,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1346,7 +1244,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1374,7 +1272,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1410,7 +1308,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1429,7 +1327,7 @@ describe("SettingsPanel", () => {
   it("updates selected AI model and persists it in profile config", async () => {
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1471,7 +1369,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1488,7 +1386,7 @@ describe("SettingsPanel", () => {
   it("shows refresh hint when endpoint changes after models are loaded", async () => {
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1518,7 +1416,6 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_mcp_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return structuredClone(shellsFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -1563,7 +1460,6 @@ describe("SettingsPanel", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(emptyProfiles);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -1573,7 +1469,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1588,7 +1484,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1626,7 +1522,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1678,7 +1574,6 @@ describe("SettingsPanel", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(noEndpointProfiles);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -1688,7 +1583,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1724,7 +1619,6 @@ describe("SettingsPanel", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(noLangProfiles);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -1734,7 +1628,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1758,185 +1652,12 @@ describe("SettingsPanel", () => {
     expect(summaryCheckbox.checked).toBe(false);
   });
 
-  it("shows repair failure message when repair_skill_registration_cmd throws", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
-      if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
-      if (command === "repair_skill_registration_cmd") throw new Error("repair failed");
-      if (command === "get_available_shells") return [];
-      if (command === "save_settings") return null;
-      if (command === "save_profiles") return null;
-      return null;
-    });
-
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    await waitFor(() => {
-      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
-    });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Repair Skill Registration" }));
-
-    await waitFor(() => {
-      expect(rendered.getByText("Failed to repair skill registration: repair failed")).toBeTruthy();
-    });
-  });
-
-  it("shows repair-remains-degraded message when repair returns non-ok status", async () => {
-    const degradedStatus: SkillRegistrationStatus = {
-      ...skillStatusFixture,
-      overall: "degraded",
-      last_error_message: "some issue",
-    };
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
-      if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(degradedStatus);
-      if (command === "repair_skill_registration_cmd") return structuredClone(degradedStatus);
-      if (command === "get_available_shells") return [];
-      if (command === "save_settings") return null;
-      if (command === "save_profiles") return null;
-      return null;
-    });
-
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Repair Skill Registration" }));
-
-    await waitFor(() => {
-      expect(
-        rendered.getByText("Skill registration remains degraded. Check details below.")
-      ).toBeTruthy();
-    });
-  });
-
-  it("shows skill status refresh failure message when refresh command throws", async () => {
-    let callCount = 0;
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
-      if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "get_skill_registration_status_cmd") {
-        callCount++;
-        if (callCount > 1) throw new Error("refresh network error");
-        return structuredClone(skillStatusFixture);
-      }
-      if (command === "get_available_shells") return [];
-      if (command === "save_settings") return null;
-      if (command === "save_profiles") return null;
-      return null;
-    });
-
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    await waitFor(() => {
-      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
-    });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Refresh Skill Status" }));
-
-    await waitFor(() => {
-      expect(rendered.getByText("Failed to refresh skill status: refresh network error")).toBeTruthy();
-    });
-  });
-
-  it("shows last_error_message when skill status has global error", async () => {
-    const errorStatus: SkillRegistrationStatus = {
-      ...skillStatusFixture,
-      overall: "failed",
-      last_error_message: "global skill registration error",
-    };
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
-      if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(errorStatus);
-      if (command === "get_available_shells") return [];
-      if (command === "save_settings") return null;
-      if (command === "save_profiles") return null;
-      return null;
-    });
-
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    await waitFor(() => {
-      expect(rendered.getByText("global skill registration error")).toBeTruthy();
-    });
-  });
-
-  it("shows agent error_message and missing_skills in skill agent list", async () => {
-    const withAgentError: SkillRegistrationStatus = {
-      overall: "degraded",
-      agents: [
-        {
-          agent_id: "claude",
-          label: "Claude Code",
-          skills_path: "/tmp/.claude/skills",
-          registered: false,
-          missing_skills: ["gwt-pty-communication"],
-          error_code: "MISSING_SKILLS",
-          error_message: "Some skills are not installed",
-        },
-      ],
-      last_checked_at: 1_739_763_600_000,
-      last_error_message: null,
-    };
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
-      if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(withAgentError);
-      if (command === "get_available_shells") return [];
-      if (command === "save_settings") return null;
-      if (command === "save_profiles") return null;
-      return null;
-    });
-
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    await waitFor(() => {
-      expect(rendered.getByText("Missing: gwt-pty-communication")).toBeTruthy();
-      expect(rendered.getByText("Some skills are not installed")).toBeTruthy();
-      // Agent without skills_path won't show path - but Claude has one
-      expect(rendered.container.textContent).toContain("/tmp/.claude/skills");
-    });
-  });
-
   it("defaults shell selection to empty string when default_shell is null", async () => {
     const noShellSettings = structuredClone(settingsFixture);
     (noShellSettings as any).default_shell = null;
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(noShellSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return structuredClone(shellsFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -1974,46 +1695,6 @@ describe("SettingsPanel", () => {
     });
   });
 
-  it("shows loading state for skill status via Refreshing label", async () => {
-    let resolveSkill!: (v: any) => void;
-    const pendingSkill = new Promise<any>((r) => { resolveSkill = r; });
-    let callCount = 0;
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
-      if (command === "get_profiles") return structuredClone(profilesFixture);
-      if (command === "get_skill_registration_status_cmd") {
-        callCount++;
-        if (callCount === 1) return structuredClone(skillStatusFixture);
-        return pendingSkill;
-      }
-      if (command === "get_available_shells") return [];
-      if (command === "save_settings") return null;
-      if (command === "save_profiles") return null;
-      return null;
-    });
-
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    await waitFor(() => {
-      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
-    });
-
-    // Trigger a refresh that will stay pending
-    await fireEvent.click(rendered.getByRole("button", { name: "Refresh Skill Status" }));
-
-    await waitFor(() => {
-      expect(rendered.getByText("Refreshing...")).toBeTruthy();
-    });
-
-    resolveSkill(structuredClone(skillStatusFixture));
-  });
-
   it("shows voice capability loading message when checking capability", async () => {
     let resolveCapability!: (v: any) => void;
     const pendingCapability = new Promise<any>((r) => { resolveCapability = r; });
@@ -2027,7 +1708,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -2050,7 +1731,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -2173,7 +1854,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2209,7 +1890,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -2218,26 +1899,6 @@ describe("SettingsPanel", () => {
       expect(
         rendered.getByText(/GPU acceleration and Qwen runtime are required/)
       ).toBeTruthy();
-    });
-  });
-
-  it("refreshes skill status and shows message on success", async () => {
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-
-    await waitFor(() => {
-      expect(rendered.container.querySelector(".skill-overview")).toBeTruthy();
-    });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Refresh Skill Status" }));
-
-    await waitFor(() => {
-      expect(rendered.getByText("Skill status refreshed.")).toBeTruthy();
     });
   });
 
@@ -2283,24 +1944,6 @@ describe("SettingsPanel", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(malformedSettings);
       if (command === "get_profiles") return structuredClone(malformedProfiles);
-      if (command === "get_skill_registration_status_cmd") {
-        return {
-          overall: null,
-          agents: [
-            {
-              agent_id: null,
-              label: null,
-              skills_path: null,
-              registered: false,
-              missing_skills: [42, "req-a"],
-              error_code: null,
-              error_message: null,
-            },
-          ],
-          last_checked_at: null,
-          last_error_message: null,
-        } as any;
-      }
       if (command === "get_available_shells") {
         return [{ id: "pwsh", name: "PowerShell", version: null }];
       }
@@ -2318,7 +1961,6 @@ describe("SettingsPanel", () => {
       expect(tabNames).toEqual([
         "Appearance",
         "Voice Input",
-        "GitHub Integration",
         "Profiles",
         "Terminal",
       ]);
@@ -2347,17 +1989,6 @@ describe("SettingsPanel", () => {
       expect(language?.value).toBe("auto");
       expect(quality?.value).toBe("balanced");
       expect(model?.value).toBe("Qwen/Qwen3-ASR-1.7B");
-    });
-
-    await switchToTab(rendered, "GitHub Integration");
-    await waitFor(() => {
-      expect(rendered.getByText("Overall: FAILED")).toBeTruthy();
-      const agentLabel = rendered.container.querySelector(
-        ".skill-agent-label",
-      ) as HTMLElement | null;
-      expect(agentLabel?.textContent?.trim()).toBe("Unknown");
-      expect(rendered.getByText("Missing: req-a")).toBeTruthy();
-      expect(rendered.getByText(/Last checked:/)).toBeTruthy();
     });
 
     await switchToTab(rendered, "Terminal");
@@ -2390,7 +2021,6 @@ describe("SettingsPanel", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(emptyKeyProfiles);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -2400,7 +2030,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2414,7 +2044,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2428,7 +2058,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2445,7 +2075,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2476,7 +2106,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2504,7 +2134,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2534,7 +2164,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2558,7 +2188,7 @@ describe("SettingsPanel", () => {
       const rendered = await renderSettingsPanel();
 
       await waitFor(() => {
-        expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+        expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
       });
 
       await switchToTab(rendered, "Profiles");
@@ -2593,7 +2223,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2627,7 +2257,6 @@ describe("SettingsPanel", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(underscoreProfiles);
-      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -2637,7 +2266,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
