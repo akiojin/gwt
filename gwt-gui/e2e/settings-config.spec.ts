@@ -4,6 +4,7 @@ import {
   defaultRecentProject,
   settingsFixture,
   profilesFixture,
+  getInvokeLog,
   openRecentProject,
   setMockCommandResponses,
   waitForInvokeCommand,
@@ -167,6 +168,25 @@ test("Profiles tab shows default profile", async ({ page }) => {
     .click();
 
   await expect(page.locator("#active-profile")).toHaveValue("default");
+});
+
+test("default profile delete button is disabled", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses());
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const deleteButton = page.getByRole("button", { name: "Delete Active Profile" });
+  await expect(page.locator("#active-profile")).toHaveValue("default");
+  await expect(deleteButton).toBeDisabled();
+  await expect(deleteButton).toHaveCSS("background-color", "rgb(49, 50, 68)");
+  await expect(deleteButton).toHaveCSS("color", "rgb(108, 112, 134)");
+  await expect(deleteButton).toHaveCSS("cursor", "not-allowed");
+
+  const invokeLog = await getInvokeLog(page);
+  expect(invokeLog).not.toContain("save_profiles");
 });
 
 test("Profiles tab uses Active Profile selector only and shows config.toml hint", async ({
@@ -430,6 +450,8 @@ test("Profiles API key peek and copy buttons appear after typing", async ({
 
   const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
   const apiKeyInput = apiKeyField.locator("input").first();
+  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeHidden();
+  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeHidden();
   await apiKeyInput.fill("sk-typed-key");
 
   await expect(apiKeyField.locator(".btn-peek-apikey")).toBeVisible();
