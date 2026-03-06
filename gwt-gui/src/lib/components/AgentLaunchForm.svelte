@@ -244,6 +244,7 @@
     selectedAgent === "codex"
       ? [
           { value: "gpt-5.3-codex", label: "gpt-5.3-codex" },
+          { value: "gpt-5.4", label: "gpt-5.4" },
           { value: "gpt-5.3-codex-spark", label: "gpt-5.3-codex-spark" },
           { value: "gpt-5.2-codex", label: "gpt-5.2-codex" },
           { value: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max" },
@@ -1477,7 +1478,8 @@
                   <label class="glm-label" for="glm-api-token">API Token</label>
                   <input
                     id="glm-api-token"
-                    type="password"
+                    type="text"
+                    class="api-key-masked"
                     autocapitalize="off"
                     autocorrect="off"
                     autocomplete="off"
@@ -2021,6 +2023,8 @@
     font-family: monospace;
     outline: none;
   }
+
+  .glm-field input.api-key-masked { -webkit-text-security: disc; }
 
   .glm-field input:focus {
     border-color: var(--accent);

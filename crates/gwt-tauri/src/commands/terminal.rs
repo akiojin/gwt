@@ -77,7 +77,7 @@ pub struct TerminalAnsiProbe {
 #[serde(rename_all = "camelCase")]
 pub struct LaunchProgressPayload {
     pub job_id: String,
-    /// "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps"
+    /// "fetch" | "validate" | "paths" | "conflicts" | "create" | "skills" | "deps"
     pub step: String,
     pub detail: Option<String>,
 }
@@ -2242,6 +2242,10 @@ fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
     })
 }
 
+fn should_launch_agent_with_wsl_shell(shell_id: Option<&str>) -> bool {
+    cfg!(target_os = "windows") && shell_id == Some("wsl")
+}
+
 /// Resolve shell command and arguments for `spawn_shell`.
 ///
 /// When an explicit shell id is given (e.g. `"powershell"`, `"cmd"`, `"wsl"`),
@@ -2500,6 +2504,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolve_shell_id_for_spawn(Some("fish")), None);
+    }
+
+    #[test]
+    fn should_launch_agent_with_wsl_shell_requires_wsl_id() {
+        assert!(!should_launch_agent_with_wsl_shell(None));
+        assert!(!should_launch_agent_with_wsl_shell(Some("cmd")));
+        assert!(!should_launch_agent_with_wsl_shell(Some("powershell")));
+    }
+
+    #[test]
+    fn should_launch_agent_with_wsl_shell_is_windows_only() {
+        assert_eq!(
+            should_launch_agent_with_wsl_shell(Some("wsl")),
+            cfg!(target_os = "windows")
+        );
     }
 
     #[test]
@@ -3129,6 +3148,18 @@ multi_agent = true
         assert!(modern
             .iter()
             .any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_default_model_is_version_gated() {
+        let req = make_request("codex");
+
+        let latest = build_agent_args("codex", &req, Some("latest"), false).unwrap();
+        assert!(latest.iter().any(|a| a == "--model=gpt-5.4"));
+
+        let installed = build_agent_args("codex", &req, Some("0.111.0"), false).unwrap();
+        assert!(installed.iter().any(|a| a == "--model=gpt-5.2-codex"));
+        assert!(!installed.iter().any(|a| a == "--model=gpt-5.4"));
     }
 
     #[test]
@@ -4158,6 +4189,42 @@ pub(crate) fn launch_agent_for_project_root(
             });
         }
 
+        // --- Skill registration ---
+        tracing::debug!(job_id = ?job_id, "launch step: skills");
+        report_launch_progress(job_id, &app_handle, "skills", None);
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
+        }
+        match gwt_core::config::Settings::load_global() {
+            Ok(settings) => {
+                if is_launch_cancelled(cancelled) {
+                    return Err("Cancelled".to_string());
+                }
+                let status =
+                    gwt_core::config::repair_skill_registration_with_settings_at_project_root(
+                        &settings,
+                        Some(project_root.as_path()),
+                    );
+                if is_launch_cancelled(cancelled) {
+                    return Err("Cancelled".to_string());
+                }
+                state.set_skill_registration_status(status);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "skills step skipped: failed to load global settings"
+                );
+                if is_launch_cancelled(cancelled) {
+                    return Err("Cancelled".to_string());
+                }
+                state.set_skill_registration_status(Default::default());
+            }
+        }
+        if is_launch_cancelled(cancelled) {
+            return Err("Cancelled".to_string());
+        }
+
         tracing::debug!(job_id = ?job_id, "launch step: deps (waiting for environment)");
         report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));
         if is_launch_cancelled(cancelled) {
@@ -4801,15 +4868,10 @@ pub(crate) fn launch_agent_for_project_root(
                 }
             }
             DockerExecMode::None => {
-                let terminal_shell = request
-                    .terminal_shell
-                    .as_deref()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
+                let terminal_shell = resolve_shell_id_for_spawn(request.terminal_shell.as_deref());
 
                 // WSL agent launch uses the PTY-write approach (FR-007).
-                if terminal_shell.as_deref() == Some("wsl") {
+                if should_launch_agent_with_wsl_shell(terminal_shell.as_deref()) {
                     if is_launch_cancelled(cancelled) {
                         return Err("Cancelled".to_string());
                     }
