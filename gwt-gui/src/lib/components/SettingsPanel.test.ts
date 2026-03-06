@@ -227,6 +227,80 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("disables deleting the default profile", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("Active Profile");
+
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const deleteButton = rendered.getByRole("button", {
+      name: "Delete Active Profile",
+    }) as HTMLButtonElement;
+
+    expect(activeProfile.value).toBe("default");
+    expect(deleteButton.disabled).toBe(true);
+
+    await fireEvent.click(deleteButton);
+
+    await waitFor(() => {
+      const options = Array.from(activeProfile.options).map((opt) => opt.value);
+      expect(options).toContain("default");
+      expect(activeProfile.value).toBe("default");
+    });
+  });
+
+  it("allows deleting a malformed default-like profile key", async () => {
+    const malformedProfiles = structuredClone(profilesFixture);
+    malformedProfiles.active = "default ";
+    malformedProfiles.profiles["default "] = {
+      name: "default ",
+      description: "",
+      env: { BROKEN: "1" },
+      disabled_env: [],
+      ai_enabled: false,
+      ai: null,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(malformedProfiles);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("Active Profile");
+
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const deleteButton = rendered.getByRole("button", {
+      name: "Delete Active Profile",
+    }) as HTMLButtonElement;
+
+    expect(activeProfile.value).toBe("default ");
+    expect(deleteButton.disabled).toBe(false);
+
+    await fireEvent.click(deleteButton);
+
+    await waitFor(() => {
+      const options = Array.from(activeProfile.options).map((opt) => opt.value);
+      expect(options).not.toContain("default ");
+      expect(activeProfile.value).toBe("default");
+    });
+  });
+
   it("loads AI model options on manual refresh", async () => {
     const rendered = await renderSettingsPanel();
 
@@ -2040,6 +2114,46 @@ describe("SettingsPanel", () => {
     expect(rendered.container.querySelector(".btn-copy-apikey")).toBeNull();
   });
 
+  it("shows peek and copy buttons when API key is typed", async () => {
+    const emptyKeyProfiles = structuredClone(profilesFixture);
+    emptyKeyProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(emptyKeyProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+
+    await fireEvent.input(apiKeyInput, { target: { value: "sk-draft-key" } });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
+      expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
+    });
+  });
+
   it("shows peek and copy buttons when API key is non-empty", async () => {
     const rendered = await renderSettingsPanel();
 
@@ -2302,6 +2416,141 @@ describe("SettingsPanel", () => {
       expect(saveCall).toBeTruthy();
       const savedConfig = saveCall![1].config as ProfilesConfig;
       expect(savedConfig.profiles.default.ai?.api_key).toBe("sk-saved-key");
+    });
+  });
+
+  it("resets API key draft and button visibility when switching profiles", async () => {
+    const twoProfiles = structuredClone(profilesFixture);
+    twoProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+    twoProfiles.profiles.dev = {
+      name: "dev",
+      description: "",
+      env: {},
+      disabled_env: [],
+      ai_enabled: true,
+      ai: {
+        endpoint: "https://api.openai.com/v1",
+        api_key: "",
+        model: "gpt-4o-mini",
+        language: "en",
+        summary_enabled: true,
+      },
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(twoProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+
+    await fireEvent.input(apiKeyInput, { target: { value: "sk-unsaved-key" } });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
+      expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
+    });
+
+    await fireEvent.change(activeProfile, { target: { value: "dev" } });
+
+    await waitFor(() => {
+      expect(apiKeyInput.value).toBe("");
+      expect(rendered.container.querySelector(".btn-peek-apikey")).toBeNull();
+      expect(rendered.container.querySelector(".btn-copy-apikey")).toBeNull();
+    });
+  });
+
+  it("preserves unsaved API key edits across profile switches on Save", async () => {
+    const twoProfiles = structuredClone(profilesFixture);
+    twoProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+    twoProfiles.profiles.dev = {
+      name: "dev",
+      description: "",
+      env: {},
+      disabled_env: [],
+      ai_enabled: true,
+      ai: {
+        endpoint: "https://api.openai.com/v1",
+        api_key: "",
+        model: "gpt-4o-mini",
+        language: "en",
+        summary_enabled: true,
+      },
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(twoProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+
+    await fireEvent.input(apiKeyInput, { target: { value: "sk-profile-a" } });
+    await fireEvent.change(activeProfile, { target: { value: "dev" } });
+
+    const saveBtn = rendered.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    await fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      const saveCall = invokeMock.mock.calls.findLast(([cmd]) => cmd === "save_profiles");
+      expect(saveCall).toBeTruthy();
+      const savedConfig = saveCall![1].config as ProfilesConfig;
+      expect(savedConfig.profiles.default.ai?.api_key).toBe("sk-profile-a");
+      expect(savedConfig.profiles.dev.ai?.api_key).toBe("");
+    });
+
+    await fireEvent.change(activeProfile, { target: { value: "default" } });
+
+    await waitFor(() => {
+      expect(apiKeyInput.value).toBe("sk-profile-a");
+      expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
+      expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
     });
   });
 
