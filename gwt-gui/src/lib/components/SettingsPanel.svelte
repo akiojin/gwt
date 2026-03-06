@@ -628,10 +628,9 @@
     peekingApiKey = false;
   }
 
-  function updateApiKeyDraft(value: string) {
-    apiKeyDraft = value;
+  function syncApiKeyDraftToProfile() {
     apiKeyCopied = false;
-    updateAiField("api_key", value);
+    updateAiField("api_key", apiKeyDraft);
   }
 
   function toggleApiKeyPeekFromNonPointerClick(event: MouseEvent) {
@@ -1203,14 +1202,16 @@
                         autocorrect="off"
                         autocomplete="off"
                         spellcheck="false"
-                        value={apiKeyDraft}
-                        oninput={(e) => updateApiKeyDraft((e.target as HTMLInputElement).value)}
+                        bind:value={apiKeyDraft}
+                        oninput={syncApiKeyDraftToProfile}
+                        onchange={syncApiKeyDraftToProfile}
                       />
-                      {#if hasApiKey}
+                      <div class="ai-apikey-actions" class:hidden={!hasApiKey}>
                         <button
                           type="button"
                           class="btn btn-ghost btn-icon btn-peek-apikey"
                           class:peeking={peekingApiKey}
+                          disabled={!hasApiKey}
                           onmousedown={startApiKeyPeek}
                           onmouseup={stopApiKeyPeek}
                           onmouseleave={stopApiKeyPeek}
@@ -1231,6 +1232,7 @@
                           type="button"
                           class="btn btn-ghost btn-icon btn-copy-apikey"
                           class:copied={apiKeyCopied}
+                          disabled={!hasApiKey}
                           onclick={handleCopyApiKey}
                           title={apiKeyCopied ? "Copied!" : "Copy API Key"}
                           aria-label={apiKeyCopied ? "Copied!" : "Copy API Key"}
@@ -1240,7 +1242,7 @@
                             <rect class="copy-front" x="9" y="8" width="10" height="12" rx="1.8"></rect>
                           </svg>
                         </button>
-                      {/if}
+                      </div>
                     </div>
                   </div>
                   <div class="ai-field">
@@ -1594,6 +1596,16 @@
 
   .ai-apikey-row input { flex: 1; min-width: 0; }
   .ai-apikey-row input.api-key-masked { -webkit-text-security: disc; }
+  .ai-apikey-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .ai-apikey-actions.hidden {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
 
   .btn-icon {
     width: 32px;
