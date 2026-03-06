@@ -3151,6 +3151,18 @@ multi_agent = true
     }
 
     #[test]
+    fn build_agent_args_codex_default_model_is_version_gated() {
+        let req = make_request("codex");
+
+        let latest = build_agent_args("codex", &req, Some("latest"), false).unwrap();
+        assert!(latest.iter().any(|a| a == "--model=gpt-5.4"));
+
+        let installed = build_agent_args("codex", &req, Some("0.111.0"), false).unwrap();
+        assert!(installed.iter().any(|a| a == "--model=gpt-5.2-codex"));
+        assert!(!installed.iter().any(|a| a == "--model=gpt-5.4"));
+    }
+
+    #[test]
     fn build_agent_args_claude_continue_prefers_resume_id_when_provided() {
         let mut req = make_request("claude");
         req.mode = Some(SessionMode::Continue);

@@ -244,6 +244,7 @@
     selectedAgent === "codex"
       ? [
           { value: "gpt-5.3-codex", label: "gpt-5.3-codex" },
+          { value: "gpt-5.4", label: "gpt-5.4" },
           { value: "gpt-5.3-codex-spark", label: "gpt-5.3-codex-spark" },
           { value: "gpt-5.2-codex", label: "gpt-5.2-codex" },
           { value: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max" },
