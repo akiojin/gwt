@@ -301,6 +301,62 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("re-disables deleting after switching back to the default profile", async () => {
+    const twoProfiles = structuredClone(profilesFixture);
+    twoProfiles.profiles.dev = {
+      name: "dev",
+      description: "",
+      env: { DEV_KEY: "dev-value" },
+      disabled_env: [],
+      ai_enabled: true,
+      ai: {
+        endpoint: "https://api.openai.com/v1",
+        api_key: "dev-key",
+        model: "gpt-4o-mini",
+        language: "en",
+        summary_enabled: true,
+      },
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(twoProfiles);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("Active Profile");
+
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const deleteButton = rendered.getByRole("button", {
+      name: "Delete Active Profile",
+    }) as HTMLButtonElement;
+
+    expect(activeProfile.value).toBe("default");
+    expect(deleteButton.disabled).toBe(true);
+
+    await fireEvent.change(activeProfile, { target: { value: "dev" } });
+    await waitFor(() => {
+      expect(activeProfile.value).toBe("dev");
+      expect(deleteButton.disabled).toBe(false);
+    });
+
+    await fireEvent.change(activeProfile, { target: { value: "default" } });
+    await waitFor(() => {
+      expect(activeProfile.value).toBe("default");
+      expect(deleteButton.disabled).toBe(true);
+    });
+  });
+
   it("loads AI model options on manual refresh", async () => {
     const rendered = await renderSettingsPanel();
 

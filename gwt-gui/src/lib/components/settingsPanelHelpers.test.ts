@@ -7,6 +7,7 @@ import {
   UI_FONT_PRESETS,
   TERMINAL_FONT_PRESETS,
   getCurrentProfile,
+  isDefaultProfileKey,
   isAiEnabled,
   toErrorMessage,
   detectGpuAvailability,
@@ -63,6 +64,13 @@ describe("settingsPanelHelpers", () => {
         },
       }),
     ).toBe(true);
+  });
+
+  it("matches only the exact default profile key", () => {
+    expect(isDefaultProfileKey("default")).toBe(true);
+    expect(isDefaultProfileKey("default ")).toBe(false);
+    expect(isDefaultProfileKey("Default")).toBe(false);
+    expect(isDefaultProfileKey("dev")).toBe(false);
   });
 
   it("converts errors to display messages", () => {

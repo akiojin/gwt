@@ -60,12 +60,17 @@ export const TERMINAL_FONT_PRESETS: FontPreset[] = [
 ];
 
 export const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
+export const DEFAULT_PROFILE_KEY = "default";
 
 export function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
   if (!cfg) return null;
   if (!key) return null;
   const p = cfg.profiles?.[key];
   return p ?? null;
+}
+
+export function isDefaultProfileKey(key: string): boolean {
+  return key === DEFAULT_PROFILE_KEY;
 }
 
 export function isAiEnabled(profile: Profile | null): boolean {
