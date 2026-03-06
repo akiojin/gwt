@@ -96,6 +96,7 @@
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
+  let defaultProfileSelected = $derived(selectedProfileKey.trim() === "default");
 
   function resetAiModelsState() {
     aiModelsRequestSeq += 1;
@@ -490,6 +491,7 @@
   function deleteSelectedProfile() {
     if (!profiles) return;
     if (!selectedProfileKey) return;
+    if (defaultProfileSelected) return;
     const copy = { ...(profiles.profiles ?? {}) };
     if (!copy[selectedProfileKey]) return;
     delete copy[selectedProfileKey];
@@ -1024,7 +1026,11 @@
               </select>
               <span class="field-hint">Saved in ~/.gwt/config.toml ([profiles]).</span>
               <div class="row">
-                <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
+                <button
+                  class="btn btn-danger"
+                  onclick={deleteSelectedProfile}
+                  disabled={!profiles || !selectedProfileKey || defaultProfileSelected}
+                >
                   Delete Active Profile
                 </button>
               </div>

@@ -227,6 +227,33 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("disables deleting the default profile", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("Active Profile");
+
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const deleteButton = rendered.getByRole("button", {
+      name: "Delete Active Profile",
+    }) as HTMLButtonElement;
+
+    expect(activeProfile.value).toBe("default");
+    expect(deleteButton.disabled).toBe(true);
+
+    await fireEvent.click(deleteButton);
+
+    await waitFor(() => {
+      const options = Array.from(activeProfile.options).map((opt) => opt.value);
+      expect(options).toContain("default");
+      expect(activeProfile.value).toBe("default");
+    });
+  });
+
   it("loads AI model options on manual refresh", async () => {
     const rendered = await renderSettingsPanel();
 
