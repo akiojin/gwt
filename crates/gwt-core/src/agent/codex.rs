@@ -14,6 +14,9 @@ use tokio::process::Command;
 const DEFAULT_CODEX_MODEL_LATEST: &str = "gpt-5.4";
 const DEFAULT_CODEX_MODEL_LEGACY: &str = "gpt-5.2-codex";
 const DEFAULT_CODEX_REASONING: &str = "high";
+const CODEX_GPT_5_4_CONTEXT_WINDOW: &str = "1000000";
+const CODEX_GPT_5_4_AUTO_COMPACT_TOKEN_LIMIT: &str = "950000";
+const CODEX_GPT_5_4_DEFAULT_FROM: &str = "0.111.0";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_COLLABORATION_MODES_MIN_VERSION: &str = "0.91.0";
@@ -161,13 +164,28 @@ fn should_enable_codex_skills_flag(version: Option<&str>) -> bool {
 }
 
 fn codex_default_model(version: Option<&str>) -> &'static str {
-    // `latest` resolves through the package runner and is the only lane where we can
-    // safely assume newly released models are available without breaking pinned/installed CLIs.
-    if version.is_some_and(|v| v.eq_ignore_ascii_case("latest")) {
+    if codex_supports_gpt_5_4_default(version) {
         DEFAULT_CODEX_MODEL_LATEST
     } else {
         DEFAULT_CODEX_MODEL_LEGACY
     }
+}
+
+fn codex_supports_gpt_5_4_default(version: Option<&str>) -> bool {
+    if version.is_some_and(|v| v.eq_ignore_ascii_case("latest")) {
+        return true;
+    }
+
+    let parsed = parse_version(version);
+    let threshold = parse_version(Some(CODEX_GPT_5_4_DEFAULT_FROM));
+    match (parsed, threshold) {
+        (Some(parsed), Some(threshold)) => compare_versions(&parsed, &threshold) != Ordering::Less,
+        _ => false,
+    }
+}
+
+fn codex_uses_gpt_5_4_context_overrides(model: &str) -> bool {
+    model.eq_ignore_ascii_case(DEFAULT_CODEX_MODEL_LATEST)
 }
 
 /// Check if Codex version supports collaboration_modes (SPEC-fdebd681)
@@ -275,6 +293,19 @@ pub fn codex_default_args(
 
     let web_search_args = get_web_search_args(skills_flag_version);
     let mut args = vec![format!("--model={}", model)];
+
+    if codex_uses_gpt_5_4_context_overrides(model) {
+        args.extend([
+            "-c".to_string(),
+            format!("model_context_window={}", CODEX_GPT_5_4_CONTEXT_WINDOW),
+            "-c".to_string(),
+            format!(
+                "model_auto_compact_token_limit={}",
+                CODEX_GPT_5_4_AUTO_COMPACT_TOKEN_LIMIT
+            ),
+        ]);
+    }
+
     args.extend(web_search_args);
 
     if !bypass_sandbox {
@@ -440,13 +471,25 @@ mod tests {
     fn test_codex_default_args_latest_uses_gpt_5_4() {
         let args = codex_default_args(None, None, Some("latest"), false, false, false);
         assert!(args.contains(&"--model=gpt-5.4".to_string()));
+        assert!(args.contains(&"model_context_window=1000000".to_string()));
+        assert!(args.contains(&"model_auto_compact_token_limit=950000".to_string()));
     }
 
     #[test]
-    fn test_codex_default_args_resolved_versions_keep_legacy_default() {
+    fn test_codex_default_args_modern_resolved_versions_use_gpt_5_4() {
         let args = codex_default_args(None, None, Some("0.111.0"), false, false, false);
+        assert!(args.contains(&"--model=gpt-5.4".to_string()));
+        assert!(args.contains(&"model_context_window=1000000".to_string()));
+        assert!(args.contains(&"model_auto_compact_token_limit=950000".to_string()));
+    }
+
+    #[test]
+    fn test_codex_default_args_legacy_resolved_versions_keep_legacy_default() {
+        let args = codex_default_args(None, None, Some("0.110.0"), false, false, false);
         assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
         assert!(!args.contains(&"--model=gpt-5.4".to_string()));
+        assert!(!args.contains(&"model_context_window=1000000".to_string()));
+        assert!(!args.contains(&"model_auto_compact_token_limit=950000".to_string()));
     }
 
     #[test]
@@ -454,6 +497,16 @@ mod tests {
         let args = codex_default_args(Some("gpt-5.2"), Some("xhigh"), None, false, false, false);
         assert!(args.contains(&"--model=gpt-5.2".to_string()));
         assert!(args.contains(&"model_reasoning_effort=xhigh".to_string()));
+        assert!(!args.contains(&"model_context_window=1000000".to_string()));
+        assert!(!args.contains(&"model_auto_compact_token_limit=950000".to_string()));
+    }
+
+    #[test]
+    fn test_codex_default_args_gpt_5_4_override_enables_context_overrides() {
+        let args = codex_default_args(Some("gpt-5.4"), None, Some("0.111.0"), false, false, false);
+        assert!(args.contains(&"--model=gpt-5.4".to_string()));
+        assert!(args.contains(&"model_context_window=1000000".to_string()));
+        assert!(args.contains(&"model_auto_compact_token_limit=950000".to_string()));
     }
 
     #[test]
