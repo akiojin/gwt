@@ -2249,7 +2249,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2280,7 +2280,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
     });
 
     await switchToTab(rendered, "Profiles");
