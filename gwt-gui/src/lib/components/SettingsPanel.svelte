@@ -60,6 +60,9 @@
   let savedTerminalFontFamily: string = $state(
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace'
   );
+  let apiKeyDraft: string = $state("");
+  let apiKeyDraftProfileKey: string = $state("");
+  let apiKeyDraftSourceValue: string = $state("");
   let peekingApiKey: boolean = $state(false);
   let apiKeyCopied: boolean = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -79,7 +82,7 @@
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     if (!profileKey || !ai || !endpoint) return "";
-    const apiKey = ai?.api_key?.trim() ?? "";
+    const apiKey = apiKeyDraft.trim();
     return `${profileKey}::${endpoint}::${apiKey}`;
   });
   let aiModelOptions = $derived.by(() => {
@@ -103,6 +106,15 @@
     aiModelsLoading = false;
     aiModelsError = null;
     aiModelsLoadedKey = "";
+  }
+
+  function resetApiKeyUiState() {
+    peekingApiKey = false;
+    apiKeyCopied = false;
+    if (copyTimer !== null) {
+      clearTimeout(copyTimer);
+      copyTimer = null;
+    }
   }
 
   $effect(() => {
@@ -160,6 +172,18 @@
     };
   });
 
+  $effect(() => {
+    const profileKey = selectedProfileKey.trim();
+    const nextValue = currentProfile?.ai?.api_key ?? "";
+    if (profileKey === apiKeyDraftProfileKey && nextValue === apiKeyDraftSourceValue) {
+      return;
+    }
+    apiKeyDraftProfileKey = profileKey;
+    apiKeyDraftSourceValue = nextValue;
+    apiKeyDraft = nextValue;
+    resetApiKeyUiState();
+  });
+
   async function handleSetupVoiceRuntime() {
     voiceRuntimeSettingUp = true;
     voiceSetupMessage = null;
@@ -196,11 +220,6 @@
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
-
-    // Reset peek/copy state on profile switch
-    peekingApiKey = false;
-    apiKeyCopied = false;
-    if (copyTimer !== null) { clearTimeout(copyTimer); copyTimer = null; }
 
     if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
       if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
@@ -288,7 +307,7 @@
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
-    const apiKey = ai?.api_key?.trim() ?? "";
+    const apiKey = apiKeyDraft.trim();
     if (!profileKey || !ai || !endpoint || !isAiEnabled(currentProfile)) {
       aiModelsError = "Endpoint is required.";
       return;
@@ -353,7 +372,7 @@
       const { invoke } = await import("$lib/tauriInvoke");
       await invoke("save_settings", { settings });
       if (profiles) {
-        await invoke("save_profiles", { config: profiles });
+        await invoke("save_profiles", { config: buildProfilesConfigWithApiKeyDraft() });
       }
       settings.app_language = normalizeAppLanguage(settings.app_language);
       saveMessage = "Settings saved.";
@@ -559,8 +578,36 @@
     };
   }
 
+  function buildProfilesConfigWithApiKeyDraft(): ProfilesConfig {
+    if (!profiles) {
+      throw new Error("Profiles are not loaded");
+    }
+    const p = currentProfile;
+    if (!p || !selectedProfileKey) {
+      return profiles;
+    }
+    if (!p.ai && apiKeyDraft.length === 0) {
+      return profiles;
+    }
+
+    const nextAi = {
+      endpoint: p.ai?.endpoint ?? "",
+      api_key: apiKeyDraft,
+      model: p.ai?.model ?? "",
+      language: p.ai?.language ?? "en",
+      summary_enabled: p.ai?.summary_enabled ?? true,
+    } as NonNullable<Profile["ai"]>;
+    const nextProfile: Profile = { ...p, ai: nextAi };
+    const nextProfiles = {
+      ...profiles,
+      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
+    };
+    profiles = nextProfiles;
+    return nextProfiles;
+  }
+
   async function handleCopyApiKey() {
-    const key = currentProfile?.ai?.api_key ?? "";
+    const key = apiKeyDraft;
     if (!key) return;
     try {
       await navigator.clipboard.writeText(key);
@@ -1119,7 +1166,7 @@
                   summary_enabled: true,
                 }}
                 {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
-                {@const hasApiKey = (currentAi?.api_key ?? "").length > 0}
+                {@const hasApiKey = apiKeyDraft.length > 0}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
@@ -1143,8 +1190,11 @@
                         autocorrect="off"
                         autocomplete="off"
                         spellcheck="false"
-                        value={currentAi?.api_key ?? ""}
-                        oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
+                        value={apiKeyDraft}
+                        oninput={(e) => {
+                          apiKeyDraft = (e.target as HTMLInputElement).value;
+                          apiKeyCopied = false;
+                        }}
                       />
                       {#if hasApiKey}
                         <button
