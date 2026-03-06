@@ -11,6 +11,7 @@
     UI_FONT_PRESETS,
     TERMINAL_FONT_PRESETS,
     getCurrentProfile,
+    isDefaultProfileKey,
     isAiEnabled,
     toErrorMessage,
     detectGpuAvailability,
@@ -99,7 +100,7 @@
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
-  let defaultProfileSelected = $derived(selectedProfileKey === "default");
+  let defaultProfileSelected = $derived(isDefaultProfileKey(selectedProfileKey));
 
   function resetAiModelsState() {
     aiModelsRequestSeq += 1;
@@ -510,7 +511,7 @@
   function deleteSelectedProfile() {
     if (!profiles) return;
     if (!selectedProfileKey) return;
-    if (defaultProfileSelected) return;
+    if (isDefaultProfileKey(selectedProfileKey)) return;
     const copy = { ...(profiles.profiles ?? {}) };
     if (!copy[selectedProfileKey]) return;
     delete copy[selectedProfileKey];

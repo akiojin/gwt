@@ -4,6 +4,7 @@ import {
   defaultRecentProject,
   settingsFixture,
   profilesFixture,
+  getInvokeLog,
   openRecentProject,
   setMockCommandResponses,
   waitForInvokeCommand,
@@ -167,6 +168,22 @@ test("Profiles tab shows default profile", async ({ page }) => {
     .click();
 
   await expect(page.locator("#active-profile")).toHaveValue("default");
+});
+
+test("default profile delete button is disabled", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses());
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const deleteButton = page.getByRole("button", { name: "Delete Active Profile" });
+  await expect(page.locator("#active-profile")).toHaveValue("default");
+  await expect(deleteButton).toBeDisabled();
+
+  const invokeLog = await getInvokeLog(page);
+  expect(invokeLog).not.toContain("save_profiles");
 });
 
 test("Profiles tab uses Active Profile selector only and shows config.toml hint", async ({
