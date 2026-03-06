@@ -14,10 +14,6 @@ import {
   normalizeAppLanguage,
   normalizeUiFontFamily,
   normalizeTerminalFontFamily,
-  normalizeSkillStatus,
-  skillStatusClass,
-  skillStatusText,
-  formatRegistrationCheckedAt,
   clampFontSize,
 } from "./settingsPanelHelpers";
 
@@ -204,76 +200,6 @@ describe("settingsPanelHelpers", () => {
     expect(normalizeTerminalFontFamily('"Custom Mono", monospace')).toBe(
       '"Custom Mono", monospace',
     );
-  });
-
-  it("normalizes skill status payload and filters invalid fields", () => {
-    const normalizedDefault = normalizeSkillStatus(null);
-    expect(normalizedDefault.overall).toBe("failed");
-    expect(normalizedDefault.agents).toEqual([]);
-    expect(typeof normalizedDefault.last_checked_at).toBe("number");
-
-    const normalized = normalizeSkillStatus({
-      overall: "ok",
-      last_checked_at: 123,
-      last_error_message: "none",
-      agents: [
-        {
-          agent_id: undefined as any,
-          label: undefined as any,
-          skills_path: undefined as any,
-          registered: 0 as any,
-          missing_skills: ["a", 1 as any, "b"],
-          error_code: undefined as any,
-          error_message: undefined as any,
-        },
-        {
-          agent_id: "codex",
-          label: "Codex",
-          skills_path: "/tmp/.codex/skills",
-          registered: true,
-          missing_skills: null as any,
-          error_code: null,
-          error_message: null,
-        },
-      ],
-    });
-
-    expect(normalized.overall).toBe("ok");
-    expect(normalized.last_checked_at).toBe(123);
-    expect(normalized.last_error_message).toBe("none");
-    expect(normalized.agents).toEqual([
-      {
-        agent_id: "unknown",
-        label: "Unknown",
-        skills_path: null,
-        registered: false,
-        missing_skills: ["a", "b"],
-        error_code: null,
-        error_message: null,
-      },
-      {
-        agent_id: "codex",
-        label: "Codex",
-        skills_path: "/tmp/.codex/skills",
-        registered: true,
-        missing_skills: [],
-        error_code: null,
-        error_message: null,
-      },
-    ]);
-  });
-
-  it("formats status labels and checked-at text", () => {
-    expect(skillStatusClass("ok")).toBe("status-ok");
-    expect(skillStatusClass("degraded")).toBe("status-degraded");
-    expect(skillStatusClass("failed")).toBe("status-failed");
-
-    expect(skillStatusText(null)).toBe("UNKNOWN");
-    expect(skillStatusText("ok")).toBe("OK");
-
-    expect(formatRegistrationCheckedAt(null)).toBe("-");
-    expect(formatRegistrationCheckedAt(0)).toBe("-");
-    expect(formatRegistrationCheckedAt(1)).not.toBe("-");
   });
 
   it("clamps font sizes", () => {

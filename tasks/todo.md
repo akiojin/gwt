@@ -1,3 +1,34 @@
+## TODO: Issue #1480 — AI設定で未認証エラー（APIキーがmacOSで設定されない）
+
+### 背景
+
+Settings > Profile で API キーを入力し Refresh すると 401 (E9002) になる。
+`~/.gwt/config.toml` で `api_key = ""` のまま。endpoint (`type="text"`) は正常保存されるが、
+api_key (`type="password"`) だけ機能しない。macOS WKWebView の `<input type="password">` で
+`oninput` イベントが正常に発火しない、または `e.target.value` が空文字を返す WKWebView 固有の挙動。
+
+### 修正方針
+
+`type="password"` を廃止し、`type="text"` + CSS `-webkit-text-security: disc` でマスク表示にする。
+
+### 実装ステップ
+
+- [x] T001 TDD: テスト更新・追加（type="text" 検証、peek の class 切替検証、API キー入力→state反映）→ RED 確認（5 tests failed）
+- [x] T002 `SettingsPanel.svelte`: input type 変更 + CSS マスク + readonly 削除
+- [x] T003 `SettingsPanel.svelte`: スタイルセクション更新（`.ai-field input[type="password"]` 削除、`.api-key-masked` 追加）
+- [x] T004 テスト実行 → GREEN 確認（81 tests passed）
+- [x] T005 svelte-check / clippy 検証（0 errors / 1 warning）
+- [x] T006 コミット＆プッシュ（657f3189）
+
+### 検証結果
+
+- [x] `cd gwt-gui && pnpm test src/lib/components/SettingsPanel.test.ts` — 81 tests passed
+- [x] `cd gwt-gui && pnpm test` — 67 files / 1415 tests passed
+- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` — 0 errors, 1 warning（既存 MergeDialog.svelte）
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` — 警告なし
+
+---
+
 ## TODO: Issue #1475 — Launch Agent で "Not authenticated" 警告を削除（2026-03-05）
 
 ### 背景
