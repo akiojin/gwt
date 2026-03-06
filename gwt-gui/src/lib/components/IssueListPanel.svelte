@@ -620,24 +620,6 @@
             {/if}
           </div>
 
-          {#if detailError}
-            <div class="ilp-error">{detailError}</div>
-          {/if}
-
-          <!-- Body -->
-          <div class="ilp-detail-body">
-            {#if isSpecIssue(detailIssue)}
-              <IssueSpecPanel
-                {projectPath}
-                issueNumber={detailIssue.number}
-              />
-            {:else if detailIssue.body}
-              <MarkdownRenderer text={detailIssue.body} />
-            {:else}
-              <p class="ilp-empty">No description provided.</p>
-            {/if}
-          </div>
-
           <!-- Actions -->
           <div class="ilp-detail-actions">
             {#if resolveExistingBranch(detailIssue.number)}
@@ -669,6 +651,24 @@
             >
               Open in GitHub
             </button>
+          </div>
+
+          {#if detailError}
+            <div class="ilp-error">{detailError}</div>
+          {/if}
+
+          <!-- Body -->
+          <div class="ilp-detail-body">
+            {#if isSpecIssue(detailIssue)}
+              <IssueSpecPanel
+                {projectPath}
+                issueNumber={detailIssue.number}
+              />
+            {:else if detailIssue.body}
+              <MarkdownRenderer text={detailIssue.body} />
+            {:else}
+              <p class="ilp-empty">No description provided.</p>
+            {/if}
           </div>
         </div>
       {/if}
@@ -1065,7 +1065,7 @@
   .ilp-detail-actions {
     display: flex;
     gap: 8px;
-    padding-top: 8px;
+    padding-bottom: 8px;
   }
 
   .ilp-action-btn {

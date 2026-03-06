@@ -1137,8 +1137,8 @@
                     <span class="ai-label">API Key</span>
                     <div class="row ai-apikey-row">
                       <input
-                        type={peekingApiKey ? "text" : "password"}
-                        readonly={peekingApiKey}
+                        type="text"
+                        class:api-key-masked={!peekingApiKey}
                         autocapitalize="off"
                         autocorrect="off"
                         autocomplete="off"
@@ -1519,7 +1519,6 @@
   }
 
   .ai-field input[type="text"],
-  .ai-field input[type="password"],
   .ai-field select {
     padding: 8px 12px;
     background: var(--bg-secondary);
@@ -1534,6 +1533,7 @@
   }
 
   .ai-apikey-row input { flex: 1; min-width: 0; }
+  .ai-apikey-row input.api-key-masked { -webkit-text-security: disc; }
 
   .btn-icon {
     width: 32px;

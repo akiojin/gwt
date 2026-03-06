@@ -1478,7 +1478,8 @@
                   <label class="glm-label" for="glm-api-token">API Token</label>
                   <input
                     id="glm-api-token"
-                    type="password"
+                    type="text"
+                    class="api-key-masked"
                     autocapitalize="off"
                     autocorrect="off"
                     autocomplete="off"
@@ -2022,6 +2023,8 @@
     font-family: monospace;
     outline: none;
   }
+
+  .glm-field input.api-key-masked { -webkit-text-security: disc; }
 
   .glm-field input:focus {
     border-color: var(--accent);
