@@ -625,6 +625,12 @@
     peekingApiKey = false;
   }
 
+  function updateApiKeyDraft(value: string) {
+    apiKeyDraft = value;
+    apiKeyCopied = false;
+    updateAiField("api_key", value);
+  }
+
   function toggleApiKeyPeekFromNonPointerClick(event: MouseEvent) {
     // Keyboard and assistive activation can dispatch click without pointer down/up.
     if (event.detail !== 0) return;
@@ -1191,10 +1197,7 @@
                         autocomplete="off"
                         spellcheck="false"
                         value={apiKeyDraft}
-                        oninput={(e) => {
-                          apiKeyDraft = (e.target as HTMLInputElement).value;
-                          apiKeyCopied = false;
-                        }}
+                        oninput={(e) => updateApiKeyDraft((e.target as HTMLInputElement).value)}
                       />
                       {#if hasApiKey}
                         <button
