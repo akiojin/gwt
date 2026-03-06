@@ -262,17 +262,23 @@ fn is_powershell_executable(command: &str) -> bool {
     )
 }
 
+fn normalize_windows_working_dir_for_shell(working_dir: &Path) -> String {
+    working_dir.to_string_lossy().replace('/', "\\")
+}
+
 fn cmd_cd_expression(working_dir: &Path) -> String {
     format!(
         "cd /D \"{}\"",
-        escape_cmd_double_quoted(working_dir.to_string_lossy().as_ref())
+        escape_cmd_double_quoted(normalize_windows_working_dir_for_shell(working_dir).as_ref())
     )
 }
 
 fn powershell_set_location_expression(working_dir: &Path) -> String {
     format!(
         "Set-Location -LiteralPath '{}'",
-        escape_powershell_single_quoted(working_dir.to_string_lossy().as_ref())
+        escape_powershell_single_quoted(
+            normalize_windows_working_dir_for_shell(working_dir).as_ref()
+        )
     )
 }
 
@@ -1221,6 +1227,23 @@ mod tests {
     }
 
     #[test]
+    fn inject_windows_working_dir_into_spawn_args_cmd_normalizes_forward_slash_worktree_path() {
+        let mut args = vec!["/C".to_string(), "codex --version".to_string()];
+        inject_windows_working_dir_into_spawn_args(
+            "cmd.exe",
+            &mut args,
+            Path::new("E:/gwt/bugfix/issue-1466"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "/C".to_string(),
+                "cd /D \"E:\\gwt\\bugfix\\issue-1466\" && codex --version".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn inject_windows_working_dir_into_spawn_args_powershell_prefixes_set_location() {
         let mut args = vec![
             "-NoLogo".to_string(),
@@ -1235,6 +1258,30 @@ mod tests {
         assert_eq!(
             args[6],
             "Set-Location -LiteralPath 'C:\\repo\\it''s'; & 'codex' '--version'".to_string()
+        );
+    }
+
+    #[test]
+    fn inject_windows_working_dir_into_spawn_args_powershell_normalizes_forward_slash_worktree_path(
+    ) {
+        let mut args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-Command".to_string(),
+            "& 'codex' '--version'".to_string(),
+        ];
+        inject_windows_working_dir_into_spawn_args(
+            "pwsh",
+            &mut args,
+            Path::new("E:/gwt/bugfix/issue-1466"),
+        );
+        assert_eq!(
+            args[6],
+            "Set-Location -LiteralPath 'E:\\gwt\\bugfix\\issue-1466'; & 'codex' '--version'"
+                .to_string()
         );
     }
 
