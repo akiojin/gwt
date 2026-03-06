@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.4.0] - 2026-03-06
+
+### Bug Fixes
+
+- **launch:** Wire skills step into launch progress flow (#1484)
+- **terminal:** Prevent non-Windows WSL agent fallback (#1486)
+- **gui:** Move issue detail action buttons above body (#1482) (#1483)
+- **gui:** Align masked token input behavior across settings and launch form (#1485)
+
+### Features
+
+- **codex:** Add gpt-5.4 model support (#1490)
+
 ## [8.3.4] - 2026-03-05
 
 ### Bug Fixes
