@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::process::Command;
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.4";
+const DEFAULT_CODEX_MODEL_LATEST: &str = "gpt-5.4";
+const DEFAULT_CODEX_MODEL_LEGACY: &str = "gpt-5.2-codex";
 const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
@@ -159,6 +160,16 @@ fn should_enable_codex_skills_flag(version: Option<&str>) -> bool {
     }
 }
 
+fn codex_default_model(version: Option<&str>) -> &'static str {
+    // `latest` resolves through the package runner and is the only lane where we can
+    // safely assume newly released models are available without breaking pinned/installed CLIs.
+    if version.is_some_and(|v| v.eq_ignore_ascii_case("latest")) {
+        DEFAULT_CODEX_MODEL_LATEST
+    } else {
+        DEFAULT_CODEX_MODEL_LEGACY
+    }
+}
+
 /// Check if Codex version supports collaboration_modes (SPEC-fdebd681)
 ///
 /// Returns true if version is v0.91.0 or later.
@@ -256,7 +267,7 @@ pub fn codex_default_args(
     let model = model_override
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_CODEX_MODEL);
+        .unwrap_or_else(|| codex_default_model(skills_flag_version));
     let reasoning = reasoning_override
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -421,8 +432,21 @@ mod tests {
         // Unknown version defaults to config-based web_search
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"web_search=live".to_string()));
-        assert!(args.contains(&"--model=gpt-5.4".to_string()));
+        assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
         assert!(args.contains(&"model_reasoning_effort=high".to_string()));
+    }
+
+    #[test]
+    fn test_codex_default_args_latest_uses_gpt_5_4() {
+        let args = codex_default_args(None, None, Some("latest"), false, false, false);
+        assert!(args.contains(&"--model=gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn test_codex_default_args_resolved_versions_keep_legacy_default() {
+        let args = codex_default_args(None, None, Some("0.111.0"), false, false, false);
+        assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
+        assert!(!args.contains(&"--model=gpt-5.4".to_string()));
     }
 
     #[test]

@@ -27,6 +27,30 @@ Codex CLI の対応モデル更新に対して、gwt 側のモデル一覧と既
 
 ---
 
+## TODO: Review対応 — Codex 既定モデルの version gate（2026-03-06）
+
+### 背景
+
+`gpt-5.4` を Codex の既定モデルへ一律で切り替えると、installed/pinned の旧 Codex CLI でも
+空モデル時に `--model=gpt-5.4` を送ってしまい、互換性回帰になる。
+
+### 実装ステップ
+
+- [x] R001 `codex.rs` に既定モデル選択ヘルパーを追加し、`latest` のみ `gpt-5.4` を使う
+- [x] R002 `codex.rs` に latest / resolved version の unit test を追加
+- [x] R003 `terminal.rs` に起動引数の version gate 回帰テストを追加
+- [x] R004 Issue #1489 の FR / SC / Tasks を version gate 仕様へ更新
+- [x] R005 対象 Rust テストを実行して GREEN を確認
+- [ ] R006 Issue / worktree / commit を更新
+
+### 調査メモ
+
+- `codex --help` / `codex exec --help` には 1M context を有効化する専用起動フラグは見当たらない
+- `openai/codex` の公開 `models.json`（少なくとも `rust-v0.106.0`〜`rust-v0.111.0`）にも `gpt-5.4` は確認できない
+- よって現時点では `gpt-5.4` の 1M context を `gwt` 側の追加引数で有効化する実装根拠はない
+
+---
+
 ## TODO: Issue #1475 — Launch Agent で "Not authenticated" 警告を削除（2026-03-05）
 
 ### 背景
