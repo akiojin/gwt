@@ -400,6 +400,84 @@ test("Profiles API key value with underscores is persisted on save_profiles", as
   expect(ai?.api_key).toBe(apiKeyValue);
 });
 
+test("Profiles API key peek and copy buttons appear after typing", async ({
+  page,
+}) => {
+  const profilesWithAi = {
+    ...profilesFixture,
+    profiles: {
+      ...profilesFixture.profiles,
+      default: {
+        ...profilesFixture.profiles.default,
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "",
+          model: "",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+  await apiKeyInput.fill("sk-typed-key");
+
+  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeVisible();
+  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeVisible();
+});
+
+test("Profiles API key typed value is sent to list_ai_models on Refresh", async ({
+  page,
+}) => {
+  const profilesWithAi = {
+    ...profilesFixture,
+    profiles: {
+      ...profilesFixture.profiles,
+      default: {
+        ...profilesFixture.profiles.default,
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "",
+          model: "",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+  await apiKeyInput.fill("sk-refresh-check-123");
+
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await waitForInvokeCommand(page, "list_ai_models");
+
+  const args = await getInvokeArgs(page, "list_ai_models");
+  expect(args).toMatchObject({
+    endpoint: "https://api.openai.com/v1",
+    apiKey: "sk-refresh-check-123",
+  });
+});
+
 test("UI Font Family selector shows presets", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
