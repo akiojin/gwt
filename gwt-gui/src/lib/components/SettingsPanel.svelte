@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import type {
-    SkillRegistrationStatus,
     ProfilesConfig,
     Profile,
     SettingsData,
@@ -19,10 +18,6 @@
     normalizeAppLanguage,
     normalizeUiFontFamily,
     normalizeTerminalFontFamily,
-    normalizeSkillStatus,
-    skillStatusClass,
-    skillStatusText,
-    formatRegistrationCheckedAt,
     clampFontSize,
   } from "./settingsPanelHelpers";
 
@@ -31,7 +26,6 @@
   type SettingsTabId =
     | "appearance"
     | "voiceInput"
-    | "githubIntegration"
     | "profiles"
     | "terminal";
   let activeSettingsTab: SettingsTabId = $state("appearance");
@@ -66,11 +60,6 @@
   let savedTerminalFontFamily: string = $state(
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace'
   );
-  let skillStatus: SkillRegistrationStatus | null = $state(null);
-  let skillStatusLoading: boolean = $state(false);
-  let skillStatusRepairing: boolean = $state(false);
-  let skillStatusMessage: string = $state("");
-
   let peekingApiKey: boolean = $state(false);
   let apiKeyCopied: boolean = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -256,47 +245,6 @@
     applyTerminalFontFamily(savedTerminalFontFamily);
   });
 
-  async function loadSkillStatus(showRefreshMessage: boolean) {
-    skillStatusLoading = true;
-    if (showRefreshMessage) {
-      skillStatusMessage = "";
-    }
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const status = await invoke<SkillRegistrationStatus>("get_skill_registration_status_cmd");
-      skillStatus = normalizeSkillStatus(status);
-      if (showRefreshMessage) {
-        skillStatusMessage = "Skill status refreshed.";
-      }
-    } catch (err) {
-      skillStatus = skillStatus ?? normalizeSkillStatus(null);
-      const message = toErrorMessage(err);
-      skillStatusMessage = showRefreshMessage
-        ? `Failed to refresh skill status: ${message}`
-        : `Failed to load skill status: ${message}`;
-    } finally {
-      skillStatusLoading = false;
-    }
-  }
-
-  async function repairSkillStatus() {
-    skillStatusRepairing = true;
-    skillStatusMessage = "";
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const status = await invoke<SkillRegistrationStatus>("repair_skill_registration_cmd");
-      skillStatus = normalizeSkillStatus(status);
-      skillStatusMessage =
-        status.overall === "ok"
-          ? "Skill registration repaired."
-          : "Skill registration remains degraded. Check details below.";
-    } catch (err) {
-      skillStatusMessage = `Failed to repair skill registration: ${toErrorMessage(err)}`;
-    } finally {
-      skillStatusRepairing = false;
-    }
-  }
-
   async function fetchAiModels(
     endpoint: string,
     apiKey: string,
@@ -376,7 +324,6 @@
       const keys = Object.keys(loadedProfiles.profiles ?? {});
       const nextSelected = loadedProfiles.active ?? keys[0] ?? "";
       selectedProfileKey = nextSelected;
-      await loadSkillStatus(false);
       try {
         const result = await invoke<ShellInfo[]>("get_available_shells");
         availableShells = Array.isArray(result) ? result : [];
@@ -680,11 +627,6 @@
           class:active={activeSettingsTab === "voiceInput"}
           onclick={() => (activeSettingsTab = "voiceInput")}
         >Voice Input</button>
-        <button
-          class="settings-tab-btn"
-          class:active={activeSettingsTab === "githubIntegration"}
-          onclick={() => (activeSettingsTab = "githubIntegration")}
-        >GitHub Integration</button>
         <button
           class="settings-tab-btn"
           class:active={activeSettingsTab === "profiles"}
@@ -1037,66 +979,6 @@
               </div>
             {/if}
           </div>
-        {:else if activeSettingsTab === "githubIntegration"}
-          <div class="section-content">
-            <div class="skill-overview">
-              <span class={`skill-badge ${skillStatusClass(skillStatus?.overall ?? "failed")}`}>
-                Overall: {skillStatusText(skillStatus?.overall)}
-              </span>
-              <span class="field-hint">
-                Last checked: {formatRegistrationCheckedAt(skillStatus?.last_checked_at)}
-              </span>
-            </div>
-
-            <div class="skill-agent-list">
-              {#each skillStatus?.agents ?? [] as agent (agent.agent_id)}
-                <div class="skill-agent-row">
-                  <div class="skill-agent-meta">
-                    <span class="skill-agent-label">{agent.label}</span>
-                    {#if agent.skills_path}
-                      <span class="skill-agent-path mono">{agent.skills_path}</span>
-                    {/if}
-                    {#if agent.missing_skills.length > 0}
-                      <span class="field-hint">
-                        Missing: {agent.missing_skills.join(", ")}
-                      </span>
-                    {/if}
-                    {#if agent.error_message}
-                      <span class="field-hint">{agent.error_message}</span>
-                    {/if}
-                  </div>
-                  <span class={`skill-mini-badge ${agent.registered ? "status-ok" : "status-failed"}`}>
-                    {agent.registered ? "REGISTERED" : "MISSING"}
-                  </span>
-                </div>
-              {/each}
-            </div>
-
-            {#if skillStatus?.last_error_message}
-              <span class="field-hint">{skillStatus.last_error_message}</span>
-            {/if}
-            {#if skillStatusMessage}
-              <span class="field-hint">{skillStatusMessage}</span>
-            {/if}
-
-            <div class="row">
-              <button
-                class="btn btn-ghost"
-                onclick={() => void loadSkillStatus(true)}
-                disabled={skillStatusLoading || skillStatusRepairing}
-              >
-                {skillStatusLoading ? "Refreshing..." : "Refresh Skill Status"}
-              </button>
-              <button
-                class="btn btn-add"
-                onclick={() => void repairSkillStatus()}
-                disabled={skillStatusRepairing}
-              >
-                {skillStatusRepairing ? "Repairing..." : "Repair Skill Registration"}
-              </button>
-            </div>
-          </div>
-
         {:else if activeSettingsTab === "terminal"}
           <div class="section-content">
             <div class="field">
@@ -1730,75 +1612,6 @@
     width: fit-content;
   }
 
-  .skill-overview {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-
-  .skill-badge,
-  .skill-mini-badge {
-    padding: 4px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border-color);
-    font-family: monospace;
-    font-size: var(--ui-font-sm);
-    letter-spacing: 0.2px;
-  }
-
-  .status-ok {
-    border-color: var(--green);
-    color: var(--green);
-  }
-
-  .status-degraded {
-    border-color: var(--yellow);
-    color: var(--yellow);
-  }
-
-  .status-failed {
-    border-color: var(--red);
-    color: var(--red);
-  }
-
-  .skill-agent-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    max-width: 960px;
-  }
-
-  .skill-agent-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--bg-secondary);
-  }
-
-  .skill-agent-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .skill-agent-label {
-    color: var(--text-primary);
-    font-size: var(--ui-font-md);
-    font-weight: 500;
-  }
-
-  .skill-agent-path {
-    color: var(--text-muted);
-    font-size: var(--ui-font-sm);
-    word-break: break-all;
-  }
-
   .field input:focus {
     border-color: var(--accent);
   }
@@ -2025,10 +1838,6 @@
     }
     .ai-grid {
       grid-template-columns: 1fr;
-    }
-    .skill-agent-row {
-      flex-direction: column;
-      align-items: flex-start;
     }
   }
 </style>

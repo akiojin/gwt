@@ -227,7 +227,14 @@
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
   let docsEditorAutoClosePaneIds: string[] = $state([]);
 
-  type LaunchStepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps";
+  type LaunchStepId =
+    | "fetch"
+    | "validate"
+    | "paths"
+    | "conflicts"
+    | "create"
+    | "skills"
+    | "deps";
   let launchStep: LaunchStepId = $state("fetch");
   let launchDetail: string = $state("");
   let launchStatus: "running" | "ok" | "error" | "cancelled" = $state("running");
@@ -238,6 +245,7 @@
     "paths",
     "conflicts",
     "create",
+    "skills",
     "deps",
   ];
   const LAUNCH_EVENT_BUFFER_LIMIT = 64;
