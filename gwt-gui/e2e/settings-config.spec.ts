@@ -299,14 +299,17 @@ test("Profiles tab shows API key peek/copy controls and preserves underscore key
   await expect(copyButton).toBeVisible();
   await expect(peekButton.locator("svg")).toBeVisible();
   await expect(copyButton.locator("svg")).toBeVisible();
-  await expect(apiKeyInput).toHaveAttribute("type", "password");
+  await expect(apiKeyInput).toHaveAttribute("type", "text");
+  await expect(apiKeyInput).toHaveClass(/\bapi-key-masked\b/);
 
   await peekButton.dispatchEvent("mousedown");
   await expect(apiKeyInput).toHaveAttribute("type", "text");
+  await expect(apiKeyInput).not.toHaveClass(/\bapi-key-masked\b/);
   await expect(apiKeyInput).toHaveValue("sk_test_ab_cd");
 
   await peekButton.dispatchEvent("mouseup");
-  await expect(apiKeyInput).toHaveAttribute("type", "password");
+  await expect(apiKeyInput).toHaveAttribute("type", "text");
+  await expect(apiKeyInput).toHaveClass(/\bapi-key-masked\b/);
 });
 
 test("copy API key button writes plaintext value and shows copied feedback", async ({
