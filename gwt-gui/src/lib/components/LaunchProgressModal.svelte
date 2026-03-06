@@ -23,13 +23,14 @@
     status === "error" && error != null && error.includes("[E1004]") && onUseExisting != null,
   );
 
-  type StepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps";
+  type StepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "skills" | "deps";
   const STEPS: { id: StepId; label: string }[] = [
     { id: "fetch", label: "Fetching agent info" },
     { id: "validate", label: "Validating request" },
     { id: "paths", label: "Resolving paths" },
     { id: "conflicts", label: "Checking conflicts" },
     { id: "create", label: "Creating worktree" },
+    { id: "skills", label: "Registering skills" },
     { id: "deps", label: "Preparing runtime" },
   ];
 
