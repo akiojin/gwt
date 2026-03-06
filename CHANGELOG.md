@@ -1,6 +1,15 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.4.1] - 2026-03-06
+
+### Bug Fixes
+
+- **terminal:** Normalize Windows shell cwd injection paths (#1466) (#1495)
+- **gui:** Keep settings API key draft in sync for refresh/save (#1497)
+- **gui:** Prevent deleting default profile in settings (#1496)
+- **gui:** Preserve unsaved API keys across profile switches (#1480) (#1498)
+
 ## [8.4.0] - 2026-03-06
 
 ### Bug Fixes
