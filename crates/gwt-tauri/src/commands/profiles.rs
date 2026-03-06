@@ -3,6 +3,7 @@
 use gwt_core::ai::{format_error_for_display, AIClient, ModelInfo};
 use gwt_core::config::ProfilesConfig;
 use gwt_core::StructuredError;
+use serde::Deserialize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use tauri::AppHandle;
 use tracing::error;
@@ -48,14 +49,18 @@ pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<()
     })
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListAiModelsRequest {
+    pub endpoint: String,
+    pub api_key: String,
+}
+
 /// List AI models from a specific OpenAI-compatible endpoint (`GET /models`).
 #[tauri::command]
-pub fn list_ai_models(
-    endpoint: String,
-    api_key: String,
-) -> Result<Vec<ModelInfo>, StructuredError> {
+pub fn list_ai_models(request: ListAiModelsRequest) -> Result<Vec<ModelInfo>, StructuredError> {
     with_panic_guard("listing ai models", "list_ai_models", || {
-        let endpoint = endpoint.trim();
+        let endpoint = request.endpoint.trim();
         if endpoint.is_empty() {
             return Err(StructuredError::internal(
                 "Endpoint is required",
@@ -63,9 +68,10 @@ pub fn list_ai_models(
             ));
         }
 
-        let client = AIClient::new_for_list_models(endpoint, api_key.trim()).map_err(|e| {
-            StructuredError::internal(&format_error_for_display(&e), "list_ai_models")
-        })?;
+        let client =
+            AIClient::new_for_list_models(endpoint, request.api_key.trim()).map_err(|e| {
+                StructuredError::internal(&format_error_for_display(&e), "list_ai_models")
+            })?;
         let mut models = client.list_models().map_err(|e| {
             StructuredError::internal(&format_error_for_display(&e), "list_ai_models")
         })?;
@@ -78,20 +84,40 @@ pub fn list_ai_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn request(endpoint: &str, api_key: &str) -> ListAiModelsRequest {
+        ListAiModelsRequest {
+            endpoint: endpoint.to_string(),
+            api_key: api_key.to_string(),
+        }
+    }
 
     #[test]
     fn list_ai_models_rejects_empty_endpoint() {
-        let err = list_ai_models("   ".to_string(), String::new()).unwrap_err();
+        let err = list_ai_models(request("   ", "")).unwrap_err();
         assert!(err.message.contains("Endpoint is required"));
     }
 
     #[test]
     fn list_ai_models_rejects_invalid_endpoint() {
-        let err = list_ai_models("not-a-url".to_string(), String::new()).unwrap_err();
+        let err = list_ai_models(request("not-a-url", "")).unwrap_err();
         assert!(
             err.message.contains("Invalid endpoint"),
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn list_ai_models_request_accepts_camel_case_api_key() {
+        let request: ListAiModelsRequest = serde_json::from_value(json!({
+            "endpoint": "https://api.openai.com/v1",
+            "apiKey": "sk-test-key"
+        }))
+        .expect("camelCase request should deserialize");
+
+        assert_eq!(request.endpoint, "https://api.openai.com/v1");
+        assert_eq!(request.api_key, "sk-test-key");
     }
 }

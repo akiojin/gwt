@@ -279,6 +279,7 @@
 
     try {
       const { invoke } = await import("$lib/tauriInvoke");
+      // The Tauri command accepts a camelCase request payload.
       const models = await invoke<AIModelInfo[]>("list_ai_models", {
         endpoint,
         apiKey,
