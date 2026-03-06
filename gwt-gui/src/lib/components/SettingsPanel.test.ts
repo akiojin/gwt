@@ -2166,8 +2166,12 @@ describe("SettingsPanel", () => {
     await switchToTab(rendered, "Profiles");
     await rendered.findByText("API Key");
 
-    expect(rendered.container.querySelector(".btn-peek-apikey")).toBeNull();
-    expect(rendered.container.querySelector(".btn-copy-apikey")).toBeNull();
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+    const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+
+    expect(peekBtn.disabled).toBe(true);
+    expect(copyBtn.disabled).toBe(true);
+    expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(true);
   });
 
   it("shows peek and copy buttons when API key is typed", async () => {
@@ -2205,8 +2209,11 @@ describe("SettingsPanel", () => {
     await fireEvent.input(apiKeyInput, { target: { value: "sk-draft-key" } });
 
     await waitFor(() => {
-      expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
-      expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
     });
   });
 
@@ -2220,8 +2227,11 @@ describe("SettingsPanel", () => {
     await switchToTab(rendered, "Profiles");
     await rendered.findByText("API Key");
 
-    expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
-    expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+    const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+    expect(peekBtn.disabled).toBe(false);
+    expect(copyBtn.disabled).toBe(false);
+    expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
   });
 
   it("renders SVG icons inside API key peek and copy buttons", async () => {
@@ -2526,16 +2536,22 @@ describe("SettingsPanel", () => {
     await fireEvent.input(apiKeyInput, { target: { value: "sk-unsaved-key" } });
 
     await waitFor(() => {
-      expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
-      expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
     });
 
     await fireEvent.change(activeProfile, { target: { value: "dev" } });
 
     await waitFor(() => {
       expect(apiKeyInput.value).toBe("");
-      expect(rendered.container.querySelector(".btn-peek-apikey")).toBeNull();
-      expect(rendered.container.querySelector(".btn-copy-apikey")).toBeNull();
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(true);
+      expect(copyBtn.disabled).toBe(true);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(true);
     });
   });
 
@@ -2605,8 +2621,11 @@ describe("SettingsPanel", () => {
 
     await waitFor(() => {
       expect(apiKeyInput.value).toBe("sk-profile-a");
-      expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
-      expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
     });
   });
 

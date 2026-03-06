@@ -450,6 +450,8 @@ test("Profiles API key peek and copy buttons appear after typing", async ({
 
   const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
   const apiKeyInput = apiKeyField.locator("input").first();
+  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeHidden();
+  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeHidden();
   await apiKeyInput.fill("sk-typed-key");
 
   await expect(apiKeyField.locator(".btn-peek-apikey")).toBeVisible();

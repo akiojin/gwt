@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.5.0] - 2026-03-06
+
+### Bug Fixes
+
+- **gui:** Add disabled styling for default profile delete button (#1501)
+- **gui:** Keep API key action buttons mounted (#1480) (#1500)
+
+### Features
+
+- **release:** Add issue comment step to release command
+
 ## [8.4.1] - 2026-03-06
 
 ### Bug Fixes
