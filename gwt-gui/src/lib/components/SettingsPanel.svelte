@@ -96,7 +96,7 @@
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
-  let defaultProfileSelected = $derived(selectedProfileKey.trim() === "default");
+  let defaultProfileSelected = $derived(selectedProfileKey === "default");
 
   function resetAiModelsState() {
     aiModelsRequestSeq += 1;
