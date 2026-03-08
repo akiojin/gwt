@@ -156,8 +156,8 @@ Next
    - **Required セクションに TODO が残っている場合は PR を作成せず、ユーザーに不足情報を確認する。**
 
 10. **Create or update the PR**
-   - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-   - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
+    - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
+    - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
 
 11. **Return PR URL**
     - `gh pr view <number> --json url -q .url`
