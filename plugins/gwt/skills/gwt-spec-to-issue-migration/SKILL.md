@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-to-issue-migration
-description: "Migrate existing local SPEC directories (specs/SPEC-*) to GitHub Issue-first specs (gwt-spec label) using scripts/migrate-specs-to-issues.sh. Use when asked to replace local spec.md/plan.md/tasks.md based workflow with GitHub Issue based management."
+description: "Migrate existing local SPEC directories (specs/SPEC-*) to GitHub Issue-first specs (gwt-spec label) using the bundled migration script. Use when asked to replace local spec.md/plan.md/tasks.md based workflow with GitHub Issue based management."
 ---
 
 # gwt Spec to Issue Migration
@@ -10,7 +10,7 @@ description: "Migrate existing local SPEC directories (specs/SPEC-*) to GitHub I
 Migrate local `specs/SPEC-*` directories to GitHub Issues (`gwt-spec` label) and switch to Issue-first spec management.
 
 This skill uses:
-- `scripts/migrate-specs-to-issues.sh`
+- `${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh`
 - `crates/gwt-core/src/git/issue_spec.rs`
 
 ## Preconditions
@@ -33,19 +33,19 @@ This skill uses:
 ### Dry-run
 
 ```bash
-bash scripts/migrate-specs-to-issues.sh --dry-run
+bash "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh" --dry-run
 ```
 
 ### Dry-run with explicit specs directory
 
 ```bash
-bash scripts/migrate-specs-to-issues.sh --dry-run --specs-dir "<path-to-specs>"
+bash "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh" --dry-run --specs-dir "<path-to-specs>"
 ```
 
 ### Execute migration
 
 ```bash
-bash scripts/migrate-specs-to-issues.sh
+bash "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh"
 ```
 
 ### Verify report
@@ -62,7 +62,7 @@ gh issue list --label gwt-spec --state all --limit 200
 
 ## Expected Behavior
 
-- Auto-detects `develop/specs` before local `specs`
+- Auto-detects local `specs/` under `$GWT_PROJECT_ROOT` or the current repository
 - If no `SPEC-*` directory exists, exits successfully with empty report (`[]`)
 - Migrates sections from `spec.md`, `plan.md`, `tasks.md` and related artifacts
 - Writes per-spec result to `migration-report.json`
