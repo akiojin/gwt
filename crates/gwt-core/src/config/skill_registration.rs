@@ -1200,9 +1200,7 @@ mod tests {
     #[test]
     fn managed_skills_include_spec_to_issue_migration() {
         assert!(
-            MANAGED_SKILL_NAMES
-                .iter()
-                .any(|skill_name| *skill_name == "gwt-spec-to-issue-migration"),
+            MANAGED_SKILL_NAMES.contains(&"gwt-spec-to-issue-migration"),
             "managed skills must include gwt-spec-to-issue-migration"
         );
     }
