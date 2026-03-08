@@ -100,7 +100,6 @@ mod tests {
             directory_tree: "src\ntests".to_string(),
             build_system: BuildSystem::Cargo,
             test_command: "cargo test".to_string(),
-            existing_specs: vec![],
             source_overview: vec![],
         }
     }

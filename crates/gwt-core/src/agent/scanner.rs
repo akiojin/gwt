@@ -1,7 +1,7 @@
 //! Repository scanner for deep context gathering
 //!
 //! Scans the repository to build context for LLM prompts:
-//! CLAUDE.md, directory tree, build config, specs, source overview.
+//! CLAUDE.md, directory tree, build config, source overview.
 
 use std::path::{Path, PathBuf};
 
@@ -37,8 +37,6 @@ pub struct RepositoryScanResult {
     pub build_system: BuildSystem,
     /// Test command for the project
     pub test_command: String,
-    /// Existing spec IDs found under specs/
-    pub existing_specs: Vec<String>,
     /// Source module overview (key file names)
     pub source_overview: Vec<String>,
 }
@@ -61,7 +59,6 @@ impl RepositoryScanner {
         let directory_tree = self.get_directory_tree();
         let build_system = self.detect_build_system();
         let test_command = build_system.test_command().to_string();
-        let existing_specs = self.find_existing_specs();
         let source_overview = self.get_source_overview();
 
         RepositoryScanResult {
@@ -69,7 +66,6 @@ impl RepositoryScanner {
             directory_tree,
             build_system,
             test_command,
-            existing_specs,
             source_overview,
         }
     }
@@ -133,29 +129,6 @@ impl RepositoryScanner {
         }
     }
 
-    fn find_existing_specs(&self) -> Vec<String> {
-        let specs_dir = self.repo_path.join("specs");
-        match std::fs::read_dir(&specs_dir) {
-            Ok(entries) => {
-                let mut specs: Vec<String> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                    .filter_map(|e| {
-                        let name = e.file_name().to_string_lossy().to_string();
-                        if name.starts_with("SPEC-") {
-                            Some(name)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                specs.sort();
-                specs
-            }
-            Err(_) => Vec::new(),
-        }
-    }
-
     fn get_source_overview(&self) -> Vec<String> {
         let output = crate::process::command("git")
             .args(["ls-tree", "-r", "--name-only", "HEAD"])
@@ -205,7 +178,6 @@ mod tests {
         let scanner = RepositoryScanner::new("/nonexistent/path/12345");
         let result = scanner.scan();
         assert!(result.claude_md.is_none());
-        assert!(result.existing_specs.is_empty());
         assert_eq!(result.build_system, BuildSystem::Unknown);
     }
 

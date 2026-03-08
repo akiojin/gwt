@@ -379,7 +379,7 @@ pub fn build_app(
                     }
                 }
 
-                // Project-scoped registration is executed when a project is opened.
+                // Project-scoped registration is executed when an agent is launched.
 
                 // Background task: check gh CLI authentication (SPEC-ad1ac432 T009)
                 {

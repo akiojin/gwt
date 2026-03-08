@@ -9,13 +9,12 @@ use gwt_core::ai::{
     OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
 };
 use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
-use gwt_core::git::Branch;
+use gwt_core::git::{fetch_issues_with_options, get_spec_issue_detail, Branch, SpecIssueDetail};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -103,7 +102,7 @@ pub fn get_agent_sidebar_view(
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "get_agent_sidebar_view"))?;
 
-    let parsed = parse_latest_spec_tasks(project_root)
+    let parsed = parse_latest_spec_tasks(&repo_path)
         .map_err(|e| StructuredError::internal(&e, "get_agent_sidebar_view"))?;
     let entries = load_recent_sub_agents(&repo_path);
     let running_refs = collect_running_pane_refs(&state, &repo_path);
@@ -169,59 +168,37 @@ pub fn get_agent_sidebar_view(
     })
 }
 
-fn parse_latest_spec_tasks(project_root: &Path) -> Result<ParsedTaskSet, String> {
-    let specs_root = project_root.join("specs");
-    if !specs_root.exists() {
-        return Ok(ParsedTaskSet {
-            spec_id: None,
-            tasks: Vec::new(),
-        });
-    }
-
-    let mut newest: Option<(SystemTime, String, std::path::PathBuf)> = None;
-    let entries = fs::read_dir(&specs_root).map_err(|e| format!("Failed to read specs/: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Failed to read specs entry: {e}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("Failed to read specs entry type: {e}"))?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("SPEC-") {
-            continue;
-        }
-
-        let tasks_path = entry.path().join("tasks.md");
-        if !tasks_path.exists() {
-            continue;
-        }
-
-        let modified = fs::metadata(&tasks_path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        match &newest {
-            Some((current, _, _)) if &modified <= current => {}
-            _ => newest = Some((modified, name, tasks_path)),
-        }
-    }
-
-    let Some((_, spec_id, tasks_path)) = newest else {
+fn parse_latest_spec_tasks(repo_path: &Path) -> Result<ParsedTaskSet, String> {
+    let latest_issue = latest_spec_issue_detail(repo_path)?;
+    let Some(issue) = latest_issue else {
         return Ok(ParsedTaskSet {
             spec_id: None,
             tasks: Vec::new(),
         });
     };
 
-    let content =
-        fs::read_to_string(&tasks_path).map_err(|e| format!("Failed to read tasks.md: {e}"))?;
-    let tasks = parse_tasks_markdown(&content);
+    Ok(parse_task_set_from_spec_issue(&issue))
+}
 
-    Ok(ParsedTaskSet {
-        spec_id: Some(spec_id),
-        tasks,
-    })
+fn latest_spec_issue_detail(repo_path: &Path) -> Result<Option<SpecIssueDetail>, String> {
+    for state in ["open", "all"] {
+        let issues = fetch_issues_with_options(repo_path, 1, 1, state, false, "specs")?;
+        if let Some(issue) = issues.issues.into_iter().next() {
+            return get_spec_issue_detail(repo_path, issue.number).map(Some);
+        }
+    }
+
+    Ok(None)
+}
+
+fn parse_task_set_from_spec_issue(issue: &SpecIssueDetail) -> ParsedTaskSet {
+    ParsedTaskSet {
+        spec_id: issue
+            .spec_id
+            .clone()
+            .or_else(|| Some(format!("#{}", issue.number))),
+        tasks: parse_tasks_markdown(&issue.sections.tasks),
+    }
 }
 
 fn parse_tasks_markdown(content: &str) -> Vec<ParsedTask> {
@@ -2107,6 +2084,30 @@ mod tests {
         assert_eq!(tasks[1].id, "T002");
         assert_eq!(tasks[1].base_status, "completed");
         assert_eq!(tasks[2].id, "TASK-3");
+    }
+
+    #[test]
+    fn parse_task_set_from_spec_issue_uses_issue_sections() {
+        let issue = SpecIssueDetail {
+            number: 1438,
+            title: "Spec".to_string(),
+            url: "https://example.test/issues/1438".to_string(),
+            updated_at: "2026-03-07T00:00:00Z".to_string(),
+            spec_id: None,
+            labels: vec!["gwt-spec".to_string()],
+            etag: "etag".to_string(),
+            body: String::new(),
+            sections: gwt_core::git::SpecIssueSections {
+                tasks: "- [ ] T010 wire registration\n- [x] T011 add tests".to_string(),
+                ..Default::default()
+            },
+        };
+
+        let parsed = parse_task_set_from_spec_issue(&issue);
+        assert_eq!(parsed.spec_id.as_deref(), Some("#1438"));
+        assert_eq!(parsed.tasks.len(), 2);
+        assert_eq!(parsed.tasks[0].id, "T010");
+        assert_eq!(parsed.tasks[1].base_status, "completed");
     }
 
     #[test]
