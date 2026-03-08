@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.5.1] - 2026-03-08
+
+### Refactor
+
+- **specs:** Remove local specs and fix skill embedding
+
 ## [8.5.0] - 2026-03-06
 
 ### Bug Fixes
