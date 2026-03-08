@@ -4233,7 +4233,7 @@ pub(crate) fn launch_agent_for_project_root(
                 let status =
                     gwt_core::config::repair_skill_registration_with_settings_at_project_root(
                         &settings,
-                        Some(project_root.as_path()),
+                        Some(working_dir.as_path()),
                     );
                 if is_launch_cancelled(cancelled) {
                     return Err("Cancelled".to_string());

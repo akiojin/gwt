@@ -47,23 +47,16 @@ bunx .
 
 ```
 gwt/
-├── src/                  # ソースコード
-│   ├── index.ts          # メインエントリーポイント
-│   ├── git.ts            # Git操作
-│   ├── worktree.ts       # ワークツリー管理
-│   ├── github.ts         # GitHub統合
-│   ├── claude.ts         # Claude Code統合
-│   ├── codex.ts          # Codex CLI統合
-│   ├── config/           # 設定・セッション管理
-│   └── ui/               # UI components
+├── crates/               # Rust workspace
+├── gwt-gui/              # フロントエンド
+├── plugins/              # gwt agent assets
 ├── tests/                # テストコード
 │   ├── unit/             # ユニットテスト
 │   ├── integration/      # 統合テスト
 │   ├── e2e/              # E2Eテスト
 │   ├── fixtures/         # テストフィクスチャ
 │   └── helpers/          # テストヘルパー
-├── docs/                 # ドキュメント
-└── specs/                # 仕様書
+└── docs/                 # ドキュメント
 ```
 
 ## Development Workflow
