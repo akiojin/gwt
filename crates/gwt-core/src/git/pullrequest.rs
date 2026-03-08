@@ -102,6 +102,8 @@ pub struct PullRequest {
     pub head_branch: String,
     /// PR state (open, closed, merged)
     pub state: String,
+    /// Base branch name
+    pub base_branch: Option<String>,
     /// PR URL (if available)
     pub url: Option<String>,
     /// PR updatedAt timestamp (ISO-8601, if available)
@@ -198,7 +200,7 @@ impl PrCache {
                 "--limit",
                 "20",
                 "--json",
-                "number,title,headRefName,state,url,updatedAt",
+                "number,title,headRefName,baseRefName,state,url,updatedAt",
             ],
         )
         .ok()?;
@@ -295,7 +297,7 @@ fn fetch_prs_by_state(repo_path: &Path, state: &str) -> Result<Vec<PullRequest>,
             "--state",
             state,
             "--json",
-            "number,title,headRefName,state,url,updatedAt",
+            "number,title,headRefName,baseRefName,state,url,updatedAt",
             "--limit",
             "100",
         ],
@@ -333,11 +335,16 @@ fn parse_gh_pr_json(json_str: &str) -> Result<Vec<PullRequest>, std::io::Error> 
                         .get("updatedAt")
                         .and_then(|u| u.as_str())
                         .map(|u| u.to_string());
+                    let base_branch = item
+                        .get("baseRefName")
+                        .and_then(|base| base.as_str())
+                        .map(|base| base.to_string());
                     prs.push(PullRequest {
                         number,
                         title: title.to_string(),
                         head_branch: head_branch.to_string(),
                         state: state.to_string(),
+                        base_branch,
                         url,
                         updated_at,
                     });
@@ -396,8 +403,8 @@ mod tests {
     #[test]
     fn test_parse_gh_pr_json() {
         let json = r#"[
-            {"number": 123, "title": "Fix bug", "headRefName": "fix/bug", "state": "OPEN", "url": "https://github.com/a/b/pull/123", "updatedAt": "2024-01-01T00:00:00Z"},
-            {"number": 456, "title": "Add feature", "headRefName": "feature/new", "state": "MERGED", "url": "https://github.com/a/b/pull/456", "updatedAt": "2024-01-02T00:00:00Z"}
+            {"number": 123, "title": "Fix bug", "headRefName": "fix/bug", "baseRefName": "develop", "state": "OPEN", "url": "https://github.com/a/b/pull/123", "updatedAt": "2024-01-01T00:00:00Z"},
+            {"number": 456, "title": "Add feature", "headRefName": "feature/new", "baseRefName": "main", "state": "MERGED", "url": "https://github.com/a/b/pull/456", "updatedAt": "2024-01-02T00:00:00Z"}
         ]"#;
 
         let prs = parse_gh_pr_json(json).unwrap();
@@ -409,7 +416,9 @@ mod tests {
             prs[0].url.as_deref(),
             Some("https://github.com/a/b/pull/123")
         );
+        assert_eq!(prs[0].base_branch.as_deref(), Some("develop"));
         assert_eq!(prs[1].head_branch, "feature/new");
+        assert_eq!(prs[1].base_branch.as_deref(), Some("main"));
     }
 
     #[test]
@@ -436,6 +445,7 @@ mod tests {
                 title: "Merged".to_string(),
                 head_branch: "feature/merged".to_string(),
                 state: "MERGED".to_string(),
+                base_branch: None,
                 url: None,
                 updated_at: None,
             },
@@ -447,6 +457,7 @@ mod tests {
                 title: "Open".to_string(),
                 head_branch: "feature/open".to_string(),
                 state: "OPEN".to_string(),
+                base_branch: None,
                 url: None,
                 updated_at: None,
             },
@@ -464,6 +475,7 @@ mod tests {
             title: "Merged".to_string(),
             head_branch: "feature/test".to_string(),
             state: "MERGED".to_string(),
+            base_branch: None,
             url: None,
             updated_at: Some("2024-02-01T00:00:00Z".to_string()),
         };
@@ -472,6 +484,7 @@ mod tests {
             title: "Open".to_string(),
             head_branch: "feature/test".to_string(),
             state: "OPEN".to_string(),
+            base_branch: None,
             url: None,
             updated_at: Some("2024-01-01T00:00:00Z".to_string()),
         };
@@ -487,6 +500,7 @@ mod tests {
             title: "Old".to_string(),
             head_branch: "feature/test".to_string(),
             state: "OPEN".to_string(),
+            base_branch: None,
             url: None,
             updated_at: Some("2024-01-01T00:00:00Z".to_string()),
         };
@@ -495,6 +509,7 @@ mod tests {
             title: "New".to_string(),
             head_branch: "feature/test".to_string(),
             state: "OPEN".to_string(),
+            base_branch: None,
             url: None,
             updated_at: Some("2024-02-01T00:00:00Z".to_string()),
         };
@@ -852,6 +867,7 @@ mod tests {
             title: "Merged".to_string(),
             head_branch: "feature/test".to_string(),
             state: "MERGED".to_string(),
+            base_branch: None,
             url: None,
             updated_at: Some("2024-02-01T00:00:00Z".to_string()),
         };
@@ -860,6 +876,7 @@ mod tests {
             title: "Open".to_string(),
             head_branch: "feature/test".to_string(),
             state: "OPEN".to_string(),
+            base_branch: None,
             url: None,
             updated_at: Some("2024-01-01T00:00:00Z".to_string()),
         };

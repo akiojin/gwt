@@ -652,6 +652,14 @@ export interface BranchPrReference {
   url: string | null;
 }
 
+export interface BranchPrPreflight {
+  baseBranch: string;
+  aheadBy: number;
+  behindBy: number;
+  status: "up_to_date" | "ahead" | "behind" | "diverged";
+  blockingReason: string | null;
+}
+
 export interface WorkflowRunInfo {
   workflowName: string;
   runId: number;

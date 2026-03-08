@@ -1505,6 +1505,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_registration_keeps_gwt_pr_branch_preflight_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let skill_content = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("gwt-pr")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+
+        assert!(skill_content.contains("git rev-list --left-right --count \"HEAD...origin/$base\""));
+        assert!(skill_content.contains("Branch update required before creating a PR."));
+    }
+
+    #[test]
     fn status_reports_path_unavailable_without_project_root() {
         let settings = registration_settings();
         let status = get_skill_registration_status_with_settings_at_project_root(&settings, None);

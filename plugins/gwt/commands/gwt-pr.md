@@ -19,7 +19,8 @@ Use this command to draft or update a GitHub PR with the gh CLI.
 1. Load `skills/gwt-pr/SKILL.md` and follow the workflow.
 2. Ensure `gh auth status` succeeds before running PR commands.
 3. Run the local working tree preflight from the skill (`git status --porcelain`); if changes exist, confirm with the user before push/PR operations.
-4. Generate or update the PR body using the provided templates.
+4. Run the branch sync preflight from the skill (`git rev-list --left-right --count "HEAD...origin/$base"`); if the branch is behind or diverged, stop before PR creation.
+5. Generate or update the PR body using the provided templates.
 
 ## Examples
 
