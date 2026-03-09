@@ -84,9 +84,15 @@ async function stopDriver(driver, driverProcess) {
   } finally {
     if (driverProcess && driverProcess.pid && !driverProcess.killed) {
       if (process.platform === "win32") {
-        spawn("taskkill", ["/PID", String(driverProcess.pid), "/T", "/F"], {
-          stdio: "ignore",
-        });
+        spawnSync(
+          "taskkill",
+          ["/PID", String(driverProcess.pid), "/T", "/F"],
+          {
+            encoding: "utf8",
+            stdio: "ignore",
+          },
+        );
+        await delay(250);
       } else {
         driverProcess.kill();
       }
