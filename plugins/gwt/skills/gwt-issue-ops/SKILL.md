@@ -241,10 +241,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-ops/scripts/inspect_issue.py" --
    - Command: `gh issue comment <number> -b "<body>"`
 
 10. **Implement fixes after approval.**
-   - Apply the approved fixes, summarize diffs/tests.
-   - After applying fixes, commit changes and push.
-   - Create or update a PR linking to the issue (e.g., `Fixes #<number>`).
-   - Post a final progress comment to the issue.
+    - Apply the approved fixes, summarize diffs/tests.
+    - After applying fixes, commit changes and push.
+    - Create or update a PR linking to the issue (e.g., `Fixes #<number>`).
+    - Post a final progress comment to the issue.
 
 ## Bundled Resources
 
