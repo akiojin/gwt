@@ -496,11 +496,19 @@ fn cleanup_legacy_managed_assets(root: &Path) -> Result<(), GwtError> {
         let path = root.join(relative_path);
         if path.is_dir() {
             std::fs::remove_dir_all(&path).map_err(|e| GwtError::ConfigWriteError {
-                reason: format!("Failed to remove legacy managed asset {}: {}", path.display(), e),
+                reason: format!(
+                    "Failed to remove legacy managed asset {}: {}",
+                    path.display(),
+                    e
+                ),
             })?;
         } else if path.is_file() {
             std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
-                reason: format!("Failed to remove legacy managed asset {}: {}", path.display(), e),
+                reason: format!(
+                    "Failed to remove legacy managed asset {}: {}",
+                    path.display(),
+                    e
+                ),
             })?;
         }
     }

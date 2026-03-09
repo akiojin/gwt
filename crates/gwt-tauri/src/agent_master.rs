@@ -646,8 +646,8 @@ fn prepare_issue_spec(
 
 fn extract_issue_number(input: &str) -> Option<u64> {
     for token in input.split_whitespace() {
-        let token =
-            token.trim_matches(|c: char| matches!(c, ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']'));
+        let token = token
+            .trim_matches(|c: char| matches!(c, ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']'));
 
         if let Some(rest) = token.strip_prefix('#') {
             if let Ok(number) = rest.parse::<u64>() {
