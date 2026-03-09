@@ -500,6 +500,128 @@ test("Profiles API key typed value is sent to list_ai_models on Refresh", async 
   });
 });
 
+test("Profiles pasted API key shows actions and is sent to list_ai_models on Refresh", async ({
+  page,
+}) => {
+  const profilesWithAi = {
+    ...profilesFixture,
+    profiles: {
+      ...profilesFixture.profiles,
+      default: {
+        ...profilesFixture.profiles.default,
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "",
+          model: "",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+
+  await apiKeyInput.evaluate((input, pasted) => {
+    const element = input as HTMLInputElement;
+    element.focus();
+    const cursor = element.value.length;
+    element.setSelectionRange(cursor, cursor);
+    const pasteEvent = new Event("paste", {
+      bubbles: true,
+      cancelable: true,
+    }) as ClipboardEvent;
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: {
+        getData: (type: string) => (type === "text/plain" ? pasted : ""),
+      },
+      configurable: true,
+    });
+    element.dispatchEvent(pasteEvent);
+  }, "sk-pasted-e2e-refresh");
+
+  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeVisible();
+  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeVisible();
+
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await waitForInvokeCommand(page, "list_ai_models");
+
+  const args = await getInvokeArgs(page, "list_ai_models");
+  expect(args).toMatchObject({
+    endpoint: "https://api.openai.com/v1",
+    apiKey: "sk-pasted-e2e-refresh",
+  });
+});
+
+test("Profiles pasted API key is sent to save_profiles on Save", async ({
+  page,
+}) => {
+  const profilesWithAi = {
+    ...profilesFixture,
+    profiles: {
+      ...profilesFixture.profiles,
+      default: {
+        ...profilesFixture.profiles.default,
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "",
+          model: "",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+
+  await apiKeyInput.evaluate((input, pasted) => {
+    const element = input as HTMLInputElement;
+    element.focus();
+    const cursor = element.value.length;
+    element.setSelectionRange(cursor, cursor);
+    const pasteEvent = new Event("paste", {
+      bubbles: true,
+      cancelable: true,
+    }) as ClipboardEvent;
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: {
+        getData: (type: string) => (type === "text/plain" ? pasted : ""),
+      },
+      configurable: true,
+    });
+    element.dispatchEvent(pasteEvent);
+  }, "sk-pasted-e2e-save");
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await waitForInvokeCommand(page, "save_profiles");
+
+  const args = await getInvokeArgs(page, "save_profiles");
+  const config = (args as Record<string, unknown>)?.config as Record<string, unknown>;
+  const profiles = config?.profiles as Record<string, unknown>;
+  const defaultProfile = profiles?.default as Record<string, unknown>;
+  const ai = defaultProfile?.ai as Record<string, unknown>;
+  expect(ai?.api_key).toBe("sk-pasted-e2e-save");
+});
+
 test("UI Font Family selector shows presets", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
