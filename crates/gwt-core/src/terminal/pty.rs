@@ -1182,12 +1182,7 @@ mod tests {
             false,
         );
         assert_eq!(program, "codex");
-        assert_eq!(
-            resolved_args,
-            vec![
-                "--version".to_string(),
-            ]
-        );
+        assert_eq!(resolved_args, vec!["--version".to_string(),]);
     }
 
     #[test]
@@ -1242,8 +1237,7 @@ mod tests {
                 "/D".to_string(),
                 "/S".to_string(),
                 "/C".to_string(),
-                "chcp 65001 > nul && claude --dangerously-skip-permissions"
-                    .to_string(),
+                "chcp 65001 > nul && claude --dangerously-skip-permissions".to_string(),
             ]
         );
     }
