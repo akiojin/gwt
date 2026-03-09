@@ -150,8 +150,14 @@ fn is_windows_store_python_alias(path: &Path) -> bool {
             .to_string_lossy()
             .replace('/', "\\")
             .to_ascii_lowercase();
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+
         normalized.contains("\\appdata\\local\\microsoft\\windowsapps\\")
-            && (normalized.ends_with("\\python.exe") || normalized.ends_with("\\python3.exe"))
+            && file_name.starts_with("python")
+            && file_name.ends_with(".exe")
     }
 
     #[cfg(not(windows))]
@@ -177,13 +183,13 @@ fn can_execute_python(path: &Path) -> bool {
 fn find_system_python() -> Result<PathBuf, String> {
     for candidate in system_python_candidates() {
         if let Ok(path) = which::which(candidate) {
+            if can_execute_python(&path) {
+                return Ok(path);
+            }
+
             if is_windows_store_python_alias(&path) {
                 continue;
             }
-            if !can_execute_python(&path) {
-                continue;
-            }
-            return Ok(path);
         }
     }
 
@@ -899,6 +905,9 @@ mod tests {
             assert!(is_windows_store_python_alias(Path::new(
                 r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.exe"
             )));
+            assert!(is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.13.exe"
+            )));
         }
 
         #[cfg(not(windows))]
@@ -908,6 +917,9 @@ mod tests {
             )));
             assert!(!is_windows_store_python_alias(Path::new(
                 r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.exe"
+            )));
+            assert!(!is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.13.exe"
             )));
         }
 
