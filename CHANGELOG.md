@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.5.3] - 2026-03-09
+
+### Bug Fixes
+
+- **gui:** Persist typed and pasted API keys in settings (#1528)
+
 ## [8.5.2] - 2026-03-09
 
 ### Bug Fixes

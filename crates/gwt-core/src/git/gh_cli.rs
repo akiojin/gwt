@@ -491,8 +491,8 @@ pub fn get_pr_statuses(repo_path: &Path) -> HashMap<String, PrStatus> {
 
 /// Parse PR list JSON and resolve per-branch statuses.
 ///
-/// When multiple PRs exist for the same branch, the latest is used
-/// (preferring merged/closed over open when timestamps are equal).
+/// Cleanup safety is driven by whether any PR for the same head branch remains
+/// unmerged (`mergedAt == null`). Latest PR selection is a separate concern.
 fn parse_pr_statuses_json(json_str: &str) -> HashMap<String, PrStatus> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
         return HashMap::new();
@@ -516,10 +516,6 @@ fn parse_pr_statuses_json(json_str: &str) -> HashMap<String, PrStatus> {
             .get("mergedAt")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let updated_at = item
-            .get("updatedAt")
-            .and_then(|v| v.as_str())
-            .map(String::from);
 
         branch_prs
             .entry(head_ref.to_string())
@@ -527,7 +523,6 @@ fn parse_pr_statuses_json(json_str: &str) -> HashMap<String, PrStatus> {
             .push(PrEntry {
                 state: state.to_string(),
                 merged_at,
-                updated_at,
             });
     }
 
@@ -544,7 +539,6 @@ fn parse_pr_statuses_json(json_str: &str) -> HashMap<String, PrStatus> {
 struct PrEntry {
     state: String,
     merged_at: Option<String>,
-    updated_at: Option<String>,
 }
 
 fn select_best_pr_status(prs: &[PrEntry]) -> PrStatus {
@@ -552,25 +546,28 @@ fn select_best_pr_status(prs: &[PrEntry]) -> PrStatus {
         return PrStatus::None;
     }
 
-    // Pick the PR with the latest timestamp
-    let best = prs
-        .iter()
-        .max_by(|a, b| {
-            let ts_a = a
-                .merged_at
-                .as_deref()
-                .or(a.updated_at.as_deref())
-                .unwrap_or("");
-            let ts_b = b
-                .merged_at
-                .as_deref()
-                .or(b.updated_at.as_deref())
-                .unwrap_or("");
-            ts_a.cmp(ts_b)
-        })
-        .unwrap();
+    let mut saw_unmerged = false;
+    let mut saw_unknown_unmerged = false;
 
-    gh_state_to_pr_status(&best.state)
+    for pr in prs.iter().filter(|pr| pr.merged_at.is_none()) {
+        saw_unmerged = true;
+        match gh_state_to_pr_status(&pr.state) {
+            PrStatus::Open => return PrStatus::Open,
+            PrStatus::Closed => return PrStatus::Closed,
+            PrStatus::Unknown => saw_unknown_unmerged = true,
+            _ => {}
+        }
+    }
+
+    if saw_unmerged && saw_unknown_unmerged {
+        return PrStatus::Unknown;
+    }
+
+    if prs.iter().all(|pr| pr.merged_at.is_some()) {
+        return PrStatus::Merged;
+    }
+
+    PrStatus::Unknown
 }
 
 fn gh_state_to_pr_status(state: &str) -> PrStatus {
@@ -1110,13 +1107,23 @@ mod tests {
     }
 
     #[test]
-    fn pr_status_multiple_prs_uses_latest() {
+    fn pr_status_multiple_prs_prefers_closed_unmerged_over_merged() {
         let json = r#"[
             {"headRefName": "feature/multi", "state": "CLOSED", "mergedAt": null, "updatedAt": "2026-01-10T10:00:00Z"},
             {"headRefName": "feature/multi", "state": "MERGED", "mergedAt": "2026-01-15T10:00:00Z", "updatedAt": "2026-01-15T10:00:00Z"}
         ]"#;
         let statuses = parse_pr_statuses_json(json);
-        assert_eq!(statuses.get("feature/multi"), Some(&PrStatus::Merged));
+        assert_eq!(statuses.get("feature/multi"), Some(&PrStatus::Closed));
+    }
+
+    #[test]
+    fn pr_status_multiple_prs_prefers_open_unmerged_over_merged() {
+        let json = r#"[
+            {"headRefName": "feature/multi", "state": "OPEN", "mergedAt": null, "updatedAt": "2026-01-10T10:00:00Z"},
+            {"headRefName": "feature/multi", "state": "MERGED", "mergedAt": "2026-01-15T10:00:00Z", "updatedAt": "2026-01-15T10:00:00Z"}
+        ]"#;
+        let statuses = parse_pr_statuses_json(json);
+        assert_eq!(statuses.get("feature/multi"), Some(&PrStatus::Open));
     }
 
     #[test]
