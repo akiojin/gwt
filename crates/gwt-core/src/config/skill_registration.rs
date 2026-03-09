@@ -1722,9 +1722,8 @@ mod tests {
                 .join("gwt-pr.md"),
         )
         .unwrap();
-        assert!(claude_pr_command.contains(
-            "compare `origin/<head>..HEAD` before any base-branch fallback."
-        ));
+        assert!(claude_pr_command
+            .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
         assert!(claude_pr_command.contains("`MANUAL CHECK`"));
 
         let claude_pr_check_command = std::fs::read_to_string(
@@ -1734,12 +1733,10 @@ mod tests {
                 .join("gwt-pr-check.md"),
         )
         .unwrap();
-        assert!(claude_pr_check_command.contains(
-            "compare `origin/<head>..HEAD` before any base-branch fallback."
-        ));
-        assert!(claude_pr_check_command.contains(
-            "return `MANUAL CHECK` instead of inferring `CREATE PR`."
-        ));
+        assert!(claude_pr_check_command
+            .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
+        assert!(claude_pr_check_command
+            .contains("return `MANUAL CHECK` instead of inferring `CREATE PR`."));
     }
 
     #[test]
