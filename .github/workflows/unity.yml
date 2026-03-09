@@ -1,0 +1,73 @@
+name: Unity
+
+on:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'gwt/gwt/**'
+      - '.github/workflows/unity.yml'
+
+jobs:
+  test-editmode:
+    name: EditMode Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          lfs: true
+      - uses: actions/cache@v4
+        with:
+          path: gwt/gwt/Library
+          key: unity-library-${{ hashFiles('gwt/gwt/Packages/manifest.json') }}
+          restore-keys: |
+            unity-library-
+      - uses: game-ci/unity-test-runner@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: gwt/gwt
+          testMode: EditMode
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          unityVersion: auto
+          customParameters: -nographics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: editmode-test-results
+          path: artifacts
+          if-no-files-found: ignore
+
+  test-playmode:
+    name: PlayMode Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          lfs: true
+      - uses: actions/cache@v4
+        with:
+          path: gwt/gwt/Library
+          key: unity-library-${{ hashFiles('gwt/gwt/Packages/manifest.json') }}
+          restore-keys: |
+            unity-library-
+      - uses: game-ci/unity-test-runner@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: gwt/gwt
+          testMode: PlayMode
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          unityVersion: auto
+          customParameters: -nographics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playmode-test-results
+          path: artifacts
+          if-no-files-found: ignore

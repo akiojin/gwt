@@ -2,8 +2,11 @@ using Cysharp.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Gwt.Core.Models;
+
+[assembly: InternalsVisibleTo("Gwt.Tests.Editor")]
 
 namespace Gwt.Core.Services.Git
 {
@@ -35,32 +38,6 @@ namespace Gwt.Core.Services.Git
         public string Upstream;
         public string TrackingStatus;
         public bool IsRemote;
-    }
-
-    [Serializable]
-    public class CommitEntry
-    {
-        public string Hash;
-        public string Message;
-    }
-
-    [Serializable]
-    public class ChangeStats
-    {
-        public int FilesChanged;
-        public int Insertions;
-        public int Deletions;
-        public bool HasUncommitted;
-        public bool HasUnpushed;
-    }
-
-    [Serializable]
-    public class BranchMeta
-    {
-        public string Upstream;
-        public int Ahead;
-        public int Behind;
-        public string BaseBranch;
     }
 
     [Serializable]

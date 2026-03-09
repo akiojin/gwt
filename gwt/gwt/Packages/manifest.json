@@ -6,7 +6,8 @@
       "scopes": [
         "com.akiojin",
         "jp.hadashikick.vcontainer",
-        "com.cysharp.unitask"
+        "com.cysharp.unitask",
+        "org.nuget"
       ]
     }
   ],
@@ -17,6 +18,7 @@
     "com.unity.cinemachine": "2.10.3",
     "com.unity.localization": "1.5.4",
     "com.unity.textmeshpro": "3.2.0-pre.12",
+    "org.nuget.system.text.json": "8.0.5",
     "com.unity.ai.navigation": "2.0.10",
     "com.unity.collab-proxy": "2.11.3",
     "com.unity.ide.rider": "3.0.39",

@@ -5,6 +5,7 @@ using System;
 using System.IO;
 using System.Threading;
 using UnityEngine;
+using UnityEngine.TestTools;
 using Cysharp.Threading.Tasks;
 
 namespace Gwt.Tests.Editor

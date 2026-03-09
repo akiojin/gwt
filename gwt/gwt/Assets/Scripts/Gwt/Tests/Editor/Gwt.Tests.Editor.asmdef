@@ -10,7 +10,9 @@
         "Gwt.Infra",
         "Gwt.Lifecycle",
         "VContainer",
-        "UniTask"
+        "UniTask",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
     ],
     "includePlatforms": [
         "Editor"
@@ -19,7 +21,8 @@
     "allowUnsafeCode": false,
     "overrideReferences": true,
     "precompiledReferences": [
-        "nunit.framework.dll"
+        "nunit.framework.dll",
+        "System.Text.Json.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [

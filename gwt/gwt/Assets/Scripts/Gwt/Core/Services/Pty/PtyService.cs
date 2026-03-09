@@ -103,7 +103,7 @@ namespace Gwt.Core.Services.Pty
 
             try
             {
-                session.Process.Kill(entireProcessTree: true);
+                session.Process.Kill();
             }
             catch (InvalidOperationException)
             {
@@ -117,7 +117,7 @@ namespace Gwt.Core.Services.Pty
 
             try
             {
-                await session.Process.WaitForExitAsync(timeoutCts.Token);
+                await UniTask.WaitUntil(() => session.Process.HasExited, cancellationToken: timeoutCts.Token);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -192,7 +192,7 @@ namespace Gwt.Core.Services.Pty
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken, session.Token);
 
-                await session.Process.WaitForExitAsync(linked.Token);
+                await UniTask.WaitUntil(() => session.Process.HasExited, cancellationToken: linked.Token);
                 session.RaiseExited(session.Process.ExitCode);
             }
             catch (OperationCanceledException) { }

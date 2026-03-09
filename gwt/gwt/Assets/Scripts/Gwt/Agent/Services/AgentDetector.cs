@@ -1,7 +1,10 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+
+[assembly: InternalsVisibleTo("Gwt.Tests.Editor")]
 
 namespace Gwt.Agent.Services
 {
