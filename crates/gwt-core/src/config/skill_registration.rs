@@ -1447,6 +1447,57 @@ mod tests {
     }
 
     #[test]
+    fn project_index_and_spec_ops_assets_encode_issue_search_first_guidance() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let project_index_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-project-index")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(project_index_skill.contains("Issues search first"));
+        assert!(project_index_skill.contains("spec integration"));
+        assert!(project_index_skill.contains("search-issues"));
+
+        let issue_spec_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-issue-spec-ops")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(issue_spec_skill.contains("search existing spec first"));
+        assert!(issue_spec_skill.contains("gwt-project-index"));
+
+        let issue_spec_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-issue-spec-ops.md"),
+        )
+        .unwrap();
+        assert!(issue_spec_command.contains("use `gwt-project-index` Issue search"));
+    }
+
+    #[test]
     fn claude_registration_prefers_plugin_namespace_when_enabled() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
