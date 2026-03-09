@@ -8,6 +8,11 @@
   // Tab state
   let activeTab = $state<"files" | "issues">("files");
 
+  type PanelNotice = {
+    title: string;
+    body: string;
+  };
+
   // Files tab state
   let query = $state("");
   let results = $state<ProjectIndexSearchResult[]>([]);
@@ -15,7 +20,9 @@
   let hasSearched = $state(false);
   let lastSearchedQuery = $state("");
   let error = $state<string | null>(null);
+  let errorNotice = $state<PanelNotice | null>(null);
   let statusError = $state<string | null>(null);
+  let statusNotice = $state<PanelNotice | null>(null);
   let indexStatus = $state<{
     indexed: boolean;
     totalFiles: number;
@@ -28,19 +35,40 @@
   let issueResults = $state<GitHubIssueSearchResult[]>([]);
   let issueSearching = $state(false);
   let issueError = $state<string | null>(null);
+  let issueNotice = $state<PanelNotice | null>(null);
   let issueIndexing = $state(false);
   let issueIndexStatus = $state<string | null>(null);
+
+  function getProjectIndexNotice(message: string): PanelNotice | null {
+    const normalized = message.toLowerCase();
+    const missingPython =
+      normalized.includes("python runtime not found") ||
+      normalized.includes("status=exit code: 9009") ||
+      normalized.includes("status=exit status: 9009");
+
+    if (!missingPython) {
+      return null;
+    }
+
+    return {
+      title: "Project Index requires Python 3.11+",
+      body: "Install Python 3.11 or later, then reopen Project Index. On Windows, make sure either `python` or `py` works in Command Prompt or PowerShell after installation.",
+    };
+  }
 
   async function loadStatus() {
     statusLoading = true;
     statusError = null;
+    statusNotice = null;
     try {
       indexStatus = await invoke("get_index_status_cmd", {
         projectRoot: projectPath,
       });
     } catch (e) {
       indexStatus = null;
-      statusError = String(e);
+      const message = String(e);
+      statusNotice = getProjectIndexNotice(message);
+      statusError = statusNotice ? null : message;
     } finally {
       statusLoading = false;
     }
@@ -57,6 +85,7 @@
 
     searching = true;
     error = null;
+    errorNotice = null;
     try {
       results = await invoke("search_project_index_cmd", {
         projectRoot: projectPath,
@@ -64,7 +93,9 @@
         nResults: 20,
       });
     } catch (e) {
-      error = String(e);
+      const message = String(e);
+      errorNotice = getProjectIndexNotice(message);
+      error = errorNotice ? null : message;
       results = [];
     } finally {
       hasSearched = true;
@@ -83,6 +114,7 @@
     issueIndexing = true;
     issueIndexStatus = null;
     issueError = null;
+    issueNotice = null;
     try {
       const result: { issuesIndexed: number; durationMs: number } = await invoke(
         "index_github_issues_cmd",
@@ -90,7 +122,9 @@
       );
       issueIndexStatus = `${result.issuesIndexed} issues indexed (${result.durationMs}ms)`;
     } catch (e) {
-      issueError = String(e);
+      const message = String(e);
+      issueNotice = getProjectIndexNotice(message);
+      issueError = issueNotice ? null : message;
     } finally {
       issueIndexing = false;
     }
@@ -102,6 +136,7 @@
 
     issueSearching = true;
     issueError = null;
+    issueNotice = null;
     try {
       issueResults = await invoke("search_github_issues_cmd", {
         projectRoot: projectPath,
@@ -109,7 +144,9 @@
         nResults: 20,
       });
     } catch (e) {
-      issueError = String(e);
+      const message = String(e);
+      issueNotice = getProjectIndexNotice(message);
+      issueError = issueNotice ? null : message;
       issueResults = [];
     } finally {
       issueSearching = false;
@@ -189,6 +226,20 @@
       <div class="error-message">{error}</div>
     {/if}
 
+    {#if errorNotice}
+      <div class="notice-message">
+        <div class="notice-title">{errorNotice.title}</div>
+        <div class="notice-body">{errorNotice.body}</div>
+      </div>
+    {/if}
+
+    {#if statusNotice}
+      <div class="notice-message">
+        <div class="notice-title">{statusNotice.title}</div>
+        <div class="notice-body">{statusNotice.body}</div>
+      </div>
+    {/if}
+
     {#if statusError}
       <div class="error-message">Failed to load index status: {statusError}</div>
     {/if}
@@ -208,7 +259,7 @@
             {/if}
           </div>
         {/each}
-      {:else if !searching && !error && hasSearched && lastSearchedQuery === query.trim()}
+      {:else if !searching && !error && !errorNotice && hasSearched && lastSearchedQuery === query.trim()}
         <div class="no-results">No results found</div>
       {/if}
     </div>
@@ -247,6 +298,13 @@
       <div class="error-message">{issueError}</div>
     {/if}
 
+    {#if issueNotice}
+      <div class="notice-message">
+        <div class="notice-title">{issueNotice.title}</div>
+        <div class="notice-body">{issueNotice.body}</div>
+      </div>
+    {/if}
+
     <div class="results">
       {#if issueResults.length > 0}
         {#each issueResults as item}
@@ -269,7 +327,7 @@
             </div>
           </button>
         {/each}
-      {:else if !issueSearching && !issueError && issueQuery.trim()}
+      {:else if !issueSearching && !issueError && !issueNotice && issueQuery.trim()}
         <div class="no-results">No results found</div>
       {/if}
     </div>
@@ -410,6 +468,26 @@
     padding: 6px 8px;
     border-radius: 4px;
     background: var(--error-bg, rgba(224, 108, 117, 0.1));
+  }
+
+  .notice-message {
+    color: var(--text-primary, #ccc);
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    background: rgba(229, 192, 123, 0.12);
+    border: 1px solid rgba(229, 192, 123, 0.24);
+    line-height: 1.45;
+  }
+
+  .notice-title {
+    color: var(--warning-color, #e5c07b);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .notice-body {
+    white-space: pre-wrap;
   }
 
   .results {

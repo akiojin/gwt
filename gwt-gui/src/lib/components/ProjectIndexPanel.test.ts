@@ -114,4 +114,86 @@ describe("ProjectIndexPanel", () => {
     await fireEvent.input(input, { target: { value: "Rust" } });
     expect(rendered.queryByText("No results found")).toBeNull();
   });
+
+  it("shows a Python installation notice instead of a raw status error", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_index_status_cmd") {
+        throw new Error(
+          "Get index status task failed: Chroma helper failed (status=exit code: 9009): Python",
+        );
+      }
+
+      if (command === "search_project_index_cmd") {
+        return [];
+      }
+
+      if (command === "index_github_issues_cmd") {
+        return {
+          issuesIndexed: 0,
+          durationMs: 1,
+        };
+      }
+
+      if (command === "search_github_issues_cmd") {
+        return [];
+      }
+
+      throw new Error(`unexpected invoke command: ${command}`);
+    });
+
+    const rendered = await renderProjectIndexPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Project Index requires Python 3.11+")).toBeTruthy();
+    });
+
+    expect(
+      rendered.getByText(/Install Python 3\.11 or later, then reopen Project Index\./),
+    ).toBeTruthy();
+    expect(rendered.queryByText(/Failed to load index status:/)).toBeNull();
+  });
+
+  it("shows a Python installation notice instead of a raw search error", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_index_status_cmd") {
+        return {
+          indexed: false,
+          totalFiles: 0,
+          dbSizeBytes: 0,
+        };
+      }
+
+      if (command === "search_project_index_cmd") {
+        throw new Error(
+          "Search project index task failed: Python runtime not found (checked python3.13/python3.12/python3.11/python3/py/python)",
+        );
+      }
+
+      if (command === "index_github_issues_cmd") {
+        return {
+          issuesIndexed: 0,
+          durationMs: 1,
+        };
+      }
+
+      if (command === "search_github_issues_cmd") {
+        return [];
+      }
+
+      throw new Error(`unexpected invoke command: ${command}`);
+    });
+
+    const rendered = await renderProjectIndexPanel();
+
+    const input = rendered.getByPlaceholderText("Search project files...") as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "Git" } });
+    await fireEvent.click(rendered.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Project Index requires Python 3.11+")).toBeTruthy();
+    });
+
+    expect(rendered.queryByText(/Search project index task failed:/)).toBeNull();
+    expect(rendered.queryByText("No results found")).toBeNull();
+  });
 });
