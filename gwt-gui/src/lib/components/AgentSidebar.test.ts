@@ -37,7 +37,7 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          specId: "SPEC-ba3f610c",
+          issueNumber: 1438,
           tasks: [
             {
               id: "T001",
@@ -114,7 +114,7 @@ describe("AgentSidebar", () => {
   it("shows empty state when no tasks are returned", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return {
@@ -141,7 +141,7 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          specId: "SPEC-order0001",
+          issueNumber: 1438,
           tasks: [
             { id: "T004", title: "failed task", status: "failed", subAgents: [] },
             { id: "T001", title: "completed task", status: "completed", subAgents: [] },
@@ -186,7 +186,7 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          specId: "SPEC-multi0001",
+          issueNumber: 1438,
           tasks: [
             {
               id: "T010",
@@ -250,7 +250,7 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          specId: "SPEC-abc123",
+          issueNumber: 1438,
           tasks: [],
         };
       }
@@ -266,14 +266,14 @@ describe("AgentSidebar", () => {
     });
 
     await waitFor(() => {
-      expect(rendered.getByText("SPEC-abc123")).toBeTruthy();
+      expect(rendered.getByText("#1438")).toBeTruthy();
     });
   });
 
   it("shows 'Agent Tasks' title", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -292,7 +292,7 @@ describe("AgentSidebar", () => {
   it("shows 'Select a branch to view tasks.' when no branch is active", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -314,7 +314,7 @@ describe("AgentSidebar", () => {
   it("shows branch name in agent-branch when available", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -335,7 +335,7 @@ describe("AgentSidebar", () => {
   it("normalizes origin/ prefix from branch names", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -377,7 +377,7 @@ describe("AgentSidebar", () => {
   it("shows 'Select a task to view assigned agents.' when no task selected and tasks empty", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -399,7 +399,7 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          specId: null,
+          issueNumber: null,
           tasks: [
             { id: "T001", title: "Empty agents task", status: "running", subAgents: [] },
           ],
@@ -424,7 +424,7 @@ describe("AgentSidebar", () => {
   it("displays summary status labels correctly", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "ok", generating: false };
@@ -445,7 +445,7 @@ describe("AgentSidebar", () => {
   it("shows 'Generating' label when summary is generating", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "ok", generating: true };
@@ -466,7 +466,7 @@ describe("AgentSidebar", () => {
   it("shows 'No session' label for no-session status", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -487,7 +487,7 @@ describe("AgentSidebar", () => {
   it("shows 'AI not configured' label", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "ai-not-configured", generating: false };
@@ -508,7 +508,7 @@ describe("AgentSidebar", () => {
   it("shows 'Disabled' label", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "disabled", generating: false };
@@ -529,7 +529,7 @@ describe("AgentSidebar", () => {
   it("shows 'Error' label for error status", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "error", generating: false, error: "Something went wrong" };
@@ -551,7 +551,7 @@ describe("AgentSidebar", () => {
   it("shows session summary error from load failure", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         throw new Error("Backend down");
@@ -572,7 +572,7 @@ describe("AgentSidebar", () => {
   it("shows warning from session summary result", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "ok", generating: false, warning: "Stale data" };
@@ -593,7 +593,7 @@ describe("AgentSidebar", () => {
   it("shows tool ID when present in session summary", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "ok", generating: false, toolId: "claude-code" };
@@ -615,7 +615,7 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          specId: null,
+          issueNumber: null,
           tasks: [
             {
               id: "T001",
@@ -656,7 +656,7 @@ describe("AgentSidebar", () => {
   it("uses selectedBranch when available over currentBranch", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -687,7 +687,7 @@ describe("AgentSidebar", () => {
   it("shows 'No branch context.' in summary section when no branch", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -709,7 +709,7 @@ describe("AgentSidebar", () => {
   it("shows 'No summary yet.' for no-session status in summary section", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "no-session", generating: false };
@@ -730,7 +730,7 @@ describe("AgentSidebar", () => {
   it("shows 'Latest summary ready.' for ok status without toolId or warning", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { specId: null, tasks: [] };
+        return { issueNumber: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return { status: "ok", generating: false };

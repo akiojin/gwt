@@ -1,4 +1,4 @@
-//! devcontainer.json parsing (SPEC-f5f5657e)
+//! devcontainer.json parsing (gwt-spec issue)
 //!
 //! Parses .devcontainer/devcontainer.json files and converts them
 //! to docker-compose compatible configurations.

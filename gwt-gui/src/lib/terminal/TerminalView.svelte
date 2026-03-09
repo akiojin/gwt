@@ -5,6 +5,7 @@
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
   import { isCopyShortcut, isPasteShortcut } from "./shortcuts";
+  import { resolveWindowsPtyOptions } from "./windowsPty";
   import { registerTerminalInputTarget } from "../voice/inputTargetRegistry";
   import { openExternalUrl } from "../openExternalUrl";
 
@@ -44,6 +45,15 @@
   type CaptureTerminalContainer = HTMLDivElement & {
     __gwtTerminal?: Terminal;
   };
+
+  type PlatformNavigator = Navigator & {
+    userAgentData?: { platform?: string | null } | null;
+  };
+
+  type TerminalWindow = Window &
+    typeof globalThis & {
+      __gwtWindowsPtyBuildNumber?: number;
+    };
 
   function isTerminalFocused(rootEl: HTMLElement): boolean {
     const el = document.activeElement;
@@ -313,6 +323,10 @@
       axis: null,
       remainder: 0,
     };
+    const windowsPty = resolveWindowsPtyOptions(
+      navigator as PlatformNavigator,
+      window as TerminalWindow,
+    );
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
@@ -343,6 +357,7 @@
         brightCyan: "#94e2d5",
         brightWhite: "#a6adc8",
       },
+      ...(windowsPty ? { windowsPty } : {}),
     });
 
     const fit = new FitAddon();
@@ -718,6 +733,7 @@
 
   .terminal-container :global(.xterm-viewport) {
     overflow-y: auto !important;
+    scrollbar-gutter: stable;
   }
 
   .terminal-container :global(.xterm-viewport::-webkit-scrollbar) {

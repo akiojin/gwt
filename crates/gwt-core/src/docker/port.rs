@@ -1,4 +1,4 @@
-//! Port allocation and conflict resolution (SPEC-f5f5657e)
+//! Port allocation and conflict resolution (gwt-spec issue)
 //!
 //! Provides utilities for finding available ports and resolving port conflicts
 //! when running multiple Docker containers.

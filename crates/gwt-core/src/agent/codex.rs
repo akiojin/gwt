@@ -188,7 +188,7 @@ fn codex_uses_gpt_5_4_context_overrides(model: &str) -> bool {
     model.eq_ignore_ascii_case(DEFAULT_CODEX_MODEL_LATEST)
 }
 
-/// Check if Codex version supports collaboration_modes (SPEC-fdebd681)
+/// Check if Codex version supports collaboration_modes (gwt-spec issue)
 ///
 /// Returns true if version is v0.91.0 or later.
 /// Note: This function accepts semantic version strings only.
@@ -339,7 +339,7 @@ pub fn codex_default_args(
     let enable_skills = should_enable_codex_skills_flag(skills_flag_version);
     args = with_codex_skills_flag(args, enable_skills);
 
-    // SPEC-fdebd681: Enable collaboration_modes (Plan/Execute mode switching)
+    // gwt-spec issue: Enable collaboration_modes (Plan/Execute mode switching)
     if collaboration_modes {
         args.push("--enable".to_string());
         args.push("collaboration_modes".to_string());

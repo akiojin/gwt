@@ -17,7 +17,6 @@ const detailFixture = {
   title: "Implement auth feature",
   url: "https://github.com/test/repo/issues/42",
   updatedAt: "2026-01-15T10:00:00Z",
-  specId: "SPEC-abc123",
   etag: "W/\"etag-value\"",
   body: "Full issue body",
   sections: {
@@ -64,20 +63,6 @@ describe("IssueSpecPanel", () => {
 
     expect(rendered.getByText("Issue Spec")).toBeTruthy();
     expect(rendered.getByText("#42")).toBeTruthy();
-  });
-
-  it("renders specId in header when provided", async () => {
-    invokeMock.mockResolvedValue(detailFixture);
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      issueNumber: 42,
-      specId: "SPEC-xyz",
-    });
-
-    await waitFor(() => {
-      expect(rendered.getByText("SPEC-xyz")).toBeTruthy();
-    });
   });
 
   it("calls get_spec_issue_detail_cmd with correct args", async () => {
@@ -231,22 +216,6 @@ describe("IssueSpecPanel", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(invokeMock).not.toHaveBeenCalledWith("get_spec_issue_detail_cmd", expect.anything());
     expect(rendered.getByText("Loading issue spec...")).toBeTruthy();
-  });
-
-  it("renders specId only when provided", async () => {
-    invokeMock.mockResolvedValue(detailFixture);
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      issueNumber: 42,
-    });
-
-    await waitFor(() => {
-      expect(rendered.getByText("#42")).toBeTruthy();
-    });
-
-    // specId should not appear when not provided
-    expect(rendered.queryByText("SPEC-abc123")).toBeNull();
   });
 
   it("displays updatedAt and etag from detail", async () => {

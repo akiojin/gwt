@@ -11,7 +11,7 @@ use gwt_core::agent::types::SessionId;
 use gwt_core::ai::{AIClient, AIResponse, ChatMessage, ToolCall};
 use gwt_core::config::ProfilesConfig;
 use gwt_core::git::{
-    find_spec_issue_by_spec_id, sync_issue_to_project, upsert_spec_issue, SpecIssueSections,
+    get_spec_issue_detail, sync_issue_to_project, upsert_spec_issue, SpecIssueSections,
     SpecProjectPhase,
 };
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::AppState;
 
 const MAX_TOOL_CALL_LOOPS: usize = 3;
-const SYSTEM_PROMPT: &str = "You are the master agent for gwt. Use ReAct and tool calls to send instructions to agent panes and capture output when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- Keep spec artifacts in GitHub Issues (Issue-first). Do not generate local spec markdown files.\n- Maintain the full bundle: spec, plan, tasks, tdd, research, data-model, quickstart, contracts, checklists.\n- Keep contracts/checklists as issue comments via artifact tools.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
+const SYSTEM_PROMPT: &str = "You are the master agent for gwt. Use ReAct and tool calls to send instructions to agent panes and capture output when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- Keep spec artifacts in GitHub Issues (Issue-first) only.\n- Maintain the full bundle: spec, plan, tasks, tdd, research, data-model, quickstart, contracts, checklists.\n- Keep contracts/checklists as issue comments via artifact tools.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectModeMessage {
@@ -42,7 +42,6 @@ pub struct ProjectModeState {
     pub session_name: Option<String>,
     pub llm_call_count: u64,
     pub estimated_tokens: u64,
-    pub active_spec_id: Option<String>,
     pub active_spec_issue_number: Option<u64>,
     pub active_spec_issue_url: Option<String>,
     pub active_spec_issue_etag: Option<String>,
@@ -56,7 +55,6 @@ pub struct ProjectModeState {
 
 #[derive(Debug, Clone)]
 struct IssueSpecPreparation {
-    spec_id: String,
     issue_number: u64,
     issue_url: String,
     etag: String,
@@ -74,7 +72,6 @@ impl ProjectModeState {
             session_name: Some("Project Mode".to_string()),
             llm_call_count: 0,
             estimated_tokens: 0,
-            active_spec_id: None,
             active_spec_issue_number: None,
             active_spec_issue_url: None,
             active_spec_issue_etag: None,
@@ -172,7 +169,7 @@ fn send_project_mode_message_legacy(
         state,
         window_label,
         trimmed,
-        working.active_spec_id.as_deref(),
+        working.active_spec_issue_number,
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -182,19 +179,18 @@ fn send_project_mode_message_legacy(
             return working;
         }
     };
-    working.active_spec_id = Some(prep.spec_id.clone());
     working.active_spec_issue_number = Some(prep.issue_number);
     working.active_spec_issue_url = Some(prep.issue_url.clone());
     working.active_spec_issue_etag = Some(prep.etag.clone());
     let note = if prep.created {
         format!(
-            "Prepared issue-first spec {} as #{} ({})",
-            prep.spec_id, prep.issue_number, prep.issue_url
+            "Prepared issue-first spec #{} ({})",
+            prep.issue_number, prep.issue_url
         )
     } else {
         format!(
-            "Updated issue-first spec {} on #{} ({})",
-            prep.spec_id, prep.issue_number, prep.issue_url
+            "Updated issue-first spec #{} ({})",
+            prep.issue_number, prep.issue_url
         )
     };
     push_message(&mut working, "assistant", "observation", &note);
@@ -284,7 +280,7 @@ All specifications must be stored as GitHub Issues using the issue_spec tools:
 Follow this workflow for every feature request:
 
 1. **Clarify**: Ask the user to clarify ambiguous requirements. Gather enough context before proceeding.
-2. **Create GitHub Issue**: Use `upsert_spec_issue` to create a new spec issue. Include the SPEC-ID and a clear title.
+2. **Create GitHub Issue**: Use `upsert_spec_issue` to create a new spec issue. Use the issue number as the only spec identifier and set a clear title.
 3. **Write 4 required sections**: Update the issue with all 4 gate sections via `upsert_spec_issue`:
    - `spec` - Functional requirements and acceptance scenarios
    - `plan` - Implementation plan with approach and architecture decisions
@@ -592,30 +588,26 @@ fn prepare_issue_spec_for_window(
     state: &AppState,
     window_label: &str,
     user_input: &str,
-    preferred_spec_id: Option<&str>,
+    preferred_issue_number: Option<u64>,
 ) -> Result<IssueSpecPreparation, String> {
     let Some(project_path) = state.project_for_window(window_label) else {
         return Err("Open a project before using Project Mode.".to_string());
     };
-    prepare_issue_spec(Path::new(&project_path), user_input, preferred_spec_id)
+    prepare_issue_spec(Path::new(&project_path), user_input, preferred_issue_number)
 }
 
 fn prepare_issue_spec(
     project_root: &Path,
     user_input: &str,
-    preferred_spec_id: Option<&str>,
+    preferred_issue_number: Option<u64>,
 ) -> Result<IssueSpecPreparation, String> {
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let spec_id = extract_spec_id(user_input)
-        .or_else(|| preferred_spec_id.map(str::to_string))
-        .unwrap_or_else(generate_spec_id);
-    let existing = find_spec_issue_by_spec_id(&repo_path, &spec_id)?;
+    let issue_number = extract_issue_number(user_input).or(preferred_issue_number);
+    let existing = issue_number
+        .map(|number| get_spec_issue_detail(&repo_path, number))
+        .transpose()?;
     let created = existing.is_none();
-    let title = build_issue_title(
-        &spec_id,
-        user_input,
-        existing.as_ref().map(|e| e.title.as_str()),
-    );
+    let title = build_issue_title(user_input, existing.as_ref().map(|e| e.title.as_str()));
     let sections = if let Some(current) = existing.as_ref() {
         let mut sections = current.sections.clone();
         sections.spec = merge_spec_section(&sections.spec, user_input);
@@ -636,7 +628,7 @@ fn prepare_issue_spec(
 
     let detail = upsert_spec_issue(
         &repo_path,
-        &spec_id,
+        issue_number,
         &title,
         &sections,
         existing.as_ref().map(|e| e.etag.as_str()),
@@ -645,7 +637,6 @@ fn prepare_issue_spec(
     let _ = sync_issue_to_project(&repo_path, detail.number, "", SpecProjectPhase::Draft);
 
     Ok(IssueSpecPreparation {
-        spec_id,
         issue_number: detail.number,
         issue_url: detail.url,
         etag: detail.etag,
@@ -653,25 +644,32 @@ fn prepare_issue_spec(
     })
 }
 
-fn extract_spec_id(input: &str) -> Option<String> {
-    for token in input.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
-        if token.len() != 13 {
-            continue;
+fn extract_issue_number(input: &str) -> Option<u64> {
+    for token in input.split_whitespace() {
+        let token = token
+            .trim_matches(|c: char| matches!(c, ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']'));
+
+        if let Some(rest) = token.strip_prefix('#') {
+            if let Ok(number) = rest.parse::<u64>() {
+                return Some(number);
+            }
         }
-        if !token[..5].eq_ignore_ascii_case("SPEC-") {
-            continue;
+
+        if let Some((_, rest)) = token.rsplit_once('#') {
+            if token.contains('/') {
+                if let Ok(number) = rest.parse::<u64>() {
+                    return Some(number);
+                }
+            }
         }
-        let suffix = &token[5..];
-        if suffix.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Some(format!("SPEC-{}", suffix.to_ascii_lowercase()));
+
+        if let Some((_, rest)) = token.rsplit_once("/issues/") {
+            if let Ok(number) = rest.parse::<u64>() {
+                return Some(number);
+            }
         }
     }
     None
-}
-
-fn generate_spec_id() -> String {
-    let raw = uuid::Uuid::new_v4().simple().to_string();
-    format!("SPEC-{}", &raw[..8])
 }
 
 fn collapse_whitespace(input: &str) -> String {
@@ -693,7 +691,7 @@ fn merge_spec_section(existing: &str, user_input: &str) -> String {
     format!("{trimmed_existing}\n\n- {normalized}")
 }
 
-fn build_issue_title(spec_id: &str, user_input: &str, existing_title: Option<&str>) -> String {
+fn build_issue_title(user_input: &str, existing_title: Option<&str>) -> String {
     if let Some(existing) = existing_title {
         if !existing.trim().is_empty() {
             return existing.trim().to_string();
@@ -709,7 +707,7 @@ fn build_issue_title(spec_id: &str, user_input: &str, existing_title: Option<&st
         title = title.chars().take(72).collect::<String>();
         title = title.trim_end().to_string();
     }
-    format!("[{}] {}", spec_id, title)
+    title
 }
 
 struct ReactSection {
@@ -1359,9 +1357,27 @@ mod tests {
     }
 
     #[test]
-    fn extract_spec_id_parses_embedded_id() {
-        let out = extract_spec_id("continue work on SPEC-ba3f610c please");
-        assert_eq!(out, Some("SPEC-ba3f610c".to_string()));
+    fn extract_issue_number_parses_hash_prefixed_issue() {
+        let out = extract_issue_number("continue work on #1438 please");
+        assert_eq!(out, Some(1438));
+    }
+
+    #[test]
+    fn extract_issue_number_ignores_plain_number_token() {
+        let out = extract_issue_number("continue work on 1438 please");
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn extract_issue_number_parses_repo_scoped_reference() {
+        let out = extract_issue_number("continue work on akiojin/gwt#1438 please");
+        assert_eq!(out, Some(1438));
+    }
+
+    #[test]
+    fn extract_issue_number_parses_issue_url() {
+        let out = extract_issue_number("https://github.com/akiojin/gwt/issues/1438");
+        assert_eq!(out, Some(1438));
     }
 
     #[test]
@@ -1376,29 +1392,22 @@ mod tests {
 
     #[test]
     fn build_issue_title_prefers_existing_title() {
-        let title = build_issue_title("SPEC-deadbeef", "new input", Some("Existing"));
+        let title = build_issue_title("new input", Some("Existing"));
         assert_eq!(title, "Existing");
     }
 
     #[test]
-    fn build_issue_title_contains_spec_id_prefix() {
-        let title = build_issue_title("SPEC-cafebabe", "Implement authentication flow", None);
-        assert!(title.starts_with("[SPEC-cafebabe] "));
+    fn build_issue_title_uses_plain_user_input() {
+        let title = build_issue_title("Implement authentication flow", None);
+        assert_eq!(title, "Implement authentication flow");
     }
 
     #[test]
     fn build_issue_title_handles_multibyte_without_panic() {
         // 72 chars total but >72 bytes (71 ASCII + 1 multibyte char)
         let input = format!("{}あ", "a".repeat(71));
-        let title = build_issue_title("SPEC-cafebabe", &input, None);
+        let title = build_issue_title(&input, None);
         assert!(title.contains('あ'));
-    }
-
-    #[test]
-    fn generate_spec_id_has_expected_shape() {
-        let id = generate_spec_id();
-        assert_eq!(id.len(), 13);
-        assert!(id.starts_with("SPEC-"));
     }
 
     #[test]
@@ -1434,7 +1443,6 @@ mod tests {
             "session_name": "Project Mode",
             "llm_call_count": 5,
             "estimated_tokens": 1000,
-            "active_spec_id": null,
             "active_spec_issue_number": null,
             "active_spec_issue_url": null,
             "active_spec_issue_etag": null

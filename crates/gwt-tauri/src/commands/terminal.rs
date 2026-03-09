@@ -217,7 +217,7 @@ fn create_new_worktree_path(
     branch_name: &str,
     base_branch: Option<&str>,
 ) -> Result<PathBuf, String> {
-    // SPEC-a4fb2db2: Try remote-first flow when gh CLI is available
+    // gwt-spec issue: Try remote-first flow when gh CLI is available
     if gwt_core::git::gh_cli::is_gh_available() && gwt_core::git::gh_cli::check_auth() {
         match create_new_worktree_remote_first(repo_path, branch_name, base_branch) {
             Ok(path) => return Ok(path),
@@ -282,7 +282,7 @@ fn rollback_new_issue_branch(repo_path: &std::path::Path, branch_name: &str) -> 
     }
 }
 
-/// SPEC-a4fb2db2: Create a worktree by first creating the branch on GitHub,
+/// gwt-spec issue: Create a worktree by first creating the branch on GitHub,
 /// then fetching it locally.
 fn create_new_worktree_remote_first(
     repo_path: &std::path::Path,
@@ -326,7 +326,7 @@ fn create_new_worktree_remote_first(
         .create_for_branch(branch_name)
         .map_err(|e| e.to_string())?;
 
-    // SPEC-b3f1a4e2 FR-005: Set upstream tracking config (non-fatal)
+    // gwt-spec issue FR-005: Set upstream tracking config (non-fatal)
     // Remote-first path always uses "origin".
     if let Err(e) = gwt_core::git::Branch::set_upstream_config(&wt.path, branch_name, "origin") {
         tracing::warn!(
@@ -491,13 +491,13 @@ fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
     };
 
     match agent_id {
-        // SPEC-3b0ed29b FR-005: Codex uses `--model=...`.
+        // gwt-spec issue FR-005: Codex uses `--model=...`.
         "codex" => vec![format!("--model={model}")],
-        // SPEC-3b0ed29b: Claude Code uses `--model <name>`.
+        // gwt-spec issue: Claude Code uses `--model <name>`.
         "claude" => vec!["--model".to_string(), model.to_string()],
-        // SPEC-3b0ed29b: Gemini CLI uses `-m <name>`.
+        // gwt-spec issue: Gemini CLI uses `-m <name>`.
         "gemini" => vec!["-m".to_string(), model.to_string()],
-        // SPEC-3b0ed29b: OpenCode uses `-m provider/model`.
+        // gwt-spec issue: OpenCode uses `-m provider/model`.
         "opencode" => vec!["-m".to_string(), model.to_string()],
         "copilot" => vec!["--model".to_string(), model.to_string()],
         _ => Vec::new(),
@@ -3771,7 +3771,7 @@ services:
         let _ = ScrollbackFile::cleanup(&pane_id);
     }
 
-    // SPEC-3b0ed29b FR-106: Claude Code launch must always set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+    // gwt-spec issue FR-106: Claude Code launch must always set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
     #[test]
     fn claude_launch_env_sets_agent_teams() {
         // Verify that after the IS_SANDBOX block, Claude Code launches include
@@ -4354,12 +4354,12 @@ pub(crate) fn launch_agent_for_project_root(
 
         let skip_permissions = request.skip_permissions.unwrap_or(false);
         if agent_id == "claude" && skip_permissions && std::env::consts::OS != "windows" {
-            // SPEC-3b0ed29b: Skip-permissions on non-Windows sets IS_SANDBOX=1 to avoid
+            // gwt-spec issue: Skip-permissions on non-Windows sets IS_SANDBOX=1 to avoid
             // accidental confirmation prompts in sandboxed environments.
             env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
         }
 
-        // SPEC-3b0ed29b FR-106: Always enable Agent Teams for Claude Code launches.
+        // gwt-spec issue FR-106: Always enable Agent Teams for Claude Code launches.
         if agent_id == "claude" {
             env_vars
                 .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
@@ -4992,7 +4992,7 @@ pub fn launch_agent(
         .map_err(|e| StructuredError::internal(&e, "launch_agent"))
 }
 
-/// Start an async launch job with progress events (SPEC-3b0ed29b US15).
+/// Start an async launch job with progress events (gwt-spec issue US15).
 #[tauri::command]
 pub fn start_launch_job(
     window: tauri::Window,

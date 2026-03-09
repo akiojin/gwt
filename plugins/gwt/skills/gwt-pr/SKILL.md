@@ -31,10 +31,17 @@ Create or update GitHub Pull Requests with the gh CLI using a detailed body temp
 When all PRs for the head branch are merged, you **must** check whether there are new commits after the merge:
 
 1. **Get the merge commit SHA** of the most recent merged PR.
-2. **Count commits after the merge**: `git rev-list --count <merge_commit>..HEAD`
-3. **Decision**:
-   - If new commits exist → create a new PR (these changes are not in the base branch)
-   - If no new commits → report "No changes since last merge" and finish (do **not** create an empty PR)
+2. **Validate merge commit ancestry first**: `git merge-base --is-ancestor <merge_commit> HEAD`
+3. **If the merge commit is an ancestor of `HEAD`**, count commits after the merge:
+   - `git rev-list --count <merge_commit>..HEAD`
+4. **If the merge commit is missing or not an ancestor of `HEAD`**, fallback to the branch upstream first:
+   - `git rev-list --count origin/<head>..HEAD`
+5. **If the upstream comparison fails**, fallback to the base branch comparison:
+   - `git rev-list --count origin/<base>..HEAD`
+6. **Decision**:
+   - If the selected count is greater than 0 → create a new PR
+   - If the selected count is 0 → report "No new changes since merge" and finish
+   - If both fallback comparisons fail → stop and report `MANUAL CHECK`
 
 ### Why this matters
 
@@ -135,9 +142,12 @@ Next
 
 6. **If all PRs are merged, perform post-merge commit check**
    - Get merge commit: `gh pr list --head <head> --state merged --json mergeCommit -q '.[0].mergeCommit.oid'`
-   - Count new commits: `git rev-list --count <merge_commit>..HEAD`
-   - If 0 → finish with message "No new changes since merge"
-   - If >0 → proceed to create new PR
+   - If the merge commit is an ancestor of `HEAD`, count `git rev-list --count <merge_commit>..HEAD`
+   - If the merge commit is missing or not an ancestor, count `git rev-list --count origin/<head>..HEAD` first
+   - Only if the upstream comparison fails, count `git rev-list --count origin/<base>..HEAD`
+   - If the selected count is 0 → finish with message "No new changes since merge"
+   - If the selected count is >0 → proceed to create new PR
+   - If neither comparison is usable → stop with `MANUAL CHECK`
 
 7. **Ensure the head branch is pushed**
    - If no upstream: `git push -u origin <head>`
@@ -222,10 +232,14 @@ elif [ "$unmerged_count" -gt 0 ]; then
 else
   # All PRs are merged - check for post-merge commits
   merge_commit=$(echo "$pr_json" | jq -r 'sort_by(.mergedAt) | last | .mergeCommit.oid')
+  new_commits=""
 
-  if [ -n "$merge_commit" ] && [ "$merge_commit" != "null" ]; then
-    new_commits=$(git rev-list --count "$merge_commit"..HEAD 2>/dev/null || echo "0")
+  if [ -n "$merge_commit" ] && [ "$merge_commit" != "null" ] && \
+     git merge-base --is-ancestor "$merge_commit" HEAD 2>/dev/null; then
+    new_commits=$(git rev-list --count "$merge_commit"..HEAD 2>/dev/null || echo "")
+  fi
 
+  if [ -n "$new_commits" ]; then
     if [ "$new_commits" -gt 0 ]; then
       echo "Found $new_commits commit(s) after merge - creating new PR"
       action=create
@@ -234,13 +248,31 @@ else
       action=none
     fi
   else
-    # Fallback: check against base branch
-    new_commits=$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "0")
+    upstream_commits=$(git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo "")
 
-    if [ "$new_commits" -gt 0 ]; then
-      action=create
+    if [ -n "$upstream_commits" ]; then
+      if [ "$upstream_commits" -gt 0 ]; then
+        echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
+        action=create
+      else
+        echo "No new commits ahead of origin/$head - nothing to do"
+        action=none
+      fi
     else
-      action=none
+      fallback_commits=$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "")
+
+      if [ -n "$fallback_commits" ]; then
+        if [ "$fallback_commits" -gt 0 ]; then
+          echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base - creating new PR"
+          action=create
+        else
+          echo "Upstream comparison unavailable and no commits ahead of origin/$base - nothing to do"
+          action=none
+        fi
+      else
+        echo "Manual check required: could not determine whether new commits exist after the last merge" >&2
+        action=manual_check
+      fi
     fi
   fi
 fi
@@ -260,6 +292,10 @@ case "$action" in
     ;;
   none)
     echo "No action needed - no new changes since last merge"
+    ;;
+  manual_check)
+    echo "Manual check required - post-merge commit status could not be determined" >&2
+    exit 1
     ;;
 esac
 ```
