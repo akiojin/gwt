@@ -107,6 +107,30 @@
   $effect(() => {
     void refreshState();
   });
+
+  $: displaySessionName =
+    state.session_name && state.session_name !== "Project Mode"
+      ? state.session_name
+      : "Project Mode";
+
+  $: {
+    const issueNumber = state.active_spec_issue_number ?? null;
+    if (!issueNumber || issueNumber === lastOpenedIssueNumber) {
+      // no-op
+    } else {
+      lastOpenedIssueNumber = issueNumber;
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("gwt-project-mode-open-spec-issue", {
+            detail: {
+              issueNumber,
+              issueUrl: state.active_spec_issue_url ?? null,
+            },
+          })
+        );
+      }
+    }
+  }
 </script>
 
 <section class="god-world" data-testid="god-world">

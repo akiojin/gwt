@@ -1,4 +1,4 @@
-//! Agent history persistence module (SPEC-a3f4c9df)
+//! Agent history persistence module (gwt-spec issue)
 //!
 //! This module provides functionality to persist agent usage history per branch,
 //! allowing the display of recently used agents even after worktrees are deleted.
@@ -89,7 +89,7 @@ impl AgentHistoryStore {
         Self::get_json_history_path()
     }
 
-    /// Load history from the default paths with format auto-detection (SPEC-a3f4c9df FR-005)
+    /// Load history from the default paths with format auto-detection (gwt-spec issue FR-005)
     ///
     /// Priority: TOML > JSON
     pub fn load() -> Result<Self, AgentHistoryError> {
@@ -111,7 +111,7 @@ impl AgentHistoryStore {
                     json_path.display()
                 );
                 if let Ok(store) = Self::load_from_json(&json_path) {
-                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                    // Auto-migrate: save as TOML for next time (gwt-spec issue)
                     if let Err(e) = store.save() {
                         warn!("Failed to auto-migrate agent history to TOML: {}", e);
                     } else {
@@ -172,7 +172,7 @@ impl AgentHistoryStore {
         }
     }
 
-    /// Save history to the default path in TOML format (SPEC-a3f4c9df FR-006)
+    /// Save history to the default path in TOML format (gwt-spec issue FR-006)
     pub fn save(&self) -> Result<(), AgentHistoryError> {
         let path = Self::get_toml_history_path()?;
         self.save_to_toml(&path)

@@ -96,6 +96,23 @@ async function switchToTab(
   await fireEvent.click(target!);
 }
 
+async function pasteText(input: HTMLInputElement, text: string) {
+  input.focus();
+  const cursor = input.value.length;
+  input.setSelectionRange(cursor, cursor);
+  const pasteEvent = new Event("paste", {
+    bubbles: true,
+    cancelable: true,
+  }) as ClipboardEvent;
+  Object.defineProperty(pasteEvent, "clipboardData", {
+    value: {
+      getData: (type: string) => (type === "text/plain" ? text : ""),
+    },
+    configurable: true,
+  });
+  await fireEvent(input, pasteEvent);
+}
+
 describe("SettingsPanel", () => {
   beforeEach(() => {
     cleanup();
@@ -224,6 +241,136 @@ describe("SettingsPanel", () => {
       ).map((o) => o.textContent?.trim());
       expect(options).not.toContain("staging");
       expect(activeProfile.value).toBe("default");
+    });
+  });
+
+  it("disables deleting the default profile", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("Active Profile");
+
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const deleteButton = rendered.getByRole("button", {
+      name: "Delete Active Profile",
+    }) as HTMLButtonElement;
+
+    expect(activeProfile.value).toBe("default");
+    expect(deleteButton.disabled).toBe(true);
+
+    await fireEvent.click(deleteButton);
+
+    await waitFor(() => {
+      const options = Array.from(activeProfile.options).map((opt) => opt.value);
+      expect(options).toContain("default");
+      expect(activeProfile.value).toBe("default");
+    });
+  });
+
+  it("allows deleting a malformed default-like profile key", async () => {
+    const malformedProfiles = structuredClone(profilesFixture);
+    malformedProfiles.active = "default ";
+    malformedProfiles.profiles["default "] = {
+      name: "default ",
+      description: "",
+      env: { BROKEN: "1" },
+      disabled_env: [],
+      ai_enabled: false,
+      ai: null,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(malformedProfiles);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("Active Profile");
+
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const deleteButton = rendered.getByRole("button", {
+      name: "Delete Active Profile",
+    }) as HTMLButtonElement;
+
+    expect(activeProfile.value).toBe("default ");
+    expect(deleteButton.disabled).toBe(false);
+
+    await fireEvent.click(deleteButton);
+
+    await waitFor(() => {
+      const options = Array.from(activeProfile.options).map((opt) => opt.value);
+      expect(options).not.toContain("default ");
+      expect(activeProfile.value).toBe("default");
+    });
+  });
+
+  it("re-disables deleting after switching back to the default profile", async () => {
+    const twoProfiles = structuredClone(profilesFixture);
+    twoProfiles.profiles.dev = {
+      name: "dev",
+      description: "",
+      env: { DEV_KEY: "dev-value" },
+      disabled_env: [],
+      ai_enabled: true,
+      ai: {
+        endpoint: "https://api.openai.com/v1",
+        api_key: "dev-key",
+        model: "gpt-4o-mini",
+        language: "en",
+        summary_enabled: true,
+      },
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(twoProfiles);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("Active Profile");
+
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const deleteButton = rendered.getByRole("button", {
+      name: "Delete Active Profile",
+    }) as HTMLButtonElement;
+
+    expect(activeProfile.value).toBe("default");
+    expect(deleteButton.disabled).toBe(true);
+
+    await fireEvent.change(activeProfile, { target: { value: "dev" } });
+    await waitFor(() => {
+      expect(activeProfile.value).toBe("dev");
+      expect(deleteButton.disabled).toBe(false);
+    });
+
+    await fireEvent.change(activeProfile, { target: { value: "default" } });
+    await waitFor(() => {
+      expect(activeProfile.value).toBe("default");
+      expect(deleteButton.disabled).toBe(true);
     });
   });
 
@@ -2036,8 +2183,99 @@ describe("SettingsPanel", () => {
     await switchToTab(rendered, "Profiles");
     await rendered.findByText("API Key");
 
-    expect(rendered.container.querySelector(".btn-peek-apikey")).toBeNull();
-    expect(rendered.container.querySelector(".btn-copy-apikey")).toBeNull();
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+    const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+
+    expect(peekBtn.disabled).toBe(true);
+    expect(copyBtn.disabled).toBe(true);
+    expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("shows peek and copy buttons when API key is typed", async () => {
+    const emptyKeyProfiles = structuredClone(profilesFixture);
+    emptyKeyProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(emptyKeyProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+
+    await fireEvent.input(apiKeyInput, { target: { value: "sk-draft-key" } });
+
+    await waitFor(() => {
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
+    });
+  });
+
+  it("shows peek and copy buttons when API key is pasted", async () => {
+    const emptyKeyProfiles = structuredClone(profilesFixture);
+    emptyKeyProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(emptyKeyProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+
+    await pasteText(apiKeyInput, "sk-pasted-key");
+
+    await waitFor(() => {
+      expect(apiKeyInput.value).toBe("sk-pasted-key");
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
+    });
   });
 
   it("shows peek and copy buttons when API key is non-empty", async () => {
@@ -2050,8 +2288,11 @@ describe("SettingsPanel", () => {
     await switchToTab(rendered, "Profiles");
     await rendered.findByText("API Key");
 
-    expect(rendered.container.querySelector(".btn-peek-apikey")).not.toBeNull();
-    expect(rendered.container.querySelector(".btn-copy-apikey")).not.toBeNull();
+    const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+    const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+    expect(peekBtn.disabled).toBe(false);
+    expect(copyBtn.disabled).toBe(false);
+    expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
   });
 
   it("renders SVG icons inside API key peek and copy buttons", async () => {
@@ -2276,6 +2517,52 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("uses pasted API key when Refresh is clicked", async () => {
+    const emptyKeyProfiles = structuredClone(profilesFixture);
+    emptyKeyProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "",
+      language: "en",
+      summary_enabled: true,
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(emptyKeyProfiles);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+
+    await pasteText(apiKeyInput, "sk-pasted-refresh");
+
+    const refreshBtn = rendered.getByRole("button", { name: "Refresh" }) as HTMLButtonElement;
+    await fireEvent.click(refreshBtn);
+
+    await waitFor(() => {
+      const listCall = invokeMock.mock.calls.find(([cmd]) => cmd === "list_ai_models");
+      expect(listCall).toBeTruthy();
+      expect(listCall![1]).toMatchObject({ apiKey: "sk-pasted-refresh" });
+    });
+  });
+
   it("persists API key to save_profiles on Save (issue #1480)", async () => {
     const rendered = await renderSettingsPanel();
 
@@ -2302,6 +2589,296 @@ describe("SettingsPanel", () => {
       expect(saveCall).toBeTruthy();
       const savedConfig = saveCall![1].config as ProfilesConfig;
       expect(savedConfig.profiles.default.ai?.api_key).toBe("sk-saved-key");
+    });
+  });
+
+  it("reloads saved default profile API key after closing and reopening settings", async () => {
+    let persistedSettings = structuredClone(settingsFixture);
+    let persistedProfiles = structuredClone(profilesFixture);
+    persistedProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "",
+      language: "ja",
+      summary_enabled: true,
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "get_settings") return structuredClone(persistedSettings);
+      if (command === "get_profiles") return structuredClone(persistedProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") {
+        persistedSettings = structuredClone(args?.settings as SettingsData);
+        return null;
+      }
+      if (command === "save_profiles") {
+        persistedProfiles = structuredClone(args?.config as ProfilesConfig);
+        return null;
+      }
+      return null;
+    });
+
+    const first = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(first, "Profiles");
+    await first.findByText("API Key");
+
+    const firstApiKeyField = Array.from(first.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const firstApiKeyInput = firstApiKeyField.querySelector("input") as HTMLInputElement;
+
+    await fireEvent.input(firstApiKeyInput, { target: { value: "sk-reopen-check" } });
+    await fireEvent.click(first.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(persistedProfiles.profiles.default.ai?.api_key).toBe("sk-reopen-check");
+    });
+
+    first.unmount();
+
+    const reopened = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(reopened, "Profiles");
+    await reopened.findByText("API Key");
+
+    const reopenedApiKeyField = Array.from(reopened.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const reopenedApiKeyInput = reopenedApiKeyField.querySelector("input") as HTMLInputElement;
+
+    await waitFor(() => {
+      expect(reopenedApiKeyInput.value).toBe("sk-reopen-check");
+      const peekBtn = reopened.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = reopened.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
+    });
+  });
+
+  it("reloads pasted default profile API key after closing and reopening settings", async () => {
+    let persistedSettings = structuredClone(settingsFixture);
+    let persistedProfiles = structuredClone(profilesFixture);
+    persistedProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "",
+      language: "ja",
+      summary_enabled: true,
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "get_settings") return structuredClone(persistedSettings);
+      if (command === "get_profiles") return structuredClone(persistedProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") {
+        persistedSettings = structuredClone(args?.settings as SettingsData);
+        return null;
+      }
+      if (command === "save_profiles") {
+        persistedProfiles = structuredClone(args?.config as ProfilesConfig);
+        return null;
+      }
+      return null;
+    });
+
+    const first = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(first, "Profiles");
+    await first.findByText("API Key");
+
+    const firstApiKeyField = Array.from(first.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const firstApiKeyInput = firstApiKeyField.querySelector("input") as HTMLInputElement;
+
+    await pasteText(firstApiKeyInput, "sk-pasted-reopen");
+    await fireEvent.click(first.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(persistedProfiles.profiles.default.ai?.api_key).toBe("sk-pasted-reopen");
+    });
+
+    first.unmount();
+
+    const reopened = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(reopened, "Profiles");
+    await reopened.findByText("API Key");
+
+    const reopenedApiKeyField = Array.from(reopened.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const reopenedApiKeyInput = reopenedApiKeyField.querySelector("input") as HTMLInputElement;
+
+    await waitFor(() => {
+      expect(reopenedApiKeyInput.value).toBe("sk-pasted-reopen");
+      const peekBtn = reopened.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = reopened.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
+    });
+  });
+
+  it("resets API key draft and button visibility when switching profiles", async () => {
+    const twoProfiles = structuredClone(profilesFixture);
+    twoProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+    twoProfiles.profiles.dev = {
+      name: "dev",
+      description: "",
+      env: {},
+      disabled_env: [],
+      ai_enabled: true,
+      ai: {
+        endpoint: "https://api.openai.com/v1",
+        api_key: "",
+        model: "gpt-4o-mini",
+        language: "en",
+        summary_enabled: true,
+      },
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(twoProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+
+    await fireEvent.input(apiKeyInput, { target: { value: "sk-unsaved-key" } });
+
+    await waitFor(() => {
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
+    });
+
+    await fireEvent.change(activeProfile, { target: { value: "dev" } });
+
+    await waitFor(() => {
+      expect(apiKeyInput.value).toBe("");
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(true);
+      expect(copyBtn.disabled).toBe(true);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(true);
+    });
+  });
+
+  it("preserves unsaved API key edits across profile switches on Save", async () => {
+    const twoProfiles = structuredClone(profilesFixture);
+    twoProfiles.profiles.default.ai = {
+      endpoint: "https://api.openai.com/v1",
+      api_key: "",
+      model: "gpt-4o-mini",
+      language: "en",
+      summary_enabled: true,
+    };
+    twoProfiles.profiles.dev = {
+      name: "dev",
+      description: "",
+      env: {},
+      disabled_env: [],
+      ai_enabled: true,
+      ai: {
+        endpoint: "https://api.openai.com/v1",
+        api_key: "",
+        model: "gpt-4o-mini",
+        language: "en",
+        summary_enabled: true,
+      },
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(twoProfiles);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    await rendered.findByText("API Key");
+
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
+      (f.textContent ?? "").includes("API Key")
+    ) as HTMLElement;
+    const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
+    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+
+    await fireEvent.input(apiKeyInput, { target: { value: "sk-profile-a" } });
+    await fireEvent.change(activeProfile, { target: { value: "dev" } });
+
+    const saveBtn = rendered.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    await fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      const saveCall = invokeMock.mock.calls.findLast(([cmd]) => cmd === "save_profiles");
+      expect(saveCall).toBeTruthy();
+      const savedConfig = saveCall![1].config as ProfilesConfig;
+      expect(savedConfig.profiles.default.ai?.api_key).toBe("sk-profile-a");
+      expect(savedConfig.profiles.dev.ai?.api_key).toBe("");
+    });
+
+    await fireEvent.change(activeProfile, { target: { value: "default" } });
+
+    await waitFor(() => {
+      expect(apiKeyInput.value).toBe("sk-profile-a");
+      const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
+      const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
+      expect(peekBtn.disabled).toBe(false);
+      expect(copyBtn.disabled).toBe(false);
+      expect(peekBtn.parentElement?.classList.contains("hidden")).toBe(false);
     });
   });
 

@@ -4,6 +4,7 @@
   import type {
     BranchInfo,
     BranchLinkedIssueInfo,
+    BranchPrPreflight,
     BranchPrReference,
     DockerContext,
     LaunchAgentRequest,
@@ -79,6 +80,35 @@
     ghCliStatus?: GhCliStatus | null;
   } = $props();
 
+  function normalizeBranchPrPreflight(value: unknown): BranchPrPreflight | null {
+    if (!value || typeof value !== "object") return null;
+    const record = value as Record<string, unknown>;
+    const baseBranch = typeof record.baseBranch === "string" ? record.baseBranch : null;
+    const aheadBy = typeof record.aheadBy === "number" ? record.aheadBy : null;
+    const behindBy = typeof record.behindBy === "number" ? record.behindBy : null;
+    const status = typeof record.status === "string" ? record.status : null;
+    const blockingReason =
+      typeof record.blockingReason === "string" || record.blockingReason === null
+        ? record.blockingReason
+        : null;
+
+    if (!baseBranch || aheadBy === null || behindBy === null || !status) {
+      return null;
+    }
+
+    if (!["up_to_date", "ahead", "behind", "diverged"].includes(status)) {
+      return null;
+    }
+
+    return {
+      baseBranch,
+      aheadBy,
+      behindBy,
+      status: status as BranchPrPreflight["status"],
+      blockingReason,
+    };
+  }
+
   let quickStartEntries: ToolSessionEntry[] = $state([]);
   let quickStartLoading: boolean = $state(false);
   let quickStartError: string | null = $state(null);
@@ -104,6 +134,10 @@
   let latestBranchPrError: string | null = $state(null);
   let latestBranchPr: BranchPrReference | null = $state(null);
   let latestBranchPrBranch: string | null = $state(null);
+  let branchPrPreflightLoading: boolean = $state(false);
+  let branchPrPreflightError: string | null = $state(null);
+  let branchPrPreflight: BranchPrPreflight | null = $state(null);
+  let branchPrPreflightBranch: string | null = $state(null);
 
   let dockerContextLoading: boolean = $state(false);
   let dockerContextError: string | null = $state(null);
@@ -182,6 +216,7 @@
   const QUICK_START_CACHE_TTL_MS = 30_000;
   const LINKED_ISSUE_CACHE_TTL_MS = 120_000;
   const LATEST_BRANCH_PR_CACHE_TTL_MS = 30_000;
+  const BRANCH_PR_PREFLIGHT_CACHE_TTL_MS = 30_000;
   const DOCKER_CONTEXT_CACHE_TTL_MS = 60_000;
   const UPDATE_BRANCH_POLL_ATTEMPTS = 8;
   const UPDATE_BRANCH_POLL_INTERVAL_MS = 1_500;
@@ -205,6 +240,7 @@
   const quickStartCache = new Map<string, CacheEntry<ToolSessionEntry[]>>();
   const linkedIssueCache = new Map<string, CacheEntry<BranchLinkedIssueInfo | null>>();
   const latestBranchPrCache = new Map<string, CacheEntry<BranchPrReference | null>>();
+  const branchPrPreflightCache = new Map<string, CacheEntry<BranchPrPreflight | null>>();
   const dockerContextCache = new Map<string, CacheEntry<DockerContext | null>>();
 
   let ghCliStatusMessage = $derived.by(() => {
@@ -472,6 +508,59 @@
     }
   }
 
+  async function loadBranchPrPreflight(options: LoadOptions = {}) {
+    const force = options.force === true;
+    const defer = options.defer === true;
+    branchPrPreflightError = null;
+
+    const branch = currentBranchName();
+    if (!branch) {
+      branchPrPreflightLoading = false;
+      branchPrPreflight = null;
+      branchPrPreflightBranch = null;
+      return;
+    }
+
+    const key = `${projectPath}::${branch}`;
+    const cached = branchPrPreflightCache.get(key);
+    if (!force && isCacheFresh(cached, BRANCH_PR_PREFLIGHT_CACHE_TTL_MS)) {
+      branchPrPreflight = cached.value;
+      branchPrPreflightBranch = branch;
+      branchPrPreflightLoading = false;
+      return;
+    }
+
+    branchPrPreflight = null;
+    branchPrPreflightBranch = branch;
+    branchPrPreflightLoading = true;
+    try {
+      if (defer) {
+        await waitForNextFrame();
+      }
+      if (currentBranchKey() !== key) return;
+
+      const invoke = await getInvoke();
+      const rawResult = await invoke<unknown>("fetch_branch_pr_preflight", {
+        projectPath,
+        branch,
+      });
+      const result = normalizeBranchPrPreflight(rawResult);
+      if (currentBranchKey() !== key) return;
+      branchPrPreflight = result;
+      if (result !== null) {
+        branchPrPreflightCache.set(key, { value: result, fetchedAtMs: Date.now() });
+      }
+    } catch (err) {
+      if (currentBranchKey() !== key) return;
+      branchPrPreflight = null;
+      branchPrPreflightError = `Failed to check branch sync: ${toErrorMessage(err)}`;
+    } finally {
+      if (currentBranchKey() === key) {
+        branchPrPreflightLoading = false;
+      }
+    }
+  }
+
   async function loadDockerContext(options: LoadOptions = {}) {
     const force = options.force === true;
     const defer = options.defer === true;
@@ -625,6 +714,10 @@
       latestBranchPrError = null;
       latestBranchPr = null;
       latestBranchPrBranch = null;
+      branchPrPreflightLoading = false;
+      branchPrPreflightError = null;
+      branchPrPreflight = null;
+      branchPrPreflightBranch = null;
       dockerContextLoading = false;
       dockerContextError = null;
       dockerContext = null;
@@ -637,6 +730,7 @@
     }
     if (activeTab === "pr") {
       loadLatestBranchPr({ defer: true });
+      loadBranchPrPreflight({ defer: true });
       return;
     }
     if (activeTab === "docker") {
@@ -807,6 +901,9 @@
     latestBranchPrCache.clear();
     latestBranchPr = null;
     latestBranchPrBranch = null;
+    branchPrPreflightCache.clear();
+    branchPrPreflight = null;
+    branchPrPreflightBranch = null;
     dockerContextCache.clear();
     clearPrDetailState(currentBranchName());
   });
@@ -1380,6 +1477,9 @@
           prDetail={prDetail}
           loading={latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
           error={ghCliStatusMessage ?? latestBranchPrError ?? prDetailError}
+          preflight={branchPrPreflight}
+          preflightLoading={branchPrPreflightLoading}
+          preflightError={branchPrPreflightError}
           updateError={updateBranchError}
           onOpenCiLog={handleOpenCiLog}
           onUpdateBranch={handleUpdateBranch}

@@ -338,7 +338,29 @@ PR bodyには以下を含めてください：
 
 **重要**: `Closes #<番号>` はコードブロックに入れず、通常の本文として記載すること。
 
-### 11. 完了メッセージ
+### 11. Closing Issue へのコメント追記
+
+`ISSUE_NUMBERS` が空でない場合、各 Issue に対してリリースに含まれる旨のコメントを追加する。
+
+まず、ステップ10で作成/更新した PR の番号を取得する：
+
+```bash
+PR_NUMBER=$(gh pr list --base main --head develop --state open --json number --jq '.[0].number')
+```
+
+各 Issue にコメントを追記：
+
+```bash
+for NUM in $ISSUE_NUMBERS; do
+  gh issue comment "$NUM" --body "Included in release v{NEW_VERSION} (#${PR_NUMBER})" || true
+done
+```
+
+- `ISSUE_NUMBERS` が空の場合はこのステップ全体をスキップ
+- コメント本文にはバージョン番号（`v{NEW_VERSION}`）と Release PR 番号を含める
+- `|| true` により、個別の Issue へのコメント失敗（既にクローズ済み等）でもリリースフロー全体を中断しない
+
+### 12. 完了メッセージ
 
 > 「リリース準備が完了しました。」
 > 「バージョン: v{NEW_VERSION}」

@@ -450,7 +450,6 @@
               <IssueSpecPanel
                 projectPath={projectPath}
                 issueNumber={tab.issueNumber ?? 0}
-                specId={tab.specId}
               />
             {:else if tab.type === "issues"}
               <IssueListPanel

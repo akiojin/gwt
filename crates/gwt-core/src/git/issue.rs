@@ -1,4 +1,4 @@
-//! GitHub Issue operations (SPEC-e4798383)
+//! GitHub Issue operations (gwt-spec issue)
 //!
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
@@ -2183,7 +2183,7 @@ mod tests {
     }
 
     // ==========================================================
-    // SPEC-rb01a2f3: Remote branch prefix stripping tests
+    // gwt-spec issue: Remote branch prefix stripping tests
     // ==========================================================
 
     #[test]
@@ -2226,7 +2226,7 @@ mod tests {
     }
 
     // ==========================================================
-    // SPEC-rb01a2f3: find_branch_for_issue remote search
+    // gwt-spec issue: find_branch_for_issue remote search
     // ==========================================================
 
     #[test]

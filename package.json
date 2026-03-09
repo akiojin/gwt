@@ -1,6 +1,6 @@
 {
   "name": "gwt",
-  "version": "8.3.4",
+  "version": "8.5.4",
   "private": true,
   "description": "Tauri desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
@@ -10,6 +10,7 @@
     "test": "cargo test -p gwt-core -p gwt-tauri --all-features",
     "test:frontend": "cd gwt-gui && pnpm test",
     "test:e2e": "cd gwt-gui && pnpm test:e2e",
+    "test:e2e:tauri:windows": "cd gwt-gui && pnpm run test:e2e:tauri:windows",
     "test:all": "bash scripts/test-all.sh",
     "installer:macos": "bash installers/macos/build-installer.sh",
     "installer:windows": "powershell -ExecutionPolicy Bypass -File installers/windows/build-msi.ps1",
@@ -40,7 +41,7 @@
   },
   "packageManager": "pnpm@10.29.2",
   "devDependencies": {
-    "@commitlint/cli": "^20.4.2",
-    "@commitlint/config-conventional": "^20.4.2"
+    "@commitlint/cli": "^20.4.3",
+    "@commitlint/config-conventional": "^20.4.3"
   }
 }

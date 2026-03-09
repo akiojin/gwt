@@ -18,17 +18,12 @@
     title: string;
     url: string;
     updatedAt: string;
-    specId?: string | null;
     etag: string;
     body: string;
     sections: SpecIssueSectionsData;
   };
 
-  let {
-    projectPath,
-    issueNumber,
-    specId,
-  }: { projectPath: string; issueNumber: number; specId?: string } = $props();
+  let { projectPath, issueNumber }: { projectPath: string; issueNumber: number } = $props();
 
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -81,9 +76,6 @@
     <div class="issue-spec-title">Issue Spec</div>
     <div class="issue-spec-meta">
       <span>#{issueNumber}</span>
-      {#if specId}
-        <span>{specId}</span>
-      {/if}
     </div>
   </header>
 

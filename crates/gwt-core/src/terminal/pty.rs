@@ -262,17 +262,23 @@ fn is_powershell_executable(command: &str) -> bool {
     )
 }
 
+fn normalize_windows_working_dir_for_shell(working_dir: &Path) -> String {
+    working_dir.to_string_lossy().replace('/', "\\")
+}
+
 fn cmd_cd_expression(working_dir: &Path) -> String {
     format!(
         "cd /D \"{}\"",
-        escape_cmd_double_quoted(working_dir.to_string_lossy().as_ref())
+        escape_cmd_double_quoted(normalize_windows_working_dir_for_shell(working_dir).as_ref())
     )
 }
 
 fn powershell_set_location_expression(working_dir: &Path) -> String {
     format!(
         "Set-Location -LiteralPath '{}'",
-        escape_powershell_single_quoted(working_dir.to_string_lossy().as_ref())
+        escape_powershell_single_quoted(
+            normalize_windows_working_dir_for_shell(working_dir).as_ref()
+        )
     )
 }
 
@@ -355,13 +361,15 @@ where
                 // or resolve_shell_for_spawn), so pass through without wrapping.
                 "wsl" => return (normalized_command.clone(), args.to_vec()),
                 "powershell" => {
-                    let shell = resolve_windows_shell();
-                    let expression = build_windows_powershell_command_expression(
-                        &normalized_command,
-                        args,
-                        windows_force_utf8,
-                    );
-                    return (shell, build_powershell_wrapped_args(expression));
+                    if !interactive {
+                        let shell = resolve_windows_shell();
+                        let expression = build_windows_powershell_command_expression(
+                            &normalized_command,
+                            args,
+                            windows_force_utf8,
+                        );
+                        return (shell, build_powershell_wrapped_args(expression));
+                    }
                 }
                 _ => {}
             }
@@ -1162,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_spawn_command_powershell_shell_interactive_keeps_wrapper() {
+    fn resolve_spawn_command_powershell_shell_interactive_avoids_wrapper() {
         let args = vec!["--version".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             "codex",
@@ -1173,17 +1181,63 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(program, "pwsh");
+        assert_eq!(program, "codex");
+        assert_eq!(resolved_args, vec!["--version".to_string(),]);
+    }
+
+    #[test]
+    fn resolve_spawn_command_powershell_shell_interactive_force_utf8_uses_cmd_wrapper() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("powershell"),
+            true,
+            true,
+        );
+        assert_eq!(program, "cmd.exe");
         assert_eq!(
             resolved_args,
             vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-ExecutionPolicy".to_string(),
-                "Bypass".to_string(),
-                "-Command".to_string(),
-                "& 'codex' '--version'".to_string(),
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                "chcp 65001 > nul && codex --version".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_powershell_shell_interactive_batch_uses_cmd_wrapper() {
+        let args = vec!["--dangerously-skip-permissions".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform_with(
+            "claude",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            |name| {
+                if name == "claude" {
+                    Some(PathBuf::from(
+                        "C:\\Users\\user\\AppData\\Roaming\\npm\\claude.cmd",
+                    ))
+                } else {
+                    None
+                }
+            },
+            Some("powershell"),
+            true,
+            true,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                "chcp 65001 > nul && claude --dangerously-skip-permissions".to_string(),
             ]
         );
     }
@@ -1221,6 +1275,23 @@ mod tests {
     }
 
     #[test]
+    fn inject_windows_working_dir_into_spawn_args_cmd_normalizes_forward_slash_worktree_path() {
+        let mut args = vec!["/C".to_string(), "codex --version".to_string()];
+        inject_windows_working_dir_into_spawn_args(
+            "cmd.exe",
+            &mut args,
+            Path::new("E:/gwt/bugfix/issue-1466"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "/C".to_string(),
+                "cd /D \"E:\\gwt\\bugfix\\issue-1466\" && codex --version".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn inject_windows_working_dir_into_spawn_args_powershell_prefixes_set_location() {
         let mut args = vec![
             "-NoLogo".to_string(),
@@ -1235,6 +1306,30 @@ mod tests {
         assert_eq!(
             args[6],
             "Set-Location -LiteralPath 'C:\\repo\\it''s'; & 'codex' '--version'".to_string()
+        );
+    }
+
+    #[test]
+    fn inject_windows_working_dir_into_spawn_args_powershell_normalizes_forward_slash_worktree_path(
+    ) {
+        let mut args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-Command".to_string(),
+            "& 'codex' '--version'".to_string(),
+        ];
+        inject_windows_working_dir_into_spawn_args(
+            "pwsh",
+            &mut args,
+            Path::new("E:/gwt/bugfix/issue-1466"),
+        );
+        assert_eq!(
+            args[6],
+            "Set-Location -LiteralPath 'E:\\gwt\\bugfix\\issue-1466'; & 'codex' '--version'"
+                .to_string()
         );
     }
 

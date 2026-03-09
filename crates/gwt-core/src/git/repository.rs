@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
-/// Repository type classification (SPEC-a70a1ece)
+/// Repository type classification (gwt-spec issue)
 ///
 /// Represents the type of directory where gwt is launched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +22,7 @@ pub enum RepoType {
     NonRepo,
 }
 
-/// Header display context (SPEC-a70a1ece)
+/// Header display context (gwt-spec issue)
 ///
 /// Contains information needed for header display.
 #[derive(Debug, Clone)]
@@ -61,7 +61,7 @@ impl HeaderContext {
     }
 }
 
-/// Check if a directory is empty (SPEC-a70a1ece)
+/// Check if a directory is empty (gwt-spec issue)
 pub fn is_empty_dir(path: &Path) -> bool {
     match std::fs::read_dir(path) {
         Ok(mut entries) => entries.next().is_none(),
@@ -69,7 +69,7 @@ pub fn is_empty_dir(path: &Path) -> bool {
     }
 }
 
-/// Check if a path is inside a git repository (SPEC-a70a1ece)
+/// Check if a path is inside a git repository (gwt-spec issue)
 pub fn is_git_repo(path: &Path) -> bool {
     let output = crate::process::command("git")
         .args(["rev-parse", "--git-dir"])
@@ -79,7 +79,7 @@ pub fn is_git_repo(path: &Path) -> bool {
     matches!(output, Ok(o) if o.status.success())
 }
 
-/// Check if a repository is bare (SPEC-a70a1ece)
+/// Check if a repository is bare (gwt-spec issue)
 pub fn is_bare_repository(path: &Path) -> bool {
     let output = crate::process::command("git")
         .args(["rev-parse", "--is-bare-repository"])
@@ -92,14 +92,14 @@ pub fn is_bare_repository(path: &Path) -> bool {
     }
 }
 
-/// Check if inside a worktree (not the main repo) (SPEC-a70a1ece)
+/// Check if inside a worktree (not the main repo) (gwt-spec issue)
 pub fn is_inside_worktree(path: &Path) -> bool {
     // A worktree has a .git file (not directory) pointing to the main repo
     let git_path = path.join(".git");
     git_path.is_file()
 }
 
-/// Find a bare repository (*.git directory) in the given directory (SPEC-a70a1ece)
+/// Find a bare repository (*.git directory) in the given directory (gwt-spec issue)
 ///
 /// Returns the path to the first bare repository found, if any.
 /// This is used to detect bare repos when gwt is started from the parent directory.
@@ -124,7 +124,7 @@ pub fn find_bare_repo_in_dir(path: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Detect the repository type at a given path (SPEC-a70a1ece)
+/// Detect the repository type at a given path (gwt-spec issue)
 pub fn detect_repo_type(path: &Path) -> RepoType {
     // 1. Check if directory is empty
     if is_empty_dir(path) {
@@ -149,7 +149,7 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
     RepoType::Normal
 }
 
-/// Get header context for display (SPEC-a70a1ece)
+/// Get header context for display (gwt-spec issue)
 pub fn get_header_context(path: &Path) -> HeaderContext {
     let repo_type = detect_repo_type(path);
     let branch_name = if repo_type != RepoType::Bare {
@@ -536,7 +536,7 @@ impl Repository {
         }
     }
 
-    /// Get recent commit log entries (SPEC-4b893dae FR-010~FR-013)
+    /// Get recent commit log entries (gwt-spec issue FR-010~FR-013)
     ///
     /// Returns a list of recent commits in oneline format (hash + message).
     /// Limit specifies the maximum number of commits to return (default: 5).
@@ -580,7 +580,7 @@ impl Repository {
         Ok(commits)
     }
 
-    /// Get diff statistics (SPEC-4b893dae FR-020~FR-024)
+    /// Get diff statistics (gwt-spec issue FR-020~FR-024)
     ///
     /// Returns change statistics for the working directory compared to HEAD.
     pub fn get_diff_stats(&self) -> Result<super::ChangeStats> {
@@ -1105,7 +1105,7 @@ pub struct WorktreeInfo {
 /// Get the main repository root from any path (resolves through worktree to main repo)
 /// This is a standalone function that doesn't require a Repository instance.
 /// For worktrees, this returns the path to the main repository.
-/// For bare repos, this returns the bare repo path itself (SPEC-a70a1ece).
+/// For bare repos, this returns the bare repo path itself (gwt-spec issue).
 /// For normal repos or non-repo paths, this returns the original path.
 pub fn get_main_repo_root(path: &Path) -> PathBuf {
     let output = crate::process::command("git")
@@ -1117,7 +1117,7 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
         Ok(o) if o.status.success() => {
             let common_dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
 
-            // SPEC-a70a1ece: For bare repos, git-common-dir returns "." - return path as-is
+            // gwt-spec issue: For bare repos, git-common-dir returns "." - return path as-is
             if common_dir == "." {
                 return path.to_path_buf();
             }
@@ -1380,7 +1380,7 @@ mod tests {
         assert_eq!(wt_repo.root(), worktree_path);
     }
 
-    // SPEC-a70a1ece T207: Unit tests for detect_repo_type()
+    // gwt-spec issue T207: Unit tests for detect_repo_type()
 
     #[test]
     fn test_detect_repo_type_empty_dir() {

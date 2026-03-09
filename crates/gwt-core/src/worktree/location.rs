@@ -1,8 +1,8 @@
-//! Worktree location types (SPEC-a70a1ece)
+//! Worktree location types (gwt-spec issue)
 
 use serde::{Deserialize, Serialize};
 
-/// Worktree placement strategy (SPEC-a70a1ece)
+/// Worktree placement strategy (gwt-spec issue)
 ///
 /// Determines where worktrees are created relative to the repository.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

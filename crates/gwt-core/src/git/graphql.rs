@@ -1,4 +1,4 @@
-//! GraphQL query builder for GitHub PR/CI status (SPEC-d6949f99)
+//! GraphQL query builder for GitHub PR/CI status (gwt-spec issue)
 //!
 //! Provides functions to build GraphQL queries, execute them via `gh api graphql`,
 //! and parse responses into `PrStatusInfo` structs.

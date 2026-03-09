@@ -19,7 +19,7 @@ path = "src/bin/voice_eval.rs"
 
 [dependencies]
 gwt-core = { workspace = true, features = ["nvidia-gpu"] }
-tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png", "test"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-store = "2"

@@ -1,4 +1,4 @@
-//! Migration configuration (SPEC-a70a1ece T702)
+//! Migration configuration (gwt-spec issue T702)
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

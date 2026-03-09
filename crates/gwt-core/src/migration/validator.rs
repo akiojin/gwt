@@ -1,4 +1,4 @@
-//! Migration validation (SPEC-a70a1ece T801-T803)
+//! Migration validation (gwt-spec issue T801-T803)
 
 use super::{MigrationConfig, MigrationError};
 use std::path::Path;
@@ -43,7 +43,7 @@ impl ValidationResult {
     }
 }
 
-/// Check available disk space (SPEC-a70a1ece T801, FR-212)
+/// Check available disk space (gwt-spec issue T801, FR-212)
 pub fn check_disk_space(path: &Path) -> Result<(u64, u64), MigrationError> {
     // Get available space using df command
     let output = crate::process::command("df")
@@ -101,7 +101,7 @@ fn get_directory_size(path: &Path) -> Result<u64, MigrationError> {
     Ok(size)
 }
 
-/// Check for locked worktrees (SPEC-a70a1ece T802, FR-222)
+/// Check for locked worktrees (gwt-spec issue T802, FR-222)
 pub fn check_locked_worktrees(repo_root: &Path) -> Result<Vec<String>, MigrationError> {
     let output = crate::process::command("git")
         .args(["worktree", "list", "--porcelain"])
@@ -134,7 +134,7 @@ pub fn check_locked_worktrees(repo_root: &Path) -> Result<Vec<String>, Migration
     Ok(locked)
 }
 
-/// Validate migration prerequisites (SPEC-a70a1ece T803)
+/// Validate migration prerequisites (gwt-spec issue T803)
 pub fn validate_migration(config: &MigrationConfig) -> Result<ValidationResult, MigrationError> {
     debug!(
         source = %config.source_root.display(),
@@ -177,7 +177,7 @@ pub fn validate_migration(config: &MigrationConfig) -> Result<ValidationResult, 
         }
     }
 
-    // SPEC-a70a1ece FR-200: All normal repositories are migration candidates
+    // gwt-spec issue FR-200: All normal repositories are migration candidates
     // (no longer require .worktrees/ directory to exist)
 
     // Check if target already exists
@@ -264,7 +264,7 @@ mod tests {
     }
 
     /// Test that validate_migration succeeds even when disk space check fails
-    /// SPEC-a70a1ece: Edge case - df command failure should not block migration
+    /// gwt-spec issue: Edge case - df command failure should not block migration
     #[test]
     fn test_validate_migration_continues_on_disk_check_failure() {
         let temp = TempDir::new().unwrap();
@@ -317,7 +317,7 @@ mod tests {
     }
 
     /// Test that validation does not require .worktrees/ directory
-    /// SPEC-a70a1ece FR-200: All normal repos should trigger migration
+    /// gwt-spec issue FR-200: All normal repos should trigger migration
     #[test]
     fn test_validate_migration_no_worktrees_dir_required() {
         let temp = TempDir::new().unwrap();

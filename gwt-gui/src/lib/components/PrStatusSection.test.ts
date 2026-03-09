@@ -46,6 +46,33 @@ describe("PrStatusSection", () => {
     expect(container.textContent).toContain("No PR");
   });
 
+  it("shows branch preflight blocking banner when no PR exists yet", async () => {
+    const { container } = await renderSection({
+      prDetail: null,
+      preflight: {
+        baseBranch: "develop",
+        aheadBy: 0,
+        behindBy: 2,
+        status: "behind",
+        blockingReason: "Branch update required before creating a PR.",
+      },
+    });
+
+    expect(container.textContent).toContain("Branch update required before creating a PR.");
+    expect(container.textContent).toContain("develop");
+    expect(container.textContent).toContain("2 commit");
+  });
+
+  it("shows preflight error while keeping no-pr empty state", async () => {
+    const { container } = await renderSection({
+      prDetail: null,
+      preflightError: "Failed to check branch sync: gh fetch failed",
+    });
+
+    expect(container.textContent).toContain("Failed to check branch sync: gh fetch failed");
+    expect(container.textContent).toContain("No PR");
+  });
+
   it("shows 'Loading...' when loading is true", async () => {
     const { container } = await renderSection({ loading: true });
     expect(container.textContent).toContain("Loading...");
@@ -614,9 +641,9 @@ describe("PrStatusSection", () => {
     });
   });
 
-  // --- SPEC-merge-pr: Mergeable badge button tests ---
+  // --- gwt-spec issue: Mergeable badge button tests ---
 
-  describe("Mergeable badge button (SPEC-merge-pr)", () => {
+  describe("Mergeable badge button (gwt-spec issue)", () => {
     it("renders button when state=OPEN, mergeable=MERGEABLE, and onMerge is provided", async () => {
       const onMerge = vi.fn();
       const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });

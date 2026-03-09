@@ -86,7 +86,7 @@
     if (!branch) return wt.safety_level;
     if (branchProtection.has(branch)) return "warning";
     const pr = prStatuses[branch] ?? "none";
-    if (pr === "open" || pr === "none") return "warning";
+    if (pr === "open" || pr === "closed" || pr === "none") return "warning";
     return "safe";
   }
 
@@ -1096,7 +1096,7 @@
     50% { opacity: 0.3; }
   }
 
-  /* Agent indicator: fixed-width slot (SPEC-b80e7996 FR-804) */
+  /* Agent indicator: fixed-width slot (gwt-spec issue FR-804) */
   .agent-indicator-slot {
     width: 12px;
     height: 12px;

@@ -1,4 +1,4 @@
-//! Docker integration tests (SPEC-f5f5657e)
+//! Docker integration tests (gwt-spec issue)
 //!
 //! These tests verify the complete Docker workflow including:
 //! - Docker file detection

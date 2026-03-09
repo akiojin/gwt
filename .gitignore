@@ -51,6 +51,9 @@ Thumbs.db
 logs/
 *.log
 
+# Local task tracking
+tasks/todo.md
+
 # Coverage
 coverage/
 *.lcov

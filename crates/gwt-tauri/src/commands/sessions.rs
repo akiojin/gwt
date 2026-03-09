@@ -9,13 +9,14 @@ use gwt_core::ai::{
     OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
 };
 use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
-use gwt_core::git::Branch;
+use gwt_core::git::{
+    fetch_issues_with_options, get_spec_issue_detail, Branch, FetchIssuesResult, SpecIssueDetail,
+};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -71,7 +72,7 @@ pub struct AgentSidebarTask {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSidebarView {
-    pub spec_id: Option<String>,
+    pub issue_number: Option<u64>,
     pub tasks: Vec<AgentSidebarTask>,
 }
 
@@ -84,7 +85,7 @@ struct ParsedTask {
 
 #[derive(Debug, Clone)]
 struct ParsedTaskSet {
-    spec_id: Option<String>,
+    issue_number: Option<u64>,
     tasks: Vec<ParsedTask>,
 }
 
@@ -103,8 +104,7 @@ pub fn get_agent_sidebar_view(
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "get_agent_sidebar_view"))?;
 
-    let parsed = parse_latest_spec_tasks(project_root)
-        .map_err(|e| StructuredError::internal(&e, "get_agent_sidebar_view"))?;
+    let parsed = parse_latest_spec_tasks(&repo_path);
     let entries = load_recent_sub_agents(&repo_path);
     let running_refs = collect_running_pane_refs(&state, &repo_path);
 
@@ -164,64 +164,58 @@ pub fn get_agent_sidebar_view(
     });
 
     Ok(AgentSidebarView {
-        spec_id: parsed.spec_id,
+        issue_number: parsed.issue_number,
         tasks,
     })
 }
 
-fn parse_latest_spec_tasks(project_root: &Path) -> Result<ParsedTaskSet, String> {
-    let specs_root = project_root.join("specs");
-    if !specs_root.exists() {
-        return Ok(ParsedTaskSet {
-            spec_id: None,
+fn parse_latest_spec_tasks(repo_path: &Path) -> ParsedTaskSet {
+    let latest_issue = latest_spec_issue_detail(repo_path);
+    let Some(issue) = latest_issue else {
+        return ParsedTaskSet {
+            issue_number: None,
             tasks: Vec::new(),
-        });
-    }
-
-    let mut newest: Option<(SystemTime, String, std::path::PathBuf)> = None;
-    let entries = fs::read_dir(&specs_root).map_err(|e| format!("Failed to read specs/: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Failed to read specs entry: {e}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("Failed to read specs entry type: {e}"))?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("SPEC-") {
-            continue;
-        }
-
-        let tasks_path = entry.path().join("tasks.md");
-        if !tasks_path.exists() {
-            continue;
-        }
-
-        let modified = fs::metadata(&tasks_path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        match &newest {
-            Some((current, _, _)) if &modified <= current => {}
-            _ => newest = Some((modified, name, tasks_path)),
-        }
-    }
-
-    let Some((_, spec_id, tasks_path)) = newest else {
-        return Ok(ParsedTaskSet {
-            spec_id: None,
-            tasks: Vec::new(),
-        });
+        };
     };
 
-    let content =
-        fs::read_to_string(&tasks_path).map_err(|e| format!("Failed to read tasks.md: {e}"))?;
-    let tasks = parse_tasks_markdown(&content);
+    parse_task_set_from_spec_issue(&issue)
+}
 
-    Ok(ParsedTaskSet {
-        spec_id: Some(spec_id),
-        tasks,
-    })
+fn latest_spec_issue_detail(repo_path: &Path) -> Option<SpecIssueDetail> {
+    latest_spec_issue_detail_with(
+        |state| fetch_issues_with_options(repo_path, 1, 1, state, false, "specs"),
+        |issue_number| get_spec_issue_detail(repo_path, issue_number),
+    )
+}
+
+fn latest_spec_issue_detail_with<FFetch, FLoad>(
+    mut fetch_issues: FFetch,
+    mut load_issue: FLoad,
+) -> Option<SpecIssueDetail>
+where
+    FFetch: FnMut(&str) -> Result<FetchIssuesResult, String>,
+    FLoad: FnMut(u64) -> Result<SpecIssueDetail, String>,
+{
+    for state in ["open", "all"] {
+        let issues = match fetch_issues(state) {
+            Ok(issues) => issues,
+            Err(_) => continue,
+        };
+        if let Some(issue) = issues.issues.into_iter().next() {
+            if let Ok(detail) = load_issue(issue.number) {
+                return Some(detail);
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_task_set_from_spec_issue(issue: &SpecIssueDetail) -> ParsedTaskSet {
+    ParsedTaskSet {
+        issue_number: Some(issue.number),
+        tasks: parse_tasks_markdown(&issue.sections.tasks),
+    }
 }
 
 fn parse_tasks_markdown(content: &str) -> Vec<ParsedTask> {
@@ -2048,6 +2042,7 @@ pub fn rebuild_all_branch_session_summaries(
 mod tests {
     use super::*;
     use crate::commands::{TestEnvGuard, ENV_LOCK};
+    use std::cell::RefCell;
     use std::fs;
     use std::path::Path;
     use std::time::Duration;
@@ -2091,6 +2086,19 @@ mod tests {
         gwt_core::config::save_session_entry(repo_root, entry).expect("save session entry");
     }
 
+    fn sample_spec_issue_detail(number: u64) -> SpecIssueDetail {
+        SpecIssueDetail {
+            number,
+            title: format!("Spec {number}"),
+            url: format!("https://example.test/issues/{number}"),
+            updated_at: "2026-03-08T00:00:00Z".to_string(),
+            labels: vec!["gwt-spec".to_string()],
+            etag: format!("etag-{number}"),
+            body: String::new(),
+            sections: gwt_core::git::SpecIssueSections::default(),
+        }
+    }
+
     #[test]
     fn parse_tasks_markdown_extracts_status_and_ids() {
         let tasks = parse_tasks_markdown(
@@ -2107,6 +2115,71 @@ mod tests {
         assert_eq!(tasks[1].id, "T002");
         assert_eq!(tasks[1].base_status, "completed");
         assert_eq!(tasks[2].id, "TASK-3");
+    }
+
+    #[test]
+    fn parse_task_set_from_spec_issue_uses_issue_sections() {
+        let issue = SpecIssueDetail {
+            sections: gwt_core::git::SpecIssueSections {
+                tasks: "- [ ] T010 wire registration\n- [x] T011 add tests".to_string(),
+                ..Default::default()
+            },
+            ..sample_spec_issue_detail(1438)
+        };
+
+        let parsed = parse_task_set_from_spec_issue(&issue);
+        assert_eq!(parsed.issue_number, Some(1438));
+        assert_eq!(parsed.tasks.len(), 2);
+        assert_eq!(parsed.tasks[0].id, "T010");
+        assert_eq!(parsed.tasks[1].base_status, "completed");
+    }
+
+    #[test]
+    fn latest_spec_issue_detail_with_returns_none_when_issue_lookup_fails() {
+        let states = RefCell::new(Vec::new());
+        let issue = latest_spec_issue_detail_with(
+            |state| {
+                states.borrow_mut().push(state.to_string());
+                Err("gh unavailable".to_string())
+            },
+            |_| panic!("detail lookup should not run when listing fails"),
+        );
+
+        assert!(issue.is_none());
+        assert_eq!(states.into_inner(), vec!["open", "all"]);
+    }
+
+    #[test]
+    fn latest_spec_issue_detail_with_falls_back_after_detail_lookup_error() {
+        let calls = RefCell::new(Vec::new());
+        let issue = latest_spec_issue_detail_with(
+            |state| {
+                calls.borrow_mut().push(format!("list:{state}"));
+                let number = if state == "open" { 10 } else { 11 };
+                Ok(FetchIssuesResult {
+                    issues: vec![gwt_core::git::GitHubIssue::new(
+                        number,
+                        format!("Spec {number}"),
+                        "2026-03-08T00:00:00Z".to_string(),
+                    )],
+                    has_next_page: false,
+                })
+            },
+            |number| {
+                calls.borrow_mut().push(format!("detail:{number}"));
+                if number == 10 {
+                    Err("temporary gh error".to_string())
+                } else {
+                    Ok(sample_spec_issue_detail(number))
+                }
+            },
+        );
+
+        assert_eq!(issue.map(|detail| detail.number), Some(11));
+        assert_eq!(
+            calls.into_inner(),
+            vec!["list:open", "detail:10", "list:all", "detail:11"]
+        );
     }
 
     #[test]

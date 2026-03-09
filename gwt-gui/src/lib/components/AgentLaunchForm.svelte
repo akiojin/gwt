@@ -147,13 +147,13 @@
   let baseBranchOptionsLoading: boolean = $state(false);
   let baseBranchOptionsError: string | null = $state(null);
 
-  // AI Branch Naming Mode (SPEC-9cd50c7c)
+  // AI Branch Naming Mode (gwt-spec issue)
   type BranchNamingMode = "direct" | "ai-suggest";
   let branchNamingMode: BranchNamingMode = $state("ai-suggest" as BranchNamingMode);
   let aiDescription: string = $state("");
   let aiConfigured: boolean = $state(true);
 
-  // From Issue state (SPEC-c6ba640a)
+  // From Issue state (gwt-spec issue)
   type NewBranchTab = "manual" | "fromIssue";
   let newBranchTab: NewBranchTab = $state("manual" as NewBranchTab);
   let ghCliStatus: GhCliStatus | null = $state(null as GhCliStatus | null);
@@ -172,7 +172,7 @@
   let detectAgentsRequestSeq = 0;
   let refreshAiConfiguredRequestSeq = 0;
 
-  // AI prefix classification state (SPEC-a2f8e3b1)
+  // AI prefix classification state (gwt-spec issue)
   let prefixClassifying: boolean = $state(false);
   let classifyRequestId: number = $state(0);
   let prefixCache: Map<number, BranchPrefix> = $state(new Map());
@@ -244,6 +244,7 @@
     selectedAgent === "codex"
       ? [
           { value: "gpt-5.3-codex", label: "gpt-5.3-codex" },
+          { value: "gpt-5.4", label: "gpt-5.4" },
           { value: "gpt-5.3-codex-spark", label: "gpt-5.3-codex-spark" },
           { value: "gpt-5.2-codex", label: "gpt-5.2-codex" },
           { value: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max" },
@@ -392,7 +393,7 @@
     })();
   });
 
-  // Check AI configuration (SPEC-9cd50c7c T043-T044)
+  // Check AI configuration (gwt-spec issue T043-T044)
   $effect(() => {
     void refreshAiConfigured();
   });

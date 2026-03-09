@@ -77,7 +77,6 @@ export interface ProjectModeState {
   lead_status?: string | null;
   llm_call_count: number;
   estimated_tokens: number;
-  active_spec_id?: string | null;
   active_spec_issue_number?: number | null;
   active_spec_issue_url?: string | null;
   active_spec_issue_etag?: string | null;
@@ -102,7 +101,7 @@ export interface AgentSidebarTask {
 }
 
 export interface AgentSidebarView {
-  specId?: string | null;
+  issueNumber?: number | null;
   tasks: AgentSidebarTask[];
 }
 
@@ -262,7 +261,6 @@ export interface Tab {
   paneId?: string;
   cwd?: string;
   issueNumber?: number;
-  specId?: string;
 }
 
 export interface ToolSessionEntry {
@@ -506,7 +504,7 @@ export interface GitChangeSummary {
   base_branch: string;
 }
 
-// GitHub Issue types (SPEC-c6ba640a, SPEC-ca4b5b07)
+// GitHub Issue types (gwt-spec issue)
 
 export interface GitHubLabel {
   name: string;
@@ -591,7 +589,7 @@ export interface LaunchAgentRequest {
   aiBranchDescription?: string;
 }
 
-// PR Status types (SPEC-d6949f99)
+// PR Status types (gwt-spec issue)
 
 export type MergeUiState =
   | "merged"
@@ -650,6 +648,14 @@ export interface BranchPrReference {
   title: string;
   state: "OPEN" | "CLOSED" | "MERGED" | (string & {});
   url: string | null;
+}
+
+export interface BranchPrPreflight {
+  baseBranch: string;
+  aheadBy: number;
+  behindBy: number;
+  status: "up_to_date" | "ahead" | "behind" | "diverged";
+  blockingReason: string | null;
 }
 
 export interface WorkflowRunInfo {
@@ -761,7 +767,7 @@ export interface DeveloperState {
   worktree: { branchName: string; path: string };
 }
 
-// PR List types (SPEC-prlist)
+// PR List types (gwt-spec issue)
 
 export interface PrListItem {
   number: number;

@@ -1,5 +1,6 @@
 import { mount } from "svelte";
 import App from "./App.svelte";
+import { parseWindowsBuildNumber } from "./lib/terminal/windowsPty";
 import "./styles/global.css";
 
 const DEFAULT_UI_FONT_FAMILY =
@@ -43,6 +44,20 @@ try {
   (window as any).__gwtTerminalFontFamily = terminalFontFamily;
 } catch {
   // Settings not available (e.g. dev mode without Tauri runtime)
+}
+
+try {
+  const { invoke } = await import("$lib/tauriInvoke");
+  const systemInfo = await invoke<{
+    osName: string;
+    osVersion: string;
+  }>("get_report_system_info");
+  const buildNumber = parseWindowsBuildNumber(systemInfo.osVersion);
+  if (systemInfo.osName === "windows" && typeof buildNumber === "number") {
+    (window as any).__gwtWindowsPtyBuildNumber = buildNumber;
+  }
+} catch {
+  // System info not available (e.g. dev mode without Tauri runtime)
 }
 
 const app = mount(App, { target: document.getElementById("app")! });

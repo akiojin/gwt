@@ -1,4 +1,4 @@
-//! Bare project configuration (SPEC-a70a1ece US5, SPEC-a3f4c9df)
+//! Bare project configuration (gwt-spec issue US5, gwt-spec issue)
 //!
 //! Manages configuration for bare repository based projects with automatic
 //! migration from JSON to TOML format.
@@ -22,7 +22,7 @@ const CONFIG_FILE_NAME_JSON: &str = "project.json";
 /// Configuration directory name
 const CONFIG_DIR_NAME: &str = ".gwt";
 
-/// Bare project configuration (SPEC-a70a1ece T501)
+/// Bare project configuration (gwt-spec issue T501)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BareProjectConfig {
     /// Bare repository name (e.g., "repo.git")
@@ -57,7 +57,7 @@ impl BareProjectConfig {
     }
 
     /// Get the config directory path for a project root
-    /// SPEC-a70a1ece T504: .gwt/ is placed at project root (bare's parent)
+    /// gwt-spec issue T504: .gwt/ is placed at project root (bare's parent)
     pub fn config_dir(project_root: &Path) -> PathBuf {
         project_root.join(CONFIG_DIR_NAME)
     }
@@ -78,7 +78,7 @@ impl BareProjectConfig {
         Self::json_config_path(project_root)
     }
 
-    /// Load configuration from a project root with format auto-detection (SPEC-a3f4c9df FR-005)
+    /// Load configuration from a project root with format auto-detection (gwt-spec issue FR-005)
     ///
     /// Priority: TOML > JSON
     pub fn load(project_root: &Path) -> Result<Option<Self>> {
@@ -113,7 +113,7 @@ impl BareProjectConfig {
             );
             match Self::load_from_json(&json_path) {
                 Ok(config) => {
-                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                    // Auto-migrate: save as TOML for next time (gwt-spec issue)
                     if let Err(e) = config.save(project_root) {
                         warn!(
                             category = "config",
@@ -170,7 +170,7 @@ impl BareProjectConfig {
         Ok(config)
     }
 
-    /// Save configuration to a project root in TOML format (SPEC-a3f4c9df FR-006)
+    /// Save configuration to a project root in TOML format (gwt-spec issue FR-006)
     pub fn save(&self, project_root: &Path) -> Result<()> {
         let config_dir = Self::config_dir(project_root);
         ensure_config_dir(&config_dir)?;
@@ -224,7 +224,7 @@ impl BareProjectConfig {
         }
     }
 
-    /// Extract bare repository name from URL (SPEC-a70a1ece T505)
+    /// Extract bare repository name from URL (gwt-spec issue T505)
     ///
     /// Examples:
     /// - `https://github.com/user/repo.git` -> `repo.git`

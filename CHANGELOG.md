@@ -1,6 +1,82 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.5.4] - 2026-03-09
+
+### Bug Fixes
+
+- **skills:** Align post-merge pr fallback rules (#1529)
+- **project-index:** Handle Windows Python launcher fallback (#1533)
+- **project-index:** Accept valid store Python launchers (#1534)
+- **gui:** Show project index Python install guidance (#1536)
+- **terminal:** Stabilize Windows agent rendering on PowerShell (#1523)
+
+### Refactor
+
+- **skills:** Align issue-first skill workflows (#1535)
+
+## [8.5.3] - 2026-03-09
+
+### Bug Fixes
+
+- **gui:** Persist typed and pasted API keys in settings (#1528)
+
+## [8.5.2] - 2026-03-09
+
+### Bug Fixes
+
+- **pr:** Require branch preflight before creation (#1506)
+- **index:** Recover project index and localize agent assets (#1522)
+- **runtime:** Harden project index recovery and asset registration (#1524)
+
+### Documentation
+
+- **skills:** Translate gwt skills and drop fix-pr license
+
+### Miscellaneous Tasks
+
+- **deps-dev:** Bump @commitlint/cli from 20.4.2 to 20.4.3 (#1508)
+- **deps-dev:** Bump @commitlint/config-conventional (#1509)
+
+## [8.5.1] - 2026-03-08
+
+### Refactor
+
+- **specs:** Remove local specs and fix skill embedding
+
+## [8.5.0] - 2026-03-06
+
+### Bug Fixes
+
+- **gui:** Add disabled styling for default profile delete button (#1501)
+- **gui:** Keep API key action buttons mounted (#1480) (#1500)
+
+### Features
+
+- **release:** Add issue comment step to release command
+
+## [8.4.1] - 2026-03-06
+
+### Bug Fixes
+
+- **terminal:** Normalize Windows shell cwd injection paths (#1466) (#1495)
+- **gui:** Keep settings API key draft in sync for refresh/save (#1497)
+- **gui:** Prevent deleting default profile in settings (#1496)
+- **gui:** Preserve unsaved API keys across profile switches (#1480) (#1498)
+
+## [8.4.0] - 2026-03-06
+
+### Bug Fixes
+
+- **launch:** Wire skills step into launch progress flow (#1484)
+- **terminal:** Prevent non-Windows WSL agent fallback (#1486)
+- **gui:** Move issue detail action buttons above body (#1482) (#1483)
+- **gui:** Align masked token input behavior across settings and launch form (#1485)
+
+### Features
+
+- **codex:** Add gpt-5.4 model support (#1490)
+
 ## [8.3.4] - 2026-03-05
 
 ### Bug Fixes
