@@ -1023,6 +1023,31 @@ profiles:
     }
 
     #[test]
+    fn save_and_load_keeps_default_profile_api_key_value() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let mut config = ProfilesConfig::default();
+        let default = config.profiles.get_mut("default").unwrap();
+        default.ai = Some(AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-default-persisted".to_string(),
+            model: String::new(),
+            language: "ja".to_string(),
+            summary_enabled: true,
+        });
+        config.save().unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        let default = loaded.profiles.get("default").unwrap();
+        let ai = default.ai.as_ref().unwrap();
+        assert_eq!(ai.api_key, "sk-default-persisted");
+        assert_eq!(ai.endpoint, "https://api.openai.com/v1");
+        assert_eq!(ai.language, "ja");
+    }
+
+    #[test]
     fn save_and_load_keeps_default_ai_only_configuration_effective() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
