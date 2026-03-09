@@ -1674,6 +1674,72 @@ mod tests {
     }
 
     #[test]
+    fn pr_assets_encode_upstream_first_post_merge_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let codex_pr_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-pr")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(codex_pr_skill.contains("git merge-base --is-ancestor <merge_commit> HEAD"));
+        assert!(codex_pr_skill.contains("git rev-list --count origin/<head>..HEAD"));
+        assert!(codex_pr_skill.contains("MANUAL CHECK"));
+
+        let claude_pr_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("gwt-pr")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(claude_pr_skill.contains("git merge-base --is-ancestor <merge_commit> HEAD"));
+        assert!(claude_pr_skill.contains("git rev-list --count origin/<head>..HEAD"));
+        assert!(claude_pr_skill.contains("MANUAL CHECK"));
+
+        let claude_pr_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-pr.md"),
+        )
+        .unwrap();
+        assert!(claude_pr_command
+            .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
+        assert!(claude_pr_command.contains("`MANUAL CHECK`"));
+
+        let claude_pr_check_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-pr-check.md"),
+        )
+        .unwrap();
+        assert!(claude_pr_check_command
+            .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
+        assert!(claude_pr_check_command
+            .contains("return `MANUAL CHECK` instead of inferring `CREATE PR`."));
+    }
+
+    #[test]
     fn project_index_and_spec_ops_assets_encode_issue_search_first_guidance() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
