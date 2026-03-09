@@ -6,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
 /// Strip the Windows extended-length path prefix (`\\?\` or `//?/`)
-/// that `std::fs::canonicalize` adds.  Git may store these in worktree
-/// metadata, causing npm/Node.js to fail on RFC 8089 file URL construction.
+/// that Git may produce in worktree/rev-parse output on Windows.
+/// These prefixes cause npm/Node.js to fail on RFC 8089 file URL construction.
 fn strip_extended_length_prefix(path: &str) -> &str {
     path.strip_prefix("//?/")
         .or_else(|| path.strip_prefix(r"\\?\"))

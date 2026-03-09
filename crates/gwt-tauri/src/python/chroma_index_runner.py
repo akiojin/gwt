@@ -482,7 +482,6 @@ def action_index_issues(project_root: str, db_path: str) -> dict:
             ],
             cwd=str(root),
             capture_output=True,
-            text=True,
             encoding="utf-8",
             check=True,
         )
