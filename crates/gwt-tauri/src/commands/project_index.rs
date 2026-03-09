@@ -3,10 +3,11 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::process::command_os;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -15,6 +16,8 @@ const CHROMA_RUNTIME_PIP_DEPS: &[&str] = &["chromadb"];
 const CHROMA_HELPER_SCRIPT: &str = include_str!("../python/chroma_index_runner.py");
 
 static CHROMA_RUNTIME_PROBE: Mutex<Option<Result<(), String>>> = Mutex::new(None);
+static PROJECT_INDEX_RECOVERY_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -456,6 +459,37 @@ fn rebuild_issue_index(
     )
 }
 
+fn project_index_recovery_lock(db_path: &Path) -> Arc<Mutex<()>> {
+    let cache = PROJECT_INDEX_RECOVERY_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    guard
+        .entry(db_path.to_string_lossy().to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn should_rebuild_issues_collection(
+    action: &str,
+    issues_collection_presence: Result<bool, String>,
+) -> bool {
+    if matches!(action, "index-issues" | "search-issues") {
+        return true;
+    }
+
+    match issues_collection_presence {
+        Ok(present) => present,
+        Err(probe_err) => {
+            warn!(
+                category = "project_index",
+                action = action,
+                error = %probe_err,
+                "Failed to inspect issues collection state before recovery; rebuilding issues index to avoid silent data loss"
+            );
+            true
+        }
+    }
+}
+
 fn run_project_index_action_with_crash_recovery(
     action: &str,
     project_root: &str,
@@ -494,10 +528,22 @@ fn run_project_index_action_with_crash_recovery(
 
     match run_primary() {
         Ok(resp) => Ok(resp),
-        Err(err) if db.exists() && is_recoverable_chroma_db_error(&err) => {
-            let issues_collection_present =
-                chroma_db_contains_collection(&python, &db.join("chroma.sqlite3"), "issues")
-                    .unwrap_or(false);
+        Err(err) if is_recoverable_chroma_db_error(&err) => {
+            let recovery_lock = project_index_recovery_lock(&db);
+            let _guard = recovery_lock
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+
+            let err = match run_primary() {
+                Ok(resp) => return Ok(resp),
+                Err(retry_err) if db.exists() && is_recoverable_chroma_db_error(&retry_err) => {
+                    retry_err
+                }
+                Err(retry_err) => return Err(retry_err),
+            };
+
+            let issues_collection_presence =
+                chroma_db_contains_collection(&python, &db.join("chroma.sqlite3"), "issues");
             let backup_path = quarantine_index_db(&db)?;
             warn!(
                 category = "project_index",
@@ -527,7 +573,7 @@ fn run_project_index_action_with_crash_recovery(
             })?;
 
             let needs_issue_rebuild =
-                matches!(action, "index-issues" | "search-issues") || issues_collection_present;
+                should_rebuild_issues_collection(action, issues_collection_presence);
             let rebuilt_issues = if needs_issue_rebuild {
                 Some(
                     rebuild_issue_index(&python, project_root, &db_path, explicit_repo_path)
@@ -932,6 +978,24 @@ mod tests {
             response.indexed.unwrap_or(false),
             "status after recovery should report the rebuilt index as present"
         );
+    }
+
+    #[test]
+    fn issues_rebuild_decision_rebuilds_when_probe_fails() {
+        assert!(should_rebuild_issues_collection(
+            "status",
+            Err("sqlite metadata probe failed".to_string())
+        ));
+    }
+
+    #[test]
+    fn issues_rebuild_decision_skips_when_probe_confirms_absent_for_files_actions() {
+        assert!(!should_rebuild_issues_collection("status", Ok(false)));
+    }
+
+    #[test]
+    fn issues_rebuild_decision_always_rebuilds_for_issue_actions() {
+        assert!(should_rebuild_issues_collection("search-issues", Ok(false)));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 use super::Settings;
 use crate::error::GwtError;
+use crate::process::command;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -558,20 +559,27 @@ fn cleanup_legacy_claude_hook_scripts(root: &Path) -> Result<(), GwtError> {
 }
 
 fn git_path_for_project_root(project_root: &Path, git_path: &str) -> Result<PathBuf, GwtError> {
-    let output = std::process::Command::new("git")
+    let dot_git = project_root.join(".git");
+    let output = match command("git")
         .arg("rev-parse")
         .arg("--git-path")
         .arg(git_path)
         .current_dir(project_root)
         .output()
-        .map_err(|e| GwtError::ConfigWriteError {
-            reason: format!(
-                "Failed to run git rev-parse --git-path {} in {}: {}",
-                git_path,
-                project_root.display(),
-                e
-            ),
-        })?;
+    {
+        Ok(output) => output,
+        Err(_spawn_err) if dot_git.is_dir() => return Ok(dot_git.join(git_path)),
+        Err(e) => {
+            return Err(GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to run git rev-parse --git-path {} in {}: {}",
+                    git_path,
+                    project_root.display(),
+                    e
+                ),
+            });
+        }
+    };
 
     if output.status.success() {
         let resolved_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -592,8 +600,7 @@ fn git_path_for_project_root(project_root: &Path, git_path: &str) -> Result<Path
         });
     }
 
-    let dot_git = project_root.join(".git");
-    if dot_git.exists() {
+    if dot_git.is_dir() {
         return Ok(dot_git.join(git_path));
     }
 
@@ -622,10 +629,26 @@ fn ensure_project_local_exclude_rules(project_root: &Path) -> Result<(), GwtErro
 
     for line in existing.lines() {
         if line == PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER {
+            if skipping_managed_block {
+                return Err(GwtError::ConfigWriteError {
+                    reason: format!(
+                        "Malformed managed exclude block in {}: nested begin marker",
+                        exclude_path.display()
+                    ),
+                });
+            }
             skipping_managed_block = true;
             continue;
         }
         if line == PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER {
+            if !skipping_managed_block {
+                return Err(GwtError::ConfigWriteError {
+                    reason: format!(
+                        "Malformed managed exclude block in {}: end marker without begin marker",
+                        exclude_path.display()
+                    ),
+                });
+            }
             skipping_managed_block = false;
             continue;
         }
@@ -638,6 +661,15 @@ fn ensure_project_local_exclude_rules(project_root: &Path) -> Result<(), GwtErro
             continue;
         }
         output_lines.push(line.to_string());
+    }
+
+    if skipping_managed_block {
+        return Err(GwtError::ConfigWriteError {
+            reason: format!(
+                "Malformed managed exclude block in {}: missing end marker",
+                exclude_path.display()
+            ),
+        });
     }
 
     while output_lines.last().is_some_and(|line| line.is_empty()) {
@@ -1328,7 +1360,7 @@ mod tests {
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
+        let output = crate::process::command("git")
             .args(args)
             .current_dir(cwd)
             .output()
@@ -1970,5 +2002,31 @@ another-pattern
         let exclude = std::fs::read_to_string(exclude_path).unwrap();
         assert!(exclude.contains(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER));
         assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.sh"));
+    }
+
+    #[test]
+    fn exclude_rules_reject_unterminated_managed_block() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        init_test_git_dir(temp.path());
+
+        let exclude_path = temp.path().join(".git").join("info").join("exclude");
+        std::fs::write(
+            &exclude_path,
+            "\
+# custom rule
+custom-pattern
+# BEGIN gwt managed local assets
+/.claude/skills/gwt-*/
+",
+        )
+        .unwrap();
+
+        let err = register_all_skills_with_settings_at_project_root(&settings, Some(temp.path()))
+            .expect_err("unterminated managed block should abort registration");
+        assert!(
+            err.to_string().contains("missing end marker"),
+            "unexpected error: {err}"
+        );
     }
 }
