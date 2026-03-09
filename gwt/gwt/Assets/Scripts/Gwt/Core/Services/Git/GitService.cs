@@ -7,26 +7,6 @@ using Gwt.Core.Models;
 
 namespace Gwt.Core.Services.Git
 {
-    public interface IGitService
-    {
-        UniTask<List<Worktree>> ListWorktreesAsync(string repoPath, CancellationToken ct = default);
-        UniTask<string> CreateWorktreeAsync(string repoPath, string worktreePath, string branch, CancellationToken ct = default);
-        UniTask DeleteWorktreeAsync(string repoPath, string worktreePath, bool force = false, CancellationToken ct = default);
-        UniTask<List<BranchInfo>> ListBranchesAsync(string repoPath, CancellationToken ct = default);
-        UniTask<string> GetCurrentBranchAsync(string repoPath, CancellationToken ct = default);
-        UniTask<ChangeSummary> GetChangeSummaryAsync(string repoPath, CancellationToken ct = default);
-        UniTask<List<CommitEntry>> GetCommitsAsync(string repoPath, string branch = null, int limit = 10, CancellationToken ct = default);
-        UniTask<ChangeStats> GetChangeStatsAsync(string repoPath, CancellationToken ct = default);
-        UniTask<BranchMeta> GetBranchMetaAsync(string repoPath, string branch = null, CancellationToken ct = default);
-        UniTask<List<FileStatusEntry>> GetWorkingTreeStatusAsync(string repoPath, CancellationToken ct = default);
-        UniTask<List<CleanupCandidate>> GetCleanupCandidatesAsync(string repoPath, CancellationToken ct = default);
-        UniTask<RepoType> GetRepoTypeAsync(string path, CancellationToken ct = default);
-        UniTask<string> GetDiffAsync(string repoPath, bool cached = false, string file = null, CancellationToken ct = default);
-        UniTask<List<StashEntry>> GetStashListAsync(string repoPath, CancellationToken ct = default);
-        UniTask<List<string>> GetBaseBranchCandidatesAsync(string repoPath, CancellationToken ct = default);
-        UniTask<List<string>> GetTagsAsync(string repoPath, CancellationToken ct = default);
-    }
-
     [Serializable]
     public class BranchInfo
     {
@@ -35,32 +15,6 @@ namespace Gwt.Core.Services.Git
         public string Upstream;
         public string TrackingStatus;
         public bool IsRemote;
-    }
-
-    [Serializable]
-    public class CommitEntry
-    {
-        public string Hash;
-        public string Message;
-    }
-
-    [Serializable]
-    public class ChangeStats
-    {
-        public int FilesChanged;
-        public int Insertions;
-        public int Deletions;
-        public bool HasUncommitted;
-        public bool HasUnpushed;
-    }
-
-    [Serializable]
-    public class BranchMeta
-    {
-        public string Upstream;
-        public int Ahead;
-        public int Behind;
-        public string BaseBranch;
     }
 
     [Serializable]
@@ -101,13 +55,19 @@ namespace Gwt.Core.Services.Git
             return ParseWorktreeList(stdout);
         }
 
-        public async UniTask<string> CreateWorktreeAsync(string repoPath, string worktreePath, string branch, CancellationToken ct = default)
+        public async UniTask<Worktree> CreateWorktreeAsync(string repoPath, string branch, string worktreePath, CancellationToken ct = default)
         {
             var (stdout, stderr, exitCode) = await _runner.RunAsync(
                 $"worktree add \"{worktreePath}\" -b \"{branch}\"", repoPath, ct);
             if (exitCode != 0)
                 throw new InvalidOperationException($"Failed to create worktree: {stderr.Trim()}");
-            return stdout.Trim();
+
+            return new Worktree
+            {
+                Path = worktreePath,
+                Branch = branch,
+                Status = WorktreeStatus.Active
+            };
         }
 
         public async UniTask DeleteWorktreeAsync(string repoPath, string worktreePath, bool force = false, CancellationToken ct = default)
@@ -119,11 +79,23 @@ namespace Gwt.Core.Services.Git
                 throw new InvalidOperationException($"Failed to delete worktree: {stderr.Trim()}");
         }
 
-        public async UniTask<List<BranchInfo>> ListBranchesAsync(string repoPath, CancellationToken ct = default)
+        public async UniTask<List<Branch>> ListBranchesAsync(string repoPath, CancellationToken ct = default)
         {
             var (stdout, _, _) = await _runner.RunAsync(
                 "branch -a --format=%(refname:short)|%(objectname:short)|%(upstream:short)|%(upstream:track)", repoPath, ct);
-            return ParseBranchList(stdout);
+            var infos = ParseBranchList(stdout);
+            var branches = new List<Branch>();
+            foreach (var info in infos)
+            {
+                branches.Add(new Branch
+                {
+                    Name = info.Name,
+                    CommitHash = info.Commit,
+                    Upstream = info.Upstream,
+                    HasRemote = !string.IsNullOrEmpty(info.Upstream),
+                });
+            }
+            return branches;
         }
 
         public async UniTask<string> GetCurrentBranchAsync(string repoPath, CancellationToken ct = default)
@@ -134,10 +106,23 @@ namespace Gwt.Core.Services.Git
             return name == "HEAD" ? null : name;
         }
 
-        public async UniTask<ChangeSummary> GetChangeSummaryAsync(string repoPath, CancellationToken ct = default)
+        public async UniTask<GitChangeSummary> GetChangeSummaryAsync(string repoPath, CancellationToken ct = default)
         {
             var (stdout, _, _) = await _runner.RunAsync("status --porcelain", repoPath, ct);
-            return ParseChangeSummary(stdout);
+            var local = ParseChangeSummary(stdout);
+            var summary = new GitChangeSummary
+            {
+                HasChanges = local.Files.Count > 0
+            };
+            foreach (var f in local.Files)
+            {
+                summary.Files.Add(new FileChange
+                {
+                    Path = f.FilePath,
+                    Kind = StatusToKind(f.IndexStatus, f.WorktreeStatus)
+                });
+            }
+            return summary;
         }
 
         public async UniTask<List<CommitEntry>> GetCommitsAsync(string repoPath, string branch = null, int limit = 10, CancellationToken ct = default)
@@ -199,10 +184,21 @@ namespace Gwt.Core.Services.Git
             return meta;
         }
 
-        public async UniTask<List<FileStatusEntry>> GetWorkingTreeStatusAsync(string repoPath, CancellationToken ct = default)
+        public async UniTask<List<WorkingTreeEntry>> GetWorkingTreeStatusAsync(string repoPath, CancellationToken ct = default)
         {
             var (stdout, _, _) = await _runner.RunAsync("status --porcelain", repoPath, ct);
-            return ParseStatusPorcelain(stdout);
+            var entries = ParseStatusPorcelain(stdout);
+            var result = new List<WorkingTreeEntry>();
+            foreach (var e in entries)
+            {
+                result.Add(new WorkingTreeEntry
+                {
+                    Path = e.FilePath,
+                    Status = $"{e.IndexStatus}{e.WorktreeStatus}",
+                    Staged = e.IndexStatus != ' ' && e.IndexStatus != '?'
+                });
+            }
+            return result;
         }
 
         public async UniTask<List<CleanupCandidate>> GetCleanupCandidatesAsync(string repoPath, CancellationToken ct = default)
@@ -484,6 +480,16 @@ namespace Gwt.Core.Services.Git
                     return num;
             }
             return 0;
+        }
+
+        private static FileChangeKind StatusToKind(char indexStatus, char worktreeStatus)
+        {
+            if (indexStatus == '?' && worktreeStatus == '?') return FileChangeKind.Untracked;
+            if (indexStatus == 'A' || worktreeStatus == 'A') return FileChangeKind.Added;
+            if (indexStatus == 'D' || worktreeStatus == 'D') return FileChangeKind.Deleted;
+            if (indexStatus == 'R' || worktreeStatus == 'R') return FileChangeKind.Renamed;
+            if (indexStatus == 'C' || worktreeStatus == 'C') return FileChangeKind.Copied;
+            return FileChangeKind.Modified;
         }
     }
 }

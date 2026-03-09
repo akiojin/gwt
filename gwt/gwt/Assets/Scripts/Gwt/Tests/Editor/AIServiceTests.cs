@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Gwt.AI.Services;
+using Gwt.Core.Models;
 using NUnit.Framework;
 
 namespace Gwt.Tests.Editor
@@ -140,12 +141,12 @@ namespace Gwt.Tests.Editor
             Assert.That(model.owned_by, Is.EqualTo("openai"));
         }
 
-        // --- ResolvedAISettingsLocal Tests ---
+        // --- ResolvedAISettings Tests ---
 
         [Test]
-        public void ResolvedAISettingsLocal_SerializesAllFields()
+        public void ResolvedAISettings_SerializesAllFields()
         {
-            var settings = new ResolvedAISettingsLocal
+            var settings = new ResolvedAISettings
             {
                 Endpoint = "https://api.openai.com/v1",
                 ApiKey = "sk-test",

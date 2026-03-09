@@ -2,6 +2,7 @@ using Cysharp.Threading.Tasks;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
+using Gwt.Core.Models;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -59,20 +60,11 @@ namespace Gwt.AI.Services
         public List<AIModelInfo> data;
     }
 
-    [System.Serializable]
-    public class ResolvedAISettingsLocal
-    {
-        public string Endpoint;
-        public string ApiKey;
-        public string Model;
-        public string Language;
-    }
-
     public class AIApiService
     {
         private async UniTask<string> SendChatRequestAsync(
             string systemPrompt, string userMessage,
-            ResolvedAISettingsLocal settings, CancellationToken ct)
+            ResolvedAISettings settings, CancellationToken ct)
         {
             var request = new AIRequest
             {
@@ -129,56 +121,56 @@ namespace Gwt.AI.Services
         }
 
         public async UniTask<string> SuggestBranchNameAsync(
-            string description, ResolvedAISettingsLocal settings, CancellationToken ct)
+            string description, ResolvedAISettings settings, CancellationToken ct)
         {
             var systemPrompt = "You are a git branch naming assistant. Given a task description, suggest a concise branch name following the convention: type/short-description (e.g., feat/add-login, fix/null-pointer). Return ONLY the branch name, nothing else.";
             return await SendChatRequestAsync(systemPrompt, description, settings, ct);
         }
 
         public async UniTask<string> GenerateCommitMessageAsync(
-            string diff, ResolvedAISettingsLocal settings, CancellationToken ct)
+            string diff, ResolvedAISettings settings, CancellationToken ct)
         {
             var systemPrompt = "You are a commit message generator. Given a git diff, generate a concise Conventional Commits message (feat:/fix:/docs:/refactor:/chore: etc.). Return ONLY the commit message, nothing else.";
             return await SendChatRequestAsync(systemPrompt, $"Generate a commit message for this diff:\n\n{diff}", settings, ct);
         }
 
         public async UniTask<string> GeneratePrDescriptionAsync(
-            string commits, string diff, ResolvedAISettingsLocal settings, CancellationToken ct)
+            string commits, string diff, ResolvedAISettings settings, CancellationToken ct)
         {
             var systemPrompt = "You are a pull request description generator. Given commits and a diff, generate a clear PR title and description in markdown format.";
             return await SendChatRequestAsync(systemPrompt, $"Commits:\n{commits}\n\nDiff:\n{diff}", settings, ct);
         }
 
         public async UniTask<string> SummarizeIssueAsync(
-            string issueBody, ResolvedAISettingsLocal settings, CancellationToken ct)
+            string issueBody, ResolvedAISettings settings, CancellationToken ct)
         {
             var systemPrompt = "Summarize the following GitHub issue in 2-3 sentences, focusing on the problem and expected outcome.";
             return await SendChatRequestAsync(systemPrompt, issueBody, settings, ct);
         }
 
         public async UniTask<string> ReviewCodeAsync(
-            string diff, ResolvedAISettingsLocal settings, CancellationToken ct)
+            string diff, ResolvedAISettings settings, CancellationToken ct)
         {
             var systemPrompt = "Review the following code diff. Identify potential bugs, security issues, and improvement suggestions. Be concise.";
             return await SendChatRequestAsync(systemPrompt, diff, settings, ct);
         }
 
         public async UniTask<string> GenerateTestsAsync(
-            string code, ResolvedAISettingsLocal settings, CancellationToken ct)
+            string code, ResolvedAISettings settings, CancellationToken ct)
         {
             var systemPrompt = "Generate unit tests for the following code. Use NUnit framework with [Test] attributes. Focus on edge cases and important behaviors.";
             return await SendChatRequestAsync(systemPrompt, code, settings, ct);
         }
 
         public async UniTask<string> LeadJudgmentAsync(
-            string context, string question, ResolvedAISettingsLocal settings, CancellationToken ct)
+            string context, string question, ResolvedAISettings settings, CancellationToken ct)
         {
             var systemPrompt = "You are the Lead of a development studio. Analyze the context and provide a clear, actionable decision. Be decisive and concise.";
             return await SendChatRequestAsync(systemPrompt, $"Context:\n{context}\n\nQuestion:\n{question}", settings, ct);
         }
 
         public async UniTask<string> ChatAsync(
-            List<AIRequestMessage> messages, ResolvedAISettingsLocal settings, CancellationToken ct)
+            List<AIRequestMessage> messages, ResolvedAISettings settings, CancellationToken ct)
         {
             var request = new AIRequest
             {
@@ -224,7 +216,7 @@ namespace Gwt.AI.Services
         }
 
         public async UniTask<List<AIModelInfo>> ListModelsAsync(
-            ResolvedAISettingsLocal settings, CancellationToken ct)
+            ResolvedAISettings settings, CancellationToken ct)
         {
             var url = settings.Endpoint.TrimEnd('/') + "/models";
 
