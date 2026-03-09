@@ -118,13 +118,79 @@ fn chroma_python_path(venv_dir: &Path) -> PathBuf {
     }
 }
 
+fn system_python_candidates() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &[
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3",
+            "py",
+            "python",
+        ]
+    }
+
+    #[cfg(not(windows))]
+    {
+        &[
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3",
+            "python",
+        ]
+    }
+}
+
+fn is_windows_store_python_alias(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized = path
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        normalized.contains("\\appdata\\local\\microsoft\\windowsapps\\")
+            && (normalized.ends_with("\\python.exe") || normalized.ends_with("\\python3.exe"))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn can_execute_python(path: &Path) -> bool {
+    match command_os(path)
+        .arg("-c")
+        .arg("import sys; print(sys.version_info[0])")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim() == "3"
+        }
+        _ => false,
+    }
+}
+
 fn find_system_python() -> Result<PathBuf, String> {
-    for candidate in ["python3.12", "python3.11", "python3", "python"] {
+    for candidate in system_python_candidates() {
         if let Ok(path) = which::which(candidate) {
+            if is_windows_store_python_alias(&path) {
+                continue;
+            }
+            if !can_execute_python(&path) {
+                continue;
+            }
             return Ok(path);
         }
     }
-    Err("Python runtime not found (checked python3.12/python3.11/python3/python)".to_string())
+
+    Err(format!(
+        "Python runtime not found (checked {})",
+        system_python_candidates().join("/")
+    ))
 }
 
 fn find_python_binary() -> Result<PathBuf, String> {
@@ -792,6 +858,65 @@ mod tests {
     fn chroma_venv_dir_is_under_runtime() {
         let dir = chroma_venv_dir().unwrap();
         assert!(dir.to_string_lossy().contains("chroma-venv"));
+    }
+
+    #[test]
+    fn system_python_candidates_include_windows_launcher_only_on_windows() {
+        let candidates = system_python_candidates();
+
+        #[cfg(windows)]
+        {
+            let py_index = candidates
+                .iter()
+                .position(|candidate| *candidate == "py")
+                .expect("Windows candidates must include py launcher");
+            let python_index = candidates
+                .iter()
+                .position(|candidate| *candidate == "python")
+                .expect("Windows candidates must include python executable");
+            assert!(
+                py_index < python_index,
+                "py launcher must be tried before bare python to avoid WindowsApps stubs"
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert!(
+                !candidates.contains(&"py"),
+                "non-Windows candidates must not include py launcher"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_store_python_alias_detection_matches_known_alias_paths() {
+        #[cfg(windows)]
+        {
+            assert!(is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python.exe"
+            )));
+            assert!(is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.exe"
+            )));
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert!(!is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python.exe"
+            )));
+            assert!(!is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.exe"
+            )));
+        }
+
+        assert!(!is_windows_store_python_alias(Path::new(
+            r"C:\Python313\python.exe"
+        )));
+        assert!(!is_windows_store_python_alias(Path::new(
+            r"C:\Windows\py.exe"
+        )));
     }
 
     #[test]
