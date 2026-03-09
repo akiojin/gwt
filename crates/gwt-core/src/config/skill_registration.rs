@@ -251,46 +251,46 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/forward-gwt-hook.sh",
+        relative_path: "hooks/scripts/gwt-forward-hook.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/forward-gwt-hook.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-forward-hook.sh"
         )),
         executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/block-git-branch-ops.sh",
+        relative_path: "hooks/scripts/gwt-block-git-branch-ops.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/block-git-branch-ops.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-git-branch-ops.sh"
         )),
         executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/block-cd-command.sh",
+        relative_path: "hooks/scripts/gwt-block-cd-command.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/block-cd-command.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-cd-command.sh"
         )),
         executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/block-file-ops.sh",
+        relative_path: "hooks/scripts/gwt-block-file-ops.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/block-file-ops.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-file-ops.sh"
         )),
         executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/block-git-dir-override.sh",
+        relative_path: "hooks/scripts/gwt-block-git-dir-override.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/block-git-dir-override.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-git-dir-override.sh"
         )),
         executable: true,
         rewrite_for_project: false,
@@ -444,11 +444,9 @@ fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
     let root = project_root.join(".claude");
     let settings_path = root.join("settings.json");
 
-    if super::claude_plugins::is_plugin_enabled_in_settings(&settings_path) {
-        cleanup_claude_duplicate_assets(&root)?;
-        let _ = super::claude_hooks::unregister_gwt_hooks(&settings_path);
-        return Ok(());
-    }
+    let _ = super::claude_plugins::remove_gwt_plugin_key_at(&settings_path);
+    let _ = super::claude_hooks::unregister_gwt_hooks(&settings_path);
+    cleanup_legacy_claude_hook_scripts(&root)?;
 
     write_managed_assets(&root, all_claude_assets(), ".claude")?;
     merge_managed_claude_hooks_into_settings(&root)
@@ -528,34 +526,27 @@ fn write_managed_asset(root: &Path, asset: &ManagedAsset, root_name: &str) -> Re
     Ok(())
 }
 
-fn cleanup_claude_duplicate_assets(root: &Path) -> Result<(), GwtError> {
-    for asset in CLAUDE_COMMAND_ASSETS
-        .iter()
-        .chain(PROJECT_SKILL_ASSETS.iter())
-        .chain(CLAUDE_HOOK_ASSETS.iter())
-    {
-        let path = root.join(asset.relative_path);
+fn cleanup_legacy_claude_hook_scripts(root: &Path) -> Result<(), GwtError> {
+    let legacy_basenames = [
+        "forward-gwt-hook.sh",
+        "block-git-branch-ops.sh",
+        "block-cd-command.sh",
+        "block-file-ops.sh",
+        "block-git-dir-override.sh",
+    ];
+
+    for basename in legacy_basenames {
+        let path = root.join("hooks").join("scripts").join(basename);
         if !path.exists() {
             continue;
         }
-
-        if path.is_dir() {
-            std::fs::remove_dir_all(&path).map_err(|e| GwtError::ConfigWriteError {
-                reason: format!(
-                    "Failed to remove Claude duplicate directory {}: {}",
-                    path.display(),
-                    e
-                ),
-            })?;
-        } else {
-            std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
-                reason: format!(
-                    "Failed to remove Claude duplicate asset {}: {}",
-                    path.display(),
-                    e
-                ),
-            })?;
-        }
+        std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove legacy Claude hook script {}: {}",
+                path.display(),
+                e
+            ),
+        })?;
     }
 
     Ok(())
@@ -1032,17 +1023,6 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
 
     let settings_path =
         claude_settings_path_for(project_root).unwrap_or_else(|| claude_root.join("settings.json"));
-    if super::claude_plugins::is_plugin_enabled_in_settings(&settings_path) {
-        return SkillAgentRegistrationStatus {
-            agent_id: SkillAgentType::Claude.id().to_string(),
-            label: SkillAgentType::Claude.label().to_string(),
-            skills_path,
-            registered: true,
-            missing_skills: Vec::new(),
-            error_code: None,
-            error_message: None,
-        };
-    }
 
     let mut missing_items = Vec::new();
 
@@ -1208,10 +1188,10 @@ mod tests {
     #[test]
     fn managed_hook_detection_uses_exact_template_commands() {
         let managed_hook_commands =
-            vec![".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit".to_string()];
+            vec![".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit".to_string()];
 
         assert!(is_managed_hook_command(
-            ".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit",
+            ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit",
             &managed_hook_commands
         ));
         assert!(!is_managed_hook_command(
@@ -1241,7 +1221,7 @@ mod tests {
     #[test]
     fn prune_managed_hook_entries_preserves_user_hook_that_mentions_gwt_hook() {
         let managed_hook_commands =
-            vec![".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit".to_string()];
+            vec![".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit".to_string()];
         let mut value = serde_json::json!(["echo gwt hook UserPromptSubmit"]);
 
         prune_managed_hook_entries(&mut value, &managed_hook_commands);
@@ -1367,13 +1347,13 @@ mod tests {
             .join(".claude")
             .join("hooks")
             .join("scripts")
-            .join("forward-gwt-hook.sh")
+            .join("gwt-forward-hook.sh")
             .exists());
 
         let settings_path = temp.path().join(".claude").join("settings.json");
         let content = std::fs::read_to_string(settings_path).unwrap();
-        assert!(content.contains("forward-gwt-hook.sh"));
-        assert!(content.contains("block-git-branch-ops.sh"));
+        assert!(content.contains("gwt-forward-hook.sh"));
+        assert!(content.contains("gwt-block-git-branch-ops.sh"));
         assert!(!content.contains("CLAUDE_PLUGIN_ROOT"));
     }
 
@@ -1498,13 +1478,13 @@ mod tests {
     }
 
     #[test]
-    fn claude_registration_prefers_plugin_namespace_when_enabled() {
+    fn claude_registration_writes_local_assets_even_when_plugin_is_enabled() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
         let claude_root = temp.path().join(".claude");
         std::fs::create_dir_all(claude_root.join("commands")).unwrap();
         std::fs::create_dir_all(claude_root.join("skills").join("gwt-pr")).unwrap();
-        std::fs::create_dir_all(claude_root.join("hooks")).unwrap();
+        std::fs::create_dir_all(claude_root.join("hooks").join("scripts")).unwrap();
         std::fs::write(claude_root.join("commands").join("gwt-pr.md"), "legacy").unwrap();
         std::fs::write(
             claude_root.join("skills").join("gwt-pr").join("SKILL.md"),
@@ -1512,6 +1492,14 @@ mod tests {
         )
         .unwrap();
         std::fs::write(claude_root.join("hooks").join("hooks.json"), "{}").unwrap();
+        std::fs::write(
+            claude_root
+                .join("hooks")
+                .join("scripts")
+                .join("forward-gwt-hook.sh"),
+            "legacy",
+        )
+        .unwrap();
         std::fs::write(
             claude_root.join("settings.json"),
             serde_json::json!({
@@ -1524,7 +1512,7 @@ mod tests {
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": ".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit"
+                                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit"
                                 }
                             ]
                         }
@@ -1542,13 +1530,26 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!claude_root.join("commands").join("gwt-pr.md").exists());
-        assert!(!claude_root
+        assert!(claude_root.join("commands").join("gwt-pr.md").exists());
+        assert!(claude_root
             .join("skills")
             .join("gwt-pr")
             .join("SKILL.md")
             .exists());
-        assert!(!claude_root.join("hooks").join("hooks.json").exists());
+        assert!(claude_root.join("hooks").join("hooks.json").exists());
+        assert!(!claude_root
+            .join("hooks")
+            .join("scripts")
+            .join("forward-gwt-hook.sh")
+            .exists());
+        assert!(claude_root
+            .join("hooks")
+            .join("scripts")
+            .join("gwt-forward-hook.sh")
+            .exists());
+
+        let settings_content = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
+        assert!(!settings_content.contains(super::super::claude_plugins::GWT_PLUGIN_FULL_NAME));
 
         let status = status_for_claude(Some(temp.path()));
         assert!(status.registered);

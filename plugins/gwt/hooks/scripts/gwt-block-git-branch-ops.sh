@@ -89,7 +89,7 @@ EOF
         fi
 
         # branchサブコマンドは参照系のみ許可
-        # ファイル名にbranchを含む場合は許可（例: git diff .claude/hooks/block-git-branch-ops.sh）
+        # ファイル名にbranchを含む場合は許可（例: git diff .claude/hooks/gwt-block-git-branch-ops.sh）
         if echo "$trimmed_segment" | grep -qE '^git[[:space:]]+((-[a-zA-Z]|--[a-z-]+)[[:space:]]+)*branch\b'; then
             # git ... branch の後の引数を抽出（branchより前を全て除去）
             branch_args=$(echo "$trimmed_segment" | sed -E 's/^git[[:space:]]+((-[a-zA-Z]|--[a-z-]+)[[:space:]]+)*branch//')

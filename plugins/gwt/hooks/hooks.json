@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/forward-gwt-hook.sh PreToolUse"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-forward-hook.sh PreToolUse"
           }
         ]
       },
@@ -26,19 +26,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/block-git-branch-ops.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-block-git-branch-ops.sh"
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/block-cd-command.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-block-cd-command.sh"
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/block-file-ops.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-block-file-ops.sh"
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/block-git-dir-override.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-block-git-dir-override.sh"
           }
         ]
       }
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/forward-gwt-hook.sh PostToolUse"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-forward-hook.sh PostToolUse"
           }
         ]
       }
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/forward-gwt-hook.sh Notification"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-forward-hook.sh Notification"
           }
         ]
       }
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/forward-gwt-hook.sh Stop"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gwt-forward-hook.sh Stop"
           }
         ]
       }
