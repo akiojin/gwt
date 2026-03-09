@@ -65,15 +65,6 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/LICENSE.txt",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/LICENSE.txt"
-        )),
-        executable: false,
-        rewrite_for_project: false,
-    },
-    ManagedAsset {
         relative_path: "skills/gwt-fix-pr/scripts/inspect_pr_checks.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1777,6 +1768,31 @@ mod tests {
         let status = status_for_claude(Some(temp.path()));
         assert!(status.registered);
         assert!(status.missing_skills.is_empty());
+    }
+
+    #[test]
+    fn claude_registration_keeps_gwt_pr_branch_preflight_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let skill_content = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("gwt-pr")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+
+        assert!(skill_content.contains("git rev-list --left-right --count \"HEAD...origin/$base\""));
+        assert!(skill_content.contains("Branch update required before creating a PR."));
     }
 
     #[test]

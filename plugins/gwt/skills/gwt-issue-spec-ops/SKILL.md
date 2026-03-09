@@ -1,12 +1,11 @@
 ---
 name: gwt-issue-spec-ops
-description: GitHub Issue-first の仕様管理（SPEC）。要件定義・仕様作成・仕様策定・仕様設計・TDD設計・計画作成・タスク生成・品質チェックリスト生成を GitHub Issue (gwt-spec ラベル) 上で実行する。「仕様を書いて」「specを作成」「TDD」「要件定義」「plan/tasks を生成」「仕様の曖昧さ解消」「整合性分析」と言われたときに使用。
+description: GitHub Issue-first spec management. Use GitHub Issues with the `gwt-spec` label for requirements definition, spec drafting, TDD planning, implementation planning, task generation, and quality checklist generation. Use this when the user asks to write a spec, create a spec, do TDD, define requirements, generate plan/tasks, resolve spec ambiguity, or analyze consistency.
 ---
 
 # gwt Issue SPEC Ops
 
-GitHub Issue が仕様の Single Source of Truth。すべての仕様はラベル `gwt-spec` 付き
-の Issue として管理する。
+GitHub Issues are the single source of truth for specs. Manage every spec as an issue labeled `gwt-spec`.
 
 ## Mandatory preflight: search existing spec first
 
@@ -35,46 +34,46 @@ shortest explicit recovery action. Do not silently skip the search.
 
 ### SPEC ID
 
-SPEC ID = **Issue 番号**。旧形式 `SPEC-[a-f0-9]{8}` は使わない。
+SPEC ID = the **issue number**. Do not use the legacy `SPEC-[a-f0-9]{8}` format.
 
 ### Label
 
-`gwt-spec` ラベルが付いた Issue = Spec Issue。
+An issue with the `gwt-spec` label is a spec issue.
 
 ### Issue body sections
 
-Issue body は以下のセクション構造に従う:
+The issue body must follow this section structure:
 
 ```markdown
 <!-- GWT_SPEC_ID:#{number} -->
 
 ## Spec
 
-(背景、ユーザーシナリオ、要件、成功基準)
+(background, user scenarios, requirements, success criteria)
 
 ## Plan
 
-(実装計画)
+(implementation plan)
 
 ## Tasks
 
-(タスクリスト)
+(task list)
 
 ## TDD
 
-(テスト設計)
+(test design)
 
 ## Research
 
-(技術調査)
+(research notes)
 
 ## Data Model
 
-(データモデル)
+(data model)
 
 ## Quickstart
 
-(最小実装手順)
+(minimum setup or usage steps)
 
 ## Contracts
 
@@ -86,12 +85,12 @@ Artifact files are managed in issue comments with `checklist:<name>` entries.
 
 ## Acceptance Checklist
 
-- [ ] (受け入れチェック項目)
+- [ ] (acceptance checklist item)
 ```
 
 ### Artifact comments
 
-Contract/Checklist はコメントとして管理。先頭行にマーカーを付ける:
+Manage contracts and checklists as issue comments. Add a marker on the first line:
 
 ```markdown
 <!-- GWT_SPEC_ARTIFACT:contract:openapi.md -->
@@ -151,7 +150,7 @@ EOF
 )"
 ```
 
-作成後、Issue 番号で `GWT_SPEC_ID` マーカーを更新:
+After creation, update the `GWT_SPEC_ID` marker with the issue number:
 
 ```bash
 gh issue edit {number} --body "$(updated body with <!-- GWT_SPEC_ID:#{number} -->)"
@@ -210,100 +209,100 @@ Before `Specify` or `Plan`, determine whether an existing spec already owns the 
 4. If an existing canonical spec is found, update it instead of creating a new one
 5. Record the chosen destination issue in `## Research` or `## Spec`
 
-### 1. Specify (仕様作成)
+### 1. Specify (draft the spec)
 
-仕様作成の手順:
+Specification drafting procedure:
 
-1. Issue body のセクション構造に従い、`## Spec` セクションを作成
-2. **必須要素**:
-   - **背景**: なぜこの機能/修正が必要か
-   - **ユーザーシナリオ**: 具体的な操作フローと期待結果。優先度 P0/P1/P2
-   - **機能要件**: `FR-001` 形式で番号付け
-   - **非機能要件**: `NFR-001` 形式（パフォーマンス、セキュリティ等）
-   - **成功基準**: `SC-001` 形式。測定可能な完了条件
-3. 不明確な箇所は `【要確認】` マーカーを付けて仮置き
-4. エッジケースとエラーハンドリングを明記
-5. 既存 spec に統合する場合は、統合理由と関連 Issue 番号を明記
+1. Create the `## Spec` section using the issue body structure above.
+2. **Required elements**:
+   - **Background**: why this feature or fix is needed
+   - **User scenarios**: concrete flows and expected outcomes, with priority P0/P1/P2
+   - **Functional requirements**: numbered as `FR-001`
+   - **Non-functional requirements**: numbered as `NFR-001` (performance, security, and so on)
+   - **Success criteria**: numbered as `SC-001`, with measurable completion conditions
+3. Mark unclear points with `[Needs Clarification]` as a temporary placeholder.
+4. Explicitly document edge cases and error handling.
+5. When integrating into an existing spec, explain the integration choice and reference the related issue numbers.
 
-### 2. Clarify (曖昧さ解消)
+### 2. Clarify (resolve ambiguity)
 
-`## Spec` に不明確な点がある場合:
+When `## Spec` still contains ambiguous points:
 
-1. 影響度の高い順に最大 **5問** の質問を作成
-2. 質問対象:
-   - スコープの境界が不明確な箇所
-   - 受け入れ基準がテスト不能な箇所
-   - 非機能要件の具体的な閾値
-   - 他機能との依存関係
-3. `【要確認】` マーカーを質問結果で置換
-4. 質問と回答を Spec セクションに反映
+1. Ask at most **5 questions**, ordered by impact.
+2. Focus questions on:
+   - unclear scope boundaries
+   - acceptance criteria that cannot be tested
+   - concrete thresholds for non-functional requirements
+   - dependencies on other features
+3. Replace `[Needs Clarification]` markers with the resolved answers.
+4. Reflect both the questions and the answers back into the Spec section.
 
-### 3. Plan (計画作成)
+### 3. Plan (write the implementation plan)
 
-`## Plan` セクションに実装計画を記載:
+Write the implementation plan in the `## Plan` section:
 
-1. **技術コンテキスト**: 影響するファイル・モジュール一覧
-2. **実装アプローチ**: 選択したアーキテクチャとその理由
-3. **フェーズ分割**: 段階的な実装計画
+1. **Technical context**: list the affected files and modules
+2. **Implementation approach**: describe the selected architecture and why it was chosen
+3. **Phasing**: break the work into staged implementation steps
 
-追加セクション生成:
+Generate supporting sections as needed:
 
-- `## Research`: 技術調査結果（ライブラリ選定、API 調査等）
-- `## Data Model`: スキーマ、型定義の設計
-- `## Quickstart`: 最小動作に必要な手順
-- `## Contracts`: API コントラクト（アーティファクトコメントで管理）
+- `## Research`: research results such as library selection or API findings
+- `## Data Model`: schema and type design
+- `## Quickstart`: minimum steps required to run or validate the feature
+- `## Contracts`: API contracts managed as artifact comments
 
-### 4. Tasks (タスク生成)
+### 4. Tasks (generate the task list)
 
-`## Tasks` セクションにタスクリストを記載:
+Write the task list in `## Tasks`:
 
-1. **フェーズ構成**: Setup → Foundation → User Stories → Finalization
-2. **タスク書式**: `- [ ] T001 [Phase] [US1] description`
-   - `T001`: 連番
+1. **Phase structure**: Setup -> Foundation -> User Stories -> Finalization
+2. **Task format**: `- [ ] T001 [Phase] [US1] description`
+   - `T001`: sequential ID
    - `[Phase]`: `[S]`etup, `[F]`oundation, `[U]`ser story, `[FIN]`alization
-   - `[USn]`: 関連ユーザーシナリオ番号
-3. **依存関係**: タスク間の依存を明記（blocked-by）
-4. **完了時**: チェックボックスを `[x]` に更新
+   - `[USn]`: related user scenario number
+3. **Dependencies**: document task dependencies explicitly, including `blocked-by` relationships
+4. **Completion**: change the checkbox to `[x]` when done
 
-### 5. Analyze (整合性分析)
+### 5. Analyze (check consistency)
 
-Spec → Plan → Tasks のカバレッジを検証:
+Validate coverage across Spec -> Plan -> Tasks:
 
-1. すべての FR/NFR が Tasks にカバーされているか
-2. すべてのユーザーシナリオがタスクにマッピングされているか
-3. 循環依存がないか
-4. テスト可能性が担保されているか
-5. 問題があれば修正を提案
+1. Confirm that every FR and NFR is covered by Tasks
+2. Confirm that every user scenario is mapped to tasks
+3. Confirm that there are no circular dependencies
+4. Confirm that the work remains testable
+5. Propose corrections if you find any gaps or inconsistencies
 
-### 6. Implement (実装実行)
+### 6. Implement (execute tasks)
 
-タスクの実行手順:
+Task execution procedure:
 
-1. `## Tasks` からチェックされていない最優先タスクを選択
-2. **TDD**: テストを先に書く → RED 確認 → 実装 → GREEN 確認
-3. 独立したタスクは並列実行可能
-4. 完了したタスクのチェックボックスを `[x]` に更新
-5. Issue body を更新して進捗を反映
+1. Select the highest-priority unchecked task from `## Tasks`
+2. **TDD**: write tests first -> confirm RED -> implement -> confirm GREEN
+3. Run independent tasks in parallel when practical
+4. Update completed task checkboxes to `[x]`
+5. Update the issue body to reflect progress
 
 ### 7. Tasks to child issues
 
-大きなタスクを子 Issue に分割する場合:
+When a large task must be split into child issues:
 
-1. 依存順に子 Issue を作成
-2. 親 Issue から子 Issue へのリンクを `## Tasks` に追加
-3. 子 Issue にも `gwt-spec` ラベルを付ける（仕様を含む場合）
+1. Create child issues in dependency order
+2. Add links from the parent issue to the child issues in `## Tasks`
+3. Add the `gwt-spec` label to child issues that also carry spec content
 
 ### 8. Quality checklists
 
-品質チェックリストの生成:
+Generate quality checklists for:
 
-- **requirements**: 要件の完全性・一貫性
-- **security**: セキュリティ考慮事項（OWASP Top 10 等）
-- **ux**: ユーザビリティ・アクセシビリティ
-- **api**: API 設計の整合性
-- **testing**: テスト戦略の網羅性
+- **requirements**: completeness and consistency of requirements
+- **security**: security considerations such as OWASP Top 10 coverage
+- **ux**: usability and accessibility
+- **api**: consistency of API design
+- **testing**: completeness of the testing strategy
 
-チェックリストはアーティファクトコメントとして Issue に追加:
+Add checklists to the issue as artifact comments:
 
 ```bash
 gh issue comment {number} --body "$(cat <<'EOF'
@@ -327,21 +326,21 @@ gh issue develop {number}
 
 ### PR link
 
-コミットメッセージまたは PR body に `Fixes #{number}` を含めて自動リンク。
+Include `Fixes #{number}` in the commit message or PR body to create an automatic link.
 
 ### Project phase transition
 
-Phase フィールドでライフサイクルを管理:
+Use the Phase field to track lifecycle state:
 
-| Phase | 意味 |
+| Phase | Meaning |
 |---|---|
-| Draft | 仕様作成中 |
-| Ready | 仕様完了、レビュー待ち |
-| Planned | 計画策定完了 |
-| Ready for Dev | 実装開始可能 |
-| In Progress | 実装中 |
-| Done | 完了 |
-| Blocked | ブロック中 |
+| Draft | Spec drafting in progress |
+| Ready | Spec complete, waiting for review |
+| Planned | Planning completed |
+| Ready for Dev | Ready to begin implementation |
+| In Progress | Implementation in progress |
+| Done | Completed |
+| Blocked | Blocked |
 
 ## Requirements
 
