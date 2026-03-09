@@ -11,8 +11,11 @@
 //! 4. Old files are never auto-deleted (use `gwt config cleanup`)
 
 use crate::error::{GwtError, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, error, info, warn};
+
+static WRITE_ATOMIC_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Migrate JSON configuration to TOML
 pub fn migrate_json_to_toml(json_path: &Path, toml_path: &Path) -> Result<()> {
@@ -133,8 +136,7 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Create temp file path
-    let temp_path = path.with_extension("tmp");
+    let temp_path = atomic_temp_path(path);
 
     // Write to temp file
     std::fs::write(&temp_path, content).map_err(|e| GwtError::ConfigWriteError {
@@ -172,6 +174,22 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn atomic_temp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("config");
+    let counter = WRITE_ATOMIC_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        counter
+    ))
 }
 
 /// Backup a broken config file (gwt-spec issue FR-009)
@@ -426,8 +444,66 @@ profiles:
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "key = \"value\"");
 
-        // Temp file should not exist
-        assert!(!temp.path().join("test.tmp").exists());
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].to_string_lossy(), "test.toml");
+    }
+
+    #[test]
+    fn test_write_atomic_supports_hidden_files() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".gwt.toml");
+
+        write_atomic(&path, "debug = true").unwrap();
+
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "debug = true");
+
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].to_string_lossy(), ".gwt.toml");
+    }
+
+    #[test]
+    fn test_write_atomic_handles_parallel_writes_without_temp_path_collisions() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+
+        for i in 0..50 {
+            let left_path = path.clone();
+            let right_path = path.clone();
+            let left = std::thread::spawn(move || {
+                write_atomic(&left_path, &format!("writer = \"left-{i}\""))
+            });
+            let right = std::thread::spawn(move || {
+                write_atomic(&right_path, &format!("writer = \"right-{i}\""))
+            });
+
+            left.join()
+                .expect("left writer thread should not panic")
+                .unwrap_or_else(|e| panic!("left writer failed on iteration {i}: {e}"));
+            right
+                .join()
+                .expect("right writer thread should not panic")
+                .unwrap_or_else(|e| panic!("right writer failed on iteration {i}: {e}"));
+        }
+
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("writer = "));
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].to_string_lossy(), "config.toml");
     }
 
     #[test]
