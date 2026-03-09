@@ -65,15 +65,6 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/LICENSE.txt",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/LICENSE.txt"
-        )),
-        executable: false,
-        rewrite_for_project: false,
-    },
-    ManagedAsset {
         relative_path: "skills/gwt-fix-pr/scripts/inspect_pr_checks.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
