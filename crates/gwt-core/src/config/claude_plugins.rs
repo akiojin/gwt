@@ -1,7 +1,8 @@
-//! Claude Code Plugin marketplace registration (SPEC-f8dab6e2)
+//! Legacy Claude Code plugin marketplace utilities.
 //!
-//! This module provides functionality to register gwt-plugins marketplace and
-//! enable gwt plugin in Claude Code settings.
+//! gwt no longer relies on `gwt@gwt-plugins` as the primary delivery mechanism for
+//! Claude Code. Project-local `.claude/*` assets are the canonical path, and the
+//! helpers in this module are kept only for migration / cleanup compatibility.
 //!
 //! Marketplace registration format in `~/.claude/plugins/known_marketplaces.json`:
 //! ```json

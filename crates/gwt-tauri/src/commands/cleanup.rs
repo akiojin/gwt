@@ -120,8 +120,10 @@ fn compute_safety_level(
     }
 
     match pr_status {
-        Some(PrStatus::Merged) | Some(PrStatus::Closed) => SafetyLevel::Safe,
-        Some(PrStatus::Open) | Some(PrStatus::None) => SafetyLevel::Warning,
+        Some(PrStatus::Merged) => SafetyLevel::Safe,
+        Some(PrStatus::Open) | Some(PrStatus::Closed) | Some(PrStatus::None) => {
+            SafetyLevel::Warning
+        }
         // Unknown or no info → don't downgrade
         _ => SafetyLevel::Safe,
     }
@@ -1026,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn integrated_safe_with_closed_pr() {
+    fn integrated_safe_with_closed_pr_downgrades_to_warning() {
         assert_eq!(
             compute_safety_level(
                 false,
@@ -1037,7 +1039,7 @@ mod tests {
                 true,
                 Some(PrStatus::Closed)
             ),
-            SafetyLevel::Safe
+            SafetyLevel::Warning
         );
     }
 

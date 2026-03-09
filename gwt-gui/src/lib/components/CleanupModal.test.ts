@@ -866,6 +866,33 @@ describe("CleanupModal", () => {
     });
   });
 
+  it("downgrades safe to warning when toggle ON and PR is closed", async () => {
+    const safeWorktree = { ...worktreeFixture, safety_level: "safe" };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [safeWorktree];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: true };
+      if (command === "get_cleanup_pr_statuses") return { [safeWorktree.branch!]: "closed" };
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(safeWorktree.branch);
+    await waitFor(() => {
+      const badge = rendered.container.querySelector(".pr-badge-closed");
+      expect(badge).toBeTruthy();
+      const dot = rendered.container.querySelector(".safety-dot");
+      expect(dot?.classList.contains("dot-warning")).toBe(true);
+    });
+  });
+
   it("downgrades safe to warning when toggle ON and PR status is missing", async () => {
     const safeWorktree = { ...worktreeFixture, safety_level: "safe" };
 

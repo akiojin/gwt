@@ -7,6 +7,29 @@ description: GitHub Issue-first spec management. Use GitHub Issues with the `gwt
 
 GitHub Issues are the single source of truth for specs. Manage every spec as an issue labeled `gwt-spec`.
 
+## Mandatory preflight: search existing spec first
+
+Before you create a new spec issue or decide where to integrate a change, use
+`gwt-project-index` Issue search first.
+
+Required behavior:
+
+1. Ensure `gh auth status` is valid before any `index-issues` call
+2. Update the Issues index if needed
+3. Run semantic Issue search with queries derived from the current request
+4. Prefer an existing canonical integrated spec over a transient point-fix/refactor spec
+5. Create a new `gwt-spec` Issue only when no suitable canonical spec exists
+
+Typical cases where this preflight is mandatory:
+
+- "既存 spec に統合して"
+- "どの仕様に入れるべきか"
+- "Project Index の統合仕様を整理して"
+- "関連仕様を探してから仕様を書いて"
+
+If `gwt-project-index` is unavailable or the Issue index is missing, say so and fall back to the
+shortest explicit recovery action. Do not silently skip the search.
+
 ## Conventions
 
 ### SPEC ID
@@ -173,6 +196,19 @@ gh issue list --label gwt-spec --state all --json number,title
 
 ## Workflow guide
 
+### 0. Search existing spec destination
+
+Before `Specify` or `Plan`, determine whether an existing spec already owns the scope.
+
+1. Use `gwt-project-index` Issue search (`index-issues` + `search-issues`)
+2. Search with at least 2 semantic queries derived from the request
+3. Rank candidates in this order:
+   - canonical integrated spec
+   - active feature/bugfix spec covering the same subsystem
+   - temporary refactor spec (historical reference only)
+4. If an existing canonical spec is found, update it instead of creating a new one
+5. Record the chosen destination issue in `## Research` or `## Spec`
+
 ### 1. Specify (draft the spec)
 
 Specification drafting procedure:
@@ -186,6 +222,7 @@ Specification drafting procedure:
    - **Success criteria**: numbered as `SC-001`, with measurable completion conditions
 3. Mark unclear points with `[Needs Clarification]` as a temporary placeholder.
 4. Explicitly document edge cases and error handling.
+5. When integrating into an existing spec, explain the integration choice and reference the related issue numbers.
 
 ### 2. Clarify (resolve ambiguity)
 
