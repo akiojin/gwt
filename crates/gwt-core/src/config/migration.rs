@@ -1,4 +1,4 @@
-//! Configuration format migration utilities (SPEC-a3f4c9df)
+//! Configuration format migration utilities (gwt-spec issue)
 //!
 //! Provides utilities for migrating configuration files between formats:
 //! - JSON → TOML
@@ -65,7 +65,7 @@ pub fn migrate_json_to_toml(json_path: &Path, toml_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Migrate YAML configuration to TOML (SPEC-a3f4c9df FR-001)
+/// Migrate YAML configuration to TOML (gwt-spec issue FR-001)
 pub fn migrate_yaml_to_toml(yaml_path: &Path, toml_path: &Path) -> Result<()> {
     debug!(
         category = "config",
@@ -126,7 +126,7 @@ pub fn migrate_yaml_to_toml(yaml_path: &Path, toml_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write file atomically using temp file + rename pattern (SPEC-a3f4c9df FR-008)
+/// Write file atomically using temp file + rename pattern (gwt-spec issue FR-008)
 pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
@@ -174,7 +174,7 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Backup a broken config file (SPEC-a3f4c9df FR-009)
+/// Backup a broken config file (gwt-spec issue FR-009)
 pub fn backup_broken_file(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -195,7 +195,7 @@ pub fn backup_broken_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Ensure directory exists with proper permissions (SPEC-a3f4c9df FR-010)
+/// Ensure directory exists with proper permissions (gwt-spec issue FR-010)
 pub fn ensure_config_dir(dir: &Path) -> Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
@@ -224,7 +224,7 @@ pub fn ensure_config_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Get list of old files that can be cleaned up (SPEC-a3f4c9df FR-011)
+/// Get list of old files that can be cleaned up (gwt-spec issue FR-011)
 pub fn get_cleanup_candidates() -> Vec<CleanupCandidate> {
     let mut candidates = Vec::new();
     let home = dirs::home_dir();

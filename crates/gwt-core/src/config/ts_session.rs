@@ -1,10 +1,10 @@
-//! TypeScript session file compatibility (FR-069, FR-070, SPEC-a3f4c9df)
+//! TypeScript session file compatibility (FR-069, FR-070, gwt-spec issue)
 //!
 //! Reads and writes session history from/to session files.
 //! Supports both TOML (new) and JSON (legacy) formats.
 //!
 //! File locations:
-//! - New: ~/.gwt/sessions/{repoName}_{hash}.toml (SPEC-a3f4c9df FR-014)
+//! - New: ~/.gwt/sessions/{repoName}_{hash}.toml (gwt-spec issue FR-014)
 //! - Legacy: ~/.config/gwt/sessions/{repoName}_{hash}.json
 //!
 //! Migration strategy:
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-/// Tool session entry from TypeScript format (FR-069, FR-070, SPEC-a3f4c9df)
+/// Tool session entry from TypeScript format (FR-069, FR-070, gwt-spec issue)
 ///
 /// Supports both camelCase (JSON legacy) and snake_case (TOML new) via serde aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +59,7 @@ pub struct ToolSessionEntry {
         alias = "toolVersion"
     )]
     pub tool_version: Option<String>,
-    /// collaboration_modes enabled (Codex v0.91.0+, SPEC-fdebd681)
+    /// collaboration_modes enabled (Codex v0.91.0+, gwt-spec issue)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -200,7 +200,7 @@ fn canonical_tool_id(tool_id: &str) -> String {
     }
 }
 
-/// TypeScript session data structure (SPEC-a3f4c9df)
+/// TypeScript session data structure (gwt-spec issue)
 ///
 /// Supports both camelCase (JSON legacy) and snake_case (TOML new) via serde aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,7 +258,7 @@ fn get_session_file_components(repo_root: &Path) -> (String, String) {
     (repo_name, hash_safe)
 }
 
-/// Get the new TOML session file path for a repository (SPEC-a3f4c9df FR-014)
+/// Get the new TOML session file path for a repository (gwt-spec issue FR-014)
 /// Path: ~/.gwt/sessions/{repoName}_{hash}.toml
 pub fn get_ts_session_toml_path(repo_root: &Path) -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -282,14 +282,14 @@ pub fn get_ts_session_path(repo_root: &Path) -> PathBuf {
     get_ts_session_json_path(repo_root)
 }
 
-/// Check if migration is needed for a repository's session file (SPEC-a3f4c9df)
+/// Check if migration is needed for a repository's session file (gwt-spec issue)
 pub fn needs_ts_session_migration(repo_root: &Path) -> bool {
     let toml_path = get_ts_session_toml_path(repo_root);
     let json_path = get_ts_session_json_path(repo_root);
     json_path.exists() && !toml_path.exists()
 }
 
-/// Migrate JSON session to TOML if needed (SPEC-a3f4c9df FR-014)
+/// Migrate JSON session to TOML if needed (gwt-spec issue FR-014)
 pub fn migrate_ts_session_if_needed(repo_root: &Path) -> Result<bool, std::io::Error> {
     if !needs_ts_session_migration(repo_root) {
         return Ok(false);
@@ -347,7 +347,7 @@ pub fn migrate_ts_session_if_needed(repo_root: &Path) -> Result<bool, std::io::E
     Ok(true)
 }
 
-/// Load TypeScript session data for a repository (SPEC-a3f4c9df)
+/// Load TypeScript session data for a repository (gwt-spec issue)
 ///
 /// Priority: TOML (new) > JSON (legacy)
 pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
@@ -373,7 +373,7 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
                 path = %json_path.display(),
                 "Loaded session from JSON (legacy)"
             );
-            // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+            // Auto-migrate: save as TOML for next time (gwt-spec issue)
             if let Ok(toml_content) = toml::to_string_pretty(&session) {
                 if let Some(parent) = toml_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -503,11 +503,11 @@ fn normalize_and_persist_session(
     session
 }
 
-/// Save session entry to session file (FR-069, SPEC-a3f4c9df)
+/// Save session entry to session file (FR-069, gwt-spec issue)
 ///
 /// Adds a new entry to the session history and updates last-used fields.
 /// Creates the session file if it doesn't exist.
-/// Always saves in TOML format to ~/.gwt/sessions/ (SPEC-a3f4c9df FR-006, FR-014)
+/// Always saves in TOML format to ~/.gwt/sessions/ (gwt-spec issue FR-006, FR-014)
 pub fn save_session_entry(
     repo_root: &Path,
     mut entry: ToolSessionEntry,
@@ -553,7 +553,7 @@ pub fn save_session_entry(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Write to file in TOML format (SPEC-a3f4c9df FR-006)
+    // Write to file in TOML format (gwt-spec issue FR-006)
     let content = toml::to_string_pretty(&session)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 

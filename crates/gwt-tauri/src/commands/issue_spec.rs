@@ -1,10 +1,10 @@
-//! Issue-first Spec Kit commands
+//! Issue-first spec commands
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::git::{
     close_spec_issue, create_spec_issue, delete_spec_issue_artifact_comment,
-    find_spec_issue_by_spec_id, get_spec_issue_detail, list_spec_issue_artifact_comments,
-    sync_issue_to_project, update_spec_issue, upsert_spec_issue,
+    get_spec_issue_detail, list_spec_issue_artifact_comments, sync_issue_to_project,
+    update_spec_issue, upsert_spec_issue,
     upsert_spec_issue_artifact_comment, ProjectSyncResult, SpecIssueArtifactComment,
     SpecIssueArtifactKind, SpecIssueDetail, SpecIssueSections, SpecProjectPhase,
 };
@@ -33,7 +33,6 @@ pub struct SpecIssueDetailData {
     pub title: String,
     pub url: String,
     pub updated_at: String,
-    pub spec_id: Option<String>,
     pub labels: Vec<String>,
     pub etag: String,
     pub body: String,
@@ -119,7 +118,6 @@ impl From<SpecIssueDetail> for SpecIssueDetailData {
             title: value.title,
             url: value.url,
             updated_at: value.updated_at,
-            spec_id: value.spec_id,
             labels: value.labels,
             etag: value.etag,
             body: value.body,
@@ -177,7 +175,7 @@ pub fn update_spec_issue_cmd(
 #[tauri::command]
 pub fn upsert_spec_issue_cmd(
     project_path: String,
-    spec_id: String,
+    issue_number: Option<u64>,
     title: String,
     sections: SpecIssueSectionsData,
     expected_etag: Option<String>,
@@ -187,7 +185,7 @@ pub fn upsert_spec_issue_cmd(
         .map_err(|e| StructuredError::internal(&e, "upsert_spec_issue_cmd"))?;
     let detail = upsert_spec_issue(
         &repo_path,
-        spec_id.trim(),
+        issue_number,
         title.trim(),
         &sections.into(),
         expected_etag.as_deref(),
@@ -207,19 +205,6 @@ pub fn get_spec_issue_detail_cmd(
     let detail = get_spec_issue_detail(&repo_path, issue_number)
         .map_err(|e| StructuredError::internal(&e, "get_spec_issue_detail_cmd"))?;
     Ok(detail.into())
-}
-
-#[tauri::command]
-pub fn find_spec_issue_by_spec_id_cmd(
-    project_path: String,
-    spec_id: String,
-) -> Result<Option<SpecIssueDetailData>, StructuredError> {
-    let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "find_spec_issue_by_spec_id_cmd"))?;
-    let detail = find_spec_issue_by_spec_id(&repo_path, spec_id.trim())
-        .map_err(|e| StructuredError::internal(&e, "find_spec_issue_by_spec_id_cmd"))?;
-    Ok(detail.map(Into::into))
 }
 
 #[tauri::command]

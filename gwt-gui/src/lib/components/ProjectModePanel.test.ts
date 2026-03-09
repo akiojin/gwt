@@ -267,12 +267,10 @@ describe("ProjectModePanel", () => {
     const rendered = await renderPanel(
       {
         active_spec_issue_number: 42,
-        active_spec_id: null,
         active_spec_issue_url: null,
       },
       {
         active_spec_issue_number: 42,
-        active_spec_id: null,
         active_spec_issue_url: null,
       }
     );
@@ -289,7 +287,6 @@ describe("ProjectModePanel", () => {
 
     expect(specEvent?.detail).toEqual({
       issueNumber: 42,
-      specId: null,
       issueUrl: null,
     });
 

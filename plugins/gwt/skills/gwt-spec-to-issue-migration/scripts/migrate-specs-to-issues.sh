@@ -11,13 +11,17 @@
 #   --label LABEL   Additional label to apply (can be repeated; gwt-spec is always applied)
 
 set -euo pipefail
+shopt -s nullglob
 
 DRY_RUN=false
 SPECS_DIR=""
 REPORT_FILE="migration-report.json"
 RATE_LIMIT_BATCH=10
 RATE_LIMIT_SLEEP=3
-EXTRA_LABELS=()
+declare -a EXTRA_LABELS=()
+REPO_ROOT=""
+declare -a SPEC_DIRS=()
+declare -a CLEANUP_TARGETS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +51,79 @@ resolve_repo_root() {
   fi
 
   git rev-parse --show-toplevel 2>/dev/null || true
+}
+
+append_cleanup_target() {
+  local target="$1"
+  [[ -e "$target" ]] || return 0
+  for existing in "${CLEANUP_TARGETS[@]-}"; do
+    [[ -n "$existing" ]] || continue
+    [[ "$existing" == "$target" ]] && return 0
+  done
+  CLEANUP_TARGETS+=("$target")
+}
+
+collect_cleanup_targets() {
+  CLEANUP_TARGETS=()
+
+  for dir in "${SPEC_DIRS[@]}"; do
+    append_cleanup_target "$dir"
+  done
+
+  append_cleanup_target "$SPECS_DIR/specs.md"
+  append_cleanup_target "$SPECS_DIR/archive"
+
+  for candidate in \
+    "$REPO_ROOT"/.specify \
+    "$REPO_ROOT"/.specify/* \
+    "$REPO_ROOT"/.github/spec-kit \
+    "$REPO_ROOT"/.github/spec-kit* \
+    "$REPO_ROOT"/.github/prompts/specify* \
+    "$REPO_ROOT"/scripts/spec-kit* \
+    "$REPO_ROOT"/scripts/specify* \
+    "$REPO_ROOT"/templates/spec-kit* \
+    "$REPO_ROOT"/templates/specify*
+  do
+    append_cleanup_target "$candidate"
+  done
+}
+
+preview_cleanup_targets() {
+  collect_cleanup_targets
+  echo ""
+  echo "Legacy cleanup plan:"
+  if [[ ${#CLEANUP_TARGETS[@]:-0} -eq 0 ]]; then
+    echo "  (no legacy paths detected beyond migration report handling)"
+  else
+    for path in "${CLEANUP_TARGETS[@]-}"; do
+      [[ -n "$path" ]] || continue
+      echo "  - $path"
+    done
+  fi
+  echo "  - $REPORT_FILE (delete after successful cleanup)"
+}
+
+cleanup_legacy_sources() {
+  collect_cleanup_targets
+
+  echo ""
+  echo "Cleaning up legacy local spec artifacts..."
+  for path in "${CLEANUP_TARGETS[@]-}"; do
+    [[ -n "$path" ]] || continue
+    [[ -e "$path" ]] || continue
+    echo "  Removing $path"
+    rm -rf "$path"
+  done
+
+  if [[ -d "$SPECS_DIR" ]] && [[ -z "$(ls -A "$SPECS_DIR" 2>/dev/null)" ]]; then
+    echo "  Removing empty $SPECS_DIR"
+    rmdir "$SPECS_DIR"
+  fi
+
+  if [[ -f "$REPORT_FILE" ]]; then
+    echo "  Removing $REPORT_FILE"
+    rm -f "$REPORT_FILE"
+  fi
 }
 
 write_empty_report_and_exit() {
@@ -80,11 +157,14 @@ elif [[ ! -d "$SPECS_DIR" ]]; then
   exit 1
 fi
 
+if [[ -z "$REPO_ROOT" ]]; then
+  REPO_ROOT=$(cd "$SPECS_DIR/.." && pwd -P)
+fi
+
 echo "Specs directory: $SPECS_DIR"
 echo "Dry run: $DRY_RUN"
 
 # Collect SPEC directories (exclude archive/)
-SPEC_DIRS=()
 for dir in "$SPECS_DIR"/SPEC-*/; do
   [[ -d "$dir" ]] || continue
   SPEC_DIRS+=("$dir")
@@ -308,4 +388,14 @@ echo "]" >> "$REPORT_FILE"
 
 echo ""
 echo "Migration complete: $SUCCESS succeeded, $FAILED failed out of $COUNT total"
-echo "Report: $REPORT_FILE"
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "Report: $REPORT_FILE"
+  preview_cleanup_targets
+elif (( FAILED > 0 )); then
+  echo "Report: $REPORT_FILE"
+  echo "Cleanup skipped because some migrations failed."
+else
+  cleanup_legacy_sources
+  echo "Legacy cleanup complete. Report removed: $REPORT_FILE"
+fi

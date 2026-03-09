@@ -633,7 +633,7 @@
     };
   });
 
-  // Listen to agent-status-changed to refresh branch list (SPEC-b80e7996 FR-821)
+  // Listen to agent-status-changed to refresh branch list (gwt-spec issue FR-821)
   $effect(() => {
     let unlisten: null | (() => void) = null;
     let cancelled = false;
@@ -660,7 +660,7 @@
     };
   });
 
-  // Polling fallback for agent status (SPEC-b80e7996 FR-822)
+  // Polling fallback for agent status (gwt-spec issue FR-822)
   // Only active when there are agent tabs open (avoids unnecessary polling).
   $effect(() => {
     if (mode !== "branch") return;
@@ -1819,7 +1819,7 @@
     flex: 1;
   }
 
-  /* Agent indicator: fixed-width slot for all branch rows (SPEC-b80e7996 FR-800) */
+  /* Agent indicator: fixed-width slot for all branch rows (gwt-spec issue FR-800) */
   .agent-indicator-slot {
     width: 12px;
     height: 12px;
@@ -1829,7 +1829,7 @@
     justify-content: center;
   }
 
-  /* Layer 1: static dot — tab is open (SPEC-b80e7996 FR-801) */
+  /* Layer 1: static dot — tab is open (gwt-spec issue FR-801) */
   .agent-static-dot {
     width: 6px;
     height: 6px;
@@ -1838,7 +1838,7 @@
     opacity: 0.45;
   }
 
-  /* Layer 2: pulsing dot — LLM is Running (SPEC-b80e7996 FR-802) */
+  /* Layer 2: pulsing dot — LLM is Running (gwt-spec issue FR-802) */
   .agent-pulse-dot {
     width: 6px;
     height: 6px;

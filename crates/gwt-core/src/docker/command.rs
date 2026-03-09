@@ -1,4 +1,4 @@
-//! Docker command wrapper (SPEC-f5f5657e)
+//! Docker command wrapper (gwt-spec issue)
 //!
 //! Provides functions to check Docker availability and daemon status.
 

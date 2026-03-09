@@ -123,7 +123,6 @@
           new CustomEvent("gwt-project-mode-open-spec-issue", {
             detail: {
               issueNumber,
-              specId: state.active_spec_id ?? null,
               issueUrl: state.active_spec_issue_url ?? null,
             },
           })

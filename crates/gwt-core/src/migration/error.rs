@@ -1,4 +1,4 @@
-//! Migration error types (SPEC-a70a1ece T704)
+//! Migration error types (gwt-spec issue T704)
 
 use std::path::PathBuf;
 use thiserror::Error;

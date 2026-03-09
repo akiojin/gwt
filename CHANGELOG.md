@@ -271,7 +271,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **spec:** Update SPEC-b7f7b9ad task completion status (#1269)
+- **spec:** Update gwt-spec issue task completion status (#1269)
 
 ## [7.13.0] - 2026-02-26
 
@@ -421,7 +421,7 @@ All notable changes to this project will be documented in this file.
 - **gui:** Normalize PR merge status badges (#1186)
 - MacOS起動時のOS環境アクセス許可ダイアログ表示を改善 (#1187)
 - Detect remote-only branches in find_branch_for_issue (#1188)
-- Worktree作成時にupstream trackingを自動設定する (#SPEC-b3f1a4e2) (#1189)
+- Worktree作成時にupstream trackingを自動設定する (gwt-spec issue) (#1189)
 
 ## [7.10.1] - 2026-02-22
 
@@ -453,13 +453,13 @@ All notable changes to this project will be documented in this file.
 - **docker:** Compose起動直後の停止理由を表示 (#1170)
 - Stabilize windows shell selection follow-up and merge develop (#1172)
 - Marketplace.jsonを.claude-plugin/に移動
-- SPEC-a4fb2db2 分析指摘の修正（エラー分類テスト・ドキュメント整合性）
+- gwt-spec issue 分析指摘の修正（エラー分類テスト・ドキュメント整合性）
 
 ### Features
 
 - **gui:** E1004エラー時に「Use Existing Branch」ボタンを表示 (#1168)
 - **cleanup:** Cleanupにunsafe限定のForce実行を追加 (#1171)
-- GitHub リモート起点の Worktree 作成 (SPEC-a4fb2db2)
+- GitHub リモート起点の Worktree 作成 (gwt-spec issue)
 
 ## [7.9.0] - 2026-02-20
 
@@ -519,7 +519,7 @@ All notable changes to this project will be documented in this file.
 
 - **gui:** Improve trackpad wheel fallback detection (#1095)
 - Create_for_branchのremoteフォールバック誤判定を修正 (#1098)
-- **specs:** SPEC-bare-wt01 を UUID-8 形式 SPEC-013cd65c にリネーム
+- **specs:** gwt-spec issue を UUID-8 形式 gwt-spec issue にリネーム
 - Offload branch/worktree listing to spawn_blocking (#1100)
 - **gui:** Restore startup window sessions with label fallback (#1101)
 - **gui:** Prevent periodic Worktree Loading during agent refresh (#1102)
@@ -773,7 +773,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **spec:** Mention Debug menu in SPEC-4470704f (#948)
+- **spec:** Mention Debug menu in gwt-spec issue (#948)
 - **spec:** Add spec + tests for agent tab restore (#989)
 - CLAUDE.mdに仕様策定+TDD必須化ルールを追加
 
@@ -803,7 +803,7 @@ All notable changes to this project will be documented in this file.
 - Add macOS shell installer script
 - MacOS PKGビルドスクリプトとアンインストーラーを追加
 - **gui:** Add agent mode master with ReAct tooling (#971)
-- エージェントモード実装 (SPEC-ba3f610c T001-T100) (#908)
+- エージェントモード実装 (gwt-spec issue T001-T100) (#908)
 - **gui:** About版バージョン表示 + Version History展開コンテンツ切れ修正 (#974)
 - Indicate active agent branches in sidebar list (#978)
 - Add sidebar mode toggle for agent tasks (#980)
@@ -860,7 +860,7 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- **tui:** AIによるブランチ名自動生成を追加 (SPEC-1ad9c07d) (#913)
+- **tui:** AIによるブランチ名自動生成を追加 (gwt-spec issue) (#913)
 
 ## [6.29.0] - 2026-02-07
 
@@ -873,7 +873,7 @@ All notable changes to this project will be documented in this file.
 
 - ログ画面のエントリを最新順（降順）で表示 (#905)
 - Claude Code起動時にCLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1を自動設定 (#906)
-- エージェントモード実装 (SPEC-ba3f610c T001-T100) (#909)
+- エージェントモード実装 (gwt-spec issue T001-T100) (#909)
 
 
 ## [6.28.1] - 2026-02-06
@@ -959,7 +959,7 @@ All notable changes to this project will be documented in this file.
 - **ci:** DevelopブランチからのmainへのPRを許可
 - **ci:** DevelopブランチからのPRも自動マージ対象に追加
 - **codex:** 日付ベースバージョンでweb_search設定形式を変更 (#860)
-- **tui:** Sessionパネルにステータス行を表示 (SPEC-1ea18899)
+- **tui:** Sessionパネルにステータス行を表示 (gwt-spec issue)
 - Gh issue list --repo resolution (#865)
 - Keep cleanup UI during refresh (#864)
 - フッターヘルプを縦スクロール化 (#872)
@@ -975,10 +975,10 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
-- CLAUDE.md にGitView技術情報追加 (SPEC-1ea18899)
-- README.mdにGitView画面の使い方を追加 (SPEC-1ea18899 T406)
+- CLAUDE.md にGitView技術情報追加 (gwt-spec issue)
+- README.mdにGitView画面の使い方を追加 (gwt-spec issue T406)
 
 ### Features
 
@@ -987,7 +987,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - セッション要約に依頼と直近指示の明示を追加
@@ -1000,8 +1000,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -1015,7 +1015,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -1025,11 +1025,11 @@ All notable changes to this project will be documented in this file.
 - **codex:** Codexバージョンに基づくweb_searchパラメーター切り替え (#851)
 - **tui:** 現在ブランチに(current)表示を追加 (#852)
 - **codex:** /releaseスキルを追加
-- **tui:** Bareリポジトリ対応とマイグレーション機能 (SPEC-a70a1ece) (#862)
-- **tui:** GitView画面基本実装 (SPEC-1ea18899)
-- **tui:** Detailsパネル削除し2ペイン構成に変更 (SPEC-1ea18899 US4)
-- **tui:** GitView PRリンクのマウスクリック対応 (SPEC-1ea18899 US2)
-- **config:** 設定ファイル統一とTOMLマイグレーション (SPEC-a3f4c9df) (#866)
+- **tui:** Bareリポジトリ対応とマイグレーション機能 (gwt-spec issue) (#862)
+- **tui:** GitView画面基本実装 (gwt-spec issue)
+- **tui:** Detailsパネル削除し2ペイン構成に変更 (gwt-spec issue US4)
+- **tui:** GitView PRリンクのマウスクリック対応 (gwt-spec issue US2)
+- **config:** 設定ファイル統一とTOMLマイグレーション (gwt-spec issue) (#866)
 - CLI/TUI改善とWeb連携を追加 (#869)
 - **cli:** Add gpt-5.3-codex model option (#899)
 
@@ -1042,7 +1042,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -1092,7 +1092,7 @@ All notable changes to this project will be documented in this file.
 
 - Hook setup重複登録防止のテスト追加 (#726)
 - Fix clippy useless vec in cleanup tests
-- **tui:** GitView T201/T301ユニットテスト追加 (SPEC-1ea18899)
+- **tui:** GitView T201/T301ユニットテスト追加 (gwt-spec issue)
 
 ### Ci
 
@@ -1182,7 +1182,7 @@ All notable changes to this project will be documented in this file.
 - **ci:** DevelopブランチからのmainへのPRを許可
 - **ci:** DevelopブランチからのPRも自動マージ対象に追加
 - **codex:** 日付ベースバージョンでweb_search設定形式を変更 (#860)
-- **tui:** Sessionパネルにステータス行を表示 (SPEC-1ea18899)
+- **tui:** Sessionパネルにステータス行を表示 (gwt-spec issue)
 - Gh issue list --repo resolution (#865)
 - Keep cleanup UI during refresh (#864)
 - フッターヘルプを縦スクロール化 (#872)
@@ -1191,10 +1191,10 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
-- CLAUDE.md にGitView技術情報追加 (SPEC-1ea18899)
-- README.mdにGitView画面の使い方を追加 (SPEC-1ea18899 T406)
+- CLAUDE.md にGitView技術情報追加 (gwt-spec issue)
+- README.mdにGitView画面の使い方を追加 (gwt-spec issue T406)
 
 ### Features
 
@@ -1203,7 +1203,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - セッション要約に依頼と直近指示の明示を追加
@@ -1216,8 +1216,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -1231,7 +1231,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -1241,11 +1241,11 @@ All notable changes to this project will be documented in this file.
 - **codex:** Codexバージョンに基づくweb_searchパラメーター切り替え (#851)
 - **tui:** 現在ブランチに(current)表示を追加 (#852)
 - **codex:** /releaseスキルを追加
-- **tui:** Bareリポジトリ対応とマイグレーション機能 (SPEC-a70a1ece) (#862)
-- **tui:** GitView画面基本実装 (SPEC-1ea18899)
-- **tui:** Detailsパネル削除し2ペイン構成に変更 (SPEC-1ea18899 US4)
-- **tui:** GitView PRリンクのマウスクリック対応 (SPEC-1ea18899 US2)
-- **config:** 設定ファイル統一とTOMLマイグレーション (SPEC-a3f4c9df) (#866)
+- **tui:** Bareリポジトリ対応とマイグレーション機能 (gwt-spec issue) (#862)
+- **tui:** GitView画面基本実装 (gwt-spec issue)
+- **tui:** Detailsパネル削除し2ペイン構成に変更 (gwt-spec issue US4)
+- **tui:** GitView PRリンクのマウスクリック対応 (gwt-spec issue US2)
+- **config:** 設定ファイル統一とTOMLマイグレーション (gwt-spec issue) (#866)
 - CLI/TUI改善とWeb連携を追加 (#869)
 
 ### Miscellaneous Tasks
@@ -1257,7 +1257,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -1304,7 +1304,7 @@ All notable changes to this project will be documented in this file.
 
 - Hook setup重複登録防止のテスト追加 (#726)
 - Fix clippy useless vec in cleanup tests
-- **tui:** GitView T201/T301ユニットテスト追加 (SPEC-1ea18899)
+- **tui:** GitView T201/T301ユニットテスト追加 (gwt-spec issue)
 
 ### Ci
 
@@ -1400,16 +1400,16 @@ All notable changes to this project will be documented in this file.
 - **ci:** DevelopブランチからのmainへのPRを許可
 - **ci:** DevelopブランチからのPRも自動マージ対象に追加
 - **codex:** 日付ベースバージョンでweb_search設定形式を変更 (#860)
-- **tui:** Sessionパネルにステータス行を表示 (SPEC-1ea18899)
+- **tui:** Sessionパネルにステータス行を表示 (gwt-spec issue)
 - Gh issue list --repo resolution (#865)
 - Keep cleanup UI during refresh (#864)
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
-- CLAUDE.md にGitView技術情報追加 (SPEC-1ea18899)
-- README.mdにGitView画面の使い方を追加 (SPEC-1ea18899 T406)
+- CLAUDE.md にGitView技術情報追加 (gwt-spec issue)
+- README.mdにGitView画面の使い方を追加 (gwt-spec issue T406)
 
 ### Features
 
@@ -1418,7 +1418,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - セッション要約に依頼と直近指示の明示を追加
@@ -1431,8 +1431,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -1446,7 +1446,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -1456,11 +1456,11 @@ All notable changes to this project will be documented in this file.
 - **codex:** Codexバージョンに基づくweb_searchパラメーター切り替え (#851)
 - **tui:** 現在ブランチに(current)表示を追加 (#852)
 - **codex:** /releaseスキルを追加
-- **tui:** Bareリポジトリ対応とマイグレーション機能 (SPEC-a70a1ece) (#862)
-- **tui:** GitView画面基本実装 (SPEC-1ea18899)
-- **tui:** Detailsパネル削除し2ペイン構成に変更 (SPEC-1ea18899 US4)
-- **tui:** GitView PRリンクのマウスクリック対応 (SPEC-1ea18899 US2)
-- **config:** 設定ファイル統一とTOMLマイグレーション (SPEC-a3f4c9df) (#866)
+- **tui:** Bareリポジトリ対応とマイグレーション機能 (gwt-spec issue) (#862)
+- **tui:** GitView画面基本実装 (gwt-spec issue)
+- **tui:** Detailsパネル削除し2ペイン構成に変更 (gwt-spec issue US4)
+- **tui:** GitView PRリンクのマウスクリック対応 (gwt-spec issue US2)
+- **config:** 設定ファイル統一とTOMLマイグレーション (gwt-spec issue) (#866)
 
 ### Miscellaneous Tasks
 
@@ -1471,7 +1471,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -1517,7 +1517,7 @@ All notable changes to this project will be documented in this file.
 
 - Hook setup重複登録防止のテスト追加 (#726)
 - Fix clippy useless vec in cleanup tests
-- **tui:** GitView T201/T301ユニットテスト追加 (SPEC-1ea18899)
+- **tui:** GitView T201/T301ユニットテスト追加 (gwt-spec issue)
 
 ### Ci
 
@@ -1528,7 +1528,7 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- **tui:** bareリポジトリ対応とマイグレーション機能 (SPEC-a70a1ece) (#862)
+- **tui:** bareリポジトリ対応とマイグレーション機能 (gwt-spec issue) (#862)
 
 ### Bug Fixes
 
@@ -1646,7 +1646,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
 
 ### Features
@@ -1656,7 +1656,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - セッション要約に依頼と直近指示の明示を追加
@@ -1669,8 +1669,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -1684,7 +1684,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -1703,7 +1703,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -1820,7 +1820,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
 
 ### Features
@@ -1830,7 +1830,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - セッション要約に依頼と直近指示の明示を追加
@@ -1843,8 +1843,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -1858,7 +1858,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -1875,7 +1875,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -1990,7 +1990,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
 
 ### Features
@@ -2000,7 +2000,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - セッション要約に依頼と直近指示の明示を追加
@@ -2013,8 +2013,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -2028,7 +2028,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -2045,7 +2045,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -2170,7 +2170,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
 
 ### Features
@@ -2180,7 +2180,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -2191,8 +2191,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -2206,7 +2206,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -2222,7 +2222,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -2328,7 +2328,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
 
 ### Features
@@ -2338,7 +2338,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -2349,8 +2349,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -2364,7 +2364,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -2378,7 +2378,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -2484,7 +2484,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
 
 ### Features
@@ -2494,7 +2494,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -2505,8 +2505,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
 - **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
@@ -2520,7 +2520,7 @@ All notable changes to this project will be documented in this file.
 - **settings:** AIタブに現在の設定値を表示
 - **settings:** Integrate Environment profiles into Settings screen
 - **settings:** Swap Enter and E key bindings in Environment category
-- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- **settings:** gwt-spec issue準拠の環境変数編集機能を実装
 - Codex collaboration_modes サポートを追加
 - Codex v0.91.0+でcollaboration_modesを強制有効化
 - **tui:** 画面レイアウトとタイトル表記を統一
@@ -2534,7 +2534,7 @@ All notable changes to this project will be documented in this file.
 - Bun.lockを.gitignoreに追加 (#771)
 - Add commitlint as dev dependency
 - Apply cargo fmt
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Develop取り込み
 - Developブランチをマージ
 - Origin/develop をマージ
@@ -2633,7 +2633,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 - README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
 
 ### Features
@@ -2643,7 +2643,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -2654,8 +2654,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 - Codex collaboration_modes サポートを追加
 - **custom-agent:** Tools.json読み込みとWizard表示機能を追加
 - **custom-agent:** カスタムエージェント起動機能を実装 (US2)
@@ -2676,7 +2676,7 @@ All notable changes to this project will be documented in this file.
 - Add commitlint as dev dependency
 - Apply cargo fmt
 - Develop取り込み
-- SPEC-71f2742d tasks.mdの完了タスクを更新
+- gwt-spec issue Issue Tasksの完了タスクを更新
 - Developブランチをマージ
 
 ### Performance
@@ -2767,7 +2767,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 
 ### Features
 
@@ -2776,7 +2776,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -2787,8 +2787,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 
 ### Miscellaneous Tasks
 
@@ -2879,7 +2879,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 
 ### Features
 
@@ -2888,7 +2888,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -2899,8 +2899,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 
 ### Miscellaneous Tasks
 
@@ -2979,7 +2979,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add PR #789 link to tasks.md (#791)
+- Add PR #789 link to Issue Tasks (#791)
 
 ### Features
 
@@ -2988,7 +2988,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -2999,8 +2999,8 @@ All notable changes to this project will be documented in this file.
 - フックスクリプトをプラグイン形式に移行 (#776)
 - Add mouse wheel scrolling for session summary (#781)
 - **tui:** Add progress modal for worktree preparation (US15) (#786)
-- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
-- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- GitHub Issue連携によるブランチ作成機能 (gwt-spec issue) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, gwt-spec issue) (#789)
 
 ### Miscellaneous Tasks
 
@@ -3075,7 +3075,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -3163,7 +3163,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -3233,7 +3233,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -3291,7 +3291,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
 - Add agent mode scaffolding and branch list layout updates (#755)
@@ -3336,7 +3336,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 
 ### Miscellaneous Tasks
@@ -3374,7 +3374,7 @@ All notable changes to this project will be documented in this file.
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
 - **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
 - セッション要約に依頼と直近指示の明示を追加 (#742)
-- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** エラーポップアップ・ログ出力システム (gwt-spec issue) (#743)
 
 ### Miscellaneous Tasks
 
@@ -3500,7 +3500,7 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - Add PR source branch validation for main
-- エージェント状態可視化機能 (SPEC-861d8cdf) (#692)
+- エージェント状態可視化機能 (gwt-spec issue) (#692)
 - ブランチ詳細優先表示とAI設定デフォルト追加 (#694)
 - Responses APIでAI要約を生成 (#696)
 - ブランチ詳細にGitHubリンクを追加 (#698)
@@ -3522,7 +3522,7 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- ブランチサマリーパネル機能 (SPEC-4b893dae) (#678)
+- ブランチサマリーパネル機能 (gwt-spec issue) (#678)
 - シングルアクティブペイン制約の実装 (#681)
 - エージェントペインと選択アイコンのUnicode化 (#683)
 - ブランチ一覧のマウス選択を追加 (#687)
@@ -3941,7 +3941,7 @@ All notable changes to this project will be documented in this file.
 - 自動マージワークフローのトリガー条件を修正
 - GraphQL APIで自動マージを実行
 - Worktreeパス衝突時のエラーハンドリングを改善 (#79)
-- 新規Worktree作成時にClaude CodeとCodex CLIを選択可能にする (SPEC-473b3d47 FR-008対応)
+- 新規Worktree作成時にClaude CodeとCodex CLIを選択可能にする (gwt-spec issue FR-008対応)
 - マージ済みPRクリーンアップ画面でqキーで前の画面に戻れるように修正
 - ESLintエラーを修正
 - StripAnsi関数の位置を修正してimport文の後に移動
@@ -3970,7 +3970,7 @@ All notable changes to this project will be documented in this file.
 - Ink UIショートカットの動作を修正
 - リリースワークフローの認証設定を追加
 - LintワークフローにMarkdownlintを統合
-- Spec Kitのブランチ自動作成を無効化
+- legacy spec workflowのブランチ自動作成を無効化
 - Bunテスト互換のモック復元処理を整備
 - Ink UIのTTY制御を安定化
 - TTYフォールバックの標準入出力を引き渡す
@@ -3985,8 +3985,8 @@ All notable changes to this project will be documented in this file.
 - TypeScript型エラーを修正してビルドを通す
 - BranchActionSelectorScreenでqキーで戻る機能と英語化を実装
 - AIToolSelectorScreenテストを非同期読み込みに対応
-- Spec Kitスクリプトのデフォルト動作をブランチ作成なしに変更
-- Spec Kitスクリプトのブランチ名制約を緩和
+- legacy spec workflowスクリプトのデフォルト動作をブランチ作成なしに変更
+- legacy spec workflowスクリプトのブランチ名制約を緩和
 - EnsureGitignoreEntryテストを統合テストに変更
 - RealtimeUpdate.test.tsxのテストアプローチを修正
 - Codex CLIのweb_search_request対応
@@ -4059,7 +4059,7 @@ All notable changes to this project will be documented in this file.
 - **lint:** ESLintエラーを修正（未使用変数の削除）
 - **docs:** Specsディレクトリのmarkdownlintエラーを修正
 - **lint:** ESLint設定を改善してテストファイルのルールを緩和
-- **docs:** Specs/feature/webui/spec.mdのbare URL修正
+- **docs:** issue-based WebUI specのbare URL修正
 - **test:** テストファイルのimportパス修正
 - **test:** Vi.mockのパスも修正してテストのimport問題を完全解決
 - **test:** 通常のimport文も../../../../cli/パスに修正
@@ -4269,7 +4269,7 @@ All notable changes to this project will be documented in this file.
 - トレイ再初期化とテストのplatform注入
 - EnvironmentProfileScreenのキーボード入力を修正
 - CodeRabbitのレビュー指摘事項を修正
-- Spec Kitスクリプトの安全性改善（eval撤廃/JSON出力）
+- legacy spec workflowスクリプトの安全性改善（eval撤廃/JSON出力）
 - Profiles.yaml未作成時の作成失敗を修正
 - プロファイル名検証と設定パス不整合を修正
 - Envキー入力のバリデーションを追加
@@ -4375,11 +4375,11 @@ All notable changes to this project will be documented in this file.
 - FR-004準拠のフッターキーバインドヘルプを追加
 - FR-070準拠のツール表示形式から二重日時表示を削除
 - Worktreeからメインリポジトリルートを解決してセッションファイルを検索
-- SPEC-d2f4762a FR要件準拠の修正
+- gwt-spec issue FR要件準拠の修正
 
 ### Documentation
 
-- OpenTUI移行の将来計画仕様を追加 (SPEC-d27be71b) (#478)
+- OpenTUI移行の将来計画仕様を追加 (gwt-spec issue) (#478)
 - Divergence起動継続の統合仕様を更新 (#479)
 - ブランチ選択後のウィザードポップアップフローを仕様化
 - README.mdを大幅に更新し日本語版README.ja.mdを新規作成
@@ -4397,19 +4397,19 @@ All notable changes to this project will be documented in this file.
 - AGENTS.md と CLAUDE.md にbun利用ルール（ローカル検証/実行）を明記
 - 仕様駆動開発ライフサイクルに関する表現を修正
 - Clean up merged PRs機能の修正仕様書を作成
-- Spec Kit完全ワークフローの文書化を完了
+- legacy spec workflow完全ワークフローの文書化を完了
 - フェーズ11ドキュメント改善 & フェーズ12 CI/CD強化完了 (T1001-T1109)
 - テスト実装プロジェクト完了サマリー作成
 - AGENTS.mdの内容を@CLAUDE.mdに移行し、開発ガイドラインを整理
 - PR自動マージ機能の説明をREADMEに追加し、ドキュメントを完成 (T015-T016)
-- Spec Kit設計ドキュメントを追加
-- SPEC-23bb2eed全タスク完了マーク
-- T011完了をtasks.mdに反映
+- legacy spec workflow設計ドキュメントを追加
+- gwt-spec issue全タスク完了マーク
+- T011完了をIssue Tasksに反映
 - セッション完了サマリー - Phase 3完了とPhase 4開始の記録
 - SESSION_SUMMARY.md最終更新 - Phase 4完了を反映
 - T098-T099完了 - ドキュメント更新（Ink.js UI移行）
 - Tasks.md更新 - Phase 6全タスク完了マーク
-- Enforce Spec Kit SDD/TDD
+- Enforce legacy spec workflow SDD/TDD
 - Bun vitestのretry未サポートを記録
 - Add commitlint rules to tasks template
 - Tasks.md Phase 4進捗を更新（T056-T071完了、T068スキップ）
@@ -4426,14 +4426,14 @@ All notable changes to this project will be documented in this file.
 - エージェントによるブランチ操作禁止を明記
 - Plan.mdのURL形式を修正（Markdownlint対応）
 - CLAUDE.mdにコミットメッセージポリシーを追記
-- Update tasks.md with completed US2 and Phase 4 status
-- SPEC-a5ae4916 に最新コミット順の要件を追記
+- Update Issue Tasks with completed US2 and Phase 4 status
+- gwt-spec issue に最新コミット順の要件を追記
 - MarkdownlintをクリアするためのSpec更新
-- SPEC-ee33ca26 品質分析完了・修正適用
-- SPEC-a5ae4916 を最新コミット表示要件に更新
+- gwt-spec issue 品質分析完了・修正適用
+- gwt-spec issue を最新コミット表示要件に更新
 - CLAUDE.mdからフック重複記述を削除しコンテキストを最適化
-- SPEC-23bb2eedを手動リリースフロー仕様に更新
-- Add SPEC-a5a44f4c release test stabilization kit
+- gwt-spec issueを手動リリースフロー仕様に更新
+- Add gwt-spec issue release test stabilization kit
 - Publish.ymlのコメントを更新 (#204)
 - READMEのインストールセクションを改善 (#207)
 - Publish.ymlのコメントを更新
@@ -4443,12 +4443,12 @@ All notable changes to this project will be documented in this file.
 - Lintエラー修正
 - Align release flow with release branch automation
 - Clarify /release can run from any branch
-- **spec:** SPEC-57fde06fにバックマージ要件を追加しワークフローを最適化
+- **spec:** gwt-spec issueにバックマージ要件を追加しワークフローを最適化
 - Web UI機能のドキュメント追加
 - **spec:** Add env config specs
 - 残りのドキュメント内の参照を更新
 - Fix changelog markdownlint errors
-- Spec Kit対応 - bugfixブランチタイプ機能の仕様書・計画・タスクを追加
+- legacy spec workflow対応 - bugfixブランチタイプ機能の仕様書・計画・タスクを追加
 - 仕様書を実装に合わせて更新＋Filter:の色をdimColorに変更
 - Plan.mdの見出しレベルを修正
 - ドキュメント内のsemantic-release言及をrelease-pleaseに更新
@@ -4476,7 +4476,7 @@ All notable changes to this project will be documented in this file.
 - Document safeToCleanup flag on BranchItem
 - Align cleanup plan with current emoji icons
 - Web UI起動手順と設定パスを最新化
-- SPEC-1f56fd80のmarkdownlint修正
+- gwt-spec issueのmarkdownlint修正
 - ヘルプテキストに serve コマンドを追加
 - Linuxのnode-gypビルド要件を追記
 - Qwen未サポート要件の適用範囲を明確化
@@ -4491,17 +4491,17 @@ All notable changes to this project will be documented in this file.
 - **spec:** ログ仕様の明確化とログビューア機能の仕様策定 (#432)
 - Update task planning instruction
 - README.md/README.ja.mdを最新の実装状態に同期 (#469)
-- OpenTUI移行の将来計画仕様を追加 (SPEC-d27be71b) (#478)
+- OpenTUI移行の将来計画仕様を追加 (gwt-spec issue) (#478)
 - Divergence起動継続の統合仕様を更新 (#479)
 - ブランチ選択後のウィザードポップアップフローを仕様化
-- Rust移行仕様書を追加（SPEC-1d62511e）
-- SPEC-d2f4762aのtasks.mdをRust移行に合わせて更新
-- SPEC-d2f4762aをRust移行に合わせて更新
+- Rust移行仕様書を追加（gwt-spec issue）
+- gwt-spec issueのIssue TasksをRust移行に合わせて更新
+- gwt-spec issueをRust移行に合わせて更新
 
 ### Features
 
 - OpenCode コーディングエージェント対応を追加 (#477)
-- Worktreeパス修復機能を追加 (SPEC-902a89dc) (#484)
+- Worktreeパス修復機能を追加 (gwt-spec issue) (#484)
 - ブランチ選択のフルパス表示 (#486)
 - OpenTUI移行 (#487)
 - 新規ブランチ作成時にブランチタイプ選択とプレフィックス自動付加を追加 (#494)
@@ -4547,21 +4547,21 @@ All notable changes to this project will be documented in this file.
 - リリースブランチの自動化を強化
 - リリースブランチ完了時のworktreeとローカルブランチ自動削除機能を追加
 - Claude Codeアカウント切り替え機能を追加
-- Add Spec Kit
+- Add legacy spec workflow
 - **specify:** ブランチを作成しない運用へ変更
 - Codex CLI対応の仕様と実装計画を追加
 - AIツール選択（Claude/Codex）機能を実装
 - ツール引数パススルーとエラーメッセージを追加
 - Npx経由でAI CLIを起動するよう変更
 - @akiojin/spec-kitを導入し、仕様駆動開発をサポート
-- 既存実装に対する包括的な機能仕様書を作成（SPEC-473b3d47）
+- 既存実装に対する包括的な機能仕様書を作成（gwt-spec issue）
 - Codex CLIのbunx対応とresumeコマンド整備
 - GitHub CLIのインストールをDockerfileに追加
-- Claude CodeをnpxからbunxへComplete移行（SPEC-c0deba7e）
+- Claude CodeをnpxからbunxへComplete移行（gwt-spec issue）
 - **auto-merge:** PR番号取得、マージ可能性チェック、PRマージステップを実装 (T004-T006)
 - Semantic-release自動リリース機能を実装
 - Semantic-release設定を明示化
-- ブランチ選択カーソル視認性向上 (SPEC-822a2cbf)
+- ブランチ選択カーソル視認性向上 (gwt-spec issue)
 - Ink.js UI移行のPhase 1完了（セットアップと準備）
 - Phase 2 開始 - 型定義拡張とカスタムフック実装（進行中）
 - Phase 2基盤実装 - カスタムフック（useTerminalSize, useScreenState）
@@ -4594,7 +4594,7 @@ All notable changes to this project will be documented in this file.
 - Add git loading indicator with tdd coverage
 - ブランチ作成機能を実装（FR-007完全対応）
 - Add git loading indicator with tdd coverage (#104)
-- SPEC-6d501fd0仕様・計画・タスクの詳細化と品質分析
+- gwt-spec issue仕様・計画・タスクの詳細化と品質分析
 - **ui:** PRクリーンアップ実行中のフィードバックを改善
 - **ui:** PRクリーンアップ実行中のフィードバックを改善
 - **ui:** 即時スピナー更新と入力ロックのレスポンス改善
@@ -4745,7 +4745,7 @@ All notable changes to this project will be documented in this file.
 - ブランチ一覧に最終アクティビティ時間を表示 (#456)
 - AIツールのインストール済み表示をバージョン番号に変更 (#461)
 - OpenCode コーディングエージェント対応を追加 (#477)
-- Worktreeパス修復機能を追加 (SPEC-902a89dc) (#484)
+- Worktreeパス修復機能を追加 (gwt-spec issue) (#484)
 - ブランチ選択のフルパス表示 (#486)
 - OpenTUI移行 (#487)
 - 新規ブランチ作成時にブランチタイプ選択とプレフィックス自動付加を追加 (#494)
@@ -4905,7 +4905,7 @@ All notable changes to this project will be documented in this file.
 - **main:** Release 2.14.0
 - Developブランチをマージしコンフリクト解消
 - **main:** Release 3.0.0
-- Spec Kit更新（日本語化とspecs一覧生成）
+- legacy spec workflow更新（日本語化とspecs一覧生成）
 - **deps-dev:** Bump @types/node from 24.10.4 to 25.0.2
 - **main:** Release 3.1.0
 - **main:** Release 3.1.1
@@ -5097,7 +5097,7 @@ All notable changes to this project will be documented in this file.
 
 ### Merge
 
-- MainブランチをSPEC-4c2ef107にマージ
+- Mainブランチをgwt-spec issueにマージ
 - Mainブランチを統合（PR #90対応）
 
 ### Revert
@@ -5474,7 +5474,7 @@ All notable changes to this project will be documented in this file.
 
 - EnvironmentProfileScreenのキーボード入力を修正
 - CodeRabbitのレビュー指摘事項を修正
-- Spec Kitスクリプトの安全性改善（eval撤廃/JSON出力）
+- legacy spec workflowスクリプトの安全性改善（eval撤廃/JSON出力）
 - Profiles.yaml未作成時の作成失敗を修正
 - プロファイル名検証と設定パス不整合を修正
 - Envキー入力のバリデーションを追加
@@ -5491,7 +5491,7 @@ All notable changes to this project will be documented in this file.
 
 ### Miscellaneous Tasks
 
-- Spec Kit更新（日本語化とspecs一覧生成）
+- legacy spec workflow更新（日本語化とspecs一覧生成）
 - **deps-dev:** Bump @types/node from 24.10.4 to 25.0.2
 - **main:** Release 3.1.0
 
@@ -5758,7 +5758,7 @@ All notable changes to this project will be documented in this file.
 - Document safeToCleanup flag on BranchItem
 - Align cleanup plan with current emoji icons
 - Web UI起動手順と設定パスを最新化
-- SPEC-1f56fd80のmarkdownlint修正
+- gwt-spec issueのmarkdownlint修正
 
 ### Features
 
@@ -6084,7 +6084,7 @@ All notable changes to this project will be documented in this file.
 
 - 残りのドキュメント内の参照を更新
 - Fix changelog markdownlint errors
-- Spec Kit対応 - bugfixブランチタイプ機能の仕様書・計画・タスクを追加
+- legacy spec workflow対応 - bugfixブランチタイプ機能の仕様書・計画・タスクを追加
 
 ### Features
 
@@ -6118,7 +6118,7 @@ All notable changes to this project will be documented in this file.
 - **lint:** ESLintエラーを修正（未使用変数の削除）
 - **docs:** Specsディレクトリのmarkdownlintエラーを修正
 - **lint:** ESLint設定を改善してテストファイルのルールを緩和
-- **docs:** Specs/feature/webui/spec.mdのbare URL修正
+- **docs:** issue-based WebUI specのbare URL修正
 - **test:** テストファイルのimportパス修正
 - **test:** Vi.mockのパスも修正してテストのimport問題を完全解決
 - **test:** 通常のimport文も../../../../cli/パスに修正
@@ -6218,7 +6218,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **spec:** SPEC-57fde06fにバックマージ要件を追加しワークフローを最適化
+- **spec:** gwt-spec issueにバックマージ要件を追加しワークフローを最適化
 
 ### Miscellaneous Tasks
 
@@ -6466,7 +6466,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Add SPEC-a5a44f4c release test stabilization kit
+- Add gwt-spec issue release test stabilization kit
 
 ### Miscellaneous Tasks
 
@@ -6498,7 +6498,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- SPEC-23bb2eedを手動リリースフロー仕様に更新
+- gwt-spec issueを手動リリースフロー仕様に更新
 
 ### Features
 
@@ -6575,7 +6575,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- SPEC-a5ae4916 を最新コミット表示要件に更新
+- gwt-spec issue を最新コミット表示要件に更新
 
 ### Features
 
@@ -6660,10 +6660,10 @@ All notable changes to this project will be documented in this file.
 ### Documentation
 
 - CLAUDE.mdにコミットメッセージポリシーを追記
-- Update tasks.md with completed US2 and Phase 4 status
-- SPEC-a5ae4916 に最新コミット順の要件を追記
+- Update Issue Tasks with completed US2 and Phase 4 status
+- gwt-spec issue に最新コミット順の要件を追記
 - MarkdownlintをクリアするためのSpec更新
-- SPEC-ee33ca26 品質分析完了・修正適用
+- gwt-spec issue 品質分析完了・修正適用
 
 ### Features
 
@@ -6788,8 +6788,8 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
-- Spec Kitスクリプトのデフォルト動作をブランチ作成なしに変更
-- Spec Kitスクリプトのブランチ名制約を緩和
+- legacy spec workflowスクリプトのデフォルト動作をブランチ作成なしに変更
+- legacy spec workflowスクリプトのブランチ名制約を緩和
 - EnsureGitignoreEntryテストを統合テストに変更
 - RealtimeUpdate.test.tsxのテストアプローチを修正
 
@@ -6952,13 +6952,13 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- SPEC-6d501fd0仕様・計画・タスクの詳細化と品質分析
+- gwt-spec issue仕様・計画・タスクの詳細化と品質分析
 
 ## [1.2.1] - 2025-10-26
 
 ### Bug Fixes
 
-- Spec Kitのブランチ自動作成を無効化
+- legacy spec workflowのブランチ自動作成を無効化
 
 ### Documentation
 
@@ -7079,7 +7079,7 @@ All notable changes to this project will be documented in this file.
 - 自動マージワークフローのトリガー条件を修正
 - GraphQL APIで自動マージを実行
 - Worktreeパス衝突時のエラーハンドリングを改善 (#79)
-- 新規Worktree作成時にClaude CodeとCodex CLIを選択可能にする (SPEC-473b3d47 FR-008対応)
+- 新規Worktree作成時にClaude CodeとCodex CLIを選択可能にする (gwt-spec issue FR-008対応)
 - マージ済みPRクリーンアップ画面でqキーで前の画面に戻れるように修正
 - ESLintエラーを修正
 - StripAnsi関数の位置を修正してimport文の後に移動
@@ -7113,19 +7113,19 @@ All notable changes to this project will be documented in this file.
 - AGENTS.md と CLAUDE.md にbun利用ルール（ローカル検証/実行）を明記
 - 仕様駆動開発ライフサイクルに関する表現を修正
 - Clean up merged PRs機能の修正仕様書を作成
-- Spec Kit完全ワークフローの文書化を完了
+- legacy spec workflow完全ワークフローの文書化を完了
 - フェーズ11ドキュメント改善 & フェーズ12 CI/CD強化完了 (T1001-T1109)
 - テスト実装プロジェクト完了サマリー作成
 - AGENTS.mdの内容を@CLAUDE.mdに移行し、開発ガイドラインを整理
 - PR自動マージ機能の説明をREADMEに追加し、ドキュメントを完成 (T015-T016)
-- Spec Kit設計ドキュメントを追加
-- SPEC-23bb2eed全タスク完了マーク
-- T011完了をtasks.mdに反映
+- legacy spec workflow設計ドキュメントを追加
+- gwt-spec issue全タスク完了マーク
+- T011完了をIssue Tasksに反映
 - セッション完了サマリー - Phase 3完了とPhase 4開始の記録
 - SESSION_SUMMARY.md最終更新 - Phase 4完了を反映
 - T098-T099完了 - ドキュメント更新（Ink.js UI移行）
 - Tasks.md更新 - Phase 6全タスク完了マーク
-- Enforce Spec Kit SDD/TDD
+- Enforce legacy spec workflow SDD/TDD
 - Bun vitestのretry未サポートを記録
 - Add commitlint rules to tasks template
 
@@ -7172,21 +7172,21 @@ All notable changes to this project will be documented in this file.
 - リリースブランチの自動化を強化
 - リリースブランチ完了時のworktreeとローカルブランチ自動削除機能を追加
 - Claude Codeアカウント切り替え機能を追加
-- Add Spec Kit
+- Add legacy spec workflow
 - **specify:** ブランチを作成しない運用へ変更
 - Codex CLI対応の仕様と実装計画を追加
 - AIツール選択（Claude/Codex）機能を実装
 - ツール引数パススルーとエラーメッセージを追加
 - Npx経由でAI CLIを起動するよう変更
 - @akiojin/spec-kitを導入し、仕様駆動開発をサポート
-- 既存実装に対する包括的な機能仕様書を作成（SPEC-473b3d47）
+- 既存実装に対する包括的な機能仕様書を作成（gwt-spec issue）
 - Codex CLIのbunx対応とresumeコマンド整備
 - GitHub CLIのインストールをDockerfileに追加
-- Claude CodeをnpxからbunxへComplete移行（SPEC-c0deba7e）
+- Claude CodeをnpxからbunxへComplete移行（gwt-spec issue）
 - **auto-merge:** PR番号取得、マージ可能性チェック、PRマージステップを実装 (T004-T006)
 - Semantic-release自動リリース機能を実装
 - Semantic-release設定を明示化
-- ブランチ選択カーソル視認性向上 (SPEC-822a2cbf)
+- ブランチ選択カーソル視認性向上 (gwt-spec issue)
 - Ink.js UI移行のPhase 1完了（セットアップと準備）
 - Phase 2 開始 - 型定義拡張とカスタムフック実装（進行中）
 - Phase 2基盤実装 - カスタムフック（useTerminalSize, useScreenState）
@@ -7256,7 +7256,7 @@ All notable changes to this project will be documented in this file.
 
 ### Merge
 
-- MainブランチをSPEC-4c2ef107にマージ
+- Mainブランチをgwt-spec issueにマージ
 - Mainブランチを統合（PR #90対応）
 
 ### Revert

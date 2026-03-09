@@ -1,4 +1,4 @@
-//! GitHub Issue commands (SPEC-c6ba640a)
+//! GitHub Issue commands (gwt-spec issue)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, IssueListCacheEntry};

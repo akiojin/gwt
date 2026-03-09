@@ -107,7 +107,6 @@
 
   interface ProjectModeSpecIssuePayload {
     issueNumber: number;
-    specId?: string | null;
     issueUrl?: string | null;
   }
 
@@ -393,7 +392,7 @@
       .catch(() => {});
   }
 
-  // Subscribe to toast bus for success/info notifications (SPEC-merge-pr FR-006)
+  // Subscribe to toast bus for success/info notifications (gwt-spec issue FR-006)
   const unsubToastBus = toastBus.subscribe((event) => {
     showToast(event.message, event.durationMs ?? 5000);
   });
@@ -1943,8 +1942,7 @@
   function openIssueSpecTab(payload: ProjectModeSpecIssuePayload) {
     const issueNumber = Number(payload.issueNumber);
     if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
-    const specId = payload.specId?.trim() || undefined;
-    const label = specId ? `Spec ${specId}` : `Issue #${issueNumber}`;
+    const label = `Issue #${issueNumber}`;
 
     const existing = tabs.find((t) => t.type === "issueSpec" || t.id === "issueSpec");
     if (existing) {
@@ -1954,7 +1952,6 @@
               ...t,
               label,
               issueNumber,
-              specId,
             }
           : t
       );
@@ -1967,7 +1964,6 @@
       label,
       type: "issueSpec",
       issueNumber,
-      ...(specId ? { specId } : {}),
     };
     tabs = [...tabs, tab];
     activeTabId = tab.id;

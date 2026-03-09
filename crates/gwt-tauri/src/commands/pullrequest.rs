@@ -1,4 +1,4 @@
-//! Pull Request status commands (SPEC-d6949f99, SPEC-a9f2e3b1)
+//! Pull Request status commands (gwt-spec issue, gwt-spec issue)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use chrono::{DateTime, Utc};
@@ -1136,7 +1136,7 @@ pub async fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, S
         .map_err(|e| StructuredError::internal(&format!("Task join failed: {e}"), "fetch_ci_log"))?
 }
 
-/// Update a PR branch with the latest base branch changes (SPEC-de3290fc T008)
+/// Update a PR branch with the latest base branch changes (gwt-spec issue T008)
 fn update_pr_branch_impl(project_path: String, pr_number: u64) -> Result<String, String> {
     use gwt_core::git::resolve_repo_slug;
 
@@ -1227,7 +1227,7 @@ pub async fn fetch_branch_pr_preflight(
     })?
 }
 
-/// Merge a pull request via GitHub REST API (SPEC-merge-pr FR-004)
+/// Merge a pull request via GitHub REST API (gwt-spec issue FR-004)
 fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<String, String> {
     use gwt_core::git::resolve_repo_slug;
 
@@ -1277,7 +1277,7 @@ pub async fn merge_pull_request(project_path: String, pr_number: u64) -> Result<
 }
 
 // ==========================================================
-// PR Dashboard commands (SPEC-prlist)
+// PR Dashboard commands (gwt-spec issue)
 // ==========================================================
 
 /// Response for fetch_pr_list

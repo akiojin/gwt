@@ -34,7 +34,7 @@ shortest explicit recovery action. Do not silently skip the search.
 
 ### SPEC ID
 
-SPEC ID = the **issue number**. Do not use the legacy `SPEC-[a-f0-9]{8}` format.
+SPEC ID = the **issue number**. Do not use legacy UUID-style spec identifiers.
 
 ### Label
 

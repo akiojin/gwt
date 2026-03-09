@@ -1,4 +1,4 @@
-//! Docker environment integration module (SPEC-f5f5657e)
+//! Docker environment integration module (gwt-spec issue)
 //!
 //! Provides automatic Docker container management for coding agents.
 //! When Docker files (docker-compose.yml, Dockerfile, .devcontainer) are detected

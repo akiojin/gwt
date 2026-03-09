@@ -860,7 +860,7 @@ describe("MainArea", () => {
 
   it("renders issueSpec tab panel", async () => {
     const tabs: Tab[] = [
-      { id: "issueSpec-1", label: "Issue Spec", type: "issueSpec", issueNumber: 42, specId: "spec-1" },
+      { id: "issueSpec-1", label: "Issue Spec", type: "issueSpec", issueNumber: 42 },
     ];
     const rendered = await renderMainArea({
       tabs,
@@ -1012,7 +1012,7 @@ describe("MainArea", () => {
 
   it("renders issueSpec tab with default issueNumber when not provided", async () => {
     const tabs: Tab[] = [
-      { id: "issueSpec-2", label: "Issue Spec", type: "issueSpec", specId: "spec-2" },
+      { id: "issueSpec-2", label: "Issue Spec", type: "issueSpec" },
     ];
     const rendered = await renderMainArea({
       tabs,

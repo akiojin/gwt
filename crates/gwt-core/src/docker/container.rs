@@ -1,4 +1,4 @@
-//! Container information structures (SPEC-f5f5657e)
+//! Container information structures (gwt-spec issue)
 //!
 //! Defines data structures for representing Docker container state.
 

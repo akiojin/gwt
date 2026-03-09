@@ -1,4 +1,4 @@
-//! Migration backup and restore (SPEC-a70a1ece T804-T805, FR-202)
+//! Migration backup and restore (gwt-spec issue T804-T805, FR-202)
 
 use super::MigrationError;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ pub struct BackupInfo {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Create a backup of the current repository state (SPEC-a70a1ece T804, FR-202)
+/// Create a backup of the current repository state (gwt-spec issue T804, FR-202)
 pub fn create_backup(source: &Path, backup_dir: &Path) -> Result<BackupInfo, MigrationError> {
     debug!(
         source = %source.display(),
@@ -76,7 +76,7 @@ pub fn create_backup(source: &Path, backup_dir: &Path) -> Result<BackupInfo, Mig
     Ok(info)
 }
 
-/// Restore repository state from backup (SPEC-a70a1ece T805, FR-210)
+/// Restore repository state from backup (gwt-spec issue T805, FR-210)
 pub fn restore_backup(backup_dir: &Path, target: &Path) -> Result<(), MigrationError> {
     debug!(
         backup = %backup_dir.display(),
