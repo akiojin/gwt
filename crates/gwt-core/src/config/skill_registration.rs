@@ -303,6 +303,15 @@ const SCOPE_NOT_CONFIGURED_MESSAGE: &str =
     "Skill registration is not configured. Enable it in Settings.";
 const PROJECT_ROOT_REQUIRED_MESSAGE: &str =
     "Project root is required for project-scoped skill registration.";
+const PROJECT_LOCAL_MANAGED_ASSET_GITIGNORE_LINES: &[&str] = &[
+    "# Project-local managed agent assets",
+    ".gwt/",
+    ".codex/skills/gwt-*/",
+    ".gemini/skills/gwt-*/",
+    ".claude/skills/gwt-*/",
+    ".claude/commands/gwt-*.md",
+    ".claude/hooks/",
+];
 
 /// Agent types that support skill registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,6 +557,55 @@ fn cleanup_legacy_claude_hook_scripts(root: &Path) -> Result<(), GwtError> {
             ),
         })?;
     }
+
+    Ok(())
+}
+
+fn ensure_project_local_gitignore_rules(project_root: &Path) -> Result<(), GwtError> {
+    let gitignore_path = project_root.join(".gitignore");
+    let existing = if gitignore_path.exists() {
+        std::fs::read_to_string(&gitignore_path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!("Failed to read {}: {}", gitignore_path.display(), e),
+        })?
+    } else {
+        String::new()
+    };
+
+    let mut missing = PROJECT_LOCAL_MANAGED_ASSET_GITIGNORE_LINES
+        .iter()
+        .copied()
+        .filter(|line| !existing.lines().any(|existing_line| existing_line == *line))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut output = existing;
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    if !output.is_empty() {
+        output.push('\n');
+    }
+
+    if !output
+        .lines()
+        .any(|line| line == PROJECT_LOCAL_MANAGED_ASSET_GITIGNORE_LINES[0])
+    {
+        output.push_str(PROJECT_LOCAL_MANAGED_ASSET_GITIGNORE_LINES[0]);
+        output.push('\n');
+        missing.remove(0);
+    }
+
+    for line in missing {
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    std::fs::write(&gitignore_path, output).map_err(|e| GwtError::ConfigWriteError {
+        reason: format!("Failed to write {}: {}", gitignore_path.display(), e),
+    })?;
 
     Ok(())
 }
@@ -915,6 +973,10 @@ pub fn register_all_skills_with_settings_at_project_root(
     settings: &Settings,
     project_root: Option<&Path>,
 ) -> Result<(), GwtError> {
+    if let Some(project_root) = project_root {
+        ensure_project_local_gitignore_rules(project_root)?;
+    }
+
     let mut failures = Vec::new();
 
     for agent in SkillAgentType::all() {
@@ -935,7 +997,7 @@ pub fn register_all_skills_with_settings_at_project_root(
     if !failures.is_empty() {
         return Err(GwtError::ConfigWriteError {
             reason: format!(
-                "Failed to register skills/plugins for {} agent(s): {}",
+                "Failed to register project-local managed assets for {} agent(s): {}",
                 failures.len(),
                 failures.join(" | ")
             ),
@@ -1355,6 +1417,14 @@ mod tests {
         assert!(content.contains("gwt-forward-hook.sh"));
         assert!(content.contains("gwt-block-git-branch-ops.sh"));
         assert!(!content.contains("CLAUDE_PLUGIN_ROOT"));
+
+        let gitignore = std::fs::read_to_string(temp.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains(".gwt/"));
+        assert!(gitignore.contains(".codex/skills/gwt-*/"));
+        assert!(gitignore.contains(".gemini/skills/gwt-*/"));
+        assert!(gitignore.contains(".claude/skills/gwt-*/"));
+        assert!(gitignore.contains(".claude/commands/gwt-*.md"));
+        assert!(gitignore.contains(".claude/hooks/"));
     }
 
     #[test]
@@ -1589,5 +1659,26 @@ mod tests {
             repair_skill_registration_with_settings_at_project_root(&settings, Some(temp.path()));
 
         assert_eq!(status.overall, "ok");
+    }
+
+    #[test]
+    fn gitignore_rules_are_added_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+
+        let gitignore = std::fs::read_to_string(temp.path().join(".gitignore")).unwrap();
+        for line in PROJECT_LOCAL_MANAGED_ASSET_GITIGNORE_LINES {
+            assert_eq!(
+                gitignore
+                    .lines()
+                    .filter(|existing| existing == line)
+                    .count(),
+                1,
+                "gitignore line should appear exactly once: {line}"
+            );
+        }
     }
 }
