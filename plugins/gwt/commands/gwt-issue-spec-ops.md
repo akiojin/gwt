@@ -18,7 +18,7 @@ Use this command to create/update Issue-first SPEC artifacts on GitHub Issues.
 
 1. Load `skills/gwt-issue-spec-ops/SKILL.md` and follow the workflow.
 2. Before creating/updating a spec, use `gwt-project-index` Issue search to find the canonical existing spec destination.
-3. Ensure `gh auth status` is valid before issue operations.
+3. Ensure `gh auth status` is valid before any `index-issues` or issue operation.
 4. Create or update the Spec/Plan/Tasks sections on the target `gwt-spec` issue.
 5. Keep SPEC ID as the GitHub issue number and preserve section structure.
 6. Report what was changed, which existing spec was selected, and what remains unresolved.

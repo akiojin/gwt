@@ -15,10 +15,11 @@ Before you create a new spec issue or decide where to integrate a change, use
 
 Required behavior:
 
-1. Update the Issues index if needed
-2. Run semantic Issue search with queries derived from the current request
-3. Prefer an existing canonical integrated spec over a transient point-fix/refactor spec
-4. Create a new `gwt-spec` Issue only when no suitable canonical spec exists
+1. Ensure `gh auth status` is valid before any `index-issues` call
+2. Update the Issues index if needed
+3. Run semantic Issue search with queries derived from the current request
+4. Prefer an existing canonical integrated spec over a transient point-fix/refactor spec
+5. Create a new `gwt-spec` Issue only when no suitable canonical spec exists
 
 Typical cases where this preflight is mandatory:
 
