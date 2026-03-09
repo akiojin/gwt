@@ -8,7 +8,7 @@ namespace Gwt.Core.Installers
         public void Install(IContainerBuilder builder)
         {
             builder.Register<Services.Git.GitCommandRunner>(Lifetime.Singleton);
-            builder.Register<Services.Git.GitService>(Lifetime.Singleton).As<Models.IGitService>();
+            builder.Register<Services.Git.GitService>(Lifetime.Singleton).As<Services.Git.IGitService>();
         }
     }
 }

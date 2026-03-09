@@ -1,15 +1,21 @@
-using System;
 using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using Gwt.Core.Models;
-using UnityEngine;
 
 namespace Gwt.Core.Services.GitHub
 {
     public class GitHubService : IGitHubService
     {
         private readonly GhCommandRunner _runner;
+
+        private static readonly JsonSerializerOptions JsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
 
         public GitHubService(GhCommandRunner runner)
         {
@@ -35,8 +41,8 @@ namespace Gwt.Core.Services.GitHub
             var json = await _runner.RunJsonAsync(
                 $"issue list --json {IssueJsonFields} --limit {limit} --state {state}",
                 repoRoot, ct);
-            var wrapper = JsonUtility.FromJson<GhIssueListWrapper>("{\"items\":" + json + "}");
-            var raw = wrapper?.items ?? new List<GhIssueDto>();
+            var raw = JsonSerializer.Deserialize<List<GhIssueDto>>(json, JsonOptions)
+                      ?? new List<GhIssueDto>();
 
             var result = new FetchIssuesResult();
             foreach (var dto in raw)
@@ -51,7 +57,7 @@ namespace Gwt.Core.Services.GitHub
             var json = await _runner.RunJsonAsync(
                 $"issue view {number} --json {IssueJsonFields}",
                 repoRoot, ct);
-            var dto = JsonUtility.FromJson<GhIssueDto>(json);
+            var dto = JsonSerializer.Deserialize<GhIssueDto>(json, JsonOptions);
             return ToModel(dto);
         }
 
@@ -70,8 +76,7 @@ namespace Gwt.Core.Services.GitHub
             var json = await _runner.RunJsonAsync(
                 $"issue list --json {IssueJsonFields} --limit 1 --state open",
                 repoRoot, ct);
-            var wrapper = JsonUtility.FromJson<GhIssueListWrapper>("{\"items\":" + json + "}");
-            var list = wrapper?.items;
+            var list = JsonSerializer.Deserialize<List<GhIssueDto>>(json, JsonOptions);
             return list?.Count > 0 ? ToModel(list[0]) : null;
         }
 
@@ -120,8 +125,8 @@ namespace Gwt.Core.Services.GitHub
             var json = await _runner.RunJsonAsync(
                 $"pr list --json {PrListFields} --limit 30 --state {state}",
                 repoRoot, ct);
-            var wrapper = JsonUtility.FromJson<GhPrListWrapper>("{\"items\":" + json + "}");
-            var dtos = wrapper?.items ?? new List<GhPrDto>();
+            var dtos = JsonSerializer.Deserialize<List<GhPrDto>>(json, JsonOptions)
+                       ?? new List<GhPrDto>();
 
             var result = new List<PullRequest>();
             foreach (var dto in dtos)
@@ -135,7 +140,7 @@ namespace Gwt.Core.Services.GitHub
             var json = await _runner.RunJsonAsync(
                 $"pr view {number} --json {PrViewFields}",
                 repoRoot, ct);
-            var dto = JsonUtility.FromJson<GhPrStatusDto>(json);
+            var dto = JsonSerializer.Deserialize<GhPrStatusDto>(json, JsonOptions);
             return ToPrStatusModel(dto);
         }
 
@@ -150,8 +155,7 @@ namespace Gwt.Core.Services.GitHub
             var json = await _runner.RunJsonAsync(
                 $"pr list --json {PrListFields} --limit 1 --state open --head {Escape(head)}",
                 repoRoot, ct);
-            var wrapper = JsonUtility.FromJson<GhPrListWrapper>("{\"items\":" + json + "}");
-            var list = wrapper?.items;
+            var list = JsonSerializer.Deserialize<List<GhPrDto>>(json, JsonOptions);
             return list?.Count > 0 ? ToPrModel(list[0]) : null;
         }
 
@@ -176,17 +180,17 @@ namespace Gwt.Core.Services.GitHub
             var json = await _runner.RunJsonAsync(
                 $"pr checks {prNumber} --json name,status,conclusion",
                 repoRoot, ct);
-            var wrapper = JsonUtility.FromJson<GhCheckListWrapper>("{\"items\":" + json + "}");
-            var dtos = wrapper?.items ?? new List<GhCheckDto>();
+            var dtos = JsonSerializer.Deserialize<List<GhCheckDto>>(json, JsonOptions)
+                       ?? new List<GhCheckDto>();
 
             var result = new List<WorkflowRunInfo>();
             foreach (var dto in dtos)
             {
                 result.Add(new WorkflowRunInfo
                 {
-                    WorkflowName = dto.name,
-                    Status = dto.status,
-                    Conclusion = dto.conclusion
+                    WorkflowName = dto.Name,
+                    Status = dto.Status,
+                    Conclusion = dto.Conclusion
                 });
             }
             return result;
@@ -199,28 +203,28 @@ namespace Gwt.Core.Services.GitHub
             if (dto == null) return null;
             var issue = new GitHubIssue
             {
-                Number = dto.number,
-                Title = dto.title,
-                UpdatedAt = dto.updatedAt,
-                Body = dto.body,
-                State = dto.state,
-                HtmlUrl = dto.url,
-                CommentsCount = dto.comments
+                Number = dto.Number,
+                Title = dto.Title,
+                UpdatedAt = dto.UpdatedAt,
+                Body = dto.Body,
+                State = dto.State,
+                HtmlUrl = dto.Url,
+                CommentsCount = dto.Comments
             };
 
-            if (dto.labels != null)
-                foreach (var l in dto.labels)
-                    issue.Labels.Add(new GitHubLabel { Name = l.name, Color = l.color });
+            if (dto.Labels != null)
+                foreach (var l in dto.Labels)
+                    issue.Labels.Add(new GitHubLabel { Name = l.Name, Color = l.Color });
 
-            if (dto.assignees != null)
-                foreach (var a in dto.assignees)
-                    issue.Assignees.Add(new GitHubAssignee { Login = a.login });
+            if (dto.Assignees != null)
+                foreach (var a in dto.Assignees)
+                    issue.Assignees.Add(new GitHubAssignee { Login = a.Login });
 
-            if (dto.milestone != null)
+            if (dto.Milestone != null)
                 issue.Milestone = new GitHubMilestone
                 {
-                    Title = dto.milestone.title,
-                    Number = dto.milestone.number
+                    Title = dto.Milestone.Title,
+                    Number = dto.Milestone.Number
                 };
 
             return issue;
@@ -231,13 +235,13 @@ namespace Gwt.Core.Services.GitHub
             if (dto == null) return null;
             return new PullRequest
             {
-                Number = dto.number,
-                Title = dto.title,
-                State = dto.state,
-                HeadBranch = dto.headRefName,
-                BaseBranch = dto.baseRefName,
-                Url = dto.url,
-                UpdatedAt = dto.updatedAt
+                Number = dto.Number,
+                Title = dto.Title,
+                State = dto.State,
+                HeadBranch = dto.HeadRefName,
+                BaseBranch = dto.BaseRefName,
+                Url = dto.Url,
+                UpdatedAt = dto.UpdatedAt
             };
         }
 
@@ -246,41 +250,41 @@ namespace Gwt.Core.Services.GitHub
             if (dto == null) return null;
             var info = new PrStatusInfo
             {
-                Number = dto.number,
-                Title = dto.title,
-                State = dto.state,
-                Url = dto.url,
-                Mergeable = dto.mergeable,
-                Author = dto.author?.login,
-                BaseBranch = dto.baseRefName,
-                HeadBranch = dto.headRefName,
-                Milestone = dto.milestone?.title,
-                ChangedFilesCount = dto.changedFiles,
-                Additions = dto.additions,
-                Deletions = dto.deletions
+                Number = dto.Number,
+                Title = dto.Title,
+                State = dto.State,
+                Url = dto.Url,
+                Mergeable = dto.Mergeable,
+                Author = dto.Author?.Login,
+                BaseBranch = dto.BaseRefName,
+                HeadBranch = dto.HeadRefName,
+                Milestone = dto.Milestone?.Title,
+                ChangedFilesCount = dto.ChangedFiles,
+                Additions = dto.Additions,
+                Deletions = dto.Deletions
             };
 
-            if (dto.labels != null)
-                foreach (var l in dto.labels) info.Labels.Add(l.name);
+            if (dto.Labels != null)
+                foreach (var l in dto.Labels) info.Labels.Add(l.Name);
 
-            if (dto.assignees != null)
-                foreach (var a in dto.assignees) info.Assignees.Add(a.login);
+            if (dto.Assignees != null)
+                foreach (var a in dto.Assignees) info.Assignees.Add(a.Login);
 
-            if (dto.statusCheckRollup != null)
-                foreach (var c in dto.statusCheckRollup)
+            if (dto.StatusCheckRollup != null)
+                foreach (var c in dto.StatusCheckRollup)
                     info.CheckSuites.Add(new WorkflowRunInfo
                     {
-                        WorkflowName = c.name,
-                        Status = c.status,
-                        Conclusion = c.conclusion
+                        WorkflowName = c.Name,
+                        Status = c.Status,
+                        Conclusion = c.Conclusion
                     });
 
-            if (dto.reviews != null)
-                foreach (var r in dto.reviews)
+            if (dto.Reviews != null)
+                foreach (var r in dto.Reviews)
                     info.Reviews.Add(new ReviewInfo
                     {
-                        Reviewer = r.author?.login,
-                        State = r.state
+                        Reviewer = r.Author?.Login,
+                        State = r.State
                     });
 
             return info;
@@ -298,108 +302,163 @@ namespace Gwt.Core.Services.GitHub
     public enum GhMergeMethod { Merge, Squash, Rebase }
 
     // ── Internal DTOs for JSON deserialization from gh CLI ─────
-    // Field names match gh CLI JSON keys (camelCase) for JsonUtility compatibility.
 
-    [Serializable]
     internal class GhLabelDto
     {
-        public string name;
-        public string color;
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+
+        [JsonPropertyName("color")]
+        public string Color { get; set; }
     }
 
-    [Serializable]
     internal class GhUserDto
     {
-        public string login;
+        [JsonPropertyName("login")]
+        public string Login { get; set; }
     }
 
-    [Serializable]
     internal class GhMilestoneDto
     {
-        public string title;
-        public int number;
+        [JsonPropertyName("title")]
+        public string Title { get; set; }
+
+        [JsonPropertyName("number")]
+        public int Number { get; set; }
     }
 
-    [Serializable]
     internal class GhIssueDto
     {
-        public int number;
-        public string title;
-        public string updatedAt;
-        public List<GhLabelDto> labels;
-        public string body;
-        public string state;
-        public string url;
-        public List<GhUserDto> assignees;
-        public int comments;
-        public GhMilestoneDto milestone;
+        [JsonPropertyName("number")]
+        public int Number { get; set; }
+
+        [JsonPropertyName("title")]
+        public string Title { get; set; }
+
+        [JsonPropertyName("updatedAt")]
+        public string UpdatedAt { get; set; }
+
+        [JsonPropertyName("labels")]
+        public List<GhLabelDto> Labels { get; set; }
+
+        [JsonPropertyName("body")]
+        public string Body { get; set; }
+
+        [JsonPropertyName("state")]
+        public string State { get; set; }
+
+        [JsonPropertyName("url")]
+        public string Url { get; set; }
+
+        [JsonPropertyName("assignees")]
+        public List<GhUserDto> Assignees { get; set; }
+
+        [JsonPropertyName("comments")]
+        public int Comments { get; set; }
+
+        [JsonPropertyName("milestone")]
+        public GhMilestoneDto Milestone { get; set; }
     }
 
-    [Serializable]
-    internal class GhIssueListWrapper
-    {
-        public List<GhIssueDto> items;
-    }
-
-    [Serializable]
     internal class GhPrDto
     {
-        public int number;
-        public string title;
-        public string state;
-        public string headRefName;
-        public string baseRefName;
-        public string url;
-        public string updatedAt;
+        [JsonPropertyName("number")]
+        public int Number { get; set; }
+
+        [JsonPropertyName("title")]
+        public string Title { get; set; }
+
+        [JsonPropertyName("state")]
+        public string State { get; set; }
+
+        [JsonPropertyName("headRefName")]
+        public string HeadRefName { get; set; }
+
+        [JsonPropertyName("baseRefName")]
+        public string BaseRefName { get; set; }
+
+        [JsonPropertyName("url")]
+        public string Url { get; set; }
+
+        [JsonPropertyName("updatedAt")]
+        public string UpdatedAt { get; set; }
     }
 
-    [Serializable]
-    internal class GhPrListWrapper
-    {
-        public List<GhPrDto> items;
-    }
-
-    [Serializable]
     internal class GhCheckDto
     {
-        public string name;
-        public string status;
-        public string conclusion;
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+
+        [JsonPropertyName("status")]
+        public string Status { get; set; }
+
+        [JsonPropertyName("conclusion")]
+        public string Conclusion { get; set; }
     }
 
-    [Serializable]
-    internal class GhCheckListWrapper
-    {
-        public List<GhCheckDto> items;
-    }
-
-    [Serializable]
     internal class GhReviewDto
     {
-        public GhUserDto author;
-        public string state;
+        [JsonPropertyName("author")]
+        public GhUserDto Author { get; set; }
+
+        [JsonPropertyName("state")]
+        public string State { get; set; }
     }
 
-    [Serializable]
     internal class GhPrStatusDto
     {
-        public int number;
-        public string title;
-        public string state;
-        public string url;
-        public string mergeable;
-        public string mergeStateStatus;
-        public GhUserDto author;
-        public string baseRefName;
-        public string headRefName;
-        public List<GhLabelDto> labels;
-        public List<GhUserDto> assignees;
-        public GhMilestoneDto milestone;
-        public List<GhCheckDto> statusCheckRollup;
-        public List<GhReviewDto> reviews;
-        public List<GhUserDto> reviewRequests;
-        public int changedFiles;
-        public int additions;
-        public int deletions;
+        [JsonPropertyName("number")]
+        public int Number { get; set; }
+
+        [JsonPropertyName("title")]
+        public string Title { get; set; }
+
+        [JsonPropertyName("state")]
+        public string State { get; set; }
+
+        [JsonPropertyName("url")]
+        public string Url { get; set; }
+
+        [JsonPropertyName("mergeable")]
+        public string Mergeable { get; set; }
+
+        [JsonPropertyName("mergeStateStatus")]
+        public string MergeStateStatus { get; set; }
+
+        [JsonPropertyName("author")]
+        public GhUserDto Author { get; set; }
+
+        [JsonPropertyName("baseRefName")]
+        public string BaseRefName { get; set; }
+
+        [JsonPropertyName("headRefName")]
+        public string HeadRefName { get; set; }
+
+        [JsonPropertyName("labels")]
+        public List<GhLabelDto> Labels { get; set; }
+
+        [JsonPropertyName("assignees")]
+        public List<GhUserDto> Assignees { get; set; }
+
+        [JsonPropertyName("milestone")]
+        public GhMilestoneDto Milestone { get; set; }
+
+        [JsonPropertyName("statusCheckRollup")]
+        public List<GhCheckDto> StatusCheckRollup { get; set; }
+
+        [JsonPropertyName("reviews")]
+        public List<GhReviewDto> Reviews { get; set; }
+
+        [JsonPropertyName("reviewRequests")]
+        public List<GhUserDto> ReviewRequests { get; set; }
+
+        [JsonPropertyName("changedFiles")]
+        public int ChangedFiles { get; set; }
+
+        [JsonPropertyName("additions")]
+        public int Additions { get; set; }
+
+        [JsonPropertyName("deletions")]
+        public int Deletions { get; set; }
     }
 }
