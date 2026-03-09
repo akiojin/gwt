@@ -29,7 +29,7 @@ struct ManagedAsset {
 const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-fix-issue",
     "gwt-fix-pr",
-    "gwt-issue-spec-ops",
+    "gwt-spec-ops",
     "gwt-pr",
     "gwt-pr-check",
     "gwt-project-index",
@@ -75,10 +75,10 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-issue-spec-ops/SKILL.md",
+        relative_path: "skills/gwt-spec-ops/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-spec-ops/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -184,10 +184,10 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-issue-spec-ops.md",
+        relative_path: "commands/gwt-spec-ops.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-issue-spec-ops.md"
+            "/../../plugins/gwt/commands/gwt-spec-ops.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -1773,7 +1773,7 @@ mod tests {
             temp.path()
                 .join(".codex")
                 .join("skills")
-                .join("gwt-issue-spec-ops")
+                .join("gwt-spec-ops")
                 .join("SKILL.md"),
         )
         .unwrap();
@@ -1784,7 +1784,7 @@ mod tests {
             temp.path()
                 .join(".claude")
                 .join("commands")
-                .join("gwt-issue-spec-ops.md"),
+                .join("gwt-spec-ops.md"),
         )
         .unwrap();
         assert!(issue_spec_command.contains("use `gwt-project-index` Issue search"));

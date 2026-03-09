@@ -77,5 +77,5 @@ gh issue list --label gwt-spec --state all --limit 200
 
 - For safety, always run `--dry-run` first.
 - Artifact files in `contracts/` and `checklists/` are migrated as issue comments.
-- After migration, ongoing spec updates should use Issue-first operations (`gwt-issue-spec-ops`).
+- After migration, ongoing spec updates should use Issue-first operations (`gwt-spec-ops`).
 - This skill is for external legacy import only; gwt's normal spec workflow should never recreate repository-local spec bundles.
