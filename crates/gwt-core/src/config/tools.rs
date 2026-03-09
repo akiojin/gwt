@@ -1,4 +1,4 @@
-//! Custom coding agent configuration management (SPEC-a3f4c9df)
+//! Custom coding agent configuration management (gwt-spec issue)
 //!
 //! This module handles loading, validating, and managing custom coding agents
 //! with automatic migration from JSON to TOML format.
@@ -134,7 +134,7 @@ impl ToolsConfig {
         Self::local_json_path(repo_root)
     }
 
-    /// Load global tools config with format auto-detection (SPEC-a3f4c9df FR-005)
+    /// Load global tools config with format auto-detection (gwt-spec issue FR-005)
     ///
     /// Priority: TOML > JSON
     /// Auto-migrates JSON to TOML on load
@@ -152,7 +152,7 @@ impl ToolsConfig {
         if let Some(json_path) = Self::global_json_path() {
             if json_path.exists() {
                 if let Some(config) = Self::load_from_json(&json_path) {
-                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                    // Auto-migrate: save as TOML for next time (gwt-spec issue)
                     if let Err(e) = config.save_global() {
                         tracing::warn!(
                             category = "config",
@@ -191,7 +191,7 @@ impl ToolsConfig {
         let json_path = Self::local_json_path(repo_root);
         if json_path.exists() {
             if let Some(config) = Self::load_from_json(&json_path) {
-                // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                // Auto-migrate: save as TOML for next time (gwt-spec issue)
                 if let Err(e) = config.save(&toml_path) {
                     tracing::warn!(
                         category = "config",
@@ -403,7 +403,7 @@ impl ToolsConfig {
         true
     }
 
-    /// Save configuration to a path in TOML format (SPEC-a3f4c9df FR-006)
+    /// Save configuration to a path in TOML format (gwt-spec issue FR-006)
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {

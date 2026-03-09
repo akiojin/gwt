@@ -27,9 +27,9 @@ struct ManagedAsset {
 
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
-    "gwt-fix-issue",
+    "gwt-issue-ops",
     "gwt-fix-pr",
-    "gwt-issue-spec-ops",
+    "gwt-spec-ops",
     "gwt-pr",
     "gwt-pr-check",
     "gwt-project-index",
@@ -39,19 +39,19 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
 
 const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
-        relative_path: "skills/gwt-fix-issue/SKILL.md",
+        relative_path: "skills/gwt-issue-ops/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-issue/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-issue-ops/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-issue/scripts/inspect_issue.py",
+        relative_path: "skills/gwt-issue-ops/scripts/inspect_issue.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-issue/scripts/inspect_issue.py"
+            "/../../plugins/gwt/skills/gwt-issue-ops/scripts/inspect_issue.py"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -75,10 +75,10 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-issue-spec-ops/SKILL.md",
+        relative_path: "skills/gwt-spec-ops/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-spec-ops/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -166,10 +166,10 @@ const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
 
 const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
-        relative_path: "commands/gwt-fix-issue.md",
+        relative_path: "commands/gwt-issue-ops.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-fix-issue.md"
+            "/../../plugins/gwt/commands/gwt-issue-ops.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -184,10 +184,10 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-issue-spec-ops.md",
+        relative_path: "commands/gwt-spec-ops.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-issue-spec-ops.md"
+            "/../../plugins/gwt/commands/gwt-spec-ops.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -276,6 +276,13 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
         executable: true,
         rewrite_for_project: false,
     },
+];
+
+const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
+    "skills/gwt-fix-issue",
+    "skills/gwt-issue-spec-ops",
+    "commands/gwt-fix-issue.md",
+    "commands/gwt-issue-spec-ops.md",
 ];
 
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
@@ -475,8 +482,35 @@ fn write_managed_assets<'a>(
         ),
     })?;
 
+    cleanup_legacy_managed_assets(root)?;
+
     for asset in assets {
         write_managed_asset(root, asset, root_name)?;
+    }
+
+    Ok(())
+}
+
+fn cleanup_legacy_managed_assets(root: &Path) -> Result<(), GwtError> {
+    for relative_path in LEGACY_MANAGED_ASSET_PATHS {
+        let path = root.join(relative_path);
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to remove legacy managed asset {}: {}",
+                    path.display(),
+                    e
+                ),
+            })?;
+        } else if path.is_file() {
+            std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to remove legacy managed asset {}: {}",
+                    path.display(),
+                    e
+                ),
+            })?;
+        }
     }
 
     Ok(())
@@ -1773,7 +1807,7 @@ mod tests {
             temp.path()
                 .join(".codex")
                 .join("skills")
-                .join("gwt-issue-spec-ops")
+                .join("gwt-spec-ops")
                 .join("SKILL.md"),
         )
         .unwrap();
@@ -1784,7 +1818,7 @@ mod tests {
             temp.path()
                 .join(".claude")
                 .join("commands")
-                .join("gwt-issue-spec-ops.md"),
+                .join("gwt-spec-ops.md"),
         )
         .unwrap();
         assert!(issue_spec_command.contains("use `gwt-project-index` Issue search"));

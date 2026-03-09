@@ -137,7 +137,7 @@ pub struct AppState {
     /// Last observed skill registration health snapshot.
     pub skill_registration_status: Arc<Mutex<SkillRegistrationStatus>>,
     pub update_manager: UpdateManager,
-    /// Whether `gh` CLI is authenticated (SPEC-ad1ac432 T009).
+    /// Whether `gh` CLI is authenticated (gwt-spec issue T009).
     pub gh_available: AtomicBool,
     /// MRU (most-recently-used) window focus history. Front = most recent.
     pub window_focus_history: Mutex<Vec<String>>,

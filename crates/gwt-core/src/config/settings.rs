@@ -1,4 +1,4 @@
-//! Settings management (SPEC-a3f4c9df)
+//! Settings management (gwt-spec issue)
 //!
 //! Manages application settings.
 //!
@@ -304,7 +304,7 @@ impl Settings {
         toml::to_string_pretty(&Self::default()).unwrap_or_default()
     }
 
-    /// Find the configuration file (SPEC-a3f4c9df FR-013)
+    /// Find the configuration file (gwt-spec issue FR-013)
     ///
     /// Priority (highest to lowest):
     /// 1. .gwt.toml (local, highest priority)
@@ -380,7 +380,7 @@ impl Settings {
         repo_root.join(".gwt").join("logs")
     }
 
-    /// Save settings to file (SPEC-a3f4c9df FR-008)
+    /// Save settings to file (gwt-spec issue FR-008)
     ///
     /// Uses atomic write (temp file + rename) for data safety.
     pub fn save(&self, path: &Path) -> Result<()> {

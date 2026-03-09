@@ -191,7 +191,7 @@ pub fn probe_path(path: String) -> ProbePathResult {
                 };
             }
 
-            // Not a bare repo: enforce migration (SPEC-a70a1ece US7).
+            // Not a bare repo: enforce migration (gwt-spec issue US7).
             let source_root = git::get_main_repo_root(&repo_path);
             ProbePathResult {
                 kind: "migrationRequired".to_string(),
@@ -274,7 +274,7 @@ pub fn open_project(
 
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
-                // Prefetch version history in background (SPEC-c9a2f731 FR-006)
+                // Prefetch version history in background (gwt-spec issue FR-006)
                 {
                     let app_handle = window.app_handle().clone();
                     let prefetch_path = project_root_str.clone();
@@ -635,7 +635,7 @@ fn encode_migration_state(state: &MigrationState) -> (String, Option<usize>, Opt
     }
 }
 
-/// Start a bare migration job for a normal repository (SPEC-a70a1ece US7).
+/// Start a bare migration job for a normal repository (gwt-spec issue US7).
 #[tauri::command]
 pub fn start_migration_job(
     window: tauri::Window,

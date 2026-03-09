@@ -14,7 +14,7 @@ impl WorktreePath {
         Self::generate_with_location(repo_root, branch_name, WorktreeLocation::Subdir)
     }
 
-    /// Generate a worktree path with specified location strategy (SPEC-a70a1ece T401-T403)
+    /// Generate a worktree path with specified location strategy (gwt-spec issue T401-T403)
     ///
     /// - Subdir: {repo_root}/.worktrees/{sanitized_branch_name}
     /// - Sibling: {repo_root_parent}/{branch_name_with_subdirs}
@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn test_generate_path_sibling_with_slash() {
-        // SPEC-a70a1ece T403: slash becomes subdirectory in sibling mode
+        // gwt-spec issue T403: slash becomes subdirectory in sibling mode
         let root = PathBuf::from("/project/repo.git");
         let path = WorktreePath::generate_with_location(
             &root,

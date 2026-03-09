@@ -1,4 +1,4 @@
-//! Docker container manager (SPEC-f5f5657e)
+//! Docker container manager (gwt-spec issue)
 //!
 //! Manages Docker containers for worktrees, including startup, shutdown,
 //! and executing commands inside containers.

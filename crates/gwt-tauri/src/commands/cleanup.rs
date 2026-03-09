@@ -1,4 +1,4 @@
-//! Worktree cleanup commands (SPEC-c4e8f210, SPEC-ad1ac432)
+//! Worktree cleanup commands (gwt-spec issue, gwt-spec issue)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::commands::terminal::capture_scrollback_tail_from_state;
@@ -25,7 +25,7 @@ pub enum SafetyLevel {
     Disabled,
 }
 
-/// Worktree info for the frontend (SPEC-c4e8f210)
+/// Worktree info for the frontend (gwt-spec issue)
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeInfo {
     pub path: String,
@@ -84,7 +84,7 @@ pub struct CleanupSettings {
     pub delete_remote_branches: bool,
 }
 
-/// Determine the safety level for a worktree (FR-500, SPEC-ad1ac432 T016-T017)
+/// Determine the safety level for a worktree (FR-500, gwt-spec issue T016-T017)
 ///
 /// When `delete_remote` is true, PR status is integrated into the judgment:
 /// - Local Safe + PR Merged/Closed → Safe
@@ -129,7 +129,7 @@ fn compute_safety_level(
     }
 }
 
-/// Resolve agent status string from session file (SPEC-b80e7996 FR-811).
+/// Resolve agent status string from session file (gwt-spec issue FR-811).
 /// For agents without Hook support, infers status from pane output.
 fn resolve_agent_status_for_worktree(
     worktree_path: &Path,
@@ -269,7 +269,7 @@ fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<Workt
             let is_protected = WorktreeManager::is_protected(branch_name);
             let is_agent_running = agent_branches.contains(branch_name);
 
-            // Read agent status from session file (SPEC-b80e7996 FR-811)
+            // Read agent status from session file (gwt-spec issue FR-811)
             let agent_status =
                 resolve_agent_status_for_worktree(&wt.path, &repo_path, branch_name, state);
 
@@ -314,7 +314,7 @@ fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<Workt
     Ok(infos)
 }
 
-/// List all worktrees with safety info (SPEC-c4e8f210 T1)
+/// List all worktrees with safety info (gwt-spec issue T1)
 #[tauri::command]
 pub async fn list_worktrees(
     project_path: String,
@@ -331,7 +331,7 @@ pub async fn list_worktrees(
     })?
 }
 
-/// Check gh CLI availability (SPEC-ad1ac432 T010)
+/// Check gh CLI availability (gwt-spec issue T010)
 #[tauri::command]
 pub async fn check_gh_available(
     state: tauri::State<'_, AppState>,
@@ -348,7 +348,7 @@ pub async fn check_gh_available(
     Ok(available)
 }
 
-/// Get PR statuses for cleanup (SPEC-ad1ac432 T011)
+/// Get PR statuses for cleanup (gwt-spec issue T011)
 #[tauri::command]
 pub async fn get_cleanup_pr_statuses(
     project_path: String,
@@ -411,7 +411,7 @@ pub async fn get_cleanup_branch_protection(
     Ok(result.into_iter().collect())
 }
 
-/// Get cleanup settings for a project (SPEC-ad1ac432 T019)
+/// Get cleanup settings for a project (gwt-spec issue T019)
 #[tauri::command]
 pub async fn get_cleanup_settings(
     project_path: String,
@@ -422,7 +422,7 @@ pub async fn get_cleanup_settings(
     Ok(load_cleanup_settings(&repo_path))
 }
 
-/// Set cleanup settings for a project (SPEC-ad1ac432 T019)
+/// Set cleanup settings for a project (gwt-spec issue T019)
 #[tauri::command]
 pub async fn set_cleanup_settings(
     project_path: String,
@@ -435,7 +435,7 @@ pub async fn set_cleanup_settings(
         .map_err(|e| StructuredError::internal(&e, "set_cleanup_settings"))
 }
 
-/// Cleanup multiple worktrees (SPEC-c4e8f210 T2, SPEC-ad1ac432 T013-T014)
+/// Cleanup multiple worktrees (gwt-spec issue T2, gwt-spec issue T013-T014)
 #[tauri::command]
 pub async fn cleanup_worktrees(
     project_path: String,
@@ -580,12 +580,12 @@ pub async fn cleanup_worktrees(
     })?
 }
 
-/// Cleanup a single worktree (SPEC-c4e8f210 T3)
+/// Cleanup a single worktree (gwt-spec issue T3)
 ///
 /// **Deprecated**: Use `cleanup_worktrees` with a single-element `branches` list instead.
 /// This command is retained for backward compatibility but the frontend now routes
-/// all deletions through `CleanupModal` → `cleanup_worktrees` (SPEC-ad1ac432 FR-612).
-#[deprecated(note = "Use cleanup_worktrees with a single branch instead (SPEC-ad1ac432 FR-612)")]
+/// all deletions through `CleanupModal` → `cleanup_worktrees` (gwt-spec issue FR-612).
+#[deprecated(note = "Use cleanup_worktrees with a single branch instead (gwt-spec issue FR-612)")]
 #[tauri::command]
 pub async fn cleanup_single_worktree(
     project_path: String,
@@ -698,7 +698,7 @@ fn build_last_tool_usage_map(repo_path: &Path) -> std::collections::HashMap<Stri
 mod tests {
     use super::*;
 
-    // -- Serialization contract tests (SPEC-d7f2a1b3) --
+    // -- Serialization contract tests (gwt-spec issue) --
 
     #[test]
     fn worktree_info_serializes_with_snake_case_keys() {
@@ -798,7 +798,7 @@ mod tests {
         );
     }
 
-    // -- agent_status field serialization tests (SPEC-b80e7996) --
+    // -- agent_status field serialization tests (gwt-spec issue) --
 
     #[test]
     fn worktree_info_agent_status_serializes_in_json() {

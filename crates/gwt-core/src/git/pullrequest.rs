@@ -8,7 +8,7 @@ use std::path::Path;
 
 use super::gh_cli::{is_gh_available, run_gh_output_with_repair};
 
-/// Detailed PR status information retrieved via GraphQL API (SPEC-d6949f99)
+/// Detailed PR status information retrieved via GraphQL API (gwt-spec issue)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrStatusInfo {
@@ -71,7 +71,7 @@ pub struct ReviewComment {
     pub created_at: String,
 }
 
-/// PR list item for the PR Dashboard (SPEC-prlist)
+/// PR list item for the PR Dashboard (gwt-spec issue)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrListItem {
@@ -216,7 +216,7 @@ impl PrCache {
     }
 }
 
-/// Cache of PR status information for branches (SPEC-d6949f99)
+/// Cache of PR status information for branches (gwt-spec issue)
 #[derive(Debug, Default)]
 pub struct PrStatusCache {
     /// Map of branch name to PR status info

@@ -1,4 +1,4 @@
-//! Legacy Claude Code Hook detection and cleanup (SPEC-861d8cdf)
+//! Legacy Claude Code Hook detection and cleanup (gwt-spec issue)
 //!
 //! Before the gwt-integration plugin migration, gwt registered hooks directly
 //! into `~/.claude/settings.json`.  This module retains only the detection

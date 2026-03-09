@@ -1096,7 +1096,7 @@
     50% { opacity: 0.3; }
   }
 
-  /* Agent indicator: fixed-width slot (SPEC-b80e7996 FR-804) */
+  /* Agent indicator: fixed-width slot (gwt-spec issue FR-804) */
   .agent-indicator-slot {
     width: 12px;
     height: 12px;

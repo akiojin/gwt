@@ -1,4 +1,4 @@
-//! Profile management for environment variables (SPEC-a3f4c9df)
+//! Profile management for environment variables (gwt-spec issue)
 //!
 //! Manages environment profiles with automatic migration from legacy profile files.
 //! - Current format: ~/.gwt/config.toml [profiles]
@@ -338,7 +338,7 @@ impl ProfilesConfig {
         Ok(None)
     }
 
-    /// Save profiles to disk in TOML format (SPEC-a3f4c9df FR-006)
+    /// Save profiles to disk in TOML format (gwt-spec issue FR-006)
     ///
     /// Persists profiles under `[profiles]` in `~/.gwt/config.toml`.
     /// Uses settings save path handling (atomic write).

@@ -1,4 +1,4 @@
-//! Integration tests for bare repository workflow (SPEC-a70a1ece T1101-T1103)
+//! Integration tests for bare repository workflow (gwt-spec issue T1101-T1103)
 //!
 //! These tests verify the end-to-end bare clone and worktree creation workflow.
 

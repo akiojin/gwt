@@ -1,4 +1,4 @@
-//! Docker file detection (SPEC-f5f5657e)
+//! Docker file detection (gwt-spec issue)
 //!
 //! Detects Docker-related files in a worktree directory.
 //! Detection priority: docker-compose.yml/compose.yml > .devcontainer > Dockerfile
