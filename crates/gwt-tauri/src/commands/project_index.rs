@@ -402,9 +402,64 @@ fn repo_path_for_issue_index(project_root: &str) -> Result<PathBuf, String> {
     resolve_repo_path_for_project_root(Path::new(project_root))
 }
 
-fn run_files_action_with_crash_recovery(
+fn chroma_db_contains_collection(
+    python: &Path,
+    db_sqlite_path: &Path,
+    collection_name: &str,
+) -> Result<bool, String> {
+    let output = command_os(python)
+        .arg("-c")
+        .arg(
+            "import sqlite3, sys; \
+             conn = sqlite3.connect(sys.argv[1]); \
+             cur = conn.cursor(); \
+             row = cur.execute('select 1 from collections where name = ? limit 1', (sys.argv[2],)).fetchone(); \
+             conn.close(); \
+             print('1' if row else '0')",
+        )
+        .arg(db_sqlite_path)
+        .arg(collection_name)
+        .output()
+        .map_err(|e| format!("Failed to inspect Chroma sqlite metadata: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to inspect Chroma sqlite metadata (status={}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "1")
+}
+
+fn rebuild_issue_index(
+    python: &Path,
+    project_root: &str,
+    db_path: &str,
+    explicit_repo_path: Option<&str>,
+) -> Result<ChromaRunnerResponse, String> {
+    let repo_path = match explicit_repo_path {
+        Some(path) => path.to_string(),
+        None => repo_path_for_issue_index(project_root)?
+            .to_string_lossy()
+            .to_string(),
+    };
+
+    run_chroma_runner(
+        python,
+        "index-issues",
+        Some(&repo_path),
+        Some(db_path),
+        None,
+        None,
+    )
+}
+
+fn run_project_index_action_with_crash_recovery(
     action: &str,
     project_root: &str,
+    explicit_repo_path: Option<&str>,
     query: Option<&str>,
     n_results: Option<u32>,
 ) -> Result<ChromaRunnerResponse, String> {
@@ -423,14 +478,26 @@ fn run_files_action_with_crash_recovery(
         ),
         "search" => run_chroma_runner(&python, "search", None, Some(&db_path), query, n_results),
         "status" => run_chroma_runner(&python, "status", None, Some(&db_path), None, None),
+        "index-issues" => rebuild_issue_index(&python, project_root, &db_path, explicit_repo_path),
+        "search-issues" => run_chroma_runner(
+            &python,
+            "search-issues",
+            None,
+            Some(&db_path),
+            query,
+            n_results,
+        ),
         _ => Err(format!(
-            "Unsupported files action for crash recovery: {action}"
+            "Unsupported Project Index action for crash recovery: {action}"
         )),
     };
 
     match run_primary() {
         Ok(resp) => Ok(resp),
         Err(err) if db.exists() && is_recoverable_chroma_db_error(&err) => {
+            let issues_collection_present =
+                chroma_db_contains_collection(&python, &db.join("chroma.sqlite3"), "issues")
+                    .unwrap_or(false);
             let backup_path = quarantine_index_db(&db)?;
             warn!(
                 category = "project_index",
@@ -438,10 +505,10 @@ fn run_files_action_with_crash_recovery(
                 db_path = %db.display(),
                 backup_path = %backup_path.display(),
                 error = %err,
-                "Recovered from crashing Chroma files index by quarantining the persisted database"
+                "Recovered from crashing Project Index database by quarantining the persisted database"
             );
 
-            let rebuild = run_chroma_runner(
+            let rebuilt_files = run_chroma_runner(
                 &python,
                 "index",
                 Some(project_root),
@@ -459,13 +526,36 @@ fn run_files_action_with_crash_recovery(
                 )
             })?;
 
-            if action == "index" {
-                return Ok(rebuild);
+            let needs_issue_rebuild =
+                matches!(action, "index-issues" | "search-issues") || issues_collection_present;
+            let rebuilt_issues = if needs_issue_rebuild {
+                Some(
+                    rebuild_issue_index(&python, project_root, &db_path, explicit_repo_path)
+                        .map_err(|rebuild_err| {
+                            format!(
+                                "Recovered crashing index at {} to {} and rebuilt files index, but failed to rebuild issues index: {}; original error: {}",
+                                db.display(),
+                                backup_path.display(),
+                                rebuild_err,
+                                err
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
+
+            if matches!(action, "index" | "index-issues") {
+                return Ok(if action == "index" {
+                    rebuilt_files
+                } else {
+                    rebuilt_issues.expect("issues rebuild must exist for index-issues")
+                });
             }
 
             run_primary().map_err(|retry_err| {
                 format!(
-                    "Recovered crashing index at {} to {} and rebuilt files index, but retrying action '{}' failed: {}",
+                    "Recovered crashing index at {} to {} and rebuilt required collections, but retrying action '{}' failed: {}",
                     db.display(),
                     backup_path.display(),
                     action,
@@ -475,6 +565,15 @@ fn run_files_action_with_crash_recovery(
         }
         Err(err) => Err(err),
     }
+}
+
+fn run_files_action_with_crash_recovery(
+    action: &str,
+    project_root: &str,
+    query: Option<&str>,
+    n_results: Option<u32>,
+) -> Result<ChromaRunnerResponse, String> {
+    run_project_index_action_with_crash_recovery(action, project_root, None, query, n_results)
 }
 
 // ---------------------------------------------------------------------------
@@ -533,14 +632,12 @@ pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusRes
 #[tauri::command]
 pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssuesResult, String> {
     tokio::task::spawn_blocking(move || {
-        let python = find_python_binary()?;
-        let db = db_path_for_project(&project_root);
         let repo_path = repo_path_for_issue_index(&project_root)?;
-        let resp = run_chroma_runner(
-            &python,
+        let repo_path = repo_path.to_string_lossy().to_string();
+        let resp = run_project_index_action_with_crash_recovery(
             "index-issues",
-            Some(&repo_path.to_string_lossy()),
-            Some(&db.to_string_lossy()),
+            &project_root,
+            Some(&repo_path),
             None,
             None,
         )?;
@@ -560,13 +657,10 @@ pub async fn search_github_issues_cmd(
     n_results: Option<u32>,
 ) -> Result<Vec<GitHubIssueSearchResult>, String> {
     tokio::task::spawn_blocking(move || {
-        let python = find_python_binary()?;
-        let db = db_path_for_project(&project_root);
-        let resp = run_chroma_runner(
-            &python,
+        let resp = run_project_index_action_with_crash_recovery(
             "search-issues",
+            &project_root,
             None,
-            Some(&db.to_string_lossy()),
             Some(&query),
             n_results,
         )?;
