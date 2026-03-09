@@ -278,6 +278,13 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
     },
 ];
 
+const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
+    "skills/gwt-fix-issue",
+    "skills/gwt-issue-spec-ops",
+    "commands/gwt-fix-issue.md",
+    "commands/gwt-issue-spec-ops.md",
+];
+
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
 const SKILLS_PATH_UNAVAILABLE_CODE: &str = "SKILLS_PATH_UNAVAILABLE";
 const SCOPE_NOT_CONFIGURED_MESSAGE: &str =
@@ -475,8 +482,27 @@ fn write_managed_assets<'a>(
         ),
     })?;
 
+    cleanup_legacy_managed_assets(root)?;
+
     for asset in assets {
         write_managed_asset(root, asset, root_name)?;
+    }
+
+    Ok(())
+}
+
+fn cleanup_legacy_managed_assets(root: &Path) -> Result<(), GwtError> {
+    for relative_path in LEGACY_MANAGED_ASSET_PATHS {
+        let path = root.join(relative_path);
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!("Failed to remove legacy managed asset {}: {}", path.display(), e),
+            })?;
+        } else if path.is_file() {
+            std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!("Failed to remove legacy managed asset {}: {}", path.display(), e),
+            })?;
+        }
     }
 
     Ok(())

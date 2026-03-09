@@ -22,6 +22,20 @@ declare -a EXTRA_LABELS=()
 REPO_ROOT=""
 declare -a SPEC_DIRS=()
 declare -a CLEANUP_TARGETS=()
+declare -a LEGACY_CLEANUP_ALLOWLIST_RELATIVE=(
+  ".specify"
+  ".github/spec-kit"
+  ".github/spec-kit.yml"
+  ".github/spec-kit.yaml"
+  ".github/prompts/specify.md"
+  ".github/prompts/specify-system.md"
+  "scripts/spec-kit.sh"
+  "scripts/specify.sh"
+  "templates/spec-kit"
+  "templates/spec-kit.md"
+  "templates/specify"
+  "templates/specify.md"
+)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -73,18 +87,8 @@ collect_cleanup_targets() {
   append_cleanup_target "$SPECS_DIR/specs.md"
   append_cleanup_target "$SPECS_DIR/archive"
 
-  for candidate in \
-    "$REPO_ROOT"/.specify \
-    "$REPO_ROOT"/.specify/* \
-    "$REPO_ROOT"/.github/spec-kit \
-    "$REPO_ROOT"/.github/spec-kit* \
-    "$REPO_ROOT"/.github/prompts/specify* \
-    "$REPO_ROOT"/scripts/spec-kit* \
-    "$REPO_ROOT"/scripts/specify* \
-    "$REPO_ROOT"/templates/spec-kit* \
-    "$REPO_ROOT"/templates/specify*
-  do
-    append_cleanup_target "$candidate"
+  for relative_path in "${LEGACY_CLEANUP_ALLOWLIST_RELATIVE[@]}"; do
+    append_cleanup_target "$REPO_ROOT/$relative_path"
   done
 }
 
@@ -284,6 +288,7 @@ BODY
 create_artifact_comments() {
   local dir="$1"
   local issue_number="$2"
+  local had_error=0
 
   for subdir in contracts checklists; do
     local artifact_dir="$dir/$subdir"
@@ -308,11 +313,15 @@ ${kind}:${name}
 ${content}
 ARTIFACT
 )
-        gh issue comment "$issue_number" --body "$comment_body" > /dev/null 2>&1 || \
-          echo "  Warning: Failed to create $kind artifact: $name"
+        if ! gh issue comment "$issue_number" --body "$comment_body" > /dev/null 2>&1; then
+          echo "  Warning: Failed to create $kind artifact: $name" >&2
+          had_error=1
+        fi
       fi
     done
   done
+
+  return "$had_error"
 }
 
 add_report_entry() {
@@ -361,16 +370,27 @@ for dir in "${SPEC_DIRS[@]}"; do
   done
 
   if issue_url=$(gh issue create --title "$title" --body "$issue_body" "${label_args[@]}" 2>/dev/null); then
+    migration_ok=true
     issue_number=$(echo "$issue_url" | sed 's#.*/##')
     echo "  Created issue #$issue_number"
 
     updated_body=$(build_issue_body "$dir" "#${issue_number}")
-    gh issue edit "$issue_number" --body "$updated_body" > /dev/null
+    if ! gh issue edit "$issue_number" --body "$updated_body" > /dev/null 2>&1; then
+      echo "  Warning: Failed to update issue body for $spec_name" >&2
+      migration_ok=false
+    fi
 
-    create_artifact_comments "$dir" "$issue_number"
+    if ! create_artifact_comments "$dir" "$issue_number"; then
+      migration_ok=false
+    fi
 
-    add_report_entry "$spec_name" "$issue_number" "$title" "success"
-    SUCCESS=$((SUCCESS + 1))
+    if [[ "$migration_ok" == "true" ]]; then
+      add_report_entry "$spec_name" "$issue_number" "$title" "success"
+      SUCCESS=$((SUCCESS + 1))
+    else
+      add_report_entry "$spec_name" "$issue_number" "$title" "failed"
+      FAILED=$((FAILED + 1))
+    fi
   else
     echo "  Failed to create issue for $spec_name" >&2
     add_report_entry "$spec_name" 0 "$title" "failed"

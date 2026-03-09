@@ -646,11 +646,25 @@ fn prepare_issue_spec(
 
 fn extract_issue_number(input: &str) -> Option<u64> {
     for token in input.split_whitespace() {
+        let token =
+            token.trim_matches(|c: char| matches!(c, ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']'));
+
         if let Some(rest) = token.strip_prefix('#') {
-            if let Ok(number) = rest
-                .trim_matches(|c: char| !c.is_ascii_digit())
-                .parse::<u64>()
-            {
+            if let Ok(number) = rest.parse::<u64>() {
+                return Some(number);
+            }
+        }
+
+        if let Some((_, rest)) = token.rsplit_once('#') {
+            if token.contains('/') {
+                if let Ok(number) = rest.parse::<u64>() {
+                    return Some(number);
+                }
+            }
+        }
+
+        if let Some((_, rest)) = token.rsplit_once("/issues/") {
+            if let Ok(number) = rest.parse::<u64>() {
                 return Some(number);
             }
         }
@@ -1352,6 +1366,18 @@ mod tests {
     fn extract_issue_number_ignores_plain_number_token() {
         let out = extract_issue_number("continue work on 1438 please");
         assert_eq!(out, None);
+    }
+
+    #[test]
+    fn extract_issue_number_parses_repo_scoped_reference() {
+        let out = extract_issue_number("continue work on akiojin/gwt#1438 please");
+        assert_eq!(out, Some(1438));
+    }
+
+    #[test]
+    fn extract_issue_number_parses_issue_url() {
+        let out = extract_issue_number("https://github.com/akiojin/gwt/issues/1438");
+        assert_eq!(out, Some(1438));
     }
 
     #[test]

@@ -146,9 +146,10 @@ pub fn create_spec_issue(
 
     let number = gh_issue_create(repo_path, title, &body)?;
     let body = render_issue_body(&format!("#{number}"), sections, &checklist);
-    let edit_result = gh_issue_edit(repo_path, number, title, &body);
-    let detail_result = get_spec_issue_detail(repo_path, number);
-    finalize_created_issue(number, edit_result, detail_result)
+    gh_issue_edit(repo_path, number, title, &body)
+        .map_err(|e| format!("Issue #{number} was created, but follow-up update failed: {e}"))?;
+    get_spec_issue_detail(repo_path, number)
+        .map_err(|e| format!("Issue #{number} was created and updated, but fetch failed: {e}"))
 }
 
 /// Update an existing spec issue by issue number. Returns the updated issue detail.
@@ -658,22 +659,6 @@ fn check_etag(expected: Option<&str>, actual: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn finalize_created_issue(
-    issue_number: u64,
-    edit_result: Result<(), String>,
-    detail_result: Result<SpecIssueDetail, String>,
-) -> Result<SpecIssueDetail, String> {
-    match detail_result {
-        Ok(detail) => Ok(detail),
-        Err(detail_err) => match edit_result {
-            Ok(()) => Err(detail_err),
-            Err(edit_err) => Err(format!(
-                "Issue #{issue_number} was created, but follow-up update and fetch failed (edit: {edit_err}; fetch: {detail_err})"
-            )),
-        },
-    }
 }
 
 fn gh_issue_create(repo_path: &Path, title: &str, body: &str) -> Result<u64, String> {
@@ -1537,43 +1522,5 @@ mod tests {
         let err =
             select_project_status_field_and_option(&nodes, "Done").expect_err("status field error");
         assert_eq!(err, "Status field not found in project");
-    }
-
-    #[test]
-    fn finalize_created_issue_returns_detail_even_when_edit_failed() {
-        let detail = SpecIssueDetail {
-            number: 42,
-            title: "created".to_string(),
-            url: "https://example.com/issues/42".to_string(),
-            updated_at: "2026-03-01T00:00:00Z".to_string(),
-            labels: vec![],
-            etag: "etag".to_string(),
-            body: "body".to_string(),
-            sections: SpecIssueSections::default(),
-        };
-
-        let result = finalize_created_issue(
-            42,
-            Err("gh issue edit failed: transient".to_string()),
-            Ok(detail.clone()),
-        )
-        .expect("should return created issue detail");
-
-        assert_eq!(result.number, detail.number);
-        assert_eq!(result.title, detail.title);
-    }
-
-    #[test]
-    fn finalize_created_issue_reports_created_issue_when_follow_up_fails() {
-        let err = finalize_created_issue(
-            77,
-            Err("gh issue edit failed".to_string()),
-            Err("gh issue view failed".to_string()),
-        )
-        .expect_err("should fail with contextual message");
-
-        assert!(err.contains("Issue #77 was created"));
-        assert!(err.contains("edit: gh issue edit failed"));
-        assert!(err.contains("fetch: gh issue view failed"));
     }
 }

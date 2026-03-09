@@ -504,7 +504,7 @@ export interface GitChangeSummary {
   base_branch: string;
 }
 
-// GitHub Issue types (gwt-spec issue, gwt-spec issue)
+// GitHub Issue types (gwt-spec issue)
 
 export interface GitHubLabel {
   name: string;

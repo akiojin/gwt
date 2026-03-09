@@ -1,4 +1,4 @@
-//! Pull Request status commands (gwt-spec issue, gwt-spec issue)
+//! Pull Request status commands for gwt-spec issue workflows
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use chrono::{DateTime, Utc};
