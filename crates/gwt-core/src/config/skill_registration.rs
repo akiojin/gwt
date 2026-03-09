@@ -7,6 +7,7 @@
 
 use super::Settings;
 use crate::error::GwtError;
+use crate::process::command;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -63,15 +64,6 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         )),
         executable: false,
         rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/LICENSE.txt",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/LICENSE.txt"
-        )),
-        executable: false,
-        rewrite_for_project: false,
     },
     ManagedAsset {
         relative_path: "skills/gwt-fix-pr/scripts/inspect_pr_checks.py",
@@ -155,11 +147,6 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: false,
     },
 ];
-
-const CLAUDE_HOOKS_JSON_TEMPLATE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../plugins/gwt/hooks/hooks.json"
-));
 
 const LEGACY_MANAGED_GWT_HOOK_COMMANDS: &[&str] = &[
     "gwt hook UserPromptSubmit",
@@ -245,52 +232,46 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
 
 const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
-        relative_path: "hooks/hooks.json",
-        body: CLAUDE_HOOKS_JSON_TEMPLATE,
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "hooks/scripts/forward-gwt-hook.sh",
+        relative_path: "hooks/scripts/gwt-forward-hook.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/forward-gwt-hook.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-forward-hook.sh"
         )),
         executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/block-git-branch-ops.sh",
+        relative_path: "hooks/scripts/gwt-block-git-branch-ops.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/block-git-branch-ops.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-git-branch-ops.sh"
         )),
         executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/block-cd-command.sh",
+        relative_path: "hooks/scripts/gwt-block-cd-command.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/block-cd-command.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-cd-command.sh"
         )),
         executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/block-file-ops.sh",
+        relative_path: "hooks/scripts/gwt-block-file-ops.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/block-file-ops.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-file-ops.sh"
         )),
         executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/block-git-dir-override.sh",
+        relative_path: "hooks/scripts/gwt-block-git-dir-override.sh",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/block-git-dir-override.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-git-dir-override.sh"
         )),
         executable: true,
         rewrite_for_project: false,
@@ -303,6 +284,28 @@ const SCOPE_NOT_CONFIGURED_MESSAGE: &str =
     "Skill registration is not configured. Enable it in Settings.";
 const PROJECT_ROOT_REQUIRED_MESSAGE: &str =
     "Project root is required for project-scoped skill registration.";
+const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER: &str = "# BEGIN gwt managed local assets";
+const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER: &str = "# END gwt managed local assets";
+const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
+    "/.codex/skills/gwt-*/",
+    "/.gemini/skills/gwt-*/",
+    "/.claude/skills/gwt-*/",
+    "/.claude/commands/gwt-*.md",
+    "/.claude/hooks/scripts/gwt-*.sh",
+];
+const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
+    ".gwt/",
+    "/.gwt/",
+    ".codex/skills/gwt-*/",
+    "/.codex/skills/gwt-*/**",
+    ".gemini/skills/gwt-*/",
+    "/.gemini/skills/gwt-*/**",
+    ".claude/skills/gwt-*/",
+    "/.claude/skills/gwt-*/**",
+    ".claude/commands/gwt-*.md",
+    ".claude/hooks/",
+    ".claude/hooks/scripts/gwt-*.sh",
+];
 
 /// Agent types that support skill registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,11 +447,9 @@ fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
     let root = project_root.join(".claude");
     let settings_path = root.join("settings.json");
 
-    if super::claude_plugins::is_plugin_enabled_in_settings(&settings_path) {
-        cleanup_claude_duplicate_assets(&root)?;
-        let _ = super::claude_hooks::unregister_gwt_hooks(&settings_path);
-        return Ok(());
-    }
+    let _ = super::claude_plugins::remove_gwt_plugin_key_at(&settings_path);
+    super::claude_hooks::unregister_gwt_hooks(&settings_path)?;
+    cleanup_legacy_claude_hook_scripts(&root)?;
 
     write_managed_assets(&root, all_claude_assets(), ".claude")?;
     merge_managed_claude_hooks_into_settings(&root)
@@ -528,35 +529,176 @@ fn write_managed_asset(root: &Path, asset: &ManagedAsset, root_name: &str) -> Re
     Ok(())
 }
 
-fn cleanup_claude_duplicate_assets(root: &Path) -> Result<(), GwtError> {
-    for asset in CLAUDE_COMMAND_ASSETS
-        .iter()
-        .chain(PROJECT_SKILL_ASSETS.iter())
-        .chain(CLAUDE_HOOK_ASSETS.iter())
-    {
-        let path = root.join(asset.relative_path);
+fn cleanup_legacy_claude_hook_scripts(root: &Path) -> Result<(), GwtError> {
+    let hooks_json_path = root.join("hooks").join("hooks.json");
+    if hooks_json_path.exists() {
+        std::fs::remove_file(&hooks_json_path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove legacy Claude hook template {}: {}",
+                hooks_json_path.display(),
+                e
+            ),
+        })?;
+    }
+
+    for basename in LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES {
+        let path = root.join("hooks").join("scripts").join(basename);
         if !path.exists() {
             continue;
         }
-
-        if path.is_dir() {
-            std::fs::remove_dir_all(&path).map_err(|e| GwtError::ConfigWriteError {
-                reason: format!(
-                    "Failed to remove Claude duplicate directory {}: {}",
-                    path.display(),
-                    e
-                ),
-            })?;
-        } else {
-            std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
-                reason: format!(
-                    "Failed to remove Claude duplicate asset {}: {}",
-                    path.display(),
-                    e
-                ),
-            })?;
-        }
+        std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove legacy Claude hook script {}: {}",
+                path.display(),
+                e
+            ),
+        })?;
     }
+
+    Ok(())
+}
+
+fn git_path_for_project_root(project_root: &Path, git_path: &str) -> Result<PathBuf, GwtError> {
+    let dot_git = project_root.join(".git");
+    let output = match command("git")
+        .arg("rev-parse")
+        .arg("--git-path")
+        .arg(git_path)
+        .current_dir(project_root)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_spawn_err) if dot_git.is_dir() => return Ok(dot_git.join(git_path)),
+        Err(e) => {
+            return Err(GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to run git rev-parse --git-path {} in {}: {}",
+                    git_path,
+                    project_root.display(),
+                    e
+                ),
+            });
+        }
+    };
+
+    if output.status.success() {
+        let resolved_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if resolved_raw.is_empty() {
+            return Err(GwtError::ConfigWriteError {
+                reason: format!(
+                    "git rev-parse --git-path {} returned an empty path for {}",
+                    git_path,
+                    project_root.display(),
+                ),
+            });
+        }
+        let resolved = PathBuf::from(&resolved_raw);
+        return Ok(if resolved.is_absolute() {
+            resolved
+        } else {
+            project_root.join(resolved)
+        });
+    }
+
+    if dot_git.is_dir() {
+        return Ok(dot_git.join(git_path));
+    }
+
+    Err(GwtError::ConfigWriteError {
+        reason: format!(
+            "Unable to resolve git path {} for {}: {}",
+            git_path,
+            project_root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    })
+}
+
+fn ensure_project_local_exclude_rules(project_root: &Path) -> Result<(), GwtError> {
+    let exclude_path = git_path_for_project_root(project_root, "info/exclude")?;
+    let existing = if exclude_path.exists() {
+        std::fs::read_to_string(&exclude_path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!("Failed to read {}: {}", exclude_path.display(), e),
+        })?
+    } else {
+        String::new()
+    };
+
+    let mut output_lines = Vec::new();
+    let mut skipping_managed_block = false;
+
+    for line in existing.lines() {
+        if line == PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER {
+            if skipping_managed_block {
+                return Err(GwtError::ConfigWriteError {
+                    reason: format!(
+                        "Malformed managed exclude block in {}: nested begin marker",
+                        exclude_path.display()
+                    ),
+                });
+            }
+            skipping_managed_block = true;
+            continue;
+        }
+        if line == PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER {
+            if !skipping_managed_block {
+                return Err(GwtError::ConfigWriteError {
+                    reason: format!(
+                        "Malformed managed exclude block in {}: end marker without begin marker",
+                        exclude_path.display()
+                    ),
+                });
+            }
+            skipping_managed_block = false;
+            continue;
+        }
+        if skipping_managed_block {
+            continue;
+        }
+        if PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES.contains(&line)
+            || LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES.contains(&line)
+        {
+            continue;
+        }
+        output_lines.push(line.to_string());
+    }
+
+    if skipping_managed_block {
+        return Err(GwtError::ConfigWriteError {
+            reason: format!(
+                "Malformed managed exclude block in {}: missing end marker",
+                exclude_path.display()
+            ),
+        });
+    }
+
+    while output_lines.last().is_some_and(|line| line.is_empty()) {
+        output_lines.pop();
+    }
+    if !output_lines.is_empty() {
+        output_lines.push(String::new());
+    }
+
+    output_lines.push(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER.to_string());
+    for line in PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES {
+        output_lines.push((*line).to_string());
+    }
+    output_lines.push(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER.to_string());
+
+    let mut output = output_lines.join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    };
+
+    if let Some(parent) = exclude_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!("Failed to create {}: {}", parent.display(), e),
+        })?;
+    }
+
+    std::fs::write(&exclude_path, output).map_err(|e| GwtError::ConfigWriteError {
+        reason: format!("Failed to write {}: {}", exclude_path.display(), e),
+    })?;
 
     Ok(())
 }
@@ -568,10 +710,68 @@ fn rewrite_project_asset_content(content: &str, root_name: &str) -> String {
         .replace("`skills/", &format!("`{root_name}/skills/"))
 }
 
-fn managed_hooks_definition() -> Result<Value, GwtError> {
-    let rendered = rewrite_project_asset_content(CLAUDE_HOOKS_JSON_TEMPLATE, ".claude");
-    serde_json::from_str::<Value>(&rendered).map_err(|e| GwtError::ConfigParseError {
-        reason: format!("Failed to parse managed Claude hooks template: {e}"),
+fn managed_hooks_definition() -> Value {
+    serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit"
+                }]
+            }],
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": ".claude/hooks/scripts/gwt-forward-hook.sh PreToolUse"
+                    }]
+                },
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": ".claude/hooks/scripts/gwt-block-git-branch-ops.sh"
+                        },
+                        {
+                            "type": "command",
+                            "command": ".claude/hooks/scripts/gwt-block-cd-command.sh"
+                        },
+                        {
+                            "type": "command",
+                            "command": ".claude/hooks/scripts/gwt-block-file-ops.sh"
+                        },
+                        {
+                            "type": "command",
+                            "command": ".claude/hooks/scripts/gwt-block-git-dir-override.sh"
+                        }
+                    ]
+                }
+            ],
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh PostToolUse"
+                }]
+            }],
+            "Notification": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh Notification"
+                }]
+            }],
+            "Stop": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh Stop"
+                }]
+            }]
+        }
     })
 }
 
@@ -599,7 +799,7 @@ fn merge_managed_claude_hooks_into_settings(claude_root: &Path) -> Result<(), Gw
         settings = serde_json::json!({});
     }
 
-    let hooks_definition = managed_hooks_definition()?;
+    let hooks_definition = managed_hooks_definition();
     let Some(managed_hooks_map) = hooks_definition.get("hooks").and_then(|v| v.as_object()) else {
         return Err(GwtError::ConfigParseError {
             reason: "Managed Claude hooks template must have a hooks object".to_string(),
@@ -759,9 +959,7 @@ fn managed_hook_commands_with_events_from_map(
 }
 
 fn required_managed_hook_commands() -> Vec<(String, String)> {
-    let Ok(definition) = managed_hooks_definition() else {
-        return Vec::new();
-    };
+    let definition = managed_hooks_definition();
 
     let Some(hooks_obj) = definition.get("hooks").and_then(|v| v.as_object()) else {
         return Vec::new();
@@ -924,6 +1122,10 @@ pub fn register_all_skills_with_settings_at_project_root(
     settings: &Settings,
     project_root: Option<&Path>,
 ) -> Result<(), GwtError> {
+    if let Some(project_root) = project_root {
+        ensure_project_local_exclude_rules(project_root)?;
+    }
+
     let mut failures = Vec::new();
 
     for agent in SkillAgentType::all() {
@@ -944,7 +1146,7 @@ pub fn register_all_skills_with_settings_at_project_root(
     if !failures.is_empty() {
         return Err(GwtError::ConfigWriteError {
             reason: format!(
-                "Failed to register skills/plugins for {} agent(s): {}",
+                "Failed to register project-local managed assets for {} agent(s): {}",
                 failures.len(),
                 failures.join(" | ")
             ),
@@ -1032,17 +1234,6 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
 
     let settings_path =
         claude_settings_path_for(project_root).unwrap_or_else(|| claude_root.join("settings.json"));
-    if super::claude_plugins::is_plugin_enabled_in_settings(&settings_path) {
-        return SkillAgentRegistrationStatus {
-            agent_id: SkillAgentType::Claude.id().to_string(),
-            label: SkillAgentType::Claude.label().to_string(),
-            skills_path,
-            registered: true,
-            missing_skills: Vec::new(),
-            error_code: None,
-            error_message: None,
-        };
-    }
 
     let mut missing_items = Vec::new();
 
@@ -1164,6 +1355,25 @@ mod tests {
         settings
     }
 
+    fn init_test_git_dir(root: &Path) {
+        std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = crate::process::command("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn registration_status_default_is_failed() {
         let status = SkillRegistrationStatus::default();
@@ -1208,10 +1418,10 @@ mod tests {
     #[test]
     fn managed_hook_detection_uses_exact_template_commands() {
         let managed_hook_commands =
-            vec![".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit".to_string()];
+            vec![".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit".to_string()];
 
         assert!(is_managed_hook_command(
-            ".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit",
+            ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit",
             &managed_hook_commands
         ));
         assert!(!is_managed_hook_command(
@@ -1241,7 +1451,7 @@ mod tests {
     #[test]
     fn prune_managed_hook_entries_preserves_user_hook_that_mentions_gwt_hook() {
         let managed_hook_commands =
-            vec![".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit".to_string()];
+            vec![".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit".to_string()];
         let mut value = serde_json::json!(["echo gwt hook UserPromptSubmit"]);
 
         prune_managed_hook_entries(&mut value, &managed_hook_commands);
@@ -1312,6 +1522,7 @@ mod tests {
     fn project_scoped_registration_writes_all_agents() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
+        init_test_git_dir(temp.path());
 
         register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
 
@@ -1367,14 +1578,30 @@ mod tests {
             .join(".claude")
             .join("hooks")
             .join("scripts")
-            .join("forward-gwt-hook.sh")
+            .join("gwt-forward-hook.sh")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("hooks")
+            .join("hooks.json")
             .exists());
 
         let settings_path = temp.path().join(".claude").join("settings.json");
         let content = std::fs::read_to_string(settings_path).unwrap();
-        assert!(content.contains("forward-gwt-hook.sh"));
-        assert!(content.contains("block-git-branch-ops.sh"));
+        assert!(content.contains("gwt-forward-hook.sh"));
+        assert!(content.contains("gwt-block-git-branch-ops.sh"));
         assert!(!content.contains("CLAUDE_PLUGIN_ROOT"));
+
+        let exclude =
+            std::fs::read_to_string(temp.path().join(".git").join("info").join("exclude")).unwrap();
+        assert!(exclude.contains(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER));
+        assert!(exclude.contains(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER));
+        assert!(exclude.contains("/.codex/skills/gwt-*/"));
+        assert!(exclude.contains("/.gemini/skills/gwt-*/"));
+        assert!(exclude.contains("/.claude/skills/gwt-*/"));
+        assert!(exclude.contains("/.claude/commands/gwt-*.md"));
+        assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.sh"));
     }
 
     #[test]
@@ -1447,20 +1674,78 @@ mod tests {
     }
 
     #[test]
-    fn claude_registration_prefers_plugin_namespace_when_enabled() {
+    fn project_index_and_spec_ops_assets_encode_issue_search_first_guidance() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let project_index_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-project-index")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(project_index_skill.contains("Issues search first"));
+        assert!(project_index_skill.contains("spec integration"));
+        assert!(project_index_skill.contains("search-issues"));
+
+        let issue_spec_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-issue-spec-ops")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(issue_spec_skill.contains("search existing spec first"));
+        assert!(issue_spec_skill.contains("gwt-project-index"));
+
+        let issue_spec_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-issue-spec-ops.md"),
+        )
+        .unwrap();
+        assert!(issue_spec_command.contains("use `gwt-project-index` Issue search"));
+    }
+
+    #[test]
+    fn claude_registration_writes_local_assets_even_when_plugin_is_enabled() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
         let claude_root = temp.path().join(".claude");
         std::fs::create_dir_all(claude_root.join("commands")).unwrap();
         std::fs::create_dir_all(claude_root.join("skills").join("gwt-pr")).unwrap();
-        std::fs::create_dir_all(claude_root.join("hooks")).unwrap();
+        std::fs::create_dir_all(claude_root.join("hooks").join("scripts")).unwrap();
         std::fs::write(claude_root.join("commands").join("gwt-pr.md"), "legacy").unwrap();
         std::fs::write(
             claude_root.join("skills").join("gwt-pr").join("SKILL.md"),
             "legacy",
         )
         .unwrap();
-        std::fs::write(claude_root.join("hooks").join("hooks.json"), "{}").unwrap();
+        std::fs::write(
+            claude_root
+                .join("hooks")
+                .join("scripts")
+                .join("forward-gwt-hook.sh"),
+            "legacy",
+        )
+        .unwrap();
         std::fs::write(
             claude_root.join("settings.json"),
             serde_json::json!({
@@ -1473,7 +1758,7 @@ mod tests {
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": ".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit"
+                                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit"
                                 }
                             ]
                         }
@@ -1491,17 +1776,77 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!claude_root.join("commands").join("gwt-pr.md").exists());
-        assert!(!claude_root
+        assert!(claude_root.join("commands").join("gwt-pr.md").exists());
+        assert!(claude_root
             .join("skills")
             .join("gwt-pr")
             .join("SKILL.md")
             .exists());
         assert!(!claude_root.join("hooks").join("hooks.json").exists());
+        assert!(!claude_root
+            .join("hooks")
+            .join("scripts")
+            .join("forward-gwt-hook.sh")
+            .exists());
+        assert!(claude_root
+            .join("hooks")
+            .join("scripts")
+            .join("gwt-forward-hook.sh")
+            .exists());
+
+        let settings_content = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
+        assert!(!settings_content.contains(super::super::claude_plugins::GWT_PLUGIN_FULL_NAME));
 
         let status = status_for_claude(Some(temp.path()));
         assert!(status.registered);
         assert!(status.missing_skills.is_empty());
+    }
+
+    #[test]
+    fn claude_registration_keeps_gwt_pr_branch_preflight_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let skill_content = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("gwt-pr")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+
+        assert!(skill_content.contains("git rev-list --left-right --count \"HEAD...origin/$base\""));
+        assert!(skill_content.contains("Branch update required before creating a PR."));
+    }
+
+    #[test]
+    fn claude_registration_propagates_invalid_settings_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        let claude_root = temp.path().join(".claude");
+        std::fs::create_dir_all(&claude_root).unwrap();
+        std::fs::write(claude_root.join("settings.json"), "{invalid").unwrap();
+
+        let err = register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .expect_err("invalid settings.json should abort registration");
+
+        let reason = err.to_string();
+        assert!(
+            reason.contains("expected") || reason.contains("EOF") || reason.contains("key"),
+            "unexpected error: {reason}"
+        );
     }
 
     #[test]
@@ -1532,10 +1877,156 @@ mod tests {
     fn repair_uses_project_root_for_status() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
+        init_test_git_dir(temp.path());
 
         let status =
             repair_skill_registration_with_settings_at_project_root(&settings, Some(temp.path()));
 
         assert_eq!(status.overall, "ok");
+    }
+
+    #[test]
+    fn exclude_rules_are_added_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        init_test_git_dir(temp.path());
+
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+
+        let exclude =
+            std::fs::read_to_string(temp.path().join(".git").join("info").join("exclude")).unwrap();
+        assert_eq!(
+            exclude
+                .lines()
+                .filter(|line| *line == PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER)
+                .count(),
+            1
+        );
+        assert_eq!(
+            exclude
+                .lines()
+                .filter(|line| *line == PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER)
+                .count(),
+            1
+        );
+        for line in PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES {
+            assert_eq!(
+                exclude.lines().filter(|existing| existing == line).count(),
+                1,
+                "exclude line should appear exactly once: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn exclude_rules_preserve_non_gwt_entries_and_replace_legacy_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        init_test_git_dir(temp.path());
+
+        let exclude_path = temp.path().join(".git").join("info").join("exclude");
+        std::fs::write(
+            &exclude_path,
+            "\
+# custom rule
+custom-pattern
+/.codex/skills/gwt-*/**
+# BEGIN gwt managed local assets
+/.claude/skills/gwt-*/
+# END gwt managed local assets
+another-pattern
+",
+        )
+        .unwrap();
+
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+
+        let exclude = std::fs::read_to_string(&exclude_path).unwrap();
+        assert!(exclude.contains("# custom rule"));
+        assert!(exclude.contains("custom-pattern"));
+        assert!(exclude.contains("another-pattern"));
+        assert!(!exclude.contains("/.codex/skills/gwt-*/**"));
+        assert_eq!(
+            exclude
+                .lines()
+                .filter(|line| *line == PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER)
+                .count(),
+            1
+        );
+        for line in PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES {
+            assert_eq!(
+                exclude.lines().filter(|existing| existing == line).count(),
+                1,
+                "exclude line should appear exactly once: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn linked_worktree_registration_writes_exclude_to_common_git_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let worktree_root = temp.path().join("worktree");
+
+        run_git(temp.path(), &["init", repo_root.to_str().unwrap()]);
+        run_git(&repo_root, &["config", "user.name", "Test User"]);
+        run_git(&repo_root, &["config", "user.email", "test@example.com"]);
+        std::fs::write(repo_root.join("README.md"), "test\n").unwrap();
+        run_git(&repo_root, &["add", "README.md"]);
+        run_git(&repo_root, &["commit", "-m", "test: init"]);
+        run_git(
+            &repo_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/test-worktree",
+                worktree_root.to_str().unwrap(),
+            ],
+        );
+
+        let settings = registration_settings();
+        register_all_skills_with_settings_at_project_root(&settings, Some(&worktree_root)).unwrap();
+
+        let exclude_path = git_path_for_project_root(&worktree_root, "info/exclude").unwrap();
+        assert_eq!(
+            exclude_path.canonicalize().unwrap(),
+            repo_root
+                .join(".git")
+                .join("info")
+                .join("exclude")
+                .canonicalize()
+                .unwrap()
+        );
+        let exclude = std::fs::read_to_string(exclude_path).unwrap();
+        assert!(exclude.contains(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER));
+        assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.sh"));
+    }
+
+    #[test]
+    fn exclude_rules_reject_unterminated_managed_block() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        init_test_git_dir(temp.path());
+
+        let exclude_path = temp.path().join(".git").join("info").join("exclude");
+        std::fs::write(
+            &exclude_path,
+            "\
+# custom rule
+custom-pattern
+# BEGIN gwt managed local assets
+/.claude/skills/gwt-*/
+",
+        )
+        .unwrap();
+
+        let err = register_all_skills_with_settings_at_project_root(&settings, Some(temp.path()))
+            .expect_err("unterminated managed block should abort registration");
+        assert!(
+            err.to_string().contains("missing end marker"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -1,6 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.5.2] - 2026-03-09
+
+### Bug Fixes
+
+- **pr:** Require branch preflight before creation (#1506)
+- **index:** Recover project index and localize agent assets (#1522)
+- **runtime:** Harden project index recovery and asset registration (#1524)
+
+### Documentation
+
+- **skills:** Translate gwt skills and drop fix-pr license
+
+### Miscellaneous Tasks
+
+- **deps-dev:** Bump @commitlint/cli from 20.4.2 to 20.4.3 (#1508)
+- **deps-dev:** Bump @commitlint/config-conventional (#1509)
+
 ## [8.5.1] - 2026-03-08
 
 ### Refactor

@@ -9,7 +9,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "8.5.1"
+version = "8.5.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -28,7 +28,7 @@ semver = "1"
 # Self-update payload extraction
 flate2 = "1.0"
 tar = "0.4"
-zip = "8.0"
+zip = "8.2"
 
 # Git operations
 gix = { version = "0.80", default-features = false, features = [

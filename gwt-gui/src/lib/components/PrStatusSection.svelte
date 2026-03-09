@@ -1,11 +1,19 @@
 <script lang="ts">
-  import type { MergeUiState, PrStatusInfo, WorkflowRunInfo } from "../types";
+  import type {
+    BranchPrPreflight,
+    MergeUiState,
+    PrStatusInfo,
+    WorkflowRunInfo,
+  } from "../types";
   import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
 
   let {
     prDetail = null,
     loading = false,
     error = null,
+    preflight = null,
+    preflightLoading = false,
+    preflightError = null,
     updateError = null,
     onOpenCiLog,
     onUpdateBranch,
@@ -17,6 +25,9 @@
     prDetail?: PrStatusInfo | null;
     loading?: boolean;
     error?: string | null;
+    preflight?: BranchPrPreflight | null;
+    preflightLoading?: boolean;
+    preflightError?: string | null;
     updateError?: string | null;
     onOpenCiLog?: (run: WorkflowRunInfo) => void;
     onUpdateBranch?: () => Promise<void>;
@@ -34,6 +45,10 @@
   const checksWarning = $derived.by(() => {
     if (!prDetail) return false;
     return shouldShowChecksWarning(prDetail);
+  });
+  const shouldShowPreflightBanner = $derived.by(() => {
+    if (prDetail || !preflight || !preflight.blockingReason) return false;
+    return preflight.status === "behind" || preflight.status === "diverged";
   });
 
   function reviewStateIcon(state: string): string {
@@ -210,6 +225,10 @@
       window.open(`${repoUrl}/actions/runs/${run.runId}`, "_blank");
     }
   }
+
+  function commitCountLabel(count: number): string {
+    return `${count} commit${count === 1 ? "" : "s"}`;
+  }
 </script>
 
 <div class="pr-status-section">
@@ -218,7 +237,24 @@
   {:else if error}
     <div class="pr-status-error">{error}</div>
   {:else if !prDetail}
-    <div class="pr-status-placeholder">No PR</div>
+    {#if preflightError}
+      <div class="pr-status-warning">{preflightError}</div>
+    {/if}
+    {#if shouldShowPreflightBanner}
+      <div class="pr-status-warning pr-preflight-warning">
+        <div>{preflight!.blockingReason}</div>
+        <div class="pr-preflight-meta">
+          Base: {preflight!.baseBranch}
+          <span>Behind: {commitCountLabel(preflight!.behindBy)}</span>
+          {#if preflight!.aheadBy > 0}
+            <span>Ahead: {commitCountLabel(preflight!.aheadBy)}</span>
+          {/if}
+        </div>
+      </div>
+    {/if}
+    <div class="pr-status-placeholder">
+      {preflightLoading ? "Checking branch sync..." : "No PR"}
+    </div>
   {:else}
     {#if updateError}
       <div class="pr-status-warning">{updateError}</div>
@@ -772,6 +808,20 @@
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
     line-height: 1.4;
+  }
+
+  .pr-preflight-warning {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .pr-preflight-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
   }
 
   @keyframes pulse {
