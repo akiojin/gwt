@@ -3,11 +3,11 @@
 # Migrate local specs/SPEC-*/ directories to GitHub Issues with gwt-spec label.
 #
 # Usage:
-#   ./scripts/migrate-specs-to-issues.sh [--dry-run] [--specs-dir DIR] [--label LABEL]...
+#   ./migrate-specs-to-issues.sh [--dry-run] [--specs-dir DIR] [--label LABEL]...
 #
 # Options:
 #   --dry-run       Show what would be done without creating issues
-#   --specs-dir     Path to specs/ directory (default: auto-detect from develop worktree)
+#   --specs-dir     Path to specs/ directory (default: auto-detect from target repository)
 #   --label LABEL   Additional label to apply (can be repeated; gwt-spec is always applied)
 
 set -euo pipefail
@@ -40,27 +40,44 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Auto-detect specs directory
+resolve_repo_root() {
+  if [[ -n "${GWT_PROJECT_ROOT:-}" ]]; then
+    printf '%s\n' "$GWT_PROJECT_ROOT"
+    return 0
+  fi
+
+  git rev-parse --show-toplevel 2>/dev/null || true
+}
+
+write_empty_report_and_exit() {
+  echo "[]" > "$REPORT_FILE"
+  echo ""
+  echo "Migration complete: 0 succeeded, 0 failed out of 0 total"
+  echo "Report: $REPORT_FILE"
+  exit 0
+}
+
 if [[ -z "$SPECS_DIR" ]]; then
-  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  REPO_ROOT=$(resolve_repo_root)
   if [[ -z "$REPO_ROOT" ]]; then
-    echo "Error: Not in a git repository" >&2
+    echo "Error: target repository root not found. Set GWT_PROJECT_ROOT or run inside a git repository." >&2
     exit 1
   fi
-  # Prefer develop worktree first, then current repository
-  for candidate in \
-    "$(dirname "$(dirname "$REPO_ROOT")")/develop/specs" \
-    "$(dirname "$REPO_ROOT")/develop/specs" \
-    "$REPO_ROOT/specs"; do
+
+  for candidate in "$REPO_ROOT/specs"; do
     if [[ -d "$candidate" ]]; then
       SPECS_DIR="$candidate"
       break
     fi
   done
+
   if [[ -z "$SPECS_DIR" ]]; then
-    echo "Error: specs/ directory not found. Use --specs-dir to specify." >&2
-    exit 1
+    echo "Specs directory not found under target repository. Nothing to migrate."
+    write_empty_report_and_exit
   fi
+elif [[ ! -d "$SPECS_DIR" ]]; then
+  echo "Error: specs directory not found: $SPECS_DIR" >&2
+  exit 1
 fi
 
 echo "Specs directory: $SPECS_DIR"
@@ -76,11 +93,7 @@ done
 echo "Found ${#SPEC_DIRS[@]} spec directories to migrate"
 
 if [[ ${#SPEC_DIRS[@]} -eq 0 ]]; then
-  echo "[]" > "$REPORT_FILE"
-  echo ""
-  echo "Migration complete: 0 succeeded, 0 failed out of 0 total"
-  echo "Report: $REPORT_FILE"
-  exit 0
+  write_empty_report_and_exit
 fi
 
 # Initialize report
@@ -131,7 +144,6 @@ build_issue_body() {
   data_model_content=$(read_section "$dir/data-model.md")
   quickstart_content=$(read_section "$dir/quickstart.md")
 
-  # Check for contracts/ and checklists/ subdirectories
   if [[ -d "$dir/contracts" ]] && [[ -n "$(ls -A "$dir/contracts" 2>/dev/null)" ]]; then
     contracts_note="Migrated from local files. See artifact comments below."
   else
@@ -189,7 +201,6 @@ ${checklists_note}
 BODY
 }
 
-# Create artifact comments for contracts/ and checklists/ files
 create_artifact_comments() {
   local dir="$1"
   local issue_number="$2"
@@ -198,7 +209,7 @@ create_artifact_comments() {
     local artifact_dir="$dir/$subdir"
     [[ -d "$artifact_dir" ]] || continue
 
-    local kind="${subdir%s}"  # contracts -> contract, checklists -> checklist
+    local kind="${subdir%s}"
     for file in "$artifact_dir"/*; do
       [[ -f "$file" ]] || continue
       local name
@@ -236,7 +247,6 @@ add_report_entry() {
     echo "," >> "$REPORT_FILE"
   fi
 
-  # Escape JSON strings
   title=$(echo "$title" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr -d '\n')
 
   cat >> "$REPORT_FILE" <<ENTRY
@@ -258,55 +268,42 @@ for dir in "${SPEC_DIRS[@]}"; do
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[$COUNT] [dry-run] Would create issue: $title (from $spec_name)"
     add_report_entry "$spec_name" 0 "$title" "dry-run"
-    SUCCESS=$((SUCCESS + 1))
-  else
-    echo -n "[$COUNT] Creating issue: $title ... "
-
-    body=$(build_issue_body "$dir" "$spec_name")
-
-    label_args=(--label gwt-spec)
-    for lbl in "${EXTRA_LABELS[@]}"; do
-      label_args+=(--label "$lbl")
-    done
-
-    issue_url=$(gh issue create \
-      "${label_args[@]}" \
-      --title "$title" \
-      --body "$body" 2>&1) || {
-      echo "FAILED"
-      add_report_entry "$spec_name" 0 "$title" "failed"
-      FAILED=$((FAILED + 1))
-      continue
-    }
-
-    # Extract issue number from URL
-    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$' || true)
-
-    if [[ -n "$issue_number" ]]; then
-      # Update GWT_SPEC_ID marker with actual issue number
-      updated_body="${body/GWT_SPEC_ID:${spec_name}/GWT_SPEC_ID:#${issue_number}}"
-      gh issue edit "$issue_number" --body "$updated_body" > /dev/null 2>&1 || true
-
-      # Create artifact comments
-      create_artifact_comments "$dir" "$issue_number"
-
-      echo "OK (#$issue_number)"
-      add_report_entry "$spec_name" "$issue_number" "$title" "migrated"
-      SUCCESS=$((SUCCESS + 1))
-    else
-      echo "FAILED (could not parse issue number)"
-      add_report_entry "$spec_name" 0 "$title" "failed"
-      FAILED=$((FAILED + 1))
-    fi
+    continue
   fi
 
-  # Rate limiting
-  if [[ "$DRY_RUN" == "false" ]] && (( COUNT % RATE_LIMIT_BATCH == 0 )); then
-    echo "  (rate limit pause: ${RATE_LIMIT_SLEEP}s)"
+  echo "[$COUNT] Creating issue: $title"
+
+  issue_body=$(build_issue_body "$dir" "$spec_name")
+
+  label_args=("--label" "gwt-spec")
+  for label in "${EXTRA_LABELS[@]}"; do
+    label_args+=("--label" "$label")
+  done
+
+  if issue_url=$(gh issue create --title "$title" --body "$issue_body" "${label_args[@]}" 2>/dev/null); then
+    issue_number=$(echo "$issue_url" | sed 's#.*/##')
+    echo "  Created issue #$issue_number"
+
+    updated_body=$(build_issue_body "$dir" "#${issue_number}")
+    gh issue edit "$issue_number" --body "$updated_body" > /dev/null
+
+    create_artifact_comments "$dir" "$issue_number"
+
+    add_report_entry "$spec_name" "$issue_number" "$title" "success"
+    SUCCESS=$((SUCCESS + 1))
+  else
+    echo "  Failed to create issue for $spec_name" >&2
+    add_report_entry "$spec_name" 0 "$title" "failed"
+    FAILED=$((FAILED + 1))
+  fi
+
+  if (( COUNT % RATE_LIMIT_BATCH == 0 )) && (( COUNT < ${#SPEC_DIRS[@]} )); then
+    echo "  Rate limit pause: sleeping ${RATE_LIMIT_SLEEP}s..."
     sleep "$RATE_LIMIT_SLEEP"
   fi
 done
 
+echo "" >> "$REPORT_FILE"
 echo "]" >> "$REPORT_FILE"
 
 echo ""

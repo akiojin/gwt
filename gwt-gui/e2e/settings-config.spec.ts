@@ -4,6 +4,7 @@ import {
   defaultRecentProject,
   settingsFixture,
   profilesFixture,
+  getInvokeLog,
   openRecentProject,
   setMockCommandResponses,
   waitForInvokeCommand,
@@ -167,6 +168,25 @@ test("Profiles tab shows default profile", async ({ page }) => {
     .click();
 
   await expect(page.locator("#active-profile")).toHaveValue("default");
+});
+
+test("default profile delete button is disabled", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses());
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const deleteButton = page.getByRole("button", { name: "Delete Active Profile" });
+  await expect(page.locator("#active-profile")).toHaveValue("default");
+  await expect(deleteButton).toBeDisabled();
+  await expect(deleteButton).toHaveCSS("background-color", "rgb(49, 50, 68)");
+  await expect(deleteButton).toHaveCSS("color", "rgb(108, 112, 134)");
+  await expect(deleteButton).toHaveCSS("cursor", "not-allowed");
+
+  const invokeLog = await getInvokeLog(page);
+  expect(invokeLog).not.toContain("save_profiles");
 });
 
 test("Profiles tab uses Active Profile selector only and shows config.toml hint", async ({
@@ -398,6 +418,86 @@ test("Profiles API key value with underscores is persisted on save_profiles", as
   const ai = defaultProfile?.ai as Record<string, unknown>;
 
   expect(ai?.api_key).toBe(apiKeyValue);
+});
+
+test("Profiles API key peek and copy buttons appear after typing", async ({
+  page,
+}) => {
+  const profilesWithAi = {
+    ...profilesFixture,
+    profiles: {
+      ...profilesFixture.profiles,
+      default: {
+        ...profilesFixture.profiles.default,
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "",
+          model: "",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeHidden();
+  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeHidden();
+  await apiKeyInput.fill("sk-typed-key");
+
+  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeVisible();
+  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeVisible();
+});
+
+test("Profiles API key typed value is sent to list_ai_models on Refresh", async ({
+  page,
+}) => {
+  const profilesWithAi = {
+    ...profilesFixture,
+    profiles: {
+      ...profilesFixture.profiles,
+      default: {
+        ...profilesFixture.profiles.default,
+        ai_enabled: true,
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "",
+          model: "",
+          language: "en",
+          summary_enabled: true,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+
+  await page
+    .getByRole("button", { name: "Profiles", exact: true })
+    .click();
+
+  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
+  const apiKeyInput = apiKeyField.locator("input").first();
+  await apiKeyInput.fill("sk-refresh-check-123");
+
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await waitForInvokeCommand(page, "list_ai_models");
+
+  const args = await getInvokeArgs(page, "list_ai_models");
+  expect(args).toMatchObject({
+    endpoint: "https://api.openai.com/v1",
+    apiKey: "sk-refresh-check-123",
+  });
 });
 
 test("UI Font Family selector shows presets", async ({ page }) => {

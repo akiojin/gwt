@@ -11,6 +11,7 @@
     UI_FONT_PRESETS,
     TERMINAL_FONT_PRESETS,
     getCurrentProfile,
+    isDefaultProfileKey,
     isAiEnabled,
     toErrorMessage,
     detectGpuAvailability,
@@ -60,6 +61,9 @@
   let savedTerminalFontFamily: string = $state(
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace'
   );
+  let apiKeyDraft: string = $state("");
+  let apiKeyDraftProfileKey: string = $state("");
+  let apiKeyDraftSourceValue: string = $state("");
   let peekingApiKey: boolean = $state(false);
   let apiKeyCopied: boolean = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -79,7 +83,7 @@
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     if (!profileKey || !ai || !endpoint) return "";
-    const apiKey = ai?.api_key?.trim() ?? "";
+    const apiKey = apiKeyDraft.trim();
     return `${profileKey}::${endpoint}::${apiKey}`;
   });
   let aiModelOptions = $derived.by(() => {
@@ -96,6 +100,7 @@
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
+  let defaultProfileSelected = $derived(isDefaultProfileKey(selectedProfileKey));
 
   function resetAiModelsState() {
     aiModelsRequestSeq += 1;
@@ -103,6 +108,15 @@
     aiModelsLoading = false;
     aiModelsError = null;
     aiModelsLoadedKey = "";
+  }
+
+  function resetApiKeyUiState() {
+    peekingApiKey = false;
+    apiKeyCopied = false;
+    if (copyTimer !== null) {
+      clearTimeout(copyTimer);
+      copyTimer = null;
+    }
   }
 
   $effect(() => {
@@ -160,6 +174,18 @@
     };
   });
 
+  $effect(() => {
+    const profileKey = selectedProfileKey.trim();
+    const nextValue = currentProfile?.ai?.api_key ?? "";
+    if (profileKey === apiKeyDraftProfileKey && nextValue === apiKeyDraftSourceValue) {
+      return;
+    }
+    apiKeyDraftProfileKey = profileKey;
+    apiKeyDraftSourceValue = nextValue;
+    apiKeyDraft = nextValue;
+    resetApiKeyUiState();
+  });
+
   async function handleSetupVoiceRuntime() {
     voiceRuntimeSettingUp = true;
     voiceSetupMessage = null;
@@ -196,11 +222,6 @@
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
-
-    // Reset peek/copy state on profile switch
-    peekingApiKey = false;
-    apiKeyCopied = false;
-    if (copyTimer !== null) { clearTimeout(copyTimer); copyTimer = null; }
 
     if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
       if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
@@ -259,6 +280,7 @@
 
     try {
       const { invoke } = await import("$lib/tauriInvoke");
+      // The Tauri command accepts a camelCase request payload.
       const models = await invoke<AIModelInfo[]>("list_ai_models", {
         endpoint,
         apiKey,
@@ -288,7 +310,7 @@
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
-    const apiKey = ai?.api_key?.trim() ?? "";
+    const apiKey = apiKeyDraft.trim();
     if (!profileKey || !ai || !endpoint || !isAiEnabled(currentProfile)) {
       aiModelsError = "Endpoint is required.";
       return;
@@ -353,7 +375,7 @@
       const { invoke } = await import("$lib/tauriInvoke");
       await invoke("save_settings", { settings });
       if (profiles) {
-        await invoke("save_profiles", { config: profiles });
+        await invoke("save_profiles", { config: buildProfilesConfigWithApiKeyDraft() });
       }
       settings.app_language = normalizeAppLanguage(settings.app_language);
       saveMessage = "Settings saved.";
@@ -490,6 +512,7 @@
   function deleteSelectedProfile() {
     if (!profiles) return;
     if (!selectedProfileKey) return;
+    if (isDefaultProfileKey(selectedProfileKey)) return;
     const copy = { ...(profiles.profiles ?? {}) };
     if (!copy[selectedProfileKey]) return;
     delete copy[selectedProfileKey];
@@ -559,8 +582,36 @@
     };
   }
 
+  function buildProfilesConfigWithApiKeyDraft(): ProfilesConfig {
+    if (!profiles) {
+      throw new Error("Profiles are not loaded");
+    }
+    const p = currentProfile;
+    if (!p || !selectedProfileKey) {
+      return profiles;
+    }
+    if (!p.ai && apiKeyDraft.length === 0) {
+      return profiles;
+    }
+
+    const nextAi = {
+      endpoint: p.ai?.endpoint ?? "",
+      api_key: apiKeyDraft,
+      model: p.ai?.model ?? "",
+      language: p.ai?.language ?? "en",
+      summary_enabled: p.ai?.summary_enabled ?? true,
+    } as NonNullable<Profile["ai"]>;
+    const nextProfile: Profile = { ...p, ai: nextAi };
+    const nextProfiles = {
+      ...profiles,
+      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
+    };
+    profiles = nextProfiles;
+    return nextProfiles;
+  }
+
   async function handleCopyApiKey() {
-    const key = currentProfile?.ai?.api_key ?? "";
+    const key = apiKeyDraft;
     if (!key) return;
     try {
       await navigator.clipboard.writeText(key);
@@ -576,6 +627,11 @@
 
   function stopApiKeyPeek() {
     peekingApiKey = false;
+  }
+
+  function syncApiKeyDraftToProfile() {
+    apiKeyCopied = false;
+    updateAiField("api_key", apiKeyDraft);
   }
 
   function toggleApiKeyPeekFromNonPointerClick(event: MouseEvent) {
@@ -1024,7 +1080,11 @@
               </select>
               <span class="field-hint">Saved in ~/.gwt/config.toml ([profiles]).</span>
               <div class="row">
-                <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
+                <button
+                  class="btn btn-danger"
+                  onclick={deleteSelectedProfile}
+                  disabled={!profiles || !selectedProfileKey || defaultProfileSelected}
+                >
                   Delete Active Profile
                 </button>
               </div>
@@ -1119,7 +1179,7 @@
                   summary_enabled: true,
                 }}
                 {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
-                {@const hasApiKey = (currentAi?.api_key ?? "").length > 0}
+                {@const hasApiKey = apiKeyDraft.length > 0}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
@@ -1143,14 +1203,16 @@
                         autocorrect="off"
                         autocomplete="off"
                         spellcheck="false"
-                        value={currentAi?.api_key ?? ""}
-                        oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
+                        bind:value={apiKeyDraft}
+                        oninput={syncApiKeyDraftToProfile}
+                        onchange={syncApiKeyDraftToProfile}
                       />
-                      {#if hasApiKey}
+                      <div class="ai-apikey-actions" class:hidden={!hasApiKey}>
                         <button
                           type="button"
                           class="btn btn-ghost btn-icon btn-peek-apikey"
                           class:peeking={peekingApiKey}
+                          disabled={!hasApiKey}
                           onmousedown={startApiKeyPeek}
                           onmouseup={stopApiKeyPeek}
                           onmouseleave={stopApiKeyPeek}
@@ -1171,6 +1233,7 @@
                           type="button"
                           class="btn btn-ghost btn-icon btn-copy-apikey"
                           class:copied={apiKeyCopied}
+                          disabled={!hasApiKey}
                           onclick={handleCopyApiKey}
                           title={apiKeyCopied ? "Copied!" : "Copy API Key"}
                           aria-label={apiKeyCopied ? "Copied!" : "Copy API Key"}
@@ -1180,7 +1243,7 @@
                             <rect class="copy-front" x="9" y="8" width="10" height="12" rx="1.8"></rect>
                           </svg>
                         </button>
-                      {/if}
+                      </div>
                     </div>
                   </div>
                   <div class="ai-field">
@@ -1534,6 +1597,16 @@
 
   .ai-apikey-row input { flex: 1; min-width: 0; }
   .ai-apikey-row input.api-key-masked { -webkit-text-security: disc; }
+  .ai-apikey-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .ai-apikey-actions.hidden {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
 
   .btn-icon {
     width: 32px;
@@ -1749,6 +1822,13 @@
 
   .btn-danger:hover:not(:disabled) {
     filter: brightness(1.05);
+  }
+
+  .btn-danger:disabled {
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    cursor: not-allowed;
+    filter: none;
   }
 
   .btn-ghost {

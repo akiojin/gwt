@@ -78,6 +78,14 @@ const latestPrFixture = {
   url: "https://github.com/test/repo/pull/42",
 };
 
+const prPreflightFixture = {
+  baseBranch: "develop",
+  aheadBy: 0,
+  behindBy: 2,
+  status: "behind",
+  blockingReason: "Branch update required before creating a PR.",
+};
+
 const prDetailFixture = {
   number: 42,
   title: "CI Test PR",
@@ -1162,6 +1170,63 @@ describe("WorktreeSummaryPanel", () => {
 
     await waitFor(() => {
       expect(rendered.getByText("No PR")).toBeTruthy();
+    });
+  });
+
+  it("loads branch PR preflight and shows blocking banner when no PR exists yet", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "fetch_branch_pr_preflight") return prPreflightFixture;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("fetch_branch_pr_preflight", {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+      });
+      expect(rendered.container.textContent).toContain(
+        "Branch update required before creating a PR."
+      );
+    });
+  });
+
+  it("shows branch preflight error in PR tab when preflight lookup fails", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "fetch_branch_pr_preflight") throw new Error("sync lookup failed");
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.container.textContent).toContain("Failed to check branch sync");
+      expect(rendered.container.textContent).toContain("No PR");
     });
   });
 

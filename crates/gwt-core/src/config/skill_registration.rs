@@ -15,14 +15,7 @@ use tracing::{info, warn};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-/// Managed skill bundle definition for Codex/Gemini.
-#[derive(Debug, Clone, Copy)]
-struct ManagedSkill {
-    name: &'static str,
-    body: &'static str,
-}
-
-/// Managed file asset definition for Claude project-local assets.
+/// Managed file asset definition for project-local agent assets.
 #[derive(Debug, Clone, Copy)]
 struct ManagedAsset {
     relative_path: &'static str,
@@ -31,43 +24,127 @@ struct ManagedAsset {
     rewrite_for_project: bool,
 }
 
-const PTY_COMMUNICATION_SKILL: ManagedSkill = ManagedSkill {
-    name: "gwt-pty-communication",
-    body: include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/gwt/skills/gwt-pty-communication/SKILL.md"
-    )),
-};
+#[cfg(test)]
+const MANAGED_SKILL_NAMES: &[&str] = &[
+    "gwt-fix-issue",
+    "gwt-fix-pr",
+    "gwt-issue-spec-ops",
+    "gwt-pr",
+    "gwt-pr-check",
+    "gwt-project-index",
+    "gwt-pty-communication",
+    "gwt-spec-to-issue-migration",
+];
 
-const ISSUE_SPEC_SKILL: ManagedSkill = ManagedSkill {
-    name: "gwt-issue-spec-ops",
-    body: include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md"
-    )),
-};
-
-const PROJECT_INDEX_SKILL: ManagedSkill = ManagedSkill {
-    name: "gwt-project-index",
-    body: include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/gwt/skills/gwt-project-index/SKILL.md"
-    )),
-};
-
-const SPEC_TO_ISSUE_MIGRATION_SKILL: ManagedSkill = ManagedSkill {
-    name: "gwt-spec-to-issue-migration",
-    body: include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/SKILL.md"
-    )),
-};
-
-const MANAGED_SKILLS: &[ManagedSkill] = &[
-    PTY_COMMUNICATION_SKILL,
-    ISSUE_SPEC_SKILL,
-    PROJECT_INDEX_SKILL,
-    SPEC_TO_ISSUE_MIGRATION_SKILL,
+const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
+    ManagedAsset {
+        relative_path: "skills/gwt-fix-issue/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-fix-issue/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-fix-issue/scripts/inspect_issue.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-fix-issue/scripts/inspect_issue.py"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-fix-pr/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-fix-pr/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-fix-pr/scripts/inspect_pr_checks.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-fix-pr/scripts/inspect_pr_checks.py"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-issue-spec-ops/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-pr/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pr/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-pr/references/pr-body-template.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pr/references/pr-body-template.md"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-pr-check/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pr-check/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-project-index/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-project-index/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-pty-communication/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pty-communication/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-to-issue-migration/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh"
+        )),
+        executable: true,
+        rewrite_for_project: false,
+    },
 ];
 
 const CLAUDE_HOOKS_JSON_TEMPLATE: &str = include_str!(concat!(
@@ -211,117 +288,6 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
     },
 ];
 
-const CLAUDE_SKILL_ASSETS: &[ManagedAsset] = &[
-    ManagedAsset {
-        relative_path: "skills/gwt-fix-issue/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-issue/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-fix-issue/scripts/inspect_issue.py",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-issue/scripts/inspect_issue.py"
-        )),
-        executable: false,
-        rewrite_for_project: false,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/LICENSE.txt",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/LICENSE.txt"
-        )),
-        executable: false,
-        rewrite_for_project: false,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/scripts/inspect_pr_checks.py",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/scripts/inspect_pr_checks.py"
-        )),
-        executable: false,
-        rewrite_for_project: false,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-issue-spec-ops/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-pr/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-pr/references/pr-body-template.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr/references/pr-body-template.md"
-        )),
-        executable: false,
-        rewrite_for_project: false,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-pr-check/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr-check/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-project-index/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-project-index/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-pty-communication/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pty-communication/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-spec-to-issue-migration/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-];
-
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
 const SKILLS_PATH_UNAVAILABLE_CODE: &str = "SKILLS_PATH_UNAVAILABLE";
 const SCOPE_NOT_CONFIGURED_MESSAGE: &str =
@@ -414,16 +380,20 @@ impl Default for SkillRegistrationStatus {
 
 fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
     match agent {
-        SkillAgentType::Claude => vec![
-            ".claude/hooks/hooks.json".to_string(),
-            ".claude/commands/gwt-pr.md".to_string(),
-            ".claude/skills/gwt-pty-communication/SKILL.md".to_string(),
-            ".claude/settings.json hooks".to_string(),
-        ],
-        SkillAgentType::Codex | SkillAgentType::Gemini => {
-            MANAGED_SKILLS.iter().map(|s| s.name.to_string()).collect()
-        }
+        SkillAgentType::Claude => all_claude_assets()
+            .map(|asset| format!(".claude/{}", asset.relative_path))
+            .chain(std::iter::once(".claude/settings.json hooks".to_string()))
+            .collect(),
+        SkillAgentType::Codex => project_asset_missing_items(".codex"),
+        SkillAgentType::Gemini => project_asset_missing_items(".gemini"),
     }
+}
+
+fn project_asset_missing_items(agent_root_name: &str) -> Vec<String> {
+    PROJECT_SKILL_ASSETS
+        .iter()
+        .map(|asset| format!("{agent_root_name}/{}", asset.relative_path))
+        .collect()
 }
 
 fn skills_root_for(agent: SkillAgentType, project_root: Option<&Path>) -> Option<PathBuf> {
@@ -435,6 +405,19 @@ fn skills_root_for(agent: SkillAgentType, project_root: Option<&Path>) -> Option
     }
 }
 
+fn agent_root_name(agent: SkillAgentType) -> &'static str {
+    match agent {
+        SkillAgentType::Claude => ".claude",
+        SkillAgentType::Codex => ".codex",
+        SkillAgentType::Gemini => ".gemini",
+    }
+}
+
+fn agent_root_for(agent: SkillAgentType, project_root: Option<&Path>) -> Option<PathBuf> {
+    let project_root = project_root?;
+    Some(project_root.join(agent_root_name(agent)))
+}
+
 fn claude_root_for(project_root: Option<&Path>) -> Option<PathBuf> {
     project_root.map(|root| root.join(".claude"))
 }
@@ -443,33 +426,22 @@ fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
     claude_root_for(project_root).map(|root| root.join("settings.json"))
 }
 
+#[cfg(test)]
 fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
-    std::fs::create_dir_all(root).map_err(|e| GwtError::ConfigWriteError {
-        reason: format!("Failed to create skills root {}: {}", root.display(), e),
-    })?;
-
-    for skill in MANAGED_SKILLS {
-        let dir = root.join(skill.name);
-        std::fs::create_dir_all(&dir).map_err(|e| GwtError::ConfigWriteError {
-            reason: format!("Failed to create skill directory {}: {}", dir.display(), e),
-        })?;
-
-        let skill_file = dir.join("SKILL.md");
-        std::fs::write(&skill_file, skill.body).map_err(|e| GwtError::ConfigWriteError {
-            reason: format!("Failed to write skill file {}: {}", skill_file.display(), e),
-        })?;
-    }
-
-    Ok(())
+    write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")
 }
 
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
     let root = project_root.join(".claude");
+    let settings_path = root.join("settings.json");
 
-    for asset in all_claude_assets() {
-        write_claude_asset(&root, asset)?;
+    if super::claude_plugins::is_plugin_enabled_in_settings(&settings_path) {
+        cleanup_claude_duplicate_assets(&root)?;
+        let _ = super::claude_hooks::unregister_gwt_hooks(&settings_path);
+        return Ok(());
     }
 
+    write_managed_assets(&root, all_claude_assets(), ".claude")?;
     merge_managed_claude_hooks_into_settings(&root)
 }
 
@@ -477,33 +449,53 @@ fn all_claude_assets() -> impl Iterator<Item = &'static ManagedAsset> {
     CLAUDE_COMMAND_ASSETS
         .iter()
         .chain(CLAUDE_HOOK_ASSETS.iter())
-        .chain(CLAUDE_SKILL_ASSETS.iter())
+        .chain(PROJECT_SKILL_ASSETS.iter())
 }
 
-fn write_claude_asset(root: &Path, asset: &ManagedAsset) -> Result<(), GwtError> {
+fn write_managed_assets<'a>(
+    root: &Path,
+    assets: impl Iterator<Item = &'a ManagedAsset>,
+    root_name: &str,
+) -> Result<(), GwtError> {
+    std::fs::create_dir_all(root).map_err(|e| GwtError::ConfigWriteError {
+        reason: format!(
+            "Failed to create agent asset root {}: {}",
+            root.display(),
+            e
+        ),
+    })?;
+
+    for asset in assets {
+        write_managed_asset(root, asset, root_name)?;
+    }
+
+    Ok(())
+}
+
+fn write_managed_asset(root: &Path, asset: &ManagedAsset, root_name: &str) -> Result<(), GwtError> {
     let path = root.join(asset.relative_path);
     let Some(parent) = path.parent() else {
         return Err(GwtError::ConfigWriteError {
-            reason: format!("Invalid Claude asset path: {}", path.display()),
+            reason: format!("Invalid managed asset path: {}", path.display()),
         });
     };
 
     std::fs::create_dir_all(parent).map_err(|e| GwtError::ConfigWriteError {
         reason: format!(
-            "Failed to create Claude asset directory {}: {}",
+            "Failed to create managed asset directory {}: {}",
             parent.display(),
             e
         ),
     })?;
 
     let content = if asset.rewrite_for_project {
-        rewrite_claude_asset_content(asset.body)
+        rewrite_project_asset_content(asset.body, root_name)
     } else {
         asset.body.to_string()
     };
 
     std::fs::write(&path, content).map_err(|e| GwtError::ConfigWriteError {
-        reason: format!("Failed to write Claude asset {}: {}", path.display(), e),
+        reason: format!("Failed to write managed asset {}: {}", path.display(), e),
     })?;
 
     #[cfg(unix)]
@@ -527,15 +519,48 @@ fn write_claude_asset(root: &Path, asset: &ManagedAsset) -> Result<(), GwtError>
     Ok(())
 }
 
-fn rewrite_claude_asset_content(content: &str) -> String {
+fn cleanup_claude_duplicate_assets(root: &Path) -> Result<(), GwtError> {
+    for asset in CLAUDE_COMMAND_ASSETS
+        .iter()
+        .chain(PROJECT_SKILL_ASSETS.iter())
+        .chain(CLAUDE_HOOK_ASSETS.iter())
+    {
+        let path = root.join(asset.relative_path);
+        if !path.exists() {
+            continue;
+        }
+
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to remove Claude duplicate directory {}: {}",
+                    path.display(),
+                    e
+                ),
+            })?;
+        } else {
+            std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to remove Claude duplicate asset {}: {}",
+                    path.display(),
+                    e
+                ),
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn rewrite_project_asset_content(content: &str, root_name: &str) -> String {
     content
-        .replace("${CLAUDE_PLUGIN_ROOT}", ".claude")
-        .replace("$CLAUDE_PLUGIN_ROOT", ".claude")
-        .replace("`skills/", "`.claude/skills/")
+        .replace("${CLAUDE_PLUGIN_ROOT}", root_name)
+        .replace("$CLAUDE_PLUGIN_ROOT", root_name)
+        .replace("`skills/", &format!("`{root_name}/skills/"))
 }
 
 fn managed_hooks_definition() -> Result<Value, GwtError> {
-    let rendered = rewrite_claude_asset_content(CLAUDE_HOOKS_JSON_TEMPLATE);
+    let rendered = rewrite_project_asset_content(CLAUDE_HOOKS_JSON_TEMPLATE, ".claude");
     serde_json::from_str::<Value>(&rendered).map_err(|e| GwtError::ConfigParseError {
         reason: format!("Failed to parse managed Claude hooks template: {e}"),
     })
@@ -810,8 +835,8 @@ fn event_contains_hook_command(value: &Value, command: &str) -> bool {
 /// Remove managed skill directories for one agent at the given root.
 #[cfg(test)]
 fn unregister_agent_skills_at(root: &Path) {
-    for skill in MANAGED_SKILLS {
-        let dir = root.join(skill.name);
+    for skill_name in MANAGED_SKILL_NAMES {
+        let dir = root.join("skills").join(skill_name);
         if dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&dir) {
                 warn!(
@@ -875,12 +900,12 @@ pub fn register_agent_skills_with_settings_at_project_root(
     match agent {
         SkillAgentType::Claude => register_claude_assets_at(project_root),
         SkillAgentType::Codex | SkillAgentType::Gemini => {
-            let Some(root) = skills_root_for(agent, Some(project_root)) else {
+            let Some(root) = agent_root_for(agent, Some(project_root)) else {
                 return Err(GwtError::ConfigWriteError {
-                    reason: format!("{} skills path could not be resolved.", agent.label()),
+                    reason: format!("{} asset root could not be resolved.", agent.label()),
                 });
             };
-            register_agent_skills_at(&root)
+            write_managed_assets(&root, PROJECT_SKILL_ASSETS.iter(), agent_root_name(agent))
         }
     }
 }
@@ -937,18 +962,24 @@ fn status_for(
         return status_for_claude(Some(project_root));
     }
 
-    let root = skills_root_for(agent, Some(project_root));
-    let skills_path = root.as_ref().map(|p| p.to_string_lossy().to_string());
+    let root = agent_root_for(agent, Some(project_root));
+    let skills_path = skills_root_for(agent, Some(project_root))
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
 
     let Some(root) = root else {
         return path_unavailable_status(agent, "Skills path could not be resolved.", skills_path);
     };
 
     let mut missing = Vec::new();
-    for skill in MANAGED_SKILLS {
-        let skill_file = root.join(skill.name).join("SKILL.md");
-        if !skill_file.exists() {
-            missing.push(skill.name.to_string());
+    for asset in PROJECT_SKILL_ASSETS {
+        let asset_path = root.join(asset.relative_path);
+        if !asset_path.exists() {
+            missing.push(format!(
+                "{}/{}",
+                agent_root_name(agent),
+                asset.relative_path
+            ));
         }
     }
 
@@ -962,12 +993,16 @@ fn status_for(
         error_code: if registered {
             None
         } else {
-            Some("SKILLS_MISSING".to_string())
+            Some("PROJECT_ASSETS_MISSING".to_string())
         },
         error_message: if registered {
             None
         } else {
-            Some(format!("Missing skills: {}", missing.join(", ")))
+            Some(format!(
+                "{} project assets are incomplete: {}",
+                agent.label(),
+                missing.join(", ")
+            ))
         },
     }
 }
@@ -986,6 +1021,20 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         );
     };
 
+    let settings_path =
+        claude_settings_path_for(project_root).unwrap_or_else(|| claude_root.join("settings.json"));
+    if super::claude_plugins::is_plugin_enabled_in_settings(&settings_path) {
+        return SkillAgentRegistrationStatus {
+            agent_id: SkillAgentType::Claude.id().to_string(),
+            label: SkillAgentType::Claude.label().to_string(),
+            skills_path,
+            registered: true,
+            missing_skills: Vec::new(),
+            error_code: None,
+            error_message: None,
+        };
+    }
+
     let mut missing_items = Vec::new();
 
     for asset in all_claude_assets() {
@@ -995,8 +1044,6 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         }
     }
 
-    let settings_path =
-        claude_settings_path_for(project_root).unwrap_or_else(|| claude_root.join("settings.json"));
     if !settings_path.exists() {
         missing_items.push(".claude/settings.json".to_string());
     } else {
@@ -1120,18 +1167,31 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         register_agent_skills_at(tmp.path()).unwrap();
 
-        for skill in MANAGED_SKILLS {
-            let path = tmp.path().join(skill.name).join("SKILL.md");
+        for skill_name in MANAGED_SKILL_NAMES {
+            let path = tmp.path().join("skills").join(skill_name).join("SKILL.md");
             assert!(path.exists(), "{} should exist", path.display());
         }
+
+        assert!(tmp
+            .path()
+            .join("skills")
+            .join("gwt-pr")
+            .join("references")
+            .join("pr-body-template.md")
+            .exists());
+        assert!(tmp
+            .path()
+            .join("skills")
+            .join("gwt-spec-to-issue-migration")
+            .join("scripts")
+            .join("migrate-specs-to-issues.sh")
+            .exists());
     }
 
     #[test]
     fn managed_skills_include_spec_to_issue_migration() {
         assert!(
-            MANAGED_SKILLS
-                .iter()
-                .any(|skill| skill.name == "gwt-spec-to-issue-migration"),
+            MANAGED_SKILL_NAMES.contains(&"gwt-spec-to-issue-migration"),
             "managed skills must include gwt-spec-to-issue-migration"
         );
     }
@@ -1246,22 +1306,39 @@ mod tests {
 
         register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
 
-        for skill in MANAGED_SKILLS {
+        for skill_name in MANAGED_SKILL_NAMES {
             assert!(temp
                 .path()
                 .join(".codex")
                 .join("skills")
-                .join(skill.name)
+                .join(skill_name)
                 .join("SKILL.md")
                 .exists());
             assert!(temp
                 .path()
                 .join(".gemini")
                 .join("skills")
-                .join(skill.name)
+                .join(skill_name)
                 .join("SKILL.md")
                 .exists());
         }
+
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-pr")
+            .join("references")
+            .join("pr-body-template.md")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".gemini")
+            .join("skills")
+            .join("gwt-spec-to-issue-migration")
+            .join("scripts")
+            .join("migrate-specs-to-issues.sh")
+            .exists());
 
         assert!(temp
             .path()
@@ -1292,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_registration_rewrites_claude_plugin_root_references() {
+    fn registration_rewrites_project_root_references_for_all_agents() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
 
@@ -1322,6 +1399,125 @@ mod tests {
         )
         .unwrap();
         assert!(command_content.contains("`.claude/skills/gwt-pr/SKILL.md`"));
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+        let codex_skill_content = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-pr")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(!codex_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
+        assert!(codex_skill_content.contains(".codex/skills/gwt-pr/references/pr-body-template.md"));
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Gemini,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+        let gemini_skill_content = std::fs::read_to_string(
+            temp.path()
+                .join(".gemini")
+                .join("skills")
+                .join("gwt-spec-to-issue-migration")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(!gemini_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
+        assert!(gemini_skill_content.contains(
+            ".gemini/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh"
+        ));
+    }
+
+    #[test]
+    fn claude_registration_prefers_plugin_namespace_when_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        let claude_root = temp.path().join(".claude");
+        std::fs::create_dir_all(claude_root.join("commands")).unwrap();
+        std::fs::create_dir_all(claude_root.join("skills").join("gwt-pr")).unwrap();
+        std::fs::create_dir_all(claude_root.join("hooks")).unwrap();
+        std::fs::write(claude_root.join("commands").join("gwt-pr.md"), "legacy").unwrap();
+        std::fs::write(
+            claude_root.join("skills").join("gwt-pr").join("SKILL.md"),
+            "legacy",
+        )
+        .unwrap();
+        std::fs::write(claude_root.join("hooks").join("hooks.json"), "{}").unwrap();
+        std::fs::write(
+            claude_root.join("settings.json"),
+            serde_json::json!({
+                "enabledPlugins": {
+                    super::super::claude_plugins::GWT_PLUGIN_FULL_NAME: true
+                },
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": ".claude/hooks/scripts/forward-gwt-hook.sh UserPromptSubmit"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        assert!(!claude_root.join("commands").join("gwt-pr.md").exists());
+        assert!(!claude_root
+            .join("skills")
+            .join("gwt-pr")
+            .join("SKILL.md")
+            .exists());
+        assert!(!claude_root.join("hooks").join("hooks.json").exists());
+
+        let status = status_for_claude(Some(temp.path()));
+        assert!(status.registered);
+        assert!(status.missing_skills.is_empty());
+    }
+
+    #[test]
+    fn claude_registration_keeps_gwt_pr_branch_preflight_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let skill_content = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("gwt-pr")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+
+        assert!(skill_content.contains("git rev-list --left-right --count \"HEAD...origin/$base\""));
+        assert!(skill_content.contains("Branch update required before creating a PR."));
     }
 
     #[test]
@@ -1343,8 +1539,8 @@ mod tests {
 
         unregister_agent_skills_at(tmp.path());
 
-        for skill in MANAGED_SKILLS {
-            assert!(!tmp.path().join(skill.name).exists());
+        for skill_name in MANAGED_SKILL_NAMES {
+            assert!(!tmp.path().join("skills").join(skill_name).exists());
         }
     }
 
