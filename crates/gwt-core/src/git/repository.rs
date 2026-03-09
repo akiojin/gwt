@@ -5,6 +5,15 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
+/// Strip the Windows extended-length path prefix (`\\?\` or `//?/`)
+/// that `std::fs::canonicalize` adds.  Git may store these in worktree
+/// metadata, causing npm/Node.js to fail on RFC 8089 file URL construction.
+fn strip_extended_length_prefix(path: &str) -> &str {
+    path.strip_prefix("//?/")
+        .or_else(|| path.strip_prefix(r"\\?\"))
+        .unwrap_or(path)
+}
+
 /// Repository type classification (SPEC-a70a1ece)
 ///
 /// Represents the type of directory where gwt is launched.
@@ -677,7 +686,7 @@ impl Repository {
                     worktrees.push(wt);
                 }
                 current = Some(WorktreeInfo {
-                    path: PathBuf::from(path),
+                    path: PathBuf::from(strip_extended_length_prefix(path)),
                     head: String::new(),
                     branch: None,
                     is_bare: false,
@@ -1122,7 +1131,7 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
                 return path.to_path_buf();
             }
 
-            let common_path = PathBuf::from(&common_dir);
+            let common_path = PathBuf::from(strip_extended_length_prefix(&common_dir));
             if common_path.is_absolute() {
                 common_path
                     .parent()
@@ -1645,6 +1654,36 @@ mod tests {
             bare_name: None,
         };
         assert_eq!(ctx.format_display(), "/worktrees/feature-x [feature-x]");
+    }
+
+    // --- strip_extended_length_prefix ---
+
+    #[test]
+    fn strip_extended_length_prefix_removes_forward_slash_form() {
+        assert_eq!(
+            strip_extended_length_prefix("//?/E:/gwt/develop"),
+            "E:/gwt/develop"
+        );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_removes_backslash_form() {
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\E:\gwt\develop"),
+            r"E:\gwt\develop"
+        );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_preserves_normal_path() {
+        assert_eq!(
+            strip_extended_length_prefix("E:/gwt/develop"),
+            "E:/gwt/develop"
+        );
+        assert_eq!(
+            strip_extended_length_prefix("/unix/path"),
+            "/unix/path"
+        );
     }
 
     // --- RepoType equality ---
