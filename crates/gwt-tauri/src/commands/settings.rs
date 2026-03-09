@@ -77,7 +77,7 @@ pub struct SettingsData {
     pub agent_gemini_path: Option<String>,
     pub agent_auto_install_deps: bool,
     pub agent_github_project_id: Option<String>,
-    /// `Some(true)` = configured, `None` / `Some(false)` = not configured.
+    /// `Some(true)` = enabled, `Some(false)` = explicitly disabled, `None` = use default.
     #[serde(default)]
     pub agent_skill_registration_enabled: Option<bool>,
     pub docker_force_host: bool,
@@ -134,7 +134,13 @@ impl From<&Settings> for SettingsData {
                 .map(|p| p.to_string_lossy().to_string()),
             agent_auto_install_deps: s.agent.auto_install_deps,
             agent_github_project_id: s.agent.github_project_id.clone(),
-            agent_skill_registration_enabled: s.agent.skill_registration.as_ref().map(|_| true),
+            agent_skill_registration_enabled: Some(
+                s.agent
+                    .skill_registration
+                    .as_ref()
+                    .map(|prefs| prefs.enabled)
+                    .unwrap_or(true),
+            ),
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
@@ -177,10 +183,9 @@ impl SettingsData {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
-        s.agent.skill_registration = if self.agent_skill_registration_enabled == Some(true) {
-            Some(SkillRegistrationPreferences::default())
-        } else {
-            None
+        s.agent.skill_registration = match self.agent_skill_registration_enabled {
+            Some(false) => Some(SkillRegistrationPreferences { enabled: false }),
+            _ => Some(SkillRegistrationPreferences::default()),
         };
 
         s.docker.force_host = self.docker_force_host;
@@ -354,7 +359,7 @@ mod tests {
         assert_eq!(data.voice_input.quality, "accurate");
         assert_eq!(data.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
         assert_eq!(data.default_shell, Some("powershell".to_string()));
-        assert_eq!(data.agent_skill_registration_enabled, None);
+        assert_eq!(data.agent_skill_registration_enabled, Some(true));
         let back = data.to_settings().unwrap();
         assert_eq!(back.appearance.ui_font_size, 16);
         assert_eq!(back.appearance.terminal_font_size, 20);
@@ -423,12 +428,16 @@ mod tests {
     #[test]
     fn test_settings_data_skill_registration_disabled_round_trip() {
         let core = Settings::default();
-        // Default has no skill_registration
         let data = SettingsData::from(&core);
-        assert_eq!(data.agent_skill_registration_enabled, None);
+        assert_eq!(data.agent_skill_registration_enabled, Some(true));
 
-        let back = data.to_settings().unwrap();
-        assert!(back.agent.skill_registration.is_none());
+        let mut disabled = data.clone();
+        disabled.agent_skill_registration_enabled = Some(false);
+        let back = disabled.to_settings().unwrap();
+        assert_eq!(
+            back.agent.skill_registration,
+            Some(SkillRegistrationPreferences { enabled: false })
+        );
     }
 
     #[test]

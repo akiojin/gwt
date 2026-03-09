@@ -1,6 +1,9 @@
 //! Project/repo management commands
 
 use crate::state::AppState;
+use gwt_core::config::{
+    repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
+};
 use gwt_core::git::{self, Branch};
 use gwt_core::migration::{
     derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig, MigrationState,
@@ -13,6 +16,7 @@ use std::{fs, io::Read};
 use tauri::Manager;
 use tauri::State;
 use tauri::{AppHandle, Emitter};
+use tracing::warn;
 use uuid::Uuid;
 
 /// Serializable project info for the frontend
@@ -108,6 +112,33 @@ fn canonical_project_identity(project_root: &Path) -> String {
         .unwrap_or_else(|_| project_root.to_path_buf())
         .to_string_lossy()
         .to_string()
+}
+
+fn refresh_skill_registration_for_project_root(
+    state: &AppState,
+    settings: &Settings,
+    project_root: &Path,
+) -> SkillRegistrationStatus {
+    let status =
+        repair_skill_registration_with_settings_at_project_root(settings, Some(project_root));
+    state.set_skill_registration_status(status.clone());
+    status
+}
+
+fn repair_project_skill_registration(state: &AppState, project_root: &Path) {
+    match Settings::load_global() {
+        Ok(settings) => {
+            let _ = refresh_skill_registration_for_project_root(state, &settings, project_root);
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                project_root = %project_root.display(),
+                "project open repair skipped: failed to load global settings"
+            );
+            state.set_skill_registration_status(Default::default());
+        }
+    }
 }
 
 pub(crate) fn resolve_repo_path_for_project_root(
@@ -269,6 +300,7 @@ pub fn open_project(
         ) {
             Ok(()) => {
                 state.push_window_focus(&current_window_label);
+                repair_project_skill_registration(&state, &project_root);
                 // Record to recent projects history
                 let _ = gwt_core::config::record_recent_project(&project_root_str);
 
@@ -745,6 +777,12 @@ pub fn cancel_quit_confirm(state: State<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::AppState;
+    use gwt_core::config::Settings;
+
+    fn init_test_git_dir(root: &Path) {
+        std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
+    }
 
     #[test]
     fn test_is_valid_github_repo_url_accepts_https() {
@@ -883,5 +921,30 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize");
         assert_eq!(value["action"], "focusedExisting");
         assert_eq!(value["focusedWindowLabel"], "project-2");
+    }
+
+    #[test]
+    fn refresh_skill_registration_for_project_root_repairs_assets_with_default_settings() {
+        let state = AppState::new();
+        let temp = tempfile::tempdir().unwrap();
+        init_test_git_dir(temp.path());
+        let settings = Settings::default();
+
+        let status = refresh_skill_registration_for_project_root(&state, &settings, temp.path());
+
+        assert_eq!(status.overall, "ok");
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-ops")
+            .join("SKILL.md")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-spec-ops.md")
+            .exists());
     }
 }
