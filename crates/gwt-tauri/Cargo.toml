@@ -32,6 +32,7 @@ uuid.workspace = true
 chrono.workspace = true
 directories.workspace = true
 dirs.workspace = true
+dunce.workspace = true
 which = "8"
 reqwest.workspace = true
 tokio-tungstenite.workspace = true

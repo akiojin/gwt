@@ -963,7 +963,7 @@ impl Repository {
         })?;
 
         // gitdir — absolute path to the worktree's .git file (forward slashes for git)
-        let abs_git_file = std::fs::canonicalize(&git_file).unwrap_or_else(|_| git_file.clone());
+        let abs_git_file = dunce::canonicalize(&git_file).unwrap_or_else(|_| git_file.clone());
         let gitdir_content = abs_git_file.to_string_lossy().replace('\\', "/");
         std::fs::write(meta_dir.join("gitdir"), format!("{}\n", gitdir_content)).map_err(|e| {
             GwtError::GitOperationFailed {
@@ -1302,13 +1302,9 @@ mod tests {
         let worktrees = repo.list_worktrees().unwrap();
         assert_eq!(worktrees.len(), 1);
         // macOS temp paths may appear as /var/... while git reports /private/var/... (canonical).
-        let expected = temp
-            .path()
-            .canonicalize()
+        let expected = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf());
-        let actual = worktrees[0]
-            .path
-            .canonicalize()
+        let actual = dunce::canonicalize(&worktrees[0].path)
             .unwrap_or_else(|_| worktrees[0].path.clone());
         assert_eq!(actual, expected);
     }

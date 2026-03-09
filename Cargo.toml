@@ -85,6 +85,9 @@ sha2 = "0.10"
 # Home directory
 dirs = "6"
 
+# Path canonicalization (UNC-free on Windows)
+dunce = "1"
+
 # System information
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 nvml-wrapper = "0.12"

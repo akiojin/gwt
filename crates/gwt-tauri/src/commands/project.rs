@@ -104,7 +104,7 @@ fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
 }
 
 fn canonical_project_identity(project_root: &Path) -> String {
-    std::fs::canonicalize(project_root)
+    dunce::canonicalize(project_root)
         .unwrap_or_else(|_| project_root.to_path_buf())
         .to_string_lossy()
         .to_string()

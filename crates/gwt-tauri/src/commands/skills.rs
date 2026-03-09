@@ -14,7 +14,7 @@ fn resolve_window_project_root(state: &AppState, window: &Window) -> Option<Path
         .ok()
         .and_then(|projects| projects.get(window.label()).cloned())?;
     let path = PathBuf::from(project_path);
-    Some(path.canonicalize().unwrap_or(path))
+    Some(dunce::canonicalize(&path).unwrap_or(path))
 }
 
 fn load_skill_registration_settings(command: &str) -> Result<Settings, StructuredError> {

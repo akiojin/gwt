@@ -2057,13 +2057,8 @@ another-pattern
 
         let exclude_path = git_path_for_project_root(&worktree_root, "info/exclude").unwrap();
         assert_eq!(
-            exclude_path.canonicalize().unwrap(),
-            repo_root
-                .join(".git")
-                .join("info")
-                .join("exclude")
-                .canonicalize()
-                .unwrap()
+            dunce::canonicalize(&exclude_path).unwrap(),
+            dunce::canonicalize(repo_root.join(".git").join("info").join("exclude")).unwrap()
         );
         let exclude = std::fs::read_to_string(exclude_path).unwrap();
         assert!(exclude.contains(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER));

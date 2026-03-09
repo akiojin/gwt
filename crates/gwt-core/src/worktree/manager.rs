@@ -125,7 +125,7 @@ impl WorktreeManager {
         }
 
         let target = path;
-        let target_canon = std::fs::canonicalize(target).ok();
+        let target_canon = dunce::canonicalize(target).ok();
 
         Ok(worktrees.into_iter().find(|wt| {
             if wt.path == target {
@@ -135,7 +135,7 @@ impl WorktreeManager {
             // On macOS (and some temp-dir setups), git may report a canonicalized path
             // (e.g., /private/var/...) while our callers hold a non-canonical alias
             // (e.g., /var/...). Fall back to canonical comparison when possible.
-            match (&target_canon, std::fs::canonicalize(&wt.path).ok()) {
+            match (&target_canon, dunce::canonicalize(&wt.path).ok()) {
                 (Some(a), Some(b)) => a == &b,
                 _ => false,
             }
@@ -151,12 +151,12 @@ impl WorktreeManager {
         // Check if this path is in the git worktree list
         let git_worktrees = self.repo.list_worktrees()?;
         let target = path;
-        let target_canon = std::fs::canonicalize(target).ok();
+        let target_canon = dunce::canonicalize(target).ok();
         let is_in_worktree_list = git_worktrees.iter().any(|info| {
             if info.path == target {
                 return true;
             }
-            match (&target_canon, std::fs::canonicalize(&info.path).ok()) {
+            match (&target_canon, dunce::canonicalize(&info.path).ok()) {
                 (Some(a), Some(b)) => a == &b,
                 _ => false,
             }
@@ -180,13 +180,13 @@ impl WorktreeManager {
     fn get_registered_worktree_by_path_basic(&self, path: &Path) -> Result<Option<Worktree>> {
         let git_worktrees = self.repo.list_worktrees()?;
         let target = path;
-        let target_canon = std::fs::canonicalize(target).ok();
+        let target_canon = dunce::canonicalize(target).ok();
 
         for info in git_worktrees {
             if info.path == target {
                 return Ok(Some(Worktree::from_git_info(&info)));
             }
-            match (&target_canon, std::fs::canonicalize(&info.path).ok()) {
+            match (&target_canon, dunce::canonicalize(&info.path).ok()) {
                 (Some(a), Some(b)) if a == &b => return Ok(Some(Worktree::from_git_info(&info))),
                 _ => {}
             }
@@ -1242,8 +1242,8 @@ fn current_worktree_metadata_name_for_repo(repo_root: &Path) -> Option<String> {
     let repo_common = rev_parse_path(repo_root, "--git-common-dir")?;
 
     let same_common = match (
-        std::fs::canonicalize(&cwd_common).ok(),
-        std::fs::canonicalize(&repo_common).ok(),
+        dunce::canonicalize(&cwd_common).ok(),
+        dunce::canonicalize(&repo_common).ok(),
     ) {
         (Some(a), Some(b)) => a == b,
         _ => cwd_common == repo_common,
@@ -1254,7 +1254,7 @@ fn current_worktree_metadata_name_for_repo(repo_root: &Path) -> Option<String> {
     }
 
     let git_dir = rev_parse_path(&cwd, "--git-dir")?;
-    let abs_git_dir = std::fs::canonicalize(&git_dir).unwrap_or(git_dir);
+    let abs_git_dir = dunce::canonicalize(&git_dir).unwrap_or(git_dir);
 
     // Linked worktrees use <common-dir>/worktrees/<name> as git-dir.
     let parent = abs_git_dir.parent()?;
@@ -1333,7 +1333,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn canonicalize_or_self(path: &Path) -> PathBuf {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
     fn run_git_in(dir: &Path, args: &[&str]) {
