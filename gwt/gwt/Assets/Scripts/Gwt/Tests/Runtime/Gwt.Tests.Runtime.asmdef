@@ -1,0 +1,30 @@
+{
+    "name": "Gwt.Tests.Runtime",
+    "rootNamespace": "Gwt.Tests.Runtime",
+    "references": [
+        "Gwt.Shared",
+        "Gwt.Core",
+        "Gwt.Agent",
+        "Gwt.Studio",
+        "Gwt.AI",
+        "Gwt.Infra",
+        "Gwt.Lifecycle",
+        "UniTask",
+        "Unity.TextMeshPro",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "VContainer.dll",
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

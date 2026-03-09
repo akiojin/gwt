@@ -1,0 +1,24 @@
+{
+    "name": "Gwt.Studio",
+    "rootNamespace": "Gwt.Studio",
+    "references": [
+        "Gwt.Shared",
+        "Gwt.Core",
+        "Gwt.Agent",
+        "UniTask",
+        "Unity.TextMeshPro",
+        "Unity.Localization",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "VContainer.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

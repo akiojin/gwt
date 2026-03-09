@@ -1,0 +1,20 @@
+{
+    "name": "Gwt.Core",
+    "rootNamespace": "Gwt.Core",
+    "references": [
+        "Gwt.Shared",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "VContainer.dll",
+        "Tomlyn.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

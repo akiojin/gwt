@@ -1,0 +1,20 @@
+{
+    "name": "Gwt.AI",
+    "rootNamespace": "Gwt.AI",
+    "references": [
+        "Gwt.Shared",
+        "Gwt.Core",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "VContainer.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

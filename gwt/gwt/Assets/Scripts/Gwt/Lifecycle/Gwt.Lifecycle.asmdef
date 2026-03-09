@@ -1,0 +1,22 @@
+{
+    "name": "Gwt.Lifecycle",
+    "rootNamespace": "Gwt.Lifecycle",
+    "references": [
+        "Gwt.Shared",
+        "Gwt.Core",
+        "Gwt.Agent",
+        "Gwt.Studio",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "VContainer.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

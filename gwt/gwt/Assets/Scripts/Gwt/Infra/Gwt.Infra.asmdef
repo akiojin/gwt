@@ -1,0 +1,20 @@
+{
+    "name": "Gwt.Infra",
+    "rootNamespace": "Gwt.Infra",
+    "references": [
+        "Gwt.Shared",
+        "Gwt.Core",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "VContainer.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
