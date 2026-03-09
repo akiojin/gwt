@@ -883,7 +883,7 @@ mod tests {
         #[cfg(not(windows))]
         {
             assert!(
-                !candidates.iter().any(|candidate| *candidate == "py"),
+                !candidates.contains(&"py"),
                 "non-Windows candidates must not include py launcher"
             );
         }
