@@ -1,11 +1,11 @@
 ---
-name: gwt-fix-issue
-description: Analyze a GitHub Issue to extract error context, stack traces, file references, and cross-references. Classify the issue, search the codebase for relevant files, produce a structured Issue Analysis Report, and propose a concrete fix plan. Post progress updates to the issue.
+name: gwt-issue-ops
+description: Analyze a GitHub Issue, detect whether it is a spec issue or a regular work issue, route spec issues to gwt-spec-ops, and produce a concrete analysis/fix plan for non-spec issues.
 metadata:
-  short-description: Analyze GitHub Issues and propose fix plans
+  short-description: Analyze GitHub Issues and route spec issues correctly
 ---
 
-# Gh Fix Issue
+# Gh Issue Ops
 
 ## Overview
 
@@ -15,11 +15,14 @@ Use gh to inspect a GitHub Issue and:
 - Fetch all comments
 - Fetch linked PRs via timeline events
 - Extract error messages, stack traces, file references, code blocks, and cross-references
-- Classify issue type (BUG / FEATURE / ENHANCEMENT / DOCUMENTATION / QUESTION)
+- Detect whether the issue is a spec issue (`gwt-spec` label, `GWT_SPEC_ID` marker, or spec section structure)
+- Classify non-spec issue type (BUG / FEATURE / ENHANCEMENT / DOCUMENTATION / QUESTION)
 - Search the codebase for relevant files
 - Propose a fix plan with confidence levels
 
-Then produce a structured Issue Analysis Report, post progress to the issue, and implement fixes after explicit approval.
+If the issue is a spec issue, stop the generic issue workflow and switch to `gwt-spec-ops`.
+
+If the issue is not a spec issue, produce a structured Issue Analysis Report, post progress to the issue, and implement fixes after explicit approval.
 
 - Depends on the `plan` skill for drafting and approving the fix plan.
 
@@ -83,19 +86,19 @@ Next
 
 ```bash
 # Inspect issue (text output)
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "<number>"
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-ops/scripts/inspect_issue.py" --repo "." --issue "<number>"
 
 # Inspect issue by URL
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "https://github.com/org/repo/issues/123"
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-ops/scripts/inspect_issue.py" --repo "." --issue "https://github.com/org/repo/issues/123"
 
 # With focus area
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "<number>" --focus "src/lib"
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-ops/scripts/inspect_issue.py" --repo "." --issue "<number>" --focus "src/lib"
 
 # JSON output
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "<number>" --json
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-ops/scripts/inspect_issue.py" --repo "." --issue "<number>" --json
 
 # Limit comment length
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "<number>" --max-comment-length 500
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-ops/scripts/inspect_issue.py" --repo "." --issue "<number>" --max-comment-length 500
 ```
 
 ## Workflow
@@ -114,18 +117,22 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --
    - Classify the issue type.
    - Check file existence for extracted file references.
 
-4. **Classify the Issue.**
+4. **Route spec issues before generic issue analysis.**
+   - If labels include `gwt-spec`, or body contains `<!-- GWT_SPEC_ID:#... -->`, or the body clearly follows the `## Spec` / `## Plan` / `## Tasks` / `## TDD` structure, stop here.
+   - For routed issues, do not emit the generic Issue Analysis Report. Hand off to `gwt-spec-ops` with the issue number and current context.
+
+5. **Classify non-spec issues.**
    - Use labels (highest priority) and body/title heuristics.
    - Classification: BUG, FEATURE, ENHANCEMENT, DOCUMENTATION, QUESTION, UNCLASSIFIED.
    - BUG issues proceed to fix planning; FEATURE/ENHANCEMENT proceed to implementation planning.
 
-5. **Search the codebase for relevant context.**
+6. **Search the codebase for relevant context.**
    - Use extracted file references as starting points.
    - Search for error messages and symbols mentioned in the issue.
    - If `--focus` is provided, restrict search to that area.
    - Use Grep/Glob to find related files and definitions.
 
-6. **Produce Issue Analysis Report (mandatory format).**
+7. **Produce Issue Analysis Report for non-spec issues (mandatory format).**
 
    Output MUST use this exact structure:
 
@@ -223,17 +230,17 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-issue/scripts/inspect_issue.py" --
    - **Medium** — Error pattern matches but fix location needs investigation
    - **Low** — Requires design decision or the root cause is unclear
 
-7. **Decide execution path based on Confidence.**
+8. **Decide execution path based on Confidence.**
    - If ALL actionable items have Confidence: High → display report, propose plan, proceed after approval.
    - If ANY actionable item has Confidence: Low → request user guidance for low-confidence items before planning.
    - For FEATURE/ENHANCEMENT types → always create a plan and request approval.
 
-8. **Post progress comment to the Issue.**
+9. **Post progress comment to the Issue.**
    - Use the Issue Progress Comment Template.
    - Include analysis summary and planned actions.
    - Command: `gh issue comment <number> -b "<body>"`
 
-9. **Implement fixes after approval.**
+10. **Implement fixes after approval.**
    - Apply the approved fixes, summarize diffs/tests.
    - After applying fixes, commit changes and push.
    - Create or update a PR linking to the issue (e.g., `Fixes #<number>`).

@@ -27,7 +27,7 @@ struct ManagedAsset {
 
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
-    "gwt-fix-issue",
+    "gwt-issue-ops",
     "gwt-fix-pr",
     "gwt-spec-ops",
     "gwt-pr",
@@ -39,19 +39,19 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
 
 const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
-        relative_path: "skills/gwt-fix-issue/SKILL.md",
+        relative_path: "skills/gwt-issue-ops/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-issue/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-issue-ops/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-issue/scripts/inspect_issue.py",
+        relative_path: "skills/gwt-issue-ops/scripts/inspect_issue.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-issue/scripts/inspect_issue.py"
+            "/../../plugins/gwt/skills/gwt-issue-ops/scripts/inspect_issue.py"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -166,10 +166,10 @@ const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
 
 const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
-        relative_path: "commands/gwt-fix-issue.md",
+        relative_path: "commands/gwt-issue-ops.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-fix-issue.md"
+            "/../../plugins/gwt/commands/gwt-issue-ops.md"
         )),
         executable: false,
         rewrite_for_project: true,
