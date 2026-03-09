@@ -3,16 +3,14 @@
     "rootNamespace": "Gwt.Core",
     "references": [
         "Gwt.Shared",
+        "VContainer",
         "UniTask"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
-    "overrideReferences": true,
-    "precompiledReferences": [
-        "VContainer.dll",
-        "Tomlyn.dll"
-    ],
+    "overrideReferences": false,
+    "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
     "versionDefines": [],

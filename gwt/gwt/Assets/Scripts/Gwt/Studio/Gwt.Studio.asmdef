@@ -5,6 +5,7 @@
         "Gwt.Shared",
         "Gwt.Core",
         "Gwt.Agent",
+        "VContainer",
         "UniTask",
         "Unity.TextMeshPro",
         "Unity.Localization",
@@ -13,10 +14,8 @@
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
-    "overrideReferences": true,
-    "precompiledReferences": [
-        "VContainer.dll"
-    ],
+    "overrideReferences": false,
+    "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
     "versionDefines": [],

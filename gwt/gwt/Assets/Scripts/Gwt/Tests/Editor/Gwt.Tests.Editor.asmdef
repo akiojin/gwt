@@ -9,6 +9,7 @@
         "Gwt.AI",
         "Gwt.Infra",
         "Gwt.Lifecycle",
+        "VContainer",
         "UniTask"
     ],
     "includePlatforms": [
@@ -18,7 +19,6 @@
     "allowUnsafeCode": false,
     "overrideReferences": true,
     "precompiledReferences": [
-        "VContainer.dll",
         "nunit.framework.dll"
     ],
     "autoReferenced": false,
