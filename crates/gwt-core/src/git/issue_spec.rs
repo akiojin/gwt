@@ -700,15 +700,7 @@ fn gh_issue_edit(
     body: &str,
 ) -> Result<(), String> {
     let issue_number = issue_number.to_string();
-    let args = vec![
-        "issue",
-        "edit",
-        issue_number.as_str(),
-        "--title",
-        title,
-        "--body",
-        body,
-    ];
+    let args = build_issue_edit_args(issue_number.as_str(), title, body);
 
     let output = run_gh_output_with_repair(repo_path, args)
         .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
@@ -718,6 +710,20 @@ fn gh_issue_edit(
         return Err(format!("gh issue edit failed: {}", stderr.trim()));
     }
     Ok(())
+}
+
+fn build_issue_edit_args<'a>(issue_number: &'a str, title: &'a str, body: &'a str) -> Vec<&'a str> {
+    vec![
+        "issue",
+        "edit",
+        issue_number,
+        "--title",
+        title,
+        "--body",
+        body,
+        "--add-label",
+        SPEC_LABEL,
+    ]
 }
 
 #[derive(Debug, Clone)]
@@ -1375,6 +1381,13 @@ mod tests {
         let n = parse_issue_number_from_create_output("https://github.com/123/repo/issues/42")
             .expect("parse issue number");
         assert_eq!(n, 42);
+    }
+
+    #[test]
+    fn build_issue_edit_args_always_reapplies_spec_label() {
+        let args = build_issue_edit_args("42", "title", "body");
+        assert!(args.contains(&"--add-label"));
+        assert!(args.contains(&SPEC_LABEL));
     }
 
     #[test]

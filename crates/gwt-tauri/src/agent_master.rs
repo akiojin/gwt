@@ -654,15 +654,6 @@ fn extract_issue_number(input: &str) -> Option<u64> {
                 return Some(number);
             }
         }
-        let digits = token.trim_matches(|c: char| !c.is_ascii_digit());
-        if digits.is_empty() {
-            continue;
-        }
-        if digits.len() == token.len() {
-            if let Ok(number) = digits.parse::<u64>() {
-                return Some(number);
-            }
-        }
     }
     None
 }
@@ -1358,9 +1349,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_issue_number_parses_plain_number_token() {
+    fn extract_issue_number_ignores_plain_number_token() {
         let out = extract_issue_number("continue work on 1438 please");
-        assert_eq!(out, Some(1438));
+        assert_eq!(out, None);
     }
 
     #[test]
