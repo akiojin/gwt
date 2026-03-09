@@ -3,17 +3,21 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::process::command_os;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::warn;
+use uuid::Uuid;
 
 const CHROMA_VENV_DIR: &str = "chroma-venv";
 const CHROMA_RUNTIME_PIP_DEPS: &[&str] = &["chromadb"];
 const CHROMA_HELPER_SCRIPT: &str = include_str!("../python/chroma_index_runner.py");
 
 static CHROMA_RUNTIME_PROBE: Mutex<Option<Result<(), String>>> = Mutex::new(None);
+static PROJECT_INDEX_RECOVERY_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -207,9 +211,17 @@ fn run_chroma_runner(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mut exit_detail = format!("{}", output.status);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = output.status.signal() {
+                exit_detail.push_str(&format!(", signal={signal}"));
+            }
+        }
         return Err(format!(
             "Chroma helper failed (status={}): {}{}",
-            output.status,
+            exit_detail,
             if stderr.is_empty() {
                 "<no stderr>"
             } else {
@@ -354,8 +366,260 @@ fn db_path_for_project(project_root: &str) -> PathBuf {
     Path::new(project_root).join(".gwt").join("index")
 }
 
+fn is_recoverable_chroma_db_error(error: &str) -> bool {
+    let normalized = error.to_lowercase();
+    normalized.contains("signal=11")
+        || normalized.contains("sigsegv")
+        || normalized.contains("segmentation fault")
+        || normalized.contains("status=139")
+}
+
+fn quarantine_index_db(db_path: &Path) -> Result<PathBuf, String> {
+    if !db_path.exists() {
+        return Err(format!(
+            "Index database does not exist at {}",
+            db_path.to_string_lossy()
+        ));
+    }
+
+    let parent = db_path.parent().ok_or_else(|| {
+        format!(
+            "Index database has no parent: {}",
+            db_path.to_string_lossy()
+        )
+    })?;
+    let backup_path = parent.join(format!("index.crashed-{}", Uuid::new_v4()));
+
+    fs::rename(db_path, &backup_path).map_err(|e| {
+        format!(
+            "Failed to quarantine crashing index database {} -> {}: {e}",
+            db_path.to_string_lossy(),
+            backup_path.to_string_lossy()
+        )
+    })?;
+
+    Ok(backup_path)
+}
+
 fn repo_path_for_issue_index(project_root: &str) -> Result<PathBuf, String> {
     resolve_repo_path_for_project_root(Path::new(project_root))
+}
+
+fn chroma_db_contains_collection(
+    python: &Path,
+    db_sqlite_path: &Path,
+    collection_name: &str,
+) -> Result<bool, String> {
+    let output = command_os(python)
+        .arg("-c")
+        .arg(
+            "import sqlite3, sys; \
+             conn = sqlite3.connect(sys.argv[1]); \
+             cur = conn.cursor(); \
+             row = cur.execute('select 1 from collections where name = ? limit 1', (sys.argv[2],)).fetchone(); \
+             conn.close(); \
+             print('1' if row else '0')",
+        )
+        .arg(db_sqlite_path)
+        .arg(collection_name)
+        .output()
+        .map_err(|e| format!("Failed to inspect Chroma sqlite metadata: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to inspect Chroma sqlite metadata (status={}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "1")
+}
+
+fn rebuild_issue_index(
+    python: &Path,
+    project_root: &str,
+    db_path: &str,
+    explicit_repo_path: Option<&str>,
+) -> Result<ChromaRunnerResponse, String> {
+    let repo_path = match explicit_repo_path {
+        Some(path) => path.to_string(),
+        None => repo_path_for_issue_index(project_root)?
+            .to_string_lossy()
+            .to_string(),
+    };
+
+    run_chroma_runner(
+        python,
+        "index-issues",
+        Some(&repo_path),
+        Some(db_path),
+        None,
+        None,
+    )
+}
+
+fn project_index_recovery_lock(db_path: &Path) -> Arc<Mutex<()>> {
+    let cache = PROJECT_INDEX_RECOVERY_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    guard
+        .entry(db_path.to_string_lossy().to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn should_rebuild_issues_collection(
+    action: &str,
+    issues_collection_presence: Result<bool, String>,
+) -> bool {
+    if matches!(action, "index-issues" | "search-issues") {
+        return true;
+    }
+
+    match issues_collection_presence {
+        Ok(present) => present,
+        Err(probe_err) => {
+            warn!(
+                category = "project_index",
+                action = action,
+                error = %probe_err,
+                "Failed to inspect issues collection state before recovery; rebuilding issues index to avoid silent data loss"
+            );
+            true
+        }
+    }
+}
+
+fn run_project_index_action_with_crash_recovery(
+    action: &str,
+    project_root: &str,
+    explicit_repo_path: Option<&str>,
+    query: Option<&str>,
+    n_results: Option<u32>,
+) -> Result<ChromaRunnerResponse, String> {
+    let python = find_python_binary()?;
+    let db = db_path_for_project(project_root);
+    let db_path = db.to_string_lossy().to_string();
+
+    let run_primary = || match action {
+        "index" => run_chroma_runner(
+            &python,
+            "index",
+            Some(project_root),
+            Some(&db_path),
+            None,
+            None,
+        ),
+        "search" => run_chroma_runner(&python, "search", None, Some(&db_path), query, n_results),
+        "status" => run_chroma_runner(&python, "status", None, Some(&db_path), None, None),
+        "index-issues" => rebuild_issue_index(&python, project_root, &db_path, explicit_repo_path),
+        "search-issues" => run_chroma_runner(
+            &python,
+            "search-issues",
+            None,
+            Some(&db_path),
+            query,
+            n_results,
+        ),
+        _ => Err(format!(
+            "Unsupported Project Index action for crash recovery: {action}"
+        )),
+    };
+
+    match run_primary() {
+        Ok(resp) => Ok(resp),
+        Err(err) if is_recoverable_chroma_db_error(&err) => {
+            let recovery_lock = project_index_recovery_lock(&db);
+            let _guard = recovery_lock
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+
+            let err = match run_primary() {
+                Ok(resp) => return Ok(resp),
+                Err(retry_err) if db.exists() && is_recoverable_chroma_db_error(&retry_err) => {
+                    retry_err
+                }
+                Err(retry_err) => return Err(retry_err),
+            };
+
+            let issues_collection_presence =
+                chroma_db_contains_collection(&python, &db.join("chroma.sqlite3"), "issues");
+            let backup_path = quarantine_index_db(&db)?;
+            warn!(
+                category = "project_index",
+                action = action,
+                db_path = %db.display(),
+                backup_path = %backup_path.display(),
+                error = %err,
+                "Recovered from crashing Project Index database by quarantining the persisted database"
+            );
+
+            let rebuilt_files = run_chroma_runner(
+                &python,
+                "index",
+                Some(project_root),
+                Some(&db_path),
+                None,
+                None,
+            )
+            .map_err(|rebuild_err| {
+                format!(
+                    "Recovered crashing index at {} to {} but failed to rebuild files index: {}; original error: {}",
+                    db.display(),
+                    backup_path.display(),
+                    rebuild_err,
+                    err
+                )
+            })?;
+
+            let needs_issue_rebuild =
+                should_rebuild_issues_collection(action, issues_collection_presence);
+            let rebuilt_issues = if needs_issue_rebuild {
+                Some(
+                    rebuild_issue_index(&python, project_root, &db_path, explicit_repo_path)
+                        .map_err(|rebuild_err| {
+                            format!(
+                                "Recovered crashing index at {} to {} and rebuilt files index, but failed to rebuild issues index: {}; original error: {}",
+                                db.display(),
+                                backup_path.display(),
+                                rebuild_err,
+                                err
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
+
+            if matches!(action, "index" | "index-issues") {
+                return Ok(if action == "index" {
+                    rebuilt_files
+                } else {
+                    rebuilt_issues.expect("issues rebuild must exist for index-issues")
+                });
+            }
+
+            run_primary().map_err(|retry_err| {
+                format!(
+                    "Recovered crashing index at {} to {} and rebuilt required collections, but retrying action '{}' failed: {}",
+                    db.display(),
+                    backup_path.display(),
+                    action,
+                    retry_err
+                )
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn run_files_action_with_crash_recovery(
+    action: &str,
+    project_root: &str,
+    query: Option<&str>,
+    n_results: Option<u32>,
+) -> Result<ChromaRunnerResponse, String> {
+    run_project_index_action_with_crash_recovery(action, project_root, None, query, n_results)
 }
 
 // ---------------------------------------------------------------------------
@@ -372,16 +636,7 @@ pub async fn ensure_index_runtime() -> Result<IndexRuntimeSetupResult, String> {
 #[tauri::command]
 pub async fn index_project_cmd(project_root: String) -> Result<IndexProjectResult, String> {
     tokio::task::spawn_blocking(move || {
-        let python = find_python_binary()?;
-        let db = db_path_for_project(&project_root);
-        let resp = run_chroma_runner(
-            &python,
-            "index",
-            Some(&project_root),
-            Some(&db.to_string_lossy()),
-            None,
-            None,
-        )?;
+        let resp = run_files_action_with_crash_recovery("index", &project_root, None, None)?;
         Ok(IndexProjectResult {
             files_indexed: resp.files_indexed.unwrap_or(0),
             duration_ms: resp.duration_ms.unwrap_or(0),
@@ -398,16 +653,8 @@ pub async fn search_project_index_cmd(
     n_results: Option<u32>,
 ) -> Result<Vec<SearchResultItem>, String> {
     tokio::task::spawn_blocking(move || {
-        let python = find_python_binary()?;
-        let db = db_path_for_project(&project_root);
-        let resp = run_chroma_runner(
-            &python,
-            "search",
-            None,
-            Some(&db.to_string_lossy()),
-            Some(&query),
-            n_results,
-        )?;
+        let resp =
+            run_files_action_with_crash_recovery("search", &project_root, Some(&query), n_results)?;
         Ok(resp.results.unwrap_or_default())
     })
     .await
@@ -417,16 +664,7 @@ pub async fn search_project_index_cmd(
 #[tauri::command]
 pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusResult, String> {
     tokio::task::spawn_blocking(move || {
-        let python = find_python_binary()?;
-        let db = db_path_for_project(&project_root);
-        let resp = run_chroma_runner(
-            &python,
-            "status",
-            None,
-            Some(&db.to_string_lossy()),
-            None,
-            None,
-        )?;
+        let resp = run_files_action_with_crash_recovery("status", &project_root, None, None)?;
         Ok(IndexStatusResult {
             indexed: resp.indexed.unwrap_or(false),
             total_files: resp.total_files.unwrap_or(0),
@@ -440,14 +678,12 @@ pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusRes
 #[tauri::command]
 pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssuesResult, String> {
     tokio::task::spawn_blocking(move || {
-        let python = find_python_binary()?;
-        let db = db_path_for_project(&project_root);
         let repo_path = repo_path_for_issue_index(&project_root)?;
-        let resp = run_chroma_runner(
-            &python,
+        let repo_path = repo_path.to_string_lossy().to_string();
+        let resp = run_project_index_action_with_crash_recovery(
             "index-issues",
-            Some(&repo_path.to_string_lossy()),
-            Some(&db.to_string_lossy()),
+            &project_root,
+            Some(&repo_path),
             None,
             None,
         )?;
@@ -467,13 +703,10 @@ pub async fn search_github_issues_cmd(
     n_results: Option<u32>,
 ) -> Result<Vec<GitHubIssueSearchResult>, String> {
     tokio::task::spawn_blocking(move || {
-        let python = find_python_binary()?;
-        let db = db_path_for_project(&project_root);
-        let resp = run_chroma_runner(
-            &python,
+        let resp = run_project_index_action_with_crash_recovery(
             "search-issues",
+            &project_root,
             None,
-            Some(&db.to_string_lossy()),
             Some(&query),
             n_results,
         )?;
@@ -497,27 +730,7 @@ pub fn spawn_background_index(project_root: String) {
         }
 
         // 2. Build index
-        let python = match find_python_binary() {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(
-                    category = "project_index",
-                    error = %e,
-                    "Failed to find python for project index"
-                );
-                return;
-            }
-        };
-
-        let db = db_path_for_project(&project_root);
-        match run_chroma_runner(
-            &python,
-            "index",
-            Some(&project_root),
-            Some(&db.to_string_lossy()),
-            None,
-            None,
-        ) {
+        match run_files_action_with_crash_recovery("index", &project_root, None, None) {
             Ok(resp) => {
                 tracing::info!(
                     category = "project_index",
@@ -540,7 +753,34 @@ pub fn spawn_background_index(project_root: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::tempdir;
+
+    fn managed_chroma_python() -> Option<PathBuf> {
+        let venv_dir = chroma_venv_dir().ok()?;
+        let python = chroma_python_path(&venv_dir);
+        python.is_file().then_some(python)
+    }
+
+    fn write_project_file(path: &Path, contents: &str) {
+        let parent = path.parent().expect("project file parent");
+        fs::create_dir_all(parent).expect("create project file parent");
+        fs::write(path, contents).expect("write project file");
+    }
+
+    fn copy_dir_recursively(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).expect("create destination dir");
+        for entry in fs::read_dir(src).expect("read source dir") {
+            let entry = entry.expect("read dir entry");
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("read entry type").is_dir() {
+                copy_dir_recursively(&src_path, &dst_path);
+            } else {
+                fs::copy(&src_path, &dst_path).expect("copy file");
+            }
+        }
+    }
 
     #[test]
     fn db_path_uses_gwt_index_dir() {
@@ -651,5 +891,225 @@ mod tests {
         let resolved =
             repo_path_for_issue_index(&root.to_string_lossy()).expect("resolve issue index repo");
         assert_eq!(resolved, bare);
+    }
+
+    #[test]
+    fn crash_recovery_detector_matches_sigsegv_signatures() {
+        assert!(is_recoverable_chroma_db_error(
+            "Chroma helper failed (status=signal: 11, signal=11): <no stderr>"
+        ));
+        assert!(is_recoverable_chroma_db_error(
+            "Fatal Python error: Segmentation fault"
+        ));
+        assert!(!is_recoverable_chroma_db_error(
+            "Chroma helper failed (status=exit status: 1): Missing Python package: chromadb"
+        ));
+    }
+
+    #[test]
+    fn quarantine_index_db_renames_directory_to_crashed_sibling() {
+        let temp = tempdir().expect("create tempdir");
+        let db = temp.path().join("index");
+        fs::create_dir_all(&db).expect("create fake index dir");
+        fs::write(db.join("chroma.sqlite3"), b"stub").expect("write fake sqlite file");
+
+        let backup = quarantine_index_db(&db).expect("quarantine fake index dir");
+
+        assert!(!db.exists(), "original db path should be moved away");
+        assert!(backup.exists(), "backup path should exist after quarantine");
+        assert!(
+            backup
+                .file_name()
+                .expect("backup file name")
+                .to_string_lossy()
+                .starts_with("index.crashed-"),
+            "backup path should use the crash quarantine naming convention"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual recovery harness using a copied persisted db from GWT_CHROMA_REPRO_SOURCE_DB"]
+    fn manual_crash_recovery_recovers_copied_persisted_index_from_env() {
+        let Some(source_db) = std::env::var_os("GWT_CHROMA_REPRO_SOURCE_DB") else {
+            eprintln!("skipping manual recovery test: GWT_CHROMA_REPRO_SOURCE_DB not set");
+            return;
+        };
+        let source_db = PathBuf::from(source_db);
+        if !source_db.is_dir() {
+            eprintln!(
+                "skipping manual recovery test: source db missing at {}",
+                source_db.display()
+            );
+            return;
+        }
+
+        let temp = tempdir().expect("create temp project root");
+        let project_root = temp.path();
+        write_project_file(
+            &project_root.join("README.md"),
+            "# Recovery Harness\nThis project is rebuilt after quarantining a copied index.\n",
+        );
+
+        let copied_db = project_root.join(".gwt").join("index");
+        copy_dir_recursively(&source_db, &copied_db);
+
+        let response = run_files_action_with_crash_recovery(
+            "status",
+            &project_root.to_string_lossy(),
+            None,
+            None,
+        )
+        .expect("recovery should rebuild copied crashing index");
+
+        assert!(copied_db.is_dir(), "rebuilt index dir should exist");
+        assert!(
+            fs::read_dir(project_root.join(".gwt"))
+                .expect("read .gwt dir")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("index.crashed-")
+                }),
+            "quarantined backup should be left next to the rebuilt index"
+        );
+        assert!(
+            response.indexed.unwrap_or(false),
+            "status after recovery should report the rebuilt index as present"
+        );
+    }
+
+    #[test]
+    fn issues_rebuild_decision_rebuilds_when_probe_fails() {
+        assert!(should_rebuild_issues_collection(
+            "status",
+            Err("sqlite metadata probe failed".to_string())
+        ));
+    }
+
+    #[test]
+    fn issues_rebuild_decision_skips_when_probe_confirms_absent_for_files_actions() {
+        assert!(!should_rebuild_issues_collection("status", Ok(false)));
+    }
+
+    #[test]
+    fn issues_rebuild_decision_always_rebuilds_for_issue_actions() {
+        assert!(should_rebuild_issues_collection("search-issues", Ok(false)));
+    }
+
+    #[test]
+    fn managed_chroma_runtime_probe_succeeds_when_available() {
+        let Some(python) = managed_chroma_python() else {
+            eprintln!("skipping managed Chroma runtime probe test: runtime not present");
+            return;
+        };
+
+        let response = run_chroma_runner(&python, "probe", None, None, None, None)
+            .expect("managed Chroma runtime probe should succeed");
+
+        assert!(response.ok, "probe response must be ok");
+        assert!(
+            response.error.is_none(),
+            "probe response must not include an error"
+        );
+    }
+
+    #[test]
+    fn managed_chroma_runtime_can_index_and_search_temp_project() {
+        let Some(python) = managed_chroma_python() else {
+            eprintln!("skipping managed Chroma runtime integration test: runtime not present");
+            return;
+        };
+
+        let project = tempdir().expect("create project tempdir");
+        write_project_file(
+            &project.path().join("src/lib.rs"),
+            "//! alpha project index smoke test\npub fn alpha_probe() {}\n",
+        );
+        write_project_file(
+            &project.path().join("README.md"),
+            "# Alpha Project\nThis repository exists for chroma integration tests.\n",
+        );
+
+        let db = tempdir().expect("create db tempdir");
+        let project_root = project.path().to_string_lossy().to_string();
+        let db_path = db.path().to_string_lossy().to_string();
+
+        let index_response = run_chroma_runner(
+            &python,
+            "index",
+            Some(&project_root),
+            Some(&db_path),
+            None,
+            None,
+        )
+        .expect("managed Chroma runtime index should succeed");
+
+        assert_eq!(
+            index_response.files_indexed,
+            Some(2),
+            "expected both fixture files to be indexed"
+        );
+
+        let search_response = run_chroma_runner(
+            &python,
+            "search",
+            None,
+            Some(&db_path),
+            Some("alpha_probe"),
+            Some(5),
+        )
+        .expect("managed Chroma runtime search should succeed");
+
+        let results = search_response.results.expect("search results");
+        assert!(
+            results.iter().any(|item| item.path == "src/lib.rs"),
+            "search results must include src/lib.rs: {:?}",
+            results
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual reproduction harness for issue #1519 using the local Chroma runtime"]
+    fn managed_chroma_runtime_probe_is_stable_across_repeated_process_runs() {
+        let python = managed_chroma_python().expect("managed Chroma runtime must be present");
+
+        for attempt in 1..=10 {
+            run_chroma_runner(&python, "probe", None, None, None, None).unwrap_or_else(|err| {
+                panic!("managed Chroma runtime probe failed on attempt {attempt}: {err}")
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "manual parallel reproduction harness for issue #1519 using the local Chroma runtime"]
+    fn managed_chroma_runtime_probe_is_stable_across_parallel_process_runs() {
+        let python = managed_chroma_python().expect("managed Chroma runtime must be present");
+        let mut workers = Vec::new();
+
+        for worker_id in 0..4 {
+            let python = python.clone();
+            workers.push(std::thread::spawn(move || {
+                for attempt in 1..=5 {
+                    run_chroma_runner(&python, "probe", None, None, None, None).unwrap_or_else(
+                        |err| {
+                            panic!(
+                                "parallel managed Chroma runtime probe failed on worker {worker_id} attempt {attempt}: {err}"
+                            )
+                        },
+                    );
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker
+                .join()
+                .expect("parallel probe worker must join cleanly");
+        }
     }
 }
