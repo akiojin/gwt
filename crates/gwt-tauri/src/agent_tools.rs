@@ -285,7 +285,8 @@ pub fn execute_tool_call(
             let patch = parse_sections_patch(sections);
             let existing = match issue_number {
                 Some(number) => Some(
-                    get_spec_issue_detail_cmd(project_path.clone(), number).map_err(|e| e.message)?,
+                    get_spec_issue_detail_cmd(project_path.clone(), number)
+                        .map_err(|e| e.message)?,
                 ),
                 None => None,
             };

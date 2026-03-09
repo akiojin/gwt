@@ -183,9 +183,15 @@ fn send_project_mode_message_legacy(
     working.active_spec_issue_url = Some(prep.issue_url.clone());
     working.active_spec_issue_etag = Some(prep.etag.clone());
     let note = if prep.created {
-        format!("Prepared issue-first spec #{} ({})", prep.issue_number, prep.issue_url)
+        format!(
+            "Prepared issue-first spec #{} ({})",
+            prep.issue_number, prep.issue_url
+        )
     } else {
-        format!("Updated issue-first spec #{} ({})", prep.issue_number, prep.issue_url)
+        format!(
+            "Updated issue-first spec #{} ({})",
+            prep.issue_number, prep.issue_url
+        )
     };
     push_message(&mut working, "assistant", "observation", &note);
     save_window_project_mode_state(state, window_label, &working);
@@ -641,7 +647,10 @@ fn prepare_issue_spec(
 fn extract_issue_number(input: &str) -> Option<u64> {
     for token in input.split_whitespace() {
         if let Some(rest) = token.strip_prefix('#') {
-            if let Ok(number) = rest.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>() {
+            if let Ok(number) = rest
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u64>()
+            {
                 return Some(number);
             }
         }

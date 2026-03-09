@@ -676,11 +676,7 @@ fn finalize_created_issue(
     }
 }
 
-fn gh_issue_create(
-    repo_path: &Path,
-    title: &str,
-    body: &str,
-) -> Result<u64, String> {
+fn gh_issue_create(repo_path: &Path, title: &str, body: &str) -> Result<u64, String> {
     let args = vec![
         "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL,
     ];
