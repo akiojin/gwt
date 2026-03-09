@@ -63,6 +63,7 @@ namespace Gwt.Core.Services.Terminal
                     _state = ParserState.Escape;
                     break;
                 case '\n':
+                    _buffer.CarriageReturn();
                     _buffer.Linefeed();
                     break;
                 case '\r':
