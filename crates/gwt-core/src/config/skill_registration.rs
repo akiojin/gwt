@@ -111,6 +111,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
+        relative_path: "skills/gwt-pr-check/scripts/check_pr_status.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pr-check/scripts/check_pr_status.py"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
         relative_path: "skills/gwt-project-index/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1449,6 +1458,13 @@ mod tests {
             .join("scripts")
             .join("migrate-specs-to-issues.sh")
             .exists());
+        assert!(tmp
+            .path()
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
+            .exists());
     }
 
     #[test]
@@ -1627,6 +1643,22 @@ mod tests {
             .join("gwt-spec-to-issue-migration")
             .join("scripts")
             .join("migrate-specs-to-issues.sh")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".gemini")
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
             .exists());
 
         assert!(temp
