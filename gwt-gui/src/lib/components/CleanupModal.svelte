@@ -86,7 +86,7 @@
     if (!branch) return wt.safety_level;
     if (branchProtection.has(branch)) return "warning";
     const pr = prStatuses[branch] ?? "none";
-    if (pr === "open" || pr === "none") return "warning";
+    if (pr === "open" || pr === "closed" || pr === "none") return "warning";
     return "safe";
   }
 

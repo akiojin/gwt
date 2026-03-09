@@ -102,6 +102,10 @@
   });
   let defaultProfileSelected = $derived(isDefaultProfileKey(selectedProfileKey));
 
+  function toPlainData<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+
   function resetAiModelsState() {
     aiModelsRequestSeq += 1;
     aiModels = [];
@@ -366,16 +370,20 @@
     saving = true;
     saveMessage = "";
     try {
-      settings = {
+      const normalizedSettings = {
         ...settings,
         ui_font_family: normalizeUiFontFamily(settings.ui_font_family),
         terminal_font_family: normalizeTerminalFontFamily(settings.terminal_font_family),
       };
+      const plainSettings = toPlainData(normalizedSettings);
+      settings = plainSettings;
 
       const { invoke } = await import("$lib/tauriInvoke");
-      await invoke("save_settings", { settings });
+      await invoke("save_settings", { settings: plainSettings });
       if (profiles) {
-        await invoke("save_profiles", { config: buildProfilesConfigWithApiKeyDraft() });
+        const plainProfiles = toPlainData(buildProfilesConfigWithApiKeyDraft());
+        profiles = plainProfiles;
+        await invoke("save_profiles", { config: plainProfiles });
       }
       settings.app_language = normalizeAppLanguage(settings.app_language);
       saveMessage = "Settings saved.";
@@ -606,7 +614,6 @@
       ...profiles,
       profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
-    profiles = nextProfiles;
     return nextProfiles;
   }
 
@@ -629,9 +636,48 @@
     peekingApiKey = false;
   }
 
-  function syncApiKeyDraftToProfile() {
+  function applyApiKeyDraft(nextValue: string) {
+    const profileKey = selectedProfileKey.trim();
     apiKeyCopied = false;
-    updateAiField("api_key", apiKeyDraft);
+    apiKeyDraft = nextValue;
+    apiKeyDraftProfileKey = profileKey;
+    apiKeyDraftSourceValue = nextValue;
+    updateAiField("api_key", nextValue);
+  }
+
+  function syncApiKeyDraftToProfile() {
+    applyApiKeyDraft(apiKeyDraft);
+  }
+
+  function syncApiKeyDraftFromDom(input: HTMLInputElement | null) {
+    if (!input) return;
+    setTimeout(() => {
+      applyApiKeyDraft(input.value);
+    }, 0);
+  }
+
+  function handleApiKeyPaste(event: ClipboardEvent) {
+    const input = event.currentTarget as HTMLInputElement | null;
+    if (!input) return;
+
+    const pastedText = event.clipboardData?.getData("text/plain");
+    if (typeof pastedText === "string" && pastedText.length > 0) {
+      event.preventDefault();
+      const selectionStart = input.selectionStart ?? input.value.length;
+      const selectionEnd = input.selectionEnd ?? input.value.length;
+      const nextValue =
+        input.value.slice(0, selectionStart) +
+        pastedText +
+        input.value.slice(selectionEnd);
+      applyApiKeyDraft(nextValue);
+      setTimeout(() => {
+        const nextCursor = selectionStart + pastedText.length;
+        input.setSelectionRange(nextCursor, nextCursor);
+      }, 0);
+      return;
+    }
+
+    syncApiKeyDraftFromDom(input);
   }
 
   function toggleApiKeyPeekFromNonPointerClick(event: MouseEvent) {
@@ -1206,6 +1252,7 @@
                         bind:value={apiKeyDraft}
                         oninput={syncApiKeyDraftToProfile}
                         onchange={syncApiKeyDraftToProfile}
+                        onpaste={handleApiKeyPaste}
                       />
                       <div class="ai-apikey-actions" class:hidden={!hasApiKey}>
                         <button
