@@ -3156,10 +3156,40 @@ multi_agent = true
 
         let latest = build_agent_args("codex", &req, Some("latest"), false).unwrap();
         assert!(latest.iter().any(|a| a == "--model=gpt-5.4"));
+        assert!(latest.iter().any(|a| a == "model_context_window=1000000"));
+        assert!(latest
+            .iter()
+            .any(|a| a == "model_auto_compact_token_limit=950000"));
 
         let installed = build_agent_args("codex", &req, Some("0.111.0"), false).unwrap();
-        assert!(installed.iter().any(|a| a == "--model=gpt-5.2-codex"));
-        assert!(!installed.iter().any(|a| a == "--model=gpt-5.4"));
+        assert!(installed.iter().any(|a| a == "--model=gpt-5.4"));
+        assert!(installed
+            .iter()
+            .any(|a| a == "model_context_window=1000000"));
+        assert!(installed
+            .iter()
+            .any(|a| a == "model_auto_compact_token_limit=950000"));
+
+        let legacy = build_agent_args("codex", &req, Some("0.110.0"), false).unwrap();
+        assert!(legacy.iter().any(|a| a == "--model=gpt-5.2-codex"));
+        assert!(!legacy.iter().any(|a| a == "--model=gpt-5.4"));
+        assert!(!legacy.iter().any(|a| a == "model_context_window=1000000"));
+        assert!(!legacy
+            .iter()
+            .any(|a| a == "model_auto_compact_token_limit=950000"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_gpt_5_4_override_enables_context_overrides() {
+        let mut req = make_request("codex");
+        req.model = Some("gpt-5.4".to_string());
+
+        let args = build_agent_args("codex", &req, Some("0.111.0"), false).unwrap();
+        assert!(args.iter().any(|a| a == "--model=gpt-5.4"));
+        assert!(args.iter().any(|a| a == "model_context_window=1000000"));
+        assert!(args
+            .iter()
+            .any(|a| a == "model_auto_compact_token_limit=950000"));
     }
 
     #[test]
@@ -4203,7 +4233,7 @@ pub(crate) fn launch_agent_for_project_root(
                 let status =
                     gwt_core::config::repair_skill_registration_with_settings_at_project_root(
                         &settings,
-                        Some(project_root.as_path()),
+                        Some(working_dir.as_path()),
                     );
                 if is_launch_cancelled(cancelled) {
                     return Err("Cancelled".to_string());

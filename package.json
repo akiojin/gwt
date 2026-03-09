@@ -1,6 +1,6 @@
 {
   "name": "gwt",
-  "version": "8.4.1",
+  "version": "8.5.1",
   "private": true,
   "description": "Tauri desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
@@ -40,7 +40,7 @@
   },
   "packageManager": "pnpm@10.29.2",
   "devDependencies": {
-    "@commitlint/cli": "^20.4.2",
-    "@commitlint/config-conventional": "^20.4.2"
+    "@commitlint/cli": "^20.4.3",
+    "@commitlint/config-conventional": "^20.4.3"
   }
 }
