@@ -24,7 +24,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    exclude: [...configDefaults.exclude, "e2e/**"],
+    exclude: [...configDefaults.exclude, "e2e/**", "e2e-tauri/**"],
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov", "html"],

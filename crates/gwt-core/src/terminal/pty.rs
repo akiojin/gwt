@@ -361,13 +361,15 @@ where
                 // or resolve_shell_for_spawn), so pass through without wrapping.
                 "wsl" => return (normalized_command.clone(), args.to_vec()),
                 "powershell" => {
-                    let shell = resolve_windows_shell();
-                    let expression = build_windows_powershell_command_expression(
-                        &normalized_command,
-                        args,
-                        windows_force_utf8,
-                    );
-                    return (shell, build_powershell_wrapped_args(expression));
+                    if !interactive {
+                        let shell = resolve_windows_shell();
+                        let expression = build_windows_powershell_command_expression(
+                            &normalized_command,
+                            args,
+                            windows_force_utf8,
+                        );
+                        return (shell, build_powershell_wrapped_args(expression));
+                    }
                 }
                 _ => {}
             }
@@ -1168,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_spawn_command_powershell_shell_interactive_keeps_wrapper() {
+    fn resolve_spawn_command_powershell_shell_interactive_avoids_wrapper() {
         let args = vec!["--version".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             "codex",
@@ -1179,17 +1181,63 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(program, "pwsh");
+        assert_eq!(program, "codex");
+        assert_eq!(resolved_args, vec!["--version".to_string(),]);
+    }
+
+    #[test]
+    fn resolve_spawn_command_powershell_shell_interactive_force_utf8_uses_cmd_wrapper() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("powershell"),
+            true,
+            true,
+        );
+        assert_eq!(program, "cmd.exe");
         assert_eq!(
             resolved_args,
             vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-ExecutionPolicy".to_string(),
-                "Bypass".to_string(),
-                "-Command".to_string(),
-                "& 'codex' '--version'".to_string(),
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                "chcp 65001 > nul && codex --version".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_powershell_shell_interactive_batch_uses_cmd_wrapper() {
+        let args = vec!["--dangerously-skip-permissions".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform_with(
+            "claude",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            |name| {
+                if name == "claude" {
+                    Some(PathBuf::from(
+                        "C:\\Users\\user\\AppData\\Roaming\\npm\\claude.cmd",
+                    ))
+                } else {
+                    None
+                }
+            },
+            Some("powershell"),
+            true,
+            true,
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                "chcp 65001 > nul && claude --dangerously-skip-permissions".to_string(),
             ]
         );
     }
