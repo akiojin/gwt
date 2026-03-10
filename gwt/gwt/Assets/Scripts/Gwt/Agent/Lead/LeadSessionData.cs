@@ -15,6 +15,10 @@ namespace Gwt.Agent.Lead
         public string HandoverDocument;
         /// <summary>Lead からユーザーへの未回答質問リスト</summary>
         public List<LeadQuestion> PendingQuestions = new();
+        /// <summary>現在実行中のタスク計画</summary>
+        public LeadTaskPlan ActivePlan;
+        /// <summary>完了済みのタスク計画履歴</summary>
+        public List<LeadTaskPlan> CompletedPlans = new();
     }
 
     [System.Serializable]
