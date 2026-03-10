@@ -2,6 +2,7 @@ using System;
 using Gwt.Core.Models;
 using TMPro;
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 namespace Gwt.Studio.UI
 {
@@ -43,7 +44,8 @@ namespace Gwt.Studio.UI
         {
             if (_inputField == null) return;
 
-            if (_inputField.isFocused && Input.GetKeyDown(KeyCode.Return))
+            var keyboard = Keyboard.current;
+            if (_inputField.isFocused && keyboard != null && keyboard.enterKey.wasPressedThisFrame)
             {
                 Submit();
             }

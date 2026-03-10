@@ -60,10 +60,19 @@ namespace Gwt.Studio.UI
             _dirty = true;
         }
 
-        private void Update()
+        public void MarkDirty()
         {
-            if (!_dirty || _boundPane == null || _terminalText == null) return;
+            _dirty = true;
+        }
 
+        /// <summary>
+        /// Render if dirty. Called externally from TerminalOverlayPanel.Update()
+        /// as a workaround for TerminalRenderer.Update() not executing.
+        /// </summary>
+        public void RenderIfDirty()
+        {
+            if (_boundPane == null || _terminalText == null) return;
+            if (!_dirty) return;
             if (Time.unscaledTime - _lastUpdateTime < MinUpdateInterval) return;
 
             _lastUpdateTime = Time.unscaledTime;
@@ -77,6 +86,11 @@ namespace Gwt.Studio.UI
             {
                 _scrollRect.verticalNormalizedPosition = 0f;
             }
+        }
+
+        private void Update()
+        {
+            RenderIfDirty();
         }
     }
 }

@@ -1,4 +1,6 @@
 using Gwt.Shared;
+using Gwt.Studio.UI;
+using UnityEngine;
 using VContainer;
 
 namespace Gwt.Studio.Installers
@@ -7,8 +9,14 @@ namespace Gwt.Studio.Installers
     {
         public void Install(IContainerBuilder builder)
         {
-            // MonoBehaviours are registered via scene, not here
-            // Register non-MonoBehaviour services only
+            builder.RegisterBuildCallback(resolver =>
+            {
+                var terminalPanel = Object.FindObjectOfType<TerminalOverlayPanel>(true);
+                if (terminalPanel != null)
+                {
+                    resolver.Inject(terminalPanel);
+                }
+            });
         }
     }
 }

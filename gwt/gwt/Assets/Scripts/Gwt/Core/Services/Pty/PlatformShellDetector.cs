@@ -24,7 +24,8 @@ namespace Gwt.Core.Services.Pty
             {
                 "cmd" => new[] { "/Q" },
                 "powershell" or "pwsh" => new[] { "-NoLogo", "-NoProfile" },
-                _ => Array.Empty<string>()
+                "zsh" or "bash" or "sh" => new[] { "-i", "-l" },
+                _ => new[] { "-i" }
             };
         }
 

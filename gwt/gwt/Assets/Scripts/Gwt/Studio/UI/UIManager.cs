@@ -20,6 +20,23 @@ namespace Gwt.Studio.UI
         public LeadInputField LeadInput => _leadInputField;
         public ProjectInfoBar ProjectInfo => _projectInfoBar;
 
+        private bool _terminalAutoOpened;
+
+        private void Update()
+        {
+            // Auto-open terminal on first frame for CLI-driven development
+            if (!_terminalAutoOpened && _terminalOverlayPanel != null)
+            {
+                _terminalAutoOpened = true;
+                OpenTerminal();
+            }
+
+            if (_terminalOverlayPanel != null && _terminalOverlayPanel.IsOpen)
+            {
+                _terminalOverlayPanel.Tick();
+            }
+        }
+
         public void OpenPanel(OverlayPanel panel)
         {
             if (panel == null || panel.IsOpen) return;
@@ -65,6 +82,16 @@ namespace Gwt.Studio.UI
         public void OpenIssueDetail() => OpenPanel(_issueDetailPanel);
         public void OpenAgentSettings() => OpenPanel(_agentSettingsPanel);
         public void OpenTerminal() => OpenPanel(_terminalOverlayPanel);
+
+        public void ToggleTerminal()
+        {
+            if (_terminalOverlayPanel == null) return;
+
+            if (_terminalOverlayPanel.IsOpen)
+                ClosePanel(_terminalOverlayPanel);
+            else
+                OpenTerminal();
+        }
 
         public void OpenTerminalForAgent(string agentSessionId)
         {

@@ -1,4 +1,7 @@
+using System;
+using Cysharp.Threading.Tasks;
 using Gwt.Core.Models;
+using Gwt.Core.Services.Pty;
 using Gwt.Core.Services.Terminal;
 using UnityEngine;
 using VContainer;
@@ -13,18 +16,19 @@ namespace Gwt.Studio.UI
 
         private ITerminalPaneManager _paneManager;
         private IPtyService _ptyService;
+        private IPlatformShellDetector _shellDetector;
         private bool _initialized;
 
         [Inject]
-        public void Construct(ITerminalPaneManager paneManager, IPtyService ptyService)
+        public void Construct(
+            ITerminalPaneManager paneManager,
+            IPtyService ptyService,
+            IPlatformShellDetector shellDetector)
         {
             _paneManager = paneManager;
             _ptyService = ptyService;
-        }
-
-        private void Start()
-        {
-            Initialize();
+            _shellDetector = shellDetector;
+            Debug.Log("[GWT] TerminalOverlayPanel — DI injected");
         }
 
         private void Initialize()
@@ -53,7 +57,44 @@ namespace Gwt.Studio.UI
         {
             Initialize();
             base.Open();
-            BindToActivePane();
+
+            if (_paneManager != null && _paneManager.PaneCount == 0)
+            {
+                SpawnDefaultShellAsync().Forget();
+            }
+            else
+            {
+                BindToActivePane();
+            }
+        }
+
+        private async UniTaskVoid SpawnDefaultShellAsync()
+        {
+            if (_ptyService == null || _shellDetector == null) return;
+
+            try
+            {
+                var shell = _shellDetector.DetectDefaultShell();
+                var shellArgs = _shellDetector.GetShellArgs(shell);
+                var workDir = Application.dataPath;
+
+                var adapter = new XtermSharpTerminalAdapter(24, 80);
+                var ptySessionId = await _ptyService.SpawnAsync(shell, shellArgs, workDir, 24, 80);
+
+                _ptyService.GetOutputStream(ptySessionId).Subscribe(data =>
+                {
+                    adapter.Feed(data);
+                });
+
+                var paneId = Guid.NewGuid().ToString("N");
+                var pane = new TerminalPaneState(paneId, adapter) { PtySessionId = ptySessionId };
+                _paneManager.AddPane(pane);
+                Debug.Log($"[GWT] Pane added: paneId={paneId}, paneCount={_paneManager.PaneCount}");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[GWT] Failed to spawn default shell: {e.Message}");
+            }
         }
 
         public void ShowForAgent(string agentSessionId)
@@ -108,6 +149,22 @@ namespace Gwt.Studio.UI
         private void OnTabSelected(int index)
         {
             BindToActivePane();
+        }
+
+        /// <summary>
+        /// Called by UIManager.Update() to process pending PTY data and render.
+        /// </summary>
+        public void Tick()
+        {
+            var activePane = _paneManager?.ActivePane;
+            if (activePane == null) return;
+
+            activePane.Terminal.ProcessPendingData();
+
+            if (_terminalRenderer != null)
+            {
+                _terminalRenderer.RenderIfDirty();
+            }
         }
 
         private void OnDestroy()

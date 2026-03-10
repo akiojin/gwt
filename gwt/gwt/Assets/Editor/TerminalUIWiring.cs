@@ -25,6 +25,22 @@ namespace Gwt.Editor
             var issueDetailPanelGO = FindByName("IssueDetailPanel");
             var agentSettingsPanelGO = FindByName("AgentSettingsPanel");
 
+            // Ensure all Canvas children have RectTransform (they may have plain Transform)
+            EnsureRectTransform(uiManagerGO);
+            EnsureRectTransform(terminalOverlayPanelGO);
+            EnsureRectTransform(terminalPanelGO);
+            EnsureRectTransform(tabBarGO);
+            EnsureRectTransform(tabContainerGO);
+            EnsureRectTransform(terminalDisplayGO);
+            EnsureRectTransform(viewportGO);
+            EnsureRectTransform(terminalTextGO);
+            EnsureRectTransform(inputAreaGO);
+            EnsureRectTransform(commandInputGO);
+            EnsureRectTransform(consolePanelGO);
+            EnsureRectTransform(gitDetailPanelGO);
+            EnsureRectTransform(issueDetailPanelGO);
+            EnsureRectTransform(agentSettingsPanelGO);
+
             // Wire TerminalOverlayPanel (includes base class _panel)
             if (terminalOverlayPanelGO != null)
             {
@@ -144,6 +160,45 @@ namespace Gwt.Editor
                 }
             }
 
+            // Fix RectTransform anchoring for all UI elements
+            StretchToParent(FindByName("UIManager"));
+            StretchToParent(terminalOverlayPanelGO);
+            StretchToParent(terminalPanelGO);
+            StretchToParent(terminalDisplayGO);
+            StretchToParent(viewportGO);
+            StretchToParent(FindByName("Content"));
+            StretchToParent(tabContainerGO);
+
+            // Fix VerticalLayoutGroup to control child sizes
+            if (terminalPanelGO != null)
+            {
+                var vlg = terminalPanelGO.GetComponent<VerticalLayoutGroup>();
+                if (vlg != null)
+                {
+                    vlg.childControlHeight = true;
+                    vlg.childControlWidth = true;
+                    vlg.childForceExpandWidth = true;
+                    vlg.childForceExpandHeight = false;
+                    EditorUtility.SetDirty(vlg);
+                }
+            }
+
+            // Fix TabBar HorizontalLayoutGroup
+            if (tabContainerGO != null)
+            {
+                var hlg = tabContainerGO.GetComponent<HorizontalLayoutGroup>();
+                if (hlg != null)
+                {
+                    hlg.childControlHeight = true;
+                    hlg.childControlWidth = true;
+                    hlg.childForceExpandWidth = false;
+                    hlg.childForceExpandHeight = true;
+                    EditorUtility.SetDirty(hlg);
+                }
+            }
+
+            Debug.Log("[GWT] RectTransform anchoring and layout groups fixed");
+
             // Set TerminalPanel initially inactive
             if (terminalPanelGO != null)
             {
@@ -185,6 +240,37 @@ namespace Gwt.Editor
                     return comp;
             }
             return null;
+        }
+
+        private static void StretchToParent(GameObject go)
+        {
+            if (go == null) return;
+            var rt = EnsureRectTransform(go);
+            if (rt == null) return;
+
+            rt.localScale = Vector3.one;
+            rt.localRotation = Quaternion.identity;
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            EditorUtility.SetDirty(go);
+        }
+
+        private static RectTransform EnsureRectTransform(GameObject go)
+        {
+            if (go == null) return null;
+            var rt = go.GetComponent<RectTransform>();
+            if (rt != null) return rt;
+
+            // GameObject under Canvas without RectTransform — add one
+            rt = go.AddComponent<RectTransform>();
+            if (rt != null)
+                Debug.Log($"[GWT] Added RectTransform to {go.name}");
+            else
+                Debug.LogError($"[GWT] Failed to add RectTransform to {go.name}");
+            return rt;
         }
 
         private static GameObject FindByName(string name)

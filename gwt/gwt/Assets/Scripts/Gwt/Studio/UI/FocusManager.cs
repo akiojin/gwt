@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 namespace Gwt.Studio.UI
 {
@@ -15,7 +16,10 @@ namespace Gwt.Studio.UI
         {
             _inputFocused = _inputField != null && _inputField.IsFocused;
 
-            if (Input.GetKeyDown(KeyCode.Escape))
+            var keyboard = Keyboard.current;
+            if (keyboard == null) return;
+
+            if (keyboard.escapeKey.wasPressedThisFrame)
             {
                 HandleEscape();
             }
