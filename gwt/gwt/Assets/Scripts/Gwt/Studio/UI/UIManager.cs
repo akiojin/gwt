@@ -25,6 +25,10 @@ namespace Gwt.Studio.UI
         private IProjectLifecycleService _projectLifecycleService;
         private IMultiProjectService _multiProjectService;
         private bool _subscribed;
+        private bool _previousBackquotePressed;
+        private bool _previousDownPressed;
+        private bool _previousUpPressed;
+        private bool _previousConfirmPressed;
 
         public ConsolePanel Console => _consolePanel;
         public LeadInputField LeadInput => _leadInputField;
@@ -62,22 +66,32 @@ namespace Gwt.Studio.UI
         private void HandleProjectSwitchHotkeys()
         {
             var commandPressed = IsCommandPressed();
+            var backquotePressed = IsBackquotePressed();
+            var downPressed = IsDownPressed();
+            var upPressed = IsUpPressed();
+            var confirmPressed = IsConfirmPressed();
 
-            if (commandPressed && IsBackquotePressedThisFrame())
+            if (commandPressed && backquotePressed && !_previousBackquotePressed)
             {
                 ToggleProjectSwitcher();
+                UpdatePreviousInputState(backquotePressed, downPressed, upPressed, confirmPressed);
                 return;
             }
 
             if (_projectSwitchOverlayPanel == null || !_projectSwitchOverlayPanel.IsOpen)
+            {
+                UpdatePreviousInputState(backquotePressed, downPressed, upPressed, confirmPressed);
                 return;
+            }
 
-            if (IsDownPressedThisFrame())
+            if (downPressed && !_previousDownPressed)
                 _projectSwitchOverlayPanel.MoveSelection(1);
-            else if (IsUpPressedThisFrame())
+            else if (upPressed && !_previousUpPressed)
                 _projectSwitchOverlayPanel.MoveSelection(-1);
-            else if (IsConfirmPressedThisFrame())
+            else if (confirmPressed && !_previousConfirmPressed)
                 ConfirmProjectSwitchAsync().Forget();
+
+            UpdatePreviousInputState(backquotePressed, downPressed, upPressed, confirmPressed);
         }
 
         public void OpenPanel(OverlayPanel panel)
@@ -275,45 +289,53 @@ namespace Gwt.Studio.UI
 #endif
         }
 
-        private static bool IsBackquotePressedThisFrame()
+        private static bool IsBackquotePressed()
         {
 #if ENABLE_INPUT_SYSTEM
             var keyboard = Keyboard.current;
-            return keyboard != null && (keyboard.backquoteKey?.wasPressedThisFrame ?? false);
+            return keyboard != null && (keyboard.backquoteKey?.isPressed ?? false);
 #else
-            return Input.GetKeyDown(KeyCode.BackQuote);
+            return Input.GetKey(KeyCode.BackQuote);
 #endif
         }
 
-        private static bool IsDownPressedThisFrame()
+        private static bool IsDownPressed()
         {
 #if ENABLE_INPUT_SYSTEM
             var keyboard = Keyboard.current;
-            return keyboard != null && (keyboard.downArrowKey?.wasPressedThisFrame ?? false);
+            return keyboard != null && (keyboard.downArrowKey?.isPressed ?? false);
 #else
-            return Input.GetKeyDown(KeyCode.DownArrow);
+            return Input.GetKey(KeyCode.DownArrow);
 #endif
         }
 
-        private static bool IsUpPressedThisFrame()
+        private static bool IsUpPressed()
         {
 #if ENABLE_INPUT_SYSTEM
             var keyboard = Keyboard.current;
-            return keyboard != null && (keyboard.upArrowKey?.wasPressedThisFrame ?? false);
+            return keyboard != null && (keyboard.upArrowKey?.isPressed ?? false);
 #else
-            return Input.GetKeyDown(KeyCode.UpArrow);
+            return Input.GetKey(KeyCode.UpArrow);
 #endif
         }
 
-        private static bool IsConfirmPressedThisFrame()
+        private static bool IsConfirmPressed()
         {
 #if ENABLE_INPUT_SYSTEM
             var keyboard = Keyboard.current;
             return keyboard != null &&
-                ((keyboard.enterKey?.wasPressedThisFrame ?? false) || (keyboard.numpadEnterKey?.wasPressedThisFrame ?? false));
+                ((keyboard.enterKey?.isPressed ?? false) || (keyboard.numpadEnterKey?.isPressed ?? false));
 #else
-            return Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter);
+            return Input.GetKey(KeyCode.Return) || Input.GetKey(KeyCode.KeypadEnter);
 #endif
+        }
+
+        private void UpdatePreviousInputState(bool backquotePressed, bool downPressed, bool upPressed, bool confirmPressed)
+        {
+            _previousBackquotePressed = backquotePressed;
+            _previousDownPressed = downPressed;
+            _previousUpPressed = upPressed;
+            _previousConfirmPressed = confirmPressed;
         }
     }
 }
