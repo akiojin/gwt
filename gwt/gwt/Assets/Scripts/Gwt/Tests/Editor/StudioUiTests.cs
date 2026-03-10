@@ -24,12 +24,31 @@ namespace Gwt.Tests.Editor
             overlay.SetServices(multi, lifecycle);
 
             overlay.Open();
+            overlay.RefreshAsync().GetAwaiter().GetResult();
             overlay.MoveSelection(1);
             overlay.MoveSelection(1);
 
             Assert.AreEqual(0, overlay.SelectedIndex);
             Assert.That(overlay.CurrentDisplayText, Does.Contain("project-a"));
             Assert.That(overlay.CurrentDisplayText, Does.Contain("project-b"));
+        }
+
+        [Test]
+        public void ProjectSwitchOverlayPanel_RefreshAsync_IncludesRecentProjectsNotOpen()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.RecentProjects.Add(new ProjectInfo { Name = "project-c", Path = "/tmp/project-c", DefaultBranch = "main" });
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            overlay.SetServices(multi, lifecycle);
+
+            overlay.RefreshAsync().GetAwaiter().GetResult();
+
+            Assert.That(overlay.CurrentDisplayText, Does.Contain("Recent Projects"));
+            Assert.That(overlay.CurrentDisplayText, Does.Contain("project-c"));
         }
 
         [Test]
@@ -70,6 +89,7 @@ namespace Gwt.Tests.Editor
 
             manager.Construct(lifecycle, multi);
             manager.OpenProjectSwitcher();
+            overlay.RefreshAsync().GetAwaiter().GetResult();
             overlay.MoveSelection(-1);
             manager.ConfirmProjectSwitchAsync().GetAwaiter().GetResult();
 
@@ -77,6 +97,32 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("project-a", bar.CurrentProjectName);
             Assert.AreEqual("Project 1/2", bar.CurrentStatus);
             Assert.IsFalse(overlay.IsOpen);
+        }
+
+        [Test]
+        public void UIManager_ConfirmProjectSwitchAsync_RecentProject_IsAddedAndActivated()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.RecentProjects.Add(new ProjectInfo { Name = "project-c", Path = "/tmp/project-c", DefaultBranch = "main" });
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+
+            manager.Construct(lifecycle, multi);
+            manager.OpenProjectSwitcher();
+            overlay.RefreshAsync().GetAwaiter().GetResult();
+            overlay.MoveSelection(1);
+            manager.ConfirmProjectSwitchAsync().GetAwaiter().GetResult();
+
+            Assert.AreEqual(2, multi.OpenProjects.Count);
+            Assert.AreEqual("/tmp/project-c", lifecycle.CurrentProject.Path);
+            Assert.AreEqual("project-c", bar.CurrentProjectName);
         }
 
         private static void SetPrivateField(object instance, string fieldName, object value)
@@ -97,6 +143,7 @@ namespace Gwt.Tests.Editor
 
         private sealed class FakeProjectLifecycleService : IProjectLifecycleService
         {
+            public System.Collections.Generic.List<ProjectInfo> RecentProjects { get; } = new();
             public ProjectInfo CurrentProject { get; private set; }
             public bool IsProjectOpen => CurrentProject != null;
 
@@ -139,7 +186,7 @@ namespace Gwt.Tests.Editor
 
             public UniTask<System.Collections.Generic.List<ProjectInfo>> GetRecentProjectsAsync(System.Threading.CancellationToken ct = default)
             {
-                return UniTask.FromResult(new System.Collections.Generic.List<ProjectInfo>());
+                return UniTask.FromResult(new System.Collections.Generic.List<ProjectInfo>(RecentProjects));
             }
 
             public ProjectInfo GetProjectInfo() => CurrentProject;

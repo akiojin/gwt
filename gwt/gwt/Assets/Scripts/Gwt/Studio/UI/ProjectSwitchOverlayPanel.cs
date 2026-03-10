@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using Cysharp.Threading.Tasks;
 using Gwt.Lifecycle.Services;
@@ -16,6 +17,7 @@ namespace Gwt.Studio.UI
 
         private IMultiProjectService _multiProjectService;
         private IProjectLifecycleService _projectLifecycleService;
+        private readonly List<ProjectEntry> _entries = new();
         private bool _subscribed;
         private int _selectedIndex;
 
@@ -49,7 +51,7 @@ namespace Gwt.Studio.UI
         {
             EnsureUi();
             OpenToActiveProject();
-            Refresh();
+            RefreshAsync().Forget();
             base.Open();
         }
 
@@ -66,26 +68,38 @@ namespace Gwt.Studio.UI
                 return;
             }
 
-            _selectedIndex = Mathf.Clamp(_multiProjectService.ActiveProjectIndex, 0, _multiProjectService.OpenProjects.Count - 1);
+            _selectedIndex = Mathf.Clamp(_multiProjectService.ActiveProjectIndex, 0, Mathf.Max(0, _entries.Count - 1));
         }
 
         public void MoveSelection(int delta)
         {
-            if (_multiProjectService == null || _multiProjectService.OpenProjects.Count == 0)
+            if (_entries.Count == 0)
                 return;
 
-            var count = _multiProjectService.OpenProjects.Count;
+            var count = _entries.Count;
             _selectedIndex = ((_selectedIndex + delta) % count + count) % count;
             Refresh();
         }
 
         public async UniTask<bool> ConfirmSelectionAsync()
         {
-            if (_multiProjectService == null || _multiProjectService.OpenProjects.Count == 0)
+            if (_multiProjectService == null || _entries.Count == 0)
                 return false;
 
-            await _multiProjectService.SwitchToProjectAsync(_selectedIndex);
-            Refresh();
+            var entry = _entries[Mathf.Clamp(_selectedIndex, 0, _entries.Count - 1)];
+            if (entry.IsOpenProject)
+            {
+                var openIndex = _multiProjectService.OpenProjects.FindIndex(project =>
+                    string.Equals(project.Path, entry.Project.Path, StringComparison.OrdinalIgnoreCase));
+                if (openIndex >= 0)
+                    await _multiProjectService.SwitchToProjectAsync(openIndex);
+            }
+            else
+            {
+                await _multiProjectService.AddProjectAsync(entry.Project.Path);
+            }
+
+            await RefreshAsync();
             Close();
             return true;
         }
@@ -100,18 +114,28 @@ namespace Gwt.Studio.UI
             if (_listText == null)
                 return;
 
-            if (_multiProjectService == null || _multiProjectService.OpenProjects.Count == 0)
+            if (_entries.Count == 0)
             {
-                _listText.text = "No open projects";
+                _listText.text = "No open or recent projects";
                 return;
             }
 
             var builder = new StringBuilder();
-            for (int i = 0; i < _multiProjectService.OpenProjects.Count; i++)
+            var wroteRecentHeader = false;
+            for (int i = 0; i < _entries.Count; i++)
             {
-                var project = _multiProjectService.OpenProjects[i];
+                var entry = _entries[i];
+                if (!entry.IsOpenProject && !wroteRecentHeader)
+                {
+                    if (builder.Length > 0)
+                        builder.AppendLine();
+                    builder.AppendLine("Recent Projects");
+                    wroteRecentHeader = true;
+                }
+
+                var project = entry.Project;
                 var selected = i == _selectedIndex ? ">" : " ";
-                var active = i == _multiProjectService.ActiveProjectIndex ? "*" : " ";
+                var active = entry.IsOpenProject && i == _multiProjectService.ActiveProjectIndex ? "*" : " ";
                 builder.Append(selected)
                     .Append(active)
                     .Append(' ')
@@ -120,24 +144,45 @@ namespace Gwt.Studio.UI
                 if (!string.IsNullOrWhiteSpace(project.DefaultBranch))
                     builder.Append(" [").Append(project.DefaultBranch).Append(']');
 
-                if (_projectLifecycleService?.CurrentProject != null &&
+                if (entry.IsOpenProject && _projectLifecycleService?.CurrentProject != null &&
                     string.Equals(_projectLifecycleService.CurrentProject.Path, project.Path, StringComparison.OrdinalIgnoreCase))
                 {
                     builder.Append(" current");
                 }
+                else if (!entry.IsOpenProject)
+                {
+                    builder.Append(" recent");
+                }
 
-                if (i < _multiProjectService.OpenProjects.Count - 1)
+                if (i < _entries.Count - 1)
                     builder.AppendLine();
             }
 
             _listText.text = builder.ToString();
         }
 
+        public async UniTask RefreshAsync()
+        {
+            EnsureUi();
+            await BuildEntriesAsync();
+
+            if (_entries.Count == 0)
+            {
+                _selectedIndex = 0;
+            }
+            else
+            {
+                _selectedIndex = Mathf.Clamp(_selectedIndex, 0, _entries.Count - 1);
+            }
+
+            Refresh();
+        }
+
         private void HandleProjectSwitched(int _)
         {
             OpenToActiveProject();
             if (IsOpen)
-                Refresh();
+                RefreshAsync().Forget();
         }
 
         private void EnsureUi()
@@ -192,10 +237,50 @@ namespace Gwt.Studio.UI
             return text;
         }
 
+        private async UniTask BuildEntriesAsync()
+        {
+            _entries.Clear();
+
+            var openProjects = _multiProjectService?.OpenProjects ?? new List<ProjectInfo>();
+            foreach (var project in openProjects)
+            {
+                _entries.Add(new ProjectEntry(project, true));
+            }
+
+            if (_projectLifecycleService == null)
+                return;
+
+            var recentProjects = await _projectLifecycleService.GetRecentProjectsAsync();
+            foreach (var recent in recentProjects)
+            {
+                if (recent == null || string.IsNullOrWhiteSpace(recent.Path))
+                    continue;
+
+                var alreadyOpen = openProjects.Exists(project =>
+                    string.Equals(project.Path, recent.Path, StringComparison.OrdinalIgnoreCase));
+                if (alreadyOpen)
+                    continue;
+
+                _entries.Add(new ProjectEntry(recent, false));
+            }
+        }
+
         private void OnDestroy()
         {
             if (_subscribed && _multiProjectService != null)
                 _multiProjectService.OnProjectSwitched -= HandleProjectSwitched;
+        }
+
+        private readonly struct ProjectEntry
+        {
+            public readonly ProjectInfo Project;
+            public readonly bool IsOpenProject;
+
+            public ProjectEntry(ProjectInfo project, bool isOpenProject)
+            {
+                Project = project;
+                IsOpenProject = isOpenProject;
+            }
         }
     }
 }
