@@ -3,6 +3,8 @@
 PLANS.md
 *.local.*
 .gwt-session.toml
+.gwt/index/
+.gwt/index.crashed-*/
 
 # Serena MCP tool cache directory
 .serena/

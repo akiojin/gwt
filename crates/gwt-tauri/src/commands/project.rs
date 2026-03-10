@@ -90,7 +90,7 @@ fn read_bare_repo_name(project_root: &Path) -> Option<String> {
     None
 }
 
-fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
+pub(crate) fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
     if git::is_git_repo(selected) {
         if git::is_bare_repository(selected) {
             selected.parent().unwrap_or(selected).to_path_buf()
