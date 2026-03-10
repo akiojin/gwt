@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Gwt.Agent.Services.SkillRegistration;
 using Gwt.Core.Models;
 using Gwt.Core.Services.Pty;
 using Gwt.Core.Services.Terminal;
@@ -16,6 +17,7 @@ namespace Gwt.Agent.Services
         private readonly AgentDetector _detector;
         private readonly IPtyService _ptyService;
         private readonly ITerminalPaneManager _paneManager;
+        private readonly ISkillRegistrationService _skillRegistration;
         private readonly Dictionary<string, AgentSessionData> _sessions = new();
         private readonly Dictionary<string, IDisposable> _outputSubscriptions = new();
         private static readonly string SessionDir = Path.Combine(
@@ -26,11 +28,12 @@ namespace Gwt.Agent.Services
         public event Action<AgentSessionData> OnAgentStatusChanged;
         public event Action<string, string> OnAgentOutput;
 
-        public AgentService(AgentDetector detector, IPtyService ptyService, ITerminalPaneManager paneManager)
+        public AgentService(AgentDetector detector, IPtyService ptyService, ITerminalPaneManager paneManager, ISkillRegistrationService skillRegistration)
         {
             _detector = detector;
             _ptyService = ptyService;
             _paneManager = paneManager;
+            _skillRegistration = skillRegistration;
         }
 
         public UniTask<List<DetectedAgent>> GetAvailableAgentsAsync(CancellationToken ct = default)
@@ -42,6 +45,8 @@ namespace Gwt.Agent.Services
             DetectedAgentType agentType, string worktreePath, string branch,
             string instructions, CancellationToken ct = default)
         {
+            await _skillRegistration.RegisterAllAsync(worktreePath, ct);
+
             var agent = await _detector.DetectAsync(agentType, ct);
             if (!agent.IsAvailable)
                 throw new InvalidOperationException($"Agent {agentType} is not available on this system.");

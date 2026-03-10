@@ -7,6 +7,7 @@ using System.Linq;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using Gwt.Agent.Services;
+using Gwt.Agent.Services.SkillRegistration;
 using Gwt.Agent.Lead;
 using Gwt.Core.Models;
 using Gwt.Core.Services.Terminal;
@@ -444,7 +445,7 @@ namespace Gwt.Tests.Editor
                 var detector = new AgentDetector();
                 var pty = new FakePtyService();
                 var paneManager = new FakeTerminalPaneManager();
-                var service = new AgentService(detector, pty, paneManager);
+                var service = new AgentService(detector, pty, paneManager, new FakeSkillRegistrationService());
 
                 var session = await service.HireAgentAsync(
                     DetectedAgentType.Codex,
@@ -478,7 +479,7 @@ namespace Gwt.Tests.Editor
                 var detector = new AgentDetector();
                 var pty = new FakePtyService();
                 var paneManager = new FakeTerminalPaneManager();
-                var service = new AgentService(detector, pty, paneManager);
+                var service = new AgentService(detector, pty, paneManager, new FakeSkillRegistrationService());
                 var session = await service.HireAgentAsync(
                     DetectedAgentType.Codex,
                     "/tmp/worktree",
@@ -510,7 +511,7 @@ namespace Gwt.Tests.Editor
                 var detector = new AgentDetector();
                 var pty = new FakePtyService();
                 var paneManager = new FakeTerminalPaneManager();
-                var service = new AgentService(detector, pty, paneManager);
+                var service = new AgentService(detector, pty, paneManager, new FakeSkillRegistrationService());
                 var session = await service.HireAgentAsync(
                     DetectedAgentType.Codex,
                     "/tmp/worktree",
@@ -551,7 +552,7 @@ namespace Gwt.Tests.Editor
 
             try
             {
-                var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager());
+                var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager(), new FakeSkillRegistrationService());
                 var restored = await service.RestoreSessionAsync(sessionId);
 
                 Assert.IsNotNull(restored);
@@ -663,7 +664,7 @@ namespace Gwt.Tests.Editor
         [Test]
         public void AgentService_ActiveSessionCount_ZeroInitially()
         {
-            var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager());
+            var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager(), new FakeSkillRegistrationService());
 
             Assert.AreEqual(0, service.ActiveSessionCount);
         }
@@ -673,7 +674,7 @@ namespace Gwt.Tests.Editor
         {
             await WithFakeAgentExecutableAsync("codex", async _ =>
             {
-                var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager());
+                var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager(), new FakeSkillRegistrationService());
                 var agents = await service.GetAvailableAgentsAsync();
 
                 Assert.IsTrue(agents.Exists(a => a.Type == DetectedAgentType.Codex && a.IsAvailable));
@@ -1087,6 +1088,16 @@ namespace Gwt.Tests.Editor
             public void PrevTab() { }
             public TerminalPaneState GetPaneByAgentSessionId(string agentSessionId) => Panes.FirstOrDefault(p => p.AgentSessionId == agentSessionId);
             public int FindPaneIndex(string paneId) => Panes.FindIndex(p => p.PaneId == paneId);
+        }
+
+        private class FakeSkillRegistrationService : ISkillRegistrationService
+        {
+            public UniTask RegisterAllAsync(string projectRoot, CancellationToken ct = default) =>
+                UniTask.CompletedTask;
+            public UniTask RegisterAgentAsync(SkillAgentType agentType, string projectRoot, CancellationToken ct = default) =>
+                UniTask.CompletedTask;
+            public SkillRegistrationStatus GetStatus(string projectRoot) =>
+                new() { Overall = "ok" };
         }
 
         private class TestObservable<T> : IObservable<T>
