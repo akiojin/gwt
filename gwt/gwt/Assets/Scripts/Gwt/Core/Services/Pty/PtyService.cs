@@ -97,7 +97,7 @@ namespace Gwt.Core.Services.Pty
                 throw new InvalidOperationException($"Session {paneId} is not running.");
 
             await session.Process.StandardInput.WriteAsync(data.AsMemory(), ct);
-            await session.Process.StandardInput.FlushAsync(ct);
+            await session.Process.StandardInput.FlushAsync();
         }
 
         public UniTask ResizeAsync(string paneId, int rows, int cols, CancellationToken ct = default)
