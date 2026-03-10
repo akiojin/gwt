@@ -14,6 +14,8 @@ namespace Gwt.Infra.Services
         {
             ".git", "node_modules", ".gwt", "Library", "Temp", "obj", "bin"
         };
+        private static readonly string IndexRoot =
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gwt", "index");
 
         private readonly List<FileIndexEntry> _index = new();
         private readonly List<IssueIndexEntry> _issueIndex = new();
@@ -143,6 +145,64 @@ namespace Gwt.Infra.Services
             finally
             {
                 await UniTask.SwitchToMainThread(ct);
+            }
+        }
+
+        public async UniTask SaveIndexAsync(string projectRoot, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var path = GetIndexStorePath(projectRoot);
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+
+            PersistedProjectIndex payload;
+            lock (_sync)
+            {
+                payload = new PersistedProjectIndex
+                {
+                    Files = new List<FileIndexEntry>(_index),
+                    Issues = new List<IssueIndexEntry>(_issueIndex),
+                    Status = new IndexStatus
+                    {
+                        IndexedFileCount = _status.IndexedFileCount,
+                        IndexedIssueCount = _status.IndexedIssueCount,
+                        PendingFiles = _status.PendingFiles,
+                        ChangedFiles = _status.ChangedFiles,
+                        LastIndexedAt = _status.LastIndexedAt,
+                        IsRunning = _status.IsRunning
+                    }
+                };
+            }
+
+            var json = JsonUtility.ToJson(payload, true);
+            await File.WriteAllTextAsync(path, json, ct);
+        }
+
+        public async UniTask LoadIndexAsync(string projectRoot, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var path = GetIndexStorePath(projectRoot);
+            if (!File.Exists(path))
+                return;
+
+            var json = await File.ReadAllTextAsync(path, ct);
+            var payload = JsonUtility.FromJson<PersistedProjectIndex>(json);
+            if (payload == null)
+                return;
+
+            lock (_sync)
+            {
+                _index.Clear();
+                _index.AddRange(payload.Files ?? new List<FileIndexEntry>());
+                _issueIndex.Clear();
+                _issueIndex.AddRange(payload.Issues ?? new List<IssueIndexEntry>());
+                _status.IndexedFileCount = payload.Status?.IndexedFileCount ?? _index.Count;
+                _status.IndexedIssueCount = payload.Status?.IndexedIssueCount ?? _issueIndex.Count;
+                _status.PendingFiles = payload.Status?.PendingFiles ?? 0;
+                _status.ChangedFiles = payload.Status?.ChangedFiles ?? 0;
+                _status.LastIndexedAt = payload.Status?.LastIndexedAt ?? string.Empty;
+                _status.IsRunning = false;
             }
         }
 
@@ -334,6 +394,23 @@ namespace Gwt.Infra.Services
             {
                 return SizeBytes == other.SizeBytes && LastWriteTimeUtc == other.LastWriteTimeUtc;
             }
+        }
+
+        private static string GetIndexStorePath(string projectRoot)
+        {
+            var fullPath = Path.GetFullPath(projectRoot);
+            var safeKey = fullPath.Replace(Path.DirectorySeparatorChar, '_')
+                .Replace(Path.AltDirectorySeparatorChar, '_')
+                .Replace(':', '_');
+            return Path.Combine(IndexRoot, $"{safeKey}.json");
+        }
+
+        [Serializable]
+        private class PersistedProjectIndex
+        {
+            public List<FileIndexEntry> Files = new();
+            public List<IssueIndexEntry> Issues = new();
+            public IndexStatus Status = new();
         }
     }
 }

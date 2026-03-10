@@ -735,6 +735,30 @@ namespace Gwt.Tests.Editor
             Assert.IsFalse(string.IsNullOrEmpty(status.LastIndexedAt));
         }
 
+        [UnityTest]
+        public IEnumerator ProjectIndexService_SaveIndexAsync_AndLoadIndexAsync_RoundTrip() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                File.WriteAllText(Path.Combine(tempDir, "README.md"), "search text");
+                var service = new ProjectIndexService();
+                await service.BuildIndexAsync(tempDir);
+                await service.BuildIssueIndexAsync(new List<IssueIndexEntry>
+                {
+                    new() { Number = 1, Title = "Issue", Body = "body", UpdatedAt = "2026-03-10T00:00:00Z" }
+                });
+
+                await service.SaveIndexAsync(tempDir);
+
+                var restored = new ProjectIndexService();
+                await restored.LoadIndexAsync(tempDir);
+
+                Assert.AreEqual(1, restored.IndexedFileCount);
+                Assert.AreEqual(1, restored.SearchIssues("Issue").Count);
+                Assert.AreEqual(1, restored.Search("search").Count);
+            });
+        });
+
         // --- MigrationState enum ---
 
         [Test]

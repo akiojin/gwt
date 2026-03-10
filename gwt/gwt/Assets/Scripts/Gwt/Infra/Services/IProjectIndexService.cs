@@ -53,6 +53,8 @@ namespace Gwt.Infra.Services
         SearchResultGroup SearchAll(string query);
         UniTask RefreshAsync(string projectRoot, CancellationToken ct = default);
         UniTask RefreshChangedFilesAsync(string projectRoot, CancellationToken ct = default);
+        UniTask SaveIndexAsync(string projectRoot, CancellationToken ct = default);
+        UniTask LoadIndexAsync(string projectRoot, CancellationToken ct = default);
         int IndexedFileCount { get; }
         IndexStatus GetStatus();
     }
