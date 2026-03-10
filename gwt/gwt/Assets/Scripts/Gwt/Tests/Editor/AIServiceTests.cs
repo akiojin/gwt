@@ -199,13 +199,29 @@ namespace Gwt.Tests.Editor
         {
             var service = new VoiceService();
             Assert.DoesNotThrow(() => service.SpeakAsync("hello", "voice1").GetAwaiter().GetResult());
+            Assert.That(service.IsSpeaking, Is.True);
+            Assert.That(service.LastSpokenText, Is.EqualTo("hello"));
+            Assert.That(service.LastVoiceId, Is.EqualTo("voice1"));
         }
 
         [Test]
         public void VoiceService_StopSpeaking_DoesNotThrow()
         {
             var service = new VoiceService();
+            service.SpeakAsync("hello", "voice1").GetAwaiter().GetResult();
             Assert.DoesNotThrow(() => service.StopSpeaking());
+            Assert.That(service.IsSpeaking, Is.False);
+        }
+
+        [Test]
+        public void VoiceService_StopRecording_PopulatesTranscript()
+        {
+            var service = new VoiceService();
+            service.StartRecordingAsync().GetAwaiter().GetResult();
+
+            service.StopRecording();
+
+            Assert.That(service.LastTranscript, Is.EqualTo("Recorded voice note"));
         }
 
         // ===========================================================

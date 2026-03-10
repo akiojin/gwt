@@ -13,6 +13,8 @@ namespace Gwt.Infra.Services
         public float BgmVolume => _bgmVolume;
         public float SfxVolume => _sfxVolume;
         public bool IsMuted { get => _isMuted; set => _isMuted = value; }
+        public BgmType? CurrentBgm => _currentBgm;
+        public SfxType? LastSfx => _lastSfx;
 
         public void PlayBgm(BgmType type)
         {

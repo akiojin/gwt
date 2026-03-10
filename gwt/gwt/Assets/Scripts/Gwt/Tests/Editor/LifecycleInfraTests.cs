@@ -1469,6 +1469,35 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(0.7f, service.BgmVolume, 0.001f);
             Assert.AreEqual(1.0f, service.SfxVolume, 0.001f);
             Assert.IsFalse(service.IsMuted);
+            Assert.IsNull(service.CurrentBgm);
+            Assert.IsNull(service.LastSfx);
+        }
+
+        [Test]
+        public void SoundService_PlayAndStop_TracksCurrentAudioState()
+        {
+            var service = new SoundService();
+
+            service.PlayBgm(BgmType.CISuccess);
+            service.PlaySfx(SfxType.ButtonClick);
+
+            Assert.AreEqual(BgmType.CISuccess, service.CurrentBgm);
+            Assert.AreEqual(SfxType.ButtonClick, service.LastSfx);
+
+            service.StopBgm();
+            Assert.IsNull(service.CurrentBgm);
+        }
+
+        [Test]
+        public void SoundService_Muted_DoesNotUpdatePlaybackState()
+        {
+            var service = new SoundService { IsMuted = true };
+
+            service.PlayBgm(BgmType.CIFail);
+            service.PlaySfx(SfxType.Notification);
+
+            Assert.IsNull(service.CurrentBgm);
+            Assert.IsNull(service.LastSfx);
         }
 
         // --- GamificationService default level ---
@@ -1494,6 +1523,30 @@ namespace Gwt.Tests.Editor
         {
             var service = new GamificationService();
             Assert.IsFalse(service.CheckBadge("any-badge"));
+        }
+
+        [Test]
+        public void GamificationService_AddExperience_UnlocksFirstBadge()
+        {
+            var service = new GamificationService();
+
+            service.AddExperience(10);
+
+            Assert.IsTrue(service.CheckBadge("first_experience"));
+            Assert.AreEqual(10, service.CurrentLevel.Experience);
+        }
+
+        [Test]
+        public void GamificationService_AddExperience_LevelsUp_AndUnlocksLevelBadge()
+        {
+            var service = new GamificationService();
+
+            service.AddExperience(120);
+
+            Assert.AreEqual(2, service.CurrentLevel.Level);
+            Assert.AreEqual(20, service.CurrentLevel.Experience);
+            Assert.AreEqual(200, service.CurrentLevel.ExperienceToNextLevel);
+            Assert.IsTrue(service.CheckBadge("level_2"));
         }
 
         // --- Badge serialization ---

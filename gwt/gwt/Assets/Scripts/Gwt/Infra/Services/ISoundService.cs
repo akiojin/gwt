@@ -30,5 +30,7 @@ namespace Gwt.Infra.Services
         float BgmVolume { get; }
         float SfxVolume { get; }
         bool IsMuted { get; set; }
+        BgmType? CurrentBgm { get; }
+        SfxType? LastSfx { get; }
     }
 }
