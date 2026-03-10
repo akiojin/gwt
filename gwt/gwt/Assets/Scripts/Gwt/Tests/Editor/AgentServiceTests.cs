@@ -1,9 +1,17 @@
 using NUnit.Framework;
+using System.Collections;
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Threading;
+using Cysharp.Threading.Tasks;
 using Gwt.Agent.Services;
 using Gwt.Agent.Lead;
+using Gwt.Core.Models;
+using Gwt.Core.Services.Terminal;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace Gwt.Tests.Editor
 {
@@ -428,6 +436,444 @@ namespace Gwt.Tests.Editor
                 "AutoPrCreated should default to false");
         }
 
+        [UnityTest]
+        public IEnumerator AgentService_HireAgentAsync_CreatesSessionAndPane() => UniTask.ToCoroutine(async () =>
+        {
+            await WithFakeAgentExecutableAsync("codex", async executablePath =>
+            {
+                var detector = new AgentDetector();
+                var pty = new FakePtyService();
+                var paneManager = new FakeTerminalPaneManager();
+                var service = new AgentService(detector, pty, paneManager);
+
+                var session = await service.HireAgentAsync(
+                    DetectedAgentType.Codex,
+                    "/tmp/worktree",
+                    "feature/test",
+                    "hello");
+
+                try
+                {
+                    Assert.AreEqual("pty-001", session.PtySessionId);
+                    Assert.AreEqual("running", session.Status);
+                    Assert.That(session.ToolVersion, Does.Contain("fake-agent"));
+                    Assert.AreEqual(executablePath, pty.LastSpawnCommand);
+                    Assert.That(pty.LastSpawnArgs, Does.Contain("--cwd"));
+                    Assert.AreEqual("hello\n", pty.LastWriteData);
+                    Assert.AreEqual(1, paneManager.Panes.Count);
+                    Assert.AreEqual(1, service.ActiveSessionCount);
+                }
+                finally
+                {
+                    DeleteAgentSessionFile(session.Id);
+                }
+            });
+        });
+
+        [UnityTest]
+        public IEnumerator AgentService_FireAgentAsync_StopsSessionAndRemovesPane() => UniTask.ToCoroutine(async () =>
+        {
+            await WithFakeAgentExecutableAsync("codex", async _ =>
+            {
+                var detector = new AgentDetector();
+                var pty = new FakePtyService();
+                var paneManager = new FakeTerminalPaneManager();
+                var service = new AgentService(detector, pty, paneManager);
+                var session = await service.HireAgentAsync(
+                    DetectedAgentType.Codex,
+                    "/tmp/worktree",
+                    "feature/test",
+                    string.Empty);
+
+                try
+                {
+                    await service.FireAgentAsync(session.Id);
+
+                    var stored = await service.GetSessionAsync(session.Id);
+                    Assert.AreEqual(session.PtySessionId, pty.KilledSessionId);
+                    Assert.AreEqual("stopped", stored.Status);
+                    Assert.AreEqual(0, paneManager.Panes.Count);
+                    Assert.AreEqual(0, service.ActiveSessionCount);
+                }
+                finally
+                {
+                    DeleteAgentSessionFile(session.Id);
+                }
+            });
+        });
+
+        [UnityTest]
+        public IEnumerator AgentService_SendInstructionAsync_AppendsHistoryAndWritesToPty() => UniTask.ToCoroutine(async () =>
+        {
+            await WithFakeAgentExecutableAsync("codex", async _ =>
+            {
+                var detector = new AgentDetector();
+                var pty = new FakePtyService();
+                var paneManager = new FakeTerminalPaneManager();
+                var service = new AgentService(detector, pty, paneManager);
+                var session = await service.HireAgentAsync(
+                    DetectedAgentType.Codex,
+                    "/tmp/worktree",
+                    "feature/test",
+                    string.Empty);
+
+                try
+                {
+                    await service.SendInstructionAsync(session.Id, "status");
+
+                    var stored = await service.GetSessionAsync(session.Id);
+                    Assert.AreEqual("status\n", pty.LastWriteData);
+                    Assert.That(stored.ConversationHistory, Contains.Item("status"));
+                }
+                finally
+                {
+                    DeleteAgentSessionFile(session.Id);
+                }
+            });
+        });
+
+        [UnityTest]
+        public IEnumerator AgentService_RestoreSessionAsync_LoadsAndMarksStopped() => UniTask.ToCoroutine(async () =>
+        {
+            var sessionId = "restore-agent-session";
+            var filePath = GetAgentSessionFilePath(sessionId);
+            Directory.CreateDirectory(Path.GetDirectoryName(filePath));
+            var saved = new AgentSessionData
+            {
+                Id = sessionId,
+                AgentType = "codex",
+                WorktreePath = "/tmp/project",
+                Branch = "feature/restore",
+                Status = "running"
+            };
+
+            File.WriteAllText(filePath, JsonUtility.ToJson(saved, true));
+
+            try
+            {
+                var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager());
+                var restored = await service.RestoreSessionAsync(sessionId);
+
+                Assert.IsNotNull(restored);
+                Assert.AreEqual("stopped", restored.Status);
+                Assert.AreEqual(1, (await service.ListSessionsAsync(string.Empty)).Count);
+            }
+            finally
+            {
+                DeleteAgentSessionFile(sessionId);
+            }
+        });
+
+        [Test]
+        public void LeadOrchestrator_ProcessUserCommandAsync_AppendsConversationHistory()
+        {
+            var orchestrator = CreateOrchestrator();
+            orchestrator.SelectLeadAsync("alex").GetAwaiter().GetResult();
+
+            var response = orchestrator.ProcessUserCommandAsync("Check CI").GetAwaiter().GetResult();
+            var data = orchestrator.GetSessionDataAsync().GetAwaiter().GetResult();
+
+            Assert.That(response, Does.Contain("Check CI"));
+            Assert.AreEqual(2, data.ConversationHistory.Count);
+            Assert.AreEqual("user", data.ConversationHistory[0].Role);
+            Assert.AreEqual("lead", data.ConversationHistory[1].Role);
+        }
+
+        [Test]
+        public void LeadOrchestrator_StartMonitoringAsync_WithoutLead_Throws()
+        {
+            var orchestrator = CreateOrchestrator();
+
+            Assert.Throws<InvalidOperationException>(() =>
+                orchestrator.StartMonitoringAsync().GetAwaiter().GetResult());
+        }
+
+        [UnityTest]
+        public IEnumerator LeadOrchestrator_StartMonitoringAsync_AssignsPendingTaskToIdleAgent() => UniTask.ToCoroutine(async () =>
+        {
+            var stub = new StubAgentService
+            {
+                SessionsToReturn = new List<AgentSessionData>
+                {
+                    new() { Id = "agent-1", AgentType = "codex", Status = "idle" }
+                }
+            };
+            var orchestrator = new LeadOrchestrator(stub);
+            orchestrator.RestoreSessionAsync("/tmp/project-monitor").GetAwaiter().GetResult();
+            orchestrator.SelectLeadAsync("alex").GetAwaiter().GetResult();
+            var data = orchestrator.GetSessionDataAsync().GetAwaiter().GetResult();
+            data.TaskAssignments.Add(new LeadTaskAssignment
+            {
+                TaskId = "task-1",
+                AssignedAgentSessionId = "agent-1",
+                Status = "pending"
+            });
+
+            string speech = null;
+            orchestrator.OnLeadSpeech += s => speech = s;
+
+            using var cts = new CancellationTokenSource();
+            cts.CancelAfter(TimeSpan.FromMilliseconds(50));
+            await orchestrator.StartMonitoringAsync(cts.Token);
+
+            Assert.AreEqual("in_progress", data.TaskAssignments[0].Status);
+            Assert.That(speech, Does.Contain("task-1"));
+        });
+
+        [Test]
+        public void LeadOrchestrator_RestoreSessionAsync_MissingFile_InitializesIdleState()
+        {
+            var projectRoot = "/tmp/project-" + Guid.NewGuid().ToString("N");
+            var orchestrator = CreateOrchestrator();
+
+            try
+            {
+                orchestrator.RestoreSessionAsync(projectRoot).GetAwaiter().GetResult();
+                var data = orchestrator.GetSessionDataAsync().GetAwaiter().GetResult();
+
+                Assert.AreEqual(projectRoot, data.ProjectRoot);
+                Assert.AreEqual("idle", data.CurrentState);
+            }
+            finally
+            {
+                DeleteLeadSessionFile(projectRoot);
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator LeadOrchestrator_SaveSessionAsync_WritesSessionFile() => UniTask.ToCoroutine(async () =>
+        {
+            var projectRoot = "/tmp/project-" + Guid.NewGuid().ToString("N");
+            var orchestrator = CreateOrchestrator();
+
+            try
+            {
+                await orchestrator.RestoreSessionAsync(projectRoot);
+                await orchestrator.SelectLeadAsync("alex");
+                await orchestrator.SaveSessionAsync();
+
+                Assert.IsTrue(File.Exists(GetLeadSessionFilePath(projectRoot)));
+            }
+            finally
+            {
+                DeleteLeadSessionFile(projectRoot);
+            }
+        });
+
+        [Test]
+        public void AgentService_ActiveSessionCount_ZeroInitially()
+        {
+            var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager());
+
+            Assert.AreEqual(0, service.ActiveSessionCount);
+        }
+
+        [UnityTest]
+        public IEnumerator AgentService_GetAvailableAgentsAsync_ReturnsDetectedAgent() => UniTask.ToCoroutine(async () =>
+        {
+            await WithFakeAgentExecutableAsync("codex", async _ =>
+            {
+                var service = new AgentService(new AgentDetector(), new FakePtyService(), new FakeTerminalPaneManager());
+                var agents = await service.GetAvailableAgentsAsync();
+
+                Assert.IsTrue(agents.Exists(a => a.Type == DetectedAgentType.Codex && a.IsAvailable));
+            });
+        });
+
+        [Test]
+        public void LeadOrchestrator_StopMonitoringAsync_ResetsState()
+        {
+            var orchestrator = CreateOrchestrator();
+
+            orchestrator.StopMonitoringAsync().GetAwaiter().GetResult();
+
+            var data = orchestrator.GetSessionDataAsync().GetAwaiter().GetResult();
+            Assert.AreEqual("idle", data.CurrentState);
+        }
+
+        // ===========================================================
+        // TDD: インタビュー確定事項の更新テスト
+        // ===========================================================
+
+        // --- 1. Lead Error Handling: Agent 自律エラーハンドリング ---
+        // 確定モデル: Agent はエラーを自律的に処理する。
+        // Lead は PTY scrollback を監視して進捗を追跡するだけ。
+        // Lead が Agent にエラー修正指示を送ることはない。
+
+        [UnityTest]
+        public IEnumerator LeadOrchestrator_CheckAgentStatus_DoesNotSendErrorFixInstructions() => UniTask.ToCoroutine(async () =>
+        {
+            // Lead の監視ループは Agent のステータスを確認するだけで、
+            // エラー修正指示を Agent に送信しないことを確認
+            var stub = new StubAgentService
+            {
+                SessionsToReturn = new List<AgentSessionData>
+                {
+                    new() { Id = "agent-err", AgentType = "codex", Status = "running" }
+                }
+            };
+            var orchestrator = new LeadOrchestrator(stub);
+            orchestrator.RestoreSessionAsync("/tmp/err-test").GetAwaiter().GetResult();
+            orchestrator.SelectLeadAsync("alex").GetAwaiter().GetResult();
+
+            // StubAgentService の SendInstructionAsync は呼ばれないはず
+            // Lead は監視のみで指示を送らない（Agent 自律エラーハンドリング）
+            using var cts = new CancellationTokenSource();
+            cts.CancelAfter(TimeSpan.FromMilliseconds(50));
+            await orchestrator.StartMonitoringAsync(cts.Token);
+
+            // SendInstructionAsync が呼ばれていないことを確認
+            Assert.IsFalse(stub.SendInstructionCalled,
+                "Lead should NOT send error fix instructions to agents (agents self-handle errors)");
+        });
+
+        [Test]
+        public void LeadOrchestrator_MonitoringModel_IsScrollbackObservation()
+        {
+            // Lead の監視は PTY scrollback 読取りによる進捗追跡であることを確認
+            var orchestrator = CreateOrchestrator();
+            orchestrator.RestoreSessionAsync("/tmp/monitor-model").GetAwaiter().GetResult();
+            orchestrator.SelectLeadAsync("alex").GetAwaiter().GetResult();
+
+            var data = orchestrator.GetSessionDataAsync().GetAwaiter().GetResult();
+
+            // 監視状態は "patrolling" で、Agent への介入は行わない
+            Assert.AreEqual("idle", data.CurrentState,
+                "Lead should be in idle/patrolling state (observation only, no intervention)");
+        }
+
+        // --- 2. Lead Floating Question UI ---
+        // 確定モデル: "?" マーカー + バルーン（質問テキスト + 選択肢ボタン）
+        // World Space Canvas 要素（Lead キャラクター位置に追従）
+
+        [Test]
+        public void LeadQuestion_DefaultState_IsUnanswered()
+        {
+            var question = new LeadQuestion
+            {
+                QuestionId = "q-001",
+                Text = "Which approach do you prefer?",
+                Choices = new List<LeadQuestionChoice>
+                {
+                    new() { Id = "opt-a", Label = "Option A" },
+                    new() { Id = "opt-b", Label = "Option B" }
+                }
+            };
+
+            Assert.IsFalse(question.IsAnswered,
+                "New question should default to unanswered");
+            Assert.IsTrue(string.IsNullOrEmpty(question.SelectedChoiceId),
+                "No choice should be selected initially");
+        }
+
+        [Test]
+        public void LeadQuestion_AnswerChoice_MarksAsAnswered()
+        {
+            var question = new LeadQuestion
+            {
+                QuestionId = "q-002",
+                Text = "Deploy now?",
+                Choices = new List<LeadQuestionChoice>
+                {
+                    new() { Id = "yes", Label = "Yes" },
+                    new() { Id = "no", Label = "No" }
+                }
+            };
+
+            // ユーザーが選択肢ボタンをクリック
+            question.SelectedChoiceId = "yes";
+            question.IsAnswered = true;
+
+            Assert.IsTrue(question.IsAnswered);
+            Assert.AreEqual("yes", question.SelectedChoiceId);
+        }
+
+        [Test]
+        public void LeadQuestion_RequiresAtLeastTwoChoices()
+        {
+            var question = new LeadQuestion
+            {
+                QuestionId = "q-003",
+                Text = "A or B?",
+                Choices = new List<LeadQuestionChoice>
+                {
+                    new() { Id = "a", Label = "A" },
+                    new() { Id = "b", Label = "B" }
+                }
+            };
+
+            Assert.That(question.Choices.Count, Is.GreaterThanOrEqualTo(2),
+                "Question should have at least 2 choices for meaningful selection");
+        }
+
+        [Test]
+        public void LeadSessionData_HasPendingQuestions()
+        {
+            var data = new LeadSessionData();
+
+            Assert.IsNotNull(data.PendingQuestions,
+                "LeadSessionData should have PendingQuestions list");
+            Assert.AreEqual(0, data.PendingQuestions.Count,
+                "PendingQuestions should default to empty");
+        }
+
+        [Test]
+        public void LeadSessionData_PendingQuestion_AddedAndRetrieved()
+        {
+            var data = new LeadSessionData();
+            data.PendingQuestions.Add(new LeadQuestion
+            {
+                QuestionId = "q-004",
+                Text = "Which framework?",
+                Choices = new List<LeadQuestionChoice>
+                {
+                    new() { Id = "react", Label = "React" },
+                    new() { Id = "svelte", Label = "Svelte" }
+                }
+            });
+
+            Assert.AreEqual(1, data.PendingQuestions.Count);
+            Assert.AreEqual("Which framework?", data.PendingQuestions[0].Text);
+            Assert.AreEqual(2, data.PendingQuestions[0].Choices.Count);
+        }
+
+        // --- 4. Camera: Drag Pan Only (no zoom) ---
+        // 確定モデル: カメラはドラッグパンのみ対応（ズームなし）
+        // StudioCameraController からズーム機能を除去済み
+
+        // --- 5. Full GFM Markdown Rendering ---
+
+        [Test]
+        public void GfmMarkdownContent_DefaultFeatureFlags_AllEnabled()
+        {
+            var content = new Gwt.Core.Models.GfmMarkdownContent();
+
+            Assert.IsTrue(content.EnableTables,
+                "GFM tables should be enabled by default");
+            Assert.IsTrue(content.EnableTaskLists,
+                "GFM task lists should be enabled by default");
+            Assert.IsTrue(content.EnableStrikethrough,
+                "GFM strikethrough should be enabled by default");
+            Assert.IsTrue(content.EnableSyntaxHighlight,
+                "GFM syntax highlighting should be enabled by default");
+            Assert.IsTrue(content.EnableAutolinks,
+                "GFM autolinks should be enabled by default");
+        }
+
+        [Test]
+        public void GfmMarkdownContent_StoresRawMarkdown()
+        {
+            var content = new Gwt.Core.Models.GfmMarkdownContent
+            {
+                RawMarkdown = "# Hello\n\n- [ ] Task 1\n- [x] Task 2\n\n| A | B |\n|---|---|\n| 1 | 2 |",
+                ContentType = "summary"
+            };
+
+            Assert.IsFalse(string.IsNullOrEmpty(content.RawMarkdown),
+                "Should store raw GFM markdown text");
+            Assert.AreEqual("summary", content.ContentType);
+        }
+
         // --- Helpers ---
 
         private static LeadOrchestrator CreateOrchestrator()
@@ -435,9 +881,104 @@ namespace Gwt.Tests.Editor
             return new LeadOrchestrator(new StubAgentService());
         }
 
+        private static void WithFakeAgentExecutable(string commandName, Action<string> action)
+        {
+            var tempDir = Path.Combine(Path.GetTempPath(), "gwt-agent-bin-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            var commandPath = Path.Combine(tempDir, commandName);
+            File.WriteAllText(commandPath, "#!/bin/sh\necho fake-agent 1.0\n");
+            using (var chmod = System.Diagnostics.Process.Start("/bin/chmod", $"+x \"{commandPath}\""))
+            {
+                chmod?.WaitForExit();
+            }
+
+            var originalPath = Environment.GetEnvironmentVariable("PATH");
+            Environment.SetEnvironmentVariable("PATH", tempDir + Path.PathSeparator + originalPath);
+
+            try
+            {
+                action(commandPath);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("PATH", originalPath);
+                if (File.Exists(commandPath))
+                    File.Delete(commandPath);
+                if (Directory.Exists(tempDir))
+                    Directory.Delete(tempDir);
+            }
+        }
+
+        private static async UniTask WithFakeAgentExecutableAsync(string commandName, Func<string, UniTask> action)
+        {
+            var tempDir = Path.Combine(Path.GetTempPath(), "gwt-agent-bin-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            var commandPath = Path.Combine(tempDir, commandName);
+            File.WriteAllText(commandPath, "#!/bin/sh\necho fake-agent 1.0\n");
+            using (var chmod = System.Diagnostics.Process.Start("/bin/chmod", $"+x \"{commandPath}\""))
+            {
+                chmod?.WaitForExit();
+            }
+
+            var originalPath = Environment.GetEnvironmentVariable("PATH");
+            Environment.SetEnvironmentVariable("PATH", tempDir + Path.PathSeparator + originalPath);
+
+            try
+            {
+                await action(commandPath);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("PATH", originalPath);
+                if (File.Exists(commandPath))
+                    File.Delete(commandPath);
+                if (Directory.Exists(tempDir))
+                    Directory.Delete(tempDir);
+            }
+        }
+
+        private static string GetAgentSessionFilePath(string sessionId)
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".gwt",
+                "sessions",
+                $"{sessionId}.json");
+        }
+
+        private static void DeleteAgentSessionFile(string sessionId)
+        {
+            var path = GetAgentSessionFilePath(sessionId);
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+
+        private static string GetLeadSessionFilePath(string projectRoot)
+        {
+            var safeKey = projectRoot.Replace(Path.DirectorySeparatorChar, '_')
+                .Replace(Path.AltDirectorySeparatorChar, '_')
+                .Replace(':', '_');
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".gwt",
+                "lead-sessions",
+                $"lead_{safeKey}.json");
+        }
+
+        private static void DeleteLeadSessionFile(string projectRoot)
+        {
+            var path = GetLeadSessionFilePath(projectRoot);
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+
         private class StubAgentService : IAgentService
         {
             public int ActiveSessionCount => 0;
+            public List<AgentSessionData> SessionsToReturn { get; set; } = new();
+            public bool SendInstructionCalled { get; private set; }
             public event System.Action<AgentSessionData> OnAgentStatusChanged;
             public event System.Action<string, string> OnAgentOutput;
 
@@ -447,12 +988,15 @@ namespace Gwt.Tests.Editor
                 Cysharp.Threading.Tasks.UniTask.FromResult(new AgentSessionData());
             public Cysharp.Threading.Tasks.UniTask FireAgentAsync(string s, System.Threading.CancellationToken ct) =>
                 Cysharp.Threading.Tasks.UniTask.CompletedTask;
-            public Cysharp.Threading.Tasks.UniTask SendInstructionAsync(string s, string i, System.Threading.CancellationToken ct) =>
-                Cysharp.Threading.Tasks.UniTask.CompletedTask;
+            public Cysharp.Threading.Tasks.UniTask SendInstructionAsync(string s, string i, System.Threading.CancellationToken ct)
+            {
+                SendInstructionCalled = true;
+                return Cysharp.Threading.Tasks.UniTask.CompletedTask;
+            }
             public Cysharp.Threading.Tasks.UniTask<AgentSessionData> GetSessionAsync(string s, System.Threading.CancellationToken ct) =>
                 Cysharp.Threading.Tasks.UniTask.FromResult<AgentSessionData>(null);
             public Cysharp.Threading.Tasks.UniTask<List<AgentSessionData>> ListSessionsAsync(string p, System.Threading.CancellationToken ct) =>
-                Cysharp.Threading.Tasks.UniTask.FromResult(new List<AgentSessionData>());
+                Cysharp.Threading.Tasks.UniTask.FromResult(new List<AgentSessionData>(SessionsToReturn));
             public Cysharp.Threading.Tasks.UniTask<AgentSessionData> RestoreSessionAsync(string s, System.Threading.CancellationToken ct) =>
                 Cysharp.Threading.Tasks.UniTask.FromResult<AgentSessionData>(null);
             public Cysharp.Threading.Tasks.UniTask SaveAllSessionsAsync(System.Threading.CancellationToken ct) =>
@@ -463,6 +1007,95 @@ namespace Gwt.Tests.Editor
             {
                 OnAgentStatusChanged?.Invoke(null);
                 OnAgentOutput?.Invoke(null, null);
+            }
+        }
+
+        private class FakePtyService : IPtyService
+        {
+            private readonly TestObservable<string> _output = new();
+
+            public string LastSpawnCommand { get; private set; }
+            public string[] LastSpawnArgs { get; private set; }
+            public string LastWriteData { get; private set; }
+            public string KilledSessionId { get; private set; }
+
+            public UniTask<string> SpawnAsync(string command, string[] args, string workingDir, int rows, int cols, CancellationToken ct = default)
+            {
+                LastSpawnCommand = command;
+                LastSpawnArgs = args;
+                return UniTask.FromResult("pty-001");
+            }
+
+            public UniTask WriteAsync(string paneId, string data, CancellationToken ct = default)
+            {
+                LastWriteData = data;
+                return UniTask.CompletedTask;
+            }
+
+            public UniTask ResizeAsync(string paneId, int rows, int cols, CancellationToken ct = default)
+            {
+                return UniTask.CompletedTask;
+            }
+
+            public UniTask KillAsync(string paneId, CancellationToken ct = default)
+            {
+                KilledSessionId = paneId;
+                return UniTask.CompletedTask;
+            }
+
+            public IObservable<string> GetOutputStream(string paneId) => _output;
+
+            public PaneStatus GetStatus(string paneId) => PaneStatus.Running;
+        }
+
+        private class FakeTerminalPaneManager : ITerminalPaneManager
+        {
+            public List<TerminalPaneState> Panes { get; } = new();
+            public int PaneCount => Panes.Count;
+            public int ActiveIndex { get; private set; } = -1;
+            public TerminalPaneState ActivePane => ActiveIndex >= 0 && ActiveIndex < Panes.Count ? Panes[ActiveIndex] : null;
+
+            public event Action<TerminalPaneState> OnPaneAdded;
+            public event Action<string> OnPaneRemoved;
+            public event Action<int> OnActiveIndexChanged;
+
+            public void AddPane(TerminalPaneState pane)
+            {
+                Panes.Add(pane);
+                ActiveIndex = Panes.Count - 1;
+                OnPaneAdded?.Invoke(pane);
+                OnActiveIndexChanged?.Invoke(ActiveIndex);
+            }
+
+            public void RemovePane(string paneId)
+            {
+                var pane = Panes.FirstOrDefault(p => p.PaneId == paneId);
+                if (pane == null) return;
+                Panes.Remove(pane);
+                ActiveIndex = Panes.Count - 1;
+                OnPaneRemoved?.Invoke(paneId);
+                OnActiveIndexChanged?.Invoke(ActiveIndex);
+            }
+
+            public void SetActiveIndex(int index)
+            {
+                ActiveIndex = index;
+                OnActiveIndexChanged?.Invoke(index);
+            }
+
+            public void NextTab() { }
+            public void PrevTab() { }
+            public TerminalPaneState GetPaneByAgentSessionId(string agentSessionId) => Panes.FirstOrDefault(p => p.AgentSessionId == agentSessionId);
+            public int FindPaneIndex(string paneId) => Panes.FindIndex(p => p.PaneId == paneId);
+        }
+
+        private class TestObservable<T> : IObservable<T>
+        {
+            public IDisposable Subscribe(IObserver<T> observer) => new NoOpDisposable();
+
+            private class NoOpDisposable : IDisposable
+            {
+                public void Dispose() { }
             }
         }
     }

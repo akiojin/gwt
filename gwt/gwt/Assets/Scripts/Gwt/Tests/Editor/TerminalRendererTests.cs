@@ -1,4 +1,5 @@
 using System.Text;
+using System.Threading;
 using Gwt.Core.Services.Terminal;
 using NUnit.Framework;
 using UnityEngine;
@@ -190,6 +191,37 @@ namespace Gwt.Tests.Editor
             adapter.Feed("A");
 
             Assert.That(fired, Is.True);
+        }
+
+        [Test]
+        public void XtermSharpTerminalAdapter_FeedFromBackgroundThread_QueuesUntilProcessed()
+        {
+            var adapter = new XtermSharpTerminalAdapter(24, 80);
+            bool fired = false;
+            adapter.BufferChanged += () => fired = true;
+
+            var thread = new Thread(() => adapter.Feed("BG"));
+            thread.Start();
+            thread.Join();
+
+            Assert.That(adapter.GetBuffer().GetCell(0, 0).Character, Is.EqualTo(' '));
+            Assert.That(fired, Is.False);
+
+            var processed = adapter.ProcessPendingData();
+
+            Assert.That(processed, Is.True);
+            Assert.That(adapter.GetBuffer().GetCell(0, 0).Character, Is.EqualTo('B'));
+            Assert.That(fired, Is.True);
+        }
+
+        [Test]
+        public void XtermSharpTerminalAdapter_ProcessPendingData_WithoutQueuedInput_ReturnsFalse()
+        {
+            var adapter = new XtermSharpTerminalAdapter(24, 80);
+
+            var processed = adapter.ProcessPendingData();
+
+            Assert.That(processed, Is.False);
         }
 
         private static int CountOccurrences(string source, string pattern)

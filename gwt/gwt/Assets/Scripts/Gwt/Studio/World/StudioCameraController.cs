@@ -7,9 +7,6 @@ namespace Gwt.Studio.World
     {
         [SerializeField] private Camera _camera;
         [SerializeField] private float _panSpeed = 5f;
-        [SerializeField] private float _zoomSpeed = 2f;
-        [SerializeField] private float _minZoom = 3f;
-        [SerializeField] private float _maxZoom = 12f;
         [SerializeField] private float _followSmoothing = 5f;
 
         private Transform _followTarget;
@@ -26,8 +23,6 @@ namespace Gwt.Studio.World
         private void Update()
         {
             if (_camera == null) return;
-
-            HandleZoom();
 
             if (_isFollowing && _followTarget != null)
             {
@@ -92,22 +87,6 @@ namespace Gwt.Studio.World
             if (mouse.middleButton.wasReleasedThisFrame)
             {
                 _isDragging = false;
-            }
-        }
-
-        private void HandleZoom()
-        {
-            var mouse = Mouse.current;
-            if (mouse == null) return;
-
-            float scroll = mouse.scroll.y.ReadValue() / 120f;
-            if (Mathf.Abs(scroll) > 0.01f)
-            {
-                _camera.orthographicSize = Mathf.Clamp(
-                    _camera.orthographicSize - scroll * _zoomSpeed,
-                    _minZoom,
-                    _maxZoom
-                );
             }
         }
 

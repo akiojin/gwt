@@ -18,21 +18,24 @@ namespace Gwt.Agent.Lead
                 Id = "alex", DisplayName = "Alex",
                 Personality = LeadPersonality.Analytical,
                 Description = "Methodical and detail-oriented. Excels at systematic debugging and thorough code review.",
-                SpriteKey = "lead_alex"
+                SpriteKey = "lead_alex",
+                VoiceKey = "lead.alex"
             },
             new()
             {
                 Id = "robin", DisplayName = "Robin",
                 Personality = LeadPersonality.Creative,
                 Description = "Innovative problem solver. Thinks outside the box and finds elegant solutions.",
-                SpriteKey = "lead_robin"
+                SpriteKey = "lead_robin",
+                VoiceKey = "lead.robin"
             },
             new()
             {
                 Id = "sam", DisplayName = "Sam",
                 Personality = LeadPersonality.Pragmatic,
                 Description = "Balanced and efficient. Focuses on shipping quality code on time.",
-                SpriteKey = "lead_sam"
+                SpriteKey = "lead_sam",
+                VoiceKey = "lead.sam"
             },
         };
 
@@ -121,14 +124,17 @@ namespace Gwt.Agent.Lead
         public async UniTask HandoverAsync(string newLeadId, CancellationToken ct = default)
         {
             var wasMonitoring = _isMonitoring;
+            var previousLeadName = CurrentLead?.DisplayName ?? "none";
             if (wasMonitoring)
                 await StopMonitoringAsync(ct);
+
+            _sessionData.HandoverDocument = BuildHandoverDocument(previousLeadName, newLeadId);
 
             _sessionData.ConversationHistory.Add(new LeadConversationEntry
             {
                 Timestamp = DateTime.UtcNow.ToString("o"),
                 Role = "system",
-                Content = $"Handover from {CurrentLead?.DisplayName ?? "none"} to {newLeadId}"
+                Content = $"Handover from {previousLeadName} to {newLeadId}"
             });
 
             await SelectLeadAsync(newLeadId, ct);
@@ -230,6 +236,20 @@ namespace Gwt.Agent.Lead
                 .Replace(Path.AltDirectorySeparatorChar, '_')
                 .Replace(':', '_');
             return Path.Combine(LeadSessionDir, $"lead_{safeKey}.json");
+        }
+
+        private string BuildHandoverDocument(string previousLeadName, string newLeadId)
+        {
+            var summaryLines = _sessionData.ConversationHistory
+                .TakeLast(6)
+                .Select(entry => $"- {entry.Role}: {entry.Content}")
+                .ToList();
+
+            if (summaryLines.Count == 0)
+                summaryLines.Add("- No prior conversation history.");
+
+            return $"Handover from {previousLeadName} to {newLeadId}\n" +
+                   string.Join("\n", summaryLines);
         }
     }
 }

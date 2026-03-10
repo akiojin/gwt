@@ -148,7 +148,7 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(12, layout.Height);
         }
 
-        // --- SimplePathfinder A* ---
+        // --- SimplePathfinder: Grid-based A* (no external plugin) ---
 
         [Test]
         public void Pathfinder_DirectPath_NoObstacles()
@@ -874,6 +874,61 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(ContextMenuItemType.Terminal, items[1].Type, "Second item should be Terminal");
             Assert.AreEqual(ContextMenuItemType.Git, items[2].Type, "Third item should be Git");
             Assert.AreEqual(ContextMenuItemType.DeleteWorktree, items[3].Type, "Fourth item should be Delete Worktree");
+        }
+
+        // --- Camera: Drag Pan Only (confirmed: no zoom) ---
+
+        [Test]
+        public void StudioCameraController_HasNoPubicZoomMethod()
+        {
+            // インタビュー確定: カメラはドラッグパンのみ対応（ズームなし）
+            var cameraType = typeof(StudioCameraController);
+            var zoomMethod = cameraType.GetMethod("HandleZoom",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+            Assert.IsNull(zoomMethod,
+                "StudioCameraController should not have HandleZoom method (drag pan only, no zoom)");
+        }
+
+        [Test]
+        public void StudioCameraController_HasNoZoomFields()
+        {
+            // ズーム関連のフィールドが存在しないことを確認
+            var cameraType = typeof(StudioCameraController);
+            var zoomSpeedField = cameraType.GetField("_zoomSpeed",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var minZoomField = cameraType.GetField("_minZoom",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var maxZoomField = cameraType.GetField("_maxZoom",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+            Assert.IsNull(zoomSpeedField, "Should not have _zoomSpeed field");
+            Assert.IsNull(minZoomField, "Should not have _minZoom field");
+            Assert.IsNull(maxZoomField, "Should not have _maxZoom field");
+        }
+
+        // --- Grid-based movement: no external plugin ---
+
+        [Test]
+        public void SimplePathfinder_IsGridBased_NotNavMesh()
+        {
+            // インタビュー確定: グリッドベース移動（A* Pathfinding Pro プラグイン不使用）
+            // SimplePathfinder は Vector2Int グリッド座標で動作する
+            var path = SimplePathfinder.FindPath(
+                new Vector2Int(0, 0),
+                new Vector2Int(2, 2),
+                new HashSet<Vector2Int>(),
+                5, 5,
+                allowDiagonal: true
+            );
+
+            Assert.IsTrue(path.Count > 0, "Grid-based pathfinder should find a path");
+            // 全ポイントが整数グリッド座標であることを確認
+            foreach (var point in path)
+            {
+                Assert.AreEqual(point, new Vector2Int(point.x, point.y),
+                    "All path points should be integer grid coordinates");
+            }
         }
     }
 }

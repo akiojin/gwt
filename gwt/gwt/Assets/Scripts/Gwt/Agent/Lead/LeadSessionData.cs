@@ -13,6 +13,8 @@ namespace Gwt.Agent.Lead
         public string LastMonitoredAt;
         /// <summary>Lead 解雇→再雇用時の引継ぎドキュメント（会話履歴要約）</summary>
         public string HandoverDocument;
+        /// <summary>Lead からユーザーへの未回答質問リスト</summary>
+        public List<LeadQuestion> PendingQuestions = new();
     }
 
     [System.Serializable]

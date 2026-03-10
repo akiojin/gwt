@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using UnityEngine;
 
 namespace Gwt.Core.Models
 {
@@ -90,8 +91,7 @@ namespace Gwt.Core.Models
         /// </summary>
         public int GetMaxAgents()
         {
-            // TODO: 実装（TDD RED 状態）
-            return 0;
+            return Mathf.Max(1, 1 + (Mathf.Max(1, Level) - 1) / 2);
         }
 
         /// <summary>
@@ -99,8 +99,10 @@ namespace Gwt.Core.Models
         /// </summary>
         public static int CalculateLevel(int totalCommits)
         {
-            // TODO: 実装（TDD RED 状態）
-            return 0;
+            if (totalCommits <= 0)
+                return 1;
+
+            return 1 + totalCommits / 25;
         }
 
         /// <summary>
@@ -108,8 +110,9 @@ namespace Gwt.Core.Models
         /// </summary>
         public int GetCommitsToNextLevel()
         {
-            // TODO: 実装（TDD RED 状態）
-            return 0;
+            var currentLevel = Mathf.Max(1, Level);
+            var nextLevelThreshold = currentLevel * 25;
+            return Mathf.Max(1, nextLevelThreshold - Mathf.Max(0, TotalCommits));
         }
     }
 

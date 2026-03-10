@@ -216,8 +216,14 @@ namespace Gwt.Agent.Services
         internal static (string command, string[] args) BuildCustomAgentCommandAndArgs(
             string executablePath, string worktreePath, Core.Models.CustomAgentProfile profile = null)
         {
-            // TODO: 実装（TDD RED 状態）— profile の DefaultArgs/WorkdirArgName を使用
-            return (executablePath, new[] { "--cwd", worktreePath });
+            var args = new List<string>();
+            if (profile?.DefaultArgs != null)
+                args.AddRange(profile.DefaultArgs.Where(arg => !string.IsNullOrWhiteSpace(arg)));
+
+            args.Add(profile?.WorkdirArgName ?? "--cwd");
+            args.Add(worktreePath);
+
+            return (executablePath, args.ToArray());
         }
 
         internal static string BuildAgentCommand(DetectedAgentType type, string executablePath, string worktreePath, string sessionId)
