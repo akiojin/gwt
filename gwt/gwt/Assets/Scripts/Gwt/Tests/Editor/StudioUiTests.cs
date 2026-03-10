@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Reflection;
 using Cysharp.Threading.Tasks;
 using Gwt.Core.Models;
@@ -76,6 +76,46 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("main", bar.CurrentBranch);
             Assert.AreEqual("Project 1/1", bar.CurrentStatus);
         }
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_Construct_UpdatesProjectInfoBar_EnvironmentFromDockerStatus() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+
+            manager.Construct(lifecycle, multi, new TerminalPaneManager(), new FakeAvailableDockerService());
+            await UniTask.WaitUntil(() => !string.IsNullOrEmpty(bar.CurrentEnvironment), cancellationToken: default);
+
+            Assert.AreEqual("Docker: workspace", bar.CurrentEnvironment);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_Construct_UpdatesProjectInfoBar_EnvironmentFallbackWhenDockerUnavailable() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+
+            manager.Construct(lifecycle, multi, new TerminalPaneManager(), new FakeFailingDockerService());
+            await UniTask.WaitUntil(() => !string.IsNullOrEmpty(bar.CurrentEnvironment), cancellationToken: default);
+
+            Assert.AreEqual("Host: Docker daemon unavailable", bar.CurrentEnvironment);
+        });
 
         [Test]
         public void UIManager_ConfirmProjectSwitchAsync_SwitchesProjectAndUpdatesBar()

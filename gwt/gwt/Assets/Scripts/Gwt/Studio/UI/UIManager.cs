@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Cysharp.Threading.Tasks;
 using Gwt.Core.Services.Terminal;
+using Gwt.Infra.Services;
 using Gwt.Lifecycle.Services;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
@@ -27,11 +28,13 @@ namespace Gwt.Studio.UI
         private IProjectLifecycleService _projectLifecycleService;
         private IMultiProjectService _multiProjectService;
         private ITerminalPaneManager _terminalPaneManager;
+        private IDockerService _dockerService;
         private bool _subscribed;
         private bool _previousBackquotePressed;
         private bool _previousDownPressed;
         private bool _previousUpPressed;
         private bool _previousConfirmPressed;
+        private int _projectInfoRefreshVersion;
 
         public ConsolePanel Console => _consolePanel;
         public LeadInputField LeadInput => _leadInputField;
@@ -41,15 +44,23 @@ namespace Gwt.Studio.UI
         public void Construct(
             IProjectLifecycleService projectLifecycleService,
             IMultiProjectService multiProjectService,
-            ITerminalPaneManager terminalPaneManager)
+            ITerminalPaneManager terminalPaneManager,
+            IDockerService dockerService = null)
         {
             _projectLifecycleService = projectLifecycleService;
             _multiProjectService = multiProjectService;
             _terminalPaneManager = terminalPaneManager;
+            _dockerService = dockerService;
             EnsureProjectSwitcher();
             SubscribeServices();
             RefreshProjectInfoBar();
             RestoreCurrentProjectSnapshot();
+        }
+
+        private void Awake()
+        {
+            EnsureProjectInfoBar();
+            RefreshProjectInfoBar();
         }
 
         private void Update()
@@ -272,6 +283,7 @@ namespace Gwt.Studio.UI
                 _projectInfoBar.SetProjectName("No Project");
                 _projectInfoBar.SetBranch(string.Empty);
                 _projectInfoBar.SetStatus("Idle");
+                _projectInfoBar.SetEnvironment(string.Empty);
                 return;
             }
 
@@ -285,6 +297,57 @@ namespace Gwt.Studio.UI
             }
 
             _projectInfoBar.SetStatus(status);
+            _projectInfoBar.SetEnvironment(string.Empty);
+            _projectInfoRefreshVersion++;
+            var refreshVersion = _projectInfoRefreshVersion;
+            var projectPath = currentProject.Path;
+            RefreshProjectEnvironmentAsync(projectPath, refreshVersion).Forget();
+        }
+
+        private async UniTaskVoid RefreshProjectEnvironmentAsync(string projectPath, int refreshVersion)
+        {
+            if (_projectInfoBar == null)
+                return;
+
+            if (_dockerService == null || string.IsNullOrWhiteSpace(projectPath))
+            {
+                _projectInfoBar.SetEnvironment(string.Empty);
+                return;
+            }
+
+            try
+            {
+                var status = await _dockerService.GetRuntimeStatusAsync(projectPath);
+                if (_projectInfoBar == null ||
+                    refreshVersion != _projectInfoRefreshVersion ||
+                    _projectLifecycleService?.CurrentProject == null ||
+                    _projectLifecycleService.CurrentProject.Path != projectPath)
+                {
+                    return;
+                }
+
+                _projectInfoBar.SetEnvironment(FormatDockerEnvironment(status));
+            }
+            catch
+            {
+                if (_projectInfoBar != null && refreshVersion == _projectInfoRefreshVersion)
+                    _projectInfoBar.SetEnvironment("Host: Docker status unavailable");
+            }
+        }
+
+        private static string FormatDockerEnvironment(DockerRuntimeStatus status)
+        {
+            if (status == null || !status.HasDockerContext)
+                return string.Empty;
+            if (status.ShouldUseDocker && !string.IsNullOrWhiteSpace(status.SuggestedService))
+                return $"Docker: {status.SuggestedService}";
+            if (!status.HasDockerCli)
+                return "Host: Docker CLI missing";
+            if (!status.CanReachDaemon)
+                return "Host: Docker daemon unavailable";
+            if (string.IsNullOrWhiteSpace(status.SuggestedService))
+                return "Host: Docker service unresolved";
+            return "Host: Docker fallback";
         }
 
         private void OnDestroy()

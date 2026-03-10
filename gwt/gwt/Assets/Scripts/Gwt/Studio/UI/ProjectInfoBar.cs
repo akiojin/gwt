@@ -8,10 +8,12 @@ namespace Gwt.Studio.UI
         [SerializeField] private TextMeshProUGUI _projectNameText;
         [SerializeField] private TextMeshProUGUI _branchText;
         [SerializeField] private TextMeshProUGUI _statusText;
+        [SerializeField] private TextMeshProUGUI _environmentText;
 
         public string CurrentProjectName { get; private set; } = string.Empty;
         public string CurrentBranch { get; private set; } = string.Empty;
         public string CurrentStatus { get; private set; } = string.Empty;
+        public string CurrentEnvironment { get; private set; } = string.Empty;
 
         private void Awake()
         {
@@ -37,6 +39,12 @@ namespace Gwt.Studio.UI
             ApplyState();
         }
 
+        public void SetEnvironment(string environment)
+        {
+            CurrentEnvironment = environment ?? string.Empty;
+            ApplyState();
+        }
+
         private void ApplyState()
         {
             EnsureUi();
@@ -46,6 +54,8 @@ namespace Gwt.Studio.UI
                 _branchText.text = CurrentBranch;
             if (_statusText != null)
                 _statusText.text = CurrentStatus;
+            if (_environmentText != null)
+                _environmentText.text = CurrentEnvironment;
         }
 
         private void EnsureUi()
@@ -58,7 +68,7 @@ namespace Gwt.Studio.UI
             rectTransform.anchorMax = new Vector2(0f, 1f);
             rectTransform.pivot = new Vector2(0f, 1f);
             rectTransform.anchoredPosition = new Vector2(20f, -20f);
-            rectTransform.sizeDelta = new Vector2(360f, 80f);
+            rectTransform.sizeDelta = new Vector2(420f, 112f);
 
             if (_projectNameText == null)
                 _projectNameText = CreateLabel("ProjectName", new Vector2(0f, 0f), 28f, FontStyles.Bold);
@@ -66,6 +76,8 @@ namespace Gwt.Studio.UI
                 _branchText = CreateLabel("Branch", new Vector2(0f, -30f), 20f, FontStyles.Normal);
             if (_statusText == null)
                 _statusText = CreateLabel("Status", new Vector2(180f, -30f), 20f, FontStyles.Italic);
+            if (_environmentText == null)
+                _environmentText = CreateLabel("Environment", new Vector2(0f, -60f), 18f, FontStyles.Normal);
         }
 
         private TextMeshProUGUI CreateLabel(string name, Vector2 anchoredPosition, float fontSize, FontStyles fontStyle)
