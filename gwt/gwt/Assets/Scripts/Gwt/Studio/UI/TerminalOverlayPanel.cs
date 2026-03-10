@@ -136,12 +136,10 @@ namespace Gwt.Studio.UI
             {
                 try
                 {
-                    var context = await _dockerService.DetectContextAsync(projectRoot);
-                    if (context != null && (context.HasDockerCompose || context.HasDevContainer))
+                    var status = await _dockerService.GetRuntimeStatusAsync(projectRoot);
+                    if (status != null && status.HasDockerContext)
                     {
-                        var services = await _dockerService.ListServicesAsync(projectRoot);
-                        var serviceName = services.Count > 0 ? services[0] : null;
-                        if (!string.IsNullOrWhiteSpace(serviceName))
+                        if (status.ShouldUseDocker && !string.IsNullOrWhiteSpace(status.SuggestedService))
                         {
                             return TerminalLaunchPlan.ForDocker(
                                 _dockerService,
@@ -149,16 +147,16 @@ namespace Gwt.Studio.UI
                                 {
                                     WorktreePath = projectRoot,
                                     Branch = _projectLifecycleService.CurrentProject?.DefaultBranch,
-                                    ServiceName = serviceName,
-                                    UseDevContainer = context.HasDevContainer
+                                    ServiceName = status.SuggestedService,
+                                    UseDevContainer = status.UseDevContainer
                                 },
-                                $"Docker {serviceName}",
-                                $"[GWT] Connected terminal to Docker service '{serviceName}'.\n");
+                                $"Docker {status.SuggestedService}",
+                                $"[GWT] Connected terminal to Docker service '{status.SuggestedService}'.\n");
                         }
 
                         return BuildHostLaunchPlan(
                             "Host Shell (Docker unavailable)",
-                            "[GWT] Docker context detected but no runnable service was found. Using host shell.\n");
+                            $"[GWT] {status.Message}\n");
                     }
                 }
                 catch (Exception e)

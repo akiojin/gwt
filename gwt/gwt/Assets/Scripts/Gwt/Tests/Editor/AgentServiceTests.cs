@@ -1244,6 +1244,17 @@ namespace Gwt.Tests.Editor
             public UniTask<List<string>> ListServicesAsync(string projectRoot, CancellationToken ct = default) =>
                 UniTask.FromResult(new List<string> { "workspace" });
 
+            public UniTask<DockerRuntimeStatus> GetRuntimeStatusAsync(string projectRoot, CancellationToken ct = default) =>
+                UniTask.FromResult(new DockerRuntimeStatus
+                {
+                    HasDockerContext = true,
+                    HasDockerCli = true,
+                    CanReachDaemon = false,
+                    ShouldUseDocker = true,
+                    SuggestedService = "workspace",
+                    Message = "Docker daemon is unavailable. Falling back to host tools."
+                });
+
             public DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request) =>
                 new()
                 {

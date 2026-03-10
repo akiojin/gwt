@@ -4,13 +4,28 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
+
+[assembly: InternalsVisibleTo("Gwt.Tests.Editor")]
 
 namespace Gwt.Infra.Services
 {
     public class DockerService : IDockerService
     {
+        private readonly IDockerCommandRunner _commandRunner;
+
+        public DockerService()
+            : this(new ProcessDockerCommandRunner())
+        {
+        }
+
+        internal DockerService(IDockerCommandRunner commandRunner)
+        {
+            _commandRunner = commandRunner ?? new ProcessDockerCommandRunner();
+        }
+
         public UniTask<DockerContextInfo> DetectContextAsync(string projectRoot, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested();
@@ -77,6 +92,53 @@ namespace Gwt.Infra.Services
             }
 
             return services.OrderBy(service => service, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        public async UniTask<DockerRuntimeStatus> GetRuntimeStatusAsync(string projectRoot, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var context = await DetectContextAsync(projectRoot, ct);
+            var status = new DockerRuntimeStatus
+            {
+                HasDockerContext = context != null && (context.HasDockerCompose || context.HasDevContainer),
+                UseDevContainer = context?.HasDevContainer ?? false
+            };
+
+            if (!status.HasDockerContext)
+            {
+                status.Message = "No Docker or devcontainer context detected.";
+                return status;
+            }
+
+            var services = await ListServicesAsync(projectRoot, ct);
+            status.SuggestedService = services.FirstOrDefault() ?? string.Empty;
+
+            var commandResult = await _commandRunner.RunAsync(new[] { "info" }, projectRoot, ct);
+            status.HasDockerCli = commandResult.CommandFound;
+            status.CanReachDaemon = commandResult.ExitCode == 0;
+            status.ShouldUseDocker = status.HasDockerCli && status.CanReachDaemon && !string.IsNullOrWhiteSpace(status.SuggestedService);
+
+            if (!status.HasDockerCli)
+            {
+                status.Message = "Docker CLI was not found. Falling back to host tools.";
+            }
+            else if (!status.CanReachDaemon)
+            {
+                status.Message = string.IsNullOrWhiteSpace(commandResult.Error)
+                    ? "Docker daemon is unavailable. Falling back to host tools."
+                    : $"Docker daemon is unavailable. Falling back to host tools.\n{commandResult.Error}";
+            }
+            else if (string.IsNullOrWhiteSpace(status.SuggestedService))
+            {
+                status.Message = "Docker context detected but no service name could be resolved. Falling back to host tools.";
+            }
+            else
+            {
+                status.Message = $"Docker service '{status.SuggestedService}' is available.";
+            }
+
+            return status;
         }
 
         public DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request)
@@ -262,6 +324,68 @@ namespace Gwt.Infra.Services
             }
 
             return string.Empty;
+        }
+
+        internal interface IDockerCommandRunner
+        {
+            UniTask<DockerCommandResult> RunAsync(string[] args, string workingDirectory, CancellationToken ct);
+        }
+
+        internal sealed class DockerCommandResult
+        {
+            public bool CommandFound { get; set; }
+            public int ExitCode { get; set; }
+            public string Output { get; set; }
+            public string Error { get; set; }
+        }
+
+        internal sealed class ProcessDockerCommandRunner : IDockerCommandRunner
+        {
+            public async UniTask<DockerCommandResult> RunAsync(string[] args, string workingDirectory, CancellationToken ct)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var result = new DockerCommandResult();
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "docker",
+                    WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory) ? Environment.CurrentDirectory : workingDirectory,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                if (args != null)
+                {
+                    foreach (var arg in args)
+                        psi.ArgumentList.Add(arg);
+                }
+
+                try
+                {
+                    using var process = new System.Diagnostics.Process { StartInfo = psi };
+                    if (!process.Start())
+                    {
+                        result.CommandFound = false;
+                        result.Error = "Failed to start docker process.";
+                        return result;
+                    }
+
+                    result.CommandFound = true;
+                    result.Output = await process.StandardOutput.ReadToEndAsync();
+                    result.Error = await process.StandardError.ReadToEndAsync();
+                    await UniTask.RunOnThreadPool(() => process.WaitForExit(5000), cancellationToken: ct);
+                    result.ExitCode = process.ExitCode;
+                    return result;
+                }
+                catch (Exception e) when (e is System.ComponentModel.Win32Exception || e is FileNotFoundException)
+                {
+                    result.CommandFound = false;
+                    result.Error = e.Message;
+                    return result;
+                }
+            }
         }
     }
 }

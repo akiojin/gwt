@@ -26,6 +26,89 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void GetRuntimeStatusAsync_NoDockerContext_ReturnsNoContext()
+        {
+            WithTempProjectRoot(root =>
+            {
+                var service = new DockerService(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
+                {
+                    CommandFound = true,
+                    ExitCode = 0
+                }));
+
+                var status = service.GetRuntimeStatusAsync(root).GetAwaiter().GetResult();
+
+                Assert.IsFalse(status.HasDockerContext);
+                Assert.IsFalse(status.ShouldUseDocker);
+                Assert.That(status.Message, Does.Contain("No Docker"));
+            });
+        }
+
+        [Test]
+        public void GetRuntimeStatusAsync_DockerCliMissing_ReturnsFallbackMessage()
+        {
+            WithTempProjectRoot(root =>
+            {
+                File.WriteAllText(Path.Combine(root, "docker-compose.yml"), "services:\n  app:\n    image: alpine\n");
+                var service = new DockerService(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
+                {
+                    CommandFound = false,
+                    ExitCode = 127,
+                    Error = "docker not found"
+                }));
+
+                var status = service.GetRuntimeStatusAsync(root).GetAwaiter().GetResult();
+
+                Assert.IsTrue(status.HasDockerContext);
+                Assert.IsFalse(status.ShouldUseDocker);
+                Assert.IsFalse(status.HasDockerCli);
+                Assert.That(status.Message, Does.Contain("Docker CLI was not found"));
+            });
+        }
+
+        [Test]
+        public void GetRuntimeStatusAsync_DaemonUnavailable_ReturnsFallbackMessage()
+        {
+            WithTempProjectRoot(root =>
+            {
+                File.WriteAllText(Path.Combine(root, "docker-compose.yml"), "services:\n  app:\n    image: alpine\n");
+                var service = new DockerService(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
+                {
+                    CommandFound = true,
+                    ExitCode = 1,
+                    Error = "Cannot connect to the Docker daemon"
+                }));
+
+                var status = service.GetRuntimeStatusAsync(root).GetAwaiter().GetResult();
+
+                Assert.IsTrue(status.HasDockerCli);
+                Assert.IsFalse(status.CanReachDaemon);
+                Assert.IsFalse(status.ShouldUseDocker);
+                Assert.That(status.Message, Does.Contain("Docker daemon is unavailable"));
+            });
+        }
+
+        [Test]
+        public void GetRuntimeStatusAsync_DockerAvailable_ReturnsSuggestedService()
+        {
+            WithTempProjectRoot(root =>
+            {
+                File.WriteAllText(Path.Combine(root, "docker-compose.yml"), "services:\n  workspace:\n    image: alpine\n");
+                var service = new DockerService(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
+                {
+                    CommandFound = true,
+                    ExitCode = 0,
+                    Output = "ServerVersion: 27.0"
+                }));
+
+                var status = service.GetRuntimeStatusAsync(root).GetAwaiter().GetResult();
+
+                Assert.IsTrue(status.ShouldUseDocker);
+                Assert.AreEqual("workspace", status.SuggestedService);
+            });
+        }
+
+        [Test]
         public void DetectContextAsync_DockerfileOnlyDetected()
         {
             WithTempProjectRoot(root =>
@@ -284,6 +367,21 @@ namespace Gwt.Tests.Editor
             public UniTask KillAsync(string paneId, CancellationToken ct = default) => UniTask.CompletedTask;
             public System.IObservable<string> GetOutputStream(string paneId) => null;
             public PaneStatus GetStatus(string paneId) => PaneStatus.Running;
+        }
+
+        private sealed class FakeDockerCommandRunner : DockerService.IDockerCommandRunner
+        {
+            private readonly DockerService.DockerCommandResult _result;
+
+            public FakeDockerCommandRunner(DockerService.DockerCommandResult result)
+            {
+                _result = result;
+            }
+
+            public UniTask<DockerService.DockerCommandResult> RunAsync(string[] args, string workingDirectory, CancellationToken ct)
+            {
+                return UniTask.FromResult(_result);
+            }
         }
     }
 }

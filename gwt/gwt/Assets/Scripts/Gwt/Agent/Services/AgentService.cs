@@ -127,25 +127,37 @@ namespace Gwt.Agent.Services
             string[] args,
             CancellationToken ct)
         {
-            var dockerRequest = await TryBuildDockerLaunchRequestAsync(agentType, worktreePath, branch, command, args, ct);
-            if (dockerRequest != null)
+            var dockerPlan = await TryBuildDockerLaunchPlanAsync(agentType, worktreePath, branch, command, args, ct);
+            if (dockerPlan.Status != null)
             {
-                try
+                if (dockerPlan.Status.ShouldUseDocker && dockerPlan.Request != null)
                 {
-                    var ptySessionId = await _dockerService.SpawnAsync(dockerRequest, _ptyService, 24, 80, ct);
-                    return new AgentLaunchResult(
-                        ptySessionId,
-                        $"{BuildPaneExecutable(command)} (docker)",
-                        $"[GWT] Agent started in Docker service '{dockerRequest.ServiceName}'.\n");
+                    try
+                    {
+                        var ptySessionId = await _dockerService.SpawnAsync(dockerPlan.Request, _ptyService, 24, 80, ct);
+                        return new AgentLaunchResult(
+                            ptySessionId,
+                            $"{BuildPaneExecutable(command)} (docker)",
+                            $"[GWT] Agent started in Docker service '{dockerPlan.Request.ServiceName}'.\n");
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"[GWT] Docker agent spawn fallback to host process: {e.Message}");
+                        var ptySessionId = await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
+                        return new AgentLaunchResult(
+                            ptySessionId,
+                            $"{BuildPaneExecutable(command)} (host fallback)",
+                            $"[GWT] Docker agent launch failed, using host process.\nReason: {e.Message}\n");
+                    }
                 }
-                catch (Exception e)
+
+                if (dockerPlan.Status.HasDockerContext)
                 {
-                    Debug.LogWarning($"[GWT] Docker agent spawn fallback to host process: {e.Message}");
                     var ptySessionId = await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
                     return new AgentLaunchResult(
                         ptySessionId,
                         $"{BuildPaneExecutable(command)} (host fallback)",
-                        $"[GWT] Docker agent launch failed, using host process.\nReason: {e.Message}\n");
+                        $"[GWT] {dockerPlan.Status.Message}\n");
                 }
             }
 
@@ -153,7 +165,7 @@ namespace Gwt.Agent.Services
             return new AgentLaunchResult(hostSessionId, BuildPaneExecutable(command), string.Empty);
         }
 
-        private async UniTask<DockerLaunchRequest> TryBuildDockerLaunchRequestAsync(
+        private async UniTask<DockerLaunchPlan> TryBuildDockerLaunchPlanAsync(
             DetectedAgentType agentType,
             string worktreePath,
             string branch,
@@ -162,36 +174,31 @@ namespace Gwt.Agent.Services
             CancellationToken ct)
         {
             if (_dockerService == null || string.IsNullOrWhiteSpace(worktreePath))
-                return null;
+                return new DockerLaunchPlan(null, null);
 
-            DockerContextInfo context;
+            DockerRuntimeStatus status;
             try
             {
-                context = await _dockerService.DetectContextAsync(worktreePath, ct);
+                status = await _dockerService.GetRuntimeStatusAsync(worktreePath, ct);
             }
             catch
             {
-                return null;
+                return new DockerLaunchPlan(null, null);
             }
 
-            if (context == null || (!context.HasDockerCompose && !context.HasDevContainer))
-                return null;
+            if (status == null || !status.HasDockerContext || string.IsNullOrWhiteSpace(status.SuggestedService))
+                return new DockerLaunchPlan(status, null);
 
-            var services = await _dockerService.ListServicesAsync(worktreePath, ct);
-            var serviceName = services.FirstOrDefault();
-            if (string.IsNullOrWhiteSpace(serviceName))
-                return null;
-
-            return new DockerLaunchRequest
+            return new DockerLaunchPlan(status, new DockerLaunchRequest
             {
                 WorktreePath = worktreePath,
                 Branch = branch,
                 AgentType = agentType.ToString().ToLowerInvariant(),
-                ServiceName = serviceName,
-                UseDevContainer = context.HasDevContainer,
+                ServiceName = status.SuggestedService,
+                UseDevContainer = status.UseDevContainer,
                 EntryCommand = GetContainerExecutable(command),
                 EntryArgs = args?.ToList() ?? new List<string>()
-            };
+            });
         }
 
         private static string GetContainerExecutable(string command)
@@ -223,6 +230,18 @@ namespace Gwt.Agent.Services
                 PtySessionId = ptySessionId;
                 PaneTitle = paneTitle;
                 InitialOutput = initialOutput;
+            }
+        }
+
+        private sealed class DockerLaunchPlan
+        {
+            public DockerRuntimeStatus Status { get; }
+            public DockerLaunchRequest Request { get; }
+
+            public DockerLaunchPlan(DockerRuntimeStatus status, DockerLaunchRequest request)
+            {
+                Status = status;
+                Request = request;
             }
         }
 

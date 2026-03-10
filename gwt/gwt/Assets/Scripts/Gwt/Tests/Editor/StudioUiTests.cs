@@ -280,10 +280,10 @@ namespace Gwt.Tests.Editor
                 try
                 {
                     var panel = panelObject.AddComponent<TerminalOverlayPanel>();
-                    panel.Construct(paneManager, pty, new FakeShellDetector(), new DockerService(), lifecycle);
+                    panel.Construct(paneManager, pty, new FakeShellDetector(), new FakeAvailableDockerService(), lifecycle);
 
                     panel.Open();
-                    await UniTask.Delay(50);
+                    await UniTask.WaitUntil(() => pty.LastCommand != null && paneManager.PaneCount > 0, cancellationToken: default);
 
                     Assert.AreEqual("docker", pty.LastCommand);
                     Assert.AreEqual("Docker workspace", paneManager.ActivePane.Title);
@@ -310,7 +310,7 @@ namespace Gwt.Tests.Editor
             panel.Construct(paneManager, pty, new FakeShellDetector(), new DockerService(), lifecycle);
 
             panel.Open();
-            await UniTask.Delay(50);
+            await UniTask.WaitUntil(() => pty.LastCommand != null && paneManager.PaneCount > 0, cancellationToken: default);
 
             Assert.AreEqual("/bin/fake-shell", pty.LastCommand);
             CollectionAssert.AreEqual(new[] { "-i" }, pty.LastArgs);
@@ -329,12 +329,12 @@ namespace Gwt.Tests.Editor
             panel.Construct(paneManager, pty, new FakeShellDetector(), new FakeFailingDockerService(), lifecycle);
 
             panel.Open();
-            await UniTask.Delay(50);
+            await UniTask.WaitUntil(() => pty.LastCommand != null && paneManager.PaneCount > 0, cancellationToken: default);
 
             Assert.AreEqual("/bin/fake-shell", pty.LastCommand);
-            Assert.AreEqual("Host Shell (Docker fallback)", paneManager.ActivePane.Title);
+            Assert.AreEqual("Host Shell (Docker unavailable)", paneManager.ActivePane.Title);
             Assert.That(paneManager.ActivePane.Terminal.GetBuffer().GetTextContent(0, 0, 1, 79),
-                Does.Contain("Docker shell unavailable"));
+                Does.Contain("Docker daemon is unavailable"));
         });
 
         [Test]
@@ -571,11 +571,57 @@ namespace Gwt.Tests.Editor
             public UniTask<System.Collections.Generic.List<string>> ListServicesAsync(string projectRoot, System.Threading.CancellationToken ct = default) =>
                 UniTask.FromResult(new System.Collections.Generic.List<string> { "workspace" });
 
+            public UniTask<DockerRuntimeStatus> GetRuntimeStatusAsync(string projectRoot, System.Threading.CancellationToken ct = default) =>
+                UniTask.FromResult(new DockerRuntimeStatus
+                {
+                    HasDockerContext = true,
+                    HasDockerCli = true,
+                    CanReachDaemon = false,
+                    ShouldUseDocker = false,
+                    SuggestedService = "workspace",
+                    Message = "Docker daemon is unavailable. Falling back to host tools."
+                });
+
             public DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request) =>
                 new() { Command = "docker", Args = new System.Collections.Generic.List<string> { "exec" }, ExecCommand = "docker exec", WorkingDirectory = request.WorktreePath };
 
             public UniTask<string> SpawnAsync(DockerLaunchRequest request, IPtyService ptyService, int rows = 24, int cols = 80, System.Threading.CancellationToken ct = default) =>
                 UniTask.FromException<string>(new InvalidOperationException("docker unavailable"));
+        }
+
+        private sealed class FakeAvailableDockerService : IDockerService
+        {
+            public UniTask<DockerContextInfo> DetectContextAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+            {
+                return UniTask.FromResult(new DockerContextInfo
+                {
+                    HasDockerCompose = true,
+                    DetectedServices = new System.Collections.Generic.List<string> { "workspace" }
+                });
+            }
+
+            public UniTask<DevContainerConfig> LoadDevContainerConfigAsync(string configPath, System.Threading.CancellationToken ct = default) =>
+                UniTask.FromResult<DevContainerConfig>(null);
+
+            public UniTask<System.Collections.Generic.List<string>> ListServicesAsync(string projectRoot, System.Threading.CancellationToken ct = default) =>
+                UniTask.FromResult(new System.Collections.Generic.List<string> { "workspace" });
+
+            public UniTask<DockerRuntimeStatus> GetRuntimeStatusAsync(string projectRoot, System.Threading.CancellationToken ct = default) =>
+                UniTask.FromResult(new DockerRuntimeStatus
+                {
+                    HasDockerContext = true,
+                    HasDockerCli = true,
+                    CanReachDaemon = true,
+                    ShouldUseDocker = true,
+                    SuggestedService = "workspace",
+                    Message = "Docker service 'workspace' is available."
+                });
+
+            public DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request) =>
+                new DockerService().BuildLaunchPlan(request);
+
+            public UniTask<string> SpawnAsync(DockerLaunchRequest request, IPtyService ptyService, int rows = 24, int cols = 80, System.Threading.CancellationToken ct = default) =>
+                new DockerService().SpawnAsync(request, ptyService, rows, cols, ct);
         }
 
         private sealed class NoOpObservable : IObservable<string>

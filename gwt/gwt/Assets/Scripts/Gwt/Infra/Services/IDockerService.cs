@@ -53,11 +53,24 @@ namespace Gwt.Infra.Services
         public string Error;
     }
 
+    [System.Serializable]
+    public class DockerRuntimeStatus
+    {
+        public bool HasDockerContext;
+        public bool HasDockerCli;
+        public bool CanReachDaemon;
+        public bool ShouldUseDocker;
+        public bool UseDevContainer;
+        public string SuggestedService;
+        public string Message;
+    }
+
     public interface IDockerService
     {
         UniTask<DockerContextInfo> DetectContextAsync(string projectRoot, CancellationToken ct = default);
         UniTask<DevContainerConfig> LoadDevContainerConfigAsync(string configPath, CancellationToken ct = default);
         UniTask<List<string>> ListServicesAsync(string projectRoot, CancellationToken ct = default);
+        UniTask<DockerRuntimeStatus> GetRuntimeStatusAsync(string projectRoot, CancellationToken ct = default);
         DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request);
         UniTask<string> SpawnAsync(
             DockerLaunchRequest request,
