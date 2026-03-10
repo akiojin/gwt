@@ -205,6 +205,8 @@ namespace Gwt.Studio.UI
 
         private void EnsureProjectSwitcher()
         {
+            EnsureProjectInfoBar();
+
             if (_projectSwitchOverlayPanel == null)
                 _projectSwitchOverlayPanel = GetComponentInChildren<ProjectSwitchOverlayPanel>(true);
 
@@ -227,6 +229,19 @@ namespace Gwt.Studio.UI
             {
                 var transitionObject = new GameObject("ProjectSceneTransitionController");
                 _projectSceneTransitionController = transitionObject.AddComponent<ProjectSceneTransitionController>();
+            }
+        }
+
+        private void EnsureProjectInfoBar()
+        {
+            if (_projectInfoBar == null)
+                _projectInfoBar = GetComponentInChildren<ProjectInfoBar>(true);
+
+            if (_projectInfoBar == null)
+            {
+                var infoBarObject = new GameObject("ProjectInfoBar");
+                infoBarObject.transform.SetParent(transform, false);
+                _projectInfoBar = infoBarObject.AddComponent<ProjectInfoBar>();
             }
         }
 
