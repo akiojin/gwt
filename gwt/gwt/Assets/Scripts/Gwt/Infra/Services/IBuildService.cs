@@ -1,4 +1,5 @@
 using Cysharp.Threading.Tasks;
+using System.Collections.Generic;
 using System.Threading;
 
 namespace Gwt.Infra.Services
@@ -27,11 +28,34 @@ namespace Gwt.Infra.Services
         public string Timestamp;
     }
 
+    [System.Serializable]
+    public class BuildArtifactInfo
+    {
+        public string Platform;
+        public string OutputPath;
+        public string Version;
+        public bool Signed;
+        public bool Uploaded;
+    }
+
+    [System.Serializable]
+    public class UpdateInfo
+    {
+        public string Version;
+        public string ReleaseNotes;
+        public string DownloadUrl;
+        public bool Mandatory;
+    }
+
     public interface IBuildService
     {
         SystemInfoData GetSystemInfo();
         UniTask<string> CaptureScreenshotAsync(string outputPath, CancellationToken ct = default);
         UniTask<string> ReadLogFileAsync(string logPath, CancellationToken ct = default);
+        UniTask<List<string>> ReadRecentLogsAsync(int maxFiles = 5, CancellationToken ct = default);
         UniTask<BugReport> CreateBugReportAsync(string description, CancellationToken ct = default);
+        string DetectReportTarget();
+        string BuildGitHubIssueBody(BugReport report);
+        List<BuildArtifactInfo> GetReleaseArtifacts(string version);
     }
 }

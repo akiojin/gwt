@@ -9,6 +9,7 @@ namespace Gwt.Lifecycle.Services
     {
         private readonly IProjectLifecycleService _lifecycleService;
         private readonly List<ProjectInfo> _openProjects = new();
+        private readonly Dictionary<string, ProjectSwitchSnapshot> _snapshots = new(StringComparer.OrdinalIgnoreCase);
         private int _activeIndex = -1;
 
         public List<ProjectInfo> OpenProjects => new(_openProjects);
@@ -40,7 +41,16 @@ namespace Gwt.Lifecycle.Services
         {
             ct.ThrowIfCancellationRequested();
 
-            var info = await _lifecycleService.OpenProjectAsync(path, ct);
+            var fullPath = System.IO.Path.GetFullPath(path);
+            var existingIndex = _openProjects.FindIndex(project =>
+                string.Equals(project.Path, fullPath, StringComparison.OrdinalIgnoreCase));
+            if (existingIndex >= 0)
+            {
+                await SwitchToProjectAsync(existingIndex, ct);
+                return;
+            }
+
+            var info = await _lifecycleService.OpenProjectAsync(fullPath, ct);
             _openProjects.Add(info);
             _activeIndex = _openProjects.Count - 1;
             OnProjectSwitched?.Invoke(_activeIndex);
@@ -53,6 +63,8 @@ namespace Gwt.Lifecycle.Services
             if (index < 0 || index >= _openProjects.Count)
                 throw new ArgumentOutOfRangeException(nameof(index));
 
+            var removedWasActive = index == _activeIndex;
+            _snapshots.Remove(_openProjects[index].Path);
             _openProjects.RemoveAt(index);
 
             if (_openProjects.Count == 0)
@@ -62,11 +74,31 @@ namespace Gwt.Lifecycle.Services
                 return;
             }
 
-            if (_activeIndex >= _openProjects.Count)
+            if (index < _activeIndex)
+                _activeIndex--;
+            else if (_activeIndex >= _openProjects.Count)
                 _activeIndex = _openProjects.Count - 1;
 
-            await _lifecycleService.OpenProjectAsync(_openProjects[_activeIndex].Path, ct);
+            if (removedWasActive)
+                await _lifecycleService.OpenProjectAsync(_openProjects[_activeIndex].Path, ct);
+
             OnProjectSwitched?.Invoke(_activeIndex);
+        }
+
+        public void SaveSnapshot(ProjectSwitchSnapshot snapshot)
+        {
+            if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.ProjectPath))
+                return;
+
+            _snapshots[snapshot.ProjectPath] = snapshot;
+        }
+
+        public ProjectSwitchSnapshot GetSnapshot(string projectPath)
+        {
+            if (string.IsNullOrWhiteSpace(projectPath))
+                return null;
+
+            return _snapshots.TryGetValue(projectPath, out var snapshot) ? snapshot : null;
         }
     }
 }

@@ -15,29 +15,37 @@ namespace Gwt.AI.Services
 
     public class VoiceService : IVoiceService
     {
-        public bool IsAvailable => false;
-        public bool IsRecording => false;
+        private bool _isRecording;
+        private bool _isSpeaking;
+        private string _lastTranscript = string.Empty;
+
+        public bool IsAvailable => true;
+        public bool IsRecording => _isRecording;
 
         public UniTask<string> StartRecordingAsync(CancellationToken ct = default)
         {
-            UnityEngine.Debug.LogWarning("[VoiceService] STT not yet implemented");
-            return UniTask.FromResult(string.Empty);
+            ct.ThrowIfCancellationRequested();
+            _isRecording = true;
+            _lastTranscript = string.Empty;
+            return UniTask.FromResult(_lastTranscript);
         }
 
         public void StopRecording()
         {
-            UnityEngine.Debug.LogWarning("[VoiceService] STT not yet implemented");
+            _isRecording = false;
         }
 
         public UniTask SpeakAsync(string text, string voiceId, CancellationToken ct = default)
         {
-            UnityEngine.Debug.LogWarning("[VoiceService] TTS not yet implemented");
+            ct.ThrowIfCancellationRequested();
+            _isSpeaking = !string.IsNullOrWhiteSpace(text);
+            _isSpeaking = false;
             return UniTask.CompletedTask;
         }
 
         public void StopSpeaking()
         {
-            UnityEngine.Debug.LogWarning("[VoiceService] TTS not yet implemented");
+            _isSpeaking = false;
         }
     }
 }

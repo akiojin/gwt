@@ -39,6 +39,7 @@
 - Unity C# コードを変更・追加した場合、必ず Unity Editor のコンソールログ（`~/Library/Logs/Unity/Editor.log`）でコンパイルエラーがないことを確認する
 - コンパイル成功を確認した後、関連する EditMode / PlayMode テストを実行して全パスを確認する
 - Unity 固有の .NET API 制約（例: `StreamWriter.FlushAsync()` は CancellationToken 非対応）に注意し、標準 .NET と差異がある前提でコーディングする
+- Unity C# の編集は `unity-csharp-edit` スキルのワークフローに従い、`unity-cli` のシンボル確認・テキスト検証を経由してから行う
 
 ## 開発ワークフロー
 

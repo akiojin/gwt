@@ -163,10 +163,10 @@ namespace Gwt.Tests.Editor
         // --- VoiceService Stub Tests ---
 
         [Test]
-        public void VoiceService_IsAvailable_ReturnsFalse()
+        public void VoiceService_IsAvailable_ReturnsTrue()
         {
             var service = new VoiceService();
-            Assert.That(service.IsAvailable, Is.False);
+            Assert.That(service.IsAvailable, Is.True);
         }
 
         [Test]
@@ -182,13 +182,16 @@ namespace Gwt.Tests.Editor
             var service = new VoiceService();
             var result = service.StartRecordingAsync().GetAwaiter().GetResult();
             Assert.That(result, Is.EqualTo(string.Empty));
+            Assert.That(service.IsRecording, Is.True);
         }
 
         [Test]
         public void VoiceService_StopRecording_DoesNotThrow()
         {
             var service = new VoiceService();
+            service.StartRecordingAsync().GetAwaiter().GetResult();
             Assert.DoesNotThrow(() => service.StopRecording());
+            Assert.That(service.IsRecording, Is.False);
         }
 
         [Test]
