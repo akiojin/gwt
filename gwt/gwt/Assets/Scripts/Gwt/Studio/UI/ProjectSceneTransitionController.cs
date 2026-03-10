@@ -15,6 +15,7 @@ namespace Gwt.Studio.UI
 
         public bool IsTransitioning { get; private set; }
         public string LastProjectPath { get; private set; } = string.Empty;
+        public string LastLoadedSceneName { get; private set; } = string.Empty;
 
         protected virtual void Awake()
         {
@@ -38,30 +39,45 @@ namespace Gwt.Studio.UI
                 await FadeAsync(1f);
 
                 var activeScene = SceneManager.GetActiveScene();
-                var useSingleReload = activeScene.name == _studioSceneName;
-                var loadMode = useSingleReload ? LoadSceneMode.Single : LoadSceneMode.Additive;
+                var previousSceneCount = SceneManager.sceneCount;
 
-                var loadOperation = SceneManager.LoadSceneAsync(_studioSceneName, loadMode);
+                var loadOperation = SceneManager.LoadSceneAsync(_studioSceneName, LoadSceneMode.Additive);
                 if (loadOperation == null)
                     return false;
 
                 while (!loadOperation.isDone)
                     await UniTask.Yield(PlayerLoopTiming.Update);
 
-                if (loadMode == LoadSceneMode.Additive)
+                Scene loadedScene = default;
+                if (SceneManager.sceneCount > previousSceneCount)
                 {
-                    var newScene = SceneManager.GetSceneByName(_studioSceneName);
-                    if (newScene.IsValid())
-                        SceneManager.SetActiveScene(newScene);
+                    loadedScene = SceneManager.GetSceneAt(SceneManager.sceneCount - 1);
+                }
 
-                    if (activeScene.IsValid() && activeScene.isLoaded && activeScene != newScene)
+                if (!loadedScene.IsValid())
+                {
+                    // Fallback for editors/runtime combinations that refuse duplicate additive load.
+                    var singleReload = SceneManager.LoadSceneAsync(_studioSceneName, LoadSceneMode.Single);
+                    if (singleReload == null)
+                        return false;
+                    while (!singleReload.isDone)
+                        await UniTask.Yield(PlayerLoopTiming.Update);
+                    loadedScene = SceneManager.GetActiveScene();
+                }
+
+                if (loadedScene.IsValid())
+                {
+                    LastLoadedSceneName = loadedScene.name;
+                    SceneManager.SetActiveScene(loadedScene);
+                }
+
+                if (activeScene.IsValid() && activeScene.isLoaded && loadedScene.IsValid() && activeScene.handle != loadedScene.handle)
+                {
+                    var unload = SceneManager.UnloadSceneAsync(activeScene);
+                    if (unload != null)
                     {
-                        var unload = SceneManager.UnloadSceneAsync(activeScene);
-                        if (unload != null)
-                        {
-                            while (!unload.isDone)
-                                await UniTask.Yield(PlayerLoopTiming.Update);
-                        }
+                        while (!unload.isDone)
+                            await UniTask.Yield(PlayerLoopTiming.Update);
                     }
                 }
 
