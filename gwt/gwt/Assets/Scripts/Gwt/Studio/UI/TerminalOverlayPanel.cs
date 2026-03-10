@@ -79,10 +79,11 @@ namespace Gwt.Studio.UI
         {
             if (_ptyService == null || _shellDetector == null) return;
 
+            var hostLaunch = BuildHostLaunchPlan();
             try
             {
                 var adapter = new XtermSharpTerminalAdapter(24, 80);
-                var launch = await ResolveLaunchAsync();
+                var launch = await ResolveLaunchAsync() ?? hostLaunch;
                 var ptySessionId = await launch.SpawnAsync(_ptyService);
 
                 var subscription = _ptyService.GetOutputStream(ptySessionId).Subscribe(data =>
@@ -101,7 +102,24 @@ namespace Gwt.Studio.UI
             }
             catch (Exception e)
             {
-                Debug.LogError($"[GWT] Failed to spawn default shell: {e.Message}");
+                try
+                {
+                    var adapter = new XtermSharpTerminalAdapter(24, 80);
+                    var ptySessionId = await hostLaunch.SpawnAsync(_ptyService);
+                    var subscription = _ptyService.GetOutputStream(ptySessionId).Subscribe(data => adapter.Feed(data));
+                    var pane = new TerminalPaneState(Guid.NewGuid().ToString("N"), adapter)
+                    {
+                        Title = "Host Shell",
+                        PtySessionId = ptySessionId,
+                        OutputSubscription = subscription
+                    };
+                    _paneManager.AddPane(pane);
+                    Debug.LogWarning($"[GWT] Docker shell fallback to host shell after spawn failure: {e.Message}");
+                }
+                catch (Exception fallbackError)
+                {
+                    Debug.LogError($"[GWT] Failed to spawn default shell: {e.Message}; fallback failed: {fallbackError.Message}");
+                }
             }
         }
 
@@ -138,6 +156,12 @@ namespace Gwt.Studio.UI
                 }
             }
 
+            return null;
+        }
+
+        private TerminalLaunchPlan BuildHostLaunchPlan()
+        {
+            var projectRoot = _projectLifecycleService?.CurrentProject?.Path;
             var shell = _shellDetector.DetectDefaultShell();
             var shellArgs = _shellDetector.GetShellArgs(shell);
             var workingDirectory = !string.IsNullOrWhiteSpace(projectRoot) ? projectRoot : Application.dataPath;

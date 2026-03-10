@@ -317,6 +317,24 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("Host Shell", paneManager.ActivePane.Title);
         });
 
+        [UnityTest]
+        public System.Collections.IEnumerator TerminalOverlayPanel_Open_FallsBackToHostShell_WhenDockerSpawnFails() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            var paneManager = new TerminalPaneManager();
+            var pty = new FakePtyService();
+            using var scope = new UiScope();
+            var panel = scope.Root.AddComponent<TerminalOverlayPanel>();
+            panel.Construct(paneManager, pty, new FakeShellDetector(), new FakeFailingDockerService(), lifecycle);
+
+            panel.Open();
+            await UniTask.Delay(50);
+
+            Assert.AreEqual("/bin/fake-shell", pty.LastCommand);
+            Assert.AreEqual("Host Shell", paneManager.ActivePane.Title);
+        });
+
         [Test]
         public void UIManager_Update_DoesNotAutoOpenTerminal_WhenNoProjectOrPanes()
         {
@@ -532,6 +550,30 @@ namespace Gwt.Tests.Editor
             public string DetectDefaultShell() => "/bin/fake-shell";
             public string[] GetShellArgs(string shell) => new[] { "-i" };
             public bool IsShellAvailable(string shell) => true;
+        }
+
+        private sealed class FakeFailingDockerService : IDockerService
+        {
+            public UniTask<DockerContextInfo> DetectContextAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+            {
+                return UniTask.FromResult(new DockerContextInfo
+                {
+                    HasDockerCompose = true,
+                    DetectedServices = new System.Collections.Generic.List<string> { "workspace" }
+                });
+            }
+
+            public UniTask<DevContainerConfig> LoadDevContainerConfigAsync(string configPath, System.Threading.CancellationToken ct = default) =>
+                UniTask.FromResult<DevContainerConfig>(null);
+
+            public UniTask<System.Collections.Generic.List<string>> ListServicesAsync(string projectRoot, System.Threading.CancellationToken ct = default) =>
+                UniTask.FromResult(new System.Collections.Generic.List<string> { "workspace" });
+
+            public DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request) =>
+                new() { Command = "docker", Args = new System.Collections.Generic.List<string> { "exec" }, ExecCommand = "docker exec", WorkingDirectory = request.WorktreePath };
+
+            public UniTask<string> SpawnAsync(DockerLaunchRequest request, IPtyService ptyService, int rows = 24, int cols = 80, System.Threading.CancellationToken ct = default) =>
+                UniTask.FromException<string>(new InvalidOperationException("docker unavailable"));
         }
 
         private sealed class NoOpObservable : IObservable<string>

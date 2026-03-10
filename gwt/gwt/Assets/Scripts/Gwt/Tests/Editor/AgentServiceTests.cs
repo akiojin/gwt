@@ -510,6 +510,39 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public IEnumerator AgentService_HireAgentAsync_FallsBackToHost_WhenDockerSpawnFails() => UniTask.ToCoroutine(async () =>
+        {
+            await WithFakeAgentExecutableAsync("codex", async executablePath =>
+            {
+                await WithTempProjectRootAsync(async root =>
+                {
+                    var detector = new AgentDetector();
+                    var pty = new FakePtyService();
+                    var paneManager = new FakeTerminalPaneManager();
+                    var service = new AgentService(detector, pty, paneManager, new FakeSkillRegistrationService(), new FakeFailingDockerService(root));
+
+                    var session = await service.HireAgentAsync(
+                        DetectedAgentType.Codex,
+                        root,
+                        "feature/docker-agent",
+                        string.Empty);
+
+                    try
+                    {
+                        Assert.AreEqual("pty-001", session.PtySessionId);
+                        Assert.AreEqual(executablePath, pty.LastSpawnCommand);
+                        Assert.That(pty.LastSpawnArgs, Does.Contain("--cwd"));
+                        Assert.AreEqual("codex", paneManager.ActivePane.Title);
+                    }
+                    finally
+                    {
+                        DeleteAgentSessionFile(session.Id);
+                    }
+                });
+            });
+        });
+
+        [UnityTest]
         public IEnumerator AgentService_FireAgentAsync_StopsSessionAndRemovesPane() => UniTask.ToCoroutine(async () =>
         {
             await WithFakeAgentExecutableAsync("codex", async _ =>
@@ -1183,6 +1216,43 @@ namespace Gwt.Tests.Editor
             public IObservable<string> GetOutputStream(string paneId) => _output;
 
             public PaneStatus GetStatus(string paneId) => PaneStatus.Running;
+        }
+
+        private sealed class FakeFailingDockerService : IDockerService
+        {
+            private readonly string _projectRoot;
+
+            public FakeFailingDockerService(string projectRoot)
+            {
+                _projectRoot = projectRoot;
+            }
+
+            public UniTask<DockerContextInfo> DetectContextAsync(string projectRoot, CancellationToken ct = default)
+            {
+                return UniTask.FromResult(new DockerContextInfo
+                {
+                    HasDockerCompose = true,
+                    DetectedServices = new List<string> { "workspace" }
+                });
+            }
+
+            public UniTask<DevContainerConfig> LoadDevContainerConfigAsync(string configPath, CancellationToken ct = default) =>
+                UniTask.FromResult<DevContainerConfig>(null);
+
+            public UniTask<List<string>> ListServicesAsync(string projectRoot, CancellationToken ct = default) =>
+                UniTask.FromResult(new List<string> { "workspace" });
+
+            public DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request) =>
+                new()
+                {
+                    Command = "docker",
+                    Args = new List<string> { "exec", "-it", "workspace" },
+                    ExecCommand = "docker exec -it workspace",
+                    WorkingDirectory = _projectRoot
+                };
+
+            public UniTask<string> SpawnAsync(DockerLaunchRequest request, IPtyService ptyService, int rows = 24, int cols = 80, CancellationToken ct = default) =>
+                UniTask.FromException<string>(new InvalidOperationException("docker unavailable"));
         }
 
         private class FakeTerminalPaneManager : ITerminalPaneManager

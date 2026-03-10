@@ -84,7 +84,7 @@ namespace Gwt.Core.Services.Pty
             await session.Process.StandardInput.FlushAsync();
         }
 
-        public UniTask ResizeAsync(string paneId, int rows, int cols, CancellationToken ct = default)
+        public async UniTask ResizeAsync(string paneId, int rows, int cols, CancellationToken ct = default)
         {
             ThrowIfDisposed();
 
@@ -92,7 +92,11 @@ namespace Gwt.Core.Services.Pty
             session.Rows = rows;
             session.Cols = cols;
 
-            return UniTask.CompletedTask;
+            if (!session.UsesPseudoTerminal || session.Process.HasExited)
+                return;
+
+            await session.Process.StandardInput.WriteAsync($"stty rows {rows} cols {cols}\n".AsMemory(), ct);
+            await session.Process.StandardInput.FlushAsync();
         }
 
         public async UniTask KillAsync(string paneId, CancellationToken ct = default)

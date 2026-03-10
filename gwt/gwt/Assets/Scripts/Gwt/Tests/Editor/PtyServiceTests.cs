@@ -343,6 +343,23 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public async Task ResizeAsync_UnixPseudoTerminal_UpdatesSttySize()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                Assert.Ignore("Pseudo terminal resize check is Unix-specific.");
+
+            var session = await _service.SpawnShellAsync(GetTempDir(), rows: 24, cols: 80, cancellationToken: CancellationToken.None);
+            var output = new System.Text.StringBuilder();
+            session.OutputReceived += data => output.Append(data);
+
+            await _service.ResizeAsync(session.Id, 50, 140, CancellationToken.None);
+            await _service.WriteAsync(session.Id, "stty size\n", CancellationToken.None);
+            await UniTask.Delay(500, cancellationToken: CancellationToken.None);
+
+            Assert.That(output.ToString(), Does.Contain("50 140"));
+        }
+
+        [Test]
         public async Task Dispose_CleansUpAllSessions()
         {
             var service = new PtyService(_shellDetector);

@@ -124,7 +124,16 @@ namespace Gwt.Agent.Services
         {
             var dockerRequest = await TryBuildDockerLaunchRequestAsync(agentType, worktreePath, branch, command, args, ct);
             if (dockerRequest != null)
-                return await _dockerService.SpawnAsync(dockerRequest, _ptyService, 24, 80, ct);
+            {
+                try
+                {
+                    return await _dockerService.SpawnAsync(dockerRequest, _ptyService, 24, 80, ct);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[GWT] Docker agent spawn fallback to host process: {e.Message}");
+                }
+            }
 
             return await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
         }
