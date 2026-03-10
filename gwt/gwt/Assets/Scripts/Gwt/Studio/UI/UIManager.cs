@@ -19,6 +19,7 @@ namespace Gwt.Studio.UI
         [SerializeField] private AgentSettingsPanel _agentSettingsPanel;
         [SerializeField] private TerminalOverlayPanel _terminalOverlayPanel;
         [SerializeField] private ProjectSwitchOverlayPanel _projectSwitchOverlayPanel;
+        [SerializeField] private ProjectSceneTransitionController _projectSceneTransitionController;
         [SerializeField] private SettingsMenuController _settingsMenu;
 
         private readonly Stack<OverlayPanel> _overlayStack = new();
@@ -182,9 +183,7 @@ namespace Gwt.Studio.UI
 
         public UniTask<bool> ConfirmProjectSwitchAsync()
         {
-            return _projectSwitchOverlayPanel != null
-                ? _projectSwitchOverlayPanel.ConfirmSelectionAsync()
-                : UniTask.FromResult(false);
+            return ConfirmProjectSwitchCoreAsync();
         }
 
         private void SubscribeServices()
@@ -218,6 +217,17 @@ namespace Gwt.Studio.UI
 
             _projectSwitchOverlayPanel.SetServices(_multiProjectService, _projectLifecycleService);
             _projectSwitchOverlayPanel.Close();
+
+            if (_projectSceneTransitionController == null)
+            {
+                _projectSceneTransitionController = FindFirstObjectByType<ProjectSceneTransitionController>(FindObjectsInactive.Include);
+            }
+
+            if (_projectSceneTransitionController == null)
+            {
+                var transitionObject = new GameObject("ProjectSceneTransitionController");
+                _projectSceneTransitionController = transitionObject.AddComponent<ProjectSceneTransitionController>();
+            }
         }
 
         private void HandleProjectOpened(ProjectInfo _)
@@ -272,6 +282,21 @@ namespace Gwt.Studio.UI
 
             if (_multiProjectService != null)
                 _multiProjectService.OnProjectSwitched -= HandleProjectSwitched;
+        }
+
+        private async UniTask<bool> ConfirmProjectSwitchCoreAsync()
+        {
+            if (_projectSwitchOverlayPanel == null)
+                return false;
+
+            var switched = await _projectSwitchOverlayPanel.ConfirmSelectionAsync();
+            if (!switched)
+                return false;
+
+            if (_projectSceneTransitionController != null && _projectLifecycleService?.CurrentProject != null)
+                await _projectSceneTransitionController.TransitionToProjectAsync(_projectLifecycleService.CurrentProject);
+
+            return true;
         }
 
         private static bool IsCommandPressed()

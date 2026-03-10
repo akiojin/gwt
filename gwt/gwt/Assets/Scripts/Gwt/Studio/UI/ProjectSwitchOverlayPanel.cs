@@ -50,8 +50,7 @@ namespace Gwt.Studio.UI
         public override void Open()
         {
             EnsureUi();
-            OpenToActiveProject();
-            RefreshAsync().Forget();
+            RefreshAndSelectActiveAsync().Forget();
             base.Open();
         }
 
@@ -175,6 +174,13 @@ namespace Gwt.Studio.UI
                 _selectedIndex = Mathf.Clamp(_selectedIndex, 0, _entries.Count - 1);
             }
 
+            Refresh();
+        }
+
+        private async UniTask RefreshAndSelectActiveAsync()
+        {
+            await RefreshAsync();
+            OpenToActiveProject();
             Refresh();
         }
 

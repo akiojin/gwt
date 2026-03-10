@@ -132,7 +132,7 @@ namespace Gwt.Agent.Lead
             });
 
             var plan = await PlanTasksAsync(command, ct);
-            var response = $"[{CurrentLead?.DisplayName ?? "Lead"}] Plan created with {plan.Tasks.Count} task(s). Plan ID: {plan.PlanId}";
+            var response = $"[{CurrentLead?.DisplayName ?? "Lead"}] Plan created for: {command}. {plan.Tasks.Count} task(s). Plan ID: {plan.PlanId}";
 
             _sessionData.ConversationHistory.Add(new LeadConversationEntry
             {

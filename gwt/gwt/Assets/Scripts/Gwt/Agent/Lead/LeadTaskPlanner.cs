@@ -95,10 +95,20 @@ Rules:
             {
                 foreach (var t in wrapper.tasks)
                 {
-                    t.Status = "pending";
-                    if (string.IsNullOrEmpty(t.WorktreeStrategy))
-                        t.WorktreeStrategy = "new";
-                    plan.Tasks.Add(t);
+                    var task = new LeadPlannedTask
+                    {
+                        TaskId = t.taskId,
+                        Title = t.title,
+                        Description = t.description,
+                        WorktreeStrategy = string.IsNullOrEmpty(t.worktreeStrategy) ? "new" : t.worktreeStrategy,
+                        SuggestedBranch = t.suggestedBranch,
+                        AgentType = t.agentType,
+                        Instructions = t.instructions,
+                        DependsOn = t.dependsOn ?? new List<string>(),
+                        Priority = t.priority,
+                        Status = "pending"
+                    };
+                    plan.Tasks.Add(task);
                 }
             }
 
@@ -159,7 +169,21 @@ Rules:
         [Serializable]
         class TaskPlanWrapper
         {
-            public List<LeadPlannedTask> tasks;
+            public List<TaskPlanItem> tasks;
+        }
+
+        [Serializable]
+        class TaskPlanItem
+        {
+            public string taskId;
+            public string title;
+            public string description;
+            public string worktreeStrategy;
+            public string suggestedBranch;
+            public string agentType;
+            public string instructions;
+            public List<string> dependsOn;
+            public int priority;
         }
     }
 }

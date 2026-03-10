@@ -28,7 +28,7 @@ namespace Gwt.Tests.Editor
             overlay.MoveSelection(1);
             overlay.MoveSelection(1);
 
-            Assert.AreEqual(0, overlay.SelectedIndex);
+            Assert.AreEqual(1, overlay.SelectedIndex);
             Assert.That(overlay.CurrentDisplayText, Does.Contain("project-a"));
             Assert.That(overlay.CurrentDisplayText, Does.Contain("project-b"));
         }
@@ -84,8 +84,10 @@ namespace Gwt.Tests.Editor
             var manager = scope.Root.AddComponent<UIManager>();
             var bar = scope.Root.AddComponent<ProjectInfoBar>();
             var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            var transition = scope.Root.AddComponent<FakeProjectSceneTransitionController>();
             SetPrivateField(manager, "_projectInfoBar", bar);
             SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+            SetPrivateField(manager, "_projectSceneTransitionController", transition);
 
             manager.Construct(lifecycle, multi);
             manager.OpenProjectSwitcher();
@@ -97,6 +99,7 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("project-a", bar.CurrentProjectName);
             Assert.AreEqual("Project 1/2", bar.CurrentStatus);
             Assert.IsFalse(overlay.IsOpen);
+            Assert.AreEqual("/tmp/project-a", transition.LastTransitionProjectPath);
         }
 
         [Test]
@@ -111,8 +114,10 @@ namespace Gwt.Tests.Editor
             var manager = scope.Root.AddComponent<UIManager>();
             var bar = scope.Root.AddComponent<ProjectInfoBar>();
             var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            var transition = scope.Root.AddComponent<FakeProjectSceneTransitionController>();
             SetPrivateField(manager, "_projectInfoBar", bar);
             SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+            SetPrivateField(manager, "_projectSceneTransitionController", transition);
 
             manager.Construct(lifecycle, multi);
             manager.OpenProjectSwitcher();
@@ -123,6 +128,7 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(2, multi.OpenProjects.Count);
             Assert.AreEqual("/tmp/project-c", lifecycle.CurrentProject.Path);
             Assert.AreEqual("project-c", bar.CurrentProjectName);
+            Assert.AreEqual("/tmp/project-c", transition.LastTransitionProjectPath);
         }
 
         private static void SetPrivateField(object instance, string fieldName, object value)
@@ -138,6 +144,17 @@ namespace Gwt.Tests.Editor
             public void Dispose()
             {
                 UnityEngine.Object.DestroyImmediate(Root);
+            }
+        }
+
+        private sealed class FakeProjectSceneTransitionController : ProjectSceneTransitionController
+        {
+            public string LastTransitionProjectPath { get; private set; }
+
+            public override UniTask<bool> TransitionToProjectAsync(ProjectInfo project)
+            {
+                LastTransitionProjectPath = project?.Path;
+                return UniTask.FromResult(true);
             }
         }
 

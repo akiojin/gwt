@@ -28,6 +28,12 @@ namespace Gwt.Studio.Installers
                 {
                     resolver.Inject(uiManager);
                 }
+
+                var transitionController = Object.FindObjectOfType<ProjectSceneTransitionController>(true);
+                if (transitionController != null)
+                {
+                    resolver.Inject(transitionController);
+                }
             });
         }
     }
