@@ -5,6 +5,7 @@
         "Gwt.Shared",
         "Gwt.Core",
         "Gwt.Agent",
+        "Gwt.Lifecycle",
         "VContainer",
         "UniTask",
         "Unity.TextMeshPro",

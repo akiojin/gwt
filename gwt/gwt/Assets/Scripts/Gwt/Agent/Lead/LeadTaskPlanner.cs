@@ -25,7 +25,7 @@ namespace Gwt.Agent.Lead
             var settings = await LoadSettingsAsync(context.ProjectRoot, ct);
 
             var response = await _aiApi.SendRequestAsync(systemPrompt, userRequest, settings, ct);
-            return ParsePlanResponse(response.Text, userRequest);
+            return ParsePlanResponse(response.Text, userRequest, context.ProjectRoot);
         }
 
         public async UniTask<LeadTaskPlan> RefinePlanAsync(LeadTaskPlan plan, string feedback, CancellationToken ct = default)
@@ -36,7 +36,7 @@ namespace Gwt.Agent.Lead
             var settings = await LoadSettingsAsync(plan.ProjectRoot ?? "", ct);
 
             var response = await _aiApi.SendRequestAsync(systemPrompt, feedback, settings, ct);
-            var refined = ParsePlanResponse(response.Text, plan.UserRequest);
+            var refined = ParsePlanResponse(response.Text, plan.UserRequest, plan.ProjectRoot);
             refined.PlanId = plan.PlanId;
             return refined;
         }
@@ -77,7 +77,7 @@ Rules:
 - Return ONLY the JSON object, no other text";
         }
 
-        LeadTaskPlan ParsePlanResponse(string content, string userRequest)
+        LeadTaskPlan ParsePlanResponse(string content, string userRequest, string projectRoot)
         {
             var json = ExtractJson(content);
             var wrapper = JsonUtility.FromJson<TaskPlanWrapper>(json);
@@ -85,7 +85,7 @@ Rules:
             var plan = new LeadTaskPlan
             {
                 PlanId = Guid.NewGuid().ToString("N")[..8],
-                ProjectRoot = context.ProjectRoot,
+                ProjectRoot = projectRoot ?? string.Empty,
                 UserRequest = userRequest,
                 CreatedAt = DateTime.UtcNow.ToString("o"),
                 Status = "draft"

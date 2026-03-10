@@ -9,22 +9,29 @@ namespace Gwt.Studio.UI
         [SerializeField] private TextMeshProUGUI _branchText;
         [SerializeField] private TextMeshProUGUI _statusText;
 
+        public string CurrentProjectName { get; private set; } = string.Empty;
+        public string CurrentBranch { get; private set; } = string.Empty;
+        public string CurrentStatus { get; private set; } = string.Empty;
+
         public void SetProjectName(string name)
         {
+            CurrentProjectName = name ?? string.Empty;
             if (_projectNameText != null)
-                _projectNameText.text = name ?? string.Empty;
+                _projectNameText.text = CurrentProjectName;
         }
 
         public void SetBranch(string branch)
         {
+            CurrentBranch = branch ?? string.Empty;
             if (_branchText != null)
-                _branchText.text = branch ?? string.Empty;
+                _branchText.text = CurrentBranch;
         }
 
         public void SetStatus(string status)
         {
+            CurrentStatus = status ?? string.Empty;
             if (_statusText != null)
-                _statusText.text = status ?? string.Empty;
+                _statusText.text = CurrentStatus;
         }
     }
 }

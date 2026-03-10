@@ -16,6 +16,18 @@ namespace Gwt.Studio.Installers
                 {
                     resolver.Inject(terminalPanel);
                 }
+
+                var projectSwitchPanel = Object.FindObjectOfType<ProjectSwitchOverlayPanel>(true);
+                if (projectSwitchPanel != null)
+                {
+                    resolver.Inject(projectSwitchPanel);
+                }
+
+                var uiManager = Object.FindObjectOfType<UIManager>(true);
+                if (uiManager != null)
+                {
+                    resolver.Inject(uiManager);
+                }
             });
         }
     }

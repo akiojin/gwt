@@ -250,7 +250,7 @@ namespace Gwt.Infra.Services
                     using var client = new HttpClient();
                     using var response = await client.GetAsync(uri, ct);
                     response.EnsureSuccessStatusCode();
-                    await using var input = await response.Content.ReadAsStreamAsync(ct);
+                    await using var input = await response.Content.ReadAsStreamAsync();
                     await using var output = File.Create(destinationPath);
                     await input.CopyToAsync(output, ct);
                     return destinationPath;

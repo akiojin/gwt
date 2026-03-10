@@ -6,16 +6,17 @@ namespace Gwt.Studio.UI
     {
         [SerializeField] private GameObject _panel;
 
-        public bool IsOpen => _panel != null && _panel.activeSelf;
+        protected GameObject PanelRoot => _panel != null ? _panel : gameObject;
+        public bool IsOpen => PanelRoot != null && PanelRoot.activeSelf;
 
         public virtual void Open()
         {
-            if (_panel != null) _panel.SetActive(true);
+            if (PanelRoot != null) PanelRoot.SetActive(true);
         }
 
         public virtual void Close()
         {
-            if (_panel != null) _panel.SetActive(false);
+            if (PanelRoot != null) PanelRoot.SetActive(false);
         }
 
         public void Toggle()
