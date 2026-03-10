@@ -147,9 +147,7 @@ fn now_millis() -> i64 {
 }
 
 fn issue_cache_file_path(repo_path: &Path) -> PathBuf {
-    let canonical = repo_path
-        .canonicalize()
-        .unwrap_or_else(|_| repo_path.to_path_buf());
+    let canonical = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
     let digest = hasher.finalize();

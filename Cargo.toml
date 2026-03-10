@@ -9,7 +9,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "8.5.5"
+version = "8.5.6"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -84,6 +84,9 @@ sha2 = "0.10"
 
 # Home directory
 dirs = "6"
+
+# Path canonicalization (UNC-free on Windows)
+dunce = "1"
 
 # System information
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }

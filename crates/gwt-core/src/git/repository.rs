@@ -1,9 +1,34 @@
 //! Repository operations
 
 use crate::error::{GwtError, Result};
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use tracing::{debug, error, info, warn};
+
+/// Strip the Windows extended-length path prefix (`\\?\` or `//?/`)
+/// that Git may produce in worktree/rev-parse output on Windows.
+/// These prefixes cause npm/Node.js to fail on RFC 8089 file URL construction.
+/// Verbatim UNC paths must keep their network-share root after normalization.
+fn strip_extended_length_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix("//?/UNC/") {
+        return Cow::Owned(format!("//{rest}"));
+    }
+
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+
+    if let Some(rest) = path.strip_prefix("//?/") {
+        return Cow::Borrowed(rest);
+    }
+
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(rest);
+    }
+
+    Cow::Borrowed(path)
+}
 
 /// Repository type classification (gwt-spec issue)
 ///
@@ -406,7 +431,7 @@ impl Repository {
             Ok(o) if o.status.success() => {
                 let common_dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
                 // common_dir is like "/gwt/.git" - parent is the repo root
-                let common_path = PathBuf::from(&common_dir);
+                let common_path = PathBuf::from(strip_extended_length_prefix(&common_dir).as_ref());
                 if common_path.is_absolute() {
                     common_path
                         .parent()
@@ -677,7 +702,7 @@ impl Repository {
                     worktrees.push(wt);
                 }
                 current = Some(WorktreeInfo {
-                    path: PathBuf::from(path),
+                    path: PathBuf::from(strip_extended_length_prefix(path).as_ref()),
                     head: String::new(),
                     branch: None,
                     is_bare: false,
@@ -954,7 +979,7 @@ impl Repository {
         })?;
 
         // gitdir — absolute path to the worktree's .git file (forward slashes for git)
-        let abs_git_file = std::fs::canonicalize(&git_file).unwrap_or_else(|_| git_file.clone());
+        let abs_git_file = dunce::canonicalize(&git_file).unwrap_or_else(|_| git_file.clone());
         let gitdir_content = abs_git_file.to_string_lossy().replace('\\', "/");
         std::fs::write(meta_dir.join("gitdir"), format!("{}\n", gitdir_content)).map_err(|e| {
             GwtError::GitOperationFailed {
@@ -1122,7 +1147,7 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
                 return path.to_path_buf();
             }
 
-            let common_path = PathBuf::from(&common_dir);
+            let common_path = PathBuf::from(strip_extended_length_prefix(&common_dir).as_ref());
             if common_path.is_absolute() {
                 common_path
                     .parent()
@@ -1293,14 +1318,10 @@ mod tests {
         let worktrees = repo.list_worktrees().unwrap();
         assert_eq!(worktrees.len(), 1);
         // macOS temp paths may appear as /var/... while git reports /private/var/... (canonical).
-        let expected = temp
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|_| temp.path().to_path_buf());
-        let actual = worktrees[0]
-            .path
-            .canonicalize()
-            .unwrap_or_else(|_| worktrees[0].path.clone());
+        let expected =
+            dunce::canonicalize(temp.path()).unwrap_or_else(|_| temp.path().to_path_buf());
+        let actual =
+            dunce::canonicalize(&worktrees[0].path).unwrap_or_else(|_| worktrees[0].path.clone());
         assert_eq!(actual, expected);
     }
 
@@ -1645,6 +1666,49 @@ mod tests {
             bare_name: None,
         };
         assert_eq!(ctx.format_display(), "/worktrees/feature-x [feature-x]");
+    }
+
+    // --- strip_extended_length_prefix ---
+
+    #[test]
+    fn strip_extended_length_prefix_removes_forward_slash_form() {
+        assert_eq!(
+            strip_extended_length_prefix("//?/E:/gwt/develop"),
+            "E:/gwt/develop"
+        );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_removes_backslash_form() {
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\E:\gwt\develop"),
+            r"E:\gwt\develop"
+        );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_preserves_unc_backslash_root() {
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_preserves_unc_forward_slash_root() {
+        assert_eq!(
+            strip_extended_length_prefix("//?/UNC/server/share/repo"),
+            "//server/share/repo"
+        );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_preserves_normal_path() {
+        assert_eq!(
+            strip_extended_length_prefix("E:/gwt/develop"),
+            "E:/gwt/develop"
+        );
+        assert_eq!(strip_extended_length_prefix("/unix/path"), "/unix/path");
     }
 
     // --- RepoType equality ---

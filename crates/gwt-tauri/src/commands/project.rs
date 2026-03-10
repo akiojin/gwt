@@ -94,7 +94,7 @@ fn read_bare_repo_name(project_root: &Path) -> Option<String> {
     None
 }
 
-fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
+pub(crate) fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
     if git::is_git_repo(selected) {
         if git::is_bare_repository(selected) {
             selected.parent().unwrap_or(selected).to_path_buf()
@@ -108,7 +108,7 @@ fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
 }
 
 fn canonical_project_identity(project_root: &Path) -> String {
-    std::fs::canonicalize(project_root)
+    dunce::canonicalize(project_root)
         .unwrap_or_else(|_| project_root.to_path_buf())
         .to_string_lossy()
         .to_string()

@@ -152,7 +152,7 @@ fn resolve_common_dir_from_gitdir(gitdir: &Path) -> Option<PathBuf> {
         gitdir.join(common)
     };
 
-    Some(resolved.canonicalize().unwrap_or(resolved))
+    Some(dunce::canonicalize(&resolved).unwrap_or(resolved))
 }
 
 fn resolve_gitdir_from_dot_git_file(dot_git_path: &Path) -> Option<PathBuf> {
@@ -1236,7 +1236,7 @@ mod tests {
     }
 
     fn canonicalize_or_self(path: &Path) -> PathBuf {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
     fn create_repo_with_remote() -> (TempDir, String) {
