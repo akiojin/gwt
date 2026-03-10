@@ -217,6 +217,27 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void BuildLaunchPlan_WithEntryCommand_AppendsExecToShellCommand()
+        {
+            var service = new DockerService();
+
+            var result = service.BuildLaunchPlan(new DockerLaunchRequest
+            {
+                ServiceName = "workspace",
+                WorktreePath = "/repo/worktree",
+                Branch = "feature/docker",
+                AgentType = "codex",
+                EntryCommand = "codex",
+                EntryArgs = new System.Collections.Generic.List<string> { "--cwd", "/repo/worktree" }
+            });
+
+            Assert.That(result.ExecCommand, Does.Contain("exec 'codex' '--cwd' '/repo/worktree'"));
+            CollectionAssert.AreEqual(
+                new[] { "exec", "-it", "workspace", "sh", "-lc", "export GWT_BRANCH='feature/docker' && export GWT_AGENT_TYPE='codex' && cd '/repo/worktree' && pwd && exec 'codex' '--cwd' '/repo/worktree'" },
+                result.Args);
+        }
+
+        [Test]
         public void SpawnAsync_NullPtyService_Throws()
         {
             var service = new DockerService();

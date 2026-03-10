@@ -35,6 +35,8 @@ namespace Gwt.Infra.Services
         public string Branch;
         public string AgentType;
         public string ServiceName;
+        public string EntryCommand;
+        public List<string> EntryArgs = new();
         public bool UseDevContainer;
         public bool FallbackToHost;
     }

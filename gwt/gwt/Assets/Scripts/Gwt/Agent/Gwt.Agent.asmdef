@@ -4,6 +4,7 @@
     "references": [
         "Gwt.Shared",
         "Gwt.Core",
+        "Gwt.Infra",
         "VContainer",
         "UniTask"
     ],

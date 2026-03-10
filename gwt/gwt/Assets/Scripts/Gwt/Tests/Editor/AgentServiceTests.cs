@@ -11,6 +11,7 @@ using Gwt.Agent.Services.SkillRegistration;
 using Gwt.Agent.Lead;
 using Gwt.Core.Models;
 using Gwt.Core.Services.Terminal;
+using Gwt.Infra.Services;
 using UnityEngine;
 using UnityEngine.TestTools;
 
@@ -468,6 +469,43 @@ namespace Gwt.Tests.Editor
                 {
                     DeleteAgentSessionFile(session.Id);
                 }
+            });
+        });
+
+        [UnityTest]
+        public IEnumerator AgentService_HireAgentAsync_UsesDockerExec_WhenProjectHasDockerContext() => UniTask.ToCoroutine(async () =>
+        {
+            await WithFakeAgentExecutableAsync("codex", async _ =>
+            {
+                await WithTempProjectRootAsync(async root =>
+                {
+                    File.WriteAllText(Path.Combine(root, "docker-compose.yml"), "services:\n  workspace:\n    image: alpine\n");
+
+                    var detector = new AgentDetector();
+                    var pty = new FakePtyService();
+                    var paneManager = new FakeTerminalPaneManager();
+                    var service = new AgentService(detector, pty, paneManager, new FakeSkillRegistrationService(), new DockerService());
+
+                    var session = await service.HireAgentAsync(
+                        DetectedAgentType.Codex,
+                        root,
+                        "feature/docker-agent",
+                        string.Empty);
+
+                    try
+                    {
+                        Assert.AreEqual("pty-001", session.PtySessionId);
+                        Assert.AreEqual("docker", pty.LastSpawnCommand);
+                        Assert.That(pty.LastSpawnArgs, Does.Contain("workspace"));
+                        Assert.That(pty.LastSpawnArgs[^1], Does.Contain("exec 'codex' '--cwd'"));
+                        Assert.That(pty.LastSpawnArgs[^1], Does.Contain(root));
+                        Assert.AreEqual("codex", paneManager.ActivePane.Title);
+                    }
+                    finally
+                    {
+                        DeleteAgentSessionFile(session.Id);
+                    }
+                });
             });
         });
 
@@ -955,6 +993,21 @@ namespace Gwt.Tests.Editor
                     File.Delete(commandPath);
                 if (Directory.Exists(tempDir))
                     Directory.Delete(tempDir);
+            }
+        }
+
+        private static async UniTask WithTempProjectRootAsync(Func<string, UniTask> action)
+        {
+            var root = Path.Combine(Path.GetTempPath(), "gwt-agent-project-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                await action(root);
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, true);
             }
         }
 

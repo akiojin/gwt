@@ -8,6 +8,7 @@ using Gwt.Agent.Services.SkillRegistration;
 using Gwt.Core.Models;
 using Gwt.Core.Services.Pty;
 using Gwt.Core.Services.Terminal;
+using Gwt.Infra.Services;
 using UnityEngine;
 
 namespace Gwt.Agent.Services
@@ -18,6 +19,7 @@ namespace Gwt.Agent.Services
         private readonly IPtyService _ptyService;
         private readonly ITerminalPaneManager _paneManager;
         private readonly ISkillRegistrationService _skillRegistration;
+        private readonly IDockerService _dockerService;
         private readonly Dictionary<string, AgentSessionData> _sessions = new();
         private readonly Dictionary<string, IDisposable> _outputSubscriptions = new();
         private static readonly string SessionDir = Path.Combine(
@@ -29,11 +31,22 @@ namespace Gwt.Agent.Services
         public event Action<string, string> OnAgentOutput;
 
         public AgentService(AgentDetector detector, IPtyService ptyService, ITerminalPaneManager paneManager, ISkillRegistrationService skillRegistration)
+            : this(detector, ptyService, paneManager, skillRegistration, null)
+        {
+        }
+
+        public AgentService(
+            AgentDetector detector,
+            IPtyService ptyService,
+            ITerminalPaneManager paneManager,
+            ISkillRegistrationService skillRegistration,
+            IDockerService dockerService)
         {
             _detector = detector;
             _ptyService = ptyService;
             _paneManager = paneManager;
             _skillRegistration = skillRegistration;
+            _dockerService = dockerService;
         }
 
         public UniTask<List<DetectedAgent>> GetAvailableAgentsAsync(CancellationToken ct = default)
@@ -64,13 +77,13 @@ namespace Gwt.Agent.Services
             };
 
             var (command, args) = BuildAgentCommandAndArgs(agentType, agent.ExecutablePath, worktreePath, session.Id);
-
-            var ptySessionId = await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
+            var ptySessionId = await SpawnAgentSessionAsync(agentType, worktreePath, branch, command, args, ct);
             session.PtySessionId = ptySessionId;
 
             var adapter = new XtermSharpTerminalAdapter(24, 80);
             var pane = new TerminalPaneState(Guid.NewGuid().ToString("N"), adapter)
             {
+                Title = BuildPaneTitle(agentType, command),
                 AgentSessionId = session.Id,
                 PtySessionId = ptySessionId
             };
@@ -99,6 +112,80 @@ namespace Gwt.Agent.Services
             OnAgentStatusChanged?.Invoke(session);
 
             return session;
+        }
+
+        private async UniTask<string> SpawnAgentSessionAsync(
+            DetectedAgentType agentType,
+            string worktreePath,
+            string branch,
+            string command,
+            string[] args,
+            CancellationToken ct)
+        {
+            var dockerRequest = await TryBuildDockerLaunchRequestAsync(agentType, worktreePath, branch, command, args, ct);
+            if (dockerRequest != null)
+                return await _dockerService.SpawnAsync(dockerRequest, _ptyService, 24, 80, ct);
+
+            return await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
+        }
+
+        private async UniTask<DockerLaunchRequest> TryBuildDockerLaunchRequestAsync(
+            DetectedAgentType agentType,
+            string worktreePath,
+            string branch,
+            string command,
+            string[] args,
+            CancellationToken ct)
+        {
+            if (_dockerService == null || string.IsNullOrWhiteSpace(worktreePath))
+                return null;
+
+            DockerContextInfo context;
+            try
+            {
+                context = await _dockerService.DetectContextAsync(worktreePath, ct);
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (context == null || (!context.HasDockerCompose && !context.HasDevContainer))
+                return null;
+
+            var services = await _dockerService.ListServicesAsync(worktreePath, ct);
+            var serviceName = services.FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(serviceName))
+                return null;
+
+            return new DockerLaunchRequest
+            {
+                WorktreePath = worktreePath,
+                Branch = branch,
+                AgentType = agentType.ToString().ToLowerInvariant(),
+                ServiceName = serviceName,
+                UseDevContainer = context.HasDevContainer,
+                EntryCommand = GetContainerExecutable(command),
+                EntryArgs = args?.ToList() ?? new List<string>()
+            };
+        }
+
+        private static string GetContainerExecutable(string command)
+        {
+            if (string.IsNullOrWhiteSpace(command))
+                return command;
+
+            var fileName = Path.GetFileName(command);
+            return string.IsNullOrWhiteSpace(fileName) ? command : fileName;
+        }
+
+        private static string BuildPaneTitle(DetectedAgentType agentType, string command)
+        {
+            var executable = GetContainerExecutable(command);
+            if (string.IsNullOrWhiteSpace(executable))
+                executable = agentType.ToString();
+
+            return executable;
         }
 
         public async UniTask FireAgentAsync(string sessionId, CancellationToken ct = default)

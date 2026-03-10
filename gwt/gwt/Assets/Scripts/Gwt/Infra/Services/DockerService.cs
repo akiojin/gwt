@@ -93,6 +93,8 @@ namespace Gwt.Infra.Services
                 steps.Add($"export GWT_AGENT_TYPE='{EscapeSingleQuotes(request.AgentType)}'");
             steps.Add($"cd '{EscapeSingleQuotes(worktree)}'");
             steps.Add("pwd");
+            if (!string.IsNullOrWhiteSpace(request.EntryCommand))
+                steps.Add(BuildExecStep(request.EntryCommand, request.EntryArgs));
             var shellCommand = string.Join(" && ", steps);
             var args = new List<string>
             {
@@ -175,6 +177,19 @@ namespace Gwt.Infra.Services
         private static string EscapeSingleQuotes(string input)
         {
             return input.Replace("'", "'\"'\"'");
+        }
+
+        private static string BuildExecStep(string command, IEnumerable<string> args)
+        {
+            var escaped = new List<string> { EscapeShellToken(command) };
+            if (args != null)
+                escaped.AddRange(args.Select(EscapeShellToken));
+            return $"exec {string.Join(" ", escaped)}";
+        }
+
+        private static string EscapeShellToken(string input)
+        {
+            return $"'{EscapeSingleQuotes(input ?? string.Empty)}'";
         }
 
         private static string BuildCommandPreview(string command, IEnumerable<string> args)
