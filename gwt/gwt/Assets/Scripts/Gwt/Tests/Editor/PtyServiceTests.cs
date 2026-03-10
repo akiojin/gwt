@@ -326,6 +326,23 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public async Task SpawnShellAsync_UnixPseudoTerminal_ReportsConfiguredSize()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                Assert.Ignore("Pseudo terminal size check is Unix-specific.");
+
+            var session = await _service.SpawnShellAsync(GetTempDir(), rows: 40, cols: 120, cancellationToken: CancellationToken.None);
+            var output = new System.Text.StringBuilder();
+            session.OutputReceived += data => output.Append(data);
+
+            await _service.WriteAsync(session.Id, "stty size\n", CancellationToken.None);
+            await UniTask.Delay(500, cancellationToken: CancellationToken.None);
+
+            Assert.That(session.UsesPseudoTerminal, Is.True);
+            Assert.That(output.ToString(), Does.Contain("40 120"));
+        }
+
+        [Test]
         public async Task Dispose_CleansUpAllSessions()
         {
             var service = new PtyService(_shellDetector);

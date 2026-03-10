@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using Cysharp.Threading.Tasks;
@@ -14,11 +16,13 @@ namespace Gwt.Core.Services.Pty
 
         private readonly IPlatformShellDetector _shellDetector;
         private readonly ConcurrentDictionary<string, PtySession> _sessions = new();
+        private readonly string _scriptPath;
         private bool _disposed;
 
         public PtyService(IPlatformShellDetector shellDetector)
         {
             _shellDetector = shellDetector;
+            _scriptPath = DetectScriptPath();
         }
 
         public async UniTask<string> SpawnAsync(
@@ -27,27 +31,7 @@ namespace Gwt.Core.Services.Pty
         {
             ThrowIfDisposed();
 
-            var psi = new ProcessStartInfo
-            {
-                FileName = command,
-                WorkingDirectory = workingDir,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8
-            };
-
-            psi.Environment["TERM"] = "xterm-256color";
-            psi.Environment["FORCE_COLOR"] = "1";
-
-            if (args != null)
-            {
-                foreach (var arg in args)
-                    psi.ArgumentList.Add(arg);
-            }
+            var (psi, usesPseudoTerminal) = CreateStartInfo(command, args, workingDir, rows, cols);
 
             var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             try
@@ -61,7 +45,7 @@ namespace Gwt.Core.Services.Pty
             }
 
             var id = Guid.NewGuid().ToString("N");
-            var session = new PtySession(id, process, workingDir, rows, cols);
+            var session = new PtySession(id, process, workingDir, rows, cols, usesPseudoTerminal);
             _sessions[id] = session;
 
             ReadStreamAsync(session, process.StandardOutput, ct).Forget();
@@ -205,7 +189,9 @@ namespace Gwt.Core.Services.Pty
                     var read = await reader.ReadAsync(buffer.AsMemory(), linked.Token);
                     if (read == 0) break;
 
-                    session.RaiseOutput(new string(buffer, 0, read));
+                    var chunk = SanitizeOutput(new string(buffer, 0, read));
+                    if (!string.IsNullOrEmpty(chunk))
+                        session.RaiseOutput(chunk);
                 }
             }
             catch (OperationCanceledException) { }
@@ -231,6 +217,113 @@ namespace Gwt.Core.Services.Pty
         private void ThrowIfDisposed()
         {
             if (_disposed) throw new ObjectDisposedException(nameof(PtyService));
+        }
+
+        private (ProcessStartInfo startInfo, bool usesPseudoTerminal) CreateStartInfo(
+            string command,
+            string[] args,
+            string workingDir,
+            int rows,
+            int cols)
+        {
+            if (CanUsePseudoTerminal())
+                return (CreateUnixPtyStartInfo(command, args, workingDir, rows, cols), true);
+
+            return (CreateRedirectedStartInfo(command, args, workingDir), false);
+        }
+
+        private ProcessStartInfo CreateRedirectedStartInfo(string command, string[] args, string workingDir)
+        {
+            var psi = CreateBaseStartInfo(command, workingDir);
+            if (args != null)
+            {
+                foreach (var arg in args)
+                    psi.ArgumentList.Add(arg);
+            }
+
+            return psi;
+        }
+
+        private ProcessStartInfo CreateUnixPtyStartInfo(
+            string command,
+            string[] args,
+            string workingDir,
+            int rows,
+            int cols)
+        {
+            var psi = CreateBaseStartInfo(_scriptPath, workingDir);
+            psi.ArgumentList.Add("-q");
+            psi.ArgumentList.Add("/dev/null");
+            psi.ArgumentList.Add("/bin/sh");
+            psi.ArgumentList.Add("-lc");
+            psi.ArgumentList.Add(BuildUnixLaunchCommand(command, args, rows, cols));
+            return psi;
+        }
+
+        private static ProcessStartInfo CreateBaseStartInfo(string command, string workingDir)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = command,
+                WorkingDirectory = string.IsNullOrWhiteSpace(workingDir) ? Environment.CurrentDirectory : workingDir,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            psi.Environment["TERM"] = "xterm-256color";
+            psi.Environment["FORCE_COLOR"] = "1";
+            return psi;
+        }
+
+        private static string BuildUnixLaunchCommand(string command, string[] args, int rows, int cols)
+        {
+            var parts = new System.Collections.Generic.List<string>
+            {
+                "export TERM=xterm-256color",
+                "export FORCE_COLOR=1"
+            };
+
+            if (rows > 0 && cols > 0)
+                parts.Add($"stty rows {rows} cols {cols} >/dev/null 2>&1 || true");
+
+            var escapedCommand = EscapeShellArgument(command);
+            var escapedArgs = args == null || args.Length == 0
+                ? string.Empty
+                : " " + string.Join(" ", args.Select(EscapeShellArgument));
+            parts.Add($"exec {escapedCommand}{escapedArgs}");
+            return string.Join("; ", parts);
+        }
+
+        private bool CanUsePseudoTerminal()
+        {
+            return !RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !string.IsNullOrWhiteSpace(_scriptPath);
+        }
+
+        private static string DetectScriptPath()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                return string.Empty;
+
+            var candidates = new[] { "/usr/bin/script", "/bin/script" };
+            return candidates.FirstOrDefault(System.IO.File.Exists) ?? string.Empty;
+        }
+
+        private static string EscapeShellArgument(string value)
+        {
+            var input = value ?? string.Empty;
+            return $"'{input.Replace("'", "'\"'\"'")}'";
+        }
+
+        private static string SanitizeOutput(string output)
+        {
+            return string.IsNullOrEmpty(output)
+                ? string.Empty
+                : output.Replace("\u0004\b\b", string.Empty);
         }
     }
 }

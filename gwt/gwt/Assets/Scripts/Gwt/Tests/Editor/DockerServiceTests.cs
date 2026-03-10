@@ -1,4 +1,7 @@
 using System.IO;
+using System.Threading;
+using Cysharp.Threading.Tasks;
+using Gwt.Core.Models;
 using Gwt.Infra.Services;
 using NUnit.Framework;
 
@@ -154,6 +157,11 @@ namespace Gwt.Tests.Editor
             Assert.That(result.ExecCommand, Does.Contain("/workspace/project"));
             Assert.That(result.ExecCommand, Does.Contain("GWT_BRANCH='feature/test'"));
             Assert.That(result.ExecCommand, Does.Contain("GWT_AGENT_TYPE='codex'"));
+            Assert.AreEqual("docker", result.Command);
+            CollectionAssert.AreEqual(
+                new[] { "exec", "-it", "app", "sh", "-lc", "export GWT_BRANCH='feature/test' && export GWT_AGENT_TYPE='codex' && cd '/workspace/project' && pwd" },
+                result.Args);
+            Assert.AreEqual("/workspace/project", result.WorkingDirectory);
             Assert.AreEqual("ready", result.State);
         }
 
@@ -184,6 +192,39 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("devcontainer_ready", result.State);
         }
 
+        [Test]
+        public void SpawnAsync_UsesPtyServiceWithStructuredDockerCommand()
+        {
+            var service = new DockerService();
+            var fakePty = new FakePtyService();
+
+            var paneId = service.SpawnAsync(new DockerLaunchRequest
+            {
+                ServiceName = "workspace",
+                WorktreePath = "/repo/worktree",
+                Branch = "feature/docker",
+                AgentType = "codex"
+            }, fakePty, rows: 40, cols: 120).GetAwaiter().GetResult();
+
+            Assert.AreEqual("fake-pane", paneId);
+            Assert.AreEqual("docker", fakePty.LastCommand);
+            CollectionAssert.AreEqual(
+                new[] { "exec", "-it", "workspace", "sh", "-lc", "export GWT_BRANCH='feature/docker' && export GWT_AGENT_TYPE='codex' && cd '/repo/worktree' && pwd" },
+                fakePty.LastArgs);
+            Assert.AreEqual("/repo/worktree", fakePty.LastWorkingDirectory);
+            Assert.AreEqual(40, fakePty.LastRows);
+            Assert.AreEqual(120, fakePty.LastCols);
+        }
+
+        [Test]
+        public void SpawnAsync_NullPtyService_Throws()
+        {
+            var service = new DockerService();
+
+            Assert.Throws<System.ArgumentNullException>(() =>
+                service.SpawnAsync(new DockerLaunchRequest(), null).GetAwaiter().GetResult());
+        }
+
         private static void WithTempProjectRoot(System.Action<string> action)
         {
             var root = Path.Combine(Path.GetTempPath(), "gwt-docker-" + System.Guid.NewGuid().ToString("N"));
@@ -197,6 +238,31 @@ namespace Gwt.Tests.Editor
                 if (Directory.Exists(root))
                     Directory.Delete(root, true);
             }
+        }
+
+        private sealed class FakePtyService : IPtyService
+        {
+            public string LastCommand { get; private set; }
+            public string[] LastArgs { get; private set; }
+            public string LastWorkingDirectory { get; private set; }
+            public int LastRows { get; private set; }
+            public int LastCols { get; private set; }
+
+            public UniTask<string> SpawnAsync(string command, string[] args, string workingDir, int rows, int cols, CancellationToken ct = default)
+            {
+                LastCommand = command;
+                LastArgs = args;
+                LastWorkingDirectory = workingDir;
+                LastRows = rows;
+                LastCols = cols;
+                return UniTask.FromResult("fake-pane");
+            }
+
+            public UniTask WriteAsync(string paneId, string data, CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask ResizeAsync(string paneId, int rows, int cols, CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask KillAsync(string paneId, CancellationToken ct = default) => UniTask.CompletedTask;
+            public System.IObservable<string> GetOutputStream(string paneId) => null;
+            public PaneStatus GetStatus(string paneId) => PaneStatus.Running;
         }
     }
 }

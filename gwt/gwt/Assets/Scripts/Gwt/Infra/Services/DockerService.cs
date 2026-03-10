@@ -1,4 +1,5 @@
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Models;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -92,16 +93,53 @@ namespace Gwt.Infra.Services
                 steps.Add($"export GWT_AGENT_TYPE='{EscapeSingleQuotes(request.AgentType)}'");
             steps.Add($"cd '{EscapeSingleQuotes(worktree)}'");
             steps.Add("pwd");
-            var command = $"docker exec -it {service} sh -lc \"{string.Join(" && ", steps)}\"";
+            var shellCommand = string.Join(" && ", steps);
+            var args = new List<string>
+            {
+                "exec",
+                "-it",
+                service,
+                "sh",
+                "-lc",
+                shellCommand
+            };
             var state = request.FallbackToHost ? "fallback_available" : request.UseDevContainer ? "devcontainer_ready" : "ready";
 
             return new DockerLaunchResult
             {
                 ContainerId = service,
-                ExecCommand = command,
+                Command = "docker",
+                Args = args,
+                WorkingDirectory = worktree,
+                ExecCommand = BuildCommandPreview("docker", args),
                 State = state,
                 Error = string.Empty
             };
+        }
+
+        public UniTask<string> SpawnAsync(
+            DockerLaunchRequest request,
+            IPtyService ptyService,
+            int rows = 24,
+            int cols = 80,
+            CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (ptyService == null)
+                throw new ArgumentNullException(nameof(ptyService));
+
+            var launchPlan = BuildLaunchPlan(request);
+            if (string.IsNullOrWhiteSpace(launchPlan.Command))
+                throw new InvalidOperationException("Docker launch plan did not produce a command.");
+
+            return ptyService.SpawnAsync(
+                launchPlan.Command,
+                launchPlan.Args?.ToArray(),
+                string.IsNullOrWhiteSpace(launchPlan.WorkingDirectory) ? "." : launchPlan.WorkingDirectory,
+                rows,
+                cols,
+                ct);
         }
 
         private static List<string> ParseComposeServices(string composeContent)
@@ -137,6 +175,20 @@ namespace Gwt.Infra.Services
         private static string EscapeSingleQuotes(string input)
         {
             return input.Replace("'", "'\"'\"'");
+        }
+
+        private static string BuildCommandPreview(string command, IEnumerable<string> args)
+        {
+            var parts = new List<string> { command };
+            if (args != null)
+            {
+                parts.AddRange(args.Select(arg =>
+                    string.IsNullOrWhiteSpace(arg) || arg.Contains(' ') || arg.Contains('"')
+                        ? $"\"{arg.Replace("\"", "\\\"")}\""
+                        : arg));
+            }
+
+            return string.Join(" ", parts);
         }
 
         private static string ExtractString(string json, params string[] keys)

@@ -13,6 +13,7 @@ namespace Gwt.Core.Services.Pty
         public string WorkingDir { get; }
         public int Rows { get; set; }
         public int Cols { get; set; }
+        public bool UsesPseudoTerminal { get; }
         public PtySessionStatus Status { get; set; }
         public int? ExitCode { get; private set; }
         public IObservable<string> OutputStream { get; }
@@ -23,13 +24,14 @@ namespace Gwt.Core.Services.Pty
         private readonly CancellationTokenSource _cts = new();
         private bool _disposed;
 
-        public PtySession(string id, Process process, string workingDir, int rows, int cols)
+        public PtySession(string id, Process process, string workingDir, int rows, int cols, bool usesPseudoTerminal = false)
         {
             Id = id;
             Process = process;
             WorkingDir = workingDir;
             Rows = rows;
             Cols = cols;
+            UsesPseudoTerminal = usesPseudoTerminal;
             Status = PtySessionStatus.Running;
             OutputStream = _outputStream;
         }

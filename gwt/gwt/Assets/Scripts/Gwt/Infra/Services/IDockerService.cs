@@ -1,4 +1,5 @@
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Models;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -43,6 +44,9 @@ namespace Gwt.Infra.Services
     {
         public string ContainerId;
         public string ExecCommand;
+        public string Command;
+        public List<string> Args = new();
+        public string WorkingDirectory;
         public string State;
         public string Error;
     }
@@ -53,5 +57,11 @@ namespace Gwt.Infra.Services
         UniTask<DevContainerConfig> LoadDevContainerConfigAsync(string configPath, CancellationToken ct = default);
         UniTask<List<string>> ListServicesAsync(string projectRoot, CancellationToken ct = default);
         DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request);
+        UniTask<string> SpawnAsync(
+            DockerLaunchRequest request,
+            IPtyService ptyService,
+            int rows = 24,
+            int cols = 80,
+            CancellationToken ct = default);
     }
 }
