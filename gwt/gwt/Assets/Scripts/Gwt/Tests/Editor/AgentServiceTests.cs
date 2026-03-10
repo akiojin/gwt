@@ -1169,6 +1169,7 @@ namespace Gwt.Tests.Editor
 
             public void NextTab() { }
             public void PrevTab() { }
+            public TerminalPaneState GetPane(int index) => index >= 0 && index < Panes.Count ? Panes[index] : null;
             public TerminalPaneState GetPaneByAgentSessionId(string agentSessionId) => Panes.FirstOrDefault(p => p.AgentSessionId == agentSessionId);
             public int FindPaneIndex(string paneId) => Panes.FindIndex(p => p.PaneId == paneId);
         }

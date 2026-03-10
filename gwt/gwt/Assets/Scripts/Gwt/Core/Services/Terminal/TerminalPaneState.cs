@@ -6,6 +6,7 @@ namespace Gwt.Core.Services.Terminal
     public class TerminalPaneState
     {
         public string PaneId { get; }
+        public string Title { get; set; }
         public string AgentSessionId { get; set; }
         public string PtySessionId { get; set; }
         public XtermSharpTerminalAdapter Terminal { get; }

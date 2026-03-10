@@ -37,8 +37,6 @@ namespace Gwt.Studio.UI
         public LeadInputField LeadInput => _leadInputField;
         public ProjectInfoBar ProjectInfo => _projectInfoBar;
 
-        private bool _terminalAutoOpened;
-
         [Inject]
         public void Construct(
             IProjectLifecycleService projectLifecycleService,
@@ -57,13 +55,6 @@ namespace Gwt.Studio.UI
         private void Update()
         {
             HandleProjectSwitchHotkeys();
-
-            // Auto-open terminal on first frame for CLI-driven development
-            if (!_terminalAutoOpened && _terminalOverlayPanel != null)
-            {
-                _terminalAutoOpened = true;
-                OpenTerminal();
-            }
 
             if (_terminalOverlayPanel != null && _terminalOverlayPanel.IsOpen)
             {

@@ -13,6 +13,7 @@ namespace Gwt.Core.Services.Terminal
         void SetActiveIndex(int index);
         void NextTab();
         void PrevTab();
+        TerminalPaneState GetPane(int index);
         TerminalPaneState GetPaneByAgentSessionId(string agentSessionId);
         int FindPaneIndex(string paneId);
 

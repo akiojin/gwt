@@ -5,6 +5,7 @@
         "Gwt.Shared",
         "Gwt.Core",
         "Gwt.Agent",
+        "Gwt.Infra",
         "Gwt.Lifecycle",
         "VContainer",
         "UniTask",

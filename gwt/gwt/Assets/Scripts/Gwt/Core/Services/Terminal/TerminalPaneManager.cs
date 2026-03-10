@@ -67,6 +67,11 @@ namespace Gwt.Core.Services.Terminal
             SetActiveIndex((ActiveIndex - 1 + _panes.Count) % _panes.Count);
         }
 
+        public TerminalPaneState GetPane(int index)
+        {
+            return index >= 0 && index < _panes.Count ? _panes[index] : null;
+        }
+
         public TerminalPaneState GetPaneByAgentSessionId(string agentSessionId)
         {
             return _panes.FirstOrDefault(p => p.AgentSessionId == agentSessionId);

@@ -1,11 +1,15 @@
 using System;
 using System.Reflection;
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Models;
+using Gwt.Core.Services.Pty;
 using Gwt.Core.Services.Terminal;
+using Gwt.Infra.Services;
 using Gwt.Lifecycle.Services;
 using Gwt.Studio.UI;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace Gwt.Tests.Editor
 {
@@ -261,10 +265,138 @@ namespace Gwt.Tests.Editor
             Assert.IsTrue(terminal.IsOpen);
         }
 
+        [UnityTest]
+        public System.Collections.IEnumerator TerminalOverlayPanel_Open_UsesDockerExecWhenProjectHasDockerContext() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectRootAsync(async root =>
+            {
+                System.IO.File.WriteAllText(System.IO.Path.Combine(root, "docker-compose.yml"), "services:\n  workspace:\n    image: alpine\n");
+
+                var lifecycle = new FakeProjectLifecycleService();
+                lifecycle.OpenProjectAsync(root).GetAwaiter().GetResult();
+                var paneManager = new TerminalPaneManager();
+                var pty = new FakePtyService();
+                var panelObject = new GameObject("TerminalOverlayPanel");
+                try
+                {
+                    var panel = panelObject.AddComponent<TerminalOverlayPanel>();
+                    panel.Construct(paneManager, pty, new FakeShellDetector(), new DockerService(), lifecycle);
+
+                    panel.Open();
+                    await UniTask.Delay(50);
+
+                    Assert.AreEqual("docker", pty.LastCommand);
+                    Assert.AreEqual("Docker workspace", paneManager.ActivePane.Title);
+                    CollectionAssert.AreEqual(
+                        new[] { "exec", "-it", "workspace", "sh", "-lc", $"export GWT_BRANCH='main' && cd '{root}' && pwd" },
+                        pty.LastArgs);
+                }
+                finally
+                {
+                    UnityEngine.Object.DestroyImmediate(panelObject);
+                }
+            });
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator TerminalOverlayPanel_Open_UsesHostShellWhenDockerContextMissing() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            var paneManager = new TerminalPaneManager();
+            var pty = new FakePtyService();
+            using var scope = new UiScope();
+            var panel = scope.Root.AddComponent<TerminalOverlayPanel>();
+            panel.Construct(paneManager, pty, new FakeShellDetector(), new DockerService(), lifecycle);
+
+            panel.Open();
+            await UniTask.Delay(50);
+
+            Assert.AreEqual("/bin/fake-shell", pty.LastCommand);
+            CollectionAssert.AreEqual(new[] { "-i" }, pty.LastArgs);
+            Assert.AreEqual("Host Shell", paneManager.ActivePane.Title);
+        });
+
+        [Test]
+        public void UIManager_Update_DoesNotAutoOpenTerminal_WhenNoProjectOrPanes()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var paneManager = new TerminalPaneManager();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var terminalObject = new GameObject("TerminalOverlayPanel");
+            terminalObject.transform.SetParent(scope.Root.transform, false);
+            var terminal = terminalObject.AddComponent<SpyTerminalOverlayPanel>();
+            SetPrivateField(manager, "_terminalOverlayPanel", terminal);
+
+            manager.Construct(lifecycle, new MultiProjectService(lifecycle), paneManager);
+            InvokePrivateMethod(manager, "Update");
+
+            Assert.AreEqual(0, terminal.OpenCount);
+        }
+
+        [Test]
+        public void UIManager_OpenTerminal_OpensTerminal_WhenRequested()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            var paneManager = new TerminalPaneManager();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var terminalObject = new GameObject("TerminalOverlayPanel");
+            terminalObject.transform.SetParent(scope.Root.transform, false);
+            var terminal = terminalObject.AddComponent<SpyTerminalOverlayPanel>();
+            SetPrivateField(manager, "_terminalOverlayPanel", terminal);
+
+            manager.Construct(lifecycle, new MultiProjectService(lifecycle), paneManager);
+            terminal.Close();
+            manager.OpenTerminal();
+
+            Assert.AreEqual(1, terminal.OpenCount);
+        }
+
         private static void SetPrivateField(object instance, string fieldName, object value)
         {
             var field = instance.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
             field.SetValue(instance, value);
+        }
+
+        private static void InvokePrivateMethod(object instance, string methodName)
+        {
+            var method = instance.GetType().GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Instance);
+            method.Invoke(instance, null);
+        }
+
+        private static void WithTempProjectRoot(Action<string> action)
+        {
+            var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "gwt-studio-ui-" + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(root);
+            try
+            {
+                action(root);
+            }
+            finally
+            {
+                if (System.IO.Directory.Exists(root))
+                    System.IO.Directory.Delete(root, true);
+            }
+        }
+
+        private static async UniTask WithTempProjectRootAsync(Func<string, UniTask> action)
+        {
+            var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "gwt-studio-ui-" + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(root);
+            try
+            {
+                await action(root);
+            }
+            finally
+            {
+                if (System.IO.Directory.Exists(root))
+                    System.IO.Directory.Delete(root, true);
+            }
         }
 
         private sealed class UiScope : IDisposable
@@ -285,6 +417,17 @@ namespace Gwt.Tests.Editor
             {
                 LastTransitionProjectPath = project?.Path;
                 return UniTask.FromResult(true);
+            }
+        }
+
+        private sealed class SpyTerminalOverlayPanel : TerminalOverlayPanel
+        {
+            public int OpenCount { get; private set; }
+
+            public override void Open()
+            {
+                OpenCount++;
+                base.Open();
             }
         }
 
@@ -361,6 +504,44 @@ namespace Gwt.Tests.Editor
             }
 
             public void CancelQuitConfirm()
+            {
+            }
+        }
+
+        private sealed class FakePtyService : IPtyService
+        {
+            public string LastCommand { get; private set; }
+            public string[] LastArgs { get; private set; }
+
+            public UniTask<string> SpawnAsync(string command, string[] args, string workingDir, int rows, int cols, System.Threading.CancellationToken ct = default)
+            {
+                LastCommand = command;
+                LastArgs = args;
+                return UniTask.FromResult(Guid.NewGuid().ToString("N"));
+            }
+
+            public UniTask WriteAsync(string paneId, string data, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask ResizeAsync(string paneId, int rows, int cols, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask KillAsync(string paneId, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public IObservable<string> GetOutputStream(string paneId) => new NoOpObservable();
+            public PaneStatus GetStatus(string paneId) => PaneStatus.Running;
+        }
+
+        private sealed class FakeShellDetector : IPlatformShellDetector
+        {
+            public string DetectDefaultShell() => "/bin/fake-shell";
+            public string[] GetShellArgs(string shell) => new[] { "-i" };
+            public bool IsShellAvailable(string shell) => true;
+        }
+
+        private sealed class NoOpObservable : IObservable<string>
+        {
+            public IDisposable Subscribe(IObserver<string> observer) => new NoOpDisposable();
+        }
+
+        private sealed class NoOpDisposable : IDisposable
+        {
+            public void Dispose()
             {
             }
         }

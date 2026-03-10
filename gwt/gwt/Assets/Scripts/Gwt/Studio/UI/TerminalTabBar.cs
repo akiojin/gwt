@@ -40,9 +40,11 @@ namespace Gwt.Studio.UI
 
             for (int i = 0; i < _paneManager.PaneCount; i++)
             {
+                var pane = _paneManager.GetPane(i);
                 var tabObj = Instantiate(_tabButtonPrefab, _tabContainer);
                 var text = tabObj.GetComponentInChildren<TextMeshProUGUI>();
-                if (text != null) text.text = $"Terminal {i + 1}";
+                if (text != null)
+                    text.text = !string.IsNullOrWhiteSpace(pane?.Title) ? pane.Title : $"Terminal {i + 1}";
 
                 int tabIndex = i;
                 var button = tabObj.GetComponent<Button>();
