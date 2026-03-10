@@ -1,8 +1,10 @@
 using System;
 using Cysharp.Threading.Tasks;
+using Gwt.Shared;
 using Gwt.Lifecycle.Services;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using VContainer.Unity;
 
 namespace Gwt.Studio.UI
 {
@@ -78,6 +80,7 @@ namespace Gwt.Studio.UI
                 if (loadedScene.IsValid())
                 {
                     LastLoadedSceneName = loadedScene.name;
+                    ReinjectLoadedScene(activeScene, loadedScene);
                     SceneManager.SetActiveScene(loadedScene);
                 }
 
@@ -152,6 +155,27 @@ namespace Gwt.Studio.UI
             }
 
             _fadeCanvasGroup.alpha = targetAlpha;
+        }
+
+        private static void ReinjectLoadedScene(Scene previousScene, Scene loadedScene)
+        {
+            var previousScope = LifetimeScope.Find<GwtRootLifetimeScope>(previousScene) as GwtRootLifetimeScope;
+            if (previousScope?.Container == null)
+                return;
+
+            foreach (var root in loadedScene.GetRootGameObjects())
+            {
+                if (root == null)
+                    continue;
+
+                if (root.TryGetComponent<GwtRootLifetimeScope>(out var duplicateScope) && duplicateScope != null)
+                {
+                    UnityEngine.Object.Destroy(duplicateScope.gameObject);
+                    continue;
+                }
+
+                previousScope.Container.InjectGameObject(root);
+            }
         }
 
         protected virtual void OnDestroy()
