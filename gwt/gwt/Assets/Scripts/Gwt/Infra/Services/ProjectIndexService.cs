@@ -15,6 +15,28 @@ namespace Gwt.Infra.Services
         {
             ".git", "node_modules", ".gwt", "Library", "Temp", "obj", "bin"
         };
+        private static readonly Dictionary<string, string[]> SemanticSynonyms = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["auth"] = new[] { "authentication", "login", "signin", "credential" },
+            ["authentication"] = new[] { "auth", "login", "signin", "credential" },
+            ["login"] = new[] { "auth", "authentication", "signin", "credential" },
+            ["signin"] = new[] { "auth", "authentication", "login" },
+            ["workspace"] = new[] { "project" },
+            ["project"] = new[] { "workspace" },
+            ["switch"] = new[] { "swap", "change" },
+            ["swap"] = new[] { "switch", "change" },
+            ["change"] = new[] { "switch", "swap" },
+            ["ticket"] = new[] { "issue" },
+            ["issue"] = new[] { "ticket" },
+            ["bug"] = new[] { "issue", "ticket", "defect" },
+            ["defect"] = new[] { "bug", "issue", "ticket" },
+            ["restart"] = new[] { "relaunch" },
+            ["relaunch"] = new[] { "restart" },
+            ["update"] = new[] { "upgrade" },
+            ["upgrade"] = new[] { "update" },
+            ["terminal"] = new[] { "shell" },
+            ["shell"] = new[] { "terminal" }
+        };
         private static readonly string IndexRoot =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gwt", "index");
 
@@ -67,7 +89,13 @@ namespace Gwt.Infra.Services
 
             _issueIndex.Clear();
             if (issues != null)
-                _issueIndex.AddRange(issues.Where(issue => issue != null));
+            {
+                foreach (var issue in issues.Where(issue => issue != null))
+                {
+                    issue.SemanticTerms = BuildIssueSemanticTerms(issue);
+                    _issueIndex.Add(issue);
+                }
+            }
 
             _status.IndexedIssueCount = _issueIndex.Count;
             _status.LastIndexedAt = DateTime.UtcNow.ToString("o");
@@ -107,6 +135,38 @@ namespace Gwt.Infra.Services
                 .ToList();
         }
 
+        public List<FileIndexEntry> SearchSemantic(string query, int maxResults = 20)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+                return new List<FileIndexEntry>();
+
+            var queryWeights = BuildSemanticWeights(query, 1f);
+            return _index
+                .Select(entry => new { Entry = entry, Score = ScoreSemantic(entry.SemanticTerms, queryWeights) })
+                .Where(result => result.Score > 0f)
+                .OrderByDescending(result => result.Score)
+                .ThenBy(result => result.Entry.RelativePath, StringComparer.OrdinalIgnoreCase)
+                .Take(Mathf.Max(1, maxResults))
+                .Select(result => result.Entry)
+                .ToList();
+        }
+
+        public List<IssueIndexEntry> SearchIssuesSemantic(string query, int maxResults = 20)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+                return new List<IssueIndexEntry>();
+
+            var queryWeights = BuildSemanticWeights(query, 1f);
+            return _issueIndex
+                .Select(issue => new { Issue = issue, Score = ScoreSemantic(issue.SemanticTerms, queryWeights) })
+                .Where(result => result.Score > 0f)
+                .OrderByDescending(result => result.Score)
+                .ThenByDescending(result => result.Issue.UpdatedAt, StringComparer.Ordinal)
+                .Take(Mathf.Max(1, maxResults))
+                .Select(result => result.Issue)
+                .ToList();
+        }
+
         public SearchResultGroup SearchAll(string query)
         {
             return new SearchResultGroup
@@ -114,6 +174,30 @@ namespace Gwt.Infra.Services
                 Files = Search(query),
                 Issues = SearchIssues(query)
             };
+        }
+
+        public SearchResultGroup SearchAllSemantic(string query, int maxResults = 20)
+        {
+            return new SearchResultGroup
+            {
+                Files = SearchSemantic(query, maxResults),
+                Issues = SearchIssuesSemantic(query, maxResults)
+            };
+        }
+
+        List<FileIndexEntry> IProjectIndexService.SearchSemantic(string query, int maxResults)
+        {
+            return SearchSemantic(query, maxResults);
+        }
+
+        List<IssueIndexEntry> IProjectIndexService.SearchIssuesSemantic(string query, int maxResults)
+        {
+            return SearchIssuesSemantic(query, maxResults);
+        }
+
+        SearchResultGroup IProjectIndexService.SearchAllSemantic(string query, int maxResults)
+        {
+            return SearchAllSemantic(query, maxResults);
         }
 
         public async UniTask RefreshAsync(string projectRoot, CancellationToken ct = default)
@@ -198,6 +282,8 @@ namespace Gwt.Infra.Services
                 _index.AddRange(payload.Files ?? new List<FileIndexEntry>());
                 _issueIndex.Clear();
                 _issueIndex.AddRange(payload.Issues ?? new List<IssueIndexEntry>());
+                EnsureSemanticTerms(_index);
+                EnsureSemanticTerms(_issueIndex);
                 _status.IndexedFileCount = payload.Status?.IndexedFileCount ?? _index.Count;
                 _status.IndexedIssueCount = payload.Status?.IndexedIssueCount ?? _issueIndex.Count;
                 _status.PendingFiles = payload.Status?.PendingFiles ?? 0;
@@ -286,7 +372,8 @@ namespace Gwt.Infra.Services
                         SizeBytes = fileInfo.Length,
                         LastModified = fileInfo.LastWriteTimeUtc.ToString("o"),
                         Extension = fileInfo.Extension,
-                        PreviewText = ReadPreview(file)
+                        PreviewText = ReadPreview(file),
+                        SemanticTerms = BuildFileSemanticTerms(relativePath, fileInfo.Name, fileInfo.Extension, ReadPreview(file))
                     });
                     snapshots[relativePath] = new FileSnapshot(fileInfo.Length, fileInfo.LastWriteTimeUtc);
 
@@ -351,6 +438,34 @@ namespace Gwt.Infra.Services
             return score;
         }
 
+        private static float ScoreSemantic(List<SemanticTokenWeight> documentTerms, Dictionary<string, float> queryWeights)
+        {
+            if (documentTerms == null || documentTerms.Count == 0 || queryWeights.Count == 0)
+                return 0f;
+
+            var dot = 0f;
+            var documentNorm = 0f;
+            var queryNorm = 0f;
+
+            foreach (var term in documentTerms)
+            {
+                if (term == null || string.IsNullOrWhiteSpace(term.Token))
+                    continue;
+
+                documentNorm += term.Weight * term.Weight;
+                if (queryWeights.TryGetValue(term.Token, out var queryWeight))
+                    dot += term.Weight * queryWeight;
+            }
+
+            foreach (var queryWeight in queryWeights.Values)
+                queryNorm += queryWeight * queryWeight;
+
+            if (dot <= 0f || documentNorm <= 0f || queryNorm <= 0f)
+                return 0f;
+
+            return dot / (Mathf.Sqrt(documentNorm) * Mathf.Sqrt(queryNorm));
+        }
+
         private int CountChangedFiles(Dictionary<string, FileSnapshot> nextSnapshots)
         {
             var changed = 0;
@@ -377,6 +492,127 @@ namespace Gwt.Infra.Services
             catch
             {
                 return string.Empty;
+            }
+        }
+
+        private static List<SemanticTokenWeight> BuildFileSemanticTerms(string relativePath, string fileName, string extension, string previewText)
+        {
+            var weights = BuildSemanticWeights(fileName, 4f);
+            MergeWeights(weights, BuildSemanticWeights(relativePath, 2f));
+            MergeWeights(weights, BuildSemanticWeights(extension, 1f));
+            MergeWeights(weights, BuildSemanticWeights(previewText, 1f));
+            return ToSemanticTerms(weights);
+        }
+
+        private static List<SemanticTokenWeight> BuildIssueSemanticTerms(IssueIndexEntry issue)
+        {
+            var weights = BuildSemanticWeights(issue.Title, 4f);
+            MergeWeights(weights, BuildSemanticWeights(issue.Body, 1f));
+
+            if (issue.Labels != null)
+            {
+                foreach (var label in issue.Labels)
+                    MergeWeights(weights, BuildSemanticWeights(label, 2f));
+            }
+
+            return ToSemanticTerms(weights);
+        }
+
+        private static Dictionary<string, float> BuildSemanticWeights(string text, float baseWeight)
+        {
+            var weights = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(text))
+                return weights;
+
+            foreach (var token in Tokenize(text))
+            {
+                if (!weights.TryAdd(token, baseWeight))
+                    weights[token] += baseWeight;
+
+                if (SemanticSynonyms.TryGetValue(token, out var synonyms))
+                {
+                    foreach (var synonym in synonyms)
+                    {
+                        if (!weights.TryAdd(synonym, baseWeight * 0.5f))
+                            weights[synonym] += baseWeight * 0.5f;
+                    }
+                }
+            }
+
+            return weights;
+        }
+
+        private static IEnumerable<string> Tokenize(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                yield break;
+
+            var parts = text
+                .ToLowerInvariant()
+                .Split(new[]
+                {
+                    ' ', '\t', '\r', '\n', '/', '\\', '_', '-', '.', ',', ':', ';', '(', ')', '[', ']', '{', '}', '"', '\''
+                }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var raw in parts)
+            {
+                var token = NormalizeToken(raw);
+                if (token.Length >= 3)
+                    yield return token;
+            }
+        }
+
+        private static string NormalizeToken(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                return string.Empty;
+
+            token = token.Trim();
+            if (token.EndsWith("ing", StringComparison.Ordinal) && token.Length > 5)
+                token = token[..^3];
+            else if (token.EndsWith("ed", StringComparison.Ordinal) && token.Length > 4)
+                token = token[..^2];
+            else if (token.EndsWith("es", StringComparison.Ordinal) && token.Length > 4)
+                token = token[..^2];
+            else if (token.EndsWith("s", StringComparison.Ordinal) && token.Length > 3)
+                token = token[..^1];
+
+            return token;
+        }
+
+        private static void MergeWeights(Dictionary<string, float> target, Dictionary<string, float> source)
+        {
+            foreach (var pair in source)
+            {
+                if (!target.TryAdd(pair.Key, pair.Value))
+                    target[pair.Key] += pair.Value;
+            }
+        }
+
+        private static List<SemanticTokenWeight> ToSemanticTerms(Dictionary<string, float> weights)
+        {
+            return weights
+                .OrderByDescending(pair => pair.Value)
+                .ThenBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(pair => new SemanticTokenWeight { Token = pair.Key, Weight = pair.Value })
+                .ToList();
+        }
+
+        private static void EnsureSemanticTerms(List<FileIndexEntry> entries)
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.SemanticTerms == null || entry.SemanticTerms.Count == 0)
+                    entry.SemanticTerms = BuildFileSemanticTerms(entry.RelativePath, entry.FileName, entry.Extension, entry.PreviewText);
+            }
+        }
+
+        private static void EnsureSemanticTerms(List<IssueIndexEntry> issues)
+        {
+            foreach (var issue in issues)
+            {
+                if (issue.SemanticTerms == null || issue.SemanticTerms.Count == 0)
+                    issue.SemanticTerms = BuildIssueSemanticTerms(issue);
             }
         }
 

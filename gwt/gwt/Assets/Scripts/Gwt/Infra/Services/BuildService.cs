@@ -1,6 +1,7 @@
 using Cysharp.Threading.Tasks;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -206,6 +207,17 @@ namespace Gwt.Infra.Services
             return wrapper?.Updates ?? new List<UpdateInfo>();
         }
 
+        public async UniTask<List<UpdateInfo>> LoadUpdateManifestAsync(string manifestSource, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (string.IsNullOrWhiteSpace(manifestSource))
+                return new List<UpdateInfo>();
+
+            var content = await ReadSourceTextAsync(manifestSource.Trim(), ct);
+            return ParseUpdateManifest(content);
+        }
+
         public UpdateInfo GetLatestUpdate(string currentVersion, List<UpdateInfo> candidates)
         {
             if (candidates == null || candidates.Count == 0)
@@ -274,6 +286,84 @@ namespace Gwt.Infra.Services
             }
 
             throw new InvalidOperationException($"Unsupported update source: {source}");
+        }
+
+        public async UniTask<PreparedUpdatePlan> PrepareUpdateAsync(
+            string currentVersion,
+            UpdateInfo candidate,
+            string executablePath,
+            string destinationDirectory = null,
+            string manifestSource = null,
+            CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var plan = new PreparedUpdatePlan
+            {
+                Candidate = candidate,
+                ManifestSource = manifestSource ?? string.Empty,
+                StagingDirectory = string.IsNullOrWhiteSpace(destinationDirectory)
+                    ? GetUpdateStagingDirectory()
+                    : destinationDirectory
+            };
+
+            if (!ShouldApplyUpdate(currentVersion, candidate))
+                return plan;
+
+            plan.DownloadedArtifactPath = await DownloadUpdateAsync(candidate, plan.StagingDirectory, ct);
+            plan.ApplyCommand = BuildApplyDownloadedUpdateCommand(plan.DownloadedArtifactPath);
+            plan.RestartCommand = BuildRestartCommand(executablePath);
+            plan.ShouldApply = !string.IsNullOrWhiteSpace(plan.DownloadedArtifactPath) &&
+                !string.IsNullOrWhiteSpace(plan.ApplyCommand);
+            if (plan.ShouldApply)
+                plan.LauncherScriptPath = await WritePreparedUpdateScriptAsync(plan, ct);
+            return plan;
+        }
+
+        public async UniTask<string> WritePreparedUpdateScriptAsync(PreparedUpdatePlan plan, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (plan == null || !plan.ShouldApply || string.IsNullOrWhiteSpace(plan.ApplyCommand))
+                return string.Empty;
+
+            var stagingDirectory = string.IsNullOrWhiteSpace(plan.StagingDirectory)
+                ? GetUpdateStagingDirectory()
+                : plan.StagingDirectory;
+            Directory.CreateDirectory(stagingDirectory);
+
+            var extension =
+                Application.platform is RuntimePlatform.WindowsEditor or RuntimePlatform.WindowsPlayer ? ".cmd" : ".sh";
+            var scriptPath = Path.Combine(stagingDirectory, $"apply-update{extension}");
+
+            await File.WriteAllTextAsync(scriptPath, BuildPreparedUpdateScript(plan), ct);
+            plan.LauncherScriptPath = scriptPath;
+            return scriptPath;
+        }
+
+        public async UniTask<bool> LaunchPreparedUpdateAsync(PreparedUpdatePlan plan, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (plan == null || !plan.ShouldApply)
+                return false;
+
+            var scriptPath = plan.LauncherScriptPath;
+            if (string.IsNullOrWhiteSpace(scriptPath) || !File.Exists(scriptPath))
+                scriptPath = await WritePreparedUpdateScriptAsync(plan, ct);
+
+            if (string.IsNullOrWhiteSpace(scriptPath) || !File.Exists(scriptPath))
+                return false;
+
+            try
+            {
+                Process.Start(BuildLauncherProcessStartInfo(scriptPath));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         public string BuildApplyUpdateCommand(UpdateInfo candidate)
@@ -350,6 +440,86 @@ namespace Gwt.Infra.Services
 
             var fileName = Path.GetFileName(source);
             return string.IsNullOrWhiteSpace(fileName) ? "gwt-update.bin" : fileName;
+        }
+
+        private static string BuildPreparedUpdateScript(PreparedUpdatePlan plan)
+        {
+            var comment = string.IsNullOrWhiteSpace(plan.ManifestSource)
+                ? string.Empty
+                : $"Manifest: {plan.ManifestSource}";
+
+            if (Application.platform is RuntimePlatform.WindowsEditor or RuntimePlatform.WindowsPlayer)
+            {
+                var builder = new StringBuilder();
+                builder.AppendLine("@echo off");
+                if (!string.IsNullOrWhiteSpace(comment))
+                    builder.AppendLine($"REM {comment}");
+                builder.AppendLine(plan.ApplyCommand);
+                if (!string.IsNullOrWhiteSpace(plan.RestartCommand))
+                {
+                    builder.AppendLine("timeout /t 2 /nobreak >nul");
+                    builder.AppendLine(plan.RestartCommand);
+                }
+
+                return builder.ToString();
+            }
+
+            var unix = new StringBuilder();
+            unix.AppendLine("#!/bin/sh");
+            unix.AppendLine("set -eu");
+            if (!string.IsNullOrWhiteSpace(comment))
+                unix.AppendLine($"# {comment}");
+            unix.AppendLine(plan.ApplyCommand);
+            if (!string.IsNullOrWhiteSpace(plan.RestartCommand))
+            {
+                unix.AppendLine("sleep 2");
+                unix.AppendLine(plan.RestartCommand);
+            }
+
+            return unix.ToString();
+        }
+
+        private static ProcessStartInfo BuildLauncherProcessStartInfo(string scriptPath)
+        {
+            var workingDirectory = Path.GetDirectoryName(scriptPath) ?? Directory.GetCurrentDirectory();
+            if (Application.platform is RuntimePlatform.WindowsEditor or RuntimePlatform.WindowsPlayer)
+            {
+                return new ProcessStartInfo("cmd.exe", $"/c \"{scriptPath}\"")
+                {
+                    WorkingDirectory = workingDirectory,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+            }
+
+            return new ProcessStartInfo("/bin/sh", $"\"{scriptPath}\"")
+            {
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+        }
+
+        private static async UniTask<string> ReadSourceTextAsync(string source, CancellationToken ct)
+        {
+            if (Uri.TryCreate(source, UriKind.Absolute, out var uri))
+            {
+                if (uri.IsFile)
+                    return await File.ReadAllTextAsync(uri.LocalPath, ct);
+
+                if (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+                {
+                    using var client = new HttpClient();
+                    using var response = await client.GetAsync(uri, ct);
+                    response.EnsureSuccessStatusCode();
+                    return await response.Content.ReadAsStringAsync();
+                }
+            }
+
+            if (File.Exists(source))
+                return await File.ReadAllTextAsync(source, ct);
+
+            return source;
         }
 
         [Serializable]

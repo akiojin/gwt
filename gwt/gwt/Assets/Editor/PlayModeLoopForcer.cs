@@ -3,7 +3,8 @@ using UnityEditor;
 using UnityEngine;
 
 /// <summary>
-/// Forces continuous PlayerLoop execution in Play Mode via Step+Unpause cycle.
+/// Forces continuous PlayerLoop execution in Play Mode without forcing the
+/// editor into a paused single-step state.
 /// Workaround for Unity 6 where the PlayerLoop halts when the Game view lacks
 /// OS-level window focus (common in CLI-driven development).
 /// </summary>
@@ -39,12 +40,11 @@ static class PlayModeLoopForcer
         if (!_active || !EditorApplication.isPlaying)
             return;
 
-        if (EditorApplication.isPaused)
-        {
-            EditorApplication.isPaused = false;
-        }
-
-        EditorApplication.Step();
+        // Queue another player loop tick without mutating the editor pause state.
+        // EditorApplication.Step() immediately pauses Play Mode and was trapping
+        // the editor in a play+pause state on Unity 6000.3.10.
+        if (!EditorApplication.isPaused)
+            EditorApplication.QueuePlayerLoopUpdate();
     }
 }
 #endif
