@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 namespace Gwt.Studio.World
 {
@@ -53,12 +54,15 @@ namespace Gwt.Studio.World
 
         private void HandleKeyboardPan()
         {
+            var keyboard = Keyboard.current;
+            if (keyboard == null) return;
+
             var input = Vector3.zero;
 
-            if (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow)) input.y += 1;
-            if (Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow)) input.y -= 1;
-            if (Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.LeftArrow)) input.x -= 1;
-            if (Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.RightArrow)) input.x += 1;
+            if (keyboard.wKey.isPressed || keyboard.upArrowKey.isPressed) input.y += 1;
+            if (keyboard.sKey.isPressed || keyboard.downArrowKey.isPressed) input.y -= 1;
+            if (keyboard.aKey.isPressed || keyboard.leftArrowKey.isPressed) input.x -= 1;
+            if (keyboard.dKey.isPressed || keyboard.rightArrowKey.isPressed) input.x += 1;
 
             if (input != Vector3.zero)
             {
@@ -69,20 +73,23 @@ namespace Gwt.Studio.World
 
         private void HandleMousePan()
         {
-            if (Input.GetMouseButtonDown(2))
+            var mouse = Mouse.current;
+            if (mouse == null) return;
+
+            if (mouse.middleButton.wasPressedThisFrame)
             {
                 _isDragging = true;
-                _dragOrigin = _camera.ScreenToWorldPoint(Input.mousePosition);
+                _dragOrigin = _camera.ScreenToWorldPoint(mouse.position.ReadValue());
             }
 
-            if (Input.GetMouseButton(2) && _isDragging)
+            if (mouse.middleButton.isPressed && _isDragging)
             {
-                var diff = _dragOrigin - _camera.ScreenToWorldPoint(Input.mousePosition);
+                var diff = _dragOrigin - _camera.ScreenToWorldPoint(mouse.position.ReadValue());
                 transform.position += diff;
                 _isFollowing = false;
             }
 
-            if (Input.GetMouseButtonUp(2))
+            if (mouse.middleButton.wasReleasedThisFrame)
             {
                 _isDragging = false;
             }
@@ -90,7 +97,10 @@ namespace Gwt.Studio.World
 
         private void HandleZoom()
         {
-            float scroll = Input.GetAxis("Mouse ScrollWheel");
+            var mouse = Mouse.current;
+            if (mouse == null) return;
+
+            float scroll = mouse.scroll.y.ReadValue() / 120f;
             if (Mathf.Abs(scroll) > 0.01f)
             {
                 _camera.orthographicSize = Mathf.Clamp(
