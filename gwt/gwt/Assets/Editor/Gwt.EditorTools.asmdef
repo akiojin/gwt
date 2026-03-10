@@ -2,8 +2,7 @@
     "name": "Gwt.EditorTools",
     "rootNamespace": "Gwt.Editor",
     "references": [
-        "Unity.TextMeshPro",
-        "Unity.Settings.Editor"
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [
         "Editor"

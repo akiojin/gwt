@@ -120,14 +120,14 @@ namespace Gwt.Editor
                 generatedAssetPaths.Add(assetPath);
             }
 
-            AssetDatabase.Refresh();
+            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
 
             foreach (var assetPath in generatedAssetPaths)
             {
                 ConfigureGeneratedTileSpriteImporter(assetPath);
             }
 
-            AssetDatabase.Refresh();
+            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
             UnityEngine.Object.DestroyImmediate(sourceTexture);
             return generatedAssetPaths;
         }
@@ -164,6 +164,8 @@ namespace Gwt.Editor
                 }
             }
 
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
             return spriteAssetPaths.Count;
         }
 
@@ -203,6 +205,9 @@ namespace Gwt.Editor
                 SpriteAtlasExtensions.Add(atlas, packables);
 
             EditorUtility.SetDirty(atlas);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.ImportAsset(definition.OutputPath, ImportAssetOptions.ForceUpdate);
+            SpriteAtlasUtility.PackAtlases(new[] { atlas }, EditorUserBuildSettings.activeBuildTarget, false);
         }
 
         public static SpriteAtlasDefinition GetHomeDesignAtlasDefinition()
