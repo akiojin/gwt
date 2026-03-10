@@ -257,6 +257,30 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("6000.0.0", data.UnityVersion);
         }
 
+        [Test]
+        public void SystemStatsData_Serialization_RoundTrip()
+        {
+            var stats = new SystemStatsData
+            {
+                AllocatedMemoryMB = 512,
+                ReservedMemoryMB = 1024,
+                MonoUsedMemoryMB = 128,
+                GraphicsMemoryMB = 4096,
+                TargetFrameRate = 60,
+                RealtimeSinceStartup = 12.5f
+            };
+
+            var json = JsonUtility.ToJson(stats);
+            var deserialized = JsonUtility.FromJson<SystemStatsData>(json);
+
+            Assert.AreEqual(stats.AllocatedMemoryMB, deserialized.AllocatedMemoryMB);
+            Assert.AreEqual(stats.ReservedMemoryMB, deserialized.ReservedMemoryMB);
+            Assert.AreEqual(stats.MonoUsedMemoryMB, deserialized.MonoUsedMemoryMB);
+            Assert.AreEqual(stats.GraphicsMemoryMB, deserialized.GraphicsMemoryMB);
+            Assert.AreEqual(stats.TargetFrameRate, deserialized.TargetFrameRate);
+            Assert.AreEqual(stats.RealtimeSinceStartup, deserialized.RealtimeSinceStartup, 0.001f);
+        }
+
         [UnityTest]
         public IEnumerator ProjectLifecycleService_OpenProjectAsync_ValidGitRepo_SetsCurrentProject() => UniTask.ToCoroutine(async () =>
         {
@@ -555,6 +579,22 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(1, service.Search("editor/").Count);
             Assert.AreEqual(1, service.Search(".uxml").Count);
             Assert.AreEqual(1, service.Search("overlay").Count);
+        }
+
+        [Test]
+        public void ProjectIndexService_Search_PrefersFileNameMatchOverPreviewMatch()
+        {
+            var service = new ProjectIndexService();
+            var indexField = typeof(ProjectIndexService).GetField("_index",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var index = (List<FileIndexEntry>)indexField.GetValue(service);
+
+            index.Add(new FileIndexEntry { FileName = "SearchPanel.cs", RelativePath = "UI/SearchPanel.cs", Extension = ".cs", PreviewText = "render panel" });
+            index.Add(new FileIndexEntry { FileName = "Panel.cs", RelativePath = "UI/Panel.cs", Extension = ".cs", PreviewText = "search feature content" });
+
+            var results = service.Search("search");
+
+            Assert.AreEqual("SearchPanel.cs", results[0].FileName);
         }
 
         [Test]
@@ -880,6 +920,18 @@ namespace Gwt.Tests.Editor
             Assert.IsNotNull(report.SystemInfo);
             Assert.IsFalse(string.IsNullOrEmpty(report.Timestamp));
         });
+
+        [Test]
+        public void BuildService_GetSystemStats_ReturnsNonNegativeMetrics()
+        {
+            var service = new BuildService();
+            var stats = service.GetSystemStats();
+
+            Assert.GreaterOrEqual(stats.AllocatedMemoryMB, 0);
+            Assert.GreaterOrEqual(stats.ReservedMemoryMB, 0);
+            Assert.GreaterOrEqual(stats.MonoUsedMemoryMB, 0);
+            Assert.GreaterOrEqual(stats.GraphicsMemoryMB, 0);
+        }
 
         [UnityTest]
         public IEnumerator BuildService_ReadRecentLogsAsync_ReturnsNewestLogsFirst() => UniTask.ToCoroutine(async () =>

@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using UnityEngine;
+using UnityEngine.Profiling;
 
 namespace Gwt.Infra.Services
 {
@@ -28,6 +29,19 @@ namespace Gwt.Infra.Services
                 GraphicsDeviceName = SystemInfo.graphicsDeviceName,
                 UnityVersion = Application.unityVersion,
                 AppVersion = Application.version
+            };
+        }
+
+        public SystemStatsData GetSystemStats()
+        {
+            return new SystemStatsData
+            {
+                AllocatedMemoryMB = BytesToMB(Profiler.GetTotalAllocatedMemoryLong()),
+                ReservedMemoryMB = BytesToMB(Profiler.GetTotalReservedMemoryLong()),
+                MonoUsedMemoryMB = BytesToMB(Profiler.GetMonoUsedSizeLong()),
+                GraphicsMemoryMB = SystemInfo.graphicsMemorySize,
+                TargetFrameRate = Application.targetFrameRate,
+                RealtimeSinceStartup = Time.realtimeSinceStartup
             };
         }
 
@@ -208,6 +222,11 @@ namespace Gwt.Infra.Services
         private static string EscapeShell(string input)
         {
             return (input ?? string.Empty).Replace("'", "'\"'\"'");
+        }
+
+        private static long BytesToMB(long value)
+        {
+            return value <= 0 ? 0 : value / (1024 * 1024);
         }
     }
 }

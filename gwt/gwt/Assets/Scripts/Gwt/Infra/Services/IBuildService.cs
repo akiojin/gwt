@@ -47,9 +47,21 @@ namespace Gwt.Infra.Services
         public bool Mandatory;
     }
 
+    [System.Serializable]
+    public class SystemStatsData
+    {
+        public long AllocatedMemoryMB;
+        public long ReservedMemoryMB;
+        public long MonoUsedMemoryMB;
+        public int GraphicsMemoryMB;
+        public int TargetFrameRate;
+        public float RealtimeSinceStartup;
+    }
+
     public interface IBuildService
     {
         SystemInfoData GetSystemInfo();
+        SystemStatsData GetSystemStats();
         UniTask<string> CaptureScreenshotAsync(string outputPath, CancellationToken ct = default);
         UniTask<string> ReadLogFileAsync(string logPath, CancellationToken ct = default);
         UniTask<List<string>> ReadRecentLogsAsync(int maxFiles = 5, CancellationToken ct = default);

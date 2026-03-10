@@ -83,6 +83,8 @@ namespace Gwt.Infra.Services
                     e.RelativePath.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                     e.Extension.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                     (!string.IsNullOrEmpty(e.PreviewText) && e.PreviewText.Contains(query, StringComparison.OrdinalIgnoreCase)))
+                .OrderByDescending(e => ScoreFile(e, query))
+                .ThenBy(e => e.RelativePath, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
 
@@ -270,6 +272,20 @@ namespace Gwt.Infra.Services
             if (!string.IsNullOrEmpty(issue.Body) && issue.Body.Contains(query, StringComparison.OrdinalIgnoreCase))
                 score += 2;
             if (issue.Labels.Any(label => label.Contains(query, StringComparison.OrdinalIgnoreCase)))
+                score += 1;
+            return score;
+        }
+
+        private static int ScoreFile(FileIndexEntry entry, string query)
+        {
+            var score = 0;
+            if (!string.IsNullOrEmpty(entry.FileName) && entry.FileName.Contains(query, StringComparison.OrdinalIgnoreCase))
+                score += 4;
+            if (!string.IsNullOrEmpty(entry.RelativePath) && entry.RelativePath.Contains(query, StringComparison.OrdinalIgnoreCase))
+                score += 2;
+            if (!string.IsNullOrEmpty(entry.Extension) && entry.Extension.Contains(query, StringComparison.OrdinalIgnoreCase))
+                score += 1;
+            if (!string.IsNullOrEmpty(entry.PreviewText) && entry.PreviewText.Contains(query, StringComparison.OrdinalIgnoreCase))
                 score += 1;
             return score;
         }
