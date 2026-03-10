@@ -1353,7 +1353,7 @@ mod tests {
         let repo_dir = temp.path().join("repo with spaces");
         std::fs::create_dir_all(&repo_dir).expect("create repo dir");
 
-        let output = std::process::Command::new("cmd.exe")
+        let output = crate::process::command("cmd.exe")
             .args(["/D", "/S", "/C", "cd"])
             .current_dir(&repo_dir)
             .output()
