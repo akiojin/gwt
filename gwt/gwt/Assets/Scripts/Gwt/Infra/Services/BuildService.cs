@@ -15,6 +15,8 @@ namespace Gwt.Infra.Services
     {
         private static readonly string LogDir =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gwt", "logs");
+        private static readonly string UpdateDir =
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gwt", "updates");
         private const string DefaultIssueUrl = "https://github.com/akiojin/gwt/issues/new";
 
         public SystemInfoData GetSystemInfo()
@@ -224,12 +226,20 @@ namespace Gwt.Infra.Services
             return ParseVersion(candidate.Version) > ParseVersion(currentVersion);
         }
 
+        public string GetUpdateStagingDirectory()
+        {
+            return UpdateDir;
+        }
+
         public async UniTask<string> DownloadUpdateAsync(UpdateInfo candidate, string destinationDirectory, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested();
 
             if (candidate == null || string.IsNullOrWhiteSpace(candidate.DownloadUrl))
                 throw new ArgumentException("Update download URL is required.", nameof(candidate));
+
+            if (string.IsNullOrWhiteSpace(destinationDirectory))
+                destinationDirectory = GetUpdateStagingDirectory();
 
             Directory.CreateDirectory(destinationDirectory);
 
@@ -277,6 +287,36 @@ namespace Gwt.Infra.Services
                 RuntimePlatform.OSXEditor or RuntimePlatform.OSXPlayer => $"open '{url}'",
                 RuntimePlatform.WindowsEditor or RuntimePlatform.WindowsPlayer => $"start \"\" \"{candidate.DownloadUrl.Trim()}\"",
                 _ => $"xdg-open '{url}'"
+            };
+        }
+
+        public string BuildApplyDownloadedUpdateCommand(string downloadedArtifactPath)
+        {
+            if (string.IsNullOrWhiteSpace(downloadedArtifactPath))
+                return string.Empty;
+
+            var fullPath = Path.GetFullPath(downloadedArtifactPath);
+            var escaped = EscapeShell(fullPath);
+            return Application.platform switch
+            {
+                RuntimePlatform.OSXEditor or RuntimePlatform.OSXPlayer => $"open '{escaped}'",
+                RuntimePlatform.WindowsEditor or RuntimePlatform.WindowsPlayer => $"start \"\" \"{fullPath}\"",
+                _ => $"xdg-open '{escaped}'"
+            };
+        }
+
+        public string BuildRestartCommand(string executablePath)
+        {
+            if (string.IsNullOrWhiteSpace(executablePath))
+                return string.Empty;
+
+            var fullPath = Path.GetFullPath(executablePath);
+            var escaped = EscapeShell(fullPath);
+            return Application.platform switch
+            {
+                RuntimePlatform.OSXEditor or RuntimePlatform.OSXPlayer => $"open '{escaped}'",
+                RuntimePlatform.WindowsEditor or RuntimePlatform.WindowsPlayer => $"start \"\" \"{fullPath}\"",
+                _ => $"'{escaped}' &"
             };
         }
 

@@ -1076,6 +1076,14 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void BuildService_GetUpdateStagingDirectory_UsesGwtUpdatesFolder()
+        {
+            var service = new BuildService();
+            Assert.That(service.GetUpdateStagingDirectory(), Does.Contain(".gwt"));
+            Assert.That(service.GetUpdateStagingDirectory(), Does.EndWith("updates"));
+        }
+
+        [Test]
         public void BuildService_BuildApplyUpdateCommand_UsesPlatformLauncher()
         {
             var service = new BuildService();
@@ -1093,6 +1101,22 @@ namespace Gwt.Tests.Editor
             Assert.That(command, Does.StartWith("xdg-open "));
             #endif
             Assert.That(command, Does.Contain("https://example.com/gwt.dmg"));
+        }
+
+        [Test]
+        public void BuildService_BuildApplyDownloadedUpdateCommand_UsesLocalArtifactPath()
+        {
+            var service = new BuildService();
+            var command = service.BuildApplyDownloadedUpdateCommand("/tmp/gwt.dmg");
+            Assert.That(command, Does.Contain("gwt.dmg"));
+        }
+
+        [Test]
+        public void BuildService_BuildRestartCommand_UsesExecutablePath()
+        {
+            var service = new BuildService();
+            var command = service.BuildRestartCommand("/Applications/gwt.app");
+            Assert.That(command, Does.Contain("gwt.app"));
         }
 
         [UnityTest]
@@ -1113,6 +1137,26 @@ namespace Gwt.Tests.Editor
 
                 Assert.IsTrue(File.Exists(downloadedPath));
                 Assert.AreEqual("update payload", File.ReadAllText(downloadedPath));
+            });
+        });
+
+        [UnityTest]
+        public IEnumerator BuildService_DownloadUpdateAsync_UsesStagingDirectory_WhenDestinationEmpty() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var sourcePath = Path.Combine(tempDir, "gwt-update.zip");
+                File.WriteAllText(sourcePath, "payload");
+
+                var service = new BuildService();
+                var downloadedPath = await service.DownloadUpdateAsync(new UpdateInfo
+                {
+                    Version = "1.2.4",
+                    DownloadUrl = sourcePath
+                }, string.Empty);
+
+                Assert.That(downloadedPath, Does.Contain(".gwt"));
+                Assert.IsTrue(File.Exists(downloadedPath));
             });
         });
 
