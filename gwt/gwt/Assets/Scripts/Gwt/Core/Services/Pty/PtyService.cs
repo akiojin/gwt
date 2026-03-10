@@ -4,10 +4,11 @@ using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Models;
 
 namespace Gwt.Core.Services.Pty
 {
-    public class PtyService : IDisposable
+    public class PtyService : IPtyService, IDisposable
     {
         private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
 
@@ -20,21 +21,15 @@ namespace Gwt.Core.Services.Pty
             _shellDetector = shellDetector;
         }
 
-        public async UniTask<PtySession> SpawnAsync(
-            string workingDir,
-            int rows = 24,
-            int cols = 80,
-            string shell = null,
-            CancellationToken cancellationToken = default)
+        public async UniTask<string> SpawnAsync(
+            string command, string[] args, string workingDir,
+            int rows, int cols, CancellationToken ct = default)
         {
             ThrowIfDisposed();
 
-            shell ??= _shellDetector.DetectDefaultShell();
-            var args = _shellDetector.GetShellArgs(shell);
-
             var psi = new ProcessStartInfo
             {
-                FileName = shell,
+                FileName = command,
                 WorkingDirectory = workingDir,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
@@ -45,59 +40,74 @@ namespace Gwt.Core.Services.Pty
                 StandardErrorEncoding = Encoding.UTF8
             };
 
-            foreach (var arg in args)
-                psi.ArgumentList.Add(arg);
+            psi.Environment["TERM"] = "xterm-256color";
+            psi.Environment["FORCE_COLOR"] = "1";
+
+            if (args != null)
+            {
+                foreach (var arg in args)
+                    psi.ArgumentList.Add(arg);
+            }
 
             var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             process.Start();
 
             var id = Guid.NewGuid().ToString("N");
             var session = new PtySession(id, process, workingDir, rows, cols);
-
             _sessions[id] = session;
 
-            // Start async read loops
-            ReadStreamAsync(session, process.StandardOutput, cancellationToken).Forget();
-            ReadStreamAsync(session, process.StandardError, cancellationToken).Forget();
-
-            // Monitor process exit
-            MonitorExitAsync(session, cancellationToken).Forget();
+            ReadStreamAsync(session, process.StandardOutput, ct).Forget();
+            ReadStreamAsync(session, process.StandardError, ct).Forget();
+            MonitorExitAsync(session, ct).Forget();
 
             await UniTask.CompletedTask;
-            return session;
+            return id;
         }
 
-        public async UniTask WriteAsync(string sessionId, string data, CancellationToken cancellationToken = default)
+        public async UniTask<PtySession> SpawnShellAsync(
+            string workingDir,
+            int rows = 24,
+            int cols = 80,
+            string shell = null,
+            CancellationToken cancellationToken = default)
         {
             ThrowIfDisposed();
 
-            var session = GetSession(sessionId);
-            if (session.Status != PtySessionStatus.Running)
-                throw new InvalidOperationException($"Session {sessionId} is not running.");
+            shell ??= _shellDetector.DetectDefaultShell();
+            var shellArgs = _shellDetector.GetShellArgs(shell);
 
-            await session.Process.StandardInput.WriteAsync(data.AsMemory(), cancellationToken);
+            var paneId = await SpawnAsync(shell, shellArgs, workingDir, rows, cols, cancellationToken);
+            return GetSession(paneId);
+        }
+
+        public async UniTask WriteAsync(string paneId, string data, CancellationToken ct = default)
+        {
+            ThrowIfDisposed();
+
+            var session = GetSession(paneId);
+            if (session.Status != PtySessionStatus.Running)
+                throw new InvalidOperationException($"Session {paneId} is not running.");
+
+            await session.Process.StandardInput.WriteAsync(data.AsMemory(), ct);
             await session.Process.StandardInput.FlushAsync();
         }
 
-        public UniTask ResizeAsync(string sessionId, int rows, int cols, CancellationToken cancellationToken = default)
+        public UniTask ResizeAsync(string paneId, int rows, int cols, CancellationToken ct = default)
         {
             ThrowIfDisposed();
 
-            var session = GetSession(sessionId);
+            var session = GetSession(paneId);
             session.Rows = rows;
             session.Cols = cols;
-
-            // Actual PTY resize requires native interop (ioctl on Unix, SetConsoleScreenBufferSize on Windows).
-            // Stubbed for now — will be implemented with native PTY backend.
 
             return UniTask.CompletedTask;
         }
 
-        public async UniTask KillAsync(string sessionId, CancellationToken cancellationToken = default)
+        public async UniTask KillAsync(string paneId, CancellationToken ct = default)
         {
             ThrowIfDisposed();
 
-            var session = GetSession(sessionId);
+            var session = GetSession(paneId);
             if (session.Process.HasExited)
                 return;
 
@@ -107,28 +117,39 @@ namespace Gwt.Core.Services.Pty
             }
             catch (InvalidOperationException)
             {
-                // Process already exited
                 return;
             }
 
-            // Wait for process to actually exit with timeout
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(DefaultTimeout);
 
             try
             {
                 await UniTask.WaitUntil(() => session.Process.HasExited, cancellationToken: timeoutCts.Token);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                // Timeout — process didn't exit gracefully, already killed above
+                // Timeout — process didn't exit gracefully
             }
         }
 
-        public PtySessionStatus GetStatus(string sessionId)
+        public IObservable<string> GetOutputStream(string paneId)
         {
             ThrowIfDisposed();
-            return GetSession(sessionId).Status;
+            return GetSession(paneId).OutputStream;
+        }
+
+        public PaneStatus GetStatus(string paneId)
+        {
+            ThrowIfDisposed();
+            var session = GetSession(paneId);
+            return session.Status switch
+            {
+                PtySessionStatus.Running => PaneStatus.Running,
+                PtySessionStatus.Completed => PaneStatus.Completed,
+                PtySessionStatus.Error => PaneStatus.Error,
+                _ => PaneStatus.Error
+            };
         }
 
         public PtySession GetSession(string sessionId)

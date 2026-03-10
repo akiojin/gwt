@@ -65,5 +65,17 @@ namespace Gwt.Studio.UI
         public void OpenIssueDetail() => OpenPanel(_issueDetailPanel);
         public void OpenAgentSettings() => OpenPanel(_agentSettingsPanel);
         public void OpenTerminal() => OpenPanel(_terminalOverlayPanel);
+
+        public void OpenTerminalForAgent(string agentSessionId)
+        {
+            if (_terminalOverlayPanel == null) return;
+
+            if (!_terminalOverlayPanel.IsOpen)
+            {
+                _overlayStack.Push(_terminalOverlayPanel);
+            }
+
+            _terminalOverlayPanel.ShowForAgent(agentSessionId);
+        }
     }
 }

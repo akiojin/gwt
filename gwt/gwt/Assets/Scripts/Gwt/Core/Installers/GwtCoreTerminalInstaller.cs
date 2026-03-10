@@ -7,8 +7,8 @@ namespace Gwt.Core.Installers
     {
         public void Install(IContainerBuilder builder)
         {
-            // TerminalEmulator is created per-terminal instance, not as a singleton.
-            // Consumers create TerminalEmulator directly with desired rows/cols.
+            builder.Register<Services.Terminal.TerminalPaneManager>(Lifetime.Singleton)
+                .As<Services.Terminal.ITerminalPaneManager>();
         }
     }
 }

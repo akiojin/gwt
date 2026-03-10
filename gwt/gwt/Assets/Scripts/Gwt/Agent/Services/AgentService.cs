@@ -4,6 +4,9 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Models;
+using Gwt.Core.Services.Pty;
+using Gwt.Core.Services.Terminal;
 using UnityEngine;
 
 namespace Gwt.Agent.Services
@@ -11,7 +14,10 @@ namespace Gwt.Agent.Services
     public class AgentService : IAgentService
     {
         private readonly AgentDetector _detector;
+        private readonly IPtyService _ptyService;
+        private readonly ITerminalPaneManager _paneManager;
         private readonly Dictionary<string, AgentSessionData> _sessions = new();
+        private readonly Dictionary<string, IDisposable> _outputSubscriptions = new();
         private static readonly string SessionDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gwt", "sessions");
 
@@ -20,9 +26,11 @@ namespace Gwt.Agent.Services
         public event Action<AgentSessionData> OnAgentStatusChanged;
         public event Action<string, string> OnAgentOutput;
 
-        public AgentService(AgentDetector detector)
+        public AgentService(AgentDetector detector, IPtyService ptyService, ITerminalPaneManager paneManager)
         {
             _detector = detector;
+            _ptyService = ptyService;
+            _paneManager = paneManager;
         }
 
         public UniTask<List<DetectedAgent>> GetAvailableAgentsAsync(CancellationToken ct = default)
@@ -50,8 +58,38 @@ namespace Gwt.Agent.Services
                 ToolVersion = agent.Version
             };
 
-            _sessions[session.Id] = session;
+            var (command, args) = BuildAgentCommandAndArgs(agentType, agent.ExecutablePath, worktreePath, session.Id);
 
+            var ptySessionId = await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
+            session.PtySessionId = ptySessionId;
+
+            var adapter = new XtermSharpTerminalAdapter(24, 80);
+            var pane = new TerminalPaneState(Guid.NewGuid().ToString("N"), adapter)
+            {
+                AgentSessionId = session.Id,
+                PtySessionId = ptySessionId
+            };
+
+            var outputStream = _ptyService.GetOutputStream(ptySessionId);
+            var sessionId = session.Id;
+            var subscription = outputStream.Subscribe(data =>
+            {
+                UniTask.Post(() =>
+                {
+                    adapter.Feed(data);
+                    OnAgentOutput?.Invoke(sessionId, data);
+                });
+            });
+            _outputSubscriptions[session.Id] = subscription;
+
+            _paneManager.AddPane(pane);
+
+            if (!string.IsNullOrEmpty(instructions))
+            {
+                await _ptyService.WriteAsync(ptySessionId, instructions + "\n", ct);
+            }
+
+            _sessions[session.Id] = session;
             await SaveSessionAsync(session, ct);
             OnAgentStatusChanged?.Invoke(session);
 
@@ -62,6 +100,23 @@ namespace Gwt.Agent.Services
         {
             if (!_sessions.TryGetValue(sessionId, out var session))
                 throw new KeyNotFoundException($"Session {sessionId} not found.");
+
+            if (!string.IsNullOrEmpty(session.PtySessionId))
+            {
+                await _ptyService.KillAsync(session.PtySessionId, ct);
+            }
+
+            if (_outputSubscriptions.TryGetValue(sessionId, out var subscription))
+            {
+                subscription.Dispose();
+                _outputSubscriptions.Remove(sessionId);
+            }
+
+            var pane = _paneManager.GetPaneByAgentSessionId(sessionId);
+            if (pane != null)
+            {
+                _paneManager.RemovePane(pane.PaneId);
+            }
 
             session.Status = "stopped";
             session.UpdatedAt = DateTime.UtcNow.ToString("o");
@@ -75,11 +130,15 @@ namespace Gwt.Agent.Services
             if (!_sessions.TryGetValue(sessionId, out var session))
                 throw new KeyNotFoundException($"Session {sessionId} not found.");
 
+            if (!string.IsNullOrEmpty(session.PtySessionId))
+            {
+                await _ptyService.WriteAsync(session.PtySessionId, instruction + "\n", ct);
+            }
+
             session.ConversationHistory.Add(instruction);
             session.UpdatedAt = DateTime.UtcNow.ToString("o");
 
             await SaveSessionAsync(session, ct);
-            OnAgentOutput?.Invoke(sessionId, instruction);
         }
 
         public UniTask<AgentSessionData> GetSessionAsync(string sessionId, CancellationToken ct = default)
@@ -133,6 +192,19 @@ namespace Gwt.Agent.Services
         private static string GetSessionFilePath(string sessionId)
         {
             return Path.Combine(SessionDir, $"{sessionId}.json");
+        }
+
+        internal static (string command, string[] args) BuildAgentCommandAndArgs(
+            DetectedAgentType type, string executablePath, string worktreePath, string sessionId)
+        {
+            return type switch
+            {
+                DetectedAgentType.Claude => (executablePath, new[] { "--session-id", sessionId, "--worktree", worktreePath }),
+                DetectedAgentType.Codex => (executablePath, new[] { "--cwd", worktreePath }),
+                DetectedAgentType.Gemini => (executablePath, new[] { "--cwd", worktreePath }),
+                DetectedAgentType.OpenCode => (executablePath, new[] { "--cwd", worktreePath }),
+                _ => throw new ArgumentOutOfRangeException(nameof(type))
+            };
         }
 
         internal static string BuildAgentCommand(DetectedAgentType type, string executablePath, string worktreePath, string sessionId)

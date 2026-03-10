@@ -171,7 +171,7 @@ namespace Gwt.Tests.Editor
             Assert.Contains(assignment.Status, validStatuses);
         }
 
-        // --- AgentService command building ---
+        // --- AgentService command building (legacy string format) ---
 
         [Test]
         public void BuildAgentCommand_Claude_IncludesSessionIdAndWorktree()
@@ -210,6 +210,54 @@ namespace Gwt.Tests.Editor
                 DetectedAgentType.OpenCode, "/usr/local/bin/opencode", "/path/to/worktree", "sess123");
 
             Assert.IsTrue(cmd.Contains("--cwd"));
+        }
+
+        // --- BuildAgentCommandAndArgs (structured format for PTY spawn) ---
+
+        [Test]
+        public void BuildAgentCommandAndArgs_Claude_ReturnsCommandAndArgs()
+        {
+            var (command, args) = AgentService.BuildAgentCommandAndArgs(
+                DetectedAgentType.Claude, "/usr/bin/claude", "/path/to/worktree", "session-123");
+
+            Assert.That(command, Is.EqualTo("/usr/bin/claude"));
+            Assert.That(args, Does.Contain("--session-id"));
+            Assert.That(args, Does.Contain("session-123"));
+            Assert.That(args, Does.Contain("--worktree"));
+            Assert.That(args, Does.Contain("/path/to/worktree"));
+        }
+
+        [Test]
+        public void BuildAgentCommandAndArgs_Codex_ReturnsCommandAndArgs()
+        {
+            var (command, args) = AgentService.BuildAgentCommandAndArgs(
+                DetectedAgentType.Codex, "/usr/bin/codex", "/path/to/worktree", "session-456");
+
+            Assert.That(command, Is.EqualTo("/usr/bin/codex"));
+            Assert.That(args, Does.Contain("--cwd"));
+            Assert.That(args, Does.Contain("/path/to/worktree"));
+        }
+
+        [Test]
+        public void BuildAgentCommandAndArgs_Gemini_ReturnsCommandAndArgs()
+        {
+            var (command, args) = AgentService.BuildAgentCommandAndArgs(
+                DetectedAgentType.Gemini, "/usr/bin/gemini", "/workspace", "session-789");
+
+            Assert.That(command, Is.EqualTo("/usr/bin/gemini"));
+            Assert.That(args, Does.Contain("--cwd"));
+            Assert.That(args, Does.Contain("/workspace"));
+        }
+
+        [Test]
+        public void BuildAgentCommandAndArgs_OpenCode_ReturnsCommandAndArgs()
+        {
+            var (command, args) = AgentService.BuildAgentCommandAndArgs(
+                DetectedAgentType.OpenCode, "/usr/bin/opencode", "/workspace", "session-abc");
+
+            Assert.That(command, Is.EqualTo("/usr/bin/opencode"));
+            Assert.That(args, Does.Contain("--cwd"));
+            Assert.That(args, Does.Contain("/workspace"));
         }
 
         // --- Helpers ---

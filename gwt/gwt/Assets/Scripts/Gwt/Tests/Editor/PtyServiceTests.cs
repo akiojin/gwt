@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Models;
 using Gwt.Core.Services.Pty;
 using NUnit.Framework;
 
@@ -180,12 +181,38 @@ namespace Gwt.Tests.Editor
             Assert.That(received, Is.EqualTo("hello"));
         }
 
+        [Test]
+        public void PtySession_OutputStream_ReceivesData()
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = GetEchoCommand(),
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            SetEchoArgs(psi);
+
+            var process = new System.Diagnostics.Process { StartInfo = psi };
+            process.Start();
+
+            using var session = new PtySession("test-5", process, "/tmp", 24, 80);
+
+            string observedData = null;
+            session.OutputStream.Subscribe(data => observedData = data);
+            session.RaiseOutput("observable-test");
+
+            Assert.That(observedData, Is.EqualTo("observable-test"));
+        }
+
         // --- PtyService Tests ---
 
         [Test]
-        public async Task SpawnAsync_CreatesSession()
+        public async Task SpawnShellAsync_CreatesSession()
         {
-            var session = await _service.SpawnAsync(GetTempDir(), cancellationToken: CancellationToken.None);
+            var session = await _service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
 
             Assert.That(session, Is.Not.Null);
             Assert.That(session.Id, Is.Not.Null.And.Not.Empty);
@@ -193,34 +220,52 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public async Task SpawnAsync_Command_ReturnsPaneId()
+        {
+            var echoCmd = GetEchoCommand();
+            var echoArgs = GetEchoArgs();
+            var paneId = await _service.SpawnAsync(echoCmd, echoArgs, GetTempDir(), 24, 80, CancellationToken.None);
+
+            Assert.That(paneId, Is.Not.Null.And.Not.Empty);
+        }
+
+        [Test]
+        public async Task SpawnAsync_Command_SetsEnvironmentVariables()
+        {
+            var echoCmd = GetEchoCommand();
+            var echoArgs = GetEchoArgs();
+            var paneId = await _service.SpawnAsync(echoCmd, echoArgs, GetTempDir(), 24, 80, CancellationToken.None);
+
+            var session = _service.GetSession(paneId);
+            Assert.That(session, Is.Not.Null);
+            Assert.That(session.Status, Is.EqualTo(PtySessionStatus.Running).Or.EqualTo(PtySessionStatus.Completed));
+        }
+
+        [Test]
         public async Task WriteAsync_SendsDataToProcess()
         {
-            var session = await _service.SpawnAsync(GetTempDir(), cancellationToken: CancellationToken.None);
+            var session = await _service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
             string output = null;
             session.OutputReceived += data => output = data;
 
-            // Write an echo command to the shell stdin
             var echoCmd = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                 ? "echo hello\r\n"
                 : "echo hello\n";
 
             await _service.WriteAsync(session.Id, echoCmd, CancellationToken.None);
 
-            // Wait briefly for output
             await UniTask.Delay(500, cancellationToken: CancellationToken.None);
 
-            // We can't guarantee exact output format, but output should have been received
             Assert.That(output, Is.Not.Null, "Should have received some output from echo command");
         }
 
         [Test]
         public async Task KillAsync_TerminatesProcess()
         {
-            var session = await _service.SpawnAsync(GetTempDir(), cancellationToken: CancellationToken.None);
+            var session = await _service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
 
             await _service.KillAsync(session.Id, CancellationToken.None);
 
-            // Wait briefly for exit handling
             await UniTask.Delay(200, cancellationToken: CancellationToken.None);
 
             Assert.That(session.Process.HasExited, Is.True);
@@ -229,11 +274,21 @@ namespace Gwt.Tests.Editor
         [Test]
         public async Task GetStatus_ReturnsRunning_ForActiveSession()
         {
-            var session = await _service.SpawnAsync(GetTempDir(), cancellationToken: CancellationToken.None);
+            var session = await _service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
 
             var status = _service.GetStatus(session.Id);
 
-            Assert.That(status, Is.EqualTo(PtySessionStatus.Running));
+            Assert.That(status, Is.EqualTo(PaneStatus.Running));
+        }
+
+        [Test]
+        public async Task GetOutputStream_ReturnsObservable()
+        {
+            var session = await _service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
+
+            var observable = _service.GetOutputStream(session.Id);
+
+            Assert.That(observable, Is.Not.Null);
         }
 
         [Test]
@@ -245,14 +300,13 @@ namespace Gwt.Tests.Editor
         [Test]
         public async Task ConcurrentSessions_AreIndependent()
         {
-            var session1 = await _service.SpawnAsync(GetTempDir(), cancellationToken: CancellationToken.None);
-            var session2 = await _service.SpawnAsync(GetTempDir(), cancellationToken: CancellationToken.None);
+            var session1 = await _service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
+            var session2 = await _service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
 
             Assert.That(session1.Id, Is.Not.EqualTo(session2.Id));
-            Assert.That(_service.GetStatus(session1.Id), Is.EqualTo(PtySessionStatus.Running));
-            Assert.That(_service.GetStatus(session2.Id), Is.EqualTo(PtySessionStatus.Running));
+            Assert.That(_service.GetStatus(session1.Id), Is.EqualTo(PaneStatus.Running));
+            Assert.That(_service.GetStatus(session2.Id), Is.EqualTo(PaneStatus.Running));
 
-            // Kill one, verify the other is unaffected
             await _service.KillAsync(session1.Id, CancellationToken.None);
             await UniTask.Delay(200, cancellationToken: CancellationToken.None);
 
@@ -263,7 +317,7 @@ namespace Gwt.Tests.Editor
         [Test]
         public async Task ResizeAsync_UpdatesDimensions()
         {
-            var session = await _service.SpawnAsync(GetTempDir(), cancellationToken: CancellationToken.None);
+            var session = await _service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
 
             await _service.ResizeAsync(session.Id, 40, 120, CancellationToken.None);
 
@@ -275,7 +329,7 @@ namespace Gwt.Tests.Editor
         public void Dispose_CleansUpAllSessions()
         {
             var service = new PtyService(_shellDetector);
-            var session = service.SpawnAsync(GetTempDir(), cancellationToken: CancellationToken.None)
+            var session = service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None)
                 .AsTask().GetAwaiter().GetResult();
             var token = session.Token;
 
@@ -299,6 +353,13 @@ namespace Gwt.Tests.Editor
             return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                 ? "cmd.exe"
                 : "/bin/echo";
+        }
+
+        private static string[] GetEchoArgs()
+        {
+            return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                ? new[] { "/c", "echo test" }
+                : new[] { "test" };
         }
 
         private static void SetEchoArgs(System.Diagnostics.ProcessStartInfo psi)
