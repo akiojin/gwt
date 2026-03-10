@@ -599,7 +599,13 @@ namespace Gwt.Tests.Editor
                     new() { Id = "agent-1", AgentType = "codex", Status = "idle" }
                 }
             };
-            var orchestrator = new LeadOrchestrator(stub);
+            var orchestrator = new LeadOrchestrator(
+                stub,
+                new FakeGitService(),
+                new FakeAIApiService(),
+                new FakeConfigService(),
+                new FakeLeadTaskPlanner(),
+                new FakeLeadMergeManager());
             orchestrator.RestoreSessionAsync("/tmp/project-monitor").GetAwaiter().GetResult();
             orchestrator.SelectLeadAsync("alex").GetAwaiter().GetResult();
             var data = orchestrator.GetSessionDataAsync().GetAwaiter().GetResult();
@@ -713,7 +719,13 @@ namespace Gwt.Tests.Editor
                     new() { Id = "agent-err", AgentType = "codex", Status = "running" }
                 }
             };
-            var orchestrator = new LeadOrchestrator(stub);
+            var orchestrator = new LeadOrchestrator(
+                stub,
+                new FakeGitService(),
+                new FakeAIApiService(),
+                new FakeConfigService(),
+                new FakeLeadTaskPlanner(),
+                new FakeLeadMergeManager());
             orchestrator.RestoreSessionAsync("/tmp/err-test").GetAwaiter().GetResult();
             orchestrator.SelectLeadAsync("alex").GetAwaiter().GetResult();
 
@@ -879,7 +891,13 @@ namespace Gwt.Tests.Editor
 
         private static LeadOrchestrator CreateOrchestrator()
         {
-            return new LeadOrchestrator(new StubAgentService());
+            return new LeadOrchestrator(
+                new StubAgentService(),
+                new FakeGitService(),
+                new FakeAIApiService(),
+                new FakeConfigService(),
+                new FakeLeadTaskPlanner(),
+                new FakeLeadMergeManager());
         }
 
         private static void WithFakeAgentExecutable(string commandName, Action<string> action)
@@ -1009,6 +1027,71 @@ namespace Gwt.Tests.Editor
                 OnAgentStatusChanged?.Invoke(null);
                 OnAgentOutput?.Invoke(null, null);
             }
+        }
+
+        private class FakeGitService : IGitService
+        {
+            public UniTask<List<Worktree>> ListWorktreesAsync(string repoRoot, CancellationToken ct = default) => UniTask.FromResult(new List<Worktree>());
+            public UniTask<Worktree> CreateWorktreeAsync(string repoRoot, string branch, string path, CancellationToken ct = default) => UniTask.FromResult<Worktree>(null);
+            public UniTask DeleteWorktreeAsync(string repoRoot, string path, bool force, CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask<List<Branch>> ListBranchesAsync(string repoRoot, CancellationToken ct = default) => UniTask.FromResult(new List<Branch>());
+            public UniTask<string> GetCurrentBranchAsync(string repoRoot, CancellationToken ct = default) => UniTask.FromResult("main");
+            public UniTask<GitChangeSummary> GetChangeSummaryAsync(string repoRoot, CancellationToken ct = default) => UniTask.FromResult(new GitChangeSummary());
+            public UniTask<List<CommitEntry>> GetCommitsAsync(string repoRoot, string branch, int limit, CancellationToken ct = default) => UniTask.FromResult(new List<CommitEntry>());
+            public UniTask<ChangeStats> GetChangeStatsAsync(string repoRoot, CancellationToken ct = default) => UniTask.FromResult(new ChangeStats());
+            public UniTask<BranchMeta> GetBranchMetaAsync(string repoRoot, string branch, CancellationToken ct = default) => UniTask.FromResult(new BranchMeta());
+            public UniTask<List<WorkingTreeEntry>> GetWorkingTreeStatusAsync(string repoRoot, CancellationToken ct = default) => UniTask.FromResult(new List<WorkingTreeEntry>());
+            public UniTask<List<CleanupCandidate>> GetCleanupCandidatesAsync(string repoRoot, CancellationToken ct = default) => UniTask.FromResult(new List<CleanupCandidate>());
+            public UniTask<RepoType> GetRepoTypeAsync(string path, CancellationToken ct = default) => UniTask.FromResult(RepoType.Normal);
+        }
+
+        private class FakeAIApiService : IAIApiService
+        {
+            public UniTask<string> SuggestBranchNameAsync(string description, ResolvedAISettings settings, CancellationToken ct = default) => UniTask.FromResult("feature/test");
+            public UniTask<string> GenerateCommitMessageAsync(string diff, ResolvedAISettings settings, CancellationToken ct = default) => UniTask.FromResult("feat: test");
+            public UniTask<string> GeneratePrDescriptionAsync(string commits, string diff, ResolvedAISettings settings, CancellationToken ct = default) => UniTask.FromResult("PR");
+            public UniTask<string> SummarizeIssueAsync(string issueBody, ResolvedAISettings settings, CancellationToken ct = default) => UniTask.FromResult("summary");
+            public UniTask<string> ReviewCodeAsync(string diff, ResolvedAISettings settings, CancellationToken ct = default) => UniTask.FromResult("review");
+            public UniTask<string> GenerateTestsAsync(string code, ResolvedAISettings settings, CancellationToken ct = default) => UniTask.FromResult("tests");
+            public UniTask<string> ChatAsync(List<ChatMessage> messages, ResolvedAISettings settings, CancellationToken ct = default) => UniTask.FromResult("chat");
+            public UniTask<AIResponse> SendRequestAsync(string systemPrompt, string userMessage, ResolvedAISettings settings, CancellationToken ct = default) =>
+                UniTask.FromResult(new AIResponse { Text = "{\"tasks\":[]}" });
+        }
+
+        private class FakeConfigService : IConfigService
+        {
+            public UniTask<Settings> LoadSettingsAsync(string projectRoot, CancellationToken ct = default) => UniTask.FromResult(new Settings());
+            public UniTask SaveSettingsAsync(string projectRoot, Settings settings, CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask<Settings> GetOrCreateSettingsAsync(string projectRoot, CancellationToken ct = default) => UniTask.FromResult(new Settings());
+            public string GetGwtDir(string projectRoot) => projectRoot;
+        }
+
+        private class FakeLeadTaskPlanner : ILeadTaskPlanner
+        {
+            public UniTask<LeadTaskPlan> CreatePlanAsync(string userRequest, ProjectContext context, CancellationToken ct = default) =>
+                UniTask.FromResult(new LeadTaskPlan
+                {
+                    PlanId = "plan",
+                    ProjectRoot = context?.ProjectRoot ?? string.Empty,
+                    UserRequest = userRequest,
+                    CreatedAt = DateTime.UtcNow.ToString("o"),
+                    Status = "draft"
+                });
+
+            public UniTask<LeadTaskPlan> RefinePlanAsync(LeadTaskPlan plan, string feedback, CancellationToken ct = default) =>
+                UniTask.FromResult(plan);
+        }
+
+        private class FakeLeadMergeManager : ILeadMergeManager
+        {
+            public UniTask<PullRequest> CreateTaskPrAsync(LeadPlannedTask task, string baseBranch, string repoRoot, CancellationToken ct = default) =>
+                UniTask.FromResult(new PullRequest());
+
+            public UniTask<bool> TryMergeAsync(long prNumber, string repoRoot, CancellationToken ct = default) =>
+                UniTask.FromResult(true);
+
+            public UniTask CleanupWorktreeAsync(LeadPlannedTask task, string repoRoot, CancellationToken ct = default) =>
+                UniTask.CompletedTask;
         }
 
         private class FakePtyService : IPtyService
