@@ -295,13 +295,6 @@ fn normalize_windows_working_dir_for_shell(working_dir: &Path) -> String {
         .replace('/', "\\")
 }
 
-fn cmd_cd_expression(working_dir: &Path) -> String {
-    format!(
-        "cd /D \"{}\"",
-        escape_cmd_double_quoted(normalize_windows_working_dir_for_shell(working_dir).as_ref())
-    )
-}
-
 fn powershell_set_location_expression(working_dir: &Path) -> String {
     format!(
         "Set-Location -LiteralPath '{}'",
@@ -317,20 +310,9 @@ fn inject_windows_working_dir_into_spawn_args(
     working_dir: &Path,
 ) {
     if is_cmd_executable(spawn_command) {
-        let c_index = spawn_args
-            .iter()
-            .position(|arg| arg.eq_ignore_ascii_case("/c"));
-        if let Some(idx) = c_index.and_then(|i| i.checked_add(1)) {
-            if let Some(expression) = spawn_args.get_mut(idx) {
-                let cd = cmd_cd_expression(working_dir);
-                let utf8_prefix = "chcp 65001 > nul && ";
-                if let Some(rest) = expression.strip_prefix(utf8_prefix) {
-                    *expression = format!("{utf8_prefix}{cd} && {rest}");
-                } else {
-                    *expression = format!("{cd} && {expression}");
-                }
-            }
-        }
+        // `CommandBuilder::cwd` already sets the working directory for `cmd.exe`.
+        // Injecting `cd /D "..." && ...` into the `/C` expression breaks when the
+        // wrapper expression is passed as a single Windows process argument.
         return;
     }
 
@@ -1275,69 +1257,28 @@ mod tests {
     }
 
     #[test]
-    fn inject_windows_working_dir_into_spawn_args_cmd_inserts_cd_prefix() {
-        let mut args = vec!["/C".to_string(), "codex --version".to_string()];
+    fn inject_windows_working_dir_into_spawn_args_cmd_relies_on_process_cwd() {
+        let original = vec!["/C".to_string(), "codex --version".to_string()];
+        let mut args = original.clone();
         inject_windows_working_dir_into_spawn_args(
             "cmd.exe",
             &mut args,
             Path::new("C:\\Users\\Test User\\repo"),
         );
-        assert_eq!(
-            args,
-            vec![
-                "/C".to_string(),
-                "cd /D \"C:\\Users\\Test User\\repo\" && codex --version".to_string()
-            ]
-        );
+        assert_eq!(args, original);
     }
 
     #[test]
-    fn inject_windows_working_dir_into_spawn_args_cmd_keeps_utf8_prefix() {
-        let mut args = vec![
+    fn inject_windows_working_dir_into_spawn_args_cmd_keeps_utf8_wrapper_expression() {
+        let original = vec![
             "/D".to_string(),
             "/S".to_string(),
             "/C".to_string(),
             "chcp 65001 > nul && codex --version".to_string(),
         ];
+        let mut args = original.clone();
         inject_windows_working_dir_into_spawn_args("cmd.exe", &mut args, Path::new("C:\\repo"));
-        assert_eq!(
-            args[3],
-            "chcp 65001 > nul && cd /D \"C:\\repo\" && codex --version".to_string()
-        );
-    }
-
-    #[test]
-    fn inject_windows_working_dir_into_spawn_args_cmd_normalizes_forward_slash_worktree_path() {
-        let mut args = vec!["/C".to_string(), "codex --version".to_string()];
-        inject_windows_working_dir_into_spawn_args(
-            "cmd.exe",
-            &mut args,
-            Path::new("E:/gwt/bugfix/issue-1466"),
-        );
-        assert_eq!(
-            args,
-            vec![
-                "/C".to_string(),
-                "cd /D \"E:\\gwt\\bugfix\\issue-1466\" && codex --version".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn inject_windows_working_dir_into_spawn_args_cmd_strips_extended_length_prefix() {
-        let mut args = vec!["/C".to_string(), "codex --version".to_string()];
-        inject_windows_working_dir_into_spawn_args(
-            "cmd.exe",
-            &mut args,
-            Path::new(r"\\?\E:\gwt\develop"),
-        );
-        assert_eq!(
-            args,
-            vec![
-                "/C".to_string(),
-                "cd /D \"E:\\gwt\\develop\" && codex --version".to_string()
-            ]
-        );
+        assert_eq!(args, original);
     }
 
     #[test]
@@ -1403,6 +1344,29 @@ mod tests {
         let mut args = vec!["--version".to_string()];
         inject_windows_working_dir_into_spawn_args("codex", &mut args, Path::new("C:\\repo"));
         assert_eq!(args, vec!["--version".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cmd_wrapper_uses_process_cwd_without_injected_cd_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_dir = temp.path().join("repo with spaces");
+        std::fs::create_dir_all(&repo_dir).expect("create repo dir");
+
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", "cd"])
+            .current_dir(&repo_dir)
+            .output()
+            .expect("spawn cmd");
+
+        assert!(output.status.success(), "cmd.exe should inherit cwd");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.trim(),
+            normalize_windows_working_dir_path(&repo_dir)
+                .to_string_lossy()
+                .replace('/', "\\")
+        );
     }
 
     /// Helper: read from PTY reader in a separate thread with timeout.
