@@ -2,6 +2,7 @@
     "name": "Gwt.Tests.Editor",
     "rootNamespace": "Gwt.Tests.Editor",
     "references": [
+        "Gwt.EditorTools",
         "Gwt.Shared",
         "Gwt.Core",
         "Gwt.Agent",

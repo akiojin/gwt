@@ -1,0 +1,19 @@
+{
+    "name": "Gwt.EditorTools",
+    "rootNamespace": "Gwt.Editor",
+    "references": [
+        "Unity.TextMeshPro",
+        "Unity.Settings.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
