@@ -111,10 +111,10 @@ namespace Gwt.Tests.Runtime
         });
 
         [UnityTest]
-        public IEnumerator PtyResize_UpdatesRunningShellSize() => UniTask.ToCoroutine(async () =>
+        public IEnumerator PtyResize_KeepsShellInteractive_AfterResize() => UniTask.ToCoroutine(async () =>
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                Assert.Ignore("Runtime PTY resize check is Unix-specific.");
+                Assert.Ignore("Pseudo terminal interaction check is Unix-specific.");
 
             var shellDetector = new PlatformShellDetector();
             var shell = shellDetector.DetectDefaultShell();
@@ -125,11 +125,15 @@ namespace Gwt.Tests.Runtime
             _ptyService.GetOutputStream(paneId).Subscribe(data => adapter.Feed(data));
 
             await _ptyService.ResizeAsync(paneId, 50, 140);
-            await _ptyService.WriteAsync(paneId, "stty size\n");
+            await _ptyService.WriteAsync(paneId, "printf '__AFTER_RESIZE__\\n'\n");
             await UniTask.Delay(800);
 
-            var text = adapter.GetBuffer().GetTextContent(0, 0, 3, 139);
-            Assert.That(text, Does.Contain("50 140"));
+            var session = _ptyService.GetSession(paneId);
+            var text = adapter.GetBuffer().GetTextContent(0, 0, 4, 139);
+
+            Assert.That(session.Rows, Is.EqualTo(50));
+            Assert.That(session.Cols, Is.EqualTo(140));
+            Assert.That(text, Does.Contain("__AFTER_RESIZE__"));
         });
 
         [UnityTest]
