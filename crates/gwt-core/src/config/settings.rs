@@ -1,4 +1,4 @@
-//! Settings management (SPEC-a3f4c9df)
+//! Settings management (gwt-spec issue)
 //!
 //! Manages application settings.
 //!
@@ -93,15 +93,23 @@ pub struct AgentSettings {
     pub skill_registration: Option<SkillRegistrationPreferences>,
 }
 
+fn default_skill_registration_enabled() -> bool {
+    true
+}
+
 /// Preferences for managed skill / plugin registration.
-///
-/// Registration always targets the User scope (home directory).
-/// This struct exists as a marker so we can distinguish
-/// "not configured" (None) from "configured" (Some).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SkillRegistrationPreferences {
-    // Currently a marker struct. Future fields (e.g. disabled agents) can be added here.
+    /// Whether project-local managed assets are automatically repaired and refreshed.
+    #[serde(default = "default_skill_registration_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for SkillRegistrationPreferences {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Docker settings
@@ -304,7 +312,7 @@ impl Settings {
         toml::to_string_pretty(&Self::default()).unwrap_or_default()
     }
 
-    /// Find the configuration file (SPEC-a3f4c9df FR-013)
+    /// Find the configuration file (gwt-spec issue FR-013)
     ///
     /// Priority (highest to lowest):
     /// 1. .gwt.toml (local, highest priority)
@@ -380,7 +388,7 @@ impl Settings {
         repo_root.join(".gwt").join("logs")
     }
 
-    /// Save settings to file (SPEC-a3f4c9df FR-008)
+    /// Save settings to file (gwt-spec issue FR-008)
     ///
     /// Uses atomic write (temp file + rename) for data safety.
     pub fn save(&self, path: &Path) -> Result<()> {

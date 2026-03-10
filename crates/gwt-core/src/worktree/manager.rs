@@ -15,7 +15,7 @@ pub struct WorktreeManager {
     repo_root: PathBuf,
     /// Git repository handle
     repo: Repository,
-    /// Worktree location strategy (SPEC-a70a1ece T404-T405)
+    /// Worktree location strategy (gwt-spec issue T404-T405)
     location: WorktreeLocation,
 }
 
@@ -26,14 +26,14 @@ impl WorktreeManager {
     /// to the main repository root to ensure worktrees are created at the
     /// correct location (e.g., /repo/.worktrees/ instead of /repo/.worktrees/branch/.worktrees/)
     ///
-    /// SPEC-a70a1ece T404-T405: Auto-detects bare repositories and uses Sibling location
+    /// gwt-spec issue T404-T405: Auto-detects bare repositories and uses Sibling location
     pub fn new(repo_root: impl AsRef<Path>) -> Result<Self> {
         let repo_root = repo_root.as_ref().to_path_buf();
         // Resolve to main repo root in case we're inside a worktree
         let main_repo_root = get_main_repo_root(&repo_root);
         let repo = Repository::discover(&main_repo_root)?;
 
-        // SPEC-a70a1ece: Detect bare repository and use appropriate location strategy
+        // gwt-spec issue: Detect bare repository and use appropriate location strategy
         let location = if is_bare_repository(&main_repo_root) {
             debug!(
                 category = "worktree",
@@ -379,7 +379,7 @@ impl WorktreeManager {
                             return Ok(wt);
                         }
                     }
-                    // SPEC-013cd65c FR-002: Bare repos store fetched branches in
+                    // gwt-spec issue FR-002: Bare repos store fetched branches in
                     // refs/heads/* without refs/remotes/*, so check local refs first.
                     if Branch::exists(&self.repo_root, branch_candidate)? {
                         resolved_branch = branch_candidate.to_string();
@@ -397,7 +397,7 @@ impl WorktreeManager {
                     remote_branch =
                         resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
 
-                    // SPEC-013cd65c FR-003: Bare repos fetch to refs/heads/*,
+                    // gwt-spec issue FR-003: Bare repos fetch to refs/heads/*,
                     // so resolve_remote_branch (which checks refs/remotes/*) may
                     // still return None. Fall back to checking refs/heads/*.
                     if remote_branch.is_none() {
@@ -437,7 +437,7 @@ impl WorktreeManager {
                             let remote_ref = format!("{}/{}", remote, resolved_branch);
                             Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
                         } else {
-                            // SPEC-a70a1ece FR-124: No local remote ref, fetch from remote
+                            // gwt-spec issue FR-124: No local remote ref, fetch from remote
                             let fetch_output = crate::process::command("git")
                                 .args(["fetch", &remote, &format!("{}:{}", branch, branch)])
                                 .current_dir(&self.repo_root)
@@ -486,7 +486,7 @@ impl WorktreeManager {
             }
         }
 
-        // SPEC-a70a1ece T405: Use location-aware path generation
+        // gwt-spec issue T405: Use location-aware path generation
         let path =
             WorktreePath::generate_with_location(&self.repo_root, &resolved_branch, self.location);
 
@@ -604,7 +604,7 @@ impl WorktreeManager {
             }
         }
 
-        // SPEC-a70a1ece T1004-T1005: Initialize submodules (non-fatal on failure)
+        // gwt-spec issue T1004-T1005: Initialize submodules (non-fatal on failure)
         if let Err(e) = crate::git::init_submodules(&path) {
             warn!(
                 category = "worktree",
@@ -614,7 +614,7 @@ impl WorktreeManager {
             );
         }
 
-        // SPEC-b3f1a4e2 FR-004: Set upstream tracking config (non-fatal)
+        // gwt-spec issue FR-004: Set upstream tracking config (non-fatal)
         if let Ok(Some(remote_name)) = Remote::default_name(&self.repo_root) {
             if let Err(e) =
                 Branch::set_upstream_config(&self.repo_root, &resolved_branch, &remote_name)
@@ -656,7 +656,7 @@ impl WorktreeManager {
             base = base_branch.unwrap_or("HEAD"),
             "Creating worktree with new branch"
         );
-        // SPEC-a70a1ece T405: Use location-aware path generation
+        // gwt-spec issue T405: Use location-aware path generation
         let path =
             WorktreePath::generate_with_location(&self.repo_root, branch_name, self.location);
         let mut did_prune = false;
@@ -693,7 +693,7 @@ impl WorktreeManager {
                     if Branch::exists(&self.repo_root, branch)? {
                         resolved_base = Some(branch.to_string());
                     } else {
-                        // SPEC-013cd65c FR-004: Try remote_exists first, fall back to
+                        // gwt-spec issue FR-004: Try remote_exists first, fall back to
                         // fetch_all + local check when it fails.
                         let mut did_fetch = false;
                         let mut found = Branch::remote_exists(&self.repo_root, remote, branch)?;
@@ -730,7 +730,7 @@ impl WorktreeManager {
                             // Keep going with the local branch when only refs/heads/* exists.
                             resolved_base = Some(branch.to_string());
                         } else {
-                            // SPEC-013cd65c: fetch_all may not work in bare repos
+                            // gwt-spec issue: fetch_all may not work in bare repos
                             // (no fetch refspec). Explicitly fetch the specific branch.
                             let fetch_output = crate::process::command("git")
                                 .args(["fetch", remote, &format!("{}:{}", branch, branch)])
@@ -818,7 +818,7 @@ impl WorktreeManager {
             drop(wt_repo);
         }
 
-        // SPEC-a70a1ece T1004-T1005: Initialize submodules (non-fatal on failure)
+        // gwt-spec issue T1004-T1005: Initialize submodules (non-fatal on failure)
         if let Err(e) = crate::git::init_submodules(&path) {
             warn!(
                 category = "worktree",
@@ -828,7 +828,7 @@ impl WorktreeManager {
             );
         }
 
-        // SPEC-b3f1a4e2 FR-003: Set upstream tracking config (non-fatal)
+        // gwt-spec issue FR-003: Set upstream tracking config (non-fatal)
         if let Ok(Some(remote_name)) = Remote::default_name(&self.repo_root) {
             if let Err(e) = Branch::set_upstream_config(&self.repo_root, branch_name, &remote_name)
             {
@@ -1426,7 +1426,7 @@ mod tests {
         assert_eq!(worktrees.len(), 2);
     }
 
-    // SPEC-b3f1a4e2: Verify upstream is set when remote exists
+    // gwt-spec issue: Verify upstream is set when remote exists
     #[test]
     fn test_create_new_branch_worktree_sets_upstream() {
         let temp = create_test_repo();
@@ -1456,7 +1456,7 @@ mod tests {
         assert_eq!(merge_val, "refs/heads/feature/upstream");
     }
 
-    // SPEC-b3f1a4e2: Verify no error when no remote exists
+    // gwt-spec issue: Verify no error when no remote exists
     #[test]
     fn test_create_new_branch_no_remote_skips_upstream() {
         let temp = create_test_repo();
@@ -1664,7 +1664,7 @@ mod tests {
         run_git_in(creator.path(), &["push", "origin", "feature/issue-42"]);
 
         assert!(!Branch::exists(temp.path(), "feature/issue-42").unwrap());
-        // SPEC-a70a1ece FR-124: remote_exists now uses ls-remote fallback, so it finds the branch
+        // gwt-spec issue FR-124: remote_exists now uses ls-remote fallback, so it finds the branch
         assert!(Branch::remote_exists(temp.path(), "origin", "feature/issue-42").unwrap());
 
         let manager = WorktreeManager::new(temp.path()).unwrap();
@@ -1990,7 +1990,7 @@ mod tests {
         );
     }
 
-    /// Create a bare test repository (SPEC-a70a1ece T406)
+    /// Create a bare test repository (gwt-spec issue T406)
     /// Returns (TempDir, PathBuf, String) where:
     /// - PathBuf is the bare repo path
     /// - String is the default branch name (main/master depending on git config)
@@ -2031,7 +2031,7 @@ mod tests {
 
     #[test]
     fn test_bare_repo_uses_sibling_location() {
-        // SPEC-a70a1ece T406: Bare repository should use Sibling location
+        // gwt-spec issue T406: Bare repository should use Sibling location
         let (_temp, bare_path, _base_branch) = create_bare_test_repo();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
@@ -2040,7 +2040,7 @@ mod tests {
 
     #[test]
     fn test_bare_repo_worktree_sibling_path() {
-        // SPEC-a70a1ece T406: Worktree should be created as sibling to bare repo
+        // gwt-spec issue T406: Worktree should be created as sibling to bare repo
         let (temp, bare_path, base_branch) = create_bare_test_repo();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
@@ -2059,7 +2059,7 @@ mod tests {
 
     #[test]
     fn test_bare_repo_worktree_creates_subdirectory_structure() {
-        // SPEC-a70a1ece FR-152: Slash-containing branches create subdirectory structure
+        // gwt-spec issue FR-152: Slash-containing branches create subdirectory structure
         // e.g., "feature/branch-name" creates feature/branch-name/ directory
         let (temp, bare_path, base_branch) = create_bare_test_repo();
 
@@ -2137,7 +2137,7 @@ mod tests {
 
     #[test]
     fn test_bare_repo_worktree_bugfix_branch() {
-        // SPEC-a70a1ece FR-152: Test bugfix/ prefix as well
+        // gwt-spec issue FR-152: Test bugfix/ prefix as well
         let (temp, bare_path, base_branch) = create_bare_test_repo();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
@@ -2273,7 +2273,7 @@ mod tests {
 
     #[test]
     fn test_bare_repo_create_for_branch_from_unfetched_remote_branch() {
-        // SPEC-013cd65c: create_for_branch("origin/<extra-branch>") should succeed
+        // gwt-spec issue: create_for_branch("origin/<extra-branch>") should succeed
         // even when that branch is not yet fetched into refs/heads/
         let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
 
@@ -2287,7 +2287,7 @@ mod tests {
 
     #[test]
     fn test_bare_repo_create_new_branch_from_unfetched_remote_base() {
-        // SPEC-013cd65c: create_new_branch with base "origin/<extra-branch>" should succeed
+        // gwt-spec issue: create_new_branch with base "origin/<extra-branch>" should succeed
         // even when that branch is not yet fetched into refs/heads/
         let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
 

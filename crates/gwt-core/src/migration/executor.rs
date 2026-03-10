@@ -1,4 +1,4 @@
-//! Migration executor (SPEC-a70a1ece T806-T812, T815, T901-T909)
+//! Migration executor (gwt-spec issue T806-T812, T815, T901-T909)
 
 use super::{
     backup::create_backup, config::MigrationConfig, error::MigrationError, state::MigrationState,
@@ -39,8 +39,8 @@ struct EvacuationManifest {
     encoding: Option<String>,
 }
 
-/// Execute full migration (SPEC-a70a1ece T815, FR-201)
-/// SPEC-a70a1ece FR-150: Migration creates structure INSIDE the original repo directory
+/// Execute full migration (gwt-spec issue T815, FR-201)
+/// gwt-spec issue FR-150: Migration creates structure INSIDE the original repo directory
 pub fn execute_migration(
     config: &MigrationConfig,
     progress: Option<MigrationProgress>,
@@ -642,7 +642,7 @@ fn is_directory_not_empty_error(err: &std::io::Error) -> bool {
         || matches!(err.raw_os_error(), Some(39 | 66))
 }
 
-/// Cleanup old .worktrees/ directory (SPEC-a70a1ece T903, FR-204)
+/// Cleanup old .worktrees/ directory (gwt-spec issue T903, FR-204)
 fn cleanup_old_worktrees_dir(config: &MigrationConfig) -> Result<(), MigrationError> {
     let worktrees_dir = config.source_root.join(".worktrees");
     if worktrees_dir.exists() {
@@ -655,7 +655,7 @@ fn cleanup_old_worktrees_dir(config: &MigrationConfig) -> Result<(), MigrationEr
     Ok(())
 }
 
-/// Create a bare repository from the source (SPEC-a70a1ece FR-203)
+/// Create a bare repository from the source (gwt-spec issue FR-203)
 fn create_bare_repository(config: &MigrationConfig) -> Result<(), MigrationError> {
     let bare_path = config.bare_repo_path();
     debug!(bare = %bare_path.display(), "Creating bare repository");
@@ -708,7 +708,7 @@ fn get_remote_url(repo_root: &Path) -> Result<Option<String>, MigrationError> {
     }
 }
 
-/// Migrate a local-only repository (SPEC-a70a1ece FR-225, T908)
+/// Migrate a local-only repository (gwt-spec issue FR-225, T908)
 fn migrate_local_only_repo(config: &MigrationConfig) -> Result<(), MigrationError> {
     let bare_path = config.bare_repo_path();
     debug!(bare = %bare_path.display(), "Migrating local-only repository");
@@ -753,16 +753,16 @@ fn migrate_local_only_repo(config: &MigrationConfig) -> Result<(), MigrationErro
 }
 
 /// List worktrees that need to be migrated
-/// SPEC-a70a1ece FR-150: 元のリポジトリディレクトリ内にworktreeを配置
+/// gwt-spec issue FR-150: 元のリポジトリディレクトリ内にworktreeを配置
 fn list_worktrees_to_migrate(
     config: &MigrationConfig,
 ) -> Result<Vec<WorktreeMigrationInfo>, MigrationError> {
     let mut worktrees = Vec::new();
     let repo_root = &config.source_root;
-    // SPEC-a70a1ece FR-150: worktrees are placed inside target_root (same as source_root)
+    // gwt-spec issue FR-150: worktrees are placed inside target_root (same as source_root)
     let target_dir = &config.target_root;
 
-    // First, add the main repository itself (SPEC-a70a1ece)
+    // First, add the main repository itself (gwt-spec issue)
     // This is the original repo's main/master branch that needs to become a worktree
     // IMPORTANT: Check is_main_repository NOW before .git is deleted
     if let Some(main_branch) = get_worktree_branch(repo_root) {
@@ -836,7 +836,7 @@ fn get_worktree_branch(worktree_path: &Path) -> Option<String> {
     }
 }
 
-/// Check if worktree has uncommitted changes (SPEC-a70a1ece T807, FR-206)
+/// Check if worktree has uncommitted changes (gwt-spec issue T807, FR-206)
 pub fn is_worktree_dirty(worktree_path: &Path) -> bool {
     let output = crate::process::command("git")
         .args(["status", "--porcelain"])
@@ -856,8 +856,8 @@ fn is_main_repository(source_path: &Path) -> bool {
     git_path.is_dir()
 }
 
-/// Migrate a single worktree (SPEC-a70a1ece T808-T809)
-/// SPEC-a70a1ece US9-S10: すべてのworktreeはgit worktree addで新規作成
+/// Migrate a single worktree (gwt-spec issue T808-T809)
+/// gwt-spec issue US9-S10: すべてのworktreeはgit worktree addで新規作成
 fn migrate_worktree(
     config: &MigrationConfig,
     wt_info: &WorktreeMigrationInfo,
@@ -897,8 +897,8 @@ fn migrate_worktree(
     Ok(())
 }
 
-/// Migrate dirty worktree using file move (SPEC-a70a1ece T808, FR-206)
-/// SPEC-a70a1ece: dirty worktreeの場合、ファイルを移動後にgit worktree addで再登録
+/// Migrate dirty worktree using file move (gwt-spec issue T808, FR-206)
+/// gwt-spec issue: dirty worktreeの場合、ファイルを移動後にgit worktree addで再登録
 fn migrate_dirty_worktree(
     config: &MigrationConfig,
     wt_info: &WorktreeMigrationInfo,
@@ -968,8 +968,8 @@ fn migrate_dirty_worktree(
     Ok(())
 }
 
-/// Migrate clean worktree using re-clone (SPEC-a70a1ece T809, FR-207)
-/// SPEC-a70a1ece US9-S10: すべてのworktreeはgit worktree addで新規作成
+/// Migrate clean worktree using re-clone (gwt-spec issue T809, FR-207)
+/// gwt-spec issue US9-S10: すべてのworktreeはgit worktree addで新規作成
 fn migrate_clean_worktree(
     config: &MigrationConfig,
     wt_info: &WorktreeMigrationInfo,
@@ -1018,7 +1018,7 @@ fn migrate_clean_worktree(
     Ok(())
 }
 
-/// Copy working files excluding .git and gitignored files (SPEC-a70a1ece T812, FR-208)
+/// Copy working files excluding .git and gitignored files (gwt-spec issue T812, FR-208)
 fn copy_working_files(source: &Path, target: &Path) -> Result<(), MigrationError> {
     // Use rsync with git-aware exclusions
     let output = crate::process::command("rsync")
@@ -1072,7 +1072,7 @@ fn fallback_copy_files(source: &Path, target: &Path) -> Result<(), MigrationErro
     Ok(())
 }
 
-/// Copy git hooks from source to bare repository (SPEC-a70a1ece T810, FR-217)
+/// Copy git hooks from source to bare repository (gwt-spec issue T810, FR-217)
 fn copy_git_hooks(source: &Path, bare_path: &Path) -> Result<(), MigrationError> {
     let source_hooks = source.join(".git/hooks");
     let target_hooks = bare_path.join("hooks");
@@ -1118,7 +1118,7 @@ fn copy_git_hooks(source: &Path, bare_path: &Path) -> Result<(), MigrationError>
     Ok(())
 }
 
-/// Preserve submodules in worktree (SPEC-a70a1ece T811, FR-218)
+/// Preserve submodules in worktree (gwt-spec issue T811, FR-218)
 fn preserve_submodules(worktree_path: &Path) -> Result<(), MigrationError> {
     // Check if .gitmodules exists
     let gitmodules = worktree_path.join(".gitmodules");
@@ -1146,14 +1146,14 @@ fn preserve_submodules(worktree_path: &Path) -> Result<(), MigrationError> {
     Ok(())
 }
 
-/// Preserve file permissions (SPEC-a70a1ece T901, FR-214)
+/// Preserve file permissions (gwt-spec issue T901, FR-214)
 fn preserve_file_permissions(_source: &Path, _target: &Path) -> Result<(), MigrationError> {
     // On Unix, permissions are preserved by cp -a and rsync -a
     // This function is a placeholder for additional permission handling if needed
     Ok(())
 }
 
-/// Migrate stash entries (SPEC-a70a1ece T902, FR-220)
+/// Migrate stash entries (gwt-spec issue T902, FR-220)
 fn migrate_stash(source: &Path, _target: &Path) -> Result<(), MigrationError> {
     // Check if source has stash
     let output = crate::process::command("git")
@@ -1180,7 +1180,7 @@ fn migrate_stash(source: &Path, _target: &Path) -> Result<(), MigrationError> {
     Ok(())
 }
 
-/// Create project config file (SPEC-a70a1ece T905, FR-219)
+/// Create project config file (gwt-spec issue T905, FR-219)
 fn create_project_config(config: &MigrationConfig) -> Result<(), MigrationError> {
     let gwt_dir = config.target_root.join(".gwt");
     std::fs::create_dir_all(&gwt_dir).map_err(|e| MigrationError::IoError {
@@ -1206,7 +1206,7 @@ fn create_project_config(config: &MigrationConfig) -> Result<(), MigrationError>
     Ok(())
 }
 
-/// Preserve tracking relationships (SPEC-a70a1ece T907, FR-221)
+/// Preserve tracking relationships (gwt-spec issue T907, FR-221)
 fn preserve_tracking_relationships(
     worktree_path: &Path,
     branch: &str,
@@ -1230,7 +1230,7 @@ fn preserve_tracking_relationships(
     Ok(())
 }
 
-/// Derive bare repository name from URL or directory (SPEC-a70a1ece T906, FR-219)
+/// Derive bare repository name from URL or directory (gwt-spec issue T906, FR-219)
 /// Priority: remote URL > directory name
 pub fn derive_bare_repo_name(url_or_path: &str) -> String {
     // First, try to get the name from remote URL if it's a path

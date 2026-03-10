@@ -1,4 +1,4 @@
-//! File-system watcher for `~/.gwt/sessions/` (SPEC-b80e7996 FR-820)
+//! File-system watcher for `~/.gwt/sessions/` (gwt-spec issue FR-820)
 //!
 //! Monitors session file changes (written by `gwt-tauri hook <Event>`) and
 //! emits a Tauri event so the frontend can refresh agent status indicators.

@@ -1056,7 +1056,6 @@ describe("IssueListPanel", () => {
           title: "Spec Issue",
           url: "https://github.com/test/repo/issues/70",
           updatedAt: "2026-01-01T00:00:00Z",
-          specId: "SPEC-70",
           etag: "etag-70",
           body: "body",
           sections: {

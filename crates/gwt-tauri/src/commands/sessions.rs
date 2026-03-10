@@ -72,7 +72,7 @@ pub struct AgentSidebarTask {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSidebarView {
-    pub spec_id: Option<String>,
+    pub issue_number: Option<u64>,
     pub tasks: Vec<AgentSidebarTask>,
 }
 
@@ -85,7 +85,7 @@ struct ParsedTask {
 
 #[derive(Debug, Clone)]
 struct ParsedTaskSet {
-    spec_id: Option<String>,
+    issue_number: Option<u64>,
     tasks: Vec<ParsedTask>,
 }
 
@@ -164,7 +164,7 @@ pub fn get_agent_sidebar_view(
     });
 
     Ok(AgentSidebarView {
-        spec_id: parsed.spec_id,
+        issue_number: parsed.issue_number,
         tasks,
     })
 }
@@ -173,7 +173,7 @@ fn parse_latest_spec_tasks(repo_path: &Path) -> ParsedTaskSet {
     let latest_issue = latest_spec_issue_detail(repo_path);
     let Some(issue) = latest_issue else {
         return ParsedTaskSet {
-            spec_id: None,
+            issue_number: None,
             tasks: Vec::new(),
         };
     };
@@ -213,10 +213,7 @@ where
 
 fn parse_task_set_from_spec_issue(issue: &SpecIssueDetail) -> ParsedTaskSet {
     ParsedTaskSet {
-        spec_id: issue
-            .spec_id
-            .clone()
-            .or_else(|| Some(format!("#{}", issue.number))),
+        issue_number: Some(issue.number),
         tasks: parse_tasks_markdown(&issue.sections.tasks),
     }
 }
@@ -2095,7 +2092,6 @@ mod tests {
             title: format!("Spec {number}"),
             url: format!("https://example.test/issues/{number}"),
             updated_at: "2026-03-08T00:00:00Z".to_string(),
-            spec_id: None,
             labels: vec!["gwt-spec".to_string()],
             etag: format!("etag-{number}"),
             body: String::new(),
@@ -2132,7 +2128,7 @@ mod tests {
         };
 
         let parsed = parse_task_set_from_spec_issue(&issue);
-        assert_eq!(parsed.spec_id.as_deref(), Some("#1438"));
+        assert_eq!(parsed.issue_number, Some(1438));
         assert_eq!(parsed.tasks.len(), 2);
         assert_eq!(parsed.tasks[0].id, "T010");
         assert_eq!(parsed.tasks[1].base_status, "completed");

@@ -19,6 +19,18 @@ const terminalInstances: any[] = [];
 const fitAddonInstances: any[] = [];
 const resizeObserverInstances: Array<{ __trigger: () => void }> = [];
 
+function setNavigatorPlatform(platform: string, userAgentDataPlatform: string | null = null) {
+  Object.defineProperty(navigator, "platform", {
+    configurable: true,
+    value: platform,
+  });
+  Object.defineProperty(navigator, "userAgentData", {
+    configurable: true,
+    value:
+      userAgentDataPlatform === null ? null : { platform: userAgentDataPlatform },
+  });
+}
+
 vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
 }));
@@ -139,6 +151,8 @@ describe("TerminalView", () => {
     callOrder = [];
     delete (window as any).__gwtTerminalFontSize;
     delete (window as any).__gwtTerminalFontFamily;
+    delete (window as any).__gwtWindowsPtyBuildNumber;
+    setNavigatorPlatform("MacIntel");
     listenMock.mockImplementation(
       async (eventName: string, handler?: unknown) => {
         callOrder.push(`listen:${eventName}`);
@@ -179,6 +193,34 @@ describe("TerminalView", () => {
     expect(terminalInstances[0].options.fontFamily).toBe(
       '"Cascadia Mono", "Cascadia Code", Consolas, monospace'
     );
+  });
+
+  it("passes Windows ConPTY options to xterm when running on Windows", async () => {
+    setNavigatorPlatform("Win32", "Windows");
+    (window as any).__gwtWindowsPtyBuildNumber = 26200;
+
+    await renderTerminalView({ paneId: "pane-winpty", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    expect(terminalInstances[0].options.windowsPty).toEqual({
+      backend: "conpty",
+      buildNumber: 26200,
+    });
+  });
+
+  it("falls back to ConPTY backend without a build number on Windows", async () => {
+    setNavigatorPlatform("Win32", "Windows");
+
+    await renderTerminalView({ paneId: "pane-winpty-fallback", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    expect(terminalInstances[0].options.windowsPty).toEqual({
+      backend: "conpty",
+    });
   });
 
   it("updates terminal font family from custom event", async () => {

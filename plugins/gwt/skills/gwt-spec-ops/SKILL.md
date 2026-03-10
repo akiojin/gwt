@@ -1,5 +1,5 @@
 ---
-name: gwt-issue-spec-ops
+name: gwt-spec-ops
 description: GitHub Issue-first spec management. Use GitHub Issues with the `gwt-spec` label for requirements definition, spec drafting, TDD planning, implementation planning, task generation, and quality checklist generation. Use this when the user asks to write a spec, create a spec, do TDD, define requirements, generate plan/tasks, resolve spec ambiguity, or analyze consistency.
 ---
 
@@ -34,7 +34,7 @@ shortest explicit recovery action. Do not silently skip the search.
 
 ### SPEC ID
 
-SPEC ID = the **issue number**. Do not use the legacy `SPEC-[a-f0-9]{8}` format.
+SPEC ID = the **issue number**. Do not use legacy UUID-style spec identifiers.
 
 ### Label
 

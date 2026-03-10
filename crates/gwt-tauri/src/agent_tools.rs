@@ -8,7 +8,7 @@
 //!
 //! # Issue-first spec tools
 //!
-//! - `upsert_spec_issue` — Create or update an issue-first spec artifact bundle for a SPEC ID.
+//! - `upsert_spec_issue` — Create or update an issue-first spec artifact bundle for an issue.
 //!   Merges section patches (spec, plan, tasks, tdd, research, data_model, quickstart,
 //!   contracts, checklists) with existing data via optimistic-concurrency `expected_etag`.
 //! - `get_spec_issue` — Get issue-first spec details for a given issue number.
@@ -26,8 +26,8 @@
 use serde_json::{json, Value};
 
 use crate::commands::issue_spec::{
-    delete_spec_issue_artifact_comment_cmd, find_spec_issue_by_spec_id_cmd,
-    get_spec_issue_detail_cmd, list_spec_issue_artifact_comments_cmd, sync_spec_issue_project_cmd,
+    delete_spec_issue_artifact_comment_cmd, get_spec_issue_detail_cmd,
+    list_spec_issue_artifact_comments_cmd, sync_spec_issue_project_cmd,
     upsert_spec_issue_artifact_comment_cmd, upsert_spec_issue_cmd, SpecIssueSectionsData,
 };
 use crate::commands::terminal::{
@@ -111,12 +111,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".to_string(),
             function: ToolFunction {
                 name: TOOL_UPSERT_SPEC_ISSUE.to_string(),
-                description: "Create or update an issue-first spec artifact bundle for a SPEC ID."
+                description: "Create or update an issue-first spec artifact bundle for an issue."
                     .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "spec_id": { "type": "string" },
+                        "issue_number": { "type": "integer", "minimum": 1 },
                         "title": { "type": "string" },
                         "expected_etag": { "type": "string" },
                         "sections": {
@@ -134,7 +134,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                             }
                         }
                     },
-                    "required": ["spec_id", "title", "sections"]
+                    "required": ["title", "sections"]
                 }),
             },
         },
@@ -277,22 +277,26 @@ pub fn execute_tool_call(
         }
         TOOL_UPSERT_SPEC_ISSUE => {
             let project_path = get_project_path_for_window(state, window_label)?;
-            let spec_id = get_required_string_any(&args, &["spec_id", "specId"])?;
+            let issue_number = get_optional_u64_any(&args, &["issue_number", "issueNumber"]);
             let title = get_required_string_any(&args, &["title"])?;
             let sections = get_required_object_any(&args, &["sections"])?;
             let expected_etag = get_optional_string_any(&args, &["expected_etag", "expectedEtag"])
                 .map(str::to_string);
             let patch = parse_sections_patch(sections);
-            let existing =
-                find_spec_issue_by_spec_id_cmd(project_path.clone(), spec_id.to_string())
-                    .map_err(|e| e.message)?;
+            let existing = match issue_number {
+                Some(number) => Some(
+                    get_spec_issue_detail_cmd(project_path.clone(), number)
+                        .map_err(|e| e.message)?,
+                ),
+                None => None,
+            };
             let merged_sections = match existing {
                 Some(detail) => merge_sections_data(detail.sections, patch),
                 None => sections_from_patch(patch),
             };
             let detail = upsert_spec_issue_cmd(
                 project_path,
-                spec_id.to_string(),
+                issue_number,
                 title.to_string(),
                 merged_sections,
                 expected_etag,

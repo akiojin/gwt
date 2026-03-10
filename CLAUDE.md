@@ -48,7 +48,7 @@
   - 機能要件（FR-*）
   - 成功基準
 - Issue body の `## Plan`、`## Tasks` セクションも策定してから実装に入る
-- `gwt-issue-spec-ops` スキルに従って Issue を作成・更新する
+- `gwt-spec-ops` スキルに従って Issue を作成・更新する
 
 #### 2. TDD（テストファースト）
 

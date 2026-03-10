@@ -275,14 +275,14 @@ pub fn build_app(
                     spawn_single_instance_focus_listener(_app.handle().clone(), guard.clone());
                 }
 
-                // Native menubar (SPEC-4470704f)
+                // Native menubar (gwt-spec issue)
                 if let Err(e) = crate::menu::rebuild_menu(_app.handle()) {
                     warn!(category = "menu", error = %e, "Failed to build initial menu");
                 } else {
                     info!(category = "menu", "Initial native menu built");
                 }
 
-                // System tray (SPEC-dfb1611a FR-310〜FR-313)
+                // System tray (gwt-spec issue FR-310〜FR-313)
                 let tray_menu = tauri::menu::Menu::new(_app)?;
                 let show_item =
                     tauri::menu::MenuItem::with_id(_app, "tray-show", "Show", true, None::<&str>)?;
@@ -381,7 +381,7 @@ pub fn build_app(
 
                 // Project-scoped registration is executed when an agent is launched.
 
-                // Background task: check gh CLI authentication (SPEC-ad1ac432 T009)
+                // Background task: check gh CLI authentication (gwt-spec issue T009)
                 {
                     let app_handle = _app.handle().clone();
                     tauri::async_runtime::spawn_blocking(move || {
@@ -398,7 +398,7 @@ pub fn build_app(
                     });
                 }
 
-                // Background task: watch session files for agent status changes (SPEC-b80e7996 FR-820)
+                // Background task: watch session files for agent status changes (gwt-spec issue FR-820)
                 {
                     let watcher_handle = _app.handle().clone();
                     if let Err(e) = crate::session_watcher::start_session_watcher(watcher_handle) {
@@ -709,7 +709,6 @@ pub fn build_app(
             crate::commands::issue_spec::update_spec_issue_cmd,
             crate::commands::issue_spec::upsert_spec_issue_cmd,
             crate::commands::issue_spec::get_spec_issue_detail_cmd,
-            crate::commands::issue_spec::find_spec_issue_by_spec_id_cmd,
             crate::commands::issue_spec::append_spec_contract_comment_cmd,
             crate::commands::issue_spec::upsert_spec_issue_artifact_comment_cmd,
             crate::commands::issue_spec::list_spec_issue_artifact_comments_cmd,

@@ -9,7 +9,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "8.5.3"
+version = "8.5.5"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -92,7 +92,7 @@ dunce = "1"
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 nvml-wrapper = "0.12"
 
-# File system watcher (SPEC-b80e7996)
+# File system watcher (gwt-spec issue)
 notify = "8"
 notify-debouncer-mini = "0.7"
 

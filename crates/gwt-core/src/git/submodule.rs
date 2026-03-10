@@ -1,15 +1,15 @@
-//! Git submodule operations (SPEC-a70a1ece US6)
+//! Git submodule operations (gwt-spec issue US6)
 
 use std::path::Path;
 use tracing::{debug, warn};
 
-/// Check if repository has submodules (SPEC-a70a1ece T1001)
+/// Check if repository has submodules (gwt-spec issue T1001)
 pub fn has_submodules(worktree_path: &Path) -> bool {
     let gitmodules = worktree_path.join(".gitmodules");
     gitmodules.exists()
 }
 
-/// Initialize and update submodules in a worktree (SPEC-a70a1ece T1002)
+/// Initialize and update submodules in a worktree (gwt-spec issue T1002)
 ///
 /// This function runs `git submodule update --init --recursive` to initialize
 /// and update all submodules. Returns Ok(()) on success or if there are no submodules.

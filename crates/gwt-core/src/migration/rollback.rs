@@ -1,4 +1,4 @@
-//! Migration rollback (SPEC-a70a1ece T813-T814)
+//! Migration rollback (gwt-spec issue T813-T814)
 
 use super::{backup::restore_backup, config::MigrationConfig, error::MigrationError};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -17,7 +17,7 @@ struct EvacuationManifest {
     encoding: Option<String>,
 }
 
-/// Rollback migration on failure (SPEC-a70a1ece T813, FR-210)
+/// Rollback migration on failure (gwt-spec issue T813, FR-210)
 pub fn rollback_migration(config: &MigrationConfig) -> Result<(), MigrationError> {
     info!("Rolling back migration...");
 
@@ -271,7 +271,7 @@ fn cleanup_migrated_worktrees(config: &MigrationConfig) -> Result<(), MigrationE
     Ok(())
 }
 
-/// Retry a network operation with exponential backoff (SPEC-a70a1ece T814, FR-226)
+/// Retry a network operation with exponential backoff (gwt-spec issue T814, FR-226)
 #[allow(dead_code)]
 pub fn retry_with_backoff<T, F>(mut operation: F, max_attempts: u32) -> Result<T, MigrationError>
 where

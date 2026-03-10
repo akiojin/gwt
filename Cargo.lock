@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "8.5.3"
+version = "8.5.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-tauri"
-version = "8.5.3"
+version = "8.5.5"
 dependencies = [
  "chrono",
  "directories",

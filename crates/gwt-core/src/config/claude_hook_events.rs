@@ -1,4 +1,4 @@
-//! Claude Code Hook event processing (SPEC-861d8cdf FR-101)
+//! Claude Code Hook event processing (gwt-spec issue FR-101)
 //!
 //! This module processes hook payloads from Claude Code (stdin JSON) and updates
 //! gwt session status stored under `~/.gwt/sessions/`.
