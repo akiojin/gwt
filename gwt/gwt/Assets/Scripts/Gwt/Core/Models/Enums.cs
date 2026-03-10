@@ -8,7 +8,7 @@ namespace Gwt.Core.Models
     public enum FileChangeKind { Added, Modified, Deleted, Renamed, Copied, Untracked }
     public enum PrStatus { Open, Closed, Merged, Draft }
     public enum SessionStatus { Active, Paused, Completed, Failed }
-    public enum AgentType { Claude, Codex, Gemini, OpenCode }
+    public enum AgentType { Claude, Codex, Gemini, OpenCode, GithubCopilot, Custom }
     public enum DivergenceStatus { UpToDate, Ahead, Behind, Diverged }
     public enum TestStatus { NotRun, Running, Passed, Failed }
     public enum WorktreeStrategy { New, Shared }

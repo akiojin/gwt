@@ -24,7 +24,7 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(6, Enum.GetValues(typeof(FileChangeKind)).Length);
             Assert.AreEqual(4, Enum.GetValues(typeof(PrStatus)).Length);
             Assert.AreEqual(4, Enum.GetValues(typeof(SessionStatus)).Length);
-            Assert.AreEqual(4, Enum.GetValues(typeof(AgentType)).Length);
+            Assert.AreEqual(6, Enum.GetValues(typeof(AgentType)).Length);
             Assert.AreEqual(4, Enum.GetValues(typeof(DivergenceStatus)).Length);
             Assert.AreEqual(4, Enum.GetValues(typeof(TestStatus)).Length);
             Assert.AreEqual(2, Enum.GetValues(typeof(WorktreeStrategy)).Length);

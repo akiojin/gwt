@@ -13,7 +13,9 @@ namespace Gwt.Agent.Services
         Claude,
         Codex,
         Gemini,
-        OpenCode
+        OpenCode,
+        GithubCopilot,
+        Custom
     }
 
     public class DetectedAgent
