@@ -1,6 +1,6 @@
 //! Project structure index commands backed by ChromaDB (Python runtime).
 
-use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::commands::project::{resolve_project_root, resolve_repo_path_for_project_root};
 use gwt_core::process::command_os;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -434,8 +434,107 @@ fn ensure_chroma_runtime_sync() -> Result<IndexRuntimeSetupResult, String> {
     })
 }
 
-fn db_path_for_project(project_root: &str) -> PathBuf {
-    Path::new(project_root).join(".gwt").join("index")
+fn db_path_for_project(project_root: impl AsRef<Path>) -> PathBuf {
+    project_root.as_ref().join(".gwt").join("index")
+}
+
+fn canonical_project_root_for_index(project_root: &Path) -> PathBuf {
+    dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf())
+}
+
+fn remove_empty_legacy_gwt_dir(legacy_db_path: &Path) {
+    let Some(legacy_gwt_dir) = legacy_db_path.parent() else {
+        return;
+    };
+
+    match fs::read_dir(legacy_gwt_dir) {
+        Ok(entries) => {
+            let mut entries = entries;
+            if entries.next().is_none() {
+                if let Err(error) = fs::remove_dir(legacy_gwt_dir) {
+                    warn!(
+                        category = "project_index",
+                        path = %legacy_gwt_dir.display(),
+                        error = %error,
+                        "Failed to remove empty legacy .gwt directory after migrating project index"
+                    );
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(
+                category = "project_index",
+                path = %legacy_gwt_dir.display(),
+                error = %error,
+                "Failed to inspect legacy .gwt directory after migrating project index"
+            );
+        }
+    }
+}
+
+fn migrate_legacy_worktree_index(
+    requested_root: &Path,
+    normalized_root: &Path,
+) -> Result<(), String> {
+    if canonical_project_root_for_index(requested_root)
+        == canonical_project_root_for_index(normalized_root)
+    {
+        return Ok(());
+    }
+
+    let legacy_db_path = db_path_for_project(requested_root);
+    if !legacy_db_path.exists() {
+        return Ok(());
+    }
+
+    let normalized_db_path = db_path_for_project(normalized_root);
+    if normalized_db_path.exists() {
+        warn!(
+            category = "project_index",
+            legacy_db_path = %legacy_db_path.display(),
+            normalized_db_path = %normalized_db_path.display(),
+            "Leaving legacy worktree project index in place because the normalized project root already has an index"
+        );
+        return Ok(());
+    }
+
+    let normalized_parent = normalized_db_path.parent().ok_or_else(|| {
+        format!(
+            "Normalized project index path has no parent: {}",
+            normalized_db_path.display()
+        )
+    })?;
+    fs::create_dir_all(normalized_parent).map_err(|error| {
+        format!(
+            "Failed to create normalized project index directory {}: {error}",
+            normalized_parent.display()
+        )
+    })?;
+    fs::rename(&legacy_db_path, &normalized_db_path).map_err(|error| {
+        format!(
+            "Failed to migrate legacy worktree project index {} -> {}: {error}",
+            legacy_db_path.display(),
+            normalized_db_path.display()
+        )
+    })?;
+
+    tracing::info!(
+        category = "project_index",
+        legacy_db_path = %legacy_db_path.display(),
+        normalized_db_path = %normalized_db_path.display(),
+        "Migrated legacy worktree project index to normalized project root"
+    );
+
+    remove_empty_legacy_gwt_dir(&legacy_db_path);
+    Ok(())
+}
+
+fn normalize_project_root_for_index(project_root: &str) -> Result<PathBuf, String> {
+    let requested_root = PathBuf::from(project_root);
+    let normalized_root = resolve_project_root(&requested_root);
+    migrate_legacy_worktree_index(&requested_root, &normalized_root)?;
+    Ok(normalized_root)
 }
 
 fn is_recoverable_chroma_db_error(error: &str) -> bool {
@@ -570,21 +669,23 @@ fn run_project_index_action_with_crash_recovery(
     n_results: Option<u32>,
 ) -> Result<ChromaRunnerResponse, String> {
     let python = find_python_binary()?;
-    let db = db_path_for_project(project_root);
+    let project_root = normalize_project_root_for_index(project_root)?;
+    let project_root = project_root.to_string_lossy().to_string();
+    let db = db_path_for_project(&project_root);
     let db_path = db.to_string_lossy().to_string();
 
     let run_primary = || match action {
         "index" => run_chroma_runner(
             &python,
             "index",
-            Some(project_root),
+            Some(&project_root),
             Some(&db_path),
             None,
             None,
         ),
         "search" => run_chroma_runner(&python, "search", None, Some(&db_path), query, n_results),
         "status" => run_chroma_runner(&python, "status", None, Some(&db_path), None, None),
-        "index-issues" => rebuild_issue_index(&python, project_root, &db_path, explicit_repo_path),
+        "index-issues" => rebuild_issue_index(&python, &project_root, &db_path, explicit_repo_path),
         "search-issues" => run_chroma_runner(
             &python,
             "search-issues",
@@ -629,7 +730,7 @@ fn run_project_index_action_with_crash_recovery(
             let rebuilt_files = run_chroma_runner(
                 &python,
                 "index",
-                Some(project_root),
+                Some(&project_root),
                 Some(&db_path),
                 None,
                 None,
@@ -648,7 +749,7 @@ fn run_project_index_action_with_crash_recovery(
                 should_rebuild_issues_collection(action, issues_collection_presence);
             let rebuilt_issues = if needs_issue_rebuild {
                 Some(
-                    rebuild_issue_index(&python, project_root, &db_path, explicit_repo_path)
+                    rebuild_issue_index(&python, &project_root, &db_path, explicit_repo_path)
                         .map_err(|rebuild_err| {
                             format!(
                                 "Recovered crashing index at {} to {} and rebuilt files index, but failed to rebuild issues index: {}; original error: {}",
@@ -750,12 +851,10 @@ pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusRes
 #[tauri::command]
 pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssuesResult, String> {
     tokio::task::spawn_blocking(move || {
-        let repo_path = repo_path_for_issue_index(&project_root)?;
-        let repo_path = repo_path.to_string_lossy().to_string();
         let resp = run_project_index_action_with_crash_recovery(
             "index-issues",
             &project_root,
-            Some(&repo_path),
+            None,
             None,
             None,
         )?;
@@ -854,10 +953,132 @@ mod tests {
         }
     }
 
+    fn init_repo_with_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+
+        let output = command_os("git")
+            .arg("init")
+            .arg(&repo)
+            .output()
+            .expect("run git init");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "test@example.com"),
+        ] {
+            let output = command_os("git")
+                .current_dir(&repo)
+                .args(["config", key, value])
+                .output()
+                .expect("run git config");
+            assert!(
+                output.status.success(),
+                "git config {key} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fs::write(repo.join("README.md"), "# Repo\n").expect("write README");
+
+        let output = command_os("git")
+            .current_dir(&repo)
+            .args(["add", "README.md"])
+            .output()
+            .expect("run git add");
+        assert!(
+            output.status.success(),
+            "git add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let output = command_os("git")
+            .current_dir(&repo)
+            .args(["commit", "-m", "initial commit"])
+            .output()
+            .expect("run git commit");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let worktree = temp.path().join(".worktrees").join("feature");
+        let output = command_os("git")
+            .current_dir(&repo)
+            .args(["worktree", "add", "-b", "feature"])
+            .arg(&worktree)
+            .output()
+            .expect("run git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        (temp, repo, worktree)
+    }
+
     #[test]
     fn db_path_uses_gwt_index_dir() {
         let path = db_path_for_project("/tmp/myproject");
         assert_eq!(path, PathBuf::from("/tmp/myproject/.gwt/index"));
+    }
+
+    #[test]
+    fn normalize_project_root_for_index_moves_legacy_worktree_index() {
+        let (_temp, repo, worktree) = init_repo_with_worktree();
+        let legacy_db = db_path_for_project(&worktree);
+        fs::create_dir_all(&legacy_db).expect("create legacy index dir");
+        fs::write(legacy_db.join("chroma.sqlite3"), b"legacy").expect("write legacy db");
+
+        let normalized = normalize_project_root_for_index(&worktree.to_string_lossy())
+            .expect("normalize worktree project root");
+
+        assert_eq!(normalized, repo);
+        assert!(
+            db_path_for_project(&repo).join("chroma.sqlite3").is_file(),
+            "normalized project root should receive the migrated index db"
+        );
+        assert!(
+            !legacy_db.exists(),
+            "legacy worktree index directory should be moved away"
+        );
+        assert!(
+            !worktree.join(".gwt").exists(),
+            "empty legacy .gwt directory should be removed"
+        );
+    }
+
+    #[test]
+    fn normalize_project_root_for_index_keeps_existing_main_repo_index() {
+        let (_temp, repo, worktree) = init_repo_with_worktree();
+        let main_db = db_path_for_project(&repo);
+        fs::create_dir_all(&main_db).expect("create normalized index dir");
+        fs::write(main_db.join("chroma.sqlite3"), b"main").expect("write normalized db");
+
+        let legacy_db = db_path_for_project(&worktree);
+        fs::create_dir_all(&legacy_db).expect("create legacy index dir");
+        fs::write(legacy_db.join("chroma.sqlite3"), b"legacy").expect("write legacy db");
+
+        let normalized = normalize_project_root_for_index(&worktree.to_string_lossy())
+            .expect("normalize worktree project root");
+
+        assert_eq!(normalized, repo);
+        assert_eq!(
+            fs::read(main_db.join("chroma.sqlite3")).expect("read normalized db"),
+            b"main"
+        );
+        assert_eq!(
+            fs::read(legacy_db.join("chroma.sqlite3")).expect("read legacy db"),
+            b"legacy"
+        );
     }
 
     #[test]

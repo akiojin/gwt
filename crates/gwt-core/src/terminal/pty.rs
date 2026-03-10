@@ -2,6 +2,7 @@
 //!
 //! Manages pseudo-terminal creation, I/O, resize, and cleanup.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -262,8 +263,36 @@ fn is_powershell_executable(command: &str) -> bool {
     )
 }
 
+fn strip_windows_extended_length_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix("//?/UNC/") {
+        return Cow::Owned(format!("//{rest}"));
+    }
+
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+
+    if let Some(rest) = path.strip_prefix("//?/") {
+        return Cow::Borrowed(rest);
+    }
+
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(rest);
+    }
+
+    Cow::Borrowed(path)
+}
+
+fn normalize_windows_working_dir_path(working_dir: &Path) -> PathBuf {
+    PathBuf::from(
+        strip_windows_extended_length_prefix(working_dir.to_string_lossy().as_ref()).as_ref(),
+    )
+}
+
 fn normalize_windows_working_dir_for_shell(working_dir: &Path) -> String {
-    working_dir.to_string_lossy().replace('/', "\\")
+    normalize_windows_working_dir_path(working_dir)
+        .to_string_lossy()
+        .replace('/', "\\")
 }
 
 fn cmd_cd_expression(working_dir: &Path) -> String {
@@ -513,11 +542,12 @@ impl PtyHandle {
             config.windows_force_utf8,
         );
         let mut spawn_args = spawn_args;
+        let normalized_working_dir = normalize_windows_working_dir_path(&config.working_dir);
         if cfg!(windows) {
             inject_windows_working_dir_into_spawn_args(
                 &spawn_command,
                 &mut spawn_args,
-                &config.working_dir,
+                &normalized_working_dir,
             );
         }
         let normalized_command = if cfg!(windows) {
@@ -549,6 +579,8 @@ impl PtyHandle {
             resolved_args = ?spawn_args,
             interactive = config.interactive,
             terminal_shell = ?config.terminal_shell,
+            working_dir = %config.working_dir.display(),
+            normalized_working_dir = %normalized_working_dir.display(),
             launch_mode,
             "Resolved PTY spawn command"
         );
@@ -557,7 +589,7 @@ impl PtyHandle {
         for arg in &spawn_args {
             cmd.arg(arg);
         }
-        cmd.cwd(&config.working_dir);
+        cmd.cwd(&normalized_working_dir);
 
         // Default to a color-capable terminal environment.
         cmd.env("TERM", "xterm-256color");
@@ -1292,6 +1324,23 @@ mod tests {
     }
 
     #[test]
+    fn inject_windows_working_dir_into_spawn_args_cmd_strips_extended_length_prefix() {
+        let mut args = vec!["/C".to_string(), "codex --version".to_string()];
+        inject_windows_working_dir_into_spawn_args(
+            "cmd.exe",
+            &mut args,
+            Path::new(r"\\?\E:\gwt\develop"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "/C".to_string(),
+                "cd /D \"E:\\gwt\\develop\" && codex --version".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn inject_windows_working_dir_into_spawn_args_powershell_prefixes_set_location() {
         let mut args = vec![
             "-NoLogo".to_string(),
@@ -1330,6 +1379,22 @@ mod tests {
             args[6],
             "Set-Location -LiteralPath 'E:\\gwt\\bugfix\\issue-1466'; & 'codex' '--version'"
                 .to_string()
+        );
+    }
+
+    #[test]
+    fn normalize_windows_working_dir_path_strips_extended_length_drive_prefix() {
+        assert_eq!(
+            normalize_windows_working_dir_path(Path::new(r"\\?\E:\gwt\develop")),
+            PathBuf::from(r"E:\gwt\develop")
+        );
+    }
+
+    #[test]
+    fn normalize_windows_working_dir_path_preserves_unc_root() {
+        assert_eq!(
+            normalize_windows_working_dir_path(Path::new(r"\\?\UNC\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
         );
     }
 

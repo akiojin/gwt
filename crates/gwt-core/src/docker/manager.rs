@@ -359,7 +359,7 @@ fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
     } else {
         base_dir.join(gitdir_path)
     };
-    let gitdir_path = gitdir_path.canonicalize().unwrap_or(gitdir_path);
+    let gitdir_path = dunce::canonicalize(&gitdir_path).unwrap_or(gitdir_path);
     if let Some(common_dir) = gitdir_path
         .components()
         .position(|c| c.as_os_str() == "worktrees")
@@ -418,7 +418,7 @@ fn detect_git_dir(worktree_path: &Path) -> Option<PathBuf> {
     } else {
         base_dir.join(gitdir_path)
     };
-    Some(gitdir_path.canonicalize().unwrap_or(gitdir_path))
+    Some(dunce::canonicalize(&gitdir_path).unwrap_or(gitdir_path))
 }
 
 fn resolve_compose_status(running_output: &str, all_output: &str) -> ContainerStatus {
@@ -1687,11 +1687,8 @@ services:
         std::fs::create_dir_all(&gitdir).unwrap();
         std::fs::write(&git_file, format!("gitdir: {}\n", gitdir.to_string_lossy())).unwrap();
 
-        let common = detect_git_common_dir(&worktree)
-            .unwrap()
-            .canonicalize()
-            .unwrap();
-        let expected = temp.path().join("repo.git").canonicalize().unwrap();
+        let common = dunce::canonicalize(detect_git_common_dir(&worktree).unwrap()).unwrap();
+        let expected = dunce::canonicalize(temp.path().join("repo.git")).unwrap();
         assert_eq!(common, expected);
     }
 
@@ -1710,11 +1707,8 @@ services:
         let gitdir_rel = PathBuf::from("../repo.git/worktrees/worktree");
         std::fs::write(&git_file, format!("gitdir: {}\n", gitdir_rel.display())).unwrap();
 
-        let common = detect_git_common_dir(&worktree)
-            .unwrap()
-            .canonicalize()
-            .unwrap();
-        let expected = temp.path().join("repo.git").canonicalize().unwrap();
+        let common = dunce::canonicalize(detect_git_common_dir(&worktree).unwrap()).unwrap();
+        let expected = dunce::canonicalize(temp.path().join("repo.git")).unwrap();
         let normalize_private = |path: &Path| {
             if let Ok(stripped) = path.strip_prefix("/private") {
                 PathBuf::from("/").join(stripped)
