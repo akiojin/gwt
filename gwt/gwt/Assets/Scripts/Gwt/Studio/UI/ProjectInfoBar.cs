@@ -1,14 +1,20 @@
+using System;
 using TMPro;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
 
 namespace Gwt.Studio.UI
 {
-    public class ProjectInfoBar : MonoBehaviour
+    public class ProjectInfoBar : MonoBehaviour, IPointerClickHandler
     {
         [SerializeField] private TextMeshProUGUI _projectNameText;
         [SerializeField] private TextMeshProUGUI _branchText;
         [SerializeField] private TextMeshProUGUI _statusText;
         [SerializeField] private TextMeshProUGUI _environmentText;
+        [SerializeField] private Button _button;
+
+        public event Action Clicked;
 
         public string CurrentProjectName { get; private set; } = string.Empty;
         public string CurrentBranch { get; private set; } = string.Empty;
@@ -18,7 +24,14 @@ namespace Gwt.Studio.UI
         private void Awake()
         {
             EnsureUi();
+            BindClick();
             ApplyState();
+        }
+
+        private void OnDestroy()
+        {
+            if (_button != null)
+                _button.onClick.RemoveListener(InvokeClicked);
         }
 
         public void SetProjectName(string name)
@@ -45,6 +58,11 @@ namespace Gwt.Studio.UI
             ApplyState();
         }
 
+        public void OnPointerClick(PointerEventData eventData)
+        {
+            InvokeClicked();
+        }
+
         private void ApplyState()
         {
             EnsureUi();
@@ -69,6 +87,17 @@ namespace Gwt.Studio.UI
             rectTransform.pivot = new Vector2(0f, 1f);
             rectTransform.anchoredPosition = new Vector2(20f, -20f);
             rectTransform.sizeDelta = new Vector2(420f, 112f);
+
+            if (gameObject.GetComponent<Image>() == null)
+            {
+                var image = gameObject.AddComponent<Image>();
+                image.color = new Color(0.11f, 0.13f, 0.17f, 0.82f);
+            }
+
+            if (_button == null)
+                _button = gameObject.GetComponent<Button>();
+            if (_button == null)
+                _button = gameObject.AddComponent<Button>();
 
             if (_projectNameText == null)
                 _projectNameText = CreateLabel("ProjectName", new Vector2(0f, 0f), 28f, FontStyles.Bold);
@@ -102,6 +131,21 @@ namespace Gwt.Studio.UI
             text.enableWordWrapping = false;
             text.text = string.Empty;
             return text;
+        }
+
+        private void BindClick()
+        {
+            if (_button == null)
+                return;
+
+            _button.targetGraphic = gameObject.GetComponent<Image>();
+            _button.onClick.RemoveListener(InvokeClicked);
+            _button.onClick.AddListener(InvokeClicked);
+        }
+
+        private void InvokeClicked()
+        {
+            Clicked?.Invoke();
         }
     }
 }

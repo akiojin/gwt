@@ -3,11 +3,13 @@ using Cysharp.Threading.Tasks;
 using Gwt.Core.Services.Terminal;
 using Gwt.Infra.Services;
 using Gwt.Lifecycle.Services;
+using Gwt.Shared;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
 using VContainer;
+using VContainer.Unity;
 
 namespace Gwt.Studio.UI
 {
@@ -59,6 +61,8 @@ namespace Gwt.Studio.UI
 
         private void Awake()
         {
+            TryResolveRuntimeServices();
+            SubscribeServices();
             EnsureProjectInfoBar();
             RefreshProjectInfoBar();
         }
@@ -214,6 +218,8 @@ namespace Gwt.Studio.UI
 
         private void EnsureProjectSwitcher()
         {
+            TryResolveRuntimeServices();
+            SubscribeServices();
             EnsureProjectInfoBar();
 
             if (_projectSwitchOverlayPanel == null)
@@ -252,6 +258,14 @@ namespace Gwt.Studio.UI
                 infoBarObject.transform.SetParent(transform, false);
                 _projectInfoBar = infoBarObject.AddComponent<ProjectInfoBar>();
             }
+
+            _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
+            _projectInfoBar.Clicked += HandleProjectInfoBarClicked;
+        }
+
+        private void HandleProjectInfoBarClicked()
+        {
+            ToggleProjectSwitcher();
         }
 
         private void HandleProjectOpened(ProjectInfo _)
@@ -274,6 +288,8 @@ namespace Gwt.Studio.UI
 
         private void RefreshProjectInfoBar()
         {
+            TryResolveRuntimeServices();
+            SubscribeServices();
             if (_projectInfoBar == null)
                 return;
 
@@ -297,10 +313,10 @@ namespace Gwt.Studio.UI
             }
 
             _projectInfoBar.SetStatus(status);
-            _projectInfoBar.SetEnvironment(string.Empty);
             _projectInfoRefreshVersion++;
             var refreshVersion = _projectInfoRefreshVersion;
             var projectPath = currentProject.Path;
+            _projectInfoBar.SetEnvironment(GetImmediateEnvironmentLabel(projectPath));
             RefreshProjectEnvironmentAsync(projectPath, refreshVersion).Forget();
         }
 
@@ -335,6 +351,59 @@ namespace Gwt.Studio.UI
             }
         }
 
+        private void TryResolveRuntimeServices()
+        {
+            if (_projectLifecycleService != null &&
+                _multiProjectService != null &&
+                _terminalPaneManager != null &&
+                _dockerService != null)
+            {
+                return;
+            }
+
+            var scope = LifetimeScope.Find<GwtRootLifetimeScope>(gameObject.scene) as GwtRootLifetimeScope;
+            var container = scope?.Container;
+            if (container == null)
+            {
+                _dockerService ??= new DockerService();
+                return;
+            }
+
+            try
+            {
+                _projectLifecycleService ??= container.Resolve<IProjectLifecycleService>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _multiProjectService ??= container.Resolve<IMultiProjectService>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _terminalPaneManager ??= container.Resolve<ITerminalPaneManager>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _dockerService ??= container.Resolve<IDockerService>();
+            }
+            catch
+            {
+            }
+
+            _dockerService ??= new DockerService();
+        }
+
         private static string FormatDockerEnvironment(DockerRuntimeStatus status)
         {
             if (status == null || !status.HasDockerContext)
@@ -350,6 +419,29 @@ namespace Gwt.Studio.UI
             return "Host: Docker fallback";
         }
 
+        private string GetImmediateEnvironmentLabel(string projectPath)
+        {
+            if (_dockerService is not DockerService dockerService || string.IsNullOrWhiteSpace(projectPath))
+                return string.Empty;
+
+            try
+            {
+                var context = dockerService.DetectContextAsync(projectPath).GetAwaiter().GetResult();
+                if (context == null || (!context.HasDockerCompose && !context.HasDevContainer))
+                    return string.Empty;
+
+                var service = context.DetectedServices != null && context.DetectedServices.Count > 0
+                    ? context.DetectedServices[0]
+                    : string.Empty;
+
+                return string.IsNullOrWhiteSpace(service) ? "Docker: context detected" : $"Docker: {service}";
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
         private void OnDestroy()
         {
             if (_projectLifecycleService != null)
@@ -360,6 +452,9 @@ namespace Gwt.Studio.UI
 
             if (_multiProjectService != null)
                 _multiProjectService.OnProjectSwitched -= HandleProjectSwitched;
+
+            if (_projectInfoBar != null)
+                _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
         }
 
         private async UniTask<bool> ConfirmProjectSwitchCoreAsync()
@@ -461,12 +556,11 @@ namespace Gwt.Studio.UI
         {
 #if ENABLE_INPUT_SYSTEM
             var keyboard = Keyboard.current;
-            return keyboard != null && (keyboard.backquoteKey?.isPressed ?? false);
+            return keyboard != null && ((keyboard.backquoteKey?.isPressed ?? false) || (keyboard.quoteKey?.isPressed ?? false));
 #else
-            return Input.GetKey(KeyCode.BackQuote);
+            return Input.GetKey(KeyCode.BackQuote) || Input.GetKey(KeyCode.Quote);
 #endif
         }
-
         private static bool IsDownPressed()
         {
 #if ENABLE_INPUT_SYSTEM

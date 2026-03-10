@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Reflection;
 using Cysharp.Threading.Tasks;
 using Gwt.Core.Models;
@@ -9,6 +10,7 @@ using Gwt.Lifecycle.Services;
 using Gwt.Studio.UI;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.UI;
 using UnityEngine.TestTools;
 
 namespace Gwt.Tests.Editor
@@ -55,6 +57,29 @@ namespace Gwt.Tests.Editor
             Assert.That(overlay.CurrentDisplayText, Does.Contain("Recent Projects"));
             Assert.That(overlay.CurrentDisplayText, Does.Contain("project-c"));
         }
+
+        [UnityTest]
+        public System.Collections.IEnumerator ProjectSwitchOverlayPanel_ClickingRecentProjectButton_OpensProject() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.RecentProjects.Add(new ProjectInfo { Name = "project-c", Path = "/tmp/project-c", DefaultBranch = "main" });
+            var multi = new MultiProjectService(lifecycle);
+
+            using var scope = new UiScope();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            overlay.SetServices(multi, lifecycle);
+            overlay.Open();
+            await overlay.RefreshAsync();
+
+            var button = overlay.GetComponentsInChildren<Button>(true).FirstOrDefault(candidate => candidate.gameObject.name == "Entry-0");
+            Assert.IsNotNull(button);
+
+            button.onClick.Invoke();
+            await UniTask.WaitUntil(() => lifecycle.CurrentProject != null, cancellationToken: default);
+
+            Assert.AreEqual("/tmp/project-c", lifecycle.CurrentProject.Path);
+            Assert.IsFalse(overlay.IsOpen);
+        });
 
         [Test]
         public void UIManager_Construct_UpdatesProjectInfoBar_FromCurrentProject()
@@ -415,6 +440,28 @@ namespace Gwt.Tests.Editor
             manager.OpenTerminal();
 
             Assert.AreEqual(1, terminal.OpenCount);
+        }
+
+        [Test]
+        public void UIManager_ProjectInfoBarClick_TogglesProjectSwitcher()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.RecentProjects.Add(new ProjectInfo { Name = "project-c", Path = "/tmp/project-c", DefaultBranch = "main" });
+            var multi = new MultiProjectService(lifecycle);
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+
+            manager.Construct(lifecycle, multi, new TerminalPaneManager());
+
+            bar.OnPointerClick(null);
+
+            Assert.IsTrue(overlay.IsOpen);
+            Assert.That(overlay.CurrentDisplayText, Does.Contain("project-c"));
         }
 
         private static void SetPrivateField(object instance, string fieldName, object value)

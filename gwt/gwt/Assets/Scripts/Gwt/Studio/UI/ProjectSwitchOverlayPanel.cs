@@ -14,6 +14,7 @@ namespace Gwt.Studio.UI
     {
         [SerializeField] private TextMeshProUGUI _titleText;
         [SerializeField] private TextMeshProUGUI _listText;
+        [SerializeField] private RectTransform _entriesContainer;
 
         private IMultiProjectService _multiProjectService;
         private IProjectLifecycleService _projectLifecycleService;
@@ -116,6 +117,7 @@ namespace Gwt.Studio.UI
             if (_entries.Count == 0)
             {
                 _listText.text = "No open or recent projects";
+                RebuildEntryButtons();
                 return;
             }
 
@@ -158,6 +160,7 @@ namespace Gwt.Studio.UI
             }
 
             _listText.text = builder.ToString();
+            RebuildEntryButtons();
         }
 
         public async UniTask RefreshAsync()
@@ -217,6 +220,11 @@ namespace Gwt.Studio.UI
 
             if (_listText == null)
                 _listText = CreateText("List", new Vector2(0f, -82f), 18f, FontStyles.Normal);
+            else
+                _listText.rectTransform.sizeDelta = new Vector2(-32f, 72f);
+
+            if (_entriesContainer == null)
+                _entriesContainer = CreateEntriesContainer();
         }
 
         private TextMeshProUGUI CreateText(string name, Vector2 anchoredPosition, float fontSize, FontStyles fontStyle)
@@ -241,6 +249,101 @@ namespace Gwt.Studio.UI
             text.enableWordWrapping = false;
             text.text = string.Empty;
             return text;
+        }
+
+        private RectTransform CreateEntriesContainer()
+        {
+            var go = new GameObject("Entries", typeof(RectTransform));
+            go.transform.SetParent(PanelRoot.transform, false);
+
+            var rect = go.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0f, 0f);
+            rect.anchorMax = new Vector2(1f, 0f);
+            rect.pivot = new Vector2(0.5f, 0f);
+            rect.anchoredPosition = new Vector2(0f, 20f);
+            rect.sizeDelta = new Vector2(-32f, 132f);
+
+            var layout = go.AddComponent<VerticalLayoutGroup>();
+            layout.spacing = 8f;
+            layout.padding = new RectOffset(0, 0, 0, 0);
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+
+            return rect;
+        }
+
+        private void RebuildEntryButtons()
+        {
+            if (_entriesContainer == null)
+                return;
+
+            for (var i = _entriesContainer.childCount - 1; i >= 0; i--)
+            {
+                var child = _entriesContainer.GetChild(i).gameObject;
+                if (Application.isPlaying)
+                    Destroy(child);
+                else
+                    DestroyImmediate(child);
+            }
+
+            for (var i = 0; i < _entries.Count; i++)
+            {
+                var entry = _entries[i];
+                var row = new GameObject($"Entry-{i}", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
+                row.transform.SetParent(_entriesContainer, false);
+
+                var image = row.GetComponent<Image>();
+                image.color = i == _selectedIndex
+                    ? new Color(0.24f, 0.32f, 0.42f, 0.95f)
+                    : new Color(0.15f, 0.18f, 0.24f, 0.88f);
+
+                var layout = row.GetComponent<LayoutElement>();
+                layout.preferredHeight = 36f;
+
+                var button = row.GetComponent<Button>();
+                button.targetGraphic = image;
+                var index = i;
+                button.onClick.AddListener(() => HandleEntryClicked(index).Forget());
+
+                var label = CreateEntryLabel(row.transform, entry);
+                label.raycastTarget = false;
+            }
+        }
+
+        private TextMeshProUGUI CreateEntryLabel(Transform parent, ProjectEntry entry)
+        {
+            var go = new GameObject("Label", typeof(RectTransform));
+            go.transform.SetParent(parent, false);
+
+            var rect = go.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = new Vector2(12f, 0f);
+            rect.offsetMax = new Vector2(-12f, 0f);
+
+            var label = go.AddComponent<TextMeshProUGUI>();
+            if (TMP_Settings.defaultFontAsset != null)
+                label.font = TMP_Settings.defaultFontAsset;
+            label.fontSize = 18f;
+            label.color = Color.white;
+            label.alignment = TextAlignmentOptions.MidlineLeft;
+            label.enableWordWrapping = false;
+            label.text = entry.IsOpenProject
+                ? $"{entry.Project.Name} [{entry.Project.DefaultBranch}]"
+                : $"{entry.Project.Name} [{entry.Project.DefaultBranch}] recent";
+            return label;
+        }
+
+        private async UniTaskVoid HandleEntryClicked(int index)
+        {
+            if (index < 0 || index >= _entries.Count)
+                return;
+
+            _selectedIndex = index;
+            Refresh();
+            await ConfirmSelectionAsync();
         }
 
         private async UniTask BuildEntriesAsync()
