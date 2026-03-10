@@ -28,7 +28,6 @@ namespace Gwt.Studio.UI
             _paneManager = paneManager;
             _ptyService = ptyService;
             _shellDetector = shellDetector;
-            Debug.Log("[GWT] TerminalOverlayPanel — DI injected");
         }
 
         private void Initialize()
@@ -81,15 +80,18 @@ namespace Gwt.Studio.UI
                 var adapter = new XtermSharpTerminalAdapter(24, 80);
                 var ptySessionId = await _ptyService.SpawnAsync(shell, shellArgs, workDir, 24, 80);
 
-                _ptyService.GetOutputStream(ptySessionId).Subscribe(data =>
+                var subscription = _ptyService.GetOutputStream(ptySessionId).Subscribe(data =>
                 {
                     adapter.Feed(data);
                 });
 
                 var paneId = Guid.NewGuid().ToString("N");
-                var pane = new TerminalPaneState(paneId, adapter) { PtySessionId = ptySessionId };
+                var pane = new TerminalPaneState(paneId, adapter)
+                {
+                    PtySessionId = ptySessionId,
+                    OutputSubscription = subscription
+                };
                 _paneManager.AddPane(pane);
-                Debug.Log($"[GWT] Pane added: paneId={paneId}, paneCount={_paneManager.PaneCount}");
             }
             catch (Exception e)
             {

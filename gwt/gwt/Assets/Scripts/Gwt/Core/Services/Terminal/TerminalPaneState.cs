@@ -1,3 +1,4 @@
+using System;
 using Gwt.Core.Models;
 
 namespace Gwt.Core.Services.Terminal
@@ -9,6 +10,7 @@ namespace Gwt.Core.Services.Terminal
         public string PtySessionId { get; set; }
         public XtermSharpTerminalAdapter Terminal { get; }
         public PaneStatus Status { get; set; }
+        public IDisposable OutputSubscription { get; set; }
 
         public TerminalPaneState(string paneId, XtermSharpTerminalAdapter terminal)
         {

@@ -60,14 +60,8 @@ namespace Gwt.Studio.UI
             _dirty = true;
         }
 
-        public void MarkDirty()
-        {
-            _dirty = true;
-        }
-
         /// <summary>
-        /// Render if dirty. Called externally from TerminalOverlayPanel.Update()
-        /// as a workaround for TerminalRenderer.Update() not executing.
+        /// Render if dirty. Called from TerminalOverlayPanel.Tick() via UIManager.Update().
         /// </summary>
         public void RenderIfDirty()
         {
@@ -86,11 +80,6 @@ namespace Gwt.Studio.UI
             {
                 _scrollRect.verticalNormalizedPosition = 0f;
             }
-        }
-
-        private void Update()
-        {
-            RenderIfDirty();
         }
     }
 }

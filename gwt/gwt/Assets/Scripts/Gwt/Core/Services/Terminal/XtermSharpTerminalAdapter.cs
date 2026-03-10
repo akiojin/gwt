@@ -48,8 +48,6 @@ namespace Gwt.Core.Services.Terminal
             return processed;
         }
 
-        public int GetPendingCount() => _pendingData.Count;
-
         public void Resize(int rows, int cols)
         {
             _emulator.Resize(rows, cols);

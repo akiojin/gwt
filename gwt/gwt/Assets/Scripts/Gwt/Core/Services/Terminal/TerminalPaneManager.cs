@@ -31,6 +31,7 @@ namespace Gwt.Core.Services.Terminal
             var index = _panes.FindIndex(p => p.PaneId == paneId);
             if (index < 0) return;
 
+            _panes[index].OutputSubscription?.Dispose();
             _panes[index].Terminal?.Dispose();
             _panes.RemoveAt(index);
 
