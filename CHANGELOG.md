@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.5.6] - 2026-03-10
+
+### Bug Fixes
+
+- **windows:** Normalize worktree paths for agent startup (#1572)
+
 ## [8.5.5] - 2026-03-10
 
 ### Bug Fixes
