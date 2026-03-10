@@ -77,18 +77,21 @@ namespace Gwt.Agent.Services
             };
 
             var (command, args) = BuildAgentCommandAndArgs(agentType, agent.ExecutablePath, worktreePath, session.Id);
-            var ptySessionId = await SpawnAgentSessionAsync(agentType, worktreePath, branch, command, args, ct);
-            session.PtySessionId = ptySessionId;
+            var launchResult = await SpawnAgentSessionAsync(agentType, worktreePath, branch, command, args, ct);
+            session.PtySessionId = launchResult.PtySessionId;
 
             var adapter = new XtermSharpTerminalAdapter(24, 80);
             var pane = new TerminalPaneState(Guid.NewGuid().ToString("N"), adapter)
             {
-                Title = BuildPaneTitle(agentType, command),
+                Title = launchResult.PaneTitle,
                 AgentSessionId = session.Id,
-                PtySessionId = ptySessionId
+                PtySessionId = launchResult.PtySessionId
             };
 
-            var outputStream = _ptyService.GetOutputStream(ptySessionId);
+            if (!string.IsNullOrWhiteSpace(launchResult.InitialOutput))
+                adapter.Feed(launchResult.InitialOutput);
+
+            var outputStream = _ptyService.GetOutputStream(launchResult.PtySessionId);
             var sessionId = session.Id;
             var subscription = outputStream.Subscribe(data =>
             {
@@ -101,10 +104,12 @@ namespace Gwt.Agent.Services
             _outputSubscriptions[session.Id] = subscription;
 
             _paneManager.AddPane(pane);
+            if (!string.IsNullOrWhiteSpace(launchResult.InitialOutput))
+                OnAgentOutput?.Invoke(sessionId, launchResult.InitialOutput);
 
             if (!string.IsNullOrEmpty(instructions))
             {
-                await _ptyService.WriteAsync(ptySessionId, instructions + "\n", ct);
+                await _ptyService.WriteAsync(launchResult.PtySessionId, instructions + "\n", ct);
             }
 
             _sessions[session.Id] = session;
@@ -114,7 +119,7 @@ namespace Gwt.Agent.Services
             return session;
         }
 
-        private async UniTask<string> SpawnAgentSessionAsync(
+        private async UniTask<AgentLaunchResult> SpawnAgentSessionAsync(
             DetectedAgentType agentType,
             string worktreePath,
             string branch,
@@ -127,15 +132,25 @@ namespace Gwt.Agent.Services
             {
                 try
                 {
-                    return await _dockerService.SpawnAsync(dockerRequest, _ptyService, 24, 80, ct);
+                    var ptySessionId = await _dockerService.SpawnAsync(dockerRequest, _ptyService, 24, 80, ct);
+                    return new AgentLaunchResult(
+                        ptySessionId,
+                        $"{BuildPaneExecutable(command)} (docker)",
+                        $"[GWT] Agent started in Docker service '{dockerRequest.ServiceName}'.\n");
                 }
                 catch (Exception e)
                 {
                     Debug.LogWarning($"[GWT] Docker agent spawn fallback to host process: {e.Message}");
+                    var ptySessionId = await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
+                    return new AgentLaunchResult(
+                        ptySessionId,
+                        $"{BuildPaneExecutable(command)} (host fallback)",
+                        $"[GWT] Docker agent launch failed, using host process.\nReason: {e.Message}\n");
                 }
             }
 
-            return await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
+            var hostSessionId = await _ptyService.SpawnAsync(command, args, worktreePath, 24, 80, ct);
+            return new AgentLaunchResult(hostSessionId, BuildPaneExecutable(command), string.Empty);
         }
 
         private async UniTask<DockerLaunchRequest> TryBuildDockerLaunchRequestAsync(
@@ -188,13 +203,27 @@ namespace Gwt.Agent.Services
             return string.IsNullOrWhiteSpace(fileName) ? command : fileName;
         }
 
-        private static string BuildPaneTitle(DetectedAgentType agentType, string command)
+        private static string BuildPaneExecutable(string command)
         {
             var executable = GetContainerExecutable(command);
             if (string.IsNullOrWhiteSpace(executable))
-                executable = agentType.ToString();
+                executable = "agent";
 
             return executable;
+        }
+
+        private sealed class AgentLaunchResult
+        {
+            public string PtySessionId { get; }
+            public string PaneTitle { get; }
+            public string InitialOutput { get; }
+
+            public AgentLaunchResult(string ptySessionId, string paneTitle, string initialOutput)
+            {
+                PtySessionId = ptySessionId;
+                PaneTitle = paneTitle;
+                InitialOutput = initialOutput;
+            }
         }
 
         public async UniTask FireAgentAsync(string sessionId, CancellationToken ct = default)

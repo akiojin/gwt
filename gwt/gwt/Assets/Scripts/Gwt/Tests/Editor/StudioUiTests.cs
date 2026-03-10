@@ -332,7 +332,9 @@ namespace Gwt.Tests.Editor
             await UniTask.Delay(50);
 
             Assert.AreEqual("/bin/fake-shell", pty.LastCommand);
-            Assert.AreEqual("Host Shell", paneManager.ActivePane.Title);
+            Assert.AreEqual("Host Shell (Docker fallback)", paneManager.ActivePane.Title);
+            Assert.That(paneManager.ActivePane.Terminal.GetBuffer().GetTextContent(0, 0, 1, 79),
+                Does.Contain("Docker shell unavailable"));
         });
 
         [Test]

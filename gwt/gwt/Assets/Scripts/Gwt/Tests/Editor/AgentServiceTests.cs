@@ -499,7 +499,7 @@ namespace Gwt.Tests.Editor
                         Assert.That(pty.LastSpawnArgs, Does.Contain("workspace"));
                         Assert.That(pty.LastSpawnArgs[^1], Does.Contain("exec 'codex' '--cwd'"));
                         Assert.That(pty.LastSpawnArgs[^1], Does.Contain(root));
-                        Assert.AreEqual("codex", paneManager.ActivePane.Title);
+                        Assert.AreEqual("codex (docker)", paneManager.ActivePane.Title);
                     }
                     finally
                     {
@@ -532,7 +532,9 @@ namespace Gwt.Tests.Editor
                         Assert.AreEqual("pty-001", session.PtySessionId);
                         Assert.AreEqual(executablePath, pty.LastSpawnCommand);
                         Assert.That(pty.LastSpawnArgs, Does.Contain("--cwd"));
-                        Assert.AreEqual("codex", paneManager.ActivePane.Title);
+                        Assert.AreEqual("codex (host fallback)", paneManager.ActivePane.Title);
+                        Assert.That(paneManager.ActivePane.Terminal.GetBuffer().GetTextContent(0, 0, 1, 79),
+                            Does.Contain("Docker agent launch failed"));
                     }
                     finally
                     {

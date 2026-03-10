@@ -111,6 +111,28 @@ namespace Gwt.Tests.Runtime
         });
 
         [UnityTest]
+        public IEnumerator PtyResize_UpdatesRunningShellSize() => UniTask.ToCoroutine(async () =>
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                Assert.Ignore("Runtime PTY resize check is Unix-specific.");
+
+            var shellDetector = new PlatformShellDetector();
+            var shell = shellDetector.DetectDefaultShell();
+            var shellArgs = shellDetector.GetShellArgs(shell);
+
+            var paneId = await _ptyService.SpawnAsync(shell, shellArgs, GetTempDir(), 24, 80);
+            var adapter = new XtermSharpTerminalAdapter(24, 80);
+            _ptyService.GetOutputStream(paneId).Subscribe(data => adapter.Feed(data));
+
+            await _ptyService.ResizeAsync(paneId, 50, 140);
+            await _ptyService.WriteAsync(paneId, "stty size\n");
+            await UniTask.Delay(800);
+
+            var text = adapter.GetBuffer().GetTextContent(0, 0, 3, 139);
+            Assert.That(text, Does.Contain("50 140"));
+        });
+
+        [UnityTest]
         public IEnumerator AnsiColors_RenderedCorrectly() => UniTask.ToCoroutine(async () =>
         {
             var adapter = new XtermSharpTerminalAdapter(24, 80);

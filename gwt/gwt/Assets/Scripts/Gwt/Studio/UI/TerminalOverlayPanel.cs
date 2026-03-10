@@ -85,6 +85,8 @@ namespace Gwt.Studio.UI
                 var adapter = new XtermSharpTerminalAdapter(24, 80);
                 var launch = await ResolveLaunchAsync() ?? hostLaunch;
                 var ptySessionId = await launch.SpawnAsync(_ptyService);
+                if (!string.IsNullOrWhiteSpace(launch.InitialOutput))
+                    adapter.Feed(launch.InitialOutput);
 
                 var subscription = _ptyService.GetOutputStream(ptySessionId).Subscribe(data =>
                 {
@@ -105,11 +107,15 @@ namespace Gwt.Studio.UI
                 try
                 {
                     var adapter = new XtermSharpTerminalAdapter(24, 80);
-                    var ptySessionId = await hostLaunch.SpawnAsync(_ptyService);
+                    var fallbackLaunch = BuildHostLaunchPlan(
+                        "Host Shell (Docker fallback)",
+                        $"[GWT] Docker shell unavailable, using host shell.\nReason: {e.Message}\n");
+                    var ptySessionId = await fallbackLaunch.SpawnAsync(_ptyService);
+                    adapter.Feed(fallbackLaunch.InitialOutput);
                     var subscription = _ptyService.GetOutputStream(ptySessionId).Subscribe(data => adapter.Feed(data));
                     var pane = new TerminalPaneState(Guid.NewGuid().ToString("N"), adapter)
                     {
-                        Title = "Host Shell",
+                        Title = fallbackLaunch.Title,
                         PtySessionId = ptySessionId,
                         OutputSubscription = subscription
                     };
@@ -146,26 +152,34 @@ namespace Gwt.Studio.UI
                                     ServiceName = serviceName,
                                     UseDevContainer = context.HasDevContainer
                                 },
-                                $"Docker {serviceName}");
+                                $"Docker {serviceName}",
+                                $"[GWT] Connected terminal to Docker service '{serviceName}'.\n");
                         }
+
+                        return BuildHostLaunchPlan(
+                            "Host Shell (Docker unavailable)",
+                            "[GWT] Docker context detected but no runnable service was found. Using host shell.\n");
                     }
                 }
                 catch (Exception e)
                 {
                     Debug.LogWarning($"[GWT] Docker shell fallback to host shell: {e.Message}");
+                    return BuildHostLaunchPlan(
+                        "Host Shell (Docker fallback)",
+                        $"[GWT] Docker shell unavailable, using host shell.\nReason: {e.Message}\n");
                 }
             }
 
             return null;
         }
 
-        private TerminalLaunchPlan BuildHostLaunchPlan()
+        private TerminalLaunchPlan BuildHostLaunchPlan(string title = "Host Shell", string initialOutput = "")
         {
             var projectRoot = _projectLifecycleService?.CurrentProject?.Path;
             var shell = _shellDetector.DetectDefaultShell();
             var shellArgs = _shellDetector.GetShellArgs(shell);
             var workingDirectory = !string.IsNullOrWhiteSpace(projectRoot) ? projectRoot : Application.dataPath;
-            return TerminalLaunchPlan.ForHostShell(shell, shellArgs, workingDirectory, "Host Shell");
+            return TerminalLaunchPlan.ForHostShell(shell, shellArgs, workingDirectory, title, initialOutput);
         }
 
         public void ShowForAgent(string agentSessionId)
@@ -258,10 +272,12 @@ namespace Gwt.Studio.UI
             private readonly Func<IPtyService, UniTask<string>> _spawn;
 
             public string Title { get; }
+            public string InitialOutput { get; }
 
-            private TerminalLaunchPlan(string title, Func<IPtyService, UniTask<string>> spawn)
+            private TerminalLaunchPlan(string title, string initialOutput, Func<IPtyService, UniTask<string>> spawn)
             {
                 Title = title;
+                InitialOutput = initialOutput;
                 _spawn = spawn;
             }
 
@@ -270,15 +286,15 @@ namespace Gwt.Studio.UI
                 return _spawn(ptyService);
             }
 
-            public static TerminalLaunchPlan ForHostShell(string command, string[] args, string workingDirectory, string title)
+            public static TerminalLaunchPlan ForHostShell(string command, string[] args, string workingDirectory, string title, string initialOutput = "")
             {
-                return new TerminalLaunchPlan(title, ptyService =>
+                return new TerminalLaunchPlan(title, initialOutput, ptyService =>
                     ptyService.SpawnAsync(command, args, workingDirectory, 24, 80));
             }
 
-            public static TerminalLaunchPlan ForDocker(IDockerService dockerService, DockerLaunchRequest request, string title)
+            public static TerminalLaunchPlan ForDocker(IDockerService dockerService, DockerLaunchRequest request, string title, string initialOutput = "")
             {
-                return new TerminalLaunchPlan(title, ptyService =>
+                return new TerminalLaunchPlan(title, initialOutput, ptyService =>
                     dockerService.SpawnAsync(request, ptyService, 24, 80));
             }
         }
