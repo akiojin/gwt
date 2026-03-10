@@ -93,15 +93,23 @@ pub struct AgentSettings {
     pub skill_registration: Option<SkillRegistrationPreferences>,
 }
 
+fn default_skill_registration_enabled() -> bool {
+    true
+}
+
 /// Preferences for managed skill / plugin registration.
-///
-/// Registration always targets the User scope (home directory).
-/// This struct exists as a marker so we can distinguish
-/// "not configured" (None) from "configured" (Some).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SkillRegistrationPreferences {
-    // Currently a marker struct. Future fields (e.g. disabled agents) can be added here.
+    /// Whether project-local managed assets are automatically repaired and refreshed.
+    #[serde(default = "default_skill_registration_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for SkillRegistrationPreferences {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Docker settings

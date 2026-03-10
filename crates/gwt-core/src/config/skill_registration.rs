@@ -111,6 +111,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
+        relative_path: "skills/gwt-pr-check/scripts/check_pr_status.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pr-check/scripts/check_pr_status.py"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
         relative_path: "skills/gwt-project-index/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -413,6 +422,15 @@ fn project_asset_missing_items(agent_root_name: &str) -> Vec<String> {
         .iter()
         .map(|asset| format!("{agent_root_name}/{}", asset.relative_path))
         .collect()
+}
+
+fn skill_registration_enabled(settings: &Settings) -> bool {
+    settings
+        .agent
+        .skill_registration
+        .as_ref()
+        .map(|prefs| prefs.enabled)
+        .unwrap_or(true)
 }
 
 fn skills_root_for(agent: SkillAgentType, project_root: Option<&Path>) -> Option<PathBuf> {
@@ -1126,7 +1144,7 @@ pub fn register_agent_skills_with_settings_at_project_root(
     project_root: Option<&Path>,
 ) -> Result<(), GwtError> {
     // Force registration is no longer needed with project-scoped assets.
-    if settings.agent.skill_registration.is_none() {
+    if !skill_registration_enabled(settings) {
         return Err(GwtError::ConfigWriteError {
             reason: SCOPE_NOT_CONFIGURED_MESSAGE.to_string(),
         });
@@ -1195,7 +1213,7 @@ fn status_for(
     settings: &Settings,
     project_root: Option<&Path>,
 ) -> SkillAgentRegistrationStatus {
-    if settings.agent.skill_registration.is_none() {
+    if !skill_registration_enabled(settings) {
         return scope_unconfigured_status(agent);
     }
 
@@ -1355,7 +1373,7 @@ pub fn repair_skill_registration_with_settings_at_project_root(
     settings: &Settings,
     project_root: Option<&Path>,
 ) -> SkillRegistrationStatus {
-    if settings.agent.skill_registration.is_some() {
+    if skill_registration_enabled(settings) {
         if let Err(err) = register_all_skills_with_settings_at_project_root(settings, project_root)
         {
             warn!(
@@ -1385,7 +1403,8 @@ mod tests {
 
     fn registration_settings() -> Settings {
         let mut settings = Settings::default();
-        settings.agent.skill_registration = Some(crate::config::SkillRegistrationPreferences {});
+        settings.agent.skill_registration =
+            Some(crate::config::SkillRegistrationPreferences::default());
         settings
     }
 
@@ -1438,6 +1457,13 @@ mod tests {
             .join("gwt-spec-to-issue-migration")
             .join("scripts")
             .join("migrate-specs-to-issues.sh")
+            .exists());
+        assert!(tmp
+            .path()
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
             .exists());
     }
 
@@ -1494,10 +1520,13 @@ mod tests {
     }
 
     #[test]
-    fn status_for_reports_scope_not_configured() {
+    fn status_for_reports_scope_not_configured_when_explicitly_disabled() {
         let tmp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.agent.skill_registration =
+            Some(crate::config::SkillRegistrationPreferences { enabled: false });
         let status = get_skill_registration_status_with_settings_at_project_root(
-            &Settings::default(),
+            &settings,
             Some(tmp.path()),
         );
         assert_eq!(status.overall, "failed");
@@ -1542,14 +1571,36 @@ mod tests {
     }
 
     #[test]
-    fn register_with_settings_requires_scope_configuration() {
+    fn register_with_settings_respects_explicit_disable() {
         let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.agent.skill_registration =
+            Some(crate::config::SkillRegistrationPreferences { enabled: false });
+        let result = register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn register_with_default_settings_is_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        init_test_git_dir(temp.path());
         let result = register_agent_skills_with_settings_at_project_root(
             SkillAgentType::Codex,
             &Settings::default(),
             Some(temp.path()),
         );
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-ops")
+            .join("SKILL.md")
+            .exists());
     }
 
     #[test]
@@ -1592,6 +1643,22 @@ mod tests {
             .join("gwt-spec-to-issue-migration")
             .join("scripts")
             .join("migrate-specs-to-issues.sh")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".gemini")
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
             .exists());
 
         assert!(temp
