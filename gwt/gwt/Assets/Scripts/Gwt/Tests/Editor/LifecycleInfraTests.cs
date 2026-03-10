@@ -544,10 +544,17 @@ namespace Gwt.Tests.Editor
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
             var index = (List<FileIndexEntry>)indexField.GetValue(service);
 
-            index.Add(new FileIndexEntry { FileName = "MainWindow", RelativePath = "Editor/MainWindow.uxml", Extension = ".uxml" });
+            index.Add(new FileIndexEntry
+            {
+                FileName = "MainWindow",
+                RelativePath = "Editor/MainWindow.uxml",
+                Extension = ".uxml",
+                PreviewText = "Open project search overlay"
+            });
 
             Assert.AreEqual(1, service.Search("editor/").Count);
             Assert.AreEqual(1, service.Search(".uxml").Count);
+            Assert.AreEqual(1, service.Search("overlay").Count);
         }
 
         [Test]
@@ -624,6 +631,52 @@ namespace Gwt.Tests.Editor
                 await service.RefreshAsync(tempDir);
 
                 Assert.AreEqual(2, service.IndexedFileCount);
+            });
+        });
+
+        [UnityTest]
+        public IEnumerator ProjectIndexService_RefreshChangedFilesAsync_TracksChangedAndDeletedFiles() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var readmePath = Path.Combine(tempDir, "README.md");
+                var changelogPath = Path.Combine(tempDir, "CHANGELOG.md");
+                File.WriteAllText(readmePath, "first");
+                File.WriteAllText(changelogPath, "old");
+
+                var service = new ProjectIndexService();
+                await service.BuildIndexAsync(tempDir);
+
+                File.WriteAllText(readmePath, "updated search tokens");
+                File.Delete(changelogPath);
+                File.WriteAllText(Path.Combine(tempDir, "Notes.txt"), "brand new");
+
+                await service.RefreshChangedFilesAsync(tempDir);
+
+                Assert.AreEqual(2, service.IndexedFileCount);
+                Assert.AreEqual(1, service.Search("updated").Count);
+                Assert.AreEqual(0, service.Search("CHANGELOG").Count);
+                Assert.AreEqual(1, service.Search("brand new").Count);
+                Assert.AreEqual(3, service.GetStatus().ChangedFiles);
+            });
+        });
+
+        [UnityTest]
+        public IEnumerator ProjectIndexService_StartBackgroundIndexAsync_UpdatesStatusAndCompletes() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                File.WriteAllText(Path.Combine(tempDir, "README.md"), "background");
+                var service = new ProjectIndexService();
+
+                await service.StartBackgroundIndexAsync(tempDir);
+
+                var deadline = DateTime.UtcNow.AddSeconds(3);
+                while (service.GetStatus().IsRunning && DateTime.UtcNow < deadline)
+                    await UniTask.Delay(50);
+
+                Assert.IsFalse(service.GetStatus().IsRunning);
+                Assert.AreEqual(1, service.IndexedFileCount);
             });
         });
 
@@ -891,6 +944,22 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void BuildService_BuildGitHubIssueCommand_ContainsRepoTitleAndBody()
+        {
+            var service = new BuildService();
+            var command = service.BuildGitHubIssueCommand("Bug: panel", new BugReport
+            {
+                Description = "panel failed",
+                LogContent = "trace"
+            });
+
+            Assert.That(command, Does.Contain("gh issue create"));
+            Assert.That(command, Does.Contain("--repo akiojin/gwt"));
+            Assert.That(command, Does.Contain("Bug: panel"));
+            Assert.That(command, Does.Contain("panel failed"));
+        }
+
+        [Test]
         public void BuildService_GetReleaseArtifacts_ReturnsThreePlatforms()
         {
             var service = new BuildService();
@@ -899,6 +968,45 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(3, artifacts.Count);
             CollectionAssert.AreEquivalent(new[] { "macOS", "Windows", "Linux" }, artifacts.ConvertAll(artifact => artifact.Platform));
             Assert.That(artifacts[0].Version, Is.EqualTo("1.2.3"));
+        }
+
+        [Test]
+        public void BuildService_GetLatestUpdate_SelectsHighestNewerVersion()
+        {
+            var service = new BuildService();
+            var latest = service.GetLatestUpdate("1.2.3", new List<UpdateInfo>
+            {
+                new() { Version = "1.2.4", DownloadUrl = "https://example.com/124" },
+                new() { Version = "1.4.0", DownloadUrl = "https://example.com/140" },
+                new() { Version = "1.2.2", DownloadUrl = "https://example.com/122" }
+            });
+
+            Assert.IsNotNull(latest);
+            Assert.AreEqual("1.4.0", latest.Version);
+        }
+
+        [Test]
+        public void BuildService_ShouldApplyUpdate_RequiresNewerVersionAndUrl()
+        {
+            var service = new BuildService();
+
+            Assert.IsTrue(service.ShouldApplyUpdate("1.2.3", new UpdateInfo
+            {
+                Version = "1.2.4",
+                DownloadUrl = "https://example.com/124"
+            }));
+
+            Assert.IsFalse(service.ShouldApplyUpdate("1.2.3", new UpdateInfo
+            {
+                Version = "1.2.3",
+                DownloadUrl = "https://example.com/123"
+            }));
+
+            Assert.IsFalse(service.ShouldApplyUpdate("1.2.3", new UpdateInfo
+            {
+                Version = "1.2.4",
+                DownloadUrl = string.Empty
+            }));
         }
 
         [Test]

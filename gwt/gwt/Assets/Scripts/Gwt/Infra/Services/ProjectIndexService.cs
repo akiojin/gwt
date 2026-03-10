@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Gwt.Infra.Services
 {
@@ -17,6 +18,9 @@ namespace Gwt.Infra.Services
         private readonly List<FileIndexEntry> _index = new();
         private readonly List<IssueIndexEntry> _issueIndex = new();
         private readonly IndexStatus _status = new();
+        private readonly object _sync = new();
+        private Dictionary<string, FileSnapshot> _fileSnapshots = new(StringComparer.OrdinalIgnoreCase);
+        private Task _backgroundIndexTask = Task.CompletedTask;
 
         public int IndexedFileCount => _index.Count;
 
@@ -24,23 +28,34 @@ namespace Gwt.Infra.Services
         {
             ct.ThrowIfCancellationRequested();
 
-            _index.Clear();
-            _status.IsRunning = true;
-            _status.PendingFiles = CountCandidateFiles(projectRoot);
             await UniTask.SwitchToThreadPool();
 
             try
             {
-                WalkDirectory(projectRoot, projectRoot, ct);
-                _status.IndexedFileCount = _index.Count;
-                _status.LastIndexedAt = DateTime.UtcNow.ToString("o");
+                RebuildIndex(projectRoot, ct);
             }
             finally
             {
-                _status.PendingFiles = 0;
-                _status.IsRunning = false;
                 await UniTask.SwitchToMainThread(ct);
             }
+        }
+
+        public UniTask StartBackgroundIndexAsync(string projectRoot, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            lock (_sync)
+            {
+                if (_backgroundIndexTask != null && !_backgroundIndexTask.IsCompleted)
+                    return UniTask.CompletedTask;
+
+                _status.IsRunning = true;
+                _status.PendingFiles = CountCandidateFiles(projectRoot);
+                _status.ChangedFiles = 0;
+                _backgroundIndexTask = Task.Run(() => RebuildIndex(projectRoot, ct), ct);
+            }
+
+            return UniTask.CompletedTask;
         }
 
         public UniTask BuildIssueIndexAsync(List<IssueIndexEntry> issues, CancellationToken ct = default)
@@ -66,7 +81,8 @@ namespace Gwt.Infra.Services
                 .Where(e =>
                     e.FileName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                     e.RelativePath.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    e.Extension.Contains(query, StringComparison.OrdinalIgnoreCase))
+                    e.Extension.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrEmpty(e.PreviewText) && e.PreviewText.Contains(query, StringComparison.OrdinalIgnoreCase)))
                 .ToList();
         }
 
@@ -100,19 +116,95 @@ namespace Gwt.Infra.Services
             await BuildIndexAsync(projectRoot, ct);
         }
 
-        public IndexStatus GetStatus()
+        public async UniTask RefreshChangedFilesAsync(string projectRoot, CancellationToken ct = default)
         {
-            return new IndexStatus
+            ct.ThrowIfCancellationRequested();
+            await UniTask.SwitchToThreadPool();
+
+            try
             {
-                IndexedFileCount = _status.IndexedFileCount,
-                IndexedIssueCount = _status.IndexedIssueCount,
-                PendingFiles = _status.PendingFiles,
-                LastIndexedAt = _status.LastIndexedAt,
-                IsRunning = _status.IsRunning
-            };
+                var (entries, snapshots) = CollectEntries(projectRoot, ct);
+                var changedFiles = CountChangedFiles(snapshots);
+
+                lock (_sync)
+                {
+                    _index.Clear();
+                    _index.AddRange(entries);
+                    _fileSnapshots = snapshots;
+                    _status.IndexedFileCount = _index.Count;
+                    _status.ChangedFiles = changedFiles;
+                    _status.PendingFiles = 0;
+                    _status.IsRunning = false;
+                    _status.LastIndexedAt = DateTime.UtcNow.ToString("o");
+                }
+            }
+            finally
+            {
+                await UniTask.SwitchToMainThread(ct);
+            }
         }
 
-        private void WalkDirectory(string dir, string root, CancellationToken ct)
+        public IndexStatus GetStatus()
+        {
+            lock (_sync)
+            {
+                return new IndexStatus
+                {
+                    IndexedFileCount = _status.IndexedFileCount,
+                    IndexedIssueCount = _status.IndexedIssueCount,
+                    PendingFiles = _status.PendingFiles,
+                    ChangedFiles = _status.ChangedFiles,
+                    LastIndexedAt = _status.LastIndexedAt,
+                    IsRunning = _status.IsRunning
+                };
+            }
+        }
+
+        private void RebuildIndex(string projectRoot, CancellationToken ct)
+        {
+            lock (_sync)
+            {
+                _status.IsRunning = true;
+                _status.PendingFiles = CountCandidateFiles(projectRoot);
+                _status.ChangedFiles = 0;
+            }
+
+            try
+            {
+                var (entries, snapshots) = CollectEntries(projectRoot, ct);
+                lock (_sync)
+                {
+                    _index.Clear();
+                    _index.AddRange(entries);
+                    _fileSnapshots = snapshots;
+                    _status.IndexedFileCount = _index.Count;
+                    _status.LastIndexedAt = DateTime.UtcNow.ToString("o");
+                }
+            }
+            finally
+            {
+                lock (_sync)
+                {
+                    _status.PendingFiles = 0;
+                    _status.IsRunning = false;
+                }
+            }
+        }
+
+        private (List<FileIndexEntry> entries, Dictionary<string, FileSnapshot> snapshots) CollectEntries(string projectRoot, CancellationToken ct)
+        {
+            var entries = new List<FileIndexEntry>();
+            var snapshots = new Dictionary<string, FileSnapshot>(StringComparer.OrdinalIgnoreCase);
+            WalkDirectory(projectRoot, projectRoot, entries, snapshots, ct);
+            return (entries, snapshots);
+        }
+
+        private void WalkDirectory(
+            string dir,
+            string root,
+            List<FileIndexEntry> entries,
+            Dictionary<string, FileSnapshot> snapshots,
+            CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -123,16 +215,23 @@ namespace Gwt.Infra.Services
                     ct.ThrowIfCancellationRequested();
 
                     var fileInfo = new FileInfo(file);
-                    _index.Add(new FileIndexEntry
+                    var relativePath = Path.GetRelativePath(root, file);
+                    entries.Add(new FileIndexEntry
                     {
-                        RelativePath = Path.GetRelativePath(root, file),
+                        RelativePath = relativePath,
                         FileName = fileInfo.Name,
                         SizeBytes = fileInfo.Length,
                         LastModified = fileInfo.LastWriteTimeUtc.ToString("o"),
-                        Extension = fileInfo.Extension
+                        Extension = fileInfo.Extension,
+                        PreviewText = ReadPreview(file)
                     });
-                    if (_status.PendingFiles > 0)
-                        _status.PendingFiles--;
+                    snapshots[relativePath] = new FileSnapshot(fileInfo.Length, fileInfo.LastWriteTimeUtc);
+
+                    lock (_sync)
+                    {
+                        if (_status.PendingFiles > 0)
+                            _status.PendingFiles--;
+                    }
                 }
 
                 foreach (var subDir in Directory.EnumerateDirectories(dir))
@@ -141,7 +240,7 @@ namespace Gwt.Infra.Services
                     if (SkipDirectories.Contains(dirName))
                         continue;
 
-                    WalkDirectory(subDir, root, ct);
+                    WalkDirectory(subDir, root, entries, snapshots, ct);
                 }
             }
             catch (UnauthorizedAccessException)
@@ -173,6 +272,52 @@ namespace Gwt.Infra.Services
             if (issue.Labels.Any(label => label.Contains(query, StringComparison.OrdinalIgnoreCase)))
                 score += 1;
             return score;
+        }
+
+        private int CountChangedFiles(Dictionary<string, FileSnapshot> nextSnapshots)
+        {
+            var changed = 0;
+            foreach (var pair in nextSnapshots)
+            {
+                if (!_fileSnapshots.TryGetValue(pair.Key, out var previous) || !previous.Equals(pair.Value))
+                    changed++;
+            }
+
+            changed += _fileSnapshots.Keys.Count(existing => !nextSnapshots.ContainsKey(existing));
+            return changed;
+        }
+
+        private static string ReadPreview(string file)
+        {
+            try
+            {
+                var fileInfo = new FileInfo(file);
+                if (fileInfo.Length > 32 * 1024)
+                    return string.Empty;
+
+                return File.ReadAllText(file);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private readonly struct FileSnapshot : IEquatable<FileSnapshot>
+        {
+            public readonly long SizeBytes;
+            public readonly DateTime LastWriteTimeUtc;
+
+            public FileSnapshot(long sizeBytes, DateTime lastWriteTimeUtc)
+            {
+                SizeBytes = sizeBytes;
+                LastWriteTimeUtc = lastWriteTimeUtc;
+            }
+
+            public bool Equals(FileSnapshot other)
+            {
+                return SizeBytes == other.SizeBytes && LastWriteTimeUtc == other.LastWriteTimeUtc;
+            }
         }
     }
 }

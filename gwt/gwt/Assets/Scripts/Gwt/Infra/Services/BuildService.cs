@@ -158,6 +158,13 @@ namespace Gwt.Infra.Services
             return builder.ToString().TrimEnd();
         }
 
+        public string BuildGitHubIssueCommand(string title, BugReport report)
+        {
+            var resolvedTitle = string.IsNullOrWhiteSpace(title) ? "Bug report" : title.Trim();
+            var body = BuildGitHubIssueBody(report);
+            return $"gh issue create --repo akiojin/gwt --title '{EscapeShell(resolvedTitle)}' --body '{EscapeShell(body)}'";
+        }
+
         public List<BuildArtifactInfo> GetReleaseArtifacts(string version)
         {
             var normalizedVersion = string.IsNullOrWhiteSpace(version) ? "0.0.0" : version.Trim();
@@ -167,6 +174,40 @@ namespace Gwt.Infra.Services
                 new() { Platform = "Windows", OutputPath = $"dist/gwt-{normalizedVersion}-windows.msi", Version = normalizedVersion, Signed = false, Uploaded = false },
                 new() { Platform = "Linux", OutputPath = $"dist/gwt-{normalizedVersion}-linux.AppImage", Version = normalizedVersion, Signed = false, Uploaded = false }
             };
+        }
+
+        public UpdateInfo GetLatestUpdate(string currentVersion, List<UpdateInfo> candidates)
+        {
+            if (candidates == null || candidates.Count == 0)
+                return null;
+
+            var current = ParseVersion(currentVersion);
+            return candidates
+                .Where(candidate => candidate != null && ParseVersion(candidate.Version) > current)
+                .OrderByDescending(candidate => ParseVersion(candidate.Version))
+                .FirstOrDefault();
+        }
+
+        public bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate)
+        {
+            if (candidate == null || string.IsNullOrWhiteSpace(candidate.DownloadUrl))
+                return false;
+
+            return ParseVersion(candidate.Version) > ParseVersion(currentVersion);
+        }
+
+        private static Version ParseVersion(string version)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return new Version(0, 0, 0);
+
+            var normalized = version.Trim().TrimStart('v', 'V');
+            return Version.TryParse(normalized, out var parsed) ? parsed : new Version(0, 0, 0);
+        }
+
+        private static string EscapeShell(string input)
+        {
+            return (input ?? string.Empty).Replace("'", "'\"'\"'");
         }
     }
 }

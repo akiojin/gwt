@@ -12,6 +12,7 @@ namespace Gwt.Infra.Services
         public long SizeBytes;
         public string LastModified;
         public string Extension;
+        public string PreviewText;
     }
 
     [System.Serializable]
@@ -30,6 +31,7 @@ namespace Gwt.Infra.Services
         public int IndexedFileCount;
         public int IndexedIssueCount;
         public int PendingFiles;
+        public int ChangedFiles;
         public string LastIndexedAt;
         public bool IsRunning;
     }
@@ -44,11 +46,13 @@ namespace Gwt.Infra.Services
     public interface IProjectIndexService
     {
         UniTask BuildIndexAsync(string projectRoot, CancellationToken ct = default);
+        UniTask StartBackgroundIndexAsync(string projectRoot, CancellationToken ct = default);
         UniTask BuildIssueIndexAsync(List<IssueIndexEntry> issues, CancellationToken ct = default);
         List<FileIndexEntry> Search(string query);
         List<IssueIndexEntry> SearchIssues(string query);
         SearchResultGroup SearchAll(string query);
         UniTask RefreshAsync(string projectRoot, CancellationToken ct = default);
+        UniTask RefreshChangedFilesAsync(string projectRoot, CancellationToken ct = default);
         int IndexedFileCount { get; }
         IndexStatus GetStatus();
     }

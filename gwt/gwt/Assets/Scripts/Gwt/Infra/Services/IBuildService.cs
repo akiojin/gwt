@@ -56,6 +56,9 @@ namespace Gwt.Infra.Services
         UniTask<BugReport> CreateBugReportAsync(string description, CancellationToken ct = default);
         string DetectReportTarget();
         string BuildGitHubIssueBody(BugReport report);
+        string BuildGitHubIssueCommand(string title, BugReport report);
         List<BuildArtifactInfo> GetReleaseArtifacts(string version);
+        UpdateInfo GetLatestUpdate(string currentVersion, List<UpdateInfo> candidates);
+        bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate);
     }
 }
