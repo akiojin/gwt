@@ -70,7 +70,9 @@ namespace Gwt.Infra.Services
         string BuildGitHubIssueBody(BugReport report);
         string BuildGitHubIssueCommand(string title, BugReport report);
         List<BuildArtifactInfo> GetReleaseArtifacts(string version);
+        List<UpdateInfo> ParseUpdateManifest(string manifestJson);
         UpdateInfo GetLatestUpdate(string currentVersion, List<UpdateInfo> candidates);
         bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate);
+        string BuildApplyUpdateCommand(UpdateInfo candidate);
     }
 }

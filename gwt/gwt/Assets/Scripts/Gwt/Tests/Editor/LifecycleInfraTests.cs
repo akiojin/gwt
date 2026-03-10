@@ -1038,6 +1038,20 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void BuildService_ParseUpdateManifest_ParsesArrayAndWrapperForms()
+        {
+            var service = new BuildService();
+
+            var fromArray = service.ParseUpdateManifest("[{\"Version\":\"1.2.4\",\"DownloadUrl\":\"https://example.com/124\"}]");
+            var fromWrapper = service.ParseUpdateManifest("{\"Updates\":[{\"Version\":\"1.3.0\",\"DownloadUrl\":\"https://example.com/130\"}]}");
+
+            Assert.AreEqual(1, fromArray.Count);
+            Assert.AreEqual("1.2.4", fromArray[0].Version);
+            Assert.AreEqual(1, fromWrapper.Count);
+            Assert.AreEqual("1.3.0", fromWrapper[0].Version);
+        }
+
+        [Test]
         public void BuildService_ShouldApplyUpdate_RequiresNewerVersionAndUrl()
         {
             var service = new BuildService();
@@ -1059,6 +1073,26 @@ namespace Gwt.Tests.Editor
                 Version = "1.2.4",
                 DownloadUrl = string.Empty
             }));
+        }
+
+        [Test]
+        public void BuildService_BuildApplyUpdateCommand_UsesPlatformLauncher()
+        {
+            var service = new BuildService();
+            var command = service.BuildApplyUpdateCommand(new UpdateInfo
+            {
+                Version = "1.2.4",
+                DownloadUrl = "https://example.com/gwt.dmg"
+            });
+
+            #if UNITY_EDITOR_OSX
+            Assert.That(command, Does.StartWith("open "));
+            #elif UNITY_EDITOR_WIN
+            Assert.That(command, Does.StartWith("start "));
+            #else
+            Assert.That(command, Does.StartWith("xdg-open "));
+            #endif
+            Assert.That(command, Does.Contain("https://example.com/gwt.dmg"));
         }
 
         [Test]

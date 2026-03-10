@@ -190,6 +190,19 @@ namespace Gwt.Infra.Services
             };
         }
 
+        public List<UpdateInfo> ParseUpdateManifest(string manifestJson)
+        {
+            if (string.IsNullOrWhiteSpace(manifestJson))
+                return new List<UpdateInfo>();
+
+            var trimmed = manifestJson.Trim();
+            if (trimmed.StartsWith("[", StringComparison.Ordinal))
+                trimmed = $"{{\"Updates\":{trimmed}}}";
+
+            var wrapper = JsonUtility.FromJson<UpdateManifestWrapper>(trimmed);
+            return wrapper?.Updates ?? new List<UpdateInfo>();
+        }
+
         public UpdateInfo GetLatestUpdate(string currentVersion, List<UpdateInfo> candidates)
         {
             if (candidates == null || candidates.Count == 0)
@@ -210,6 +223,20 @@ namespace Gwt.Infra.Services
             return ParseVersion(candidate.Version) > ParseVersion(currentVersion);
         }
 
+        public string BuildApplyUpdateCommand(UpdateInfo candidate)
+        {
+            if (candidate == null || string.IsNullOrWhiteSpace(candidate.DownloadUrl))
+                return string.Empty;
+
+            var url = EscapeShell(candidate.DownloadUrl.Trim());
+            return Application.platform switch
+            {
+                RuntimePlatform.OSXEditor or RuntimePlatform.OSXPlayer => $"open '{url}'",
+                RuntimePlatform.WindowsEditor or RuntimePlatform.WindowsPlayer => $"start \"\" \"{candidate.DownloadUrl.Trim()}\"",
+                _ => $"xdg-open '{url}'"
+            };
+        }
+
         private static Version ParseVersion(string version)
         {
             if (string.IsNullOrWhiteSpace(version))
@@ -227,6 +254,12 @@ namespace Gwt.Infra.Services
         private static long BytesToMB(long value)
         {
             return value <= 0 ? 0 : value / (1024 * 1024);
+        }
+
+        [Serializable]
+        private class UpdateManifestWrapper
+        {
+            public List<UpdateInfo> Updates = new();
         }
     }
 }
