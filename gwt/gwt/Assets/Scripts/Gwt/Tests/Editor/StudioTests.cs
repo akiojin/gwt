@@ -124,6 +124,23 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void StudioLayout_FindDeskByAgent_FindsAgentInAssignedAgentIds()
+        {
+            var layout = new StudioLayout();
+            layout.AddDesk(new DeskSlot
+            {
+                GridPosition = new Vector2Int(4, 4),
+                AssignedBranch = "feature/shared",
+                AssignedAgentIds = new List<string> { "agent-a", "agent-b" }
+            });
+
+            var desk = layout.FindDeskByAgent("agent-b");
+
+            Assert.IsNotNull(desk);
+            Assert.AreEqual("feature/shared", desk.AssignedBranch);
+        }
+
+        [Test]
         public void StudioLayout_DefaultSize()
         {
             var layout = new StudioLayout();
@@ -315,6 +332,20 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(DeskState.Remote, desk.GetState());
         }
 
+        [Test]
+        public void DeskSlot_GetState_ReturnsStaffed_WhenAssignedAgentIdsExist()
+        {
+            var desk = new DeskSlot
+            {
+                GridPosition = new Vector2Int(0, 0),
+                AssignedBranch = "feature/test",
+                AssignedAgentIds = new List<string> { "agent-1", "agent-2" },
+                IsRemote = false
+            };
+
+            Assert.AreEqual(DeskState.Staffed, desk.GetState());
+        }
+
         // --- Dynamic studio expansion (US-29, FR-044) ---
 
         [Test]
@@ -380,6 +411,36 @@ namespace Gwt.Tests.Editor
                 "Layout should never shrink below MinHeight");
         }
 
+        [Test]
+        public void StudioLayout_ExpandIfNeeded_NoExpansionWithinCapacity()
+        {
+            var layout = new StudioLayout();
+            for (int i = 0; i < StudioLayout.DesksPerRow; i++)
+            {
+                layout.AddDesk(new DeskSlot
+                {
+                    GridPosition = new Vector2Int(i, 2),
+                    AssignedBranch = $"feature/capacity-{i}"
+                });
+            }
+
+            bool expanded = layout.ExpandIfNeeded();
+
+            Assert.IsFalse(expanded);
+            Assert.AreEqual(StudioLayout.MinHeight, layout.Height);
+        }
+
+        [Test]
+        public void StudioLayout_ShrinkIfNeeded_NoChangeWhenAlreadyMinimal()
+        {
+            var layout = new StudioLayout();
+
+            bool shrunk = layout.ShrinkIfNeeded();
+
+            Assert.IsFalse(shrunk);
+            Assert.AreEqual(StudioLayout.MinHeight, layout.Height);
+        }
+
         // --- Studio door (US-22, US-23, FR-045) ---
 
         [Test]
@@ -442,6 +503,32 @@ namespace Gwt.Tests.Editor
             Assert.IsFalse(result, "Move should fail when target position is occupied");
             var desk = layout.FindDeskByBranch("feature/a");
             Assert.AreEqual(new Vector2Int(2, 3), desk.GridPosition, "Position should not change on failed move");
+        }
+
+        [Test]
+        public void StudioLayout_MoveDesk_SamePosition_ReturnsTrueWithoutMutation()
+        {
+            var layout = new StudioLayout();
+            layout.AddDesk(new DeskSlot
+            {
+                GridPosition = new Vector2Int(2, 3),
+                AssignedBranch = "feature/noop"
+            });
+
+            bool result = layout.MoveDesk("feature/noop", new Vector2Int(2, 3));
+
+            Assert.IsTrue(result);
+            Assert.AreEqual(new Vector2Int(2, 3), layout.FindDeskByBranch("feature/noop").GridPosition);
+        }
+
+        [Test]
+        public void StudioLayout_MoveDesk_Fails_WhenDeskMissing()
+        {
+            var layout = new StudioLayout();
+
+            bool result = layout.MoveDesk("feature/missing", new Vector2Int(9, 9));
+
+            Assert.IsFalse(result);
         }
 
         // --- GetEmptyDesks / GetStaffedDesks (FR-013, FR-050) ---
@@ -540,6 +627,13 @@ namespace Gwt.Tests.Editor
         {
             var label = RandomNameGenerator.GetAgentTypeLabel(DetectedAgentType.GithubCopilot);
             Assert.AreEqual("Copilot", label);
+        }
+
+        [Test]
+        public void RandomNameGenerator_GetAgentTypeLabel_OpenCode_ReturnsOpenCode()
+        {
+            var label = RandomNameGenerator.GetAgentTypeLabel(DetectedAgentType.OpenCode);
+            Assert.AreEqual("OpenCode", label);
         }
 
         [Test]
@@ -658,6 +752,128 @@ namespace Gwt.Tests.Editor
         {
             Assert.AreEqual(6, System.Enum.GetValues(typeof(DetectedAgentType)).Length,
                 "DetectedAgentType should have 6 values: Claude, Codex, Gemini, OpenCode, GithubCopilot, Custom");
+        }
+
+        // ===========================================================
+        // TDD: インタビュー確定事項に基づく追加テスト（RED 状態）
+        // ===========================================================
+
+        // --- Studio expansion direction: downward (#1546) ---
+
+        [Test]
+        public void StudioLayout_ExpansionDirection_IsDown()
+        {
+            Assert.AreEqual(StudioLayout.ExpansionDirection.Down, StudioLayout.Expansion,
+                "Studio should expand downward (y increases)");
+        }
+
+        [Test]
+        public void StudioLayout_DoorPosition_IsAtBottomRow()
+        {
+            var layout = new StudioLayout();
+            // ドアはスタジオ最下段（y=0）に配置される
+            Assert.AreEqual(0, layout.DoorPosition.y,
+                "Door should be at y=0 (bottom row)");
+        }
+
+        [Test]
+        public void StudioLayout_ExpandIfNeeded_ExpandsDownward_NotUpward()
+        {
+            var layout = new StudioLayout();
+            int originalHeight = layout.Height;
+
+            // 容量超過するデスクを追加
+            for (int i = 0; i < StudioLayout.DesksPerRow * 3 + 1; i++)
+            {
+                layout.AddDesk(new DeskSlot
+                {
+                    GridPosition = new Vector2Int(i % StudioLayout.DesksPerRow,
+                        i / StudioLayout.DesksPerRow * StudioLayout.DeskRowHeight + 2),
+                    AssignedBranch = $"feature/expand-{i}"
+                });
+            }
+
+            layout.ExpandIfNeeded();
+
+            // 拡張後もドア（y=0）は変わらない = 下方向に拡張
+            Assert.AreEqual(0, layout.DoorPosition.y,
+                "Door position should remain at y=0 after expansion (expansion goes downward)");
+        }
+
+        // --- 1 Issue : N Agent — DeskSlot supports multiple agents (#1545 FR-028) ---
+
+        [Test]
+        public void DeskSlot_AssignedAgentIds_SupportsMultipleAgents()
+        {
+            var desk = new DeskSlot
+            {
+                GridPosition = new Vector2Int(0, 0),
+                AssignedBranch = "feature/multi-agent",
+                AssignedAgentIds = new List<string> { "agent-claude-1", "agent-codex-2", "agent-gemini-3" }
+            };
+
+            Assert.AreEqual(3, desk.AssignedAgentIds.Count,
+                "DeskSlot should support multiple agent IDs for 1:N Agent");
+        }
+
+        [Test]
+        public void DeskSlot_GetState_ReturnsStaffed_WhenMultipleAgentsAssigned()
+        {
+            var desk = new DeskSlot
+            {
+                GridPosition = new Vector2Int(0, 0),
+                AssignedBranch = "feature/test",
+                AssignedAgentIds = new List<string> { "agent-1", "agent-2" },
+                IsRemote = false
+            };
+
+            // 複数 Agent が着席している場合も Staffed を返す
+            Assert.AreEqual(DeskState.Staffed, desk.GetState(),
+                "Desk with multiple agents should return Staffed state");
+        }
+
+        [Test]
+        public void StudioLayout_FindDesksByWorktree_ReturnsAllAgentsOnDesk()
+        {
+            var layout = new StudioLayout();
+            layout.AddDesk(new DeskSlot
+            {
+                GridPosition = new Vector2Int(0, 0),
+                AssignedBranch = "feature/shared",
+                AssignedAgentIds = new List<string> { "agent-1", "agent-2" }
+            });
+
+            var desk = layout.FindDeskByBranch("feature/shared");
+            Assert.IsNotNull(desk);
+            Assert.AreEqual(2, desk.AssignedAgentIds.Count,
+                "Desk should hold multiple agent IDs for shared worktree");
+        }
+
+        // --- Context menu for multi-agent desk (#1547 + #1545 FR-028) ---
+
+        [Test]
+        public void ContextMenuBuilder_StaffedDesk_ItemOrder_IsCorrect()
+        {
+            var items = ContextMenuBuilder.BuildStaffedDeskMenu(hasSummary: true, hasPr: true);
+
+            // インタビュー確定: Terminal, Summary, Git, PR, Fire Agent の順
+            Assert.AreEqual(ContextMenuItemType.Terminal, items[0].Type, "First item should be Terminal");
+            Assert.AreEqual(ContextMenuItemType.Summary, items[1].Type, "Second item should be Summary");
+            Assert.AreEqual(ContextMenuItemType.Git, items[2].Type, "Third item should be Git");
+            Assert.AreEqual(ContextMenuItemType.PR, items[3].Type, "Fourth item should be PR");
+            Assert.AreEqual(ContextMenuItemType.FireAgent, items[4].Type, "Fifth item should be Fire Agent");
+        }
+
+        [Test]
+        public void ContextMenuBuilder_EmptyDesk_ItemOrder_IsCorrect()
+        {
+            var items = ContextMenuBuilder.BuildEmptyDeskMenu();
+
+            // インタビュー確定: Hire Agent, Terminal, Git, Delete Worktree の順
+            Assert.AreEqual(ContextMenuItemType.HireAgent, items[0].Type, "First item should be Hire Agent");
+            Assert.AreEqual(ContextMenuItemType.Terminal, items[1].Type, "Second item should be Terminal");
+            Assert.AreEqual(ContextMenuItemType.Git, items[2].Type, "Third item should be Git");
+            Assert.AreEqual(ContextMenuItemType.DeleteWorktree, items[3].Type, "Fourth item should be Delete Worktree");
         }
     }
 }

@@ -18,6 +18,8 @@ namespace Gwt.Core.Models
         public VoiceInputSettings VoiceInput = new();
         public TerminalSettings Terminal = new();
         public ProfilesConfig Profiles = new();
+        public SoundSettings Sound = new();
+        public List<CustomAgentProfile> CustomAgentProfiles = new();
     }
 
     [System.Serializable]
@@ -60,5 +62,68 @@ namespace Gwt.Core.Models
     public class TerminalSettings
     {
         public string DefaultShell;
+    }
+
+    [System.Serializable]
+    public class SoundSettings
+    {
+        /// <summary>BGM はデフォルト OFF（ユーザーが有効化する）</summary>
+        public bool BgmEnabled;
+        /// <summary>SE（効果音）はデフォルト ON</summary>
+        public bool SeEnabled = true;
+        public float BgmVolume = 0.5f;
+        public float SeVolume = 0.7f;
+    }
+
+    /// <summary>
+    /// スタジオレベル（コミット数ベースのレベルシステム）。
+    /// Agent 同時起動上限がレベルに連動する。
+    /// </summary>
+    [System.Serializable]
+    public class StudioLevel
+    {
+        public int Level = 1;
+        public int TotalCommits;
+
+        /// <summary>
+        /// 現在のレベルでの Agent 同時起動上限を取得する。
+        /// </summary>
+        public int GetMaxAgents()
+        {
+            // TODO: 実装（TDD RED 状態）
+            return 0;
+        }
+
+        /// <summary>
+        /// コミット数からレベルを算出する。
+        /// </summary>
+        public static int CalculateLevel(int totalCommits)
+        {
+            // TODO: 実装（TDD RED 状態）
+            return 0;
+        }
+
+        /// <summary>
+        /// 次のレベルアップに必要なコミット数を取得する。
+        /// </summary>
+        public int GetCommitsToNextLevel()
+        {
+            // TODO: 実装（TDD RED 状態）
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// ユーザーカスタム Agent のプロファイル定義。
+    /// JSON 形式で CLI パスと引数を指定する。
+    /// </summary>
+    [System.Serializable]
+    public class CustomAgentProfile
+    {
+        public string Id;
+        public string DisplayName;
+        public string CliPath;
+        public List<string> DefaultArgs = new();
+        public string WorkdirArgName = "--cwd";
     }
 }

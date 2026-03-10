@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Threading;
 
 namespace Gwt.Core.Services.Terminal
 {
@@ -12,6 +13,7 @@ namespace Gwt.Core.Services.Terminal
     {
         private readonly TerminalEmulator _emulator;
         private readonly ConcurrentQueue<string> _pendingData = new();
+        private readonly int _mainThreadId;
 
         public event Action BufferChanged;
         public event Action<string> TitleChanged;
@@ -21,6 +23,7 @@ namespace Gwt.Core.Services.Terminal
 
         public XtermSharpTerminalAdapter(int rows = 24, int cols = 80)
         {
+            _mainThreadId = Environment.CurrentManagedThreadId;
             _emulator = new TerminalEmulator(rows, cols);
             _emulator.BufferChanged += () => BufferChanged?.Invoke();
             _emulator.TitleChanged += t => TitleChanged?.Invoke(t);
@@ -31,6 +34,12 @@ namespace Gwt.Core.Services.Terminal
         /// </summary>
         public void Feed(string data)
         {
+            if (Environment.CurrentManagedThreadId == _mainThreadId)
+            {
+                _emulator.Write(data);
+                return;
+            }
+
             _pendingData.Enqueue(data);
         }
 

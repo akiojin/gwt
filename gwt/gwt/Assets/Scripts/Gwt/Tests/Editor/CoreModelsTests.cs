@@ -2,6 +2,7 @@ using Gwt.Core.Models;
 using Gwt.Core.Services.Config;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using UnityEngine;
@@ -391,6 +392,157 @@ namespace Gwt.Tests.Editor
             Assert.IsNotNull(summary.BulletPoints);
             Assert.AreEqual(0, summary.BulletPoints.Count);
             Assert.IsNotNull(summary.Metrics);
+        }
+
+        // ===========================================================
+        // TDD: インタビュー確定事項に基づく追加テスト（RED 状態）
+        // ===========================================================
+
+        // --- Sound settings (BGM default OFF, SE default ON, #1560) ---
+
+        [Test]
+        public void SoundSettings_DefaultValues()
+        {
+            var settings = new SoundSettings();
+
+            Assert.AreEqual(false, settings.BgmEnabled,
+                "BGM should be disabled by default (user opt-in)");
+            Assert.AreEqual(true, settings.SeEnabled,
+                "SE (sound effects) should be enabled by default");
+        }
+
+        [Test]
+        public void SoundSettings_DefaultVolumes()
+        {
+            var settings = new SoundSettings();
+
+            Assert.That(settings.BgmVolume, Is.GreaterThan(0f).And.LessThanOrEqualTo(1f),
+                "BGM volume should have a valid default (0-1)");
+            Assert.That(settings.SeVolume, Is.GreaterThan(0f).And.LessThanOrEqualTo(1f),
+                "SE volume should have a valid default (0-1)");
+        }
+
+        [Test]
+        public void Settings_HasSoundSettings()
+        {
+            var settings = new Settings();
+
+            Assert.IsNotNull(settings.Sound,
+                "Settings should include SoundSettings");
+            Assert.AreEqual(false, settings.Sound.BgmEnabled,
+                "BGM should default to OFF in Settings");
+            Assert.AreEqual(true, settings.Sound.SeEnabled,
+                "SE should default to ON in Settings");
+        }
+
+        // --- Studio level system (commit-count based, #1555) ---
+
+        [Test]
+        public void StudioLevel_DefaultValues()
+        {
+            var level = new StudioLevel();
+
+            Assert.AreEqual(1, level.Level, "Default level should be 1");
+            Assert.AreEqual(0, level.TotalCommits, "Default total commits should be 0");
+        }
+
+        [Test]
+        public void StudioLevel_CalculateLevel_ZeroCommits_ReturnsLevel1()
+        {
+            var result = StudioLevel.CalculateLevel(0);
+
+            Assert.AreEqual(1, result, "Level 1 should be the minimum level");
+        }
+
+        [Test]
+        public void StudioLevel_CalculateLevel_IncrementsWithCommits()
+        {
+            var level10 = StudioLevel.CalculateLevel(10);
+            var level50 = StudioLevel.CalculateLevel(50);
+            var level100 = StudioLevel.CalculateLevel(100);
+
+            Assert.That(level50, Is.GreaterThan(level10),
+                "More commits should result in a higher level");
+            Assert.That(level100, Is.GreaterThan(level50),
+                "100 commits should yield a higher level than 50");
+        }
+
+        [Test]
+        public void StudioLevel_GetMaxAgents_Level1_ReturnsMinimumAgents()
+        {
+            var level = new StudioLevel { Level = 1, TotalCommits = 0 };
+            var maxAgents = level.GetMaxAgents();
+
+            Assert.That(maxAgents, Is.GreaterThan(0),
+                "Even at level 1, at least 1 agent should be allowed");
+            Assert.That(maxAgents, Is.LessThanOrEqualTo(3),
+                "Level 1 should have a low agent limit");
+        }
+
+        [Test]
+        public void StudioLevel_GetMaxAgents_HigherLevel_HasHigherLimit()
+        {
+            var lowLevel = new StudioLevel { Level = 1 };
+            var highLevel = new StudioLevel { Level = 5 };
+
+            Assert.That(highLevel.GetMaxAgents(), Is.GreaterThan(lowLevel.GetMaxAgents()),
+                "Higher studio level should allow more concurrent agents");
+        }
+
+        [Test]
+        public void StudioLevel_GetCommitsToNextLevel_ReturnsPositive()
+        {
+            var level = new StudioLevel { Level = 1, TotalCommits = 5 };
+            var remaining = level.GetCommitsToNextLevel();
+
+            Assert.That(remaining, Is.GreaterThan(0),
+                "Should return positive number of commits needed for next level");
+        }
+
+        // --- Custom agent profile (FR-030, #1545) ---
+
+        [Test]
+        public void CustomAgentProfile_DefaultValues()
+        {
+            var profile = new CustomAgentProfile();
+
+            Assert.IsNotNull(profile.DefaultArgs,
+                "DefaultArgs should be initialized as empty list");
+            Assert.AreEqual(0, profile.DefaultArgs.Count);
+            Assert.AreEqual("--cwd", profile.WorkdirArgName,
+                "Default workdir argument should be --cwd");
+        }
+
+        [Test]
+        public void Settings_HasCustomAgentProfiles()
+        {
+            var settings = new Settings();
+
+            Assert.IsNotNull(settings.CustomAgentProfiles,
+                "Settings should include CustomAgentProfiles list");
+            Assert.AreEqual(0, settings.CustomAgentProfiles.Count,
+                "Custom profiles should default to empty");
+        }
+
+        [Test]
+        public void CustomAgentProfile_SerializationRoundtrip()
+        {
+            var original = new CustomAgentProfile
+            {
+                Id = "my-agent",
+                DisplayName = "My Custom Agent",
+                CliPath = "/usr/local/bin/my-agent",
+                DefaultArgs = new System.Collections.Generic.List<string> { "--verbose" },
+                WorkdirArgName = "--project-dir"
+            };
+
+            var json = JsonUtility.ToJson(original);
+            var deserialized = JsonUtility.FromJson<CustomAgentProfile>(json);
+
+            Assert.AreEqual(original.Id, deserialized.Id);
+            Assert.AreEqual(original.DisplayName, deserialized.DisplayName);
+            Assert.AreEqual(original.CliPath, deserialized.CliPath);
+            Assert.AreEqual(original.WorkdirArgName, deserialized.WorkdirArgName);
         }
     }
 }

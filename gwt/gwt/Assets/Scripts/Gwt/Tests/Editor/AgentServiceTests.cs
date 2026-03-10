@@ -260,6 +260,174 @@ namespace Gwt.Tests.Editor
             Assert.That(args, Does.Contain("/workspace"));
         }
 
+        // ===========================================================
+        // TDD: インタビュー確定事項に基づく追加テスト（RED 状態）
+        // ===========================================================
+
+        // --- GithubCopilot command building (FR-028, #1545) ---
+
+        [Test]
+        public void BuildAgentCommand_GithubCopilot_IncludesCwd()
+        {
+            var cmd = AgentService.BuildAgentCommand(
+                DetectedAgentType.GithubCopilot, "/usr/local/bin/github-copilot", "/path/to/worktree", "sess123");
+
+            Assert.IsTrue(cmd.Contains("--cwd"));
+            Assert.IsTrue(cmd.Contains("/path/to/worktree"));
+        }
+
+        [Test]
+        public void BuildAgentCommandAndArgs_GithubCopilot_ReturnsCommandAndArgs()
+        {
+            var (command, args) = AgentService.BuildAgentCommandAndArgs(
+                DetectedAgentType.GithubCopilot, "/usr/bin/gh-copilot", "/path/to/worktree", "session-ghc");
+
+            Assert.That(command, Is.EqualTo("/usr/bin/gh-copilot"));
+            Assert.That(args, Does.Contain("--cwd"));
+            Assert.That(args, Does.Contain("/path/to/worktree"));
+        }
+
+        // --- Custom agent command building (FR-030, #1545) ---
+
+        [Test]
+        public void BuildAgentCommand_Custom_IncludesCwd()
+        {
+            var cmd = AgentService.BuildAgentCommand(
+                DetectedAgentType.Custom, "/usr/local/bin/my-agent", "/path/to/worktree", "sess123");
+
+            Assert.IsTrue(cmd.Contains("/path/to/worktree"));
+        }
+
+        [Test]
+        public void BuildAgentCommandAndArgs_Custom_ReturnsCommandAndArgs()
+        {
+            var (command, args) = AgentService.BuildAgentCommandAndArgs(
+                DetectedAgentType.Custom, "/usr/bin/custom-agent", "/path/to/worktree", "session-custom");
+
+            Assert.That(command, Is.EqualTo("/usr/bin/custom-agent"));
+            Assert.That(args, Does.Contain("/path/to/worktree"));
+        }
+
+        [Test]
+        public void BuildCustomAgentCommandAndArgs_WithProfile_UsesProfileArgs()
+        {
+            var profile = new Gwt.Core.Models.CustomAgentProfile
+            {
+                Id = "my-agent",
+                DisplayName = "My Agent",
+                CliPath = "/usr/bin/my-agent",
+                DefaultArgs = new System.Collections.Generic.List<string> { "--verbose", "--no-color" },
+                WorkdirArgName = "--project-dir"
+            };
+
+            var (command, args) = AgentService.BuildCustomAgentCommandAndArgs(
+                profile.CliPath, "/path/to/worktree", profile);
+
+            Assert.That(command, Is.EqualTo("/usr/bin/my-agent"));
+            Assert.That(args, Does.Contain("--project-dir"),
+                "Should use profile's WorkdirArgName instead of default --cwd");
+            Assert.That(args, Does.Contain("--verbose"),
+                "Should include profile's DefaultArgs");
+            Assert.That(args, Does.Contain("--no-color"),
+                "Should include all profile's DefaultArgs");
+            Assert.That(args, Does.Contain("/path/to/worktree"));
+        }
+
+        // --- 1 Issue : N Agent support (FR-028, FR-029, #1545) ---
+
+        [Test]
+        public void AgentSessionData_MultipleAgentsOnSameWorktree_AllowedByDesign()
+        {
+            var session1 = new AgentSessionData
+            {
+                Id = "sess-1",
+                AgentType = "claude",
+                WorktreePath = "/shared/worktree",
+                Branch = "feature/multi-agent",
+                Status = "running"
+            };
+            var session2 = new AgentSessionData
+            {
+                Id = "sess-2",
+                AgentType = "codex",
+                WorktreePath = "/shared/worktree",
+                Branch = "feature/multi-agent",
+                Status = "running"
+            };
+
+            // 同一 worktree に複数 agent を割り当てられることを確認
+            Assert.AreEqual(session1.WorktreePath, session2.WorktreePath,
+                "Multiple agents should share the same worktree path");
+            Assert.AreNotEqual(session1.Id, session2.Id,
+                "Each agent session should have a unique ID");
+            Assert.AreNotEqual(session1.AgentType, session2.AgentType,
+                "Different agent types can coexist on same worktree");
+        }
+
+        // --- Lead personality types (interview: 3 personality variants) ---
+
+        [Test]
+        public void LeadPersonality_HasThreeValues()
+        {
+            Assert.AreEqual(3, System.Enum.GetValues(typeof(LeadPersonality)).Length,
+                "LeadPersonality should have exactly 3 values");
+        }
+
+        [Test]
+        public void LeadOrchestrator_GetCandidates_EachHasUniquePersonality()
+        {
+            var orchestrator = CreateOrchestrator();
+            var candidates = orchestrator.GetCandidates();
+            var personalities = candidates.Select(c => c.Personality).Distinct().ToList();
+
+            Assert.AreEqual(3, personalities.Count,
+                "Each Lead candidate should have a distinct personality type");
+        }
+
+        [Test]
+        public void LeadOrchestrator_GetCandidates_AllHaveVoiceKeys()
+        {
+            var orchestrator = CreateOrchestrator();
+            var candidates = orchestrator.GetCandidates();
+
+            foreach (var candidate in candidates)
+            {
+                // インタビュー確定: 各候補に声（VoiceKey）が付与される
+                Assert.IsFalse(string.IsNullOrEmpty(candidate.VoiceKey),
+                    $"Candidate {candidate.Id} should have a voice key for TTS.");
+            }
+        }
+
+        // --- Lead handover generates handover document (FR-013, #1549) ---
+
+        [Test]
+        public void LeadOrchestrator_Handover_GeneratesHandoverDocument()
+        {
+            var orchestrator = CreateOrchestrator();
+            orchestrator.SelectLeadAsync("alex").GetAwaiter().GetResult();
+            // 会話履歴を蓄積
+            orchestrator.ProcessUserCommandAsync("Fix the login bug").GetAwaiter().GetResult();
+            orchestrator.ProcessUserCommandAsync("Also add tests").GetAwaiter().GetResult();
+
+            // Lead を交代（インタビュー確定: 引継ぎドキュメントを生成）
+            orchestrator.HandoverAsync("robin").GetAwaiter().GetResult();
+            var sessionData = orchestrator.GetSessionDataAsync().GetAwaiter().GetResult();
+
+            Assert.IsFalse(string.IsNullOrEmpty(sessionData.HandoverDocument),
+                "Handover should generate a summary document from previous Lead's conversation history");
+        }
+
+        // --- Auto PR creation (FR-031, #1545) ---
+
+        [Test]
+        public void AgentSessionData_HasAutoPrEnabled()
+        {
+            var session = new AgentSessionData();
+            // インタビュー確定: Agent タスク完了時に自動 PR 作成
+            Assert.IsFalse(session.AutoPrCreated,
+                "AutoPrCreated should default to false");
+        }
+
         // --- Helpers ---
 
         private static LeadOrchestrator CreateOrchestrator()

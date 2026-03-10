@@ -15,5 +15,7 @@ namespace Gwt.Agent.Lead
         public LeadPersonality Personality;
         public string Description;
         public string SpriteKey;
+        /// <summary>TTS 用ボイスキー。各候補に異なる声を割り当てる。</summary>
+        public string VoiceKey;
     }
 }

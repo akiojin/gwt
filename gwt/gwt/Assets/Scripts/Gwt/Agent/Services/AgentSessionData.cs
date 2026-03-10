@@ -18,5 +18,7 @@ namespace Gwt.Agent.Services
         public string Model;
         public string ToolVersion;
         public List<string> ConversationHistory = new();
+        /// <summary>タスク完了時に自動 PR が作成されたかどうか</summary>
+        public bool AutoPrCreated;
     }
 }

@@ -37,8 +37,14 @@ namespace Gwt.Studio.Entity
         /// </summary>
         public static List<ContextMenuItem> BuildStaffedDeskMenu(bool hasSummary, bool hasPr)
         {
-            // TODO: 実装（TDD RED 状態）
-            return new List<ContextMenuItem>();
+            return new List<ContextMenuItem>
+            {
+                new() { Type = ContextMenuItemType.Terminal, IsEnabled = true },
+                new() { Type = ContextMenuItemType.Summary, IsEnabled = hasSummary },
+                new() { Type = ContextMenuItemType.Git, IsEnabled = true },
+                new() { Type = ContextMenuItemType.PR, IsEnabled = hasPr },
+                new() { Type = ContextMenuItemType.FireAgent, IsEnabled = true }
+            };
         }
 
         /// <summary>
@@ -47,8 +53,13 @@ namespace Gwt.Studio.Entity
         /// </summary>
         public static List<ContextMenuItem> BuildEmptyDeskMenu()
         {
-            // TODO: 実装（TDD RED 状態）
-            return new List<ContextMenuItem>();
+            return new List<ContextMenuItem>
+            {
+                new() { Type = ContextMenuItemType.HireAgent, IsEnabled = true },
+                new() { Type = ContextMenuItemType.Terminal, IsEnabled = true },
+                new() { Type = ContextMenuItemType.Git, IsEnabled = true },
+                new() { Type = ContextMenuItemType.DeleteWorktree, IsEnabled = true }
+            };
         }
     }
 }

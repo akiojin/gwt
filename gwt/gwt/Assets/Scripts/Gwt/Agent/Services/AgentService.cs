@@ -203,8 +203,21 @@ namespace Gwt.Agent.Services
                 DetectedAgentType.Codex => (executablePath, new[] { "--cwd", worktreePath }),
                 DetectedAgentType.Gemini => (executablePath, new[] { "--cwd", worktreePath }),
                 DetectedAgentType.OpenCode => (executablePath, new[] { "--cwd", worktreePath }),
+                DetectedAgentType.GithubCopilot => (executablePath, new[] { "--cwd", worktreePath }),
+                DetectedAgentType.Custom => BuildCustomAgentCommandAndArgs(executablePath, worktreePath),
                 _ => throw new ArgumentOutOfRangeException(nameof(type))
             };
+        }
+
+        /// <summary>
+        /// カスタムAgentのコマンドとargsを構築する。
+        /// CustomAgentProfile の DefaultArgs と WorkdirArgName を使用する。
+        /// </summary>
+        internal static (string command, string[] args) BuildCustomAgentCommandAndArgs(
+            string executablePath, string worktreePath, Core.Models.CustomAgentProfile profile = null)
+        {
+            // TODO: 実装（TDD RED 状態）— profile の DefaultArgs/WorkdirArgName を使用
+            return (executablePath, new[] { "--cwd", worktreePath });
         }
 
         internal static string BuildAgentCommand(DetectedAgentType type, string executablePath, string worktreePath, string sessionId)
@@ -215,6 +228,8 @@ namespace Gwt.Agent.Services
                 DetectedAgentType.Codex => $"\"{executablePath}\" --cwd \"{worktreePath}\"",
                 DetectedAgentType.Gemini => $"\"{executablePath}\" --cwd \"{worktreePath}\"",
                 DetectedAgentType.OpenCode => $"\"{executablePath}\" --cwd \"{worktreePath}\"",
+                DetectedAgentType.GithubCopilot => $"\"{executablePath}\" --cwd \"{worktreePath}\"",
+                DetectedAgentType.Custom => $"\"{executablePath}\" --cwd \"{worktreePath}\"",
                 _ => throw new ArgumentOutOfRangeException(nameof(type))
             };
         }

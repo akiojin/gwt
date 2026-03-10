@@ -11,6 +11,8 @@ namespace Gwt.Agent.Lead
         public List<LeadTaskAssignment> TaskAssignments = new();
         public string CurrentState;
         public string LastMonitoredAt;
+        /// <summary>Lead 解雇→再雇用時の引継ぎドキュメント（会話履歴要約）</summary>
+        public string HandoverDocument;
     }
 
     [System.Serializable]

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 namespace Gwt.Studio.World
@@ -22,6 +23,8 @@ namespace Gwt.Studio.World
         public Vector2Int GridPosition;
         public string AssignedBranch;
         public string AssignedAgentId;
+        /// <summary>1 Issue : N Agent 対応。複数 Agent を同一デスク（worktree）に割り当て可能。</summary>
+        public List<string> AssignedAgentIds = new();
         public bool IsRemote;
 
         /// <summary>
@@ -30,7 +33,12 @@ namespace Gwt.Studio.World
         /// </summary>
         public DeskState GetState()
         {
-            // TODO: 実装（TDD RED 状態）
+            if (IsRemote)
+                return DeskState.Remote;
+
+            if (!string.IsNullOrEmpty(AssignedAgentId) || AssignedAgentIds.Count > 0)
+                return DeskState.Staffed;
+
             return DeskState.Empty;
         }
     }
@@ -42,6 +50,10 @@ namespace Gwt.Studio.World
         public const int MinHeight = 12;
         public const int DeskRowHeight = 4;
         public const int DesksPerRow = 4;
+
+        /// <summary>スタジオの拡張方向。下方向（y増加方向）に行を追加する。</summary>
+        public enum ExpansionDirection { Down }
+        public static readonly ExpansionDirection Expansion = ExpansionDirection.Down;
 
         public int Width = MinWidth;
         public int Height = MinHeight;
@@ -57,7 +69,7 @@ namespace Gwt.Studio.World
 
         public DeskSlot FindDeskByAgent(string agentId)
         {
-            return Desks.Find(d => d.AssignedAgentId == agentId);
+            return Desks.Find(d => d.AssignedAgentId == agentId || d.AssignedAgentIds.Contains(agentId));
         }
 
         public bool AddDesk(DeskSlot desk)
@@ -80,8 +92,13 @@ namespace Gwt.Studio.World
         /// <returns>拡張が行われた場合 true</returns>
         public bool ExpandIfNeeded()
         {
-            // TODO: 実装（TDD RED 状態）
-            return false;
+            var requiredRows = Mathf.CeilToInt(Desks.Count / (float)DesksPerRow);
+            var currentRows = Mathf.Max(1, (Height - MinHeight) / DeskRowHeight + 1);
+            if (requiredRows <= currentRows)
+                return false;
+
+            Height += (requiredRows - currentRows) * DeskRowHeight;
+            return true;
         }
 
         /// <summary>
@@ -91,8 +108,14 @@ namespace Gwt.Studio.World
         /// <returns>縮小が行われた場合 true</returns>
         public bool ShrinkIfNeeded()
         {
-            // TODO: 実装（TDD RED 状態）
-            return false;
+            var requiredRows = Mathf.Max(1, Mathf.CeilToInt(Desks.Count / (float)DesksPerRow));
+            var requiredHeight = MinHeight + (requiredRows - 1) * DeskRowHeight;
+            var targetHeight = Mathf.Max(MinHeight, requiredHeight);
+            if (targetHeight >= Height)
+                return false;
+
+            Height = targetHeight;
+            return true;
         }
 
         /// <summary>
@@ -101,8 +124,18 @@ namespace Gwt.Studio.World
         /// </summary>
         public bool MoveDesk(string branch, Vector2Int newPosition)
         {
-            // TODO: 実装（TDD RED 状態）
-            return false;
+            var desk = FindDeskByBranch(branch);
+            if (desk == null)
+                return false;
+
+            if (desk.GridPosition == newPosition)
+                return true;
+
+            if (Desks.Any(d => d != desk && d.GridPosition == newPosition))
+                return false;
+
+            desk.GridPosition = newPosition;
+            return true;
         }
 
         /// <summary>
@@ -110,8 +143,7 @@ namespace Gwt.Studio.World
         /// </summary>
         public List<DeskSlot> GetEmptyDesks()
         {
-            // TODO: 実装（TDD RED 状態）
-            return new List<DeskSlot>();
+            return Desks.Where(d => d.GetState() == DeskState.Empty).ToList();
         }
 
         /// <summary>
@@ -119,8 +151,7 @@ namespace Gwt.Studio.World
         /// </summary>
         public List<DeskSlot> GetStaffedDesks()
         {
-            // TODO: 実装（TDD RED 状態）
-            return new List<DeskSlot>();
+            return Desks.Where(d => d.GetState() == DeskState.Staffed).ToList();
         }
     }
 }
