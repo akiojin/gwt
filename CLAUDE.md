@@ -38,6 +38,8 @@
 
 - Unity C# コードを変更・追加した場合、必ず Unity Editor のコンソールログ（`~/Library/Logs/Unity/Editor.log`）でコンパイルエラーがないことを確認する
 - コンパイル成功を確認した後、関連する EditMode / PlayMode テストを実行して全パスを確認する
+- ユーザー可視の Unity 挙動を変更した場合、Test Runner だけで完了とせず、`unity-runtime-e2e` スキルに従って `play_game` / input / scene or UI inspection / screenshot を用いた実 runtime E2E を最低 1 本実行する
+- `unity-cli raw get_compilation_state --json '{}'` の判定は `errorCount == 0` だけでなく `consoleErrorCount == 0` も満たすこと。必要なら `unity-cli raw clear_console --json '{}'` 後に再確認する
 - Unity 固有の .NET API 制約（例: `StreamWriter.FlushAsync()` は CancellationToken 非対応）に注意し、標準 .NET と差異がある前提でコーディングする
 - Unity C# の編集は `unity-csharp-edit` スキルのワークフローに従い、`unity-cli` のシンボル確認・テキスト検証を経由してから行う
 

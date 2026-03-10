@@ -2,6 +2,9 @@ using System.Collections.Generic;
 using Cysharp.Threading.Tasks;
 using Gwt.Lifecycle.Services;
 using UnityEngine;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
 using VContainer;
 
 namespace Gwt.Studio.UI
@@ -58,10 +61,9 @@ namespace Gwt.Studio.UI
 
         private void HandleProjectSwitchHotkeys()
         {
-            var commandPressed = Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand) ||
-                Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+            var commandPressed = IsCommandPressed();
 
-            if (commandPressed && Input.GetKeyDown(KeyCode.BackQuote))
+            if (commandPressed && IsBackquotePressedThisFrame())
             {
                 ToggleProjectSwitcher();
                 return;
@@ -70,11 +72,11 @@ namespace Gwt.Studio.UI
             if (_projectSwitchOverlayPanel == null || !_projectSwitchOverlayPanel.IsOpen)
                 return;
 
-            if (Input.GetKeyDown(KeyCode.DownArrow))
+            if (IsDownPressedThisFrame())
                 _projectSwitchOverlayPanel.MoveSelection(1);
-            else if (Input.GetKeyDown(KeyCode.UpArrow))
+            else if (IsUpPressedThisFrame())
                 _projectSwitchOverlayPanel.MoveSelection(-1);
-            else if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+            else if (IsConfirmPressedThisFrame())
                 ConfirmProjectSwitchAsync().Forget();
         }
 
@@ -256,6 +258,62 @@ namespace Gwt.Studio.UI
 
             if (_multiProjectService != null)
                 _multiProjectService.OnProjectSwitched -= HandleProjectSwitched;
+        }
+
+        private static bool IsCommandPressed()
+        {
+#if ENABLE_INPUT_SYSTEM
+            var keyboard = Keyboard.current;
+            return keyboard != null &&
+                ((keyboard.leftCommandKey?.isPressed ?? false) ||
+                 (keyboard.rightCommandKey?.isPressed ?? false) ||
+                 (keyboard.leftCtrlKey?.isPressed ?? false) ||
+                 (keyboard.rightCtrlKey?.isPressed ?? false));
+#else
+            return Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand) ||
+                Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+#endif
+        }
+
+        private static bool IsBackquotePressedThisFrame()
+        {
+#if ENABLE_INPUT_SYSTEM
+            var keyboard = Keyboard.current;
+            return keyboard != null && (keyboard.backquoteKey?.wasPressedThisFrame ?? false);
+#else
+            return Input.GetKeyDown(KeyCode.BackQuote);
+#endif
+        }
+
+        private static bool IsDownPressedThisFrame()
+        {
+#if ENABLE_INPUT_SYSTEM
+            var keyboard = Keyboard.current;
+            return keyboard != null && (keyboard.downArrowKey?.wasPressedThisFrame ?? false);
+#else
+            return Input.GetKeyDown(KeyCode.DownArrow);
+#endif
+        }
+
+        private static bool IsUpPressedThisFrame()
+        {
+#if ENABLE_INPUT_SYSTEM
+            var keyboard = Keyboard.current;
+            return keyboard != null && (keyboard.upArrowKey?.wasPressedThisFrame ?? false);
+#else
+            return Input.GetKeyDown(KeyCode.UpArrow);
+#endif
+        }
+
+        private static bool IsConfirmPressedThisFrame()
+        {
+#if ENABLE_INPUT_SYSTEM
+            var keyboard = Keyboard.current;
+            return keyboard != null &&
+                ((keyboard.enterKey?.wasPressedThisFrame ?? false) || (keyboard.numpadEnterKey?.wasPressedThisFrame ?? false));
+#else
+            return Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter);
+#endif
         }
     }
 }
