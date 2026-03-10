@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.5.7] - 2026-03-10
+
+### Bug Fixes
+
+- **pty:** Avoid broken Windows cmd cwd injection (#1575)
+
 ## [8.5.6] - 2026-03-10
 
 ### Bug Fixes
