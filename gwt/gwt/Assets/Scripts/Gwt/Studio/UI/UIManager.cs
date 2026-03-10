@@ -243,6 +243,7 @@ namespace Gwt.Studio.UI
         private void HandleProjectSwitched(int _)
         {
             RefreshProjectInfoBar();
+            RestoreCurrentProjectSnapshot();
             _projectSwitchOverlayPanel?.Refresh();
         }
 
@@ -289,6 +290,7 @@ namespace Gwt.Studio.UI
             if (_projectSwitchOverlayPanel == null)
                 return false;
 
+            SaveCurrentProjectSnapshot();
             var switched = await _projectSwitchOverlayPanel.ConfirmSelectionAsync();
             if (!switched)
                 return false;
@@ -297,6 +299,37 @@ namespace Gwt.Studio.UI
                 await _projectSceneTransitionController.TransitionToProjectAsync(_projectLifecycleService.CurrentProject);
 
             return true;
+        }
+
+        private void SaveCurrentProjectSnapshot()
+        {
+            if (_multiProjectService == null || _projectLifecycleService?.CurrentProject == null || _projectInfoBar == null)
+                return;
+
+            _multiProjectService.SaveSnapshot(new ProjectSwitchSnapshot
+            {
+                ProjectPath = _projectLifecycleService.CurrentProject.Path,
+                DeskStateKey = _projectInfoBar.CurrentProjectName,
+                IssueMarkerStateKey = _projectInfoBar.CurrentBranch,
+                AgentStateKey = _projectInfoBar.CurrentStatus
+            });
+        }
+
+        private void RestoreCurrentProjectSnapshot()
+        {
+            if (_multiProjectService == null || _projectLifecycleService?.CurrentProject == null || _projectInfoBar == null)
+                return;
+
+            var snapshot = _multiProjectService.GetSnapshot(_projectLifecycleService.CurrentProject.Path);
+            if (snapshot == null)
+                return;
+
+            if (!string.IsNullOrWhiteSpace(snapshot.DeskStateKey))
+                _projectInfoBar.SetProjectName(snapshot.DeskStateKey);
+            if (!string.IsNullOrWhiteSpace(snapshot.IssueMarkerStateKey))
+                _projectInfoBar.SetBranch(snapshot.IssueMarkerStateKey);
+            if (!string.IsNullOrWhiteSpace(snapshot.AgentStateKey))
+                _projectInfoBar.SetStatus(snapshot.AgentStateKey);
         }
 
         private static bool IsCommandPressed()

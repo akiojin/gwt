@@ -262,12 +262,16 @@ namespace Gwt.Studio.UI
                 if (recent == null || string.IsNullOrWhiteSpace(recent.Path))
                     continue;
 
+                var normalized = await _projectLifecycleService.ProbePathAsync(recent.Path);
+                if (normalized == null)
+                    continue;
+
                 var alreadyOpen = openProjects.Exists(project =>
-                    string.Equals(project.Path, recent.Path, StringComparison.OrdinalIgnoreCase));
+                    string.Equals(project.Path, normalized.Path, StringComparison.OrdinalIgnoreCase));
                 if (alreadyOpen)
                     continue;
 
-                _entries.Add(new ProjectEntry(recent, false));
+                _entries.Add(new ProjectEntry(normalized, false));
             }
         }
 

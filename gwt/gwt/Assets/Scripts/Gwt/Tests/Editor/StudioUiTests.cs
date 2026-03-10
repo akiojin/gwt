@@ -103,6 +103,36 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void UIManager_ConfirmProjectSwitchAsync_SavesSnapshotOfPreviousProject()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            multi.AddProjectAsync("/tmp/project-b").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            var transition = scope.Root.AddComponent<FakeProjectSceneTransitionController>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+            SetPrivateField(manager, "_projectSceneTransitionController", transition);
+
+            manager.Construct(lifecycle, multi);
+            manager.OpenProjectSwitcher();
+            overlay.RefreshAsync().GetAwaiter().GetResult();
+            overlay.MoveSelection(-1);
+            manager.ConfirmProjectSwitchAsync().GetAwaiter().GetResult();
+
+            var snapshot = multi.GetSnapshot("/tmp/project-b");
+            Assert.IsNotNull(snapshot);
+            Assert.AreEqual("project-b", snapshot.DeskStateKey);
+            Assert.AreEqual("main", snapshot.IssueMarkerStateKey);
+            Assert.AreEqual("Project 2/2", snapshot.AgentStateKey);
+        }
+
+        [Test]
         public void UIManager_ConfirmProjectSwitchAsync_RecentProject_IsAddedAndActivated()
         {
             var lifecycle = new FakeProjectLifecycleService();
