@@ -73,6 +73,7 @@ namespace Gwt.Infra.Services
         List<UpdateInfo> ParseUpdateManifest(string manifestJson);
         UpdateInfo GetLatestUpdate(string currentVersion, List<UpdateInfo> candidates);
         bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate);
+        UniTask<string> DownloadUpdateAsync(UpdateInfo candidate, string destinationDirectory, CancellationToken ct = default);
         string BuildApplyUpdateCommand(UpdateInfo candidate);
     }
 }

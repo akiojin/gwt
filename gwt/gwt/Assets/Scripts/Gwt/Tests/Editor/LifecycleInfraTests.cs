@@ -1095,6 +1095,27 @@ namespace Gwt.Tests.Editor
             Assert.That(command, Does.Contain("https://example.com/gwt.dmg"));
         }
 
+        [UnityTest]
+        public IEnumerator BuildService_DownloadUpdateAsync_FileUri_CopiesArtifact() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var sourcePath = Path.Combine(tempDir, "gwt.dmg");
+                var downloadDir = Path.Combine(tempDir, "downloads");
+                File.WriteAllText(sourcePath, "update payload");
+
+                var service = new BuildService();
+                var downloadedPath = await service.DownloadUpdateAsync(new UpdateInfo
+                {
+                    Version = "1.2.4",
+                    DownloadUrl = new Uri(sourcePath).AbsoluteUri
+                }, downloadDir);
+
+                Assert.IsTrue(File.Exists(downloadedPath));
+                Assert.AreEqual("update payload", File.ReadAllText(downloadedPath));
+            });
+        });
+
         [Test]
         public void BuildArtifactInfo_Serialization_RoundTrip()
         {

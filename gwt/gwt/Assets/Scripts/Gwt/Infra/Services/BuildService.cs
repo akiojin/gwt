@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Threading;
 using UnityEngine;
@@ -223,6 +224,48 @@ namespace Gwt.Infra.Services
             return ParseVersion(candidate.Version) > ParseVersion(currentVersion);
         }
 
+        public async UniTask<string> DownloadUpdateAsync(UpdateInfo candidate, string destinationDirectory, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (candidate == null || string.IsNullOrWhiteSpace(candidate.DownloadUrl))
+                throw new ArgumentException("Update download URL is required.", nameof(candidate));
+
+            Directory.CreateDirectory(destinationDirectory);
+
+            var source = candidate.DownloadUrl.Trim();
+            var fileName = ResolveDownloadFileName(source);
+            var destinationPath = Path.Combine(destinationDirectory, fileName);
+
+            if (Uri.TryCreate(source, UriKind.Absolute, out var uri))
+            {
+                if (uri.IsFile)
+                {
+                    File.Copy(uri.LocalPath, destinationPath, true);
+                    return destinationPath;
+                }
+
+                if (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+                {
+                    using var client = new HttpClient();
+                    using var response = await client.GetAsync(uri, ct);
+                    response.EnsureSuccessStatusCode();
+                    await using var input = await response.Content.ReadAsStreamAsync(ct);
+                    await using var output = File.Create(destinationPath);
+                    await input.CopyToAsync(output, ct);
+                    return destinationPath;
+                }
+            }
+
+            if (File.Exists(source))
+            {
+                File.Copy(source, destinationPath, true);
+                return destinationPath;
+            }
+
+            throw new InvalidOperationException($"Unsupported update source: {source}");
+        }
+
         public string BuildApplyUpdateCommand(UpdateInfo candidate)
         {
             if (candidate == null || string.IsNullOrWhiteSpace(candidate.DownloadUrl))
@@ -254,6 +297,19 @@ namespace Gwt.Infra.Services
         private static long BytesToMB(long value)
         {
             return value <= 0 ? 0 : value / (1024 * 1024);
+        }
+
+        private static string ResolveDownloadFileName(string source)
+        {
+            if (Uri.TryCreate(source, UriKind.Absolute, out var uri))
+            {
+                var localName = Path.GetFileName(uri.LocalPath);
+                if (!string.IsNullOrWhiteSpace(localName))
+                    return localName;
+            }
+
+            var fileName = Path.GetFileName(source);
+            return string.IsNullOrWhiteSpace(fileName) ? "gwt-update.bin" : fileName;
         }
 
         [Serializable]
