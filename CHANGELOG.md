@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.5.5] - 2026-03-10
+
+### Bug Fixes
+
+- **skills:** Repair project-local skill registration (#1559)
+- **skills:** Add deterministic gwt-pr-check logic (#1561)
+
 ## [8.5.4] - 2026-03-09
 
 ### Bug Fixes
