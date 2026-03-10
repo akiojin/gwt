@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Services.Terminal;
 using Gwt.Lifecycle.Services;
 using Gwt.Studio.UI;
 using NUnit.Framework;
@@ -65,7 +66,7 @@ namespace Gwt.Tests.Editor
             SetPrivateField(manager, "_projectInfoBar", bar);
             SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
 
-            manager.Construct(lifecycle, multi);
+            manager.Construct(lifecycle, multi, new TerminalPaneManager());
 
             Assert.AreEqual("project-a", bar.CurrentProjectName);
             Assert.AreEqual("main", bar.CurrentBranch);
@@ -89,7 +90,7 @@ namespace Gwt.Tests.Editor
             SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
             SetPrivateField(manager, "_projectSceneTransitionController", transition);
 
-            manager.Construct(lifecycle, multi);
+            manager.Construct(lifecycle, multi, new TerminalPaneManager());
             manager.OpenProjectSwitcher();
             overlay.RefreshAsync().GetAwaiter().GetResult();
             overlay.MoveSelection(-1);
@@ -119,7 +120,7 @@ namespace Gwt.Tests.Editor
             SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
             SetPrivateField(manager, "_projectSceneTransitionController", transition);
 
-            manager.Construct(lifecycle, multi);
+            manager.Construct(lifecycle, multi, new TerminalPaneManager());
             manager.OpenProjectSwitcher();
             overlay.RefreshAsync().GetAwaiter().GetResult();
             overlay.MoveSelection(-1);
@@ -149,7 +150,7 @@ namespace Gwt.Tests.Editor
             SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
             SetPrivateField(manager, "_projectSceneTransitionController", transition);
 
-            manager.Construct(lifecycle, multi);
+            manager.Construct(lifecycle, multi, new TerminalPaneManager());
             manager.OpenProjectSwitcher();
             overlay.RefreshAsync().GetAwaiter().GetResult();
             overlay.MoveSelection(1);
@@ -159,6 +160,105 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("/tmp/project-c", lifecycle.CurrentProject.Path);
             Assert.AreEqual("project-c", bar.CurrentProjectName);
             Assert.AreEqual("/tmp/project-c", transition.LastTransitionProjectPath);
+        }
+
+        [Test]
+        public void UIManager_Construct_RestoresSavedSnapshot_ForCurrentProject()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            multi.SaveSnapshot(new ProjectSwitchSnapshot
+            {
+                ProjectPath = "/tmp/project-a",
+                DeskStateKey = "snapshot-project",
+                IssueMarkerStateKey = "feature/snapshot",
+                AgentStateKey = "Restored"
+            });
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+
+            manager.Construct(lifecycle, multi, new TerminalPaneManager());
+
+            Assert.AreEqual("snapshot-project", bar.CurrentProjectName);
+            Assert.AreEqual("feature/snapshot", bar.CurrentBranch);
+            Assert.AreEqual("Restored", bar.CurrentStatus);
+        }
+
+        [Test]
+        public void UIManager_Construct_RestoresSnapshotForCurrentProject()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            multi.SaveSnapshot(new ProjectSwitchSnapshot
+            {
+                ProjectPath = "/tmp/project-a",
+                DeskStateKey = "desk-snapshot",
+                IssueMarkerStateKey = "branch-snapshot",
+                AgentStateKey = "status-snapshot"
+            });
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+
+            manager.Construct(lifecycle, multi, new TerminalPaneManager());
+
+            Assert.AreEqual("desk-snapshot", bar.CurrentProjectName);
+            Assert.AreEqual("branch-snapshot", bar.CurrentBranch);
+            Assert.AreEqual("status-snapshot", bar.CurrentStatus);
+        }
+
+        [Test]
+        public void UIManager_ConfirmProjectSwitchAsync_RestoresTerminalPaneFromSnapshot()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            multi.AddProjectAsync("/tmp/project-b").GetAwaiter().GetResult();
+
+            var paneManager = new TerminalPaneManager();
+            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80)));
+            paneManager.AddPane(new TerminalPaneState("pane-b", new XtermSharpTerminalAdapter(24, 80)));
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            var terminal = scope.Root.AddComponent<TerminalOverlayPanel>();
+            var transition = scope.Root.AddComponent<FakeProjectSceneTransitionController>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+            SetPrivateField(manager, "_projectSceneTransitionController", transition);
+            SetPrivateField(manager, "_terminalOverlayPanel", terminal);
+
+            manager.Construct(lifecycle, multi, paneManager);
+            terminal.Open();
+
+            manager.OpenProjectSwitcher();
+            overlay.RefreshAsync().GetAwaiter().GetResult();
+            overlay.MoveSelection(-1);
+            manager.ConfirmProjectSwitchAsync().GetAwaiter().GetResult();
+
+            paneManager.SetActiveIndex(0);
+            terminal.Close();
+
+            manager.OpenProjectSwitcher();
+            overlay.RefreshAsync().GetAwaiter().GetResult();
+            overlay.MoveSelection(1);
+            manager.ConfirmProjectSwitchAsync().GetAwaiter().GetResult();
+
+            Assert.AreEqual("pane-b", paneManager.ActivePane.PaneId);
+            Assert.IsTrue(terminal.IsOpen);
         }
 
         private static void SetPrivateField(object instance, string fieldName, object value)

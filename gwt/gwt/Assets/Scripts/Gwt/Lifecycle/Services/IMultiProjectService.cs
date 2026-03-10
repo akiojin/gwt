@@ -11,6 +11,9 @@ namespace Gwt.Lifecycle.Services
         public string DeskStateKey;
         public string IssueMarkerStateKey;
         public string AgentStateKey;
+        public bool TerminalWasOpen;
+        public string ActiveTerminalPaneId;
+        public string ActiveAgentSessionId;
     }
 
     public interface IMultiProjectService

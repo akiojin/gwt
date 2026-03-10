@@ -171,7 +171,10 @@ namespace Gwt.Tests.Editor
                 ProjectPath = "/tmp/project-a",
                 DeskStateKey = "desk-state",
                 IssueMarkerStateKey = "issue-state",
-                AgentStateKey = "agent-state"
+                AgentStateKey = "agent-state",
+                TerminalWasOpen = true,
+                ActiveTerminalPaneId = "pane-1",
+                ActiveAgentSessionId = "agent-1"
             };
 
             var json = JsonUtility.ToJson(snapshot);
@@ -181,6 +184,9 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(snapshot.DeskStateKey, deserialized.DeskStateKey);
             Assert.AreEqual(snapshot.IssueMarkerStateKey, deserialized.IssueMarkerStateKey);
             Assert.AreEqual(snapshot.AgentStateKey, deserialized.AgentStateKey);
+            Assert.AreEqual(snapshot.TerminalWasOpen, deserialized.TerminalWasOpen);
+            Assert.AreEqual(snapshot.ActiveTerminalPaneId, deserialized.ActiveTerminalPaneId);
+            Assert.AreEqual(snapshot.ActiveAgentSessionId, deserialized.ActiveAgentSessionId);
         }
 
         [Test]
@@ -192,7 +198,10 @@ namespace Gwt.Tests.Editor
                 ProjectPath = "/tmp/project-a",
                 DeskStateKey = "desk",
                 IssueMarkerStateKey = "issue",
-                AgentStateKey = "agent"
+                AgentStateKey = "agent",
+                TerminalWasOpen = true,
+                ActiveTerminalPaneId = "pane-1",
+                ActiveAgentSessionId = "agent-1"
             };
 
             multi.SaveSnapshot(snapshot);
@@ -200,6 +209,8 @@ namespace Gwt.Tests.Editor
             var restored = multi.GetSnapshot("/tmp/project-a");
             Assert.IsNotNull(restored);
             Assert.AreEqual("desk", restored.DeskStateKey);
+            Assert.IsTrue(restored.TerminalWasOpen);
+            Assert.AreEqual("pane-1", restored.ActiveTerminalPaneId);
         }
 
         [Test]
@@ -759,6 +770,80 @@ namespace Gwt.Tests.Editor
             });
         });
 
+        [UnityTest]
+        public IEnumerator ProjectIndexService_SearchSemantic_MatchesSynonymizedFileQuery() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var filePath = Path.Combine(tempDir, "project-switch.txt");
+                File.WriteAllText(filePath, "project switching overlay flow");
+
+                var service = new ProjectIndexService();
+                await service.BuildIndexAsync(tempDir);
+
+                var matches = service.SearchSemantic("workspace swap", 5);
+                Assert.AreEqual(1, matches.Count);
+                Assert.That(matches[0].RelativePath, Does.Contain("project-switch.txt"));
+            });
+        });
+
+        [UnityTest]
+        public IEnumerator ProjectIndexService_SearchSemantic_MatchesAuthenticationSynonym() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var filePath = Path.Combine(tempDir, "login-service.txt");
+                File.WriteAllText(filePath, "auth credential workflow");
+
+                var service = new ProjectIndexService();
+                await service.BuildIndexAsync(tempDir);
+
+                var matches = service.SearchSemantic("authentication", 5);
+                Assert.AreEqual(1, matches.Count);
+                Assert.That(matches[0].RelativePath, Does.Contain("login-service.txt"));
+            });
+        });
+
+        [Test]
+        public void ProjectIndexService_SearchIssuesSemantic_MatchesSynonymizedIssueQuery()
+        {
+            var service = new ProjectIndexService();
+            service.BuildIssueIndexAsync(new List<IssueIndexEntry>
+            {
+                new()
+                {
+                    Number = 1558,
+                    Title = "Project switch overlay flow",
+                    Body = "Switch workspace between projects",
+                    Labels = new List<string> { "gwt-spec" },
+                    UpdatedAt = "2026-03-10T00:00:00Z"
+                }
+            }).GetAwaiter().GetResult();
+
+            var matches = service.SearchIssuesSemantic("workspace swap", 5);
+            Assert.AreEqual(1, matches.Count);
+            Assert.AreEqual(1558, matches[0].Number);
+        }
+
+        [UnityTest]
+        public IEnumerator ProjectIndexService_LoadIndexAsync_PreservesSemanticTerms() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                File.WriteAllText(Path.Combine(tempDir, "terminal-shell.txt"), "terminal overlay");
+                var service = new ProjectIndexService();
+                await service.BuildIndexAsync(tempDir);
+                await service.SaveIndexAsync(tempDir);
+
+                var restored = new ProjectIndexService();
+                await restored.LoadIndexAsync(tempDir);
+
+                var matches = restored.SearchSemantic("shell", 5);
+                Assert.AreEqual(1, matches.Count);
+                Assert.That(matches[0].RelativePath, Does.Contain("terminal-shell.txt"));
+            });
+        });
+
         // --- MigrationState enum ---
 
         [Test]
@@ -1075,6 +1160,22 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("1.3.0", fromWrapper[0].Version);
         }
 
+        [UnityTest]
+        public IEnumerator BuildService_LoadUpdateManifestAsync_LocalFile_ParsesContent() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var manifestPath = Path.Combine(tempDir, "updates.json");
+                File.WriteAllText(manifestPath, "[{\"Version\":\"1.2.4\",\"DownloadUrl\":\"https://example.com/124\"}]");
+
+                var service = new BuildService();
+                var updates = await service.LoadUpdateManifestAsync(manifestPath);
+
+                Assert.AreEqual(1, updates.Count);
+                Assert.AreEqual("1.2.4", updates[0].Version);
+            });
+        });
+
         [Test]
         public void BuildService_ShouldApplyUpdate_RequiresNewerVersionAndUrl()
         {
@@ -1144,6 +1245,35 @@ namespace Gwt.Tests.Editor
         }
 
         [UnityTest]
+        public IEnumerator BuildService_WritePreparedUpdateScriptAsync_WritesLauncherScript() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var sourcePath = Path.Combine(tempDir, "gwt-update.zip");
+                File.WriteAllText(sourcePath, "payload");
+
+                var service = new BuildService();
+                var plan = await service.PrepareUpdateAsync(
+                    "1.2.3",
+                    new UpdateInfo
+                    {
+                        Version = "1.2.4",
+                        DownloadUrl = sourcePath
+                    },
+                    "/Applications/gwt.app",
+                    Path.Combine(tempDir, "staging"),
+                    manifestSource: Path.Combine(tempDir, "manifest.json"));
+
+                var scriptPath = await service.WritePreparedUpdateScriptAsync(plan);
+                Assert.IsTrue(File.Exists(scriptPath));
+
+                var script = File.ReadAllText(scriptPath);
+                Assert.That(script, Does.Contain("gwt-update.zip"));
+                Assert.That(script, Does.Contain("gwt.app"));
+            });
+        });
+
+        [UnityTest]
         public IEnumerator BuildService_DownloadUpdateAsync_FileUri_CopiesArtifact() => UniTask.ToCoroutine(async () =>
         {
             await WithTempProjectAsync(async tempDir =>
@@ -1183,6 +1313,92 @@ namespace Gwt.Tests.Editor
                 Assert.IsTrue(File.Exists(downloadedPath));
             });
         });
+
+        [UnityTest]
+        public IEnumerator BuildService_PrepareUpdateAsync_DownloadsArtifactAndBuildsCommands() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var sourcePath = Path.Combine(tempDir, "gwt-update.zip");
+                File.WriteAllText(sourcePath, "payload");
+
+                var service = new BuildService();
+                var plan = await service.PrepareUpdateAsync(
+                    "1.2.3",
+                    new UpdateInfo
+                    {
+                        Version = "1.2.4",
+                        DownloadUrl = sourcePath
+                    },
+                    "/Applications/gwt.app",
+                    Path.Combine(tempDir, "staging"),
+                    manifestSource: Path.Combine(tempDir, "manifest.json"));
+
+                Assert.IsTrue(plan.ShouldApply);
+                Assert.IsTrue(File.Exists(plan.DownloadedArtifactPath));
+                Assert.IsTrue(File.Exists(plan.LauncherScriptPath));
+                Assert.That(plan.ApplyCommand, Does.Contain("gwt-update.zip"));
+                Assert.That(plan.RestartCommand, Does.Contain("gwt.app"));
+                Assert.That(plan.StagingDirectory, Does.Contain("staging"));
+            });
+        });
+
+        [Test]
+        public void BuildService_PrepareUpdateAsync_SkipsWhenCandidateIsNotApplicable()
+        {
+            var service = new BuildService();
+            var plan = service.PrepareUpdateAsync(
+                "1.2.3",
+                new UpdateInfo
+                {
+                    Version = "1.2.3",
+                    DownloadUrl = "https://example.com/gwt.dmg"
+                },
+                "/Applications/gwt.app").GetAwaiter().GetResult();
+
+            Assert.IsFalse(plan.ShouldApply);
+            Assert.IsTrue(string.IsNullOrEmpty(plan.DownloadedArtifactPath));
+            Assert.IsTrue(string.IsNullOrEmpty(plan.ApplyCommand));
+        }
+
+        [UnityTest]
+        public IEnumerator BuildService_WritePreparedUpdateScriptAsync_WritesApplyAndRestartCommands() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var service = new BuildService();
+                var plan = new PreparedUpdatePlan
+                {
+                    Candidate = new UpdateInfo { Version = "1.2.4", DownloadUrl = "file:///tmp/gwt-update.zip" },
+                    ManifestSource = Path.Combine(tempDir, "manifest.json"),
+                    DownloadedArtifactPath = Path.Combine(tempDir, "gwt-update.zip"),
+                    ApplyCommand = "open '/tmp/gwt-update.zip'",
+                    RestartCommand = "open '/Applications/gwt.app'",
+                    StagingDirectory = Path.Combine(tempDir, "staging"),
+                    ShouldApply = true
+                };
+
+                var scriptPath = await service.WritePreparedUpdateScriptAsync(plan);
+                var scriptText = File.ReadAllText(scriptPath);
+
+                Assert.AreEqual(scriptPath, plan.LauncherScriptPath);
+                Assert.That(scriptText, Does.Contain("manifest.json"));
+                Assert.That(scriptText, Does.Contain(plan.ApplyCommand));
+                Assert.That(scriptText, Does.Contain(plan.RestartCommand));
+            });
+        });
+
+        [Test]
+        public void BuildService_LaunchPreparedUpdateAsync_InvalidPlan_ReturnsFalse()
+        {
+            var service = new BuildService();
+            var launched = service.LaunchPreparedUpdateAsync(new PreparedUpdatePlan
+            {
+                ShouldApply = false
+            }).GetAwaiter().GetResult();
+
+            Assert.IsFalse(launched);
+        }
 
         [Test]
         public void BuildArtifactInfo_Serialization_RoundTrip()

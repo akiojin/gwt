@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Services.Terminal;
 using Gwt.Lifecycle.Services;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
@@ -25,6 +26,7 @@ namespace Gwt.Studio.UI
         private readonly Stack<OverlayPanel> _overlayStack = new();
         private IProjectLifecycleService _projectLifecycleService;
         private IMultiProjectService _multiProjectService;
+        private ITerminalPaneManager _terminalPaneManager;
         private bool _subscribed;
         private bool _previousBackquotePressed;
         private bool _previousDownPressed;
@@ -38,13 +40,18 @@ namespace Gwt.Studio.UI
         private bool _terminalAutoOpened;
 
         [Inject]
-        public void Construct(IProjectLifecycleService projectLifecycleService, IMultiProjectService multiProjectService)
+        public void Construct(
+            IProjectLifecycleService projectLifecycleService,
+            IMultiProjectService multiProjectService,
+            ITerminalPaneManager terminalPaneManager)
         {
             _projectLifecycleService = projectLifecycleService;
             _multiProjectService = multiProjectService;
+            _terminalPaneManager = terminalPaneManager;
             EnsureProjectSwitcher();
             SubscribeServices();
             RefreshProjectInfoBar();
+            RestoreCurrentProjectSnapshot();
         }
 
         private void Update()
@@ -248,6 +255,7 @@ namespace Gwt.Studio.UI
         private void HandleProjectOpened(ProjectInfo _)
         {
             RefreshProjectInfoBar();
+            RestoreCurrentProjectSnapshot();
         }
 
         private void HandleProjectClosed()
@@ -313,6 +321,8 @@ namespace Gwt.Studio.UI
             if (_projectSceneTransitionController != null && _projectLifecycleService?.CurrentProject != null)
                 await _projectSceneTransitionController.TransitionToProjectAsync(_projectLifecycleService.CurrentProject);
 
+            RefreshProjectInfoBar();
+            RestoreCurrentProjectSnapshot();
             return true;
         }
 
@@ -326,7 +336,10 @@ namespace Gwt.Studio.UI
                 ProjectPath = _projectLifecycleService.CurrentProject.Path,
                 DeskStateKey = _projectInfoBar.CurrentProjectName,
                 IssueMarkerStateKey = _projectInfoBar.CurrentBranch,
-                AgentStateKey = _projectInfoBar.CurrentStatus
+                AgentStateKey = _projectInfoBar.CurrentStatus,
+                TerminalWasOpen = _terminalOverlayPanel != null && _terminalOverlayPanel.IsOpen,
+                ActiveTerminalPaneId = _terminalPaneManager?.ActivePane?.PaneId ?? string.Empty,
+                ActiveAgentSessionId = _terminalPaneManager?.ActivePane?.AgentSessionId ?? string.Empty
             });
         }
 
@@ -345,6 +358,34 @@ namespace Gwt.Studio.UI
                 _projectInfoBar.SetBranch(snapshot.IssueMarkerStateKey);
             if (!string.IsNullOrWhiteSpace(snapshot.AgentStateKey))
                 _projectInfoBar.SetStatus(snapshot.AgentStateKey);
+
+            RestoreTerminalSnapshot(snapshot);
+        }
+
+        private void RestoreTerminalSnapshot(ProjectSwitchSnapshot snapshot)
+        {
+            if (_terminalPaneManager == null || snapshot == null)
+                return;
+
+            if (!string.IsNullOrWhiteSpace(snapshot.ActiveTerminalPaneId))
+            {
+                var paneIndex = _terminalPaneManager.FindPaneIndex(snapshot.ActiveTerminalPaneId);
+                if (paneIndex >= 0)
+                    _terminalPaneManager.SetActiveIndex(paneIndex);
+            }
+            else if (!string.IsNullOrWhiteSpace(snapshot.ActiveAgentSessionId))
+            {
+                var pane = _terminalPaneManager.GetPaneByAgentSessionId(snapshot.ActiveAgentSessionId);
+                if (pane != null)
+                {
+                    var paneIndex = _terminalPaneManager.FindPaneIndex(pane.PaneId);
+                    if (paneIndex >= 0)
+                        _terminalPaneManager.SetActiveIndex(paneIndex);
+                }
+            }
+
+            if (snapshot.TerminalWasOpen && _terminalOverlayPanel != null && !_terminalOverlayPanel.IsOpen)
+                OpenTerminal();
         }
 
         private static bool IsCommandPressed()

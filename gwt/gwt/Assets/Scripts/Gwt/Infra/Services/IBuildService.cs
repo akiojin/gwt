@@ -58,6 +58,19 @@ namespace Gwt.Infra.Services
         public float RealtimeSinceStartup;
     }
 
+    [System.Serializable]
+    public class PreparedUpdatePlan
+    {
+        public UpdateInfo Candidate;
+        public string ManifestSource;
+        public string DownloadedArtifactPath;
+        public string ApplyCommand;
+        public string RestartCommand;
+        public string StagingDirectory;
+        public string LauncherScriptPath;
+        public bool ShouldApply;
+    }
+
     public interface IBuildService
     {
         SystemInfoData GetSystemInfo();
@@ -71,10 +84,20 @@ namespace Gwt.Infra.Services
         string BuildGitHubIssueCommand(string title, BugReport report);
         List<BuildArtifactInfo> GetReleaseArtifacts(string version);
         List<UpdateInfo> ParseUpdateManifest(string manifestJson);
+        UniTask<List<UpdateInfo>> LoadUpdateManifestAsync(string manifestSource, CancellationToken ct = default);
         UpdateInfo GetLatestUpdate(string currentVersion, List<UpdateInfo> candidates);
         bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate);
         string GetUpdateStagingDirectory();
         UniTask<string> DownloadUpdateAsync(UpdateInfo candidate, string destinationDirectory, CancellationToken ct = default);
+        UniTask<PreparedUpdatePlan> PrepareUpdateAsync(
+            string currentVersion,
+            UpdateInfo candidate,
+            string executablePath,
+            string destinationDirectory = null,
+            string manifestSource = null,
+            CancellationToken ct = default);
+        UniTask<string> WritePreparedUpdateScriptAsync(PreparedUpdatePlan plan, CancellationToken ct = default);
+        UniTask<bool> LaunchPreparedUpdateAsync(PreparedUpdatePlan plan, CancellationToken ct = default);
         string BuildApplyUpdateCommand(UpdateInfo candidate);
         string BuildApplyDownloadedUpdateCommand(string downloadedArtifactPath);
         string BuildRestartCommand(string executablePath);

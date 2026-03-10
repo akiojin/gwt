@@ -13,6 +13,7 @@ namespace Gwt.Infra.Services
         public string LastModified;
         public string Extension;
         public string PreviewText;
+        public List<SemanticTokenWeight> SemanticTerms = new();
     }
 
     [System.Serializable]
@@ -23,6 +24,14 @@ namespace Gwt.Infra.Services
         public string Body;
         public List<string> Labels = new();
         public string UpdatedAt;
+        public List<SemanticTokenWeight> SemanticTerms = new();
+    }
+
+    [System.Serializable]
+    public class SemanticTokenWeight
+    {
+        public string Token;
+        public float Weight;
     }
 
     [System.Serializable]
@@ -49,8 +58,11 @@ namespace Gwt.Infra.Services
         UniTask StartBackgroundIndexAsync(string projectRoot, CancellationToken ct = default);
         UniTask BuildIssueIndexAsync(List<IssueIndexEntry> issues, CancellationToken ct = default);
         List<FileIndexEntry> Search(string query);
+        List<FileIndexEntry> SearchSemantic(string query, int maxResults = 20);
         List<IssueIndexEntry> SearchIssues(string query);
+        List<IssueIndexEntry> SearchIssuesSemantic(string query, int maxResults = 20);
         SearchResultGroup SearchAll(string query);
+        SearchResultGroup SearchAllSemantic(string query, int maxResults = 20);
         UniTask RefreshAsync(string projectRoot, CancellationToken ct = default);
         UniTask RefreshChangedFilesAsync(string projectRoot, CancellationToken ct = default);
         UniTask SaveIndexAsync(string projectRoot, CancellationToken ct = default);

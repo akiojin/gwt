@@ -8,6 +8,8 @@ namespace Gwt.Studio.UI
 {
     public class ProjectSceneTransitionController : MonoBehaviour
     {
+        private static ProjectSceneTransitionController _instance;
+
         [SerializeField] private string _studioSceneName = "StudioScene";
         [SerializeField] private float _fadeDuration = 0.15f;
 
@@ -16,9 +18,17 @@ namespace Gwt.Studio.UI
         public bool IsTransitioning { get; private set; }
         public string LastProjectPath { get; private set; } = string.Empty;
         public string LastLoadedSceneName { get; private set; } = string.Empty;
+        public float CurrentFadeAlpha => _fadeCanvasGroup != null ? _fadeCanvasGroup.alpha : 0f;
 
         protected virtual void Awake()
         {
+            if (_instance != null && _instance != this)
+            {
+                Destroy(gameObject);
+                return;
+            }
+
+            _instance = this;
             DontDestroyOnLoad(gameObject);
             EnsureFadeOverlay();
         }
@@ -142,6 +152,12 @@ namespace Gwt.Studio.UI
             }
 
             _fadeCanvasGroup.alpha = targetAlpha;
+        }
+
+        protected virtual void OnDestroy()
+        {
+            if (_instance == this)
+                _instance = null;
         }
     }
 }
