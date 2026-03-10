@@ -10,13 +10,94 @@ namespace Gwt.Core.Services.Terminal
             var buffer = adapter.GetBuffer();
             var sb = new StringBuilder(visibleRows * adapter.Cols * 2);
 
-            for (int row = 0; row < visibleRows && row < buffer.Rows; row++)
+            // scrollOffset > 0 means we're viewing scrollback history
+            // scrollOffset == 0 means we're viewing the live buffer bottom
+            int scrollbackLines = buffer.ScrollbackLines;
+            bool first = true;
+
+            if (scrollOffset > 0 && scrollbackLines > 0)
             {
-                if (row > 0) sb.Append('\n');
+                // Render from scrollback buffer
+                int scrollbackStart = scrollbackLines - scrollOffset;
+                if (scrollbackStart < 0) scrollbackStart = 0;
+
+                for (int i = scrollbackStart; i < scrollbackLines && visibleRows > 0; i++)
+                {
+                    if (!first) sb.Append('\n');
+                    first = false;
+                    var line = buffer.GetScrollbackLine(i);
+                    BuildScrollbackRow(line, sb);
+                    visibleRows--;
+                }
+            }
+
+            // Render visible screen rows
+            int startRow = scrollOffset > scrollbackLines ? 0 : 0;
+            for (int row = startRow; row < visibleRows && row < buffer.Rows; row++)
+            {
+                if (!first) sb.Append('\n');
+                first = false;
                 BuildRow(buffer, row, sb);
             }
 
             return sb.ToString();
+        }
+
+        internal static void BuildScrollbackRow(TerminalCell[] line, StringBuilder sb)
+        {
+            if (line == null) return;
+
+            byte currentFg = 255;
+            bool hasOpenColor = false;
+            bool hasOpenBold = false;
+            bool hasOpenItalic = false;
+            bool hasOpenUnderline = false;
+
+            int trailingSpaces = line.Length - 1;
+            while (trailingSpaces >= 0 && line[trailingSpaces].Character == ' '
+                   && line[trailingSpaces].ForegroundColor == 7
+                   && line[trailingSpaces].BackgroundColor == 0)
+            {
+                trailingSpaces--;
+            }
+
+            for (int col = 0; col <= trailingSpaces; col++)
+            {
+                var cell = line[col];
+                byte fg = cell.ForegroundColor;
+
+                if (fg != currentFg)
+                {
+                    if (hasOpenColor) sb.Append("</color>");
+                    hasOpenColor = false;
+
+                    if (fg != 7)
+                    {
+                        var color = MapAnsiColor(fg);
+                        sb.Append("<color=#");
+                        sb.Append(ColorUtility.ToHtmlStringRGB(color));
+                        sb.Append('>');
+                        hasOpenColor = true;
+                    }
+                    currentFg = fg;
+                }
+
+                if (cell.Bold && !hasOpenBold) { sb.Append("<b>"); hasOpenBold = true; }
+                else if (!cell.Bold && hasOpenBold) { sb.Append("</b>"); hasOpenBold = false; }
+
+                if (cell.Italic && !hasOpenItalic) { sb.Append("<i>"); hasOpenItalic = true; }
+                else if (!cell.Italic && hasOpenItalic) { sb.Append("</i>"); hasOpenItalic = false; }
+
+                if (cell.Underline && !hasOpenUnderline) { sb.Append("<u>"); hasOpenUnderline = true; }
+                else if (!cell.Underline && hasOpenUnderline) { sb.Append("</u>"); hasOpenUnderline = false; }
+
+                AppendEscaped(sb, cell.Character);
+            }
+
+            if (hasOpenUnderline) sb.Append("</u>");
+            if (hasOpenItalic) sb.Append("</i>");
+            if (hasOpenBold) sb.Append("</b>");
+            if (hasOpenColor) sb.Append("</color>");
         }
 
         internal static void BuildRow(TerminalBuffer buffer, int row, StringBuilder sb)

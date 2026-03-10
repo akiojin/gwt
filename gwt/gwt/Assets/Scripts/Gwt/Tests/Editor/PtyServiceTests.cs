@@ -326,11 +326,10 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
-        public void Dispose_CleansUpAllSessions()
+        public async Task Dispose_CleansUpAllSessions()
         {
             var service = new PtyService(_shellDetector);
-            var session = service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None)
-                .AsTask().GetAwaiter().GetResult();
+            var session = await service.SpawnShellAsync(GetTempDir(), cancellationToken: CancellationToken.None);
             var token = session.Token;
 
             service.Dispose();

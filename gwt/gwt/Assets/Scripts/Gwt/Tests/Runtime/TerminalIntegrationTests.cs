@@ -32,13 +32,12 @@ namespace Gwt.Tests.Runtime
         [UnityTest]
         public IEnumerator SpawnEcho_OutputReachesXtermBuffer() => UniTask.ToCoroutine(async () =>
         {
+            var adapter = new XtermSharpTerminalAdapter(24, 80);
             var echoCmd = GetEchoCommand();
             var echoArgs = GetEchoArgs("hello");
+
+            // Subscribe before spawn to avoid missing early output
             var paneId = await _ptyService.SpawnAsync(echoCmd, echoArgs, GetTempDir(), 24, 80);
-
-            var adapter = new XtermSharpTerminalAdapter(24, 80);
-            var pane = new TerminalPaneState("test-pane", adapter) { PtySessionId = paneId };
-
             _ptyService.GetOutputStream(paneId).Subscribe(data => adapter.Feed(data));
 
             await UniTask.Delay(1000);
@@ -54,13 +53,13 @@ namespace Gwt.Tests.Runtime
         {
             var echoCmd = GetEchoCommand();
 
-            var paneId1 = await _ptyService.SpawnAsync(echoCmd, GetEchoArgs("AAA"), GetTempDir(), 24, 80);
-            var paneId2 = await _ptyService.SpawnAsync(echoCmd, GetEchoArgs("BBB"), GetTempDir(), 24, 80);
-
             var adapter1 = new XtermSharpTerminalAdapter(24, 80);
             var adapter2 = new XtermSharpTerminalAdapter(24, 80);
 
+            var paneId1 = await _ptyService.SpawnAsync(echoCmd, GetEchoArgs("AAA"), GetTempDir(), 24, 80);
             _ptyService.GetOutputStream(paneId1).Subscribe(data => adapter1.Feed(data));
+
+            var paneId2 = await _ptyService.SpawnAsync(echoCmd, GetEchoArgs("BBB"), GetTempDir(), 24, 80);
             _ptyService.GetOutputStream(paneId2).Subscribe(data => adapter2.Feed(data));
 
             _paneManager.AddPane(new TerminalPaneState("pane-1", adapter1) { PtySessionId = paneId1 });

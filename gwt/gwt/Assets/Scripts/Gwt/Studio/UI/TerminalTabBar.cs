@@ -20,10 +20,13 @@ namespace Gwt.Studio.UI
         public void Initialize(ITerminalPaneManager paneManager)
         {
             _paneManager = paneManager;
-            _paneManager.OnPaneAdded += _ => RebuildTabs();
-            _paneManager.OnPaneRemoved += _ => RebuildTabs();
+            _paneManager.OnPaneAdded += OnPaneAddedHandler;
+            _paneManager.OnPaneRemoved += OnPaneRemovedHandler;
             _paneManager.OnActiveIndexChanged += OnActiveChanged;
         }
+
+        private void OnPaneAddedHandler(TerminalPaneState _) => RebuildTabs();
+        private void OnPaneRemovedHandler(string _) => RebuildTabs();
 
         private void RebuildTabs()
         {
@@ -61,6 +64,16 @@ namespace Gwt.Studio.UI
         private void OnActiveChanged(int activeIndex)
         {
             UpdateActiveHighlight(activeIndex);
+        }
+
+        private void OnDestroy()
+        {
+            if (_paneManager != null)
+            {
+                _paneManager.OnPaneAdded -= OnPaneAddedHandler;
+                _paneManager.OnPaneRemoved -= OnPaneRemovedHandler;
+                _paneManager.OnActiveIndexChanged -= OnActiveChanged;
+            }
         }
 
         private void UpdateActiveHighlight(int activeIndex)

@@ -50,7 +50,15 @@ namespace Gwt.Core.Services.Pty
             }
 
             var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            process.Start();
+            try
+            {
+                process.Start();
+            }
+            catch
+            {
+                process.Dispose();
+                throw;
+            }
 
             var id = Guid.NewGuid().ToString("N");
             var session = new PtySession(id, process, workingDir, rows, cols);
@@ -89,7 +97,7 @@ namespace Gwt.Core.Services.Pty
                 throw new InvalidOperationException($"Session {paneId} is not running.");
 
             await session.Process.StandardInput.WriteAsync(data.AsMemory(), ct);
-            await session.Process.StandardInput.FlushAsync();
+            await session.Process.StandardInput.FlushAsync(ct);
         }
 
         public UniTask ResizeAsync(string paneId, int rows, int cols, CancellationToken ct = default)
