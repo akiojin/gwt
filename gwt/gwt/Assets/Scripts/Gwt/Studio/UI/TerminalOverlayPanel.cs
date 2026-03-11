@@ -5,8 +5,10 @@ using Gwt.Core.Services.Pty;
 using Gwt.Core.Services.Terminal;
 using Gwt.Infra.Services;
 using Gwt.Lifecycle.Services;
+using Gwt.Shared;
 using UnityEngine;
 using VContainer;
+using VContainer.Unity;
 
 namespace Gwt.Studio.UI
 {
@@ -22,6 +24,12 @@ namespace Gwt.Studio.UI
         private IDockerService _dockerService;
         private IProjectLifecycleService _projectLifecycleService;
         private bool _initialized;
+        private string _lastSpawnError = string.Empty;
+
+        public string ActivePaneTitle => _paneManager?.ActivePane?.Title ?? string.Empty;
+        public string ActivePtySessionId => _paneManager?.ActivePane?.PtySessionId ?? string.Empty;
+        public int PaneCount => _paneManager?.PaneCount ?? 0;
+        public string LastSpawnError => _lastSpawnError;
 
         [Inject]
         public void Construct(
@@ -40,6 +48,7 @@ namespace Gwt.Studio.UI
 
         private void Initialize()
         {
+            TryResolveRuntimeServices();
             if (_initialized) return;
             if (_paneManager == null) return;
             _initialized = true;
@@ -64,66 +73,67 @@ namespace Gwt.Studio.UI
         {
             Initialize();
             base.Open();
+            EnsurePane();
+        }
 
-            if (_paneManager != null && _paneManager.PaneCount == 0)
-            {
+        public void EnsurePane()
+        {
+            Initialize();
+
+            if (ShouldSpawnDefaultPane())
                 SpawnDefaultShellAsync().Forget();
-            }
             else
-            {
                 BindToActivePane();
-            }
         }
 
         private async UniTaskVoid SpawnDefaultShellAsync()
         {
             if (_ptyService == null || _shellDetector == null) return;
+            _lastSpawnError = string.Empty;
 
             var hostLaunch = BuildHostLaunchPlan();
+            var launchPtyService = CreateLaunchPtyService();
             try
             {
-                var adapter = new XtermSharpTerminalAdapter(24, 80);
                 var launch = await ResolveLaunchAsync() ?? hostLaunch;
-                var ptySessionId = await launch.SpawnAsync(_ptyService);
-                if (!string.IsNullOrWhiteSpace(launch.InitialOutput))
-                    adapter.Feed(launch.InitialOutput);
-
-                var subscription = _ptyService.GetOutputStream(ptySessionId).Subscribe(data =>
-                {
-                    adapter.Feed(data);
-                });
-
-                var paneId = Guid.NewGuid().ToString("N");
-                var pane = new TerminalPaneState(paneId, adapter)
-                {
-                    Title = launch.Title,
-                    PtySessionId = ptySessionId,
-                    OutputSubscription = subscription
-                };
-                _paneManager.AddPane(pane);
+                await SpawnPaneAsync(launch, launchPtyService);
+                _ptyService = launchPtyService;
+                _terminalInputField?.Initialize(_ptyService);
             }
             catch (Exception e)
             {
+                if (TryResetDisposedPtyService(e))
+                {
+                    try
+                    {
+                        launchPtyService = CreateLaunchPtyService();
+                        var retryLaunch = await ResolveLaunchAsync() ?? hostLaunch;
+                        await SpawnPaneAsync(retryLaunch, launchPtyService);
+                        _ptyService = launchPtyService;
+                        _terminalInputField?.Initialize(_ptyService);
+                        return;
+                    }
+                    catch (Exception retryError)
+                    {
+                        e = retryError;
+                    }
+                }
+
                 try
                 {
-                    var adapter = new XtermSharpTerminalAdapter(24, 80);
+                    TryResetDisposedPtyService(e);
+                    launchPtyService = CreateLaunchPtyService();
                     var fallbackLaunch = BuildHostLaunchPlan(
                         "Host Shell (Docker fallback)",
                         $"[GWT] Docker shell unavailable, using host shell.\nReason: {e.Message}\n");
-                    var ptySessionId = await fallbackLaunch.SpawnAsync(_ptyService);
-                    adapter.Feed(fallbackLaunch.InitialOutput);
-                    var subscription = _ptyService.GetOutputStream(ptySessionId).Subscribe(data => adapter.Feed(data));
-                    var pane = new TerminalPaneState(Guid.NewGuid().ToString("N"), adapter)
-                    {
-                        Title = fallbackLaunch.Title,
-                        PtySessionId = ptySessionId,
-                        OutputSubscription = subscription
-                    };
-                    _paneManager.AddPane(pane);
+                    await SpawnPaneAsync(fallbackLaunch, launchPtyService);
+                    _ptyService = launchPtyService;
+                    _terminalInputField?.Initialize(_ptyService);
                     Debug.LogWarning($"[GWT] Docker shell fallback to host shell after spawn failure: {e.Message}");
                 }
                 catch (Exception fallbackError)
                 {
+                    _lastSpawnError = $"{e.Message} | fallback: {fallbackError.Message}";
                     Debug.LogError($"[GWT] Failed to spawn default shell: {e.Message}; fallback failed: {fallbackError.Message}");
                 }
             }
@@ -169,6 +179,23 @@ namespace Gwt.Studio.UI
             }
 
             return null;
+        }
+
+        private async UniTask SpawnPaneAsync(TerminalLaunchPlan launch, IPtyService ptyService)
+        {
+            var adapter = new XtermSharpTerminalAdapter(24, 80);
+            var ptySessionId = await launch.SpawnAsync(ptyService);
+            if (!string.IsNullOrWhiteSpace(launch.InitialOutput))
+                adapter.Feed(launch.InitialOutput);
+
+            var subscription = ptyService.GetOutputStream(ptySessionId).Subscribe(data => adapter.Feed(data));
+            var pane = new TerminalPaneState(Guid.NewGuid().ToString("N"), adapter)
+            {
+                Title = launch.Title,
+                PtySessionId = ptySessionId,
+                OutputSubscription = subscription
+            };
+            _paneManager.AddPane(pane);
         }
 
         private TerminalLaunchPlan BuildHostLaunchPlan(string title = "Host Shell", string initialOutput = "")
@@ -263,6 +290,103 @@ namespace Gwt.Studio.UI
             {
                 _terminalTabBar.OnTabSelected -= OnTabSelected;
             }
+        }
+
+        private void TryResolveRuntimeServices()
+        {
+            if (_paneManager != null &&
+                _ptyService != null &&
+                _shellDetector != null &&
+                _dockerService != null &&
+                _projectLifecycleService != null)
+            {
+                return;
+            }
+
+            var scope = LifetimeScope.Find<GwtRootLifetimeScope>(gameObject.scene) as GwtRootLifetimeScope;
+            var container = scope?.Container;
+            if (container != null)
+            {
+                try
+                {
+                    _paneManager ??= container.Resolve<ITerminalPaneManager>();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    _ptyService ??= container.Resolve<IPtyService>();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    _shellDetector ??= container.Resolve<IPlatformShellDetector>();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    _dockerService ??= container.Resolve<IDockerService>();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    _projectLifecycleService ??= container.Resolve<IProjectLifecycleService>();
+                }
+                catch
+                {
+                }
+            }
+
+            _shellDetector ??= new PlatformShellDetector();
+            _ptyService ??= new PtyService(_shellDetector);
+            _paneManager ??= new TerminalPaneManager();
+            _dockerService ??= new DockerService();
+        }
+
+        private bool ShouldSpawnDefaultPane()
+        {
+            return _paneManager != null &&
+                (_paneManager.PaneCount == 0 || string.IsNullOrWhiteSpace(_paneManager.ActivePane?.PtySessionId));
+        }
+
+        private IPtyService CreateLaunchPtyService()
+        {
+            if (Application.isPlaying && ShouldSpawnDefaultPane())
+            {
+                _shellDetector ??= new PlatformShellDetector();
+                return new PtyService(_shellDetector);
+            }
+
+            return _ptyService;
+        }
+
+        private bool TryResetDisposedPtyService(Exception exception)
+        {
+            if (!IsDisposedPtyException(exception))
+                return false;
+
+            _shellDetector ??= new PlatformShellDetector();
+            _ptyService = new PtyService(_shellDetector);
+            return true;
+        }
+
+        private static bool IsDisposedPtyException(Exception exception)
+        {
+            return exception is ObjectDisposedException ||
+                (exception?.InnerException != null && IsDisposedPtyException(exception.InnerException)) ||
+                (!string.IsNullOrWhiteSpace(exception?.Message) &&
+                 exception.Message.IndexOf("disposed", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         private sealed class TerminalLaunchPlan

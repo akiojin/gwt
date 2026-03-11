@@ -13,8 +13,11 @@ namespace Gwt.Studio.UI
         [SerializeField] private TextMeshProUGUI _statusText;
         [SerializeField] private TextMeshProUGUI _environmentText;
         [SerializeField] private Button _button;
+        [SerializeField] private Button _terminalButton;
+        [SerializeField] private TextMeshProUGUI _terminalButtonText;
 
         public event Action Clicked;
+        public event Action TerminalRequested;
 
         public string CurrentProjectName { get; private set; } = string.Empty;
         public string CurrentBranch { get; private set; } = string.Empty;
@@ -32,6 +35,8 @@ namespace Gwt.Studio.UI
         {
             if (_button != null)
                 _button.onClick.RemoveListener(InvokeClicked);
+            if (_terminalButton != null)
+                _terminalButton.onClick.RemoveListener(InvokeTerminalRequested);
         }
 
         public void SetProjectName(string name)
@@ -107,6 +112,8 @@ namespace Gwt.Studio.UI
                 _statusText = CreateLabel("Status", new Vector2(180f, -30f), 20f, FontStyles.Italic);
             if (_environmentText == null)
                 _environmentText = CreateLabel("Environment", new Vector2(0f, -60f), 18f, FontStyles.Normal);
+            if (_terminalButton == null)
+                CreateTerminalButton();
         }
 
         private TextMeshProUGUI CreateLabel(string name, Vector2 anchoredPosition, float fontSize, FontStyles fontStyle)
@@ -141,11 +148,67 @@ namespace Gwt.Studio.UI
             _button.targetGraphic = gameObject.GetComponent<Image>();
             _button.onClick.RemoveListener(InvokeClicked);
             _button.onClick.AddListener(InvokeClicked);
+
+            if (_terminalButton != null)
+            {
+                _terminalButton.onClick.RemoveListener(InvokeTerminalRequested);
+                _terminalButton.onClick.AddListener(InvokeTerminalRequested);
+            }
         }
 
         private void InvokeClicked()
         {
             Clicked?.Invoke();
+        }
+
+        private void CreateTerminalButton()
+        {
+            var buttonObject = new GameObject("TerminalButton", typeof(RectTransform), typeof(Image), typeof(Button));
+            buttonObject.transform.SetParent(transform, false);
+
+            var rect = buttonObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(1f, 1f);
+            rect.anchorMax = new Vector2(1f, 1f);
+            rect.pivot = new Vector2(1f, 1f);
+            rect.anchoredPosition = new Vector2(0f, 0f);
+            rect.sizeDelta = new Vector2(126f, 30f);
+
+            var image = buttonObject.GetComponent<Image>();
+            image.color = new Color(0.24f, 0.32f, 0.42f, 0.95f);
+
+            _terminalButton = buttonObject.GetComponent<Button>();
+            _terminalButton.targetGraphic = image;
+
+            _terminalButtonText = CreateTerminalButtonLabel(buttonObject.transform);
+        }
+
+        private TextMeshProUGUI CreateTerminalButtonLabel(Transform parent)
+        {
+            var go = new GameObject("Label", typeof(RectTransform));
+            go.transform.SetParent(parent, false);
+
+            var rect = go.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+
+            var text = go.AddComponent<TextMeshProUGUI>();
+            if (TMP_Settings.defaultFontAsset != null)
+                text.font = TMP_Settings.defaultFontAsset;
+            text.fontSize = 16f;
+            text.fontStyle = FontStyles.Bold;
+            text.color = Color.white;
+            text.alignment = TextAlignmentOptions.Center;
+            text.enableWordWrapping = false;
+            text.text = "Terminal";
+            text.raycastTarget = false;
+            return text;
+        }
+
+        private void InvokeTerminalRequested()
+        {
+            TerminalRequested?.Invoke();
         }
     }
 }

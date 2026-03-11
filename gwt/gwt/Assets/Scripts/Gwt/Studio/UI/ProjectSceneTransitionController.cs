@@ -51,6 +51,13 @@ namespace Gwt.Studio.UI
                 await FadeAsync(1f);
 
                 var activeScene = SceneManager.GetActiveScene();
+                if (activeScene.IsValid() && string.Equals(activeScene.name, _studioSceneName, StringComparison.Ordinal))
+                {
+                    LastLoadedSceneName = activeScene.name;
+                    await FadeAsync(0f);
+                    return true;
+                }
+
                 var previousSceneCount = SceneManager.sceneCount;
 
                 var loadOperation = SceneManager.LoadSceneAsync(_studioSceneName, LoadSceneMode.Additive);

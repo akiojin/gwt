@@ -152,7 +152,16 @@ namespace Gwt.Studio.UI
         public void OpenGitDetail() => OpenPanel(_gitDetailPanel);
         public void OpenIssueDetail() => OpenPanel(_issueDetailPanel);
         public void OpenAgentSettings() => OpenPanel(_agentSettingsPanel);
-        public void OpenTerminal() => OpenPanel(_terminalOverlayPanel);
+        public void OpenTerminal()
+        {
+            if (_terminalOverlayPanel == null)
+                return;
+
+            if (!_terminalOverlayPanel.IsOpen)
+                OpenPanel(_terminalOverlayPanel);
+            else
+                _terminalOverlayPanel.EnsurePane();
+        }
         public void OpenProjectSwitcher()
         {
             EnsureProjectSwitcher();
@@ -263,11 +272,18 @@ namespace Gwt.Studio.UI
 
             _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
             _projectInfoBar.Clicked += HandleProjectInfoBarClicked;
+            _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
+            _projectInfoBar.TerminalRequested += HandleProjectInfoBarTerminalRequested;
         }
 
         private void HandleProjectInfoBarClicked()
         {
             ToggleProjectSwitcher();
+        }
+
+        private void HandleProjectInfoBarTerminalRequested()
+        {
+            OpenTerminal();
         }
 
         private void HandleProjectSwitchEntryInvoked()
@@ -290,7 +306,15 @@ namespace Gwt.Studio.UI
         {
             RefreshProjectInfoBar();
             RestoreCurrentProjectSnapshot();
-            _projectSwitchOverlayPanel?.Refresh();
+            try
+            {
+                if (_projectSwitchOverlayPanel != null && _projectSwitchOverlayPanel.IsOpen)
+                    _projectSwitchOverlayPanel.Refresh();
+            }
+            catch (MissingReferenceException)
+            {
+                _projectSwitchOverlayPanel = null;
+            }
         }
 
         private void RefreshProjectInfoBar()
@@ -461,7 +485,10 @@ namespace Gwt.Studio.UI
                 _multiProjectService.OnProjectSwitched -= HandleProjectSwitched;
 
             if (_projectInfoBar != null)
+            {
                 _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
+                _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
+            }
 
             if (_projectSwitchOverlayPanel != null)
                 _projectSwitchOverlayPanel.EntryInvoked -= HandleProjectSwitchEntryInvoked;
