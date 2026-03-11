@@ -77,6 +77,7 @@ namespace Gwt.Studio.UI
             SubscribeServices();
             RefreshProjectInfoBar();
             RestoreCurrentProjectSnapshot();
+            ApplyPendingProjectTransitionState();
         }
 
         private void Awake()
@@ -85,6 +86,7 @@ namespace Gwt.Studio.UI
             SubscribeServices();
             EnsureProjectInfoBar();
             RefreshProjectInfoBar();
+            ApplyPendingProjectTransitionState();
         }
 
         private void Update()
@@ -880,6 +882,26 @@ namespace Gwt.Studio.UI
                 _projectInfoBar.SetStatus(snapshot.AgentStateKey);
 
             RestoreTerminalSnapshot(snapshot);
+        }
+
+        private void ApplyPendingProjectTransitionState()
+        {
+            if (_projectLifecycleService?.CurrentProject == null)
+                return;
+
+            if (_projectSceneTransitionController == null)
+                _projectSceneTransitionController = FindFirstObjectByType<ProjectSceneTransitionController>(FindObjectsInactive.Include);
+
+            if (_projectSceneTransitionController == null)
+                return;
+
+            if (!_projectSceneTransitionController.TryConsumePendingRestore(_projectLifecycleService.CurrentProject.Path))
+                return;
+
+            RefreshProjectInfoBar();
+            RestoreCurrentProjectSnapshot();
+            if (_terminalOverlayPanel != null)
+                _terminalOverlayPanel.RefreshActivePaneTitleForCurrentProjectAsync().Forget();
         }
 
         private void RestoreTerminalSnapshot(ProjectSwitchSnapshot snapshot)

@@ -11,6 +11,7 @@ namespace Gwt.Studio.UI
     public class ProjectSceneTransitionController : MonoBehaviour
     {
         private static ProjectSceneTransitionController _instance;
+        private static string _pendingRestoreProjectPath = string.Empty;
 
         [SerializeField] private string _studioSceneName = "StudioScene";
         [SerializeField] private float _fadeDuration = 0.15f;
@@ -53,7 +54,18 @@ namespace Gwt.Studio.UI
                 var activeScene = SceneManager.GetActiveScene();
                 if (activeScene.IsValid() && string.Equals(activeScene.name, _studioSceneName, StringComparison.Ordinal))
                 {
-                    LastLoadedSceneName = activeScene.name;
+                    MarkPendingRestore(project.Path);
+                    var reload = SceneManager.LoadSceneAsync(_studioSceneName, LoadSceneMode.Single);
+                    if (reload == null)
+                        return false;
+
+                    while (!reload.isDone)
+                        await UniTask.Yield(PlayerLoopTiming.Update);
+
+                    var reloadedScene = SceneManager.GetActiveScene();
+                    if (reloadedScene.IsValid())
+                        LastLoadedSceneName = reloadedScene.name;
+
                     await FadeAsync(0f);
                     return true;
                 }
@@ -108,6 +120,31 @@ namespace Gwt.Studio.UI
             {
                 IsTransitioning = false;
             }
+        }
+
+        public bool TryConsumePendingRestore(string currentProjectPath)
+        {
+            if (string.IsNullOrWhiteSpace(currentProjectPath))
+                return false;
+
+            if (!HasPendingRestore(currentProjectPath))
+                return false;
+
+            _pendingRestoreProjectPath = string.Empty;
+            return true;
+        }
+
+        public bool HasPendingRestore(string currentProjectPath)
+        {
+            if (string.IsNullOrWhiteSpace(currentProjectPath))
+                return false;
+
+            return string.Equals(_pendingRestoreProjectPath, currentProjectPath, StringComparison.Ordinal);
+        }
+
+        protected void MarkPendingRestore(string projectPath)
+        {
+            _pendingRestoreProjectPath = projectPath ?? string.Empty;
         }
 
         private void EnsureFadeOverlay()

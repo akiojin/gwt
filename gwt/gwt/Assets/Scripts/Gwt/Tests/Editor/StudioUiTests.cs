@@ -288,6 +288,38 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void UIManager_Construct_ConsumesPendingProjectTransitionRestore()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            multi.SaveSnapshot(new ProjectSwitchSnapshot
+            {
+                ProjectPath = "/tmp/project-a",
+                DeskStateKey = "pending-project",
+                IssueMarkerStateKey = "feature/pending",
+                AgentStateKey = "PendingRestored"
+            });
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            var transition = scope.Root.AddComponent<FakeProjectSceneTransitionController>();
+            transition.MarkPending("/tmp/project-a");
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+            SetPrivateField(manager, "_projectSceneTransitionController", transition);
+
+            manager.Construct(lifecycle, multi, new TerminalPaneManager());
+
+            Assert.AreEqual("pending-project", bar.CurrentProjectName);
+            Assert.AreEqual("feature/pending", bar.CurrentBranch);
+            Assert.AreEqual("PendingRestored", bar.CurrentStatus);
+            Assert.IsFalse(transition.HasPendingFor("/tmp/project-a"));
+        }
+
+        [Test]
         public void UIManager_Construct_RestoresSnapshotForCurrentProject()
         {
             var lifecycle = new FakeProjectLifecycleService();
@@ -892,6 +924,16 @@ namespace Gwt.Tests.Editor
             {
                 LastTransitionProjectPath = project?.Path;
                 return UniTask.FromResult(true);
+            }
+
+            public void MarkPending(string projectPath)
+            {
+                MarkPendingRestore(projectPath);
+            }
+
+            public bool HasPendingFor(string projectPath)
+            {
+                return HasPendingRestore(projectPath);
             }
         }
 
