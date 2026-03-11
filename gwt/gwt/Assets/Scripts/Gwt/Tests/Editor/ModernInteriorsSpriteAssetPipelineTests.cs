@@ -304,6 +304,31 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual(1, animations[0].Row);
             Assert.AreEqual(0, animations[0].ColumnOffset);
             Assert.IsTrue(animations[0].Loop);
+
+            var expected = new[]
+            {
+                ("idle_down", 1, CharacterAnimationPipeline.DirectionStride * 0),
+                ("idle_up", 1, CharacterAnimationPipeline.DirectionStride * 1),
+                ("idle_left", 1, CharacterAnimationPipeline.DirectionStride * 2),
+                ("idle_right", 1, CharacterAnimationPipeline.DirectionStride * 3),
+                ("walk_down", 2, CharacterAnimationPipeline.DirectionStride * 0),
+                ("walk_up", 2, CharacterAnimationPipeline.DirectionStride * 1),
+                ("walk_left", 2, CharacterAnimationPipeline.DirectionStride * 2),
+                ("walk_right", 2, CharacterAnimationPipeline.DirectionStride * 3),
+                ("sit_down", 4, CharacterAnimationPipeline.DirectionStride * 0),
+                ("sit_up", 4, CharacterAnimationPipeline.DirectionStride * 1),
+                ("sit_left", 4, CharacterAnimationPipeline.DirectionStride * 2),
+                ("sit_right", 4, CharacterAnimationPipeline.DirectionStride * 3),
+            };
+
+            for (var i = 0; i < expected.Length; i++)
+            {
+                Assert.AreEqual(expected[i].Item1, animations[i].AnimationName, $"Animation name mismatch at index {i}");
+                Assert.AreEqual(expected[i].Item2, animations[i].Row, $"Animation row mismatch at index {i}");
+                Assert.AreEqual(expected[i].Item3, animations[i].ColumnOffset, $"Animation column offset mismatch at index {i}");
+                Assert.AreEqual(6, animations[i].FrameCount, $"Animation frame count mismatch at index {i}");
+                Assert.IsTrue(animations[i].Loop, $"Animation loop flag mismatch at index {i}");
+            }
         }
 
         [Test]

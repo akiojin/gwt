@@ -1,4 +1,6 @@
 using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Cysharp.Threading.Tasks;
@@ -19,6 +21,7 @@ namespace Gwt.Tests.Runtime
         [SetUp]
         public void SetUp()
         {
+            ResetRuntimePaneState();
             _ptyService = new PtyService(new PlatformShellDetector());
             _paneManager = new TerminalPaneManager();
         }
@@ -27,6 +30,7 @@ namespace Gwt.Tests.Runtime
         public void TearDown()
         {
             _ptyService?.Dispose();
+            ResetRuntimePaneState();
         }
 
         [UnityTest]
@@ -151,6 +155,47 @@ namespace Gwt.Tests.Runtime
             await UniTask.CompletedTask;
         });
 
+        [UnityTest]
+        public IEnumerator TerminalPaneManager_PersistsPanesAcrossInstances_DuringPlayMode() => UniTask.ToCoroutine(async () =>
+        {
+            var adapter = new XtermSharpTerminalAdapter(24, 80);
+            _paneManager.AddPane(new TerminalPaneState("pane-runtime", adapter)
+            {
+                Title = "Docker gwt",
+                PtySessionId = "pty-session-1"
+            });
+
+            var secondManager = new TerminalPaneManager();
+
+            Assert.That(secondManager.PaneCount, Is.EqualTo(1));
+            Assert.That(secondManager.ActivePane, Is.Not.Null);
+            Assert.That(secondManager.ActivePane.PaneId, Is.EqualTo("pane-runtime"));
+            Assert.That(secondManager.ActivePane.Title, Is.EqualTo("Docker gwt"));
+            Assert.That(secondManager.ActivePane.PtySessionId, Is.EqualTo("pty-session-1"));
+
+            await UniTask.CompletedTask;
+        });
+
+        [UnityTest]
+        public IEnumerator TerminalPaneManager_RemovePane_UpdatesSharedRuntimeStateAcrossInstances() => UniTask.ToCoroutine(async () =>
+        {
+            var adapter = new XtermSharpTerminalAdapter(24, 80);
+            _paneManager.AddPane(new TerminalPaneState("pane-runtime", adapter)
+            {
+                Title = "Docker gwt",
+                PtySessionId = "pty-session-1"
+            });
+
+            var secondManager = new TerminalPaneManager();
+            secondManager.RemovePane("pane-runtime");
+
+            Assert.That(_paneManager.PaneCount, Is.EqualTo(0));
+            Assert.That(_paneManager.ActivePane, Is.Null);
+            Assert.That(secondManager.PaneCount, Is.EqualTo(0));
+
+            await UniTask.CompletedTask;
+        });
+
         private static string GetTempDir()
         {
             return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
@@ -163,6 +208,15 @@ namespace Gwt.Tests.Runtime
             return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                 ? "cmd.exe"
                 : "/bin/echo";
+        }
+
+        private static void ResetRuntimePaneState()
+        {
+            var panesField = typeof(TerminalPaneManager).GetField("RuntimePanes", BindingFlags.Static | BindingFlags.NonPublic);
+            var activeIndexField = typeof(TerminalPaneManager).GetField("RuntimeActiveIndex", BindingFlags.Static | BindingFlags.NonPublic);
+            if (panesField?.GetValue(null) is IList<TerminalPaneState> panes)
+                panes.Clear();
+            activeIndexField?.SetValue(null, -1);
         }
 
         private static string[] GetEchoArgs(string message)
