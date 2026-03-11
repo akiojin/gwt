@@ -42,6 +42,7 @@ namespace Gwt.Studio.UI
         private IGamificationService _gamificationService;
         private PreparedUpdatePlan _preparedUpdatePlan;
         private string _preparedUpdateProjectPath = string.Empty;
+        private bool _preparedUpdateLaunchReady;
         private bool _subscribed;
         private bool _previousBackquotePressed;
         private bool _previousDownPressed;
@@ -454,21 +455,42 @@ namespace Gwt.Studio.UI
                 !string.IsNullOrWhiteSpace(currentProjectPath) &&
                 string.Equals(_preparedUpdateProjectPath, currentProjectPath, System.StringComparison.Ordinal))
             {
-                _projectInfoBar.SetUpdateState("Launching update...");
                 _soundService?.PlaySfx(SfxType.ButtonClick);
-
-                var launched = await _buildService.LaunchPreparedUpdateAsync(_preparedUpdatePlan);
-                if (launched)
+                if (!_preparedUpdateLaunchReady)
                 {
-                    _projectInfoBar.SetUpdateState("Update launch started", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
-                    _gamificationService?.AddExperience(20);
-                    ClearPreparedUpdate();
-                    _projectInfoBar.SetUpdateButtonLabel("Update");
+                    _projectInfoBar.SetUpdateState("Staging update...");
+                    var scriptPath = await _buildService.WritePreparedUpdateScriptAsync(_preparedUpdatePlan);
+                    if (!string.IsNullOrWhiteSpace(scriptPath))
+                    {
+                        _preparedUpdatePlan.LauncherScriptPath = scriptPath;
+                        _preparedUpdateLaunchReady = true;
+                        _projectInfoBar.SetUpdateState("Update staged", _preparedUpdatePlan.Candidate?.Version, scriptPath);
+                        _projectInfoBar.SetUpdateButtonLabel("Launch");
+                        _gamificationService?.AddExperience(5);
+                    }
+                    else
+                    {
+                        _projectInfoBar.SetUpdateState("Update staging failed", _preparedUpdatePlan.Candidate?.Version);
+                        _projectInfoBar.SetUpdateButtonLabel("Apply");
+                    }
                 }
                 else
                 {
-                    _projectInfoBar.SetUpdateState("Update launch failed", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
-                    _projectInfoBar.SetUpdateButtonLabel("Apply");
+                    _projectInfoBar.SetUpdateState("Launching update...");
+
+                    var launched = await _buildService.LaunchPreparedUpdateAsync(_preparedUpdatePlan);
+                    if (launched)
+                    {
+                        _projectInfoBar.SetUpdateState("Update launch started", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
+                        _gamificationService?.AddExperience(20);
+                        ClearPreparedUpdate();
+                        _projectInfoBar.SetUpdateButtonLabel("Update");
+                    }
+                    else
+                    {
+                        _projectInfoBar.SetUpdateState("Update launch failed", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
+                        _projectInfoBar.SetUpdateButtonLabel("Launch");
+                    }
                 }
 
                 RefreshMetaStatus();
@@ -514,6 +536,7 @@ namespace Gwt.Studio.UI
                 {
                     _preparedUpdatePlan = plan;
                     _preparedUpdateProjectPath = currentProjectPath;
+                    _preparedUpdateLaunchReady = false;
                     _projectInfoBar.SetUpdateState($"Update {latest.Version} ready", latest.Version, plan.ApplyCommand);
                     _projectInfoBar.SetUpdateButtonLabel("Apply");
                     _gamificationService?.AddExperience(15);
@@ -734,6 +757,7 @@ namespace Gwt.Studio.UI
         {
             _preparedUpdatePlan = null;
             _preparedUpdateProjectPath = string.Empty;
+            _preparedUpdateLaunchReady = false;
         }
 
         private void RefreshMetaStatus()

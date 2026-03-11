@@ -776,12 +776,23 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
 
             updateButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update staged", cancellationToken: default);
+
+            Assert.AreEqual("Update staged", bar.CurrentUpdateStatus);
+            Assert.AreEqual("Launch", bar.CurrentUpdateButtonLabel);
+            Assert.AreEqual("/tmp/apply-update.sh", bar.LastUpdateCommand);
+            Assert.AreEqual(1, buildService.PrepareCallCount);
+            Assert.AreEqual(1, buildService.WriteScriptCallCount);
+            Assert.AreEqual(0, buildService.LaunchCallCount);
+
+            updateButton.onClick.Invoke();
             await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update launch started", cancellationToken: default);
 
             Assert.AreEqual("Update launch started", bar.CurrentUpdateStatus);
             Assert.AreEqual("Update", bar.CurrentUpdateButtonLabel);
             Assert.AreEqual("/tmp/apply-update.sh", bar.LastUpdateCommand);
             Assert.AreEqual(1, buildService.PrepareCallCount);
+            Assert.AreEqual(1, buildService.WriteScriptCallCount);
             Assert.AreEqual(1, buildService.LaunchCallCount);
         });
 
@@ -1125,6 +1136,7 @@ namespace Gwt.Tests.Editor
         {
             public int PrepareCallCount { get; private set; }
             public int LaunchCallCount { get; private set; }
+            public int WriteScriptCallCount { get; private set; }
 
             public SystemInfoData GetSystemInfo() => new() { OS = "TestOS", UnityVersion = "6000.3.10f1", AppVersion = "1.0.0" };
             public SystemStatsData GetSystemStats() => new() { AllocatedMemoryMB = 1, ReservedMemoryMB = 2, MonoUsedMemoryMB = 1 };
@@ -1167,7 +1179,11 @@ namespace Gwt.Tests.Editor
                     ShouldApply = true
                 });
             }
-            public UniTask<string> WritePreparedUpdateScriptAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default) => UniTask.FromResult("/tmp/apply-update.sh");
+            public UniTask<string> WritePreparedUpdateScriptAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default)
+            {
+                WriteScriptCallCount++;
+                return UniTask.FromResult("/tmp/apply-update.sh");
+            }
             public UniTask<bool> LaunchPreparedUpdateAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default)
             {
                 LaunchCallCount++;
