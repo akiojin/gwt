@@ -22,6 +22,7 @@ namespace Gwt.Studio.UI
         private bool _subscribed;
         private int _selectedIndex;
 
+        public event Action EntryInvoked;
         public int SelectedIndex => _selectedIndex;
         public string CurrentDisplayText => _listText != null ? _listText.text : string.Empty;
 
@@ -335,6 +336,12 @@ namespace Gwt.Studio.UI
 
             _selectedIndex = index;
             Refresh();
+            if (EntryInvoked != null)
+            {
+                EntryInvoked.Invoke();
+                return;
+            }
+
             await ConfirmSelectionAsync();
         }
 

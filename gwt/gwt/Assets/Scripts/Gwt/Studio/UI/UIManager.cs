@@ -233,6 +233,8 @@ namespace Gwt.Studio.UI
             }
 
             _projectSwitchOverlayPanel.SetServices(_multiProjectService, _projectLifecycleService);
+            _projectSwitchOverlayPanel.EntryInvoked -= HandleProjectSwitchEntryInvoked;
+            _projectSwitchOverlayPanel.EntryInvoked += HandleProjectSwitchEntryInvoked;
             _projectSwitchOverlayPanel.Close();
 
             if (_projectSceneTransitionController == null)
@@ -266,6 +268,11 @@ namespace Gwt.Studio.UI
         private void HandleProjectInfoBarClicked()
         {
             ToggleProjectSwitcher();
+        }
+
+        private void HandleProjectSwitchEntryInvoked()
+        {
+            ConfirmProjectSwitchAsync().Forget();
         }
 
         private void HandleProjectOpened(ProjectInfo _)
@@ -455,6 +462,9 @@ namespace Gwt.Studio.UI
 
             if (_projectInfoBar != null)
                 _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
+
+            if (_projectSwitchOverlayPanel != null)
+                _projectSwitchOverlayPanel.EntryInvoked -= HandleProjectSwitchEntryInvoked;
         }
 
         private async UniTask<bool> ConfirmProjectSwitchCoreAsync()
