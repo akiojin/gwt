@@ -80,8 +80,19 @@ namespace Gwt.Core.Services.Pty
             if (session.Status != PtySessionStatus.Running)
                 throw new InvalidOperationException($"Session {paneId} is not running.");
 
-            await session.Process.StandardInput.WriteAsync(data.AsMemory(), ct);
-            await session.Process.StandardInput.FlushAsync();
+            await session.StandardInputLock.WaitAsync(ct);
+            try
+            {
+                if (!TryGetStandardInput(session.Process, out var writer))
+                    throw new InvalidOperationException("PTY session input stream is not writable.");
+
+                await writer.WriteAsync(data.AsMemory(), ct);
+                await writer.FlushAsync();
+            }
+            finally
+            {
+                session.StandardInputLock.Release();
+            }
         }
 
         public async UniTask ResizeAsync(string paneId, int rows, int cols, CancellationToken ct = default)
@@ -95,8 +106,19 @@ namespace Gwt.Core.Services.Pty
             if (!session.UsesPseudoTerminal || session.Process.HasExited)
                 return;
 
-            await session.Process.StandardInput.WriteAsync($"stty rows {rows} cols {cols}\n".AsMemory(), ct);
-            await session.Process.StandardInput.FlushAsync();
+            await session.StandardInputLock.WaitAsync(ct);
+            try
+            {
+                if (!TryGetStandardInput(session.Process, out var writer))
+                    return;
+
+                await writer.WriteAsync($"stty rows {rows} cols {cols}\n".AsMemory(), ct);
+                await writer.FlushAsync();
+            }
+            finally
+            {
+                session.StandardInputLock.Release();
+            }
         }
 
         public async UniTask KillAsync(string paneId, CancellationToken ct = default)
@@ -321,6 +343,23 @@ namespace Gwt.Core.Services.Pty
         {
             var input = value ?? string.Empty;
             return $"'{input.Replace("'", "'\"'\"'")}'";
+        }
+
+        private static bool TryGetStandardInput(Process process, out System.IO.StreamWriter writer)
+        {
+            writer = null;
+            if (process == null)
+                return false;
+
+            try
+            {
+                writer = process.StandardInput;
+                return writer != null;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
         }
 
         private static string SanitizeOutput(string output)

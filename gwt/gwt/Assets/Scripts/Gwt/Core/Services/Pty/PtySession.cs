@@ -22,6 +22,7 @@ namespace Gwt.Core.Services.Pty
 
         private readonly PtyOutputStream _outputStream = new();
         private readonly CancellationTokenSource _cts = new();
+        private readonly SemaphoreSlim _standardInputLock = new(1, 1);
         private bool _disposed;
 
         public PtySession(string id, Process process, string workingDir, int rows, int cols, bool usesPseudoTerminal = false)
@@ -51,6 +52,7 @@ namespace Gwt.Core.Services.Pty
         }
 
         public CancellationToken Token => _cts.Token;
+        public SemaphoreSlim StandardInputLock => _standardInputLock;
 
         public void Dispose()
         {
@@ -58,6 +60,7 @@ namespace Gwt.Core.Services.Pty
             _disposed = true;
             _cts.Cancel();
             _cts.Dispose();
+            _standardInputLock.Dispose();
             try { if (!Process.HasExited) Process.Kill(); } catch { }
             Process.Dispose();
         }
