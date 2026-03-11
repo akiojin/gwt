@@ -474,6 +474,9 @@ namespace Gwt.Studio.UI
                 }
                 catch (Exception e)
                 {
+                    if (IsDisposedPtyException(e))
+                        return;
+
                     Debug.LogWarning($"[GWT] Failed to resize PTY session '{activePane.PtySessionId}': {e.Message}");
                 }
             }
