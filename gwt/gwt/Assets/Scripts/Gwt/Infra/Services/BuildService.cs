@@ -263,6 +263,9 @@ namespace Gwt.Infra.Services
             {
                 if (uri.IsFile)
                 {
+                    if (PathsEqual(uri.LocalPath, destinationPath))
+                        return destinationPath;
+
                     File.Copy(uri.LocalPath, destinationPath, true);
                     return destinationPath;
                 }
@@ -281,11 +284,24 @@ namespace Gwt.Infra.Services
 
             if (File.Exists(source))
             {
+                if (PathsEqual(source, destinationPath))
+                    return destinationPath;
+
                 File.Copy(source, destinationPath, true);
                 return destinationPath;
             }
 
             throw new InvalidOperationException($"Unsupported update source: {source}");
+        }
+
+        private static bool PathsEqual(string left, string right)
+        {
+            if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+                return false;
+
+            var normalizedLeft = Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var normalizedRight = Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
         }
 
         public async UniTask<PreparedUpdatePlan> PrepareUpdateAsync(

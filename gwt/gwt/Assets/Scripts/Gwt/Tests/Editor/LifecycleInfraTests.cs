@@ -1295,6 +1295,29 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public IEnumerator BuildService_DownloadUpdateAsync_FileUri_DoesNotCopyWhenSourceAlreadyInDestination() => UniTask.ToCoroutine(async () =>
+        {
+            await WithTempProjectAsync(async tempDir =>
+            {
+                var downloadDir = Path.Combine(tempDir, "downloads");
+                Directory.CreateDirectory(downloadDir);
+                var sourcePath = Path.Combine(downloadDir, "gwt-update.zip");
+                File.WriteAllText(sourcePath, "payload");
+
+                var service = new BuildService();
+                var downloadedPath = await service.DownloadUpdateAsync(new UpdateInfo
+                {
+                    Version = "1.2.4",
+                    DownloadUrl = new Uri(sourcePath).AbsoluteUri
+                }, downloadDir);
+
+                Assert.AreEqual(sourcePath, downloadedPath);
+                Assert.IsTrue(File.Exists(downloadedPath));
+                Assert.AreEqual("payload", File.ReadAllText(downloadedPath));
+            });
+        });
+
+        [UnityTest]
         public IEnumerator BuildService_DownloadUpdateAsync_UsesStagingDirectory_WhenDestinationEmpty() => UniTask.ToCoroutine(async () =>
         {
             await WithTempProjectAsync(async tempDir =>

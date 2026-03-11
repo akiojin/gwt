@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using Gwt.AI.Services;
 using Cysharp.Threading.Tasks;
 using Gwt.Core.Services.Terminal;
@@ -16,6 +17,9 @@ namespace Gwt.Studio.UI
 {
     public class UIManager : MonoBehaviour
     {
+        private static readonly string DefaultUpdateManifestPath =
+            Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".gwt", "updates", "manifest.json");
+
         [SerializeField] private ConsolePanel _consolePanel;
         [SerializeField] private LeadInputField _leadInputField;
         [SerializeField] private ProjectInfoBar _projectInfoBar;
@@ -285,6 +289,8 @@ namespace Gwt.Studio.UI
 
             _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
             _projectInfoBar.Clicked += HandleProjectInfoBarClicked;
+            _projectInfoBar.UpdateRequested -= HandleProjectInfoBarUpdateRequested;
+            _projectInfoBar.UpdateRequested += HandleProjectInfoBarUpdateRequested;
             _projectInfoBar.VoiceRequested -= HandleProjectInfoBarVoiceRequested;
             _projectInfoBar.VoiceRequested += HandleProjectInfoBarVoiceRequested;
             _projectInfoBar.ReportRequested -= HandleProjectInfoBarReportRequested;
@@ -296,6 +302,11 @@ namespace Gwt.Studio.UI
         private void HandleProjectInfoBarClicked()
         {
             ToggleProjectSwitcher();
+        }
+
+        private void HandleProjectInfoBarUpdateRequested()
+        {
+            HandleUpdateRequestedAsync().Forget();
         }
 
         private void HandleProjectInfoBarVoiceRequested()
@@ -358,6 +369,8 @@ namespace Gwt.Studio.UI
                 _projectInfoBar.SetBranch(string.Empty);
                 _projectInfoBar.SetStatus("Idle");
                 _projectInfoBar.SetEnvironment(string.Empty);
+                _projectInfoBar.SetUpdateState(string.Empty);
+                _projectInfoBar.SetReportState(string.Empty);
                 return;
             }
 
@@ -406,6 +419,67 @@ namespace Gwt.Studio.UI
             catch (System.Exception e)
             {
                 _projectInfoBar.SetReportState($"Report failed: {e.Message}");
+            }
+
+            RefreshMetaStatus();
+        }
+
+        private async UniTaskVoid HandleUpdateRequestedAsync()
+        {
+            TryResolveRuntimeServices();
+            if (_projectInfoBar == null)
+                return;
+
+            if (_buildService == null)
+            {
+                _projectInfoBar.SetUpdateState("Update unavailable");
+                RefreshMetaStatus();
+                return;
+            }
+
+            _projectInfoBar.SetUpdateState("Checking updates...");
+            _soundService?.PlaySfx(SfxType.ButtonClick);
+
+            try
+            {
+                var manifestSource = ResolveDefaultUpdateManifestSource();
+                if (string.IsNullOrWhiteSpace(manifestSource))
+                {
+                    _projectInfoBar.SetUpdateState("Update source missing");
+                    RefreshMetaStatus();
+                    return;
+                }
+
+                var candidates = await _buildService.LoadUpdateManifestAsync(manifestSource);
+                var systemInfo = _buildService.GetSystemInfo();
+                var currentVersion = !string.IsNullOrWhiteSpace(systemInfo?.AppVersion) ? systemInfo.AppVersion : Application.version;
+                var latest = _buildService.GetLatestUpdate(currentVersion, candidates);
+                if (latest == null)
+                {
+                    _projectInfoBar.SetUpdateState("No update available");
+                    RefreshMetaStatus();
+                    return;
+                }
+
+                var plan = await _buildService.PrepareUpdateAsync(
+                    currentVersion,
+                    latest,
+                    Application.dataPath,
+                    manifestSource: manifestSource);
+
+                if (plan != null && plan.ShouldApply)
+                {
+                    _projectInfoBar.SetUpdateState($"Update {latest.Version} ready", latest.Version, plan.ApplyCommand);
+                    _gamificationService?.AddExperience(15);
+                }
+                else
+                {
+                    _projectInfoBar.SetUpdateState($"Update {latest.Version} pending", latest.Version);
+                }
+            }
+            catch (System.Exception e)
+            {
+                _projectInfoBar.SetUpdateState($"Update failed: {e.Message}");
             }
 
             RefreshMetaStatus();
@@ -598,6 +672,14 @@ namespace Gwt.Studio.UI
             }
         }
 
+        private static string ResolveDefaultUpdateManifestSource()
+        {
+            if (File.Exists(DefaultUpdateManifestPath))
+                return DefaultUpdateManifestPath;
+
+            return string.Empty;
+        }
+
         private void RefreshMetaStatus()
         {
             if (_projectInfoBar == null)
@@ -654,6 +736,7 @@ namespace Gwt.Studio.UI
             if (_projectInfoBar != null)
             {
                 _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
+                _projectInfoBar.UpdateRequested -= HandleProjectInfoBarUpdateRequested;
                 _projectInfoBar.VoiceRequested -= HandleProjectInfoBarVoiceRequested;
                 _projectInfoBar.ReportRequested -= HandleProjectInfoBarReportRequested;
                 _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
