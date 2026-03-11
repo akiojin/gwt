@@ -1,18 +1,36 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using UnityEngine;
 
 namespace Gwt.Core.Services.Terminal
 {
     public class TerminalPaneManager : ITerminalPaneManager
     {
-        private readonly List<TerminalPaneState> _panes = new();
+        private static readonly List<TerminalPaneState> RuntimePanes = new();
+        private static int RuntimeActiveIndex = -1;
 
-        public int PaneCount => _panes.Count;
-        public int ActiveIndex { get; private set; } = -1;
+        private readonly List<TerminalPaneState> _panes = new();
+        private List<TerminalPaneState> PaneStore => Application.isPlaying ? RuntimePanes : _panes;
+
+        public int PaneCount => PaneStore.Count;
+
+        public int ActiveIndex
+        {
+            get => Application.isPlaying ? RuntimeActiveIndex : _activeIndex;
+            private set
+            {
+                if (Application.isPlaying)
+                    RuntimeActiveIndex = value;
+                else
+                    _activeIndex = value;
+            }
+        }
+
+        private int _activeIndex = -1;
 
         public TerminalPaneState ActivePane =>
-            ActiveIndex >= 0 && ActiveIndex < _panes.Count ? _panes[ActiveIndex] : null;
+            ActiveIndex >= 0 && ActiveIndex < PaneStore.Count ? PaneStore[ActiveIndex] : null;
 
         public event Action<TerminalPaneState> OnPaneAdded;
         public event Action<string> OnPaneRemoved;
@@ -20,28 +38,28 @@ namespace Gwt.Core.Services.Terminal
 
         public void AddPane(TerminalPaneState pane)
         {
-            _panes.Add(pane);
-            ActiveIndex = _panes.Count - 1;
+            PaneStore.Add(pane);
+            ActiveIndex = PaneStore.Count - 1;
             OnPaneAdded?.Invoke(pane);
             OnActiveIndexChanged?.Invoke(ActiveIndex);
         }
 
         public void RemovePane(string paneId)
         {
-            var index = _panes.FindIndex(p => p.PaneId == paneId);
+            var index = PaneStore.FindIndex(p => p.PaneId == paneId);
             if (index < 0) return;
 
-            _panes[index].OutputSubscription?.Dispose();
-            _panes[index].Terminal?.Dispose();
-            _panes.RemoveAt(index);
+            PaneStore[index].OutputSubscription?.Dispose();
+            PaneStore[index].Terminal?.Dispose();
+            PaneStore.RemoveAt(index);
 
-            if (_panes.Count == 0)
+            if (PaneStore.Count == 0)
             {
                 ActiveIndex = -1;
             }
             else
             {
-                ActiveIndex = Math.Min(ActiveIndex, _panes.Count - 1);
+                ActiveIndex = Math.Min(ActiveIndex, PaneStore.Count - 1);
             }
 
             OnPaneRemoved?.Invoke(paneId);
@@ -50,36 +68,37 @@ namespace Gwt.Core.Services.Terminal
 
         public void SetActiveIndex(int index)
         {
-            if (index < 0 || index >= _panes.Count) return;
+            if (index < 0 || index >= PaneStore.Count) return;
             ActiveIndex = index;
             OnActiveIndexChanged?.Invoke(ActiveIndex);
         }
 
         public void NextTab()
         {
-            if (_panes.Count == 0) return;
-            SetActiveIndex((ActiveIndex + 1) % _panes.Count);
+            if (PaneStore.Count == 0) return;
+            SetActiveIndex((ActiveIndex + 1) % PaneStore.Count);
         }
 
         public void PrevTab()
         {
-            if (_panes.Count == 0) return;
-            SetActiveIndex((ActiveIndex - 1 + _panes.Count) % _panes.Count);
+            if (PaneStore.Count == 0) return;
+            SetActiveIndex((ActiveIndex - 1 + PaneStore.Count) % PaneStore.Count);
         }
 
         public TerminalPaneState GetPane(int index)
         {
-            return index >= 0 && index < _panes.Count ? _panes[index] : null;
+            return index >= 0 && index < PaneStore.Count ? PaneStore[index] : null;
         }
 
         public TerminalPaneState GetPaneByAgentSessionId(string agentSessionId)
         {
-            return _panes.FirstOrDefault(p => p.AgentSessionId == agentSessionId);
+            return PaneStore.FirstOrDefault(p => p.AgentSessionId == agentSessionId);
         }
 
         public int FindPaneIndex(string paneId)
         {
-            return _panes.FindIndex(p => p.PaneId == paneId);
+            return PaneStore.FindIndex(p => p.PaneId == paneId);
         }
+
     }
 }
