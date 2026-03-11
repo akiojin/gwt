@@ -28,7 +28,6 @@ struct ManagedAsset {
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-issue-resolve",
-    "gwt-issue-ops",
     "gwt-fix-pr",
     "gwt-spec-ops",
     "gwt-pr",
@@ -55,24 +54,6 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
             "/../../plugins/gwt/skills/gwt-issue-resolve/scripts/inspect_issue.py"
         )),
         executable: true,
-        rewrite_for_project: false,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-issue-ops/SKILL.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-ops/SKILL.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "skills/gwt-issue-ops/scripts/inspect_issue.py",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-ops/scripts/inspect_issue.py"
-        )),
-        executable: false,
         rewrite_for_project: false,
     },
     ManagedAsset {
@@ -203,28 +184,10 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-issue-ops.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-issue-ops.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
         relative_path: "commands/gwt-fix-pr.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/gwt/commands/gwt-fix-pr.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "commands/gwt-spec-ops.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-spec-ops.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -1920,15 +1883,6 @@ mod tests {
         assert!(issue_resolve_skill.contains("Direct fix path"));
         assert!(issue_resolve_skill.contains("gwt-project-index"));
 
-        let issue_spec_command = std::fs::read_to_string(
-            temp.path()
-                .join(".claude")
-                .join("commands")
-                .join("gwt-spec-ops.md"),
-        )
-        .unwrap();
-        assert!(issue_spec_command.contains("switch to `gwt-issue-resolve` first"));
-
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
                 .join(".claude")
@@ -1938,6 +1892,12 @@ mod tests {
         .unwrap();
         assert!(issue_resolve_command.contains("direct fix"));
         assert!(issue_resolve_command.contains("existing SPEC"));
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-spec-ops.md")
+            .exists());
     }
 
     #[test]
