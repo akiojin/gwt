@@ -1094,6 +1094,49 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_BlocksRealLaunchInEditor() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_preparedUpdatePlan", new PreparedUpdatePlan
+            {
+                Candidate = new UpdateInfo { Version = "1.1.0", DownloadUrl = "file:///tmp/gwt-1.1.0.zip" },
+                DownloadedArtifactPath = "/tmp/gwt-1.1.0.zip",
+                ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
+                LauncherScriptPath = "/tmp/apply-update.sh",
+                ShouldApply = true
+            });
+            SetPrivateField(manager, "_preparedUpdateProjectPath", "/tmp/project-a");
+            SetPrivateField(manager, "_preparedUpdateLaunchReady", true);
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new BuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService());
+
+            var updateButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+            Assert.IsNotNull(updateButton);
+
+            updateButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Launch blocked in editor", cancellationToken: default);
+
+            Assert.AreEqual("Launch blocked in editor", bar.CurrentUpdateStatus);
+            Assert.AreEqual("Launch", bar.CurrentUpdateButtonLabel);
+            Assert.AreEqual("/tmp/apply-update.sh", bar.LastUpdateCommand);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_Construct_RestoresPersistedPreparedUpdateState() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();

@@ -493,11 +493,19 @@ namespace Gwt.Studio.UI
                 }
                 else
                 {
+                    if (ShouldBlockRealUpdateLaunchInEditor())
+                    {
+                        _projectInfoBar.SetUpdateState("Launch blocked in editor", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
+                        _projectInfoBar.SetUpdateButtonLabel("Launch");
+                        RefreshMetaStatus();
+                        return;
+                    }
+
                     _projectInfoBar.SetUpdateState("Launching update...");
 
                     var launched = await _buildService.LaunchPreparedUpdateAsync(_preparedUpdatePlan);
-                if (launched)
-                {
+                    if (launched)
+                    {
                     _projectInfoBar.SetUpdateState("Update launch started", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
                     _gamificationService?.AddExperience(20);
                     ClearPreparedUpdate();
@@ -777,6 +785,12 @@ namespace Gwt.Studio.UI
             _preparedUpdateProjectPath = string.Empty;
             _preparedUpdateLaunchReady = false;
             TryDeletePreparedUpdateState();
+        }
+
+        private bool ShouldBlockRealUpdateLaunchInEditor()
+        {
+            return Application.isEditor &&
+                _buildService is BuildService;
         }
 
         private void RestorePreparedUpdateStateIfNeeded()
