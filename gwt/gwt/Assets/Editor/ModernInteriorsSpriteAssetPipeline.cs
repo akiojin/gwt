@@ -134,6 +134,22 @@ namespace Gwt.Editor
                    textureHeight % cellSize == 0;
         }
 
+        public static bool IsLikelySheetAsset(string assetPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath))
+                return false;
+
+            if (assetPath.IndexOf("singles", StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+
+            var fileName = Path.GetFileNameWithoutExtension(assetPath);
+            return fileName.IndexOf("layer", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fileName.IndexOf("tileset", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fileName.IndexOf("spritesheet", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   assetPath.IndexOf("/Animated_Spritesheets/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fileName.StartsWith("UI_", StringComparison.OrdinalIgnoreCase);
+        }
+
         public static List<TileSlice> BuildTileSlices(string spriteNamePrefix, int textureWidth, int textureHeight, int cellSize)
         {
             if (textureWidth <= 0) throw new ArgumentOutOfRangeException(nameof(textureWidth));
@@ -242,7 +258,7 @@ namespace Gwt.Editor
             importer.mipmapEnabled = false;
             importer.spritePixelsPerUnit = cellSize.Value;
 
-            if (ShouldSliceAsMultiple(texture.width, texture.height, cellSize.Value))
+            if (ShouldSliceAsMultiple(texture.width, texture.height, cellSize.Value) && IsLikelySheetAsset(assetPath))
             {
                 importer.spriteImportMode = SpriteImportMode.Multiple;
                 importer.spritesheet = BuildTileSlices(

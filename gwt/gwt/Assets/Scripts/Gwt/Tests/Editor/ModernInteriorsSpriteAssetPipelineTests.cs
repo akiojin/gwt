@@ -49,6 +49,17 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void IsLikelySheetAsset_UsesPathAndFileNameHints()
+        {
+            Assert.IsTrue(ModernInteriorsSpriteAssetPipeline.IsLikelySheetAsset(
+                "Assets/Graphics/moderninteriors-win/6_Home_Designs/TV_Studio_Designs/48x48/Tv_Studio_Design_layer_1_48x48.png"));
+            Assert.IsTrue(ModernInteriorsSpriteAssetPipeline.IsLikelySheetAsset(
+                "Assets/Graphics/moderninteriors-win/4_User_Interface_Elements/UI_32x32.png"));
+            Assert.IsFalse(ModernInteriorsSpriteAssetPipeline.IsLikelySheetAsset(
+                "Assets/Graphics/moderninteriors-win/1_Interiors/16x16/Theme_Sorter_Shadowless_Singles/Bedroom_Singles_Shadowless_45.png"));
+        }
+
+        [Test]
         public void BuildTileSlices_CreatesExpectedCells()
         {
             var slices = ModernInteriorsSpriteAssetPipeline.BuildTileSlices("TestSheet", 64, 32, 16);
@@ -86,6 +97,18 @@ namespace Gwt.Tests.Editor
             Assert.IsNotNull(importer);
             Assert.AreEqual(SpriteImportMode.Single, importer.spriteImportMode);
             Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<Sprite>(assetPath));
+        }
+
+        [Test]
+        public void ConfigureSourceSpriteImporter_SinglesFolder_StaysSingleMode()
+        {
+            var assetPath = CreateTextureAsset("Bedroom_Singles_Shadowless_45_16x16.png", 48, 48, "Singles");
+
+            ModernInteriorsSpriteAssetPipeline.ConfigureSourceSpriteImporter(assetPath);
+
+            var importer = AssetImporter.GetAtPath(assetPath) as TextureImporter;
+            Assert.IsNotNull(importer);
+            Assert.AreEqual(SpriteImportMode.Single, importer.spriteImportMode);
         }
 
         [Test]
@@ -156,11 +179,15 @@ namespace Gwt.Tests.Editor
                 background.PackableFolderPaths);
         }
 
-        private static string CreateTextureAsset(string fileName, int width, int height)
+        private static string CreateTextureAsset(string fileName, int width, int height, string subFolder = null)
         {
             EnsureFolder(TempRoot);
 
-            var assetPath = $"{TempRoot}/{fileName}";
+            var assetPath = string.IsNullOrWhiteSpace(subFolder)
+                ? $"{TempRoot}/{fileName}"
+                : $"{TempRoot}/{subFolder}/{fileName}";
+            if (!string.IsNullOrWhiteSpace(subFolder))
+                EnsureFolder($"{TempRoot}/{subFolder}");
             var relativePath = assetPath.Substring("Assets/".Length)
                 .Replace('/', Path.DirectorySeparatorChar);
             var fullPath = Path.Combine(Application.dataPath, relativePath);
