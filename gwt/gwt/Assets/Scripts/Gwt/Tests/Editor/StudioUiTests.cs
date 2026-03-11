@@ -1457,12 +1457,14 @@ namespace Gwt.Tests.Editor
             var lifecycle = new FakeProjectLifecycleService();
             lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
 
+            var scriptPath = Path.Combine(Path.GetTempPath(), "gwt-restored-launch-" + Guid.NewGuid().ToString("N") + ".sh");
             var statePath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".gwt",
                 "updates",
                 "prepared-update-state.json");
             Directory.CreateDirectory(Path.GetDirectoryName(statePath)!);
+            File.WriteAllText(scriptPath, "#!/bin/sh\nexit 0\n");
 
             try
             {
@@ -1472,7 +1474,7 @@ namespace Gwt.Tests.Editor
                     LaunchReady = true,
                     StatusText = "Update staged",
                     ButtonLabel = "Launch",
-                    DisplayCommand = "/tmp/apply-update.sh",
+                    DisplayCommand = scriptPath,
                     CandidateVersion = "1.1.0",
                     CandidateDownloadUrl = "file:///tmp/gwt-1.1.0.zip",
                     CandidateReleaseNotes = "Test update",
@@ -1481,7 +1483,7 @@ namespace Gwt.Tests.Editor
                     ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
                     RestartCommand = "open /Applications/GWT.app",
                     StagingDirectory = "/tmp",
-                    LauncherScriptPath = "/tmp/apply-update.sh",
+                    LauncherScriptPath = scriptPath,
                     LauncherExecutablePath = "/usr/local/bin/gwt-updater",
                     ShouldApply = true
                 };
@@ -1492,7 +1494,12 @@ namespace Gwt.Tests.Editor
                 var bar = scope.Root.AddComponent<ProjectInfoBar>();
                 SetPrivateField(manager, "_projectInfoBar", bar);
 
-                var buildService = new FakeBuildService();
+                System.Diagnostics.ProcessStartInfo captured = null;
+                var buildService = BuildService.CreateForTests(psi =>
+                {
+                    captured = psi;
+                    return new System.Diagnostics.Process();
+                });
                 manager.Construct(
                     lifecycle,
                     new MultiProjectService(lifecycle),
@@ -1501,11 +1508,18 @@ namespace Gwt.Tests.Editor
                     buildService,
                     new VoiceService(),
                     new SoundService(),
-                    new GamificationService());
+                    new GamificationService(),
+                    new FakeConfigService(new Settings
+                    {
+                        Update = new UpdateSettings
+                        {
+                            AllowLaunchInEditor = true
+                        }
+                    }));
 
                 Assert.AreEqual("Update staged", bar.CurrentUpdateStatus);
                 Assert.AreEqual("Launch", bar.CurrentUpdateButtonLabel);
-                Assert.AreEqual("/tmp/apply-update.sh", bar.LastUpdateCommand);
+                Assert.AreEqual(scriptPath, bar.LastUpdateCommand);
 
                 var updateButton = bar.GetComponentsInChildren<Button>(true)
                     .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
@@ -1515,10 +1529,14 @@ namespace Gwt.Tests.Editor
                 await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update launch started", cancellationToken: default);
 
                 Assert.AreEqual("Update", bar.CurrentUpdateButtonLabel);
-                Assert.AreEqual(1, buildService.LaunchCallCount);
+                Assert.IsNotNull(captured);
+                Assert.AreEqual("/usr/local/bin/gwt-updater", captured.FileName);
+                Assert.That(captured.Arguments, Does.Contain(scriptPath));
             }
             finally
             {
+                if (File.Exists(scriptPath))
+                    File.Delete(scriptPath);
                 if (File.Exists(statePath))
                     File.Delete(statePath);
             }
