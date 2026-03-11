@@ -49,11 +49,14 @@ namespace Gwt.Lifecycle.Services
             if (index < 0 || index >= OpenProjectsStore.Count)
                 throw new ArgumentOutOfRangeException(nameof(index));
 
-            if (index == ActiveIndexValue)
+            var targetPath = OpenProjectsStore[index].Path;
+            if (index == ActiveIndexValue &&
+                _lifecycleService?.CurrentProject != null &&
+                string.Equals(_lifecycleService.CurrentProject.Path, targetPath, StringComparison.OrdinalIgnoreCase))
                 return;
 
             ActiveIndexValue = index;
-            await _lifecycleService.OpenProjectAsync(OpenProjectsStore[index].Path, ct);
+            await _lifecycleService.OpenProjectAsync(targetPath, ct);
             OnProjectSwitched?.Invoke(index);
         }
 

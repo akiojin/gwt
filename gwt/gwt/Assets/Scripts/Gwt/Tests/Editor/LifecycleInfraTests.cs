@@ -228,6 +228,23 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void MultiProjectService_AddProjectAsync_ReopensExistingPath_WhenCurrentProjectMissing()
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            lifecycle.CloseProjectAsync().GetAwaiter().GetResult();
+            var openCallCount = lifecycle.OpenCallCount;
+
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            Assert.AreEqual(1, multi.OpenProjects.Count);
+            Assert.AreEqual(openCallCount + 1, lifecycle.OpenCallCount);
+            Assert.AreEqual("/tmp/project-a", lifecycle.CurrentProject.Path);
+        }
+
+        [Test]
         public void MultiProjectService_RemoveProjectAsync_RemovingEarlierEntry_ShiftsActiveIndexWithoutReopen()
         {
             var lifecycle = new FakeProjectLifecycleService();
