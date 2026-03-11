@@ -445,6 +445,20 @@ namespace Gwt.Studio.UI
                  exception.Message.IndexOf("disposed", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
+        private static bool IsIgnorableResizeException(Exception exception)
+        {
+            if (IsDisposedPtyException(exception))
+                return true;
+
+            if (string.IsNullOrWhiteSpace(exception?.Message))
+                return false;
+
+            var message = exception.Message;
+            return message.IndexOf("StandardIn has not been redirected", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("Standard input has not been redirected", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("input stream is not writable", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         private async UniTaskVoid RefreshActivePaneSizeAsync()
         {
             var activePane = _paneManager?.ActivePane;
@@ -474,7 +488,7 @@ namespace Gwt.Studio.UI
                 }
                 catch (Exception e)
                 {
-                    if (IsDisposedPtyException(e))
+                    if (IsIgnorableResizeException(e))
                         return;
 
                     Debug.LogWarning($"[GWT] Failed to resize PTY session '{activePane.PtySessionId}': {e.Message}");

@@ -751,6 +751,34 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator TerminalOverlayPanel_Tick_IgnoresBenignResizeFailures() => UniTask.ToCoroutine(async () =>
+        {
+            using var scope = new UiScope();
+            var panel = scope.Root.AddComponent<TerminalOverlayPanel>();
+            var rect = panel.gameObject.AddComponent<RectTransform>();
+            rect.sizeDelta = new Vector2(900f, 540f);
+
+            var paneManager = new TerminalPaneManager();
+            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-a",
+                Title = "Host Shell"
+            });
+
+            var pty = new FakePtyService
+            {
+                ResizeException = new InvalidOperationException("StandardIn has not been redirected.")
+            };
+            panel.Construct(paneManager, pty, new FakeShellDetector(), new FakeAvailableDockerService(), new FakeProjectLifecycleService());
+            panel.Open();
+            panel.Tick();
+
+            await UniTask.Yield();
+            LogAssert.NoUnexpectedReceived();
+            Assert.AreEqual(1, pty.ResizeCallCount);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator TerminalInputField_SubmitText_WritesToPty_AndRendererShowsOutput() => UniTask.ToCoroutine(async () =>
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -1687,6 +1715,7 @@ namespace Gwt.Tests.Editor
             public int LastResizeRows { get; private set; }
             public int LastResizeCols { get; private set; }
             public int ResizeCallCount { get; private set; }
+            public Exception ResizeException { get; set; }
 
             public UniTask<string> SpawnAsync(string command, string[] args, string workingDir, int rows, int cols, System.Threading.CancellationToken ct = default)
             {
@@ -1702,6 +1731,8 @@ namespace Gwt.Tests.Editor
                 LastResizeRows = rows;
                 LastResizeCols = cols;
                 ResizeCallCount++;
+                if (ResizeException != null)
+                    return UniTask.FromException(ResizeException);
                 return UniTask.CompletedTask;
             }
             public UniTask KillAsync(string paneId, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
