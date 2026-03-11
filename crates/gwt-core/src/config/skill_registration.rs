@@ -280,9 +280,12 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
 
 const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
     "skills/gwt-fix-issue",
+    "skills/gwt-issue-ops",
     "skills/gwt-issue-spec-ops",
     "commands/gwt-fix-issue.md",
+    "commands/gwt-issue-ops.md",
     "commands/gwt-issue-spec-ops.md",
+    "commands/gwt-spec-ops.md",
 ];
 
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
@@ -1897,6 +1900,64 @@ mod tests {
             .join(".claude")
             .join("commands")
             .join("gwt-spec-ops.md")
+            .exists());
+    }
+
+    #[test]
+    fn registration_removes_retired_issue_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        let codex_issue_ops_dir = temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-ops");
+        std::fs::create_dir_all(&codex_issue_ops_dir).unwrap();
+        std::fs::write(codex_issue_ops_dir.join("SKILL.md"), "legacy").unwrap();
+
+        let claude_commands_dir = temp.path().join(".claude").join("commands");
+        std::fs::create_dir_all(&claude_commands_dir).unwrap();
+        std::fs::write(claude_commands_dir.join("gwt-issue-ops.md"), "legacy").unwrap();
+        std::fs::write(claude_commands_dir.join("gwt-spec-ops.md"), "legacy").unwrap();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        assert!(!temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-ops")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-issue-ops.md")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-spec-ops.md")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-resolve")
+            .join("SKILL.md")
             .exists());
     }
 
