@@ -21,9 +21,14 @@ namespace Gwt.Infra.Services
         {
         }
 
-        internal DockerService(IDockerCommandRunner commandRunner)
+        private DockerService(IDockerCommandRunner commandRunner)
         {
             _commandRunner = commandRunner ?? new ProcessDockerCommandRunner();
+        }
+
+        internal static DockerService CreateForTests(IDockerCommandRunner commandRunner)
+        {
+            return new DockerService(commandRunner);
         }
 
         public UniTask<DockerContextInfo> DetectContextAsync(string projectRoot, CancellationToken ct = default)

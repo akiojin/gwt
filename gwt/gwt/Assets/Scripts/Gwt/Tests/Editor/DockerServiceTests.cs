@@ -30,7 +30,7 @@ namespace Gwt.Tests.Editor
         {
             WithTempProjectRoot(root =>
             {
-                var service = new DockerService(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
+                var service = DockerService.CreateForTests(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
                 {
                     CommandFound = true,
                     ExitCode = 0
@@ -50,7 +50,7 @@ namespace Gwt.Tests.Editor
             WithTempProjectRoot(root =>
             {
                 File.WriteAllText(Path.Combine(root, "docker-compose.yml"), "services:\n  app:\n    image: alpine\n");
-                var service = new DockerService(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
+                var service = DockerService.CreateForTests(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
                 {
                     CommandFound = false,
                     ExitCode = 127,
@@ -72,7 +72,7 @@ namespace Gwt.Tests.Editor
             WithTempProjectRoot(root =>
             {
                 File.WriteAllText(Path.Combine(root, "docker-compose.yml"), "services:\n  app:\n    image: alpine\n");
-                var service = new DockerService(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
+                var service = DockerService.CreateForTests(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
                 {
                     CommandFound = true,
                     ExitCode = 1,
@@ -94,7 +94,7 @@ namespace Gwt.Tests.Editor
             WithTempProjectRoot(root =>
             {
                 File.WriteAllText(Path.Combine(root, "docker-compose.yml"), "services:\n  workspace:\n    image: alpine\n");
-                var service = new DockerService(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
+                var service = DockerService.CreateForTests(new FakeDockerCommandRunner(new DockerService.DockerCommandResult
                 {
                     CommandFound = true,
                     ExitCode = 0,
