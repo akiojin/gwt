@@ -1,11 +1,16 @@
 ---
 name: gwt-spec-ops
-description: GitHub Issue-first spec management. Use GitHub Issues with the `gwt-spec` label for requirements definition, spec drafting, TDD planning, implementation planning, task generation, and quality checklist generation. Use this when the user asks to write a spec, create a spec, do TDD, define requirements, generate plan/tasks, resolve spec ambiguity, or analyze consistency.
+description: GitHub Issue-first SPEC execution. Use an existing or newly created `gwt-spec` issue to stabilize the spec bundle, maintain plan/tasks/TDD artifacts, and drive implementation progress.
 ---
 
 # gwt Issue SPEC Ops
 
 GitHub Issues are the single source of truth for specs. Manage every spec as an issue labeled `gwt-spec`.
+
+`gwt-spec-ops` starts after the target SPEC issue has already been identified.
+
+- If the user starts from a plain Issue, use `gwt-issue-resolve` first.
+- If the user already has a `gwt-spec` issue number, or the target SPEC destination is already known, continue with this skill.
 
 ## Mandatory preflight: search existing spec first
 
@@ -209,22 +214,23 @@ Before `Specify` or `Plan`, determine whether an existing spec already owns the 
 4. If an existing canonical spec is found, update it instead of creating a new one
 5. Record the chosen destination issue in `## Research` or `## Spec`
 
-### 1. Specify (draft the spec)
+### 1. Stabilize the spec for execution
 
-Specification drafting procedure:
+Execution-oriented spec maintenance procedure:
 
-1. Create the `## Spec` section using the issue body structure above.
+1. Update the `## Spec` section only as much as needed to unblock planning and implementation.
 2. **Required elements**:
    - **Background**: why this feature or fix is needed
    - **User scenarios**: concrete flows and expected outcomes, with priority P0/P1/P2
    - **Functional requirements**: numbered as `FR-001`
    - **Non-functional requirements**: numbered as `NFR-001` (performance, security, and so on)
    - **Success criteria**: numbered as `SC-001`, with measurable completion conditions
-3. Mark unclear points with `[Needs Clarification]` as a temporary placeholder.
-4. Explicitly document edge cases and error handling.
-5. When integrating into an existing spec, explain the integration choice and reference the related issue numbers.
+3. Fill missing details from the source Issue, existing comments, or current implementation context before asking the user.
+4. Mark unresolved blockers with `[Needs Clarification]` only when they truly block execution.
+5. Explicitly document edge cases and error handling that affect implementation or testing.
+6. When integrating new work into an existing SPEC, explain the integration choice and reference the related issue numbers.
 
-### 2. Clarify (resolve ambiguity)
+### 2. Clarify blocking ambiguity
 
 When `## Spec` still contains ambiguous points:
 
@@ -283,6 +289,7 @@ Task execution procedure:
 3. Run independent tasks in parallel when practical
 4. Update completed task checkboxes to `[x]`
 5. Update the issue body to reflect progress
+6. When execution started from a plain Issue, keep the originating Issue linked from the SPEC and reflect status back to the original Issue or PR thread
 
 ### 7. Tasks to child issues
 

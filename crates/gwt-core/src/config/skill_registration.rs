@@ -27,6 +27,7 @@ struct ManagedAsset {
 
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
+    "gwt-issue-resolve",
     "gwt-issue-ops",
     "gwt-fix-pr",
     "gwt-spec-ops",
@@ -38,6 +39,24 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
 ];
 
 const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
+    ManagedAsset {
+        relative_path: "skills/gwt-issue-resolve/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-issue-resolve/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-issue-resolve/scripts/inspect_issue.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-issue-resolve/scripts/inspect_issue.py"
+        )),
+        executable: true,
+        rewrite_for_project: false,
+    },
     ManagedAsset {
         relative_path: "skills/gwt-issue-ops/SKILL.md",
         body: include_str!(concat!(
@@ -174,6 +193,15 @@ const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
 ];
 
 const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
+    ManagedAsset {
+        relative_path: "commands/gwt-issue-resolve.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-issue-resolve.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
     ManagedAsset {
         relative_path: "commands/gwt-issue-ops.md",
         body: include_str!(concat!(
@@ -1598,7 +1626,7 @@ mod tests {
             .path()
             .join(".codex")
             .join("skills")
-            .join("gwt-issue-ops")
+            .join("gwt-issue-resolve")
             .join("SKILL.md")
             .exists());
     }
@@ -1881,6 +1909,17 @@ mod tests {
         assert!(issue_spec_skill.contains("search existing spec first"));
         assert!(issue_spec_skill.contains("gwt-project-index"));
 
+        let issue_resolve_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-issue-resolve")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(issue_resolve_skill.contains("Direct fix path"));
+        assert!(issue_resolve_skill.contains("gwt-project-index"));
+
         let issue_spec_command = std::fs::read_to_string(
             temp.path()
                 .join(".claude")
@@ -1888,7 +1927,17 @@ mod tests {
                 .join("gwt-spec-ops.md"),
         )
         .unwrap();
-        assert!(issue_spec_command.contains("use `gwt-project-index` Issue search"));
+        assert!(issue_spec_command.contains("switch to `gwt-issue-resolve` first"));
+
+        let issue_resolve_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-issue-resolve.md"),
+        )
+        .unwrap();
+        assert!(issue_resolve_command.contains("direct fix"));
+        assert!(issue_resolve_command.contains("existing SPEC"));
     }
 
     #[test]

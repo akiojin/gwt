@@ -1,12 +1,12 @@
 ---
-description: Manage Issue-first specs (gwt-spec) using the gwt-spec-ops skill
+description: Execute and maintain Issue-first specs (gwt-spec) using the gwt-spec-ops skill
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
 # GWT Issue Spec Ops Command
 
-Use this command to create/update Issue-first SPEC artifacts on GitHub Issues.
+Use this command after the target `gwt-spec` issue is already known. It maintains the SPEC bundle and drives plan/tasks/TDD/implementation progress.
 
 ## Usage
 
@@ -17,11 +17,11 @@ Use this command to create/update Issue-first SPEC artifacts on GitHub Issues.
 ## Steps
 
 1. Load `skills/gwt-spec-ops/SKILL.md` and follow the workflow.
-2. Before creating/updating a spec, use `gwt-project-index` Issue search to find the canonical existing spec destination.
-3. Ensure `gh auth status` is valid before any `index-issues` or issue operation.
-4. Create or update the Spec/Plan/Tasks sections on the target `gwt-spec` issue.
+2. If the user starts from a plain Issue and no SPEC issue is known yet, switch to `gwt-issue-resolve` first.
+3. Ensure `gh auth status` is valid before any issue operation.
+4. Create or update the Spec/Plan/Tasks/TDD sections on the target `gwt-spec` issue.
 5. Keep SPEC ID as the GitHub issue number and preserve section structure.
-6. Report what was changed, which existing spec was selected, and what remains unresolved.
+6. Report what was changed, what implementation step is next, and what remains unresolved.
 
 ## Examples
 
@@ -30,7 +30,7 @@ Use this command to create/update Issue-first SPEC artifacts on GitHub Issues.
 ```
 
 ```text
-/gwt:gwt-spec-ops 新機能のspecを作成して
+/gwt:gwt-spec-ops SPEC #1288 を進めて
 ```
 
 ```text
