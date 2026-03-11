@@ -180,6 +180,7 @@ namespace Gwt.Studio.UI
         public void OpenAgentSettings() => OpenPanel(_agentSettingsPanel);
         public void OpenTerminal()
         {
+            EnsureTerminalOverlayPanel();
             if (_terminalOverlayPanel == null)
                 return;
 
@@ -198,6 +199,7 @@ namespace Gwt.Studio.UI
 
         public void ToggleTerminal()
         {
+            EnsureTerminalOverlayPanel();
             if (_terminalOverlayPanel == null) return;
 
             if (_terminalOverlayPanel.IsOpen)
@@ -208,6 +210,7 @@ namespace Gwt.Studio.UI
 
         public void OpenTerminalForAgent(string agentSessionId)
         {
+            EnsureTerminalOverlayPanel();
             if (_terminalOverlayPanel == null) return;
 
             if (!_terminalOverlayPanel.IsOpen)
@@ -306,6 +309,12 @@ namespace Gwt.Studio.UI
             _projectInfoBar.ReportRequested += HandleProjectInfoBarReportRequested;
             _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
             _projectInfoBar.TerminalRequested += HandleProjectInfoBarTerminalRequested;
+        }
+
+        private void EnsureTerminalOverlayPanel()
+        {
+            if (_terminalOverlayPanel == null)
+                _terminalOverlayPanel = GetComponentInChildren<TerminalOverlayPanel>(true);
         }
 
         private void HandleProjectInfoBarClicked()
@@ -1047,6 +1056,7 @@ namespace Gwt.Studio.UI
 
         private void RestoreTerminalSnapshot(ProjectSwitchSnapshot snapshot)
         {
+            EnsureTerminalOverlayPanel();
             if (_terminalPaneManager == null || snapshot == null)
                 return;
 
