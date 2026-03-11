@@ -322,8 +322,16 @@ namespace Gwt.Tests.Editor
             multi.AddProjectAsync("/tmp/project-b").GetAwaiter().GetResult();
 
             var paneManager = new TerminalPaneManager();
-            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80)));
-            paneManager.AddPane(new TerminalPaneState("pane-b", new XtermSharpTerminalAdapter(24, 80)));
+            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-a",
+                Title = "Docker workspace-a"
+            });
+            paneManager.AddPane(new TerminalPaneState("pane-b", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-b",
+                Title = "Docker workspace-b"
+            });
 
             using var scope = new UiScope();
             var manager = scope.Root.AddComponent<UIManager>();
@@ -403,6 +411,8 @@ namespace Gwt.Tests.Editor
 
             Assert.AreEqual("pane-b", paneManager.ActivePane.PaneId);
             Assert.IsTrue(terminal.IsOpen);
+            Assert.AreEqual("pty-b", terminal.ActivePtySessionId);
+            Assert.AreEqual("Docker workspace-b", terminal.ActivePaneTitle);
             Assert.AreEqual("/tmp/project-b", transition.LastTransitionProjectPath);
         });
 
