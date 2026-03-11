@@ -71,13 +71,38 @@ namespace Gwt.Tests.Editor
             overlay.Open();
             await overlay.RefreshAsync();
 
-            var button = overlay.GetComponentsInChildren<Button>(true).FirstOrDefault(candidate => candidate.gameObject.name == "Entry-0");
+            var button = overlay.GetComponentsInChildren<Button>(true).FirstOrDefault(candidate => candidate.gameObject.name.StartsWith("Entry-0-", StringComparison.Ordinal));
             Assert.IsNotNull(button);
 
             button.onClick.Invoke();
             await UniTask.WaitUntil(() => lifecycle.CurrentProject != null, cancellationToken: default);
 
             Assert.AreEqual("/tmp/project-c", lifecycle.CurrentProject.Path);
+            Assert.IsFalse(overlay.IsOpen);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator ProjectSwitchOverlayPanel_ClickingOpenProjectButton_SwitchesActiveProject() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            await multi.AddProjectAsync("/tmp/project-a");
+            await multi.AddProjectAsync("/tmp/project-b");
+
+            using var scope = new UiScope();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            overlay.SetServices(multi, lifecycle);
+            overlay.Open();
+            await overlay.RefreshAsync();
+
+            var button = overlay.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name.StartsWith("Entry-0-project-a", StringComparison.Ordinal));
+            Assert.IsNotNull(button);
+
+            button.onClick.Invoke();
+            await UniTask.WaitUntil(() => lifecycle.CurrentProject != null && lifecycle.CurrentProject.Path == "/tmp/project-a", cancellationToken: default);
+
+            Assert.AreEqual("/tmp/project-a", lifecycle.CurrentProject.Path);
             Assert.IsFalse(overlay.IsOpen);
         });
 

@@ -126,6 +126,9 @@ namespace Gwt.Studio.UI
             for (int i = 0; i < _entries.Count; i++)
             {
                 var entry = _entries[i];
+                var isCurrentProject = entry.IsOpenProject &&
+                    _projectLifecycleService?.CurrentProject != null &&
+                    string.Equals(_projectLifecycleService.CurrentProject.Path, entry.Project.Path, StringComparison.OrdinalIgnoreCase);
                 if (!entry.IsOpenProject && !wroteRecentHeader)
                 {
                     if (builder.Length > 0)
@@ -140,20 +143,7 @@ namespace Gwt.Studio.UI
                 builder.Append(selected)
                     .Append(active)
                     .Append(' ')
-                    .Append(project.Name);
-
-                if (!string.IsNullOrWhiteSpace(project.DefaultBranch))
-                    builder.Append(" [").Append(project.DefaultBranch).Append(']');
-
-                if (entry.IsOpenProject && _projectLifecycleService?.CurrentProject != null &&
-                    string.Equals(_projectLifecycleService.CurrentProject.Path, project.Path, StringComparison.OrdinalIgnoreCase))
-                {
-                    builder.Append(" current");
-                }
-                else if (!entry.IsOpenProject)
-                {
-                    builder.Append(" recent");
-                }
+                    .Append(BuildEntryLabelText(entry, isCurrentProject));
 
                 if (i < _entries.Count - 1)
                     builder.AppendLine();
@@ -291,8 +281,12 @@ namespace Gwt.Studio.UI
             for (var i = 0; i < _entries.Count; i++)
             {
                 var entry = _entries[i];
+                var isCurrentProject = entry.IsOpenProject &&
+                    _projectLifecycleService?.CurrentProject != null &&
+                    string.Equals(_projectLifecycleService.CurrentProject.Path, entry.Project.Path, StringComparison.OrdinalIgnoreCase);
                 var row = new GameObject($"Entry-{i}", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
                 row.transform.SetParent(_entriesContainer, false);
+                row.name = $"Entry-{i}-{SanitizeName(entry.Project.Name)}";
 
                 var image = row.GetComponent<Image>();
                 image.color = i == _selectedIndex
@@ -307,12 +301,12 @@ namespace Gwt.Studio.UI
                 var index = i;
                 button.onClick.AddListener(() => HandleEntryClicked(index).Forget());
 
-                var label = CreateEntryLabel(row.transform, entry);
+                var label = CreateEntryLabel(row.transform, entry, isCurrentProject);
                 label.raycastTarget = false;
             }
         }
 
-        private TextMeshProUGUI CreateEntryLabel(Transform parent, ProjectEntry entry)
+        private TextMeshProUGUI CreateEntryLabel(Transform parent, ProjectEntry entry, bool isCurrentProject)
         {
             var go = new GameObject("Label", typeof(RectTransform));
             go.transform.SetParent(parent, false);
@@ -330,9 +324,7 @@ namespace Gwt.Studio.UI
             label.color = Color.white;
             label.alignment = TextAlignmentOptions.MidlineLeft;
             label.enableWordWrapping = false;
-            label.text = entry.IsOpenProject
-                ? $"{entry.Project.Name} [{entry.Project.DefaultBranch}]"
-                : $"{entry.Project.Name} [{entry.Project.DefaultBranch}] recent";
+            label.text = BuildEntryLabelText(entry, isCurrentProject);
             return label;
         }
 
@@ -344,6 +336,33 @@ namespace Gwt.Studio.UI
             _selectedIndex = index;
             Refresh();
             await ConfirmSelectionAsync();
+        }
+
+        private static string BuildEntryLabelText(ProjectEntry entry, bool isCurrentProject)
+        {
+            var label = entry.Project.Name;
+            if (!string.IsNullOrWhiteSpace(entry.Project.DefaultBranch))
+                label += $" [{entry.Project.DefaultBranch}]";
+
+            if (isCurrentProject)
+                return $"{label} current";
+
+            if (!entry.IsOpenProject)
+                return $"{label} recent";
+
+            return label;
+        }
+
+        private static string SanitizeName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "project";
+
+            var sanitized = value.Replace(' ', '-');
+            foreach (var invalid in System.IO.Path.GetInvalidFileNameChars())
+                sanitized = sanitized.Replace(invalid.ToString(), string.Empty);
+
+            return string.IsNullOrWhiteSpace(sanitized) ? "project" : sanitized;
         }
 
         private async UniTask BuildEntriesAsync()
