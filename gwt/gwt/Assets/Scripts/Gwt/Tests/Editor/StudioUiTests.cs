@@ -630,6 +630,75 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectSwitchOverlayButton_RestoresFirstProjectTerminalSnapshot_OnRoundTrip() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            await multi.AddProjectAsync("/tmp/project-a");
+            await multi.AddProjectAsync("/tmp/project-b");
+
+            var paneManager = new TerminalPaneManager();
+            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-a",
+                Title = "Docker workspace-a"
+            });
+            paneManager.AddPane(new TerminalPaneState("pane-b", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-b",
+                Title = "Docker workspace-b"
+            });
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            var terminal = scope.Root.AddComponent<TerminalOverlayPanel>();
+            var transition = scope.Root.AddComponent<FakeProjectSceneTransitionController>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+            SetPrivateField(manager, "_projectSceneTransitionController", transition);
+            SetPrivateField(manager, "_terminalOverlayPanel", terminal);
+
+            terminal.Construct(paneManager, new FakePtyService(), new FakeShellDetector(), new FakeProjectAwareDockerService(), lifecycle);
+            manager.Construct(lifecycle, multi, paneManager);
+            terminal.Open();
+
+            manager.OpenProjectSwitcher();
+            await overlay.RefreshAsync();
+            var projectAButton = overlay.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name.StartsWith("Entry-0-project-a", StringComparison.Ordinal));
+            Assert.IsNotNull(projectAButton);
+            projectAButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => lifecycle.CurrentProject != null && lifecycle.CurrentProject.Path == "/tmp/project-a", cancellationToken: default);
+
+            paneManager.SetActiveIndex(0);
+            if (!terminal.IsOpen)
+                terminal.Open();
+
+            manager.OpenProjectSwitcher();
+            await overlay.RefreshAsync();
+            var projectBButton = overlay.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name.StartsWith("Entry-1-project-b", StringComparison.Ordinal));
+            Assert.IsNotNull(projectBButton);
+            projectBButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => lifecycle.CurrentProject != null && lifecycle.CurrentProject.Path == "/tmp/project-b", cancellationToken: default);
+
+            manager.OpenProjectSwitcher();
+            await overlay.RefreshAsync();
+            projectAButton = overlay.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name.StartsWith("Entry-0-project-a", StringComparison.Ordinal));
+            Assert.IsNotNull(projectAButton);
+            projectAButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => lifecycle.CurrentProject != null && lifecycle.CurrentProject.Path == "/tmp/project-a", cancellationToken: default);
+
+            Assert.IsTrue(terminal.IsOpen);
+            Assert.AreEqual("pane-a", paneManager.ActivePane.PaneId);
+            Assert.AreEqual("pty-a", terminal.ActivePtySessionId);
+            Assert.AreEqual("Docker workspace-a", terminal.ActivePaneTitle);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator TerminalOverlayPanel_RefreshActivePaneTitleForCurrentProjectAsync_UsesDockerStatus() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();
