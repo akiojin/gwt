@@ -387,6 +387,59 @@ namespace Gwt.Tests.Editor
             Assert.IsFalse(transition.HasPendingFor("/tmp/project-a"));
         }
 
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_Construct_ReopensPendingProjectTransitionRestore_WhenCurrentProjectMissing() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.SaveSnapshot(new ProjectSwitchSnapshot
+            {
+                ProjectPath = "/tmp/project-a",
+                DeskStateKey = "reopened-project",
+                IssueMarkerStateKey = "feature/reopened",
+                AgentStateKey = "Reopened",
+                TerminalWasOpen = true,
+                ActiveTerminalPaneId = "pane-b"
+            });
+
+            var paneManager = new TerminalPaneManager();
+            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-a",
+                Title = "Docker workspace-a"
+            });
+            paneManager.AddPane(new TerminalPaneState("pane-b", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-b",
+                Title = "Docker workspace-b"
+            });
+            paneManager.SetActiveIndex(0);
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            var terminal = scope.Root.AddComponent<TerminalOverlayPanel>();
+            var transition = scope.Root.AddComponent<FakeProjectSceneTransitionController>();
+            transition.MarkPending("/tmp/project-a");
+            terminal.Construct(paneManager, new FakePtyService(), new FakeShellDetector(), new FakeProjectAwareDockerService(), lifecycle);
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+            SetPrivateField(manager, "_projectSceneTransitionController", transition);
+            SetPrivateField(manager, "_terminalOverlayPanel", terminal);
+
+            manager.Construct(lifecycle, multi, paneManager);
+            await UniTask.WaitUntil(() => lifecycle.CurrentProject != null && lifecycle.CurrentProject.Path == "/tmp/project-a", cancellationToken: default);
+
+            Assert.AreEqual("reopened-project", bar.CurrentProjectName);
+            Assert.AreEqual("feature/reopened", bar.CurrentBranch);
+            Assert.AreEqual("Reopened", bar.CurrentStatus);
+            Assert.IsTrue(terminal.IsOpen);
+            Assert.AreEqual("pane-b", paneManager.ActivePane.PaneId);
+            Assert.AreEqual("pty-b", terminal.ActivePtySessionId);
+            Assert.IsFalse(transition.HasPendingFor("/tmp/project-a"));
+        });
+
         [Test]
         public void UIManager_Construct_RestoresSnapshotForCurrentProject()
         {

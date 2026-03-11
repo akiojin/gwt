@@ -142,6 +142,12 @@ namespace Gwt.Studio.UI
             return string.Equals(_pendingRestoreProjectPath, currentProjectPath, StringComparison.Ordinal);
         }
 
+        public bool TryGetPendingRestoreProjectPath(out string projectPath)
+        {
+            projectPath = _pendingRestoreProjectPath;
+            return !string.IsNullOrWhiteSpace(projectPath);
+        }
+
         protected void MarkPendingRestore(string projectPath)
         {
             _pendingRestoreProjectPath = projectPath ?? string.Empty;

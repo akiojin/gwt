@@ -79,7 +79,7 @@ namespace Gwt.Studio.UI
             SubscribeServices();
             RefreshProjectInfoBar();
             RestoreCurrentProjectSnapshot();
-            ApplyPendingProjectTransitionState();
+            ApplyPendingProjectTransitionStateAsync().Forget();
             RestorePreparedUpdateStateIfNeeded();
         }
 
@@ -89,7 +89,7 @@ namespace Gwt.Studio.UI
             SubscribeServices();
             EnsureProjectInfoBar();
             RefreshProjectInfoBar();
-            ApplyPendingProjectTransitionState();
+            ApplyPendingProjectTransitionStateAsync().Forget();
             RestorePreparedUpdateStateIfNeeded();
         }
 
@@ -1008,18 +1008,35 @@ namespace Gwt.Studio.UI
             RestoreTerminalSnapshot(snapshot);
         }
 
-        private void ApplyPendingProjectTransitionState()
+        private async UniTaskVoid ApplyPendingProjectTransitionStateAsync()
         {
-            if (_projectLifecycleService?.CurrentProject == null)
-                return;
-
             if (_projectSceneTransitionController == null)
                 _projectSceneTransitionController = FindFirstObjectByType<ProjectSceneTransitionController>(FindObjectsInactive.Include);
 
             if (_projectSceneTransitionController == null)
                 return;
 
-            if (!_projectSceneTransitionController.TryConsumePendingRestore(_projectLifecycleService.CurrentProject.Path))
+            var currentProject = _projectLifecycleService?.CurrentProject;
+            if (currentProject == null &&
+                _projectSceneTransitionController.TryGetPendingRestoreProjectPath(out var pendingProjectPath) &&
+                !string.IsNullOrWhiteSpace(pendingProjectPath) &&
+                _multiProjectService != null)
+            {
+                try
+                {
+                    await _multiProjectService.AddProjectAsync(pendingProjectPath);
+                    currentProject = _projectLifecycleService?.CurrentProject;
+                }
+                catch
+                {
+                    return;
+                }
+            }
+
+            if (currentProject == null)
+                return;
+
+            if (!_projectSceneTransitionController.TryConsumePendingRestore(currentProject.Path))
                 return;
 
             RefreshProjectInfoBar();
