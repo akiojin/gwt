@@ -18,6 +18,8 @@ namespace Gwt.Editor
         public const string GeneratedSpriteRoot = "Assets/Generated/ModernInteriorsTilemapSprites";
         public const string GeneratedTileRoot = "Assets/Generated/ModernInteriorsTilemapTiles";
         public const string GeneratedAtlasPath = "Assets/Generated/ModernInteriorsAtlases/HomeDesigns.spriteatlas";
+        public const string GeneratedCharacterAtlasPath = "Assets/Generated/ModernInteriorsAtlases/Characters.spriteatlas";
+        public const string GeneratedBackgroundAtlasPath = "Assets/Generated/ModernInteriorsAtlases/Backgrounds.spriteatlas";
 
         private static readonly Regex CellSizePattern = new(@"(?<!\d)(16|32|48)x\1(?!\d)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
@@ -38,6 +40,33 @@ namespace Gwt.Editor
             AssetDatabase.Refresh();
 
             Debug.Log($"[GWT] Generated {generatedSprites} tile sprites and {generatedTiles} tile assets from {sheetPaths.Count} home design sheets");
+        }
+
+        [MenuItem("GWT/Graphics/Generate Sprite Importers And Atlases")]
+        public static void GenerateSpriteImportersAndAtlases()
+        {
+            var spritePaths = CollectSpritePngPaths();
+            foreach (var assetPath in spritePaths)
+            {
+                ConfigureSourceSpriteImporter(assetPath);
+            }
+
+            CreateOrUpdateAtlas(GetCharacterAtlasDefinition());
+            CreateOrUpdateAtlas(GetBackgroundAtlasDefinition());
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+
+            Debug.Log($"[GWT] Configured {spritePaths.Count} sprite importers and updated character/background atlases");
+        }
+
+        public static List<string> CollectSpritePngPaths()
+        {
+            return AssetDatabase.FindAssets("t:Texture2D", new[] { GraphicsRoot })
+                .Select(AssetDatabase.GUIDToAssetPath)
+                .Where(IsSpriteCandidateAsset)
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ToList();
         }
 
         public static List<string> CollectHomeDesignLayerSheetPaths()
@@ -66,6 +95,22 @@ namespace Gwt.Editor
                    InferCellSize(assetPath).HasValue;
         }
 
+        public static bool IsSpriteCandidateAsset(string assetPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath) ||
+                !assetPath.StartsWith(GraphicsRoot, StringComparison.Ordinal) ||
+                !assetPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var fileName = Path.GetFileNameWithoutExtension(assetPath);
+            if (fileName.IndexOf("preview", StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+
+            return InferCellSize(assetPath).HasValue;
+        }
+
         public static int? InferCellSize(string assetPath)
         {
             if (string.IsNullOrWhiteSpace(assetPath))
@@ -76,6 +121,17 @@ namespace Gwt.Editor
                 return null;
 
             return int.Parse(match.Groups[1].Value);
+        }
+
+        public static bool ShouldSliceAsMultiple(int textureWidth, int textureHeight, int cellSize)
+        {
+            if (textureWidth <= 0) throw new ArgumentOutOfRangeException(nameof(textureWidth));
+            if (textureHeight <= 0) throw new ArgumentOutOfRangeException(nameof(textureHeight));
+            if (cellSize <= 0) throw new ArgumentOutOfRangeException(nameof(cellSize));
+
+            return (textureWidth > cellSize || textureHeight > cellSize) &&
+                   textureWidth % cellSize == 0 &&
+                   textureHeight % cellSize == 0;
         }
 
         public static List<TileSlice> BuildTileSlices(string spriteNamePrefix, int textureWidth, int textureHeight, int cellSize)
@@ -169,6 +225,49 @@ namespace Gwt.Editor
             return spriteAssetPaths.Count;
         }
 
+        public static void ConfigureSourceSpriteImporter(string assetPath)
+        {
+            var cellSize = InferCellSize(assetPath);
+            if (!cellSize.HasValue)
+                return;
+
+            var importer = AssetImporter.GetAtPath(assetPath) as TextureImporter;
+            var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath);
+            if (importer == null || texture == null)
+                return;
+
+            importer.textureType = TextureImporterType.Sprite;
+            importer.alphaIsTransparency = true;
+            importer.filterMode = FilterMode.Point;
+            importer.mipmapEnabled = false;
+            importer.spritePixelsPerUnit = cellSize.Value;
+
+            if (ShouldSliceAsMultiple(texture.width, texture.height, cellSize.Value))
+            {
+                importer.spriteImportMode = SpriteImportMode.Multiple;
+                importer.spritesheet = BuildTileSlices(
+                        Path.GetFileNameWithoutExtension(assetPath),
+                        texture.width,
+                        texture.height,
+                        cellSize.Value)
+                    .Select(slice => new SpriteMetaData
+                    {
+                        name = slice.Name,
+                        rect = new Rect(slice.Rect.x, slice.Rect.y, slice.Rect.width, slice.Rect.height),
+                        alignment = (int)SpriteAlignment.Center,
+                        pivot = new Vector2(0.5f, 0.5f)
+                    })
+                    .ToArray();
+            }
+            else
+            {
+                importer.spriteImportMode = SpriteImportMode.Single;
+                importer.spritesheet = Array.Empty<SpriteMetaData>();
+            }
+
+            importer.SaveAndReimport();
+        }
+
         public static void CreateOrUpdateAtlas(SpriteAtlasDefinition definition)
         {
             if (definition == null) throw new ArgumentNullException(nameof(definition));
@@ -207,7 +306,6 @@ namespace Gwt.Editor
             EditorUtility.SetDirty(atlas);
             AssetDatabase.SaveAssets();
             AssetDatabase.ImportAsset(definition.OutputPath, ImportAssetOptions.ForceUpdate);
-            SpriteAtlasUtility.PackAtlases(new[] { atlas }, EditorUserBuildSettings.activeBuildTarget, false);
         }
 
         public static SpriteAtlasDefinition GetHomeDesignAtlasDefinition()
@@ -216,6 +314,27 @@ namespace Gwt.Editor
                 "HomeDesigns",
                 GeneratedAtlasPath,
                 new[] { GeneratedSpriteRoot });
+        }
+
+        public static SpriteAtlasDefinition GetCharacterAtlasDefinition()
+        {
+            return new SpriteAtlasDefinition(
+                "Characters",
+                GeneratedCharacterAtlasPath,
+                new[] { GraphicsRoot + "/2_Characters" });
+        }
+
+        public static SpriteAtlasDefinition GetBackgroundAtlasDefinition()
+        {
+            return new SpriteAtlasDefinition(
+                "Backgrounds",
+                GeneratedBackgroundAtlasPath,
+                new[]
+                {
+                    GraphicsRoot + "/1_Interiors",
+                    GraphicsRoot + "/3_Animated_objects",
+                    GraphicsRoot + "/6_Home_Designs"
+                });
         }
 
         private static void ConfigureGeneratedTileSpriteImporter(string assetPath)
