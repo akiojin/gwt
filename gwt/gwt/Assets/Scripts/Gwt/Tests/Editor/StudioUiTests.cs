@@ -561,6 +561,30 @@ namespace Gwt.Tests.Editor
             Assert.That(overlay.CurrentDisplayText, Does.Contain("project-c"));
         }
 
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarReportButton_PreparesBugReport() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+
+            manager.Construct(lifecycle, new MultiProjectService(lifecycle), new TerminalPaneManager(), null, new FakeBuildService());
+
+            var reportButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "ReportButton");
+            Assert.IsNotNull(reportButton);
+
+            reportButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentReportStatus == "Report ready", cancellationToken: default);
+
+            Assert.That(bar.LastReportTarget, Does.Contain("github.com/akiojin/gwt/issues/new"));
+            Assert.That(bar.LastReportCommand, Does.Contain("gh issue create"));
+        });
+
         private static void SetPrivateField(object instance, string fieldName, object value)
         {
             var field = instance.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
@@ -848,6 +872,39 @@ namespace Gwt.Tests.Editor
 
             public UniTask<string> SpawnAsync(DockerLaunchRequest request, IPtyService ptyService, int rows = 24, int cols = 80, System.Threading.CancellationToken ct = default) =>
                 new DockerService().SpawnAsync(request, ptyService, rows, cols, ct);
+        }
+
+        private sealed class FakeBuildService : IBuildService
+        {
+            public SystemInfoData GetSystemInfo() => new() { OS = "TestOS", UnityVersion = "6000.3.10f1", AppVersion = "1.0.0" };
+            public SystemStatsData GetSystemStats() => new() { AllocatedMemoryMB = 1, ReservedMemoryMB = 2, MonoUsedMemoryMB = 1 };
+            public UniTask<string> CaptureScreenshotAsync(string outputPath, System.Threading.CancellationToken ct = default) => UniTask.FromResult(outputPath);
+            public UniTask<string> ReadLogFileAsync(string logPath, System.Threading.CancellationToken ct = default) => UniTask.FromResult(string.Empty);
+            public UniTask<System.Collections.Generic.List<string>> ReadRecentLogsAsync(int maxFiles = 5, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new System.Collections.Generic.List<string>());
+            public UniTask<BugReport> CreateBugReportAsync(string description, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new BugReport
+            {
+                Description = description,
+                LogContent = "test-log",
+                ScreenshotPath = "/tmp/test.png",
+                Timestamp = "2026-03-11T00:00:00Z",
+                SystemInfo = GetSystemInfo()
+            });
+            public string DetectReportTarget() => "https://github.com/akiojin/gwt/issues/new";
+            public string BuildGitHubIssueBody(BugReport report) => $"Report:{report.Description}";
+            public string BuildGitHubIssueCommand(string title, BugReport report) => $"gh issue create --title '{title}' --body '{report.Description}'";
+            public System.Collections.Generic.List<BuildArtifactInfo> GetReleaseArtifacts(string version) => new();
+            public System.Collections.Generic.List<UpdateInfo> ParseUpdateManifest(string manifestJson) => new();
+            public UniTask<System.Collections.Generic.List<UpdateInfo>> LoadUpdateManifestAsync(string manifestSource, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new System.Collections.Generic.List<UpdateInfo>());
+            public UpdateInfo GetLatestUpdate(string currentVersion, System.Collections.Generic.List<UpdateInfo> candidates) => null;
+            public bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate) => false;
+            public string GetUpdateStagingDirectory() => "/tmp";
+            public UniTask<string> DownloadUpdateAsync(UpdateInfo candidate, string destinationDirectory, System.Threading.CancellationToken ct = default) => UniTask.FromResult(string.Empty);
+            public UniTask<PreparedUpdatePlan> PrepareUpdateAsync(string currentVersion, UpdateInfo candidate, string executablePath, string destinationDirectory = null, string manifestSource = null, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new PreparedUpdatePlan());
+            public UniTask<string> WritePreparedUpdateScriptAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default) => UniTask.FromResult(string.Empty);
+            public UniTask<bool> LaunchPreparedUpdateAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default) => UniTask.FromResult(false);
+            public string BuildApplyUpdateCommand(UpdateInfo candidate) => string.Empty;
+            public string BuildApplyDownloadedUpdateCommand(string downloadedArtifactPath) => string.Empty;
+            public string BuildRestartCommand(string executablePath) => string.Empty;
         }
 
         private sealed class NoOpObservable : IObservable<string>

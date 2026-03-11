@@ -31,6 +31,7 @@ namespace Gwt.Studio.UI
         private IMultiProjectService _multiProjectService;
         private ITerminalPaneManager _terminalPaneManager;
         private IDockerService _dockerService;
+        private IBuildService _buildService;
         private bool _subscribed;
         private bool _previousBackquotePressed;
         private bool _previousDownPressed;
@@ -47,12 +48,14 @@ namespace Gwt.Studio.UI
             IProjectLifecycleService projectLifecycleService,
             IMultiProjectService multiProjectService,
             ITerminalPaneManager terminalPaneManager,
-            IDockerService dockerService = null)
+            IDockerService dockerService = null,
+            IBuildService buildService = null)
         {
             _projectLifecycleService = projectLifecycleService;
             _multiProjectService = multiProjectService;
             _terminalPaneManager = terminalPaneManager;
             _dockerService = dockerService;
+            _buildService = buildService;
             EnsureProjectSwitcher();
             SubscribeServices();
             RefreshProjectInfoBar();
@@ -272,6 +275,8 @@ namespace Gwt.Studio.UI
 
             _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
             _projectInfoBar.Clicked += HandleProjectInfoBarClicked;
+            _projectInfoBar.ReportRequested -= HandleProjectInfoBarReportRequested;
+            _projectInfoBar.ReportRequested += HandleProjectInfoBarReportRequested;
             _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
             _projectInfoBar.TerminalRequested += HandleProjectInfoBarTerminalRequested;
         }
@@ -279,6 +284,11 @@ namespace Gwt.Studio.UI
         private void HandleProjectInfoBarClicked()
         {
             ToggleProjectSwitcher();
+        }
+
+        private void HandleProjectInfoBarReportRequested()
+        {
+            HandleReportRequestedAsync().Forget();
         }
 
         private void HandleProjectInfoBarTerminalRequested()
@@ -351,6 +361,33 @@ namespace Gwt.Studio.UI
             RefreshProjectEnvironmentAsync(projectPath, refreshVersion).Forget();
         }
 
+        private async UniTaskVoid HandleReportRequestedAsync()
+        {
+            TryResolveRuntimeServices();
+            if (_projectInfoBar == null)
+                return;
+
+            if (_buildService == null)
+            {
+                _projectInfoBar.SetReportState("Report unavailable");
+                return;
+            }
+
+            _projectInfoBar.SetReportState("Preparing report...");
+
+            try
+            {
+                var report = await _buildService.CreateBugReportAsync("Report from Project Info");
+                var target = _buildService.DetectReportTarget();
+                var command = _buildService.BuildGitHubIssueCommand("Bug: Project Info report", report);
+                _projectInfoBar.SetReportState("Report ready", target, command);
+            }
+            catch (System.Exception e)
+            {
+                _projectInfoBar.SetReportState($"Report failed: {e.Message}");
+            }
+        }
+
         private async UniTaskVoid RefreshProjectEnvironmentAsync(string projectPath, int refreshVersion)
         {
             if (_projectInfoBar == null)
@@ -387,7 +424,8 @@ namespace Gwt.Studio.UI
             if (_projectLifecycleService != null &&
                 _multiProjectService != null &&
                 _terminalPaneManager != null &&
-                _dockerService != null)
+                _dockerService != null &&
+                _buildService != null)
             {
                 return;
             }
@@ -427,6 +465,14 @@ namespace Gwt.Studio.UI
             try
             {
                 _dockerService ??= container.Resolve<IDockerService>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _buildService ??= container.Resolve<IBuildService>();
             }
             catch
             {
@@ -487,6 +533,7 @@ namespace Gwt.Studio.UI
             if (_projectInfoBar != null)
             {
                 _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
+                _projectInfoBar.ReportRequested -= HandleProjectInfoBarReportRequested;
                 _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
             }
 
