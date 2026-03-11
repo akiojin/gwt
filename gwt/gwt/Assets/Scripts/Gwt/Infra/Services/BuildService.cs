@@ -19,6 +19,22 @@ namespace Gwt.Infra.Services
         private static readonly string UpdateDir =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gwt", "updates");
         private const string DefaultIssueUrl = "https://github.com/akiojin/gwt/issues/new";
+        private readonly Func<ProcessStartInfo, Process> _processStarter;
+
+        public BuildService()
+            : this(Process.Start)
+        {
+        }
+
+        private BuildService(Func<ProcessStartInfo, Process> processStarter)
+        {
+            _processStarter = processStarter ?? Process.Start;
+        }
+
+        public static BuildService CreateForTests(Func<ProcessStartInfo, Process> processStarter)
+        {
+            return new BuildService(processStarter);
+        }
 
         public SystemInfoData GetSystemInfo()
         {
@@ -373,8 +389,7 @@ namespace Gwt.Infra.Services
 
             try
             {
-                Process.Start(BuildLauncherProcessStartInfo(scriptPath));
-                return true;
+                return _processStarter(BuildLauncherProcessStartInfo(scriptPath)) != null;
             }
             catch
             {
