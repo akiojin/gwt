@@ -40,6 +40,8 @@ namespace Gwt.Studio.UI
         private IVoiceService _voiceService;
         private ISoundService _soundService;
         private IGamificationService _gamificationService;
+        private PreparedUpdatePlan _preparedUpdatePlan;
+        private string _preparedUpdateProjectPath = string.Empty;
         private bool _subscribed;
         private bool _previousBackquotePressed;
         private bool _previousDownPressed;
@@ -365,13 +367,21 @@ namespace Gwt.Studio.UI
             var currentProject = _projectLifecycleService?.CurrentProject;
             if (currentProject == null)
             {
+                ClearPreparedUpdate();
                 _projectInfoBar.SetProjectName("No Project");
                 _projectInfoBar.SetBranch(string.Empty);
                 _projectInfoBar.SetStatus("Idle");
                 _projectInfoBar.SetEnvironment(string.Empty);
                 _projectInfoBar.SetUpdateState(string.Empty);
+                _projectInfoBar.SetUpdateButtonLabel("Update");
                 _projectInfoBar.SetReportState(string.Empty);
                 return;
+            }
+
+            if (!string.Equals(_preparedUpdateProjectPath, currentProject.Path, System.StringComparison.Ordinal))
+            {
+                ClearPreparedUpdate();
+                _projectInfoBar.SetUpdateButtonLabel("Update");
             }
 
             _projectInfoBar.SetProjectName(currentProject.Name);
@@ -433,11 +443,40 @@ namespace Gwt.Studio.UI
             if (_buildService == null)
             {
                 _projectInfoBar.SetUpdateState("Update unavailable");
+                _projectInfoBar.SetUpdateButtonLabel("Update");
+                RefreshMetaStatus();
+                return;
+            }
+
+            var currentProjectPath = _projectLifecycleService?.CurrentProject?.Path ?? string.Empty;
+            if (_preparedUpdatePlan != null &&
+                _preparedUpdatePlan.ShouldApply &&
+                !string.IsNullOrWhiteSpace(currentProjectPath) &&
+                string.Equals(_preparedUpdateProjectPath, currentProjectPath, System.StringComparison.Ordinal))
+            {
+                _projectInfoBar.SetUpdateState("Launching update...");
+                _soundService?.PlaySfx(SfxType.ButtonClick);
+
+                var launched = await _buildService.LaunchPreparedUpdateAsync(_preparedUpdatePlan);
+                if (launched)
+                {
+                    _projectInfoBar.SetUpdateState("Update launch started", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
+                    _gamificationService?.AddExperience(20);
+                    ClearPreparedUpdate();
+                    _projectInfoBar.SetUpdateButtonLabel("Update");
+                }
+                else
+                {
+                    _projectInfoBar.SetUpdateState("Update launch failed", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
+                    _projectInfoBar.SetUpdateButtonLabel("Apply");
+                }
+
                 RefreshMetaStatus();
                 return;
             }
 
             _projectInfoBar.SetUpdateState("Checking updates...");
+            _projectInfoBar.SetUpdateButtonLabel("Checking...");
             _soundService?.PlaySfx(SfxType.ButtonClick);
 
             try
@@ -445,7 +484,9 @@ namespace Gwt.Studio.UI
                 var manifestSource = ResolveDefaultUpdateManifestSource();
                 if (string.IsNullOrWhiteSpace(manifestSource))
                 {
+                    ClearPreparedUpdate();
                     _projectInfoBar.SetUpdateState("Update source missing");
+                    _projectInfoBar.SetUpdateButtonLabel("Update");
                     RefreshMetaStatus();
                     return;
                 }
@@ -456,7 +497,9 @@ namespace Gwt.Studio.UI
                 var latest = _buildService.GetLatestUpdate(currentVersion, candidates);
                 if (latest == null)
                 {
+                    ClearPreparedUpdate();
                     _projectInfoBar.SetUpdateState("No update available");
+                    _projectInfoBar.SetUpdateButtonLabel("Update");
                     RefreshMetaStatus();
                     return;
                 }
@@ -469,17 +512,24 @@ namespace Gwt.Studio.UI
 
                 if (plan != null && plan.ShouldApply)
                 {
+                    _preparedUpdatePlan = plan;
+                    _preparedUpdateProjectPath = currentProjectPath;
                     _projectInfoBar.SetUpdateState($"Update {latest.Version} ready", latest.Version, plan.ApplyCommand);
+                    _projectInfoBar.SetUpdateButtonLabel("Apply");
                     _gamificationService?.AddExperience(15);
                 }
                 else
                 {
+                    ClearPreparedUpdate();
                     _projectInfoBar.SetUpdateState($"Update {latest.Version} pending", latest.Version);
+                    _projectInfoBar.SetUpdateButtonLabel("Update");
                 }
             }
             catch (System.Exception e)
             {
+                ClearPreparedUpdate();
                 _projectInfoBar.SetUpdateState($"Update failed: {e.Message}");
+                _projectInfoBar.SetUpdateButtonLabel("Update");
             }
 
             RefreshMetaStatus();
@@ -678,6 +728,12 @@ namespace Gwt.Studio.UI
                 return DefaultUpdateManifestPath;
 
             return string.Empty;
+        }
+
+        private void ClearPreparedUpdate()
+        {
+            _preparedUpdatePlan = null;
+            _preparedUpdateProjectPath = string.Empty;
         }
 
         private void RefreshMetaStatus()

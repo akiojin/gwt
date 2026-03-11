@@ -39,6 +39,7 @@ namespace Gwt.Studio.UI
         public string CurrentEnvironment { get; private set; } = string.Empty;
         public string CurrentReportStatus { get; private set; } = string.Empty;
         public string CurrentUpdateStatus { get; private set; } = string.Empty;
+        public string CurrentUpdateButtonLabel { get; private set; } = "Update";
         public string CurrentVoiceStatus { get; private set; } = string.Empty;
         public string CurrentAudioStatus { get; private set; } = string.Empty;
         public string CurrentProgressStatus { get; private set; } = string.Empty;
@@ -108,6 +109,12 @@ namespace Gwt.Studio.UI
             ApplyState();
         }
 
+        public void SetUpdateButtonLabel(string label)
+        {
+            CurrentUpdateButtonLabel = string.IsNullOrWhiteSpace(label) ? "Update" : label;
+            ApplyState();
+        }
+
         public void SetVoiceState(string status)
         {
             CurrentVoiceStatus = status ?? string.Empty;
@@ -147,6 +154,8 @@ namespace Gwt.Studio.UI
                 _reportStatusText.text = CurrentReportStatus;
             if (_updateStatusText != null)
                 _updateStatusText.text = CurrentUpdateStatus;
+            if (_updateButtonText != null)
+                _updateButtonText.text = CurrentUpdateButtonLabel;
             if (_voiceStatusText != null)
                 _voiceStatusText.text = CurrentVoiceStatus;
             if (_audioStatusText != null)

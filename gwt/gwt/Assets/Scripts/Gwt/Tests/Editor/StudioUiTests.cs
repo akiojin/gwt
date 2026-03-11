@@ -618,12 +618,13 @@ namespace Gwt.Tests.Editor
             var bar = scope.Root.AddComponent<ProjectInfoBar>();
             SetPrivateField(manager, "_projectInfoBar", bar);
 
+            var buildService = new FakeBuildService();
             manager.Construct(
                 lifecycle,
                 new MultiProjectService(lifecycle),
                 new TerminalPaneManager(),
                 null,
-                new FakeBuildService(),
+                buildService,
                 new VoiceService(),
                 new SoundService(),
                 new GamificationService());
@@ -636,10 +637,52 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
 
             Assert.AreEqual("Update 1.1.0 ready", bar.CurrentUpdateStatus);
+            Assert.AreEqual("Apply", bar.CurrentUpdateButtonLabel);
             Assert.AreEqual("1.1.0", bar.LastUpdateVersion);
             Assert.That(bar.LastUpdateCommand, Does.Contain("/tmp/gwt-1.1.0.zip"));
             Assert.That(bar.CurrentAudioStatus, Does.Contain("ButtonClick"));
             Assert.That(bar.CurrentProgressStatus, Does.Contain("Badges 1"));
+            Assert.AreEqual(1, buildService.PrepareCallCount);
+            Assert.AreEqual(0, buildService.LaunchCallCount);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_LaunchesPreparedUpdatePlan() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+
+            var buildService = new FakeBuildService();
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                buildService,
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService());
+
+            var updateButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+            Assert.IsNotNull(updateButton);
+
+            updateButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
+
+            updateButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update launch started", cancellationToken: default);
+
+            Assert.AreEqual("Update launch started", bar.CurrentUpdateStatus);
+            Assert.AreEqual("Update", bar.CurrentUpdateButtonLabel);
+            Assert.AreEqual("/tmp/apply-update.sh", bar.LastUpdateCommand);
+            Assert.AreEqual(1, buildService.PrepareCallCount);
+            Assert.AreEqual(1, buildService.LaunchCallCount);
         });
 
         [UnityTest]
@@ -969,6 +1012,9 @@ namespace Gwt.Tests.Editor
 
         private sealed class FakeBuildService : IBuildService
         {
+            public int PrepareCallCount { get; private set; }
+            public int LaunchCallCount { get; private set; }
+
             public SystemInfoData GetSystemInfo() => new() { OS = "TestOS", UnityVersion = "6000.3.10f1", AppVersion = "1.0.0" };
             public SystemStatsData GetSystemStats() => new() { AllocatedMemoryMB = 1, ReservedMemoryMB = 2, MonoUsedMemoryMB = 1 };
             public UniTask<string> CaptureScreenshotAsync(string outputPath, System.Threading.CancellationToken ct = default) => UniTask.FromResult(outputPath);
@@ -995,19 +1041,27 @@ namespace Gwt.Tests.Editor
             public bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate) => candidate != null && candidate.Version != currentVersion;
             public string GetUpdateStagingDirectory() => "/tmp";
             public UniTask<string> DownloadUpdateAsync(UpdateInfo candidate, string destinationDirectory, System.Threading.CancellationToken ct = default) => UniTask.FromResult("/tmp/gwt-1.1.0.zip");
-            public UniTask<PreparedUpdatePlan> PrepareUpdateAsync(string currentVersion, UpdateInfo candidate, string executablePath, string destinationDirectory = null, string manifestSource = null, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new PreparedUpdatePlan
+            public UniTask<PreparedUpdatePlan> PrepareUpdateAsync(string currentVersion, UpdateInfo candidate, string executablePath, string destinationDirectory = null, string manifestSource = null, System.Threading.CancellationToken ct = default)
             {
-                Candidate = candidate,
-                ManifestSource = manifestSource ?? "/tmp/manifest.json",
-                DownloadedArtifactPath = "/tmp/gwt-1.1.0.zip",
-                ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
-                RestartCommand = "open /Applications/GWT.app",
-                StagingDirectory = "/tmp",
-                LauncherScriptPath = "/tmp/apply-update.sh",
-                ShouldApply = true
-            });
+                PrepareCallCount++;
+                return UniTask.FromResult(new PreparedUpdatePlan
+                {
+                    Candidate = candidate,
+                    ManifestSource = manifestSource ?? "/tmp/manifest.json",
+                    DownloadedArtifactPath = "/tmp/gwt-1.1.0.zip",
+                    ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
+                    RestartCommand = "open /Applications/GWT.app",
+                    StagingDirectory = "/tmp",
+                    LauncherScriptPath = "/tmp/apply-update.sh",
+                    ShouldApply = true
+                });
+            }
             public UniTask<string> WritePreparedUpdateScriptAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default) => UniTask.FromResult("/tmp/apply-update.sh");
-            public UniTask<bool> LaunchPreparedUpdateAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default) => UniTask.FromResult(true);
+            public UniTask<bool> LaunchPreparedUpdateAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default)
+            {
+                LaunchCallCount++;
+                return UniTask.FromResult(true);
+            }
             public string BuildApplyUpdateCommand(UpdateInfo candidate) => "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app";
             public string BuildApplyDownloadedUpdateCommand(string downloadedArtifactPath) => $"cp {downloadedArtifactPath} /Applications/GWT.app";
             public string BuildRestartCommand(string executablePath) => "open /Applications/GWT.app";
