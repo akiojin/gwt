@@ -223,6 +223,46 @@ namespace Gwt.Studio.UI
             if (!IsOpen) Open();
         }
 
+        public async UniTask RefreshActivePaneTitleForCurrentProjectAsync()
+        {
+            Initialize();
+
+            var activePane = _paneManager?.ActivePane;
+            if (activePane == null || !string.IsNullOrWhiteSpace(activePane.AgentSessionId))
+                return;
+
+            activePane.Title = await ResolveActivePaneTitleAsync();
+            _terminalTabBar?.RefreshTabs();
+
+            if (IsOpen)
+                BindToActivePane();
+        }
+
+        private async UniTask<string> ResolveActivePaneTitleAsync()
+        {
+            var projectRoot = _projectLifecycleService?.CurrentProject?.Path;
+            if (string.IsNullOrWhiteSpace(projectRoot) || _dockerService == null)
+                return "Host Shell";
+
+            try
+            {
+                var status = await _dockerService.GetRuntimeStatusAsync(projectRoot);
+                if (status != null && status.HasDockerContext)
+                {
+                    if (status.ShouldUseDocker && !string.IsNullOrWhiteSpace(status.SuggestedService))
+                        return $"Docker {status.SuggestedService}";
+
+                    return "Host Shell (Docker unavailable)";
+                }
+            }
+            catch
+            {
+                return "Host Shell (Docker fallback)";
+            }
+
+            return "Host Shell";
+        }
+
         private void BindToActivePane()
         {
             var activePane = _paneManager?.ActivePane;

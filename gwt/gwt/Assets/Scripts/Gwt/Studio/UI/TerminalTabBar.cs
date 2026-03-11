@@ -25,6 +25,11 @@ namespace Gwt.Studio.UI
             _paneManager.OnActiveIndexChanged += OnActiveChanged;
         }
 
+        public void RefreshTabs()
+        {
+            RebuildTabs();
+        }
+
         private void OnPaneAddedHandler(TerminalPaneState _) => RebuildTabs();
         private void OnPaneRemovedHandler(string _) => RebuildTabs();
 

@@ -406,6 +406,28 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator TerminalOverlayPanel_RefreshActivePaneTitleForCurrentProjectAsync_UsesDockerStatus() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-b").GetAwaiter().GetResult();
+
+            var paneManager = new TerminalPaneManager();
+            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-a",
+                Title = "Docker workspace-a"
+            });
+
+            using var scope = new UiScope();
+            var panel = scope.Root.AddComponent<TerminalOverlayPanel>();
+            panel.Construct(paneManager, new FakePtyService(), new FakeShellDetector(), new FakeProjectAwareDockerService(), lifecycle);
+
+            await panel.RefreshActivePaneTitleForCurrentProjectAsync();
+
+            Assert.AreEqual("Docker workspace-b", paneManager.ActivePane.Title);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator TerminalOverlayPanel_Open_UsesDockerExecWhenProjectHasDockerContext() => UniTask.ToCoroutine(async () =>
         {
             await WithTempProjectRootAsync(async root =>
@@ -778,6 +800,48 @@ namespace Gwt.Tests.Editor
                     SuggestedService = "workspace",
                     Message = "Docker service 'workspace' is available."
                 });
+
+            public DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request) =>
+                new DockerService().BuildLaunchPlan(request);
+
+            public UniTask<string> SpawnAsync(DockerLaunchRequest request, IPtyService ptyService, int rows = 24, int cols = 80, System.Threading.CancellationToken ct = default) =>
+                new DockerService().SpawnAsync(request, ptyService, rows, cols, ct);
+        }
+
+        private sealed class FakeProjectAwareDockerService : IDockerService
+        {
+            public UniTask<DockerContextInfo> DetectContextAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+            {
+                var service = projectRoot.EndsWith("project-b", StringComparison.OrdinalIgnoreCase) ? "workspace-b" : "workspace-a";
+                return UniTask.FromResult(new DockerContextInfo
+                {
+                    HasDockerCompose = true,
+                    DetectedServices = new System.Collections.Generic.List<string> { service }
+                });
+            }
+
+            public UniTask<DevContainerConfig> LoadDevContainerConfigAsync(string configPath, System.Threading.CancellationToken ct = default) =>
+                UniTask.FromResult<DevContainerConfig>(null);
+
+            public UniTask<System.Collections.Generic.List<string>> ListServicesAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+            {
+                var service = projectRoot.EndsWith("project-b", StringComparison.OrdinalIgnoreCase) ? "workspace-b" : "workspace-a";
+                return UniTask.FromResult(new System.Collections.Generic.List<string> { service });
+            }
+
+            public UniTask<DockerRuntimeStatus> GetRuntimeStatusAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+            {
+                var service = projectRoot.EndsWith("project-b", StringComparison.OrdinalIgnoreCase) ? "workspace-b" : "workspace-a";
+                return UniTask.FromResult(new DockerRuntimeStatus
+                {
+                    HasDockerContext = true,
+                    HasDockerCli = true,
+                    CanReachDaemon = true,
+                    ShouldUseDocker = true,
+                    SuggestedService = service,
+                    Message = $"Docker service '{service}' is available."
+                });
+            }
 
             public DockerLaunchResult BuildLaunchPlan(DockerLaunchRequest request) =>
                 new DockerService().BuildLaunchPlan(request);

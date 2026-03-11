@@ -509,6 +509,8 @@ namespace Gwt.Studio.UI
 
             RefreshProjectInfoBar();
             RestoreCurrentProjectSnapshot();
+            if (_terminalOverlayPanel != null)
+                await _terminalOverlayPanel.RefreshActivePaneTitleForCurrentProjectAsync();
             return true;
         }
 
