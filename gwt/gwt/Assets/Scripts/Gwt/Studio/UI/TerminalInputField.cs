@@ -1,4 +1,5 @@
 using System;
+using Cysharp.Threading.Tasks;
 using Gwt.Core.Models;
 using TMPro;
 using UnityEngine;
@@ -60,6 +61,14 @@ namespace Gwt.Studio.UI
 
             _inputField.text = string.Empty;
             _inputField.ActivateInputField();
+
+            await SubmitText(text);
+        }
+
+        public async UniTask SubmitText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return;
 
             OnInputSubmitted?.Invoke(text);
 

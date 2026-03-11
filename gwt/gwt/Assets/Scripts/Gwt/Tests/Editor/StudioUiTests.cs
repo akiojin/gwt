@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Cysharp.Threading.Tasks;
 using Gwt.AI.Services;
 using Gwt.Core.Models;
@@ -10,6 +11,7 @@ using Gwt.Infra.Services;
 using Gwt.Lifecycle.Services;
 using Gwt.Studio.UI;
 using NUnit.Framework;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.TestTools;
@@ -476,6 +478,64 @@ namespace Gwt.Tests.Editor
             Assert.Greater(pty.LastResizeCols, 80);
             Assert.AreEqual(pty.LastResizeRows, pane.Terminal.Rows);
             Assert.AreEqual(pty.LastResizeCols, pane.Terminal.Cols);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator TerminalInputField_SubmitText_WritesToPty_AndRendererShowsOutput() => UniTask.ToCoroutine(async () =>
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                Assert.Ignore("Shell round-trip test is Unix-specific.");
+
+            var ptyService = new PtyService(new PlatformShellDetector());
+            try
+            {
+                var shellDetector = new PlatformShellDetector();
+                var shell = shellDetector.DetectDefaultShell();
+                var shellArgs = shellDetector.GetShellArgs(shell);
+                var paneId = await ptyService.SpawnAsync(shell, shellArgs, "/tmp", 24, 80);
+
+                var paneManager = new TerminalPaneManager();
+                var adapter = new XtermSharpTerminalAdapter(24, 80);
+                var subscription = ptyService.GetOutputStream(paneId).Subscribe(data => adapter.Feed(data));
+                paneManager.AddPane(new TerminalPaneState("pane-ui", adapter)
+                {
+                    PtySessionId = paneId,
+                    Title = "Host Shell",
+                    OutputSubscription = subscription
+                });
+
+                using var scope = new UiScope();
+                var panel = scope.Root.AddComponent<TerminalOverlayPanel>();
+                var rendererObject = new GameObject("Renderer", typeof(RectTransform));
+                rendererObject.transform.SetParent(scope.Root.transform, false);
+                var renderer = rendererObject.AddComponent<TerminalRenderer>();
+                var textObject = new GameObject("Text", typeof(RectTransform));
+                textObject.transform.SetParent(rendererObject.transform, false);
+                var text = textObject.AddComponent<TextMeshProUGUI>();
+                var inputObject = new GameObject("Input", typeof(RectTransform));
+                inputObject.transform.SetParent(scope.Root.transform, false);
+                var input = inputObject.AddComponent<TerminalInputField>();
+
+                SetPrivateField(renderer, "_terminalText", text);
+                SetPrivateField(panel, "_terminalRenderer", renderer);
+                SetPrivateField(panel, "_terminalInputField", input);
+
+                panel.Construct(paneManager, ptyService, shellDetector, null, null);
+                panel.Open();
+
+                await input.SubmitText("printf '__UI_INPUT__\\n'");
+                await UniTask.Delay(800);
+                panel.Tick();
+                await UniTask.DelayFrame(1);
+                panel.Tick();
+
+                Assert.That(adapter.GetBuffer().GetTextContent(0, 0, 6, adapter.Cols - 1), Does.Contain("__UI_INPUT__"));
+                Assert.That(text.text, Does.Contain("__UI_INPUT__"));
+            }
+            finally
+            {
+                ptyService.Dispose();
+            }
         });
 
         [UnityTest]
