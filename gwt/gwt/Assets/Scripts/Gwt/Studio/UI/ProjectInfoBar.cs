@@ -18,6 +18,7 @@ namespace Gwt.Studio.UI
         [SerializeField] private TextMeshProUGUI _audioStatusText;
         [SerializeField] private TextMeshProUGUI _progressStatusText;
         [SerializeField] private TextMeshProUGUI _searchStatusText;
+        [SerializeField] private TextMeshProUGUI _terminalStatusText;
         [SerializeField] private Button _button;
         [SerializeField] private Button _searchButton;
         [SerializeField] private TextMeshProUGUI _searchButtonText;
@@ -48,6 +49,7 @@ namespace Gwt.Studio.UI
         public string CurrentAudioStatus { get; private set; } = string.Empty;
         public string CurrentProgressStatus { get; private set; } = string.Empty;
         public string CurrentSearchStatus { get; private set; } = string.Empty;
+        public string CurrentTerminalStatus { get; private set; } = string.Empty;
         public string LastUpdateVersion { get; private set; } = string.Empty;
         public string LastUpdateCommand { get; private set; } = string.Empty;
         public string LastReportTarget { get; private set; } = string.Empty;
@@ -146,6 +148,12 @@ namespace Gwt.Studio.UI
             ApplyState();
         }
 
+        public void SetTerminalState(string status)
+        {
+            CurrentTerminalStatus = status ?? string.Empty;
+            ApplyState();
+        }
+
         public void OnPointerClick(PointerEventData eventData)
         {
             if (eventData?.pointerPressRaycast.gameObject != null &&
@@ -183,6 +191,8 @@ namespace Gwt.Studio.UI
                 _progressStatusText.text = CurrentProgressStatus;
             if (_searchStatusText != null)
                 _searchStatusText.text = CurrentSearchStatus;
+            if (_terminalStatusText != null)
+                _terminalStatusText.text = CurrentTerminalStatus;
         }
 
         private void EnsureUi()
@@ -195,7 +205,7 @@ namespace Gwt.Studio.UI
             rectTransform.anchorMax = new Vector2(0f, 1f);
             rectTransform.pivot = new Vector2(0f, 1f);
             rectTransform.anchoredPosition = new Vector2(20f, -20f);
-            rectTransform.sizeDelta = new Vector2(640f, 180f);
+            rectTransform.sizeDelta = new Vector2(640f, 206f);
 
             if (gameObject.GetComponent<Image>() == null)
             {
@@ -228,9 +238,12 @@ namespace Gwt.Studio.UI
                 _reportStatusText = CreateLabel("ReportStatus", new Vector2(280f, -114f), 16f, FontStyles.Normal);
             if (_searchStatusText == null)
                 _searchStatusText = CreateLabel("SearchStatus", new Vector2(0f, -140f), 16f, FontStyles.Normal);
+            if (_terminalStatusText == null)
+                _terminalStatusText = CreateLabel("TerminalStatus", new Vector2(0f, -166f), 16f, FontStyles.Normal);
             SetLabelWidth(_updateStatusText, 270f);
             SetLabelWidth(_reportStatusText, 300f);
             SetLabelWidth(_searchStatusText, 360f);
+            SetLabelWidth(_terminalStatusText, 360f);
             if (_searchButton == null)
                 CreateSearchButton();
             if (_updateButton == null)

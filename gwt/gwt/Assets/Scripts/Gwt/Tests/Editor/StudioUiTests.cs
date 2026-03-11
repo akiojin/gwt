@@ -225,6 +225,52 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("Index: 12 files / 3 issues / semantic", bar.CurrentSearchStatus);
         });
 
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_Construct_UpdatesProjectInfoBar_TerminalStatusFromPaneManager() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+
+            var paneManager = new TerminalPaneManager();
+            manager.Construct(
+                lifecycle,
+                multi,
+                paneManager,
+                new FakeAvailableDockerService(),
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                new FakeProjectIndexService());
+
+            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80))
+            {
+                Title = "Docker workspace",
+                PtySessionId = "pty-a"
+            });
+
+            await UniTask.Yield();
+            Assert.AreEqual("Terminal: Docker workspace", bar.CurrentTerminalStatus);
+
+            paneManager.AddPane(new TerminalPaneState("pane-b", new XtermSharpTerminalAdapter(24, 80))
+            {
+                Title = "Host Shell",
+                PtySessionId = "pty-b"
+            });
+
+            await UniTask.Yield();
+            Assert.AreEqual("Terminal: Host Shell (2)", bar.CurrentTerminalStatus);
+        });
+
         [Test]
         public void UIManager_ConfirmProjectSwitchAsync_SwitchesProjectAndUpdatesBar()
         {

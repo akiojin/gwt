@@ -261,6 +261,13 @@ namespace Gwt.Studio.UI
             if (_multiProjectService != null)
                 _multiProjectService.OnProjectSwitched += HandleProjectSwitched;
 
+            if (_terminalPaneManager != null)
+            {
+                _terminalPaneManager.OnPaneAdded += HandleTerminalPaneAdded;
+                _terminalPaneManager.OnPaneRemoved += HandleTerminalPaneRemoved;
+                _terminalPaneManager.OnActiveIndexChanged += HandleTerminalActiveIndexChanged;
+            }
+
             _subscribed = true;
         }
 
@@ -388,6 +395,21 @@ namespace Gwt.Studio.UI
             {
                 _projectSwitchOverlayPanel = null;
             }
+        }
+
+        private void HandleTerminalPaneAdded(TerminalPaneState _)
+        {
+            RefreshMetaStatus();
+        }
+
+        private void HandleTerminalPaneRemoved(string _)
+        {
+            RefreshMetaStatus();
+        }
+
+        private void HandleTerminalActiveIndexChanged(int _)
+        {
+            RefreshMetaStatus();
         }
 
         private void RefreshProjectInfoBar()
@@ -1054,6 +1076,7 @@ namespace Gwt.Studio.UI
             _projectInfoBar.SetAudioState(FormatAudioStatus());
             _projectInfoBar.SetProgressState(FormatProgressStatus());
             _projectInfoBar.SetSearchState(FormatSearchStatus());
+            _projectInfoBar.SetTerminalState(FormatTerminalStatus());
         }
 
         private string FormatVoiceStatus()
@@ -1107,6 +1130,27 @@ namespace Gwt.Studio.UI
             return $"Index: {status.IndexedFileCount} files / {status.IndexedIssueCount} issues{embeddings}";
         }
 
+        private string FormatTerminalStatus()
+        {
+            if (_terminalPaneManager == null)
+                return string.Empty;
+
+            if (_terminalPaneManager.PaneCount <= 0)
+                return "Terminal: idle";
+
+            var activePane = _terminalPaneManager.ActivePane;
+            if (activePane == null)
+                return $"Terminal: {_terminalPaneManager.PaneCount} tabs";
+
+            var title = string.IsNullOrWhiteSpace(activePane.Title) ? "Shell" : activePane.Title;
+            if (string.IsNullOrWhiteSpace(activePane.PtySessionId))
+                return $"Terminal: {title} (opening)";
+            if (_terminalPaneManager.PaneCount == 1)
+                return $"Terminal: {title}";
+
+            return $"Terminal: {title} ({_terminalPaneManager.PaneCount})";
+        }
+
         private void OnDestroy()
         {
             if (_projectLifecycleService != null)
@@ -1117,6 +1161,13 @@ namespace Gwt.Studio.UI
 
             if (_multiProjectService != null)
                 _multiProjectService.OnProjectSwitched -= HandleProjectSwitched;
+
+            if (_terminalPaneManager != null)
+            {
+                _terminalPaneManager.OnPaneAdded -= HandleTerminalPaneAdded;
+                _terminalPaneManager.OnPaneRemoved -= HandleTerminalPaneRemoved;
+                _terminalPaneManager.OnActiveIndexChanged -= HandleTerminalActiveIndexChanged;
+            }
 
             if (_projectInfoBar != null)
             {
