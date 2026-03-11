@@ -44,8 +44,19 @@ namespace Gwt.Infra.Services
         private readonly List<IssueIndexEntry> _issueIndex = new();
         private readonly IndexStatus _status = new();
         private readonly object _sync = new();
+        private readonly IProjectEmbeddingService _embeddingService;
         private Dictionary<string, FileSnapshot> _fileSnapshots = new(StringComparer.OrdinalIgnoreCase);
         private Task _backgroundIndexTask = Task.CompletedTask;
+
+        public ProjectIndexService()
+            : this(new ProjectEmbeddingService())
+        {
+        }
+
+        public ProjectIndexService(IProjectEmbeddingService embeddingService)
+        {
+            _embeddingService = embeddingService;
+        }
 
         public int IndexedFileCount => _index.Count;
 
@@ -93,12 +104,14 @@ namespace Gwt.Infra.Services
                 foreach (var issue in issues.Where(issue => issue != null))
                 {
                     issue.SemanticTerms = BuildIssueSemanticTerms(issue);
+                    issue.EmbeddingVector = BuildEmbeddingVector(issue.SemanticTerms);
                     _issueIndex.Add(issue);
                 }
             }
 
             _status.IndexedIssueCount = _issueIndex.Count;
             _status.LastIndexedAt = DateTime.UtcNow.ToString("o");
+            _status.HasEmbeddings = _embeddingService?.IsAvailable == true;
             return UniTask.CompletedTask;
         }
 
@@ -141,8 +154,9 @@ namespace Gwt.Infra.Services
                 return new List<FileIndexEntry>();
 
             var queryWeights = BuildSemanticWeights(query, 1f);
+            var queryVector = BuildEmbeddingVector(ToSemanticTerms(queryWeights));
             return _index
-                .Select(entry => new { Entry = entry, Score = ScoreSemantic(entry.SemanticTerms, queryWeights) })
+                .Select(entry => new { Entry = entry, Score = ScoreSemanticEntry(entry, queryWeights, queryVector) })
                 .Where(result => result.Score > 0f)
                 .OrderByDescending(result => result.Score)
                 .ThenBy(result => result.Entry.RelativePath, StringComparer.OrdinalIgnoreCase)
@@ -157,8 +171,9 @@ namespace Gwt.Infra.Services
                 return new List<IssueIndexEntry>();
 
             var queryWeights = BuildSemanticWeights(query, 1f);
+            var queryVector = BuildEmbeddingVector(ToSemanticTerms(queryWeights));
             return _issueIndex
-                .Select(issue => new { Issue = issue, Score = ScoreSemantic(issue.SemanticTerms, queryWeights) })
+                .Select(issue => new { Issue = issue, Score = ScoreSemanticIssue(issue, queryWeights, queryVector) })
                 .Where(result => result.Score > 0f)
                 .OrderByDescending(result => result.Score)
                 .ThenByDescending(result => result.Issue.UpdatedAt, StringComparer.Ordinal)
@@ -225,6 +240,7 @@ namespace Gwt.Infra.Services
                     _status.PendingFiles = 0;
                     _status.IsRunning = false;
                     _status.LastIndexedAt = DateTime.UtcNow.ToString("o");
+                    _status.HasEmbeddings = _embeddingService?.IsAvailable == true;
                 }
             }
             finally
@@ -254,7 +270,8 @@ namespace Gwt.Infra.Services
                         PendingFiles = _status.PendingFiles,
                         ChangedFiles = _status.ChangedFiles,
                         LastIndexedAt = _status.LastIndexedAt,
-                        IsRunning = _status.IsRunning
+                        IsRunning = _status.IsRunning,
+                        HasEmbeddings = _status.HasEmbeddings
                     }
                 };
             }
@@ -284,12 +301,15 @@ namespace Gwt.Infra.Services
                 _issueIndex.AddRange(payload.Issues ?? new List<IssueIndexEntry>());
                 EnsureSemanticTerms(_index);
                 EnsureSemanticTerms(_issueIndex);
+                EnsureEmbeddings(_index);
+                EnsureEmbeddings(_issueIndex);
                 _status.IndexedFileCount = payload.Status?.IndexedFileCount ?? _index.Count;
                 _status.IndexedIssueCount = payload.Status?.IndexedIssueCount ?? _issueIndex.Count;
                 _status.PendingFiles = payload.Status?.PendingFiles ?? 0;
                 _status.ChangedFiles = payload.Status?.ChangedFiles ?? 0;
                 _status.LastIndexedAt = payload.Status?.LastIndexedAt ?? string.Empty;
                 _status.IsRunning = false;
+                _status.HasEmbeddings = payload.Status?.HasEmbeddings ?? false;
             }
         }
 
@@ -304,7 +324,8 @@ namespace Gwt.Infra.Services
                     PendingFiles = _status.PendingFiles,
                     ChangedFiles = _status.ChangedFiles,
                     LastIndexedAt = _status.LastIndexedAt,
-                    IsRunning = _status.IsRunning
+                    IsRunning = _status.IsRunning,
+                    HasEmbeddings = _status.HasEmbeddings
                 };
             }
         }
@@ -328,6 +349,7 @@ namespace Gwt.Infra.Services
                     _fileSnapshots = snapshots;
                     _status.IndexedFileCount = _index.Count;
                     _status.LastIndexedAt = DateTime.UtcNow.ToString("o");
+                    _status.HasEmbeddings = _embeddingService?.IsAvailable == true;
                 }
             }
             finally
@@ -375,6 +397,7 @@ namespace Gwt.Infra.Services
                         PreviewText = ReadPreview(file),
                         SemanticTerms = BuildFileSemanticTerms(relativePath, fileInfo.Name, fileInfo.Extension, ReadPreview(file))
                     });
+                    entries[^1].EmbeddingVector = BuildEmbeddingVector(entries[^1].SemanticTerms);
                     snapshots[relativePath] = new FileSnapshot(fileInfo.Length, fileInfo.LastWriteTimeUtc);
 
                     lock (_sync)
@@ -459,6 +482,55 @@ namespace Gwt.Infra.Services
 
             foreach (var queryWeight in queryWeights.Values)
                 queryNorm += queryWeight * queryWeight;
+
+            if (dot <= 0f || documentNorm <= 0f || queryNorm <= 0f)
+                return 0f;
+
+            return dot / (Mathf.Sqrt(documentNorm) * Mathf.Sqrt(queryNorm));
+        }
+
+        private float ScoreSemanticEntry(FileIndexEntry entry, Dictionary<string, float> queryWeights, List<float> queryVector)
+        {
+            var vectorScore = ScoreEmbedding(entry?.EmbeddingVector, queryVector);
+            if (vectorScore > 0f)
+                return vectorScore;
+
+            return ScoreSemantic(entry?.SemanticTerms, queryWeights);
+        }
+
+        private float ScoreSemanticIssue(IssueIndexEntry issue, Dictionary<string, float> queryWeights, List<float> queryVector)
+        {
+            var vectorScore = ScoreEmbedding(issue?.EmbeddingVector, queryVector);
+            if (vectorScore > 0f)
+                return vectorScore;
+
+            return ScoreSemantic(issue?.SemanticTerms, queryWeights);
+        }
+
+        private List<float> BuildEmbeddingVector(List<SemanticTokenWeight> semanticTerms)
+        {
+            if (_embeddingService == null || !_embeddingService.IsAvailable)
+                return new List<float>();
+
+            return _embeddingService.EmbedTerms(semanticTerms);
+        }
+
+        private static float ScoreEmbedding(List<float> documentVector, List<float> queryVector)
+        {
+            if (documentVector == null || queryVector == null)
+                return 0f;
+            if (documentVector.Count == 0 || queryVector.Count == 0 || documentVector.Count != queryVector.Count)
+                return 0f;
+
+            var dot = 0f;
+            var documentNorm = 0f;
+            var queryNorm = 0f;
+            for (var i = 0; i < documentVector.Count; i++)
+            {
+                dot += documentVector[i] * queryVector[i];
+                documentNorm += documentVector[i] * documentVector[i];
+                queryNorm += queryVector[i] * queryVector[i];
+            }
 
             if (dot <= 0f || documentNorm <= 0f || queryNorm <= 0f)
                 return 0f;
@@ -613,6 +685,24 @@ namespace Gwt.Infra.Services
             {
                 if (issue.SemanticTerms == null || issue.SemanticTerms.Count == 0)
                     issue.SemanticTerms = BuildIssueSemanticTerms(issue);
+            }
+        }
+
+        private void EnsureEmbeddings(List<FileIndexEntry> entries)
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.EmbeddingVector == null || entry.EmbeddingVector.Count == 0)
+                    entry.EmbeddingVector = BuildEmbeddingVector(entry.SemanticTerms);
+            }
+        }
+
+        private void EnsureEmbeddings(List<IssueIndexEntry> issues)
+        {
+            foreach (var issue in issues)
+            {
+                if (issue.EmbeddingVector == null || issue.EmbeddingVector.Count == 0)
+                    issue.EmbeddingVector = BuildEmbeddingVector(issue.SemanticTerms);
             }
         }
 

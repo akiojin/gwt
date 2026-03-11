@@ -3,6 +3,7 @@ using System.Collections;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.TestTools;
 using Gwt.Lifecycle.Services;
@@ -743,6 +744,7 @@ namespace Gwt.Tests.Editor
 
             var status = service.GetStatus();
             Assert.AreEqual(2, status.IndexedIssueCount);
+            Assert.IsTrue(status.HasEmbeddings);
             Assert.IsFalse(string.IsNullOrEmpty(status.LastIndexedAt));
         }
 
@@ -767,6 +769,7 @@ namespace Gwt.Tests.Editor
                 Assert.AreEqual(1, restored.IndexedFileCount);
                 Assert.AreEqual(1, restored.SearchIssues("Issue").Count);
                 Assert.AreEqual(1, restored.Search("search").Count);
+                Assert.IsTrue(restored.GetStatus().HasEmbeddings);
             });
         });
 
@@ -843,6 +846,34 @@ namespace Gwt.Tests.Editor
                 Assert.That(matches[0].RelativePath, Does.Contain("terminal-shell.txt"));
             });
         });
+
+        [Test]
+        public void ProjectIndexService_SearchSemantic_UsesEmbeddingVectorRankingWhenAvailable()
+        {
+            var service = new ProjectIndexService(new FixedEmbeddingService());
+            var indexField = typeof(ProjectIndexService).GetField("_index",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var index = (List<FileIndexEntry>)indexField.GetValue(service);
+
+            index.Add(new FileIndexEntry
+            {
+                FileName = "auth.txt",
+                RelativePath = "auth.txt",
+                SemanticTerms = new List<SemanticTokenWeight> { new() { Token = "auth", Weight = 1f } },
+                EmbeddingVector = new List<float> { 1f, 0f }
+            });
+            index.Add(new FileIndexEntry
+            {
+                FileName = "terminal.txt",
+                RelativePath = "terminal.txt",
+                SemanticTerms = new List<SemanticTokenWeight> { new() { Token = "terminal", Weight = 1f } },
+                EmbeddingVector = new List<float> { 0f, 1f }
+            });
+
+            var matches = service.SearchSemantic("authentication", 5);
+            Assert.AreEqual(1, matches.Count);
+            Assert.AreEqual("auth.txt", matches[0].RelativePath);
+        }
 
         // --- MigrationState enum ---
 
@@ -1809,6 +1840,32 @@ namespace Gwt.Tests.Editor
                         Directory.CreateDirectory(dir);
                     File.WriteAllText(recentPath, backup);
                 }
+            }
+        }
+
+        private sealed class FixedEmbeddingService : IProjectEmbeddingService
+        {
+            public bool IsAvailable => true;
+            public int Dimensions => 2;
+
+            public List<float> EmbedTerms(IEnumerable<SemanticTokenWeight> terms)
+            {
+                var tokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (terms != null)
+                {
+                    foreach (var term in terms)
+                    {
+                        if (term != null && !string.IsNullOrWhiteSpace(term.Token))
+                            tokens.Add(term.Token);
+                    }
+                }
+
+                if (tokens.Contains("auth") || tokens.Contains("authentication") || tokens.Contains("login"))
+                    return new List<float> { 1f, 0f };
+                if (tokens.Contains("terminal") || tokens.Contains("shell"))
+                    return new List<float> { 0f, 1f };
+
+                return new List<float> { 0f, 0f };
             }
         }
     }

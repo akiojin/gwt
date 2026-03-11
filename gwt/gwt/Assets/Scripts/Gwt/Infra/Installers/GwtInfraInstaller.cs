@@ -9,6 +9,7 @@ namespace Gwt.Infra.Installers
         {
             builder.Register<Services.BuildService>(Lifetime.Singleton).As<Services.IBuildService>();
             builder.RegisterInstance<Services.IDockerService>(new Services.DockerService());
+            builder.Register<Services.ProjectEmbeddingService>(Lifetime.Singleton).As<Services.IProjectEmbeddingService>();
             builder.Register<Services.ProjectIndexService>(Lifetime.Singleton).As<Services.IProjectIndexService>();
             builder.Register<Services.MigrationService>(Lifetime.Singleton).As<Services.IMigrationService>();
             builder.Register<Services.SoundService>(Lifetime.Singleton).As<Services.ISoundService>();

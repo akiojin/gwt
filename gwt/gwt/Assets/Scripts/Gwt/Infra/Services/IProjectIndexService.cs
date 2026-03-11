@@ -14,6 +14,7 @@ namespace Gwt.Infra.Services
         public string Extension;
         public string PreviewText;
         public List<SemanticTokenWeight> SemanticTerms = new();
+        public List<float> EmbeddingVector = new();
     }
 
     [System.Serializable]
@@ -25,6 +26,7 @@ namespace Gwt.Infra.Services
         public List<string> Labels = new();
         public string UpdatedAt;
         public List<SemanticTokenWeight> SemanticTerms = new();
+        public List<float> EmbeddingVector = new();
     }
 
     [System.Serializable]
@@ -43,6 +45,7 @@ namespace Gwt.Infra.Services
         public int ChangedFiles;
         public string LastIndexedAt;
         public bool IsRunning;
+        public bool HasEmbeddings;
     }
 
     [System.Serializable]
