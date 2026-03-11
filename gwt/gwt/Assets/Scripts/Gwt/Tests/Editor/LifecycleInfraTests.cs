@@ -1530,6 +1530,38 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void BuildService_LaunchPreparedUpdateAsync_UsesLauncherArgumentsOverride()
+        {
+            WithTempProject(tempDir =>
+            {
+                System.Diagnostics.ProcessStartInfo captured = null;
+                var service = BuildService.CreateForTests(psi =>
+                {
+                    captured = psi;
+                    return new System.Diagnostics.Process();
+                });
+
+                var scriptPath = Path.Combine(tempDir, "apply-update.sh");
+                File.WriteAllText(scriptPath, "#!/bin/sh\nexit 0\n");
+
+                var launched = service.LaunchPreparedUpdateAsync(new PreparedUpdatePlan
+                {
+                    ShouldApply = true,
+                    LauncherScriptPath = scriptPath,
+                    LauncherExecutablePath = "/usr/local/bin/gwt-updater",
+                    LauncherArguments = "--channel stable",
+                    ApplyCommand = "echo ok"
+                }).GetAwaiter().GetResult();
+
+                Assert.IsTrue(launched);
+                Assert.IsNotNull(captured);
+                Assert.AreEqual("/usr/local/bin/gwt-updater", captured.FileName);
+                Assert.That(captured.Arguments, Does.Contain("--channel stable"));
+                Assert.That(captured.Arguments, Does.Contain(scriptPath));
+            });
+        }
+
+        [Test]
         public void BuildService_LaunchPreparedUpdateAsync_ProcessStarterReturnsNull_ReturnsFalse()
         {
             WithTempProject(tempDir =>

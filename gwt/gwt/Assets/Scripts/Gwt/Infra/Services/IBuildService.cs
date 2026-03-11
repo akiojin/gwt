@@ -69,6 +69,7 @@ namespace Gwt.Infra.Services
         public string StagingDirectory;
         public string LauncherScriptPath;
         public string LauncherExecutablePath;
+        public string LauncherArguments;
         public bool ShouldApply;
     }
 

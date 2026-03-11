@@ -879,6 +879,8 @@ namespace Gwt.Studio.UI
                 plan.StagingDirectory = updateSettings.StagingDirectory.Trim();
             if (!string.IsNullOrWhiteSpace(updateSettings.ExternalLauncherPath))
                 plan.LauncherExecutablePath = updateSettings.ExternalLauncherPath.Trim();
+            if (!string.IsNullOrWhiteSpace(updateSettings.ExternalLauncherArgs))
+                plan.LauncherArguments = updateSettings.ExternalLauncherArgs.Trim();
         }
 
         private static string ResolveDefaultUpdateManifestSource()
@@ -975,6 +977,7 @@ namespace Gwt.Studio.UI
                     StagingDirectory = _preparedUpdatePlan.StagingDirectory ?? string.Empty,
                     LauncherScriptPath = _preparedUpdatePlan.LauncherScriptPath ?? string.Empty,
                     LauncherExecutablePath = _preparedUpdatePlan.LauncherExecutablePath ?? string.Empty,
+                    LauncherArguments = _preparedUpdatePlan.LauncherArguments ?? string.Empty,
                     ShouldApply = _preparedUpdatePlan.ShouldApply
                 };
                 File.WriteAllText(PreparedUpdateStatePath, JsonUtility.ToJson(payload));
@@ -1015,6 +1018,7 @@ namespace Gwt.Studio.UI
             public string StagingDirectory;
             public string LauncherScriptPath;
             public string LauncherExecutablePath;
+            public string LauncherArguments;
             public bool ShouldApply;
 
             public PreparedUpdatePlan ToPreparedUpdatePlan()
@@ -1035,6 +1039,7 @@ namespace Gwt.Studio.UI
                     StagingDirectory = StagingDirectory,
                     LauncherScriptPath = LauncherScriptPath,
                     LauncherExecutablePath = LauncherExecutablePath,
+                    LauncherArguments = LauncherArguments,
                     ShouldApply = ShouldApply
                 };
             }

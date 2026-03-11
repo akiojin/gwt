@@ -389,7 +389,10 @@ namespace Gwt.Infra.Services
 
             try
             {
-                return _processStarter(BuildLauncherProcessStartInfo(scriptPath, plan.LauncherExecutablePath)) != null;
+                return _processStarter(BuildLauncherProcessStartInfo(
+                    scriptPath,
+                    plan.LauncherExecutablePath,
+                    plan.LauncherArguments)) != null;
             }
             catch
             {
@@ -510,12 +513,15 @@ namespace Gwt.Infra.Services
             return unix.ToString();
         }
 
-        private static ProcessStartInfo BuildLauncherProcessStartInfo(string scriptPath, string launcherExecutablePath)
+        private static ProcessStartInfo BuildLauncherProcessStartInfo(
+            string scriptPath,
+            string launcherExecutablePath,
+            string launcherArguments)
         {
             var workingDirectory = Path.GetDirectoryName(scriptPath) ?? Directory.GetCurrentDirectory();
             if (!string.IsNullOrWhiteSpace(launcherExecutablePath))
             {
-                return new ProcessStartInfo(launcherExecutablePath, $"\"{scriptPath}\"")
+                return new ProcessStartInfo(launcherExecutablePath, BuildLauncherArguments(scriptPath, launcherArguments))
                 {
                     WorkingDirectory = workingDirectory,
                     UseShellExecute = false,
@@ -539,6 +545,17 @@ namespace Gwt.Infra.Services
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+        }
+
+        private static string BuildLauncherArguments(string scriptPath, string launcherArguments)
+        {
+            var quotedScriptPath = $"\"{scriptPath}\"";
+            if (string.IsNullOrWhiteSpace(launcherArguments))
+                return quotedScriptPath;
+
+            return launcherArguments.Contains("{script}", StringComparison.Ordinal)
+                ? launcherArguments.Replace("{script}", quotedScriptPath, StringComparison.Ordinal)
+                : $"{launcherArguments} {quotedScriptPath}";
         }
 
         private static async UniTask<string> ReadSourceTextAsync(string source, CancellationToken ct)

@@ -72,6 +72,7 @@ namespace Gwt.Core.Models
         public string ManifestSource = string.Empty;
         public string StagingDirectory = string.Empty;
         public string ExternalLauncherPath = string.Empty;
+        public string ExternalLauncherArgs = string.Empty;
         public bool AllowLaunchInEditor;
     }
 

@@ -1398,7 +1398,8 @@ namespace Gwt.Tests.Editor
                     Update = new UpdateSettings
                     {
                         StagingDirectory = "/tmp/custom-staging",
-                        ExternalLauncherPath = "/usr/local/bin/gwt-updater"
+                        ExternalLauncherPath = "/usr/local/bin/gwt-updater",
+                        ExternalLauncherArgs = "--channel stable"
                     }
                 }));
 
@@ -1413,6 +1414,7 @@ namespace Gwt.Tests.Editor
             Assert.IsNotNull(buildService.LastPreparedPlan);
             Assert.AreEqual("/tmp/custom-staging", buildService.LastPreparedPlan.StagingDirectory);
             Assert.AreEqual("/usr/local/bin/gwt-updater", buildService.LastPreparedPlan.LauncherExecutablePath);
+            Assert.AreEqual("--channel stable", buildService.LastPreparedPlan.LauncherArguments);
         });
 
         [UnityTest]
@@ -1559,6 +1561,7 @@ namespace Gwt.Tests.Editor
                     StagingDirectory = "/tmp",
                     LauncherScriptPath = scriptPath,
                     LauncherExecutablePath = "/usr/local/bin/gwt-updater",
+                    LauncherArguments = "--channel stable",
                     ShouldApply = true
                 };
                 File.WriteAllText(statePath, JsonUtility.ToJson(persisted));
@@ -1605,6 +1608,7 @@ namespace Gwt.Tests.Editor
                 Assert.AreEqual("Update", bar.CurrentUpdateButtonLabel);
                 Assert.IsNotNull(captured);
                 Assert.AreEqual("/usr/local/bin/gwt-updater", captured.FileName);
+                Assert.That(captured.Arguments, Does.Contain("--channel stable"));
                 Assert.That(captured.Arguments, Does.Contain(scriptPath));
             }
             finally
@@ -2043,6 +2047,7 @@ namespace Gwt.Tests.Editor
                     RestartCommand = "open /Applications/GWT.app",
                     StagingDirectory = destinationDirectory ?? "/tmp",
                     LauncherScriptPath = "/tmp/apply-update.sh",
+                    LauncherArguments = string.Empty,
                     ShouldApply = true
                 };
                 return UniTask.FromResult(LastPreparedPlan);
@@ -2141,6 +2146,7 @@ namespace Gwt.Tests.Editor
             public string StagingDirectory;
             public string LauncherScriptPath;
             public string LauncherExecutablePath;
+            public string LauncherArguments;
             public bool ShouldApply;
         }
 

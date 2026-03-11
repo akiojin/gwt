@@ -117,6 +117,7 @@ namespace Gwt.Tests.Editor
                     ManifestSource = "https://updates.example.com/manifest.json",
                     StagingDirectory = "/tmp/gwt-updates",
                     ExternalLauncherPath = "/usr/local/bin/gwt-updater",
+                    ExternalLauncherArgs = "--channel stable",
                     AllowLaunchInEditor = true
                 }
             };
@@ -131,6 +132,7 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("https://updates.example.com/manifest.json", deserialized.Update.ManifestSource);
             Assert.AreEqual("/tmp/gwt-updates", deserialized.Update.StagingDirectory);
             Assert.AreEqual("/usr/local/bin/gwt-updater", deserialized.Update.ExternalLauncherPath);
+            Assert.AreEqual("--channel stable", deserialized.Update.ExternalLauncherArgs);
             Assert.IsTrue(deserialized.Update.AllowLaunchInEditor);
         }
 
