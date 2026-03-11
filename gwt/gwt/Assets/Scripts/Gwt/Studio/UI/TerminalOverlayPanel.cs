@@ -24,6 +24,10 @@ namespace Gwt.Studio.UI
         private IDockerService _dockerService;
         private IProjectLifecycleService _projectLifecycleService;
         private bool _initialized;
+        private bool _sizeRefreshPending = true;
+        private string _lastSizedPaneId = string.Empty;
+        private int _lastSizedRows;
+        private int _lastSizedCols;
         private string _lastSpawnError = string.Empty;
 
         public string ActivePaneTitle => _paneManager?.ActivePane?.Title ?? string.Empty;
@@ -279,6 +283,8 @@ namespace Gwt.Studio.UI
             {
                 _terminalInputField.SetActivePtySession(activePane?.PtySessionId);
             }
+
+            _sizeRefreshPending = true;
         }
 
         private void OnPaneAdded(TerminalPaneState pane)
@@ -315,6 +321,16 @@ namespace Gwt.Studio.UI
             {
                 _terminalRenderer.RenderIfDirty();
             }
+
+            if (_sizeRefreshPending || !string.Equals(_lastSizedPaneId, activePane.PaneId, StringComparison.Ordinal))
+            {
+                RefreshActivePaneSizeAsync().Forget();
+            }
+        }
+
+        private void OnRectTransformDimensionsChange()
+        {
+            _sizeRefreshPending = true;
         }
 
         private void OnDestroy()
@@ -427,6 +443,63 @@ namespace Gwt.Studio.UI
                 (exception?.InnerException != null && IsDisposedPtyException(exception.InnerException)) ||
                 (!string.IsNullOrWhiteSpace(exception?.Message) &&
                  exception.Message.IndexOf("disposed", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private async UniTaskVoid RefreshActivePaneSizeAsync()
+        {
+            var activePane = _paneManager?.ActivePane;
+            if (activePane == null)
+                return;
+
+            var (rows, cols) = CalculateDesiredTerminalSize(activePane);
+            if (rows <= 0 || cols <= 0)
+                return;
+
+            if (string.Equals(_lastSizedPaneId, activePane.PaneId, StringComparison.Ordinal) &&
+                _lastSizedRows == rows &&
+                _lastSizedCols == cols)
+            {
+                _sizeRefreshPending = false;
+                return;
+            }
+
+            activePane.Terminal.Resize(rows, cols);
+            _terminalRenderer?.SetVisibleRows(rows);
+
+            if (_ptyService != null && !string.IsNullOrWhiteSpace(activePane.PtySessionId))
+            {
+                try
+                {
+                    await _ptyService.ResizeAsync(activePane.PtySessionId, rows, cols);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[GWT] Failed to resize PTY session '{activePane.PtySessionId}': {e.Message}");
+                }
+            }
+
+            _lastSizedPaneId = activePane.PaneId;
+            _lastSizedRows = rows;
+            _lastSizedCols = cols;
+            _sizeRefreshPending = false;
+        }
+
+        private (int rows, int cols) CalculateDesiredTerminalSize(TerminalPaneState activePane)
+        {
+            var rect = (_terminalRenderer != null ? _terminalRenderer.GetComponent<RectTransform>() : null) ??
+                GetComponent<RectTransform>();
+            var width = rect != null && rect.rect.width > 0f ? rect.rect.width : 720f;
+            var height = rect != null && rect.rect.height > 0f ? rect.rect.height : 432f;
+
+            const float horizontalPadding = 24f;
+            const float verticalPadding = 36f;
+            const float cellWidth = 9f;
+            const float cellHeight = 18f;
+
+            var cols = Mathf.Max(20, Mathf.FloorToInt((width - horizontalPadding) / cellWidth));
+            var rows = Mathf.Max(8, Mathf.FloorToInt((height - verticalPadding) / cellHeight));
+
+            return (rows, cols);
         }
 
         private sealed class TerminalLaunchPlan

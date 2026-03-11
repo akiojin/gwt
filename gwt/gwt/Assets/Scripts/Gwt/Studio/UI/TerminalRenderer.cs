@@ -55,6 +55,12 @@ namespace Gwt.Studio.UI
             _dirty = true;
         }
 
+        public void SetVisibleRows(int visibleRows)
+        {
+            _visibleRows = Mathf.Max(1, visibleRows);
+            _dirty = true;
+        }
+
         private void OnBufferChanged()
         {
             _dirty = true;

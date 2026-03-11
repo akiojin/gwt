@@ -344,6 +344,7 @@ namespace Gwt.Tests.Editor
             SetPrivateField(manager, "_projectSceneTransitionController", transition);
             SetPrivateField(manager, "_terminalOverlayPanel", terminal);
 
+            terminal.Construct(paneManager, new FakePtyService(), new FakeShellDetector(), new FakeProjectAwareDockerService(), lifecycle);
             manager.Construct(lifecycle, multi, paneManager);
             terminal.Open();
 
@@ -373,8 +374,16 @@ namespace Gwt.Tests.Editor
             await multi.AddProjectAsync("/tmp/project-b");
 
             var paneManager = new TerminalPaneManager();
-            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80)));
-            paneManager.AddPane(new TerminalPaneState("pane-b", new XtermSharpTerminalAdapter(24, 80)));
+            paneManager.AddPane(new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-a",
+                Title = "Docker workspace-a"
+            });
+            paneManager.AddPane(new TerminalPaneState("pane-b", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-b",
+                Title = "Docker workspace-b"
+            });
 
             using var scope = new UiScope();
             var manager = scope.Root.AddComponent<UIManager>();
@@ -387,6 +396,7 @@ namespace Gwt.Tests.Editor
             SetPrivateField(manager, "_projectSceneTransitionController", transition);
             SetPrivateField(manager, "_terminalOverlayPanel", terminal);
 
+            terminal.Construct(paneManager, new FakePtyService(), new FakeShellDetector(), new FakeProjectAwareDockerService(), lifecycle);
             manager.Construct(lifecycle, multi, paneManager);
             terminal.Open();
 
@@ -436,6 +446,36 @@ namespace Gwt.Tests.Editor
             await panel.RefreshActivePaneTitleForCurrentProjectAsync();
 
             Assert.AreEqual("Docker workspace-b", paneManager.ActivePane.Title);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator TerminalOverlayPanel_Tick_ResizesActivePaneAndPtyFromViewport() => UniTask.ToCoroutine(async () =>
+        {
+            using var scope = new UiScope();
+            var panel = scope.Root.AddComponent<TerminalOverlayPanel>();
+            var rect = panel.gameObject.AddComponent<RectTransform>();
+            rect.sizeDelta = new Vector2(900f, 540f);
+
+            var paneManager = new TerminalPaneManager();
+            var pane = new TerminalPaneState("pane-a", new XtermSharpTerminalAdapter(24, 80))
+            {
+                PtySessionId = "pty-a",
+                Title = "Host Shell"
+            };
+            paneManager.AddPane(pane);
+
+            var pty = new FakePtyService();
+            panel.Construct(paneManager, pty, new FakeShellDetector(), new FakeAvailableDockerService(), new FakeProjectLifecycleService());
+            panel.Open();
+            panel.Tick();
+
+            await UniTask.WaitUntil(() => pty.ResizeCallCount > 0, cancellationToken: default);
+
+            Assert.AreEqual("pty-a", pty.LastResizedPaneId);
+            Assert.Greater(pty.LastResizeRows, 24);
+            Assert.Greater(pty.LastResizeCols, 80);
+            Assert.AreEqual(pty.LastResizeRows, pane.Terminal.Rows);
+            Assert.AreEqual(pty.LastResizeCols, pane.Terminal.Cols);
         });
 
         [UnityTest]
@@ -876,6 +916,10 @@ namespace Gwt.Tests.Editor
         {
             public string LastCommand { get; private set; }
             public string[] LastArgs { get; private set; }
+            public string LastResizedPaneId { get; private set; }
+            public int LastResizeRows { get; private set; }
+            public int LastResizeCols { get; private set; }
+            public int ResizeCallCount { get; private set; }
 
             public UniTask<string> SpawnAsync(string command, string[] args, string workingDir, int rows, int cols, System.Threading.CancellationToken ct = default)
             {
@@ -885,7 +929,14 @@ namespace Gwt.Tests.Editor
             }
 
             public UniTask WriteAsync(string paneId, string data, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
-            public UniTask ResizeAsync(string paneId, int rows, int cols, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask ResizeAsync(string paneId, int rows, int cols, System.Threading.CancellationToken ct = default)
+            {
+                LastResizedPaneId = paneId;
+                LastResizeRows = rows;
+                LastResizeCols = cols;
+                ResizeCallCount++;
+                return UniTask.CompletedTask;
+            }
             public UniTask KillAsync(string paneId, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
             public IObservable<string> GetOutputStream(string paneId) => new NoOpObservable();
             public PaneStatus GetStatus(string paneId) => PaneStatus.Running;
