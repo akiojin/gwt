@@ -937,14 +937,14 @@ mod tests {
             .path()
             .join(".codex")
             .join("skills")
-            .join("gwt-issue-ops")
+            .join("gwt-issue-resolve")
             .join("SKILL.md")
             .exists());
         assert!(temp
             .path()
             .join(".claude")
             .join("commands")
-            .join("gwt-spec-ops.md")
+            .join("gwt-issue-resolve.md")
             .exists());
     }
 }
