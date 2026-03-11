@@ -2,18 +2,38 @@ using Cysharp.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using UnityEngine;
 
 namespace Gwt.Lifecycle.Services
 {
     public class MultiProjectService : IMultiProjectService
     {
+        private static readonly List<ProjectInfo> RuntimeOpenProjects = new();
+        private static readonly Dictionary<string, ProjectSwitchSnapshot> RuntimeSnapshots = new(StringComparer.OrdinalIgnoreCase);
+        private static int RuntimeActiveIndex = -1;
+
         private readonly IProjectLifecycleService _lifecycleService;
         private readonly List<ProjectInfo> _openProjects = new();
         private readonly Dictionary<string, ProjectSwitchSnapshot> _snapshots = new(StringComparer.OrdinalIgnoreCase);
         private int _activeIndex = -1;
 
-        public List<ProjectInfo> OpenProjects => new(_openProjects);
-        public int ActiveProjectIndex => _activeIndex;
+        private List<ProjectInfo> OpenProjectsStore => Application.isPlaying ? RuntimeOpenProjects : _openProjects;
+        private Dictionary<string, ProjectSwitchSnapshot> SnapshotStore => Application.isPlaying ? RuntimeSnapshots : _snapshots;
+
+        private int ActiveIndexValue
+        {
+            get => Application.isPlaying ? RuntimeActiveIndex : _activeIndex;
+            set
+            {
+                if (Application.isPlaying)
+                    RuntimeActiveIndex = value;
+                else
+                    _activeIndex = value;
+            }
+        }
+
+        public List<ProjectInfo> OpenProjects => new(OpenProjectsStore);
+        public int ActiveProjectIndex => ActiveIndexValue;
 
         public event Action<int> OnProjectSwitched;
 
@@ -26,14 +46,14 @@ namespace Gwt.Lifecycle.Services
         {
             ct.ThrowIfCancellationRequested();
 
-            if (index < 0 || index >= _openProjects.Count)
+            if (index < 0 || index >= OpenProjectsStore.Count)
                 throw new ArgumentOutOfRangeException(nameof(index));
 
-            if (index == _activeIndex)
+            if (index == ActiveIndexValue)
                 return;
 
-            _activeIndex = index;
-            await _lifecycleService.OpenProjectAsync(_openProjects[index].Path, ct);
+            ActiveIndexValue = index;
+            await _lifecycleService.OpenProjectAsync(OpenProjectsStore[index].Path, ct);
             OnProjectSwitched?.Invoke(index);
         }
 
@@ -42,7 +62,7 @@ namespace Gwt.Lifecycle.Services
             ct.ThrowIfCancellationRequested();
 
             var fullPath = System.IO.Path.GetFullPath(path);
-            var existingIndex = _openProjects.FindIndex(project =>
+            var existingIndex = OpenProjectsStore.FindIndex(project =>
                 string.Equals(project.Path, fullPath, StringComparison.OrdinalIgnoreCase));
             if (existingIndex >= 0)
             {
@@ -51,38 +71,38 @@ namespace Gwt.Lifecycle.Services
             }
 
             var info = await _lifecycleService.OpenProjectAsync(fullPath, ct);
-            _openProjects.Add(info);
-            _activeIndex = _openProjects.Count - 1;
-            OnProjectSwitched?.Invoke(_activeIndex);
+            OpenProjectsStore.Add(info);
+            ActiveIndexValue = OpenProjectsStore.Count - 1;
+            OnProjectSwitched?.Invoke(ActiveIndexValue);
         }
 
         public async UniTask RemoveProjectAsync(int index, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested();
 
-            if (index < 0 || index >= _openProjects.Count)
+            if (index < 0 || index >= OpenProjectsStore.Count)
                 throw new ArgumentOutOfRangeException(nameof(index));
 
-            var removedWasActive = index == _activeIndex;
-            _snapshots.Remove(_openProjects[index].Path);
-            _openProjects.RemoveAt(index);
+            var removedWasActive = index == ActiveIndexValue;
+            SnapshotStore.Remove(OpenProjectsStore[index].Path);
+            OpenProjectsStore.RemoveAt(index);
 
-            if (_openProjects.Count == 0)
+            if (OpenProjectsStore.Count == 0)
             {
-                _activeIndex = -1;
+                ActiveIndexValue = -1;
                 await _lifecycleService.CloseProjectAsync(ct);
                 return;
             }
 
-            if (index < _activeIndex)
-                _activeIndex--;
-            else if (_activeIndex >= _openProjects.Count)
-                _activeIndex = _openProjects.Count - 1;
+            if (index < ActiveIndexValue)
+                ActiveIndexValue--;
+            else if (ActiveIndexValue >= OpenProjectsStore.Count)
+                ActiveIndexValue = OpenProjectsStore.Count - 1;
 
             if (removedWasActive)
-                await _lifecycleService.OpenProjectAsync(_openProjects[_activeIndex].Path, ct);
+                await _lifecycleService.OpenProjectAsync(OpenProjectsStore[ActiveIndexValue].Path, ct);
 
-            OnProjectSwitched?.Invoke(_activeIndex);
+            OnProjectSwitched?.Invoke(ActiveIndexValue);
         }
 
         public void SaveSnapshot(ProjectSwitchSnapshot snapshot)
@@ -90,7 +110,7 @@ namespace Gwt.Lifecycle.Services
             if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.ProjectPath))
                 return;
 
-            _snapshots[snapshot.ProjectPath] = snapshot;
+            SnapshotStore[snapshot.ProjectPath] = snapshot;
         }
 
         public ProjectSwitchSnapshot GetSnapshot(string projectPath)
@@ -98,7 +118,7 @@ namespace Gwt.Lifecycle.Services
             if (string.IsNullOrWhiteSpace(projectPath))
                 return null;
 
-            return _snapshots.TryGetValue(projectPath, out var snapshot) ? snapshot : null;
+            return SnapshotStore.TryGetValue(projectPath, out var snapshot) ? snapshot : null;
         }
     }
 }
