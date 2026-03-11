@@ -10,14 +10,16 @@ namespace Gwt.Editor
     public readonly struct AnimationRowDefinition
     {
         public string AnimationName { get; }
-        public int StartRow { get; }
+        public int Row { get; }
+        public int ColumnOffset { get; }
         public int FrameCount { get; }
         public bool Loop { get; }
 
-        public AnimationRowDefinition(string animationName, int startRow, int frameCount, bool loop)
+        public AnimationRowDefinition(string animationName, int row, int columnOffset, int frameCount, bool loop)
         {
             AnimationName = animationName;
-            StartRow = startRow;
+            Row = row;
+            ColumnOffset = columnOffset;
             FrameCount = frameCount;
             Loop = loop;
         }
@@ -34,20 +36,25 @@ namespace Gwt.Editor
         public const int SheetRows = 41;
         public const float DefaultFrameRate = 8f;
 
+        public const int DirectionStride = SheetColumns / 4; // 14 columns per direction
+
         public static readonly AnimationRowDefinition[] StudioAnimations = new[]
         {
-            new AnimationRowDefinition("idle_down", 0, 6, true),
-            new AnimationRowDefinition("idle_up", 1, 6, true),
-            new AnimationRowDefinition("idle_left", 2, 6, true),
-            new AnimationRowDefinition("idle_right", 3, 6, true),
-            new AnimationRowDefinition("walk_down", 4, 6, true),
-            new AnimationRowDefinition("walk_up", 5, 6, true),
-            new AnimationRowDefinition("walk_left", 6, 6, true),
-            new AnimationRowDefinition("walk_right", 7, 6, true),
-            new AnimationRowDefinition("sit_down", 8, 6, true),
-            new AnimationRowDefinition("sit_up", 9, 6, true),
-            new AnimationRowDefinition("sit_left", 10, 6, true),
-            new AnimationRowDefinition("sit_right", 11, 6, true),
+            // idle: row 1 (4 directions concatenated)
+            new AnimationRowDefinition("idle_down",  1, DirectionStride * 0, 6, true),
+            new AnimationRowDefinition("idle_up",    1, DirectionStride * 1, 6, true),
+            new AnimationRowDefinition("idle_left",  1, DirectionStride * 2, 6, true),
+            new AnimationRowDefinition("idle_right", 1, DirectionStride * 3, 6, true),
+            // walk: row 2 (4 directions concatenated)
+            new AnimationRowDefinition("walk_down",  2, DirectionStride * 0, 6, true),
+            new AnimationRowDefinition("walk_up",    2, DirectionStride * 1, 6, true),
+            new AnimationRowDefinition("walk_left",  2, DirectionStride * 2, 6, true),
+            new AnimationRowDefinition("walk_right", 2, DirectionStride * 3, 6, true),
+            // sit: row 4 (4 directions concatenated, variant 1)
+            new AnimationRowDefinition("sit_down",   4, DirectionStride * 0, 6, true),
+            new AnimationRowDefinition("sit_up",     4, DirectionStride * 1, 6, true),
+            new AnimationRowDefinition("sit_left",   4, DirectionStride * 2, 6, true),
+            new AnimationRowDefinition("sit_right",  4, DirectionStride * 3, 6, true),
         };
 
         public static List<string> CollectPremadeCharacterPaths()
@@ -88,7 +95,7 @@ namespace Gwt.Editor
             return clip;
         }
 
-        public static Sprite[] GetRowSprites(string spriteSheetPath, int row, int frameCount)
+        public static Sprite[] GetRowSprites(string spriteSheetPath, int row, int columnOffset, int frameCount)
         {
             var allSprites = AssetDatabase.LoadAllAssetRepresentationsAtPath(spriteSheetPath)
                 .OfType<Sprite>()
@@ -97,7 +104,7 @@ namespace Gwt.Editor
             if (allSprites.Length == 0)
                 return new Sprite[0];
 
-            var startIndex = row * SheetColumns;
+            var startIndex = row * SheetColumns + columnOffset;
             var result = new List<Sprite>();
             for (int i = 0; i < frameCount && startIndex + i < allSprites.Length; i++)
             {
@@ -173,7 +180,7 @@ namespace Gwt.Editor
                 var characterDir = $"{GeneratedAnimationsRoot}/{characterName}";
                 EnsureFolder(characterDir);
 
-                var idleFrames = GetRowSprites(sheetPath, StudioAnimations[0].StartRow, StudioAnimations[0].FrameCount);
+                var idleFrames = GetRowSprites(sheetPath, StudioAnimations[0].Row, StudioAnimations[0].ColumnOffset, StudioAnimations[0].FrameCount);
                 if (idleFrames.Length == 0)
                 {
                     Debug.LogWarning($"[CharacterAnimationPipeline] No sprites found for {characterName}, skipping.");
@@ -182,7 +189,7 @@ namespace Gwt.Editor
 
                 foreach (var anim in StudioAnimations)
                 {
-                    var frames = GetRowSprites(sheetPath, anim.StartRow, anim.FrameCount);
+                    var frames = GetRowSprites(sheetPath, anim.Row, anim.ColumnOffset, anim.FrameCount);
                     if (frames.Length == 0) continue;
 
                     var clip = CreateAnimationClip(anim.AnimationName, frames, DefaultFrameRate, anim.Loop);

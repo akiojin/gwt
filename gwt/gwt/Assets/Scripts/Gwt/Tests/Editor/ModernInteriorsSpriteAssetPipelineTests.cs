@@ -301,7 +301,8 @@ namespace Gwt.Tests.Editor
             Assert.IsTrue(animations.Length >= 12, "Should have at least 12 animations (idle/walk/sit x 4 directions)");
 
             Assert.AreEqual("idle_down", animations[0].AnimationName);
-            Assert.AreEqual(0, animations[0].StartRow);
+            Assert.AreEqual(1, animations[0].Row);
+            Assert.AreEqual(0, animations[0].ColumnOffset);
             Assert.IsTrue(animations[0].Loop);
         }
 
