@@ -2,6 +2,7 @@
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.IO;
 using Cysharp.Threading.Tasks;
 using Gwt.AI.Services;
 using Gwt.Core.Models;
@@ -880,6 +881,134 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_Construct_RestoresPersistedPreparedUpdateState() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            var statePath = GetPreparedUpdateStatePath();
+            try
+            {
+                using (var scope = new UiScope())
+                {
+                    var manager = scope.Root.AddComponent<UIManager>();
+                    var bar = scope.Root.AddComponent<ProjectInfoBar>();
+                    SetPrivateField(manager, "_projectInfoBar", bar);
+                    manager.Construct(lifecycle, multi, new TerminalPaneManager(), null, new FakeBuildService(), new VoiceService(), new SoundService(), new GamificationService());
+
+                    var updateButton = bar.GetComponentsInChildren<Button>(true)
+                        .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+                    Assert.IsNotNull(updateButton);
+
+                    updateButton.onClick.Invoke();
+                    await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
+                    updateButton.onClick.Invoke();
+                    await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update staged", cancellationToken: default);
+
+                    Assert.IsTrue(System.IO.File.Exists(statePath));
+                    Assert.That(System.IO.File.ReadAllText(statePath), Does.Contain("Update staged"));
+                }
+
+                using var restoreScope = new UiScope();
+                var restoredManager = restoreScope.Root.AddComponent<UIManager>();
+                var restoredBar = restoreScope.Root.AddComponent<ProjectInfoBar>();
+                SetPrivateField(restoredManager, "_projectInfoBar", restoredBar);
+                restoredManager.Construct(lifecycle, multi, new TerminalPaneManager(), null, new FakeBuildService(), new VoiceService(), new SoundService(), new GamificationService());
+                InvokePrivateMethod(restoredManager, "RestorePreparedUpdateStateIfNeeded");
+
+                Assert.AreEqual("Update staged", restoredBar.CurrentUpdateStatus);
+                Assert.AreEqual("Launch", restoredBar.CurrentUpdateButtonLabel);
+                Assert.AreEqual("1.1.0", restoredBar.LastUpdateVersion);
+                Assert.AreEqual("/tmp/apply-update.sh", restoredBar.LastUpdateCommand);
+            }
+            finally
+            {
+                if (System.IO.File.Exists(statePath))
+                    System.IO.File.Delete(statePath);
+            }
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_Construct_RestoresPreparedUpdateState_AndLaunches() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            var statePath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".gwt",
+                "updates",
+                "prepared-update-state.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(statePath)!);
+
+            try
+            {
+                var persisted = new PersistedPreparedUpdateStateFixture
+                {
+                    ProjectPath = "/tmp/project-a",
+                    LaunchReady = true,
+                    StatusText = "Update staged",
+                    ButtonLabel = "Launch",
+                    DisplayCommand = "/tmp/apply-update.sh",
+                    Plan = new PreparedUpdatePlan
+                    {
+                        Candidate = new UpdateInfo
+                        {
+                            Version = "1.1.0",
+                            DownloadUrl = "file:///tmp/gwt-1.1.0.zip",
+                            ReleaseNotes = "Test update"
+                        },
+                        ManifestSource = "/tmp/manifest.json",
+                        DownloadedArtifactPath = "/tmp/gwt-1.1.0.zip",
+                        ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
+                        RestartCommand = "open /Applications/GWT.app",
+                        StagingDirectory = "/tmp",
+                        LauncherScriptPath = "/tmp/apply-update.sh",
+                        ShouldApply = true
+                    }
+                };
+                File.WriteAllText(statePath, JsonUtility.ToJson(persisted));
+
+                using var scope = new UiScope();
+                var manager = scope.Root.AddComponent<UIManager>();
+                var bar = scope.Root.AddComponent<ProjectInfoBar>();
+                SetPrivateField(manager, "_projectInfoBar", bar);
+
+                var buildService = new FakeBuildService();
+                manager.Construct(
+                    lifecycle,
+                    new MultiProjectService(lifecycle),
+                    new TerminalPaneManager(),
+                    null,
+                    buildService,
+                    new VoiceService(),
+                    new SoundService(),
+                    new GamificationService());
+
+                Assert.AreEqual("Update staged", bar.CurrentUpdateStatus);
+                Assert.AreEqual("Launch", bar.CurrentUpdateButtonLabel);
+                Assert.AreEqual("/tmp/apply-update.sh", bar.LastUpdateCommand);
+
+                var updateButton = bar.GetComponentsInChildren<Button>(true)
+                    .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+                Assert.IsNotNull(updateButton);
+
+                updateButton.onClick.Invoke();
+                await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update launch started", cancellationToken: default);
+
+                Assert.AreEqual("Update", bar.CurrentUpdateButtonLabel);
+                Assert.AreEqual(1, buildService.LaunchCallCount);
+            }
+            finally
+            {
+                if (File.Exists(statePath))
+                    File.Delete(statePath);
+            }
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_ProjectInfoBarVoiceButton_TogglesVoiceAndUpdatesStatus() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();
@@ -925,6 +1054,18 @@ namespace Gwt.Tests.Editor
         {
             var method = instance.GetType().GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Instance);
             method.Invoke(instance, null);
+        }
+
+        private static void InvokePrivateMethod(object instance, string methodName, params object[] args)
+        {
+            var method = instance.GetType().GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Instance);
+            method.Invoke(instance, args);
+        }
+
+        private static string GetPreparedUpdateStatePath()
+        {
+            var field = typeof(UIManager).GetField("PreparedUpdateStatePath", BindingFlags.NonPublic | BindingFlags.Static);
+            return (string)field.GetValue(null);
         }
 
         private static void WithTempProjectRoot(Action<string> action)
@@ -1285,6 +1426,17 @@ namespace Gwt.Tests.Editor
             public string BuildApplyUpdateCommand(UpdateInfo candidate) => "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app";
             public string BuildApplyDownloadedUpdateCommand(string downloadedArtifactPath) => $"cp {downloadedArtifactPath} /Applications/GWT.app";
             public string BuildRestartCommand(string executablePath) => "open /Applications/GWT.app";
+        }
+
+        [System.Serializable]
+        private sealed class PersistedPreparedUpdateStateFixture
+        {
+            public string ProjectPath;
+            public bool LaunchReady;
+            public string StatusText;
+            public string ButtonLabel;
+            public string DisplayCommand;
+            public PreparedUpdatePlan Plan;
         }
 
         private sealed class NoOpObservable : IObservable<string>

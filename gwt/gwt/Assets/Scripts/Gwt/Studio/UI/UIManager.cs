@@ -19,6 +19,8 @@ namespace Gwt.Studio.UI
     {
         private static readonly string DefaultUpdateManifestPath =
             Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".gwt", "updates", "manifest.json");
+        private static readonly string PreparedUpdateStatePath =
+            Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".gwt", "updates", "prepared-update-state.json");
 
         [SerializeField] private ConsolePanel _consolePanel;
         [SerializeField] private LeadInputField _leadInputField;
@@ -78,6 +80,7 @@ namespace Gwt.Studio.UI
             RefreshProjectInfoBar();
             RestoreCurrentProjectSnapshot();
             ApplyPendingProjectTransitionState();
+            RestorePreparedUpdateStateIfNeeded();
         }
 
         private void Awake()
@@ -87,6 +90,7 @@ namespace Gwt.Studio.UI
             EnsureProjectInfoBar();
             RefreshProjectInfoBar();
             ApplyPendingProjectTransitionState();
+            RestorePreparedUpdateStateIfNeeded();
         }
 
         private void Update()
@@ -381,7 +385,8 @@ namespace Gwt.Studio.UI
                 return;
             }
 
-            if (!string.Equals(_preparedUpdateProjectPath, currentProject.Path, System.StringComparison.Ordinal))
+            if (_preparedUpdatePlan != null &&
+                !string.Equals(_preparedUpdateProjectPath, currentProject.Path, System.StringComparison.Ordinal))
             {
                 ClearPreparedUpdate();
                 _projectInfoBar.SetUpdateButtonLabel("Update");
@@ -468,6 +473,7 @@ namespace Gwt.Studio.UI
                         _preparedUpdateLaunchReady = true;
                         _projectInfoBar.SetUpdateState("Update staged", _preparedUpdatePlan.Candidate?.Version, scriptPath);
                         _projectInfoBar.SetUpdateButtonLabel("Launch");
+                        PersistPreparedUpdateState("Update staged", "Launch", scriptPath);
                         _gamificationService?.AddExperience(5);
                     }
                     else
@@ -481,11 +487,11 @@ namespace Gwt.Studio.UI
                     _projectInfoBar.SetUpdateState("Launching update...");
 
                     var launched = await _buildService.LaunchPreparedUpdateAsync(_preparedUpdatePlan);
-                    if (launched)
-                    {
-                        _projectInfoBar.SetUpdateState("Update launch started", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
-                        _gamificationService?.AddExperience(20);
-                        ClearPreparedUpdate();
+                if (launched)
+                {
+                    _projectInfoBar.SetUpdateState("Update launch started", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
+                    _gamificationService?.AddExperience(20);
+                    ClearPreparedUpdate();
                         _projectInfoBar.SetUpdateButtonLabel("Update");
                     }
                     else
@@ -541,6 +547,7 @@ namespace Gwt.Studio.UI
                     _preparedUpdateLaunchReady = false;
                     _projectInfoBar.SetUpdateState($"Update {latest.Version} ready", latest.Version, plan.ApplyCommand);
                     _projectInfoBar.SetUpdateButtonLabel("Apply");
+                    PersistPreparedUpdateState($"Update {latest.Version} ready", "Apply", plan.ApplyCommand);
                     _gamificationService?.AddExperience(15);
                 }
                 else
@@ -760,6 +767,123 @@ namespace Gwt.Studio.UI
             _preparedUpdatePlan = null;
             _preparedUpdateProjectPath = string.Empty;
             _preparedUpdateLaunchReady = false;
+            TryDeletePreparedUpdateState();
+        }
+
+        private void RestorePreparedUpdateStateIfNeeded()
+        {
+            if (_projectInfoBar == null || _projectLifecycleService?.CurrentProject == null)
+                return;
+
+            try
+            {
+                if (!File.Exists(PreparedUpdateStatePath))
+                    return;
+
+                var payload = JsonUtility.FromJson<PersistedPreparedUpdateState>(File.ReadAllText(PreparedUpdateStatePath));
+                if (payload == null || string.IsNullOrWhiteSpace(payload.ProjectPath))
+                    return;
+
+                if (!string.Equals(payload.ProjectPath, _projectLifecycleService.CurrentProject.Path, System.StringComparison.Ordinal))
+                    return;
+
+                _preparedUpdatePlan = payload.ToPreparedUpdatePlan();
+                _preparedUpdateProjectPath = payload.ProjectPath;
+                _preparedUpdateLaunchReady = payload.LaunchReady;
+                _projectInfoBar.SetUpdateState(payload.StatusText, payload.CandidateVersion, payload.DisplayCommand);
+                _projectInfoBar.SetUpdateButtonLabel(payload.ButtonLabel);
+            }
+            catch
+            {
+            }
+        }
+
+        private void PersistPreparedUpdateState(string statusText, string buttonLabel, string displayCommand)
+        {
+            if (_preparedUpdatePlan == null || string.IsNullOrWhiteSpace(_preparedUpdateProjectPath))
+                return;
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(PreparedUpdateStatePath) ?? ".");
+                var payload = new PersistedPreparedUpdateState
+                {
+                    ProjectPath = _preparedUpdateProjectPath,
+                    LaunchReady = _preparedUpdateLaunchReady,
+                    StatusText = statusText ?? string.Empty,
+                    ButtonLabel = buttonLabel ?? "Update",
+                    DisplayCommand = displayCommand ?? string.Empty,
+                    CandidateVersion = _preparedUpdatePlan.Candidate?.Version ?? string.Empty,
+                    CandidateDownloadUrl = _preparedUpdatePlan.Candidate?.DownloadUrl ?? string.Empty,
+                    CandidateReleaseNotes = _preparedUpdatePlan.Candidate?.ReleaseNotes ?? string.Empty,
+                    CandidateMandatory = _preparedUpdatePlan.Candidate?.Mandatory ?? false,
+                    ManifestSource = _preparedUpdatePlan.ManifestSource ?? string.Empty,
+                    DownloadedArtifactPath = _preparedUpdatePlan.DownloadedArtifactPath ?? string.Empty,
+                    ApplyCommand = _preparedUpdatePlan.ApplyCommand ?? string.Empty,
+                    RestartCommand = _preparedUpdatePlan.RestartCommand ?? string.Empty,
+                    StagingDirectory = _preparedUpdatePlan.StagingDirectory ?? string.Empty,
+                    LauncherScriptPath = _preparedUpdatePlan.LauncherScriptPath ?? string.Empty,
+                    ShouldApply = _preparedUpdatePlan.ShouldApply
+                };
+                File.WriteAllText(PreparedUpdateStatePath, JsonUtility.ToJson(payload));
+            }
+            catch
+            {
+            }
+        }
+
+        private static void TryDeletePreparedUpdateState()
+        {
+            try
+            {
+                if (File.Exists(PreparedUpdateStatePath))
+                    File.Delete(PreparedUpdateStatePath);
+            }
+            catch
+            {
+            }
+        }
+
+        [System.Serializable]
+        private class PersistedPreparedUpdateState
+        {
+            public string ProjectPath;
+            public bool LaunchReady;
+            public string StatusText;
+            public string ButtonLabel;
+            public string DisplayCommand;
+            public string CandidateVersion;
+            public string CandidateDownloadUrl;
+            public string CandidateReleaseNotes;
+            public bool CandidateMandatory;
+            public string ManifestSource;
+            public string DownloadedArtifactPath;
+            public string ApplyCommand;
+            public string RestartCommand;
+            public string StagingDirectory;
+            public string LauncherScriptPath;
+            public bool ShouldApply;
+
+            public PreparedUpdatePlan ToPreparedUpdatePlan()
+            {
+                return new PreparedUpdatePlan
+                {
+                    Candidate = new UpdateInfo
+                    {
+                        Version = CandidateVersion,
+                        DownloadUrl = CandidateDownloadUrl,
+                        ReleaseNotes = CandidateReleaseNotes,
+                        Mandatory = CandidateMandatory
+                    },
+                    ManifestSource = ManifestSource,
+                    DownloadedArtifactPath = DownloadedArtifactPath,
+                    ApplyCommand = ApplyCommand,
+                    RestartCommand = RestartCommand,
+                    StagingDirectory = StagingDirectory,
+                    LauncherScriptPath = LauncherScriptPath,
+                    ShouldApply = ShouldApply
+                };
+            }
         }
 
         private void RefreshMetaStatus()
