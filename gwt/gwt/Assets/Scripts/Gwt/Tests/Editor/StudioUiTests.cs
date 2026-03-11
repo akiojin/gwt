@@ -2,6 +2,7 @@
 using System.Linq;
 using System.Reflection;
 using Cysharp.Threading.Tasks;
+using Gwt.AI.Services;
 using Gwt.Core.Models;
 using Gwt.Core.Services.Pty;
 using Gwt.Core.Services.Terminal;
@@ -572,7 +573,15 @@ namespace Gwt.Tests.Editor
             var bar = scope.Root.AddComponent<ProjectInfoBar>();
             SetPrivateField(manager, "_projectInfoBar", bar);
 
-            manager.Construct(lifecycle, new MultiProjectService(lifecycle), new TerminalPaneManager(), null, new FakeBuildService());
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService());
 
             var reportButton = bar.GetComponentsInChildren<Button>(true)
                 .FirstOrDefault(candidate => candidate.gameObject.name == "ReportButton");
@@ -581,12 +590,15 @@ namespace Gwt.Tests.Editor
             reportButton.onClick.Invoke();
             await UniTask.WaitUntil(() => bar.CurrentReportStatus == "Report ready", cancellationToken: default);
 
+            Assert.AreEqual("Report ready", bar.CurrentReportStatus);
             Assert.That(bar.LastReportTarget, Does.Contain("github.com/akiojin/gwt/issues/new"));
             Assert.That(bar.LastReportCommand, Does.Contain("gh issue create"));
+            Assert.That(bar.CurrentAudioStatus, Does.Contain("ButtonClick"));
+            Assert.That(bar.CurrentProgressStatus, Does.Contain("Badges 1"));
         });
 
         [UnityTest]
-        public System.Collections.IEnumerator UIManager_ProjectInfoBarReportButton_PreparesBugReport() => UniTask.ToCoroutine(async () =>
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarVoiceButton_TogglesVoiceAndUpdatesStatus() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();
             lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
@@ -596,17 +608,29 @@ namespace Gwt.Tests.Editor
             var bar = scope.Root.AddComponent<ProjectInfoBar>();
             SetPrivateField(manager, "_projectInfoBar", bar);
 
-            manager.Construct(lifecycle, new MultiProjectService(lifecycle), new TerminalPaneManager(), null, new FakeBuildService());
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService());
 
-            var reportButton = bar.GetComponentsInChildren<Button>(true)
-                .FirstOrDefault(candidate => candidate.gameObject.name == "ReportButton");
-            Assert.IsNotNull(reportButton);
+            var voiceButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "VoiceButton");
+            Assert.IsNotNull(voiceButton);
 
-            reportButton.onClick.Invoke();
-            await UniTask.WaitUntil(() => bar.CurrentReportStatus == "Report ready", cancellationToken: default);
+            voiceButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentVoiceStatus == "Voice: Recording", cancellationToken: default);
+            Assert.AreEqual("Voice: Recording", bar.CurrentVoiceStatus);
+            Assert.That(bar.CurrentAudioStatus, Does.Contain("ButtonClick"));
 
-            Assert.That(bar.LastReportTarget, Does.Contain("github.com/akiojin/gwt/issues/new"));
-            Assert.That(bar.LastReportCommand, Does.Contain("gh issue create"));
+            voiceButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentVoiceStatus.Contains("Recorded voice note"), cancellationToken: default);
+            Assert.That(bar.CurrentVoiceStatus, Does.Contain("Recorded voice note"));
+            Assert.That(bar.CurrentProgressStatus, Does.Contain("Badges 1"));
         });
 
         private static void SetPrivateField(object instance, string fieldName, object value)
@@ -896,39 +920,6 @@ namespace Gwt.Tests.Editor
 
             public UniTask<string> SpawnAsync(DockerLaunchRequest request, IPtyService ptyService, int rows = 24, int cols = 80, System.Threading.CancellationToken ct = default) =>
                 new DockerService().SpawnAsync(request, ptyService, rows, cols, ct);
-        }
-
-        private sealed class FakeBuildService : IBuildService
-        {
-            public SystemInfoData GetSystemInfo() => new() { OS = "TestOS", UnityVersion = "6000.3.10f1", AppVersion = "1.0.0" };
-            public SystemStatsData GetSystemStats() => new() { AllocatedMemoryMB = 1, ReservedMemoryMB = 2, MonoUsedMemoryMB = 1 };
-            public UniTask<string> CaptureScreenshotAsync(string outputPath, System.Threading.CancellationToken ct = default) => UniTask.FromResult(outputPath);
-            public UniTask<string> ReadLogFileAsync(string logPath, System.Threading.CancellationToken ct = default) => UniTask.FromResult(string.Empty);
-            public UniTask<System.Collections.Generic.List<string>> ReadRecentLogsAsync(int maxFiles = 5, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new System.Collections.Generic.List<string>());
-            public UniTask<BugReport> CreateBugReportAsync(string description, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new BugReport
-            {
-                Description = description,
-                LogContent = "test-log",
-                ScreenshotPath = "/tmp/test.png",
-                Timestamp = "2026-03-11T00:00:00Z",
-                SystemInfo = GetSystemInfo()
-            });
-            public string DetectReportTarget() => "https://github.com/akiojin/gwt/issues/new";
-            public string BuildGitHubIssueBody(BugReport report) => $"Report:{report.Description}";
-            public string BuildGitHubIssueCommand(string title, BugReport report) => $"gh issue create --title '{title}' --body '{report.Description}'";
-            public System.Collections.Generic.List<BuildArtifactInfo> GetReleaseArtifacts(string version) => new();
-            public System.Collections.Generic.List<UpdateInfo> ParseUpdateManifest(string manifestJson) => new();
-            public UniTask<System.Collections.Generic.List<UpdateInfo>> LoadUpdateManifestAsync(string manifestSource, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new System.Collections.Generic.List<UpdateInfo>());
-            public UpdateInfo GetLatestUpdate(string currentVersion, System.Collections.Generic.List<UpdateInfo> candidates) => null;
-            public bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate) => false;
-            public string GetUpdateStagingDirectory() => "/tmp";
-            public UniTask<string> DownloadUpdateAsync(UpdateInfo candidate, string destinationDirectory, System.Threading.CancellationToken ct = default) => UniTask.FromResult(string.Empty);
-            public UniTask<PreparedUpdatePlan> PrepareUpdateAsync(string currentVersion, UpdateInfo candidate, string executablePath, string destinationDirectory = null, string manifestSource = null, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new PreparedUpdatePlan());
-            public UniTask<string> WritePreparedUpdateScriptAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default) => UniTask.FromResult(string.Empty);
-            public UniTask<bool> LaunchPreparedUpdateAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default) => UniTask.FromResult(false);
-            public string BuildApplyUpdateCommand(UpdateInfo candidate) => string.Empty;
-            public string BuildApplyDownloadedUpdateCommand(string downloadedArtifactPath) => string.Empty;
-            public string BuildRestartCommand(string executablePath) => string.Empty;
         }
 
         private sealed class FakeBuildService : IBuildService

@@ -4,6 +4,7 @@
     "references": [
         "Gwt.Shared",
         "Gwt.Core",
+        "Gwt.AI",
         "Gwt.Agent",
         "Gwt.Infra",
         "Gwt.Lifecycle",

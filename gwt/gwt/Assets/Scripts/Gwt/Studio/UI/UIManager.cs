@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Gwt.AI.Services;
 using Cysharp.Threading.Tasks;
 using Gwt.Core.Services.Terminal;
 using Gwt.Infra.Services;
@@ -32,6 +33,9 @@ namespace Gwt.Studio.UI
         private ITerminalPaneManager _terminalPaneManager;
         private IDockerService _dockerService;
         private IBuildService _buildService;
+        private IVoiceService _voiceService;
+        private ISoundService _soundService;
+        private IGamificationService _gamificationService;
         private bool _subscribed;
         private bool _previousBackquotePressed;
         private bool _previousDownPressed;
@@ -49,13 +53,19 @@ namespace Gwt.Studio.UI
             IMultiProjectService multiProjectService,
             ITerminalPaneManager terminalPaneManager,
             IDockerService dockerService = null,
-            IBuildService buildService = null)
+            IBuildService buildService = null,
+            IVoiceService voiceService = null,
+            ISoundService soundService = null,
+            IGamificationService gamificationService = null)
         {
             _projectLifecycleService = projectLifecycleService;
             _multiProjectService = multiProjectService;
             _terminalPaneManager = terminalPaneManager;
             _dockerService = dockerService;
             _buildService = buildService;
+            _voiceService = voiceService;
+            _soundService = soundService;
+            _gamificationService = gamificationService;
             EnsureProjectSwitcher();
             SubscribeServices();
             RefreshProjectInfoBar();
@@ -275,6 +285,8 @@ namespace Gwt.Studio.UI
 
             _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
             _projectInfoBar.Clicked += HandleProjectInfoBarClicked;
+            _projectInfoBar.VoiceRequested -= HandleProjectInfoBarVoiceRequested;
+            _projectInfoBar.VoiceRequested += HandleProjectInfoBarVoiceRequested;
             _projectInfoBar.ReportRequested -= HandleProjectInfoBarReportRequested;
             _projectInfoBar.ReportRequested += HandleProjectInfoBarReportRequested;
             _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
@@ -284,6 +296,11 @@ namespace Gwt.Studio.UI
         private void HandleProjectInfoBarClicked()
         {
             ToggleProjectSwitcher();
+        }
+
+        private void HandleProjectInfoBarVoiceRequested()
+        {
+            HandleVoiceRequestedAsync().Forget();
         }
 
         private void HandleProjectInfoBarReportRequested()
@@ -359,6 +376,7 @@ namespace Gwt.Studio.UI
             var projectPath = currentProject.Path;
             _projectInfoBar.SetEnvironment(GetImmediateEnvironmentLabel(projectPath));
             RefreshProjectEnvironmentAsync(projectPath, refreshVersion).Forget();
+            RefreshMetaStatus();
         }
 
         private async UniTaskVoid HandleReportRequestedAsync()
@@ -370,10 +388,12 @@ namespace Gwt.Studio.UI
             if (_buildService == null)
             {
                 _projectInfoBar.SetReportState("Report unavailable");
+                RefreshMetaStatus();
                 return;
             }
 
             _projectInfoBar.SetReportState("Preparing report...");
+            _soundService?.PlaySfx(SfxType.ButtonClick);
 
             try
             {
@@ -381,11 +401,40 @@ namespace Gwt.Studio.UI
                 var target = _buildService.DetectReportTarget();
                 var command = _buildService.BuildGitHubIssueCommand("Bug: Project Info report", report);
                 _projectInfoBar.SetReportState("Report ready", target, command);
+                _gamificationService?.AddExperience(10);
             }
             catch (System.Exception e)
             {
                 _projectInfoBar.SetReportState($"Report failed: {e.Message}");
             }
+
+            RefreshMetaStatus();
+        }
+
+        private async UniTaskVoid HandleVoiceRequestedAsync()
+        {
+            TryResolveRuntimeServices();
+            if (_projectInfoBar == null)
+                return;
+
+            if (_voiceService == null)
+            {
+                _projectInfoBar.SetVoiceState("Voice unavailable");
+                return;
+            }
+
+            _soundService?.PlaySfx(SfxType.ButtonClick);
+            if (_voiceService.IsRecording)
+            {
+                _voiceService.StopRecording();
+                _gamificationService?.AddExperience(5);
+            }
+            else
+            {
+                await _voiceService.StartRecordingAsync();
+            }
+
+            RefreshMetaStatus();
         }
 
         private async UniTaskVoid RefreshProjectEnvironmentAsync(string projectPath, int refreshVersion)
@@ -425,7 +474,10 @@ namespace Gwt.Studio.UI
                 _multiProjectService != null &&
                 _terminalPaneManager != null &&
                 _dockerService != null &&
-                _buildService != null)
+                _buildService != null &&
+                _voiceService != null &&
+                _soundService != null &&
+                _gamificationService != null)
             {
                 return;
             }
@@ -478,7 +530,34 @@ namespace Gwt.Studio.UI
             {
             }
 
+            try
+            {
+                _voiceService ??= container.Resolve<IVoiceService>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _soundService ??= container.Resolve<ISoundService>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _gamificationService ??= container.Resolve<IGamificationService>();
+            }
+            catch
+            {
+            }
+
             _dockerService ??= new DockerService();
+            _voiceService ??= new VoiceService();
+            _soundService ??= new SoundService();
+            _gamificationService ??= new GamificationService();
         }
 
         private static string FormatDockerEnvironment(DockerRuntimeStatus status)
@@ -519,6 +598,48 @@ namespace Gwt.Studio.UI
             }
         }
 
+        private void RefreshMetaStatus()
+        {
+            if (_projectInfoBar == null)
+                return;
+
+            _projectInfoBar.SetVoiceState(FormatVoiceStatus());
+            _projectInfoBar.SetAudioState(FormatAudioStatus());
+            _projectInfoBar.SetProgressState(FormatProgressStatus());
+        }
+
+        private string FormatVoiceStatus()
+        {
+            if (_voiceService == null || !_voiceService.IsAvailable)
+                return "Voice unavailable";
+            if (_voiceService.IsRecording)
+                return "Voice: Recording";
+            if (!string.IsNullOrWhiteSpace(_voiceService.LastTranscript))
+                return $"Voice: {_voiceService.LastTranscript}";
+            return "Voice: Idle";
+        }
+
+        private string FormatAudioStatus()
+        {
+            if (_soundService == null)
+                return string.Empty;
+            if (_soundService.IsMuted)
+                return "Audio: Muted";
+
+            var bgm = _soundService.CurrentBgm?.ToString() ?? "-";
+            var sfx = _soundService.LastSfx?.ToString() ?? "-";
+            return $"Audio: BGM {bgm} / SFX {sfx}";
+        }
+
+        private string FormatProgressStatus()
+        {
+            if (_gamificationService == null)
+                return string.Empty;
+
+            var badges = _gamificationService.GetBadges().Count;
+            return $"Level {_gamificationService.CurrentLevel.Level} | Badges {badges}";
+        }
+
         private void OnDestroy()
         {
             if (_projectLifecycleService != null)
@@ -533,6 +654,7 @@ namespace Gwt.Studio.UI
             if (_projectInfoBar != null)
             {
                 _projectInfoBar.Clicked -= HandleProjectInfoBarClicked;
+                _projectInfoBar.VoiceRequested -= HandleProjectInfoBarVoiceRequested;
                 _projectInfoBar.ReportRequested -= HandleProjectInfoBarReportRequested;
                 _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
             }
