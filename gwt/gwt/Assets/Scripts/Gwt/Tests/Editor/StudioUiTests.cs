@@ -14,6 +14,7 @@ using Gwt.Studio.UI;
 using NUnit.Framework;
 using TMPro;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 using UnityEngine.TestTools;
 
@@ -61,6 +62,21 @@ namespace Gwt.Tests.Editor
             Assert.That(overlay.CurrentDisplayText, Does.Contain("Recent Projects"));
             Assert.That(overlay.CurrentDisplayText, Does.Contain("project-c"));
         }
+
+        [UnityTest]
+        public System.Collections.IEnumerator ProjectSwitchOverlayPanel_RefreshAsync_FallsBackToWorkspaceProject_WhenNoRecentProjects() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+
+            using var scope = new UiScope();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            overlay.SetServices(multi, lifecycle);
+
+            await overlay.RefreshAsync();
+
+            Assert.That(overlay.CurrentDisplayText, Does.Not.Contain("No open or recent projects"));
+        });
 
         [UnityTest]
         public System.Collections.IEnumerator ProjectSwitchOverlayPanel_ClickingRecentProjectButton_OpensProject() => UniTask.ToCoroutine(async () =>
@@ -754,6 +770,33 @@ namespace Gwt.Tests.Editor
 
             Assert.IsTrue(overlay.IsOpen);
             Assert.That(overlay.CurrentDisplayText, Does.Contain("project-c"));
+        }
+
+        [Test]
+        public void ProjectInfoBar_OnPointerClick_IgnoresChildButtonClicks()
+        {
+            using var scope = new UiScope();
+            var eventSystemObject = new GameObject("EventSystem");
+            eventSystemObject.AddComponent<EventSystem>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            bar.SetProjectName("demo");
+
+            var childButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "TerminalButton");
+            Assert.IsNotNull(childButton);
+
+            var clicked = false;
+            bar.Clicked += () => clicked = true;
+
+            var eventData = new PointerEventData(EventSystem.current)
+            {
+                pointerPressRaycast = new RaycastResult { gameObject = childButton.gameObject }
+            };
+
+            bar.OnPointerClick(eventData);
+
+            Assert.IsFalse(clicked);
+            UnityEngine.Object.DestroyImmediate(eventSystemObject);
         }
 
         [UnityTest]

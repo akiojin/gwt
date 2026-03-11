@@ -135,6 +135,12 @@ namespace Gwt.Studio.UI
 
         public void OnPointerClick(PointerEventData eventData)
         {
+            if (eventData?.pointerPressRaycast.gameObject != null &&
+                eventData.pointerPressRaycast.gameObject != gameObject)
+            {
+                return;
+            }
+
             InvokeClicked();
         }
 

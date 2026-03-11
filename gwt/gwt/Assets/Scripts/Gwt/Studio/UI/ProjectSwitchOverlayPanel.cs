@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using Cysharp.Threading.Tasks;
 using Gwt.Lifecycle.Services;
@@ -401,6 +402,33 @@ namespace Gwt.Studio.UI
                     continue;
 
                 _entries.Add(new ProjectEntry(normalized, false));
+            }
+
+            if (_entries.Count == 0)
+                await AddFallbackWorkspaceProjectAsync(openProjects);
+        }
+
+        private async UniTask AddFallbackWorkspaceProjectAsync(List<ProjectInfo> openProjects)
+        {
+            if (_projectLifecycleService == null)
+                return;
+
+            var directory = new DirectoryInfo(Path.GetDirectoryName(Application.dataPath) ?? Application.dataPath);
+            for (var depth = 0; directory != null && depth < 8; depth++, directory = directory.Parent)
+            {
+                var candidate = await _projectLifecycleService.ProbePathAsync(directory.FullName);
+                if (candidate == null || string.IsNullOrWhiteSpace(candidate.Path))
+                    continue;
+
+                var alreadyOpen = openProjects.Exists(project =>
+                    string.Equals(project.Path, candidate.Path, StringComparison.OrdinalIgnoreCase));
+                var alreadyListed = _entries.Exists(entry =>
+                    string.Equals(entry.Project.Path, candidate.Path, StringComparison.OrdinalIgnoreCase));
+                if (alreadyOpen || alreadyListed)
+                    continue;
+
+                _entries.Add(new ProjectEntry(candidate, false));
+                return;
             }
         }
 
