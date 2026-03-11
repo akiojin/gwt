@@ -43,6 +43,7 @@ namespace Gwt.Studio.UI
         private ITerminalPaneManager _terminalPaneManager;
         private IDockerService _dockerService;
         private IBuildService _buildService;
+        private IProjectIndexService _projectIndexService;
         private IConfigService _configService;
         private IVoiceService _voiceService;
         private ISoundService _soundService;
@@ -71,13 +72,15 @@ namespace Gwt.Studio.UI
             IVoiceService voiceService = null,
             ISoundService soundService = null,
             IGamificationService gamificationService = null,
-            IConfigService configService = null)
+            IConfigService configService = null,
+            IProjectIndexService projectIndexService = null)
         {
             _projectLifecycleService = projectLifecycleService;
             _multiProjectService = multiProjectService;
             _terminalPaneManager = terminalPaneManager;
             _dockerService = dockerService;
             _buildService = buildService;
+            _projectIndexService = projectIndexService;
             _configService = configService;
             _voiceService = voiceService;
             _soundService = soundService;
@@ -316,6 +319,8 @@ namespace Gwt.Studio.UI
             _projectInfoBar.ReportRequested += HandleProjectInfoBarReportRequested;
             _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
             _projectInfoBar.TerminalRequested += HandleProjectInfoBarTerminalRequested;
+            _projectInfoBar.SearchRequested -= HandleProjectInfoBarSearchRequested;
+            _projectInfoBar.SearchRequested += HandleProjectInfoBarSearchRequested;
         }
 
         private void EnsureTerminalOverlayPanel()
@@ -347,6 +352,11 @@ namespace Gwt.Studio.UI
         private void HandleProjectInfoBarTerminalRequested()
         {
             OpenTerminal();
+        }
+
+        private void HandleProjectInfoBarSearchRequested()
+        {
+            HandleSearchRequestedAsync().Forget();
         }
 
         private void HandleProjectSwitchEntryInvoked()
@@ -620,6 +630,36 @@ namespace Gwt.Studio.UI
             RefreshMetaStatus();
         }
 
+        private async UniTaskVoid HandleSearchRequestedAsync()
+        {
+            TryResolveRuntimeServices();
+            if (_projectInfoBar == null)
+                return;
+
+            var currentProjectPath = _projectLifecycleService?.CurrentProject?.Path ?? string.Empty;
+            if (_projectIndexService == null || string.IsNullOrWhiteSpace(currentProjectPath))
+            {
+                _projectInfoBar.SetSearchState("Index unavailable");
+                return;
+            }
+
+            _projectInfoBar.SetSearchState("Indexing...");
+            _soundService?.PlaySfx(SfxType.ButtonClick);
+
+            try
+            {
+                await _projectIndexService.StartBackgroundIndexAsync(currentProjectPath);
+                _gamificationService?.AddExperience(5);
+            }
+            catch (System.Exception e)
+            {
+                _projectInfoBar.SetSearchState($"Index failed: {e.Message}");
+                return;
+            }
+
+            RefreshMetaStatus();
+        }
+
         private async UniTaskVoid RefreshProjectEnvironmentAsync(string projectPath, int refreshVersion)
         {
             if (_projectInfoBar == null)
@@ -658,6 +698,7 @@ namespace Gwt.Studio.UI
                 _terminalPaneManager != null &&
                 _dockerService != null &&
                 _buildService != null &&
+                _projectIndexService != null &&
                 _configService != null &&
                 _voiceService != null &&
                 _soundService != null &&
@@ -709,6 +750,14 @@ namespace Gwt.Studio.UI
             try
             {
                 _buildService ??= container.Resolve<IBuildService>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _projectIndexService ??= container.Resolve<IProjectIndexService>();
             }
             catch
             {
@@ -999,6 +1048,7 @@ namespace Gwt.Studio.UI
             _projectInfoBar.SetVoiceState(FormatVoiceStatus());
             _projectInfoBar.SetAudioState(FormatAudioStatus());
             _projectInfoBar.SetProgressState(FormatProgressStatus());
+            _projectInfoBar.SetSearchState(FormatSearchStatus());
         }
 
         private string FormatVoiceStatus()
@@ -1033,6 +1083,25 @@ namespace Gwt.Studio.UI
             return $"Level {_gamificationService.CurrentLevel.Level} | Badges {badges}";
         }
 
+        private string FormatSearchStatus()
+        {
+            if (_projectIndexService == null)
+                return string.Empty;
+
+            var status = _projectIndexService.GetStatus();
+            if (status == null)
+                return string.Empty;
+
+            if (status.IsRunning)
+                return $"Index: {status.IndexedFileCount} files / {status.PendingFiles} pending";
+
+            var embeddings = status.HasEmbeddings ? " / semantic" : string.Empty;
+            if (status.IndexedFileCount <= 0 && status.IndexedIssueCount <= 0)
+                return $"Index: idle{embeddings}";
+
+            return $"Index: {status.IndexedFileCount} files / {status.IndexedIssueCount} issues{embeddings}";
+        }
+
         private void OnDestroy()
         {
             if (_projectLifecycleService != null)
@@ -1051,6 +1120,7 @@ namespace Gwt.Studio.UI
                 _projectInfoBar.VoiceRequested -= HandleProjectInfoBarVoiceRequested;
                 _projectInfoBar.ReportRequested -= HandleProjectInfoBarReportRequested;
                 _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
+                _projectInfoBar.SearchRequested -= HandleProjectInfoBarSearchRequested;
             }
 
             if (_projectSwitchOverlayPanel != null)

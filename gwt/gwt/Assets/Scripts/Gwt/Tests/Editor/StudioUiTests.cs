@@ -187,6 +187,44 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("Host: Docker daemon unavailable", bar.CurrentEnvironment);
         });
 
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_Construct_UpdatesProjectInfoBar_SearchStatusFromIndexService() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            var multi = new MultiProjectService(lifecycle);
+            multi.AddProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            var overlay = scope.Root.AddComponent<ProjectSwitchOverlayPanel>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_projectSwitchOverlayPanel", overlay);
+
+            manager.Construct(
+                lifecycle,
+                multi,
+                new TerminalPaneManager(),
+                new FakeAvailableDockerService(),
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                new FakeProjectIndexService
+                {
+                    Status = new IndexStatus
+                    {
+                        IndexedFileCount = 12,
+                        IndexedIssueCount = 3,
+                        HasEmbeddings = true
+                    }
+                });
+
+            await UniTask.Yield();
+            Assert.AreEqual("Index: 12 files / 3 issues / semantic", bar.CurrentSearchStatus);
+        });
+
         [Test]
         public void UIManager_ConfirmProjectSwitchAsync_SwitchesProjectAndUpdatesBar()
         {
@@ -1030,6 +1068,42 @@ namespace Gwt.Tests.Editor
             Assert.That(bar.LastReportCommand, Does.Contain("gh issue create"));
             Assert.That(bar.CurrentAudioStatus, Does.Contain("ButtonClick"));
             Assert.That(bar.CurrentProgressStatus, Does.Contain("Badges 1"));
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarSearchButton_StartsBackgroundIndex() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+
+            var indexService = new FakeProjectIndexService();
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService);
+
+            var searchButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "SearchButton");
+            Assert.IsNotNull(searchButton);
+
+            searchButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => indexService.StartBackgroundIndexCallCount == 1, cancellationToken: default);
+
+            Assert.AreEqual("/tmp/project-a", indexService.LastProjectRoot);
+            Assert.AreEqual("Index: 7 files / 2 issues / semantic", bar.CurrentSearchStatus);
+            Assert.That(bar.CurrentAudioStatus, Does.Contain("ButtonClick"));
         });
 
         [UnityTest]
@@ -2007,6 +2081,45 @@ namespace Gwt.Tests.Editor
                 => UniTask.FromResult(_settings ?? new Settings());
 
             public string GetGwtDir(string projectRoot) => Path.Combine(projectRoot, ".gwt");
+        }
+
+        private sealed class FakeProjectIndexService : IProjectIndexService
+        {
+            public IndexStatus Status { get; set; } = new();
+            public int StartBackgroundIndexCallCount { get; private set; }
+            public string LastProjectRoot { get; private set; }
+
+            public int IndexedFileCount => Status?.IndexedFileCount ?? 0;
+
+            public UniTask BuildIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+
+            public UniTask StartBackgroundIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+            {
+                StartBackgroundIndexCallCount++;
+                LastProjectRoot = projectRoot;
+                Status = new IndexStatus
+                {
+                    IndexedFileCount = 7,
+                    IndexedIssueCount = 2,
+                    PendingFiles = 0,
+                    HasEmbeddings = true,
+                    IsRunning = false
+                };
+                return UniTask.CompletedTask;
+            }
+
+            public UniTask BuildIssueIndexAsync(System.Collections.Generic.List<IssueIndexEntry> issues, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public List<FileIndexEntry> Search(string query) => new();
+            public List<FileIndexEntry> SearchSemantic(string query, int maxResults = 20) => new();
+            public List<IssueIndexEntry> SearchIssues(string query) => new();
+            public List<IssueIndexEntry> SearchIssuesSemantic(string query, int maxResults = 20) => new();
+            public SearchResultGroup SearchAll(string query) => new();
+            public SearchResultGroup SearchAllSemantic(string query, int maxResults = 20) => new();
+            public UniTask RefreshAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask RefreshChangedFilesAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask SaveIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask LoadIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public IndexStatus GetStatus() => Status;
         }
 
         [System.Serializable]

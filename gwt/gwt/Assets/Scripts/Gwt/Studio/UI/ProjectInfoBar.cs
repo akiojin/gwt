@@ -17,7 +17,10 @@ namespace Gwt.Studio.UI
         [SerializeField] private TextMeshProUGUI _voiceStatusText;
         [SerializeField] private TextMeshProUGUI _audioStatusText;
         [SerializeField] private TextMeshProUGUI _progressStatusText;
+        [SerializeField] private TextMeshProUGUI _searchStatusText;
         [SerializeField] private Button _button;
+        [SerializeField] private Button _searchButton;
+        [SerializeField] private TextMeshProUGUI _searchButtonText;
         [SerializeField] private Button _updateButton;
         [SerializeField] private TextMeshProUGUI _updateButtonText;
         [SerializeField] private Button _voiceButton;
@@ -32,6 +35,7 @@ namespace Gwt.Studio.UI
         public event Action VoiceRequested;
         public event Action ReportRequested;
         public event Action TerminalRequested;
+        public event Action SearchRequested;
 
         public string CurrentProjectName { get; private set; } = string.Empty;
         public string CurrentBranch { get; private set; } = string.Empty;
@@ -43,6 +47,7 @@ namespace Gwt.Studio.UI
         public string CurrentVoiceStatus { get; private set; } = string.Empty;
         public string CurrentAudioStatus { get; private set; } = string.Empty;
         public string CurrentProgressStatus { get; private set; } = string.Empty;
+        public string CurrentSearchStatus { get; private set; } = string.Empty;
         public string LastUpdateVersion { get; private set; } = string.Empty;
         public string LastUpdateCommand { get; private set; } = string.Empty;
         public string LastReportTarget { get; private set; } = string.Empty;
@@ -61,6 +66,8 @@ namespace Gwt.Studio.UI
                 _button.onClick.RemoveListener(InvokeClicked);
             if (_updateButton != null)
                 _updateButton.onClick.RemoveListener(InvokeUpdateRequested);
+            if (_searchButton != null)
+                _searchButton.onClick.RemoveListener(InvokeSearchRequested);
             if (_voiceButton != null)
                 _voiceButton.onClick.RemoveListener(InvokeVoiceRequested);
             if (_reportButton != null)
@@ -133,6 +140,12 @@ namespace Gwt.Studio.UI
             ApplyState();
         }
 
+        public void SetSearchState(string status)
+        {
+            CurrentSearchStatus = status ?? string.Empty;
+            ApplyState();
+        }
+
         public void OnPointerClick(PointerEventData eventData)
         {
             if (eventData?.pointerPressRaycast.gameObject != null &&
@@ -168,6 +181,8 @@ namespace Gwt.Studio.UI
                 _audioStatusText.text = CurrentAudioStatus;
             if (_progressStatusText != null)
                 _progressStatusText.text = CurrentProgressStatus;
+            if (_searchStatusText != null)
+                _searchStatusText.text = CurrentSearchStatus;
         }
 
         private void EnsureUi()
@@ -180,7 +195,7 @@ namespace Gwt.Studio.UI
             rectTransform.anchorMax = new Vector2(0f, 1f);
             rectTransform.pivot = new Vector2(0f, 1f);
             rectTransform.anchoredPosition = new Vector2(20f, -20f);
-            rectTransform.sizeDelta = new Vector2(640f, 152f);
+            rectTransform.sizeDelta = new Vector2(640f, 180f);
 
             if (gameObject.GetComponent<Image>() == null)
             {
@@ -211,8 +226,13 @@ namespace Gwt.Studio.UI
                 _updateStatusText = CreateLabel("UpdateStatus", new Vector2(0f, -114f), 16f, FontStyles.Normal);
             if (_reportStatusText == null)
                 _reportStatusText = CreateLabel("ReportStatus", new Vector2(280f, -114f), 16f, FontStyles.Normal);
+            if (_searchStatusText == null)
+                _searchStatusText = CreateLabel("SearchStatus", new Vector2(0f, -140f), 16f, FontStyles.Normal);
             SetLabelWidth(_updateStatusText, 270f);
             SetLabelWidth(_reportStatusText, 300f);
+            SetLabelWidth(_searchStatusText, 360f);
+            if (_searchButton == null)
+                CreateSearchButton();
             if (_updateButton == null)
                 CreateUpdateButton();
             if (_voiceButton == null)
@@ -271,6 +291,12 @@ namespace Gwt.Studio.UI
                 _updateButton.onClick.AddListener(InvokeUpdateRequested);
             }
 
+            if (_searchButton != null)
+            {
+                _searchButton.onClick.RemoveListener(InvokeSearchRequested);
+                _searchButton.onClick.AddListener(InvokeSearchRequested);
+            }
+
             if (_voiceButton != null)
             {
                 _voiceButton.onClick.RemoveListener(InvokeVoiceRequested);
@@ -313,6 +339,26 @@ namespace Gwt.Studio.UI
             _updateButton = buttonObject.GetComponent<Button>();
             _updateButton.targetGraphic = image;
             _updateButtonText = CreateButtonLabel(buttonObject.transform, "Update");
+        }
+
+        private void CreateSearchButton()
+        {
+            var buttonObject = new GameObject("SearchButton", typeof(RectTransform), typeof(Image), typeof(Button));
+            buttonObject.transform.SetParent(transform, false);
+
+            var rect = buttonObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(1f, 1f);
+            rect.anchorMax = new Vector2(1f, 1f);
+            rect.pivot = new Vector2(1f, 1f);
+            rect.anchoredPosition = new Vector2(-484f, 0f);
+            rect.sizeDelta = new Vector2(108f, 30f);
+
+            var image = buttonObject.GetComponent<Image>();
+            image.color = new Color(0.22f, 0.28f, 0.16f, 0.95f);
+
+            _searchButton = buttonObject.GetComponent<Button>();
+            _searchButton.targetGraphic = image;
+            _searchButtonText = CreateButtonLabel(buttonObject.transform, "Index");
         }
 
         private void CreateVoiceButton()
@@ -404,6 +450,11 @@ namespace Gwt.Studio.UI
         private void InvokeUpdateRequested()
         {
             UpdateRequested?.Invoke();
+        }
+
+        private void InvokeSearchRequested()
+        {
+            SearchRequested?.Invoke();
         }
 
         private void InvokeReportRequested()
