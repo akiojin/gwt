@@ -14,12 +14,15 @@ namespace Gwt.Editor
     public static class ModernInteriorsSpriteAssetPipeline
     {
         public const string GraphicsRoot = "Assets/Graphics/moderninteriors-win";
+        public const string OfficeGraphicsRoot = "Assets/Graphics/Modern_Office_Revamped_v1.2";
         public const string HomeDesignsRoot = GraphicsRoot + "/6_Home_Designs";
         public const string GeneratedSpriteRoot = "Assets/Generated/ModernInteriorsTilemapSprites";
         public const string GeneratedTileRoot = "Assets/Generated/ModernInteriorsTilemapTiles";
         public const string GeneratedAtlasPath = "Assets/Generated/ModernInteriorsAtlases/HomeDesigns.spriteatlas";
         public const string GeneratedCharacterAtlasPath = "Assets/Generated/ModernInteriorsAtlases/Characters.spriteatlas";
         public const string GeneratedBackgroundAtlasPath = "Assets/Generated/ModernInteriorsAtlases/Backgrounds.spriteatlas";
+        public const string GeneratedOfficeAtlasPath = "Assets/Generated/ModernInteriorsAtlases/Office.spriteatlas";
+        public const string GeneratedUiAtlasPath = "Assets/Generated/ModernInteriorsAtlases/UI.spriteatlas";
 
         private static readonly Regex CellSizePattern = new(@"(?<!\d)(16|32|48)x\1(?!\d)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
@@ -53,16 +56,18 @@ namespace Gwt.Editor
 
             CreateOrUpdateAtlas(GetCharacterAtlasDefinition());
             CreateOrUpdateAtlas(GetBackgroundAtlasDefinition());
+            CreateOrUpdateAtlas(GetOfficeAtlasDefinition());
+            CreateOrUpdateAtlas(GetUiAtlasDefinition());
 
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
 
-            Debug.Log($"[GWT] Configured {spritePaths.Count} sprite importers and updated character/background atlases");
+            Debug.Log($"[GWT] Configured {spritePaths.Count} sprite importers and updated character/background/office/UI atlases");
         }
 
         public static List<string> CollectSpritePngPaths()
         {
-            return AssetDatabase.FindAssets("t:Texture2D", new[] { GraphicsRoot })
+            return AssetDatabase.FindAssets("t:Texture2D", new[] { GraphicsRoot, OfficeGraphicsRoot })
                 .Select(AssetDatabase.GUIDToAssetPath)
                 .Where(IsSpriteCandidateAsset)
                 .OrderBy(path => path, StringComparer.Ordinal)
@@ -98,8 +103,13 @@ namespace Gwt.Editor
         public static bool IsSpriteCandidateAsset(string assetPath)
         {
             if (string.IsNullOrWhiteSpace(assetPath) ||
-                !assetPath.StartsWith(GraphicsRoot, StringComparison.Ordinal) ||
                 !assetPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!assetPath.StartsWith(GraphicsRoot, StringComparison.Ordinal) &&
+                !assetPath.StartsWith(OfficeGraphicsRoot, StringComparison.Ordinal))
             {
                 return false;
             }
@@ -147,7 +157,9 @@ namespace Gwt.Editor
                    fileName.IndexOf("tileset", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    fileName.IndexOf("spritesheet", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    assetPath.IndexOf("/Animated_Spritesheets/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   fileName.StartsWith("UI_", StringComparison.OrdinalIgnoreCase);
+                   fileName.StartsWith("UI_", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.StartsWith("Modern_Office_", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.StartsWith("Room_Builder_", StringComparison.OrdinalIgnoreCase);
         }
 
         public static List<TileSlice> BuildTileSlices(string spriteNamePrefix, int textureWidth, int textureHeight, int cellSize)
@@ -351,6 +363,22 @@ namespace Gwt.Editor
                     GraphicsRoot + "/3_Animated_objects",
                     GraphicsRoot + "/6_Home_Designs"
                 });
+        }
+
+        public static SpriteAtlasDefinition GetOfficeAtlasDefinition()
+        {
+            return new SpriteAtlasDefinition(
+                "Office",
+                GeneratedOfficeAtlasPath,
+                new[] { OfficeGraphicsRoot });
+        }
+
+        public static SpriteAtlasDefinition GetUiAtlasDefinition()
+        {
+            return new SpriteAtlasDefinition(
+                "UI",
+                GeneratedUiAtlasPath,
+                new[] { GraphicsRoot + "/4_User_Interface_Elements" });
         }
 
         private static void ConfigureGeneratedTileSpriteImporter(string assetPath)
