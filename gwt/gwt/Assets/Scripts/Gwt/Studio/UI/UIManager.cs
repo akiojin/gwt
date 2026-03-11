@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using Gwt.AI.Services;
 using Cysharp.Threading.Tasks;
+using Gwt.Core.Models;
 using Gwt.Core.Services.Terminal;
 using Gwt.Infra.Services;
 using Gwt.Lifecycle.Services;
@@ -19,8 +20,11 @@ namespace Gwt.Studio.UI
     {
         private static readonly string DefaultUpdateManifestPath =
             Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".gwt", "updates", "manifest.json");
+        private static readonly string DefaultUpdateManifestSourcePath =
+            Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".gwt", "updates", "manifest-source.txt");
         private static readonly string PreparedUpdateStatePath =
             Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".gwt", "updates", "prepared-update-state.json");
+        private const string UpdateManifestSourceEnvVar = "GWT_UPDATE_MANIFEST_SOURCE";
 
         [SerializeField] private ConsolePanel _consolePanel;
         [SerializeField] private LeadInputField _leadInputField;
@@ -39,6 +43,7 @@ namespace Gwt.Studio.UI
         private ITerminalPaneManager _terminalPaneManager;
         private IDockerService _dockerService;
         private IBuildService _buildService;
+        private IConfigService _configService;
         private IVoiceService _voiceService;
         private ISoundService _soundService;
         private IGamificationService _gamificationService;
@@ -65,13 +70,15 @@ namespace Gwt.Studio.UI
             IBuildService buildService = null,
             IVoiceService voiceService = null,
             ISoundService soundService = null,
-            IGamificationService gamificationService = null)
+            IGamificationService gamificationService = null,
+            IConfigService configService = null)
         {
             _projectLifecycleService = projectLifecycleService;
             _multiProjectService = multiProjectService;
             _terminalPaneManager = terminalPaneManager;
             _dockerService = dockerService;
             _buildService = buildService;
+            _configService = configService;
             _voiceService = voiceService;
             _soundService = soundService;
             _gamificationService = gamificationService;
@@ -466,6 +473,7 @@ namespace Gwt.Studio.UI
             }
 
             var currentProjectPath = _projectLifecycleService?.CurrentProject?.Path ?? string.Empty;
+            var updateSettings = await LoadProjectUpdateSettingsAsync(currentProjectPath);
             if (_preparedUpdatePlan != null &&
                 _preparedUpdatePlan.ShouldApply &&
                 !string.IsNullOrWhiteSpace(currentProjectPath) &&
@@ -493,7 +501,7 @@ namespace Gwt.Studio.UI
                 }
                 else
                 {
-                    if (ShouldBlockRealUpdateLaunchInEditor())
+                    if (ShouldBlockRealUpdateLaunchInEditor(updateSettings))
                     {
                         _projectInfoBar.SetUpdateState("Launch blocked in editor", _preparedUpdatePlan.Candidate?.Version, _preparedUpdatePlan.LauncherScriptPath);
                         _projectInfoBar.SetUpdateButtonLabel("Launch");
@@ -528,7 +536,7 @@ namespace Gwt.Studio.UI
 
             try
             {
-                var manifestSource = ResolveDefaultUpdateManifestSource();
+                var manifestSource = await ResolveUpdateManifestSourceAsync(currentProjectPath, updateSettings);
                 if (string.IsNullOrWhiteSpace(manifestSource))
                 {
                     ClearPreparedUpdate();
@@ -648,6 +656,7 @@ namespace Gwt.Studio.UI
                 _terminalPaneManager != null &&
                 _dockerService != null &&
                 _buildService != null &&
+                _configService != null &&
                 _voiceService != null &&
                 _soundService != null &&
                 _gamificationService != null)
@@ -698,6 +707,14 @@ namespace Gwt.Studio.UI
             try
             {
                 _buildService ??= container.Resolve<IBuildService>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _configService ??= container.Resolve<IConfigService>();
             }
             catch
             {
@@ -771,8 +788,49 @@ namespace Gwt.Studio.UI
             }
         }
 
+        private async UniTask<UpdateSettings> LoadProjectUpdateSettingsAsync(string projectPath)
+        {
+            if (_configService == null || string.IsNullOrWhiteSpace(projectPath))
+                return null;
+
+            try
+            {
+                var settings = await _configService.LoadSettingsAsync(projectPath);
+                return settings?.Update;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private async UniTask<string> ResolveUpdateManifestSourceAsync(string projectPath, UpdateSettings updateSettings)
+        {
+            if (!string.IsNullOrWhiteSpace(updateSettings?.ManifestSource))
+                return updateSettings.ManifestSource.Trim();
+
+            return ResolveDefaultUpdateManifestSource();
+        }
+
         private static string ResolveDefaultUpdateManifestSource()
         {
+            var envSource = System.Environment.GetEnvironmentVariable(UpdateManifestSourceEnvVar)?.Trim();
+            if (!string.IsNullOrWhiteSpace(envSource))
+                return envSource;
+
+            try
+            {
+                if (File.Exists(DefaultUpdateManifestSourcePath))
+                {
+                    var configuredSource = File.ReadAllText(DefaultUpdateManifestSourcePath).Trim();
+                    if (!string.IsNullOrWhiteSpace(configuredSource))
+                        return configuredSource;
+                }
+            }
+            catch
+            {
+            }
+
             if (File.Exists(DefaultUpdateManifestPath))
                 return DefaultUpdateManifestPath;
 
@@ -787,10 +845,11 @@ namespace Gwt.Studio.UI
             TryDeletePreparedUpdateState();
         }
 
-        private bool ShouldBlockRealUpdateLaunchInEditor()
+        private bool ShouldBlockRealUpdateLaunchInEditor(UpdateSettings updateSettings)
         {
             return Application.isEditor &&
-                _buildService is BuildService;
+                _buildService is BuildService &&
+                !(updateSettings?.AllowLaunchInEditor ?? false);
         }
 
         private void RestorePreparedUpdateStateIfNeeded()

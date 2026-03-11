@@ -20,6 +20,7 @@ namespace Gwt.Core.Models
         public TerminalSettings Terminal = new();
         public ProfilesConfig Profiles = new();
         public SoundSettings Sound = new();
+        public UpdateSettings Update = new();
         public List<CustomAgentProfile> CustomAgentProfiles = new();
     }
 
@@ -63,6 +64,13 @@ namespace Gwt.Core.Models
     public class TerminalSettings
     {
         public string DefaultShell;
+    }
+
+    [System.Serializable]
+    public class UpdateSettings
+    {
+        public string ManifestSource = string.Empty;
+        public bool AllowLaunchInEditor;
     }
 
     [System.Serializable]

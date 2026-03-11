@@ -1137,6 +1137,200 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_UsesEnvironmentManifestSource() => UniTask.ToCoroutine(async () =>
+        {
+            var envVarName = GetUpdateManifestSourceEnvVar();
+            var previousValue = Environment.GetEnvironmentVariable(envVarName);
+            Environment.SetEnvironmentVariable(envVarName, "https://updates.example.com/manifest.json");
+
+            try
+            {
+                var lifecycle = new FakeProjectLifecycleService();
+                lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+                using var scope = new UiScope();
+                var manager = scope.Root.AddComponent<UIManager>();
+                var bar = scope.Root.AddComponent<ProjectInfoBar>();
+                SetPrivateField(manager, "_projectInfoBar", bar);
+
+                var buildService = new FakeBuildService();
+                manager.Construct(
+                    lifecycle,
+                    new MultiProjectService(lifecycle),
+                    new TerminalPaneManager(),
+                    null,
+                    buildService,
+                    new VoiceService(),
+                    new SoundService(),
+                    new GamificationService());
+
+                var updateButton = bar.GetComponentsInChildren<Button>(true)
+                    .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+                Assert.IsNotNull(updateButton);
+
+                updateButton.onClick.Invoke();
+                await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
+
+                Assert.AreEqual("https://updates.example.com/manifest.json", buildService.LastLoadedManifestSource);
+                Assert.AreEqual("https://updates.example.com/manifest.json", buildService.LastPreparedManifestSource);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(envVarName, previousValue);
+            }
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_UsesConfiguredManifestSourceFile() => UniTask.ToCoroutine(async () =>
+        {
+            var sourceConfigPath = GetUpdateManifestSourcePath();
+            var envVarName = GetUpdateManifestSourceEnvVar();
+            var previousValue = Environment.GetEnvironmentVariable(envVarName);
+            Environment.SetEnvironmentVariable(envVarName, null);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(sourceConfigPath)!);
+            File.WriteAllText(sourceConfigPath, "https://updates.example.com/configured-manifest.json");
+
+            try
+            {
+                var lifecycle = new FakeProjectLifecycleService();
+                lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+                using var scope = new UiScope();
+                var manager = scope.Root.AddComponent<UIManager>();
+                var bar = scope.Root.AddComponent<ProjectInfoBar>();
+                SetPrivateField(manager, "_projectInfoBar", bar);
+
+                var buildService = new FakeBuildService();
+                manager.Construct(
+                    lifecycle,
+                    new MultiProjectService(lifecycle),
+                    new TerminalPaneManager(),
+                    null,
+                    buildService,
+                    new VoiceService(),
+                    new SoundService(),
+                    new GamificationService());
+
+                var updateButton = bar.GetComponentsInChildren<Button>(true)
+                    .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+                Assert.IsNotNull(updateButton);
+
+                updateButton.onClick.Invoke();
+                await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
+
+                Assert.AreEqual("https://updates.example.com/configured-manifest.json", buildService.LastLoadedManifestSource);
+                Assert.AreEqual("https://updates.example.com/configured-manifest.json", buildService.LastPreparedManifestSource);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(envVarName, previousValue);
+                if (File.Exists(sourceConfigPath))
+                    File.Delete(sourceConfigPath);
+            }
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_UsesSettingsManifestSource() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+
+            var buildService = new FakeBuildService();
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                buildService,
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings
+                {
+                    Update = new UpdateSettings
+                    {
+                        ManifestSource = "https://updates.example.com/settings-manifest.json"
+                    }
+                }));
+
+            var updateButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+            Assert.IsNotNull(updateButton);
+
+            updateButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
+
+            Assert.AreEqual("https://updates.example.com/settings-manifest.json", buildService.LastLoadedManifestSource);
+            Assert.AreEqual("https://updates.example.com/settings-manifest.json", buildService.LastPreparedManifestSource);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_AllowsLaunchInEditor_WhenSettingsEnableIt() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            var scriptPath = Path.Combine(Path.GetTempPath(), "gwt-allow-launch-" + Guid.NewGuid().ToString("N") + ".sh");
+            File.WriteAllText(scriptPath, "#!/bin/sh\nexit 0\n");
+
+            try
+            {
+                using var scope = new UiScope();
+                var manager = scope.Root.AddComponent<UIManager>();
+                var bar = scope.Root.AddComponent<ProjectInfoBar>();
+                SetPrivateField(manager, "_projectInfoBar", bar);
+                SetPrivateField(manager, "_preparedUpdatePlan", new PreparedUpdatePlan
+                {
+                    Candidate = new UpdateInfo { Version = "1.1.0", DownloadUrl = "file:///tmp/gwt-1.1.0.zip" },
+                    DownloadedArtifactPath = "/tmp/gwt-1.1.0.zip",
+                    ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
+                    LauncherScriptPath = scriptPath,
+                    ShouldApply = true
+                });
+                SetPrivateField(manager, "_preparedUpdateProjectPath", "/tmp/project-a");
+                SetPrivateField(manager, "_preparedUpdateLaunchReady", true);
+
+                manager.Construct(
+                    lifecycle,
+                    new MultiProjectService(lifecycle),
+                    new TerminalPaneManager(),
+                    null,
+                    BuildService.CreateForTests(_ => new System.Diagnostics.Process()),
+                    new VoiceService(),
+                    new SoundService(),
+                    new GamificationService(),
+                    new FakeConfigService(new Settings
+                    {
+                        Update = new UpdateSettings
+                        {
+                            AllowLaunchInEditor = true
+                        }
+                    }));
+
+                var updateButton = bar.GetComponentsInChildren<Button>(true)
+                    .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+                Assert.IsNotNull(updateButton);
+
+                updateButton.onClick.Invoke();
+                await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update launch started", cancellationToken: default);
+
+                Assert.AreEqual("Update launch started", bar.CurrentUpdateStatus);
+                Assert.AreEqual("Update", bar.CurrentUpdateButtonLabel);
+            }
+            finally
+            {
+                if (File.Exists(scriptPath))
+                    File.Delete(scriptPath);
+            }
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_Construct_RestoresPersistedPreparedUpdateState() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();
@@ -1321,6 +1515,18 @@ namespace Gwt.Tests.Editor
         private static string GetPreparedUpdateStatePath()
         {
             var field = typeof(UIManager).GetField("PreparedUpdateStatePath", BindingFlags.NonPublic | BindingFlags.Static);
+            return (string)field.GetValue(null);
+        }
+
+        private static string GetUpdateManifestSourcePath()
+        {
+            var field = typeof(UIManager).GetField("DefaultUpdateManifestSourcePath", BindingFlags.NonPublic | BindingFlags.Static);
+            return (string)field.GetValue(null);
+        }
+
+        private static string GetUpdateManifestSourceEnvVar()
+        {
+            var field = typeof(UIManager).GetField("UpdateManifestSourceEnvVar", BindingFlags.NonPublic | BindingFlags.Static);
             return (string)field.GetValue(null);
         }
 
@@ -1627,6 +1833,8 @@ namespace Gwt.Tests.Editor
             public int PrepareCallCount { get; private set; }
             public int LaunchCallCount { get; private set; }
             public int WriteScriptCallCount { get; private set; }
+            public string LastLoadedManifestSource { get; private set; }
+            public string LastPreparedManifestSource { get; private set; }
 
             public SystemInfoData GetSystemInfo() => new() { OS = "TestOS", UnityVersion = "6000.3.10f1", AppVersion = "1.0.0" };
             public SystemStatsData GetSystemStats() => new() { AllocatedMemoryMB = 1, ReservedMemoryMB = 2, MonoUsedMemoryMB = 1 };
@@ -1649,7 +1857,11 @@ namespace Gwt.Tests.Editor
             {
                 new UpdateInfo { Version = "1.1.0", DownloadUrl = "file:///tmp/gwt-1.1.0.zip", ReleaseNotes = "Test update" }
             };
-            public UniTask<System.Collections.Generic.List<UpdateInfo>> LoadUpdateManifestAsync(string manifestSource, System.Threading.CancellationToken ct = default) => UniTask.FromResult(ParseUpdateManifest("{}"));
+            public UniTask<System.Collections.Generic.List<UpdateInfo>> LoadUpdateManifestAsync(string manifestSource, System.Threading.CancellationToken ct = default)
+            {
+                LastLoadedManifestSource = manifestSource ?? string.Empty;
+                return UniTask.FromResult(ParseUpdateManifest("{}"));
+            }
             public UpdateInfo GetLatestUpdate(string currentVersion, System.Collections.Generic.List<UpdateInfo> candidates) => candidates.FirstOrDefault();
             public bool ShouldApplyUpdate(string currentVersion, UpdateInfo candidate) => candidate != null && candidate.Version != currentVersion;
             public string GetUpdateStagingDirectory() => "/tmp";
@@ -1657,6 +1869,7 @@ namespace Gwt.Tests.Editor
             public UniTask<PreparedUpdatePlan> PrepareUpdateAsync(string currentVersion, UpdateInfo candidate, string executablePath, string destinationDirectory = null, string manifestSource = null, System.Threading.CancellationToken ct = default)
             {
                 PrepareCallCount++;
+                LastPreparedManifestSource = manifestSource ?? string.Empty;
                 return UniTask.FromResult(new PreparedUpdatePlan
                 {
                     Candidate = candidate,
@@ -1682,6 +1895,27 @@ namespace Gwt.Tests.Editor
             public string BuildApplyUpdateCommand(UpdateInfo candidate) => "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app";
             public string BuildApplyDownloadedUpdateCommand(string downloadedArtifactPath) => $"cp {downloadedArtifactPath} /Applications/GWT.app";
             public string BuildRestartCommand(string executablePath) => "open /Applications/GWT.app";
+        }
+
+        private sealed class FakeConfigService : IConfigService
+        {
+            private readonly Settings _settings;
+
+            public FakeConfigService(Settings settings)
+            {
+                _settings = settings;
+            }
+
+            public UniTask<Settings> LoadSettingsAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+                => UniTask.FromResult(_settings);
+
+            public UniTask SaveSettingsAsync(string projectRoot, Settings settings, System.Threading.CancellationToken ct = default)
+                => UniTask.CompletedTask;
+
+            public UniTask<Settings> GetOrCreateSettingsAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+                => UniTask.FromResult(_settings ?? new Settings());
+
+            public string GetGwtDir(string projectRoot) => Path.Combine(projectRoot, ".gwt");
         }
 
         [System.Serializable]

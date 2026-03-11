@@ -101,6 +101,7 @@ namespace Gwt.Tests.Editor
             Assert.IsNotNull(settings.Agent);
             Assert.IsNotNull(settings.Docker);
             Assert.IsNotNull(settings.Appearance);
+            Assert.IsNotNull(settings.Update);
         }
 
         [Test]
@@ -110,7 +111,12 @@ namespace Gwt.Tests.Editor
             {
                 DefaultBaseBranch = "develop",
                 Debug = true,
-                LogRetentionDays = 7
+                LogRetentionDays = 7,
+                Update = new UpdateSettings
+                {
+                    ManifestSource = "https://updates.example.com/manifest.json",
+                    AllowLaunchInEditor = true
+                }
             };
 
             var json = JsonUtility.ToJson(original);
@@ -119,6 +125,9 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("develop", deserialized.DefaultBaseBranch);
             Assert.AreEqual(true, deserialized.Debug);
             Assert.AreEqual(7, deserialized.LogRetentionDays);
+            Assert.IsNotNull(deserialized.Update);
+            Assert.AreEqual("https://updates.example.com/manifest.json", deserialized.Update.ManifestSource);
+            Assert.IsTrue(deserialized.Update.AllowLaunchInEditor);
         }
 
         [Test]
