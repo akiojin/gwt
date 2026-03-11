@@ -1299,6 +1299,49 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_UsesSettingsStagingDirectoryAndLauncherPath() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+
+            var buildService = new FakeBuildService();
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                buildService,
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings
+                {
+                    Update = new UpdateSettings
+                    {
+                        StagingDirectory = "/tmp/custom-staging",
+                        ExternalLauncherPath = "/usr/local/bin/gwt-updater"
+                    }
+                }));
+
+            var updateButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+            Assert.IsNotNull(updateButton);
+
+            updateButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
+
+            Assert.AreEqual("/tmp/custom-staging", buildService.LastPrepareDestinationDirectory);
+            Assert.IsNotNull(buildService.LastPreparedPlan);
+            Assert.AreEqual("/tmp/custom-staging", buildService.LastPreparedPlan.StagingDirectory);
+            Assert.AreEqual("/usr/local/bin/gwt-updater", buildService.LastPreparedPlan.LauncherExecutablePath);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_AllowsLaunchInEditor_WhenSettingsEnableIt() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();
@@ -1430,22 +1473,17 @@ namespace Gwt.Tests.Editor
                     StatusText = "Update staged",
                     ButtonLabel = "Launch",
                     DisplayCommand = "/tmp/apply-update.sh",
-                    Plan = new PreparedUpdatePlan
-                    {
-                        Candidate = new UpdateInfo
-                        {
-                            Version = "1.1.0",
-                            DownloadUrl = "file:///tmp/gwt-1.1.0.zip",
-                            ReleaseNotes = "Test update"
-                        },
-                        ManifestSource = "/tmp/manifest.json",
-                        DownloadedArtifactPath = "/tmp/gwt-1.1.0.zip",
-                        ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
-                        RestartCommand = "open /Applications/GWT.app",
-                        StagingDirectory = "/tmp",
-                        LauncherScriptPath = "/tmp/apply-update.sh",
-                        ShouldApply = true
-                    }
+                    CandidateVersion = "1.1.0",
+                    CandidateDownloadUrl = "file:///tmp/gwt-1.1.0.zip",
+                    CandidateReleaseNotes = "Test update",
+                    ManifestSource = "/tmp/manifest.json",
+                    DownloadedArtifactPath = "/tmp/gwt-1.1.0.zip",
+                    ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
+                    RestartCommand = "open /Applications/GWT.app",
+                    StagingDirectory = "/tmp",
+                    LauncherScriptPath = "/tmp/apply-update.sh",
+                    LauncherExecutablePath = "/usr/local/bin/gwt-updater",
+                    ShouldApply = true
                 };
                 File.WriteAllText(statePath, JsonUtility.ToJson(persisted));
 
@@ -1866,6 +1904,8 @@ namespace Gwt.Tests.Editor
             public int WriteScriptCallCount { get; private set; }
             public string LastLoadedManifestSource { get; private set; }
             public string LastPreparedManifestSource { get; private set; }
+            public string LastPrepareDestinationDirectory { get; private set; }
+            public PreparedUpdatePlan LastPreparedPlan { get; private set; }
 
             public SystemInfoData GetSystemInfo() => new() { OS = "TestOS", UnityVersion = "6000.3.10f1", AppVersion = "1.0.0" };
             public SystemStatsData GetSystemStats() => new() { AllocatedMemoryMB = 1, ReservedMemoryMB = 2, MonoUsedMemoryMB = 1 };
@@ -1901,17 +1941,19 @@ namespace Gwt.Tests.Editor
             {
                 PrepareCallCount++;
                 LastPreparedManifestSource = manifestSource ?? string.Empty;
-                return UniTask.FromResult(new PreparedUpdatePlan
+                LastPrepareDestinationDirectory = destinationDirectory ?? string.Empty;
+                LastPreparedPlan = new PreparedUpdatePlan
                 {
                     Candidate = candidate,
                     ManifestSource = manifestSource ?? "/tmp/manifest.json",
                     DownloadedArtifactPath = "/tmp/gwt-1.1.0.zip",
                     ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
                     RestartCommand = "open /Applications/GWT.app",
-                    StagingDirectory = "/tmp",
+                    StagingDirectory = destinationDirectory ?? "/tmp",
                     LauncherScriptPath = "/tmp/apply-update.sh",
                     ShouldApply = true
-                });
+                };
+                return UniTask.FromResult(LastPreparedPlan);
             }
             public UniTask<string> WritePreparedUpdateScriptAsync(PreparedUpdatePlan plan, System.Threading.CancellationToken ct = default)
             {
@@ -1957,7 +1999,18 @@ namespace Gwt.Tests.Editor
             public string StatusText;
             public string ButtonLabel;
             public string DisplayCommand;
-            public PreparedUpdatePlan Plan;
+            public string CandidateVersion;
+            public string CandidateDownloadUrl;
+            public string CandidateReleaseNotes;
+            public bool CandidateMandatory;
+            public string ManifestSource;
+            public string DownloadedArtifactPath;
+            public string ApplyCommand;
+            public string RestartCommand;
+            public string StagingDirectory;
+            public string LauncherScriptPath;
+            public string LauncherExecutablePath;
+            public bool ShouldApply;
         }
 
         private sealed class NoOpObservable : IObservable<string>

@@ -563,10 +563,12 @@ namespace Gwt.Studio.UI
                     currentVersion,
                     latest,
                     Application.dataPath,
+                    destinationDirectory: ResolveUpdateStagingDirectory(updateSettings),
                     manifestSource: manifestSource);
 
                 if (plan != null && plan.ShouldApply)
                 {
+                    ApplyUpdateSettingsToPreparedPlan(plan, updateSettings);
                     _preparedUpdatePlan = plan;
                     _preparedUpdateProjectPath = currentProjectPath;
                     _preparedUpdateLaunchReady = false;
@@ -812,6 +814,24 @@ namespace Gwt.Studio.UI
             return ResolveDefaultUpdateManifestSource();
         }
 
+        private static string ResolveUpdateStagingDirectory(UpdateSettings updateSettings)
+        {
+            return string.IsNullOrWhiteSpace(updateSettings?.StagingDirectory)
+                ? null
+                : updateSettings.StagingDirectory.Trim();
+        }
+
+        private static void ApplyUpdateSettingsToPreparedPlan(PreparedUpdatePlan plan, UpdateSettings updateSettings)
+        {
+            if (plan == null || updateSettings == null)
+                return;
+
+            if (!string.IsNullOrWhiteSpace(updateSettings.StagingDirectory))
+                plan.StagingDirectory = updateSettings.StagingDirectory.Trim();
+            if (!string.IsNullOrWhiteSpace(updateSettings.ExternalLauncherPath))
+                plan.LauncherExecutablePath = updateSettings.ExternalLauncherPath.Trim();
+        }
+
         private static string ResolveDefaultUpdateManifestSource()
         {
             var envSource = System.Environment.GetEnvironmentVariable(UpdateManifestSourceEnvVar)?.Trim();
@@ -905,6 +925,7 @@ namespace Gwt.Studio.UI
                     RestartCommand = _preparedUpdatePlan.RestartCommand ?? string.Empty,
                     StagingDirectory = _preparedUpdatePlan.StagingDirectory ?? string.Empty,
                     LauncherScriptPath = _preparedUpdatePlan.LauncherScriptPath ?? string.Empty,
+                    LauncherExecutablePath = _preparedUpdatePlan.LauncherExecutablePath ?? string.Empty,
                     ShouldApply = _preparedUpdatePlan.ShouldApply
                 };
                 File.WriteAllText(PreparedUpdateStatePath, JsonUtility.ToJson(payload));
@@ -944,6 +965,7 @@ namespace Gwt.Studio.UI
             public string RestartCommand;
             public string StagingDirectory;
             public string LauncherScriptPath;
+            public string LauncherExecutablePath;
             public bool ShouldApply;
 
             public PreparedUpdatePlan ToPreparedUpdatePlan()
@@ -963,6 +985,7 @@ namespace Gwt.Studio.UI
                     RestartCommand = RestartCommand,
                     StagingDirectory = StagingDirectory,
                     LauncherScriptPath = LauncherScriptPath,
+                    LauncherExecutablePath = LauncherExecutablePath,
                     ShouldApply = ShouldApply
                 };
             }

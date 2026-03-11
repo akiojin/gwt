@@ -70,6 +70,8 @@ namespace Gwt.Core.Models
     public class UpdateSettings
     {
         public string ManifestSource = string.Empty;
+        public string StagingDirectory = string.Empty;
+        public string ExternalLauncherPath = string.Empty;
         public bool AllowLaunchInEditor;
     }
 

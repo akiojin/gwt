@@ -389,7 +389,7 @@ namespace Gwt.Infra.Services
 
             try
             {
-                return _processStarter(BuildLauncherProcessStartInfo(scriptPath)) != null;
+                return _processStarter(BuildLauncherProcessStartInfo(scriptPath, plan.LauncherExecutablePath)) != null;
             }
             catch
             {
@@ -510,9 +510,19 @@ namespace Gwt.Infra.Services
             return unix.ToString();
         }
 
-        private static ProcessStartInfo BuildLauncherProcessStartInfo(string scriptPath)
+        private static ProcessStartInfo BuildLauncherProcessStartInfo(string scriptPath, string launcherExecutablePath)
         {
             var workingDirectory = Path.GetDirectoryName(scriptPath) ?? Directory.GetCurrentDirectory();
+            if (!string.IsNullOrWhiteSpace(launcherExecutablePath))
+            {
+                return new ProcessStartInfo(launcherExecutablePath, $"\"{scriptPath}\"")
+                {
+                    WorkingDirectory = workingDirectory,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+            }
+
             if (Application.platform is RuntimePlatform.WindowsEditor or RuntimePlatform.WindowsPlayer)
             {
                 return new ProcessStartInfo("cmd.exe", $"/c \"{scriptPath}\"")

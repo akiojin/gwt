@@ -68,6 +68,7 @@ namespace Gwt.Infra.Services
         public string RestartCommand;
         public string StagingDirectory;
         public string LauncherScriptPath;
+        public string LauncherExecutablePath;
         public bool ShouldApply;
     }
 
