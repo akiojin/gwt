@@ -135,7 +135,7 @@ fn voice_runtime_venv_dir() -> Result<PathBuf, String> {
 fn voice_runtime_python_path(venv_dir: &Path) -> PathBuf {
     #[cfg(windows)]
     {
-        return venv_dir.join("Scripts").join("python.exe");
+        venv_dir.join("Scripts").join("python.exe")
     }
 
     #[cfg(not(windows))]

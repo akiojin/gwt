@@ -1370,6 +1370,7 @@ mod tests {
     }
 
     /// Helper: read from PTY reader in a separate thread with timeout.
+    #[cfg_attr(windows, allow(dead_code))]
     fn read_with_timeout(
         mut reader: Box<dyn Read + Send>,
         mut writer: Option<Box<dyn Write + Send>>,
@@ -1426,6 +1427,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn platform_echo_command() -> (String, Vec<String>, Option<String>, bool) {
         if cfg!(windows) {
             (
@@ -1450,6 +1452,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn platform_env_command() -> (String, Vec<String>, Option<String>, bool) {
         if cfg!(windows) {
             (
@@ -1470,6 +1473,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn platform_success_exit_command() -> (String, Vec<String>, Option<String>, bool) {
         if cfg!(windows) {
             (
@@ -1489,6 +1493,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn platform_invalid_command() -> (String, Vec<String>, Option<String>, bool) {
         if cfg!(windows) {
             (

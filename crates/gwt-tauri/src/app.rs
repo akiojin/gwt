@@ -50,6 +50,7 @@ fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
     env.get("PATH")
         .map(|v| v.trim())
@@ -57,7 +58,7 @@ fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
         .map(str::to_string)
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, not(unix)), allow(dead_code))]
 pub(crate) fn apply_captured_path_to_process_env(env: &HashMap<String, String>) -> bool {
     let Some(path) = captured_path_from_env(env) else {
         return false;
@@ -66,6 +67,7 @@ pub(crate) fn apply_captured_path_to_process_env(env: &HashMap<String, String>) 
     true
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[cfg(not(test))]
 pub(crate) fn spawn_login_shell_env_capture(app_handle: tauri::AppHandle<tauri::Wry>) {
     {
@@ -175,6 +177,13 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_WINDOW_NEXT_TAB => Some("next-tab"),
         _ => None,
     }
+}
+
+fn should_refresh_window_focus_dependent_menu(
+    previous_focused_label: Option<&str>,
+    next_focused_label: &str,
+) -> bool {
+    previous_focused_label != Some(next_focused_label)
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -518,7 +527,6 @@ pub fn build_app(
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
-                let _ = crate::menu::rebuild_menu(app);
                 return;
             }
 
@@ -561,21 +569,34 @@ pub fn build_app(
                 api.prevent_close();
                 let _ = window.hide();
                 state.remove_window_from_history(window.label());
+                state.clear_last_focused_window(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
             if let tauri::WindowEvent::Focused(true) = event {
                 let state = window.app_handle().state::<AppState>();
+                let previous_focused_window = state.last_focused_window();
+                state.set_last_focused_window(window.label());
                 if state.project_for_window(window.label()).is_some() {
                     state.push_window_focus(window.label());
                 }
-                let _ = crate::menu::rebuild_menu(window.app_handle());
+                if should_refresh_window_focus_dependent_menu(
+                    previous_focused_window.as_deref(),
+                    window.label(),
+                ) {
+                    let _ = crate::menu::refresh_window_submenu_for_label(
+                        window.app_handle(),
+                        &state,
+                        window.label(),
+                    );
+                }
             }
 
             if let tauri::WindowEvent::Destroyed = event {
                 let state = window.app_handle().state::<AppState>();
                 state.clear_window_state(window.label());
                 state.remove_window_from_history(window.label());
+                state.clear_last_focused_window(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
                 // Exit the app when all windows are truly closed (hidden windows still count as open).
@@ -1070,6 +1091,19 @@ mod tests {
 
         let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
         assert_eq!(captured_path_from_env(&empty_path), None);
+    }
+
+    #[test]
+    fn focus_dependent_menu_refresh_skips_same_window_refocus() {
+        assert!(!should_refresh_window_focus_dependent_menu(
+            Some("main"),
+            "main"
+        ));
+        assert!(should_refresh_window_focus_dependent_menu(
+            Some("main"),
+            "project-2"
+        ));
+        assert!(should_refresh_window_focus_dependent_menu(None, "main"));
     }
 
     #[test]

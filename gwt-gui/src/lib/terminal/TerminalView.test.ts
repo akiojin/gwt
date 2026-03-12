@@ -133,6 +133,20 @@ function triggerResizeObserver(index = 0) {
   observer.__trigger();
 }
 
+function installElementSize(
+  el: Element,
+  size: { width: number; height: number },
+) {
+  Object.defineProperty(el, "clientWidth", {
+    configurable: true,
+    get: () => size.width,
+  });
+  Object.defineProperty(el, "clientHeight", {
+    configurable: true,
+    get: () => size.height,
+  });
+}
+
 function installFontSetStub() {
   fontSetReadyResolve = null;
   fontSetLoadingDoneHandler = null;
@@ -743,8 +757,8 @@ describe("TerminalView", () => {
     }
   });
 
-  it("re-fits on window focus while active", async () => {
-    await renderTerminalView({
+  it("does not re-fit on window focus while layout is unchanged", async () => {
+    const { container } = await renderTerminalView({
       paneId: "pane-focus-refit",
       active: true,
     });
@@ -759,12 +773,21 @@ describe("TerminalView", () => {
     fit.mockClear();
     term.refresh.mockClear();
 
-    window.dispatchEvent(new Event("focus"));
-
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    installElementSize(rootEl, { width: 800, height: 600 });
+    triggerResizeObserver(0);
     await waitFor(() => {
       expect(fit).toHaveBeenCalled();
-      expect(term.refresh).toHaveBeenCalled();
     });
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    window.dispatchEvent(new Event("focus"));
+
+    await Promise.resolve();
+
+    expect(fit).not.toHaveBeenCalled();
+    expect(term.refresh).not.toHaveBeenCalled();
   });
 
   it("flushes xterm write buffer before refreshing on window focus", async () => {
@@ -883,8 +906,8 @@ describe("TerminalView", () => {
     }
   });
 
-  it("re-fits on visibility restore while active", async () => {
-    await renderTerminalView({
+  it("does not re-fit on visibility restore while layout is unchanged", async () => {
+    const { container } = await renderTerminalView({
       paneId: "pane-visibility-refit",
       active: true,
     });
@@ -898,6 +921,94 @@ describe("TerminalView", () => {
     const fit = fitAddonInstances[0].fit;
     fit.mockClear();
     term.refresh.mockClear();
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    installElementSize(rootEl, { width: 800, height: 600 });
+    triggerResizeObserver(0);
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+    });
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      await Promise.resolve();
+
+      expect(fit).not.toHaveBeenCalled();
+      expect(term.refresh).not.toHaveBeenCalled();
+    } finally {
+      if (hiddenDescriptor) {
+        Object.defineProperty(document, "hidden", hiddenDescriptor);
+      } else {
+        Reflect.deleteProperty(document, "hidden");
+      }
+    }
+  });
+
+  it("re-fits on window focus when layout changed while active", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-focus-layout-changed",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const size = { width: 800, height: 600 };
+    installElementSize(rootEl, size);
+    triggerResizeObserver(0);
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+    });
+
+    fit.mockClear();
+    term.refresh.mockClear();
+    size.width = 801;
+
+    window.dispatchEvent(new Event("focus"));
+
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+      expect(term.refresh).toHaveBeenCalled();
+    });
+  });
+
+  it("re-fits on visibility restore when layout changed while active", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-visibility-layout-changed",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const size = { width: 800, height: 600 };
+    installElementSize(rootEl, size);
+    triggerResizeObserver(0);
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+    });
+
+    fit.mockClear();
+    term.refresh.mockClear();
+    size.height = 601;
 
     const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
     Object.defineProperty(document, "hidden", {
