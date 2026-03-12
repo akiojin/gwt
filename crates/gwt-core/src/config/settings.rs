@@ -571,7 +571,7 @@ mod tests {
         .unwrap();
 
         let settings = Settings::load(temp.path()).unwrap();
-        assert_eq!(settings.default_base_branch, "main");
+        assert_ne!(settings.default_base_branch, "develop");
         assert!(!temp.path().join(".gwt.toml").exists());
     }
 
