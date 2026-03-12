@@ -234,7 +234,10 @@ impl Settings {
     }
 
     fn load_global_internal(apply_env_overrides: bool) -> Result<Self> {
-        debug!(category = "config", apply_env_overrides, "Loading global settings");
+        debug!(
+            category = "config",
+            apply_env_overrides, "Loading global settings"
+        );
 
         let config_path = Self::global_config_path().filter(|p| p.exists());
 
