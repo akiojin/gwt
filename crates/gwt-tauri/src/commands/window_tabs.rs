@@ -68,12 +68,16 @@ pub fn sync_window_agent_tabs(
 
     state.set_window_agent_tabs(window.label(), tabs.clone(), active_tab_id);
     if !should_rebuild_window_menu(&previous_tabs, &tabs) {
-        crate::menu::refresh_window_tab_checkmarks(window.app_handle(), &state)
-            .map_err(|e| StructuredError::internal(&e.to_string(), "sync_window_agent_tabs"))?;
+        crate::menu::refresh_window_tab_checkmarks_for_label(
+            window.app_handle(),
+            &state,
+            window.label(),
+        )
+        .map_err(|e| StructuredError::internal(&e.to_string(), "sync_window_agent_tabs"))?;
         return Ok(());
     }
 
-    crate::menu::rebuild_menu(window.app_handle())
+    crate::menu::refresh_window_submenu_for_label(window.app_handle(), &state, window.label())
         .map_err(|e| StructuredError::internal(&e.to_string(), "sync_window_agent_tabs"))
 }
 
@@ -85,8 +89,12 @@ pub fn sync_window_active_tab(
 ) -> Result<(), StructuredError> {
     let active_tab_id = normalize_active_tab_id(active_tab_id);
     state.set_window_agent_active_tab(window.label(), active_tab_id);
-    crate::menu::refresh_window_tab_checkmarks(window.app_handle(), &state)
-        .map_err(|e| StructuredError::internal(&e.to_string(), "sync_window_active_tab"))?;
+    crate::menu::refresh_window_tab_checkmarks_for_label(
+        window.app_handle(),
+        &state,
+        window.label(),
+    )
+    .map_err(|e| StructuredError::internal(&e.to_string(), "sync_window_active_tab"))?;
     Ok(())
 }
 
