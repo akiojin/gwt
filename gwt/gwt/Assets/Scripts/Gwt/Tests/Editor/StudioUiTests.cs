@@ -1375,8 +1375,8 @@ namespace Gwt.Tests.Editor
             Assert.That(issuePanel.CurrentBody, Does.Contain("handles authentication requests"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("SessionStore.cs"));
-            Assert.IsFalse(issuePanel.IsHireEnabled);
-            Assert.AreEqual("Hire", issuePanel.CurrentHireLabel);
+            Assert.IsTrue(issuePanel.IsHireEnabled);
+            Assert.AreEqual("Open Detail", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]
@@ -1432,6 +1432,58 @@ namespace Gwt.Tests.Editor
             Assert.That(issuePanel.CurrentBody, Does.Contain("Agent hired: agent-session"));
             Assert.IsFalse(issuePanel.IsHireEnabled);
             Assert.AreEqual("Hired", issuePanel.CurrentHireLabel);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_IssueDetailPanelActionButton_OpensGitDetailPanel_ForFileTopHit() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            var gitPanel = scope.Root.AddComponent<GitDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+            SetPrivateField(manager, "_gitDetailPanel", gitPanel);
+
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Files = new List<FileIndexEntry>
+                    {
+                        new() { RelativePath = "Assets/Scripts/Auth/LoginService.cs", FileName = "LoginService.cs", PreviewText = "handles authentication requests" }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService,
+                new FakeAgentService());
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+
+            Assert.AreEqual("Open Detail", issuePanel.CurrentHireLabel);
+            issuePanel.HireButton.onClick.Invoke();
+            await UniTask.Yield();
+
+            Assert.IsTrue(gitPanel.IsOpen);
+            Assert.AreEqual("Search Result", gitPanel.CurrentBranch);
+            Assert.AreEqual("Assets/Scripts/Auth/LoginService.cs", gitPanel.CurrentCommits);
+            Assert.That(gitPanel.CurrentDiff, Does.Contain("handles authentication requests"));
         });
 
         [UnityTest]

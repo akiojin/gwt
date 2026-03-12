@@ -61,6 +61,7 @@ namespace Gwt.Studio.UI
         private int _projectInfoRefreshVersion;
         private string _lastSearchQuery = string.Empty;
         private IssueIndexEntry _lastSearchTopIssue;
+        private FileIndexEntry _lastSearchTopFile;
 
         public ConsolePanel Console => _consolePanel;
         public LeadInputField LeadInput => _leadInputField;
@@ -366,6 +367,20 @@ namespace Gwt.Studio.UI
 
             _issueDetailPanel.HireRequested -= HandleIssueDetailHireRequested;
             _issueDetailPanel.HireRequested += HandleIssueDetailHireRequested;
+        }
+
+        private void EnsureGitDetailPanel()
+        {
+            if (_gitDetailPanel == null)
+                _gitDetailPanel = GetComponentInChildren<GitDetailPanel>(true);
+
+            if (_gitDetailPanel == null)
+            {
+                var panelObject = new GameObject("GitDetailPanel");
+                panelObject.transform.SetParent(transform, false);
+                _gitDetailPanel = panelObject.AddComponent<GitDetailPanel>();
+                _gitDetailPanel.Close();
+            }
         }
 
         private void EnsureTerminalOverlayPanel()
@@ -755,18 +770,22 @@ namespace Gwt.Studio.UI
 
                 _lastSearchQuery = query;
                 _lastSearchTopIssue = results?.Issues != null && results.Issues.Count > 0 ? results.Issues[0] : null;
+                _lastSearchTopFile = _lastSearchTopIssue == null && results?.Files != null && results.Files.Count > 0 ? results.Files[0] : null;
                 var (title, body) = BuildSearchPresentation(query, results);
                 var canHire = await CanHireSearchIssueAsync();
                 _issueDetailPanel.SetIssue(title, body, canHire);
                 _issueDetailPanel.SetHireState(
-                    canHire,
-                    _lastSearchTopIssue == null ? "Hire" : canHire ? "Hire Codex" : "Codex unavailable");
+                    canHire || _lastSearchTopFile != null,
+                    _lastSearchTopIssue == null
+                        ? _lastSearchTopFile != null ? "Open Detail" : "Hire"
+                        : canHire ? "Hire Codex" : "Codex unavailable");
                 OpenPanel(_issueDetailPanel);
             }
             catch (System.Exception e)
             {
                 _lastSearchQuery = query;
                 _lastSearchTopIssue = null;
+                _lastSearchTopFile = null;
                 _issueDetailPanel.SetIssue($"Search: {query}", $"Search failed: {e.Message}");
                 _issueDetailPanel.SetHireState(false, "Hire");
                 OpenPanel(_issueDetailPanel);
@@ -793,6 +812,19 @@ namespace Gwt.Studio.UI
         {
             TryResolveRuntimeServices();
             var currentProject = _projectLifecycleService?.CurrentProject;
+            if (_lastSearchTopIssue == null && _lastSearchTopFile != null)
+            {
+                EnsureGitDetailPanel();
+                if (_gitDetailPanel == null)
+                    return;
+
+                _gitDetailPanel.SetBranch("Search Result");
+                _gitDetailPanel.SetCommits(_lastSearchTopFile.RelativePath);
+                _gitDetailPanel.SetDiff(_lastSearchTopFile.PreviewText ?? string.Empty);
+                OpenPanel(_gitDetailPanel);
+                return;
+            }
+
             if (_agentService == null || currentProject == null || _lastSearchTopIssue == null)
                 return;
 
