@@ -756,7 +756,8 @@ namespace Gwt.Studio.UI
                 _lastSearchQuery = query;
                 _lastSearchTopIssue = results?.Issues != null && results.Issues.Count > 0 ? results.Issues[0] : null;
                 var (title, body) = BuildSearchPresentation(query, results);
-                _issueDetailPanel.SetIssue(title, body, _lastSearchTopIssue != null && _agentService != null && _projectLifecycleService?.CurrentProject != null);
+                var canHire = await CanHireSearchIssueAsync();
+                _issueDetailPanel.SetIssue(title, body, canHire);
                 OpenPanel(_issueDetailPanel);
             }
             catch (System.Exception e)
@@ -765,6 +766,22 @@ namespace Gwt.Studio.UI
                 _lastSearchTopIssue = null;
                 _issueDetailPanel.SetIssue($"Search: {query}", $"Search failed: {e.Message}");
                 OpenPanel(_issueDetailPanel);
+            }
+        }
+
+        private async UniTask<bool> CanHireSearchIssueAsync()
+        {
+            if (_lastSearchTopIssue == null || _agentService == null || _projectLifecycleService?.CurrentProject == null)
+                return false;
+
+            try
+            {
+                var agents = await _agentService.GetAvailableAgentsAsync();
+                return agents != null && agents.Exists(agent => agent.Type == DetectedAgentType.Codex && agent.IsAvailable);
+            }
+            catch
+            {
+                return false;
             }
         }
 

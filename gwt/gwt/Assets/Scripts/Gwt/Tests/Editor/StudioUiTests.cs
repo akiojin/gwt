@@ -1279,6 +1279,56 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_LeadInputFieldSearchCommand_DisablesHireWhenCodexUnavailable() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var agentService = new FakeAgentService
+            {
+                AvailableAgents = new List<DetectedAgent>
+                {
+                    new() { Type = DetectedAgentType.Codex, IsAvailable = false }
+                }
+            };
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug", Body = "Investigate auth failures", Labels = new List<string> { "bug", "auth" } }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService,
+                agentService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+
+            Assert.IsFalse(issuePanel.IsHireEnabled);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_LeadInputFieldSearchCommand_ShowsTopFilePreview_WhenNoIssueMatches() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();
@@ -2582,13 +2632,17 @@ namespace Gwt.Tests.Editor
             public string LastWorktreePath { get; private set; }
             public string LastBranch { get; private set; }
             public string LastInstructions { get; private set; }
+            public List<DetectedAgent> AvailableAgents { get; set; } = new()
+            {
+                new DetectedAgent { Type = DetectedAgentType.Codex, IsAvailable = true }
+            };
 
             public int ActiveSessionCount => HireCallCount;
             public event Action<AgentSessionData> OnAgentStatusChanged;
             public event Action<string, string> OnAgentOutput;
 
             public UniTask<List<DetectedAgent>> GetAvailableAgentsAsync(System.Threading.CancellationToken ct = default)
-                => UniTask.FromResult(new List<DetectedAgent>());
+                => UniTask.FromResult(new List<DetectedAgent>(AvailableAgents));
 
             public UniTask<AgentSessionData> HireAgentAsync(DetectedAgentType agentType, string worktreePath, string branch, string instructions, System.Threading.CancellationToken ct = default)
             {
