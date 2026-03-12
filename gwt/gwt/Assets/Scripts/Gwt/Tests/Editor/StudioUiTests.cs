@@ -1153,6 +1153,55 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_LeadInputFieldSearchCommand_OpensIssueDetailPanelWithResults() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Files = new List<FileIndexEntry>
+                    {
+                        new() { RelativePath = "Assets/Scripts/Auth/LoginService.cs", FileName = "LoginService.cs" }
+                    },
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug" }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+
+            Assert.AreEqual("authentication", indexService.LastSemanticQuery);
+            Assert.AreEqual("Search: authentication", issuePanel.CurrentTitle);
+            Assert.That(issuePanel.CurrentBody, Does.Contain("LoginService.cs"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("#42 Authentication search bug"));
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_PreparesUpdatePlan() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();
@@ -2138,11 +2187,19 @@ namespace Gwt.Tests.Editor
         {
             public IndexStatus Status { get; set; } = new();
             public int StartBackgroundIndexCallCount { get; private set; }
+            public int BuildIndexCallCount { get; private set; }
             public string LastProjectRoot { get; private set; }
+            public string LastSemanticQuery { get; private set; }
+            public SearchResultGroup SemanticResults { get; set; } = new();
 
             public int IndexedFileCount => Status?.IndexedFileCount ?? 0;
 
-            public UniTask BuildIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask BuildIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default)
+            {
+                BuildIndexCallCount++;
+                LastProjectRoot = projectRoot;
+                return UniTask.CompletedTask;
+            }
 
             public UniTask StartBackgroundIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default)
             {
@@ -2165,7 +2222,11 @@ namespace Gwt.Tests.Editor
             public List<IssueIndexEntry> SearchIssues(string query) => new();
             public List<IssueIndexEntry> SearchIssuesSemantic(string query, int maxResults = 20) => new();
             public SearchResultGroup SearchAll(string query) => new();
-            public SearchResultGroup SearchAllSemantic(string query, int maxResults = 20) => new();
+            public SearchResultGroup SearchAllSemantic(string query, int maxResults = 20)
+            {
+                LastSemanticQuery = query;
+                return SemanticResults;
+            }
             public UniTask RefreshAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
             public UniTask RefreshChangedFilesAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
             public UniTask SaveIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;

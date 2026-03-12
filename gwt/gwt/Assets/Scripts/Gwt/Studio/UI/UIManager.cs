@@ -97,6 +97,7 @@ namespace Gwt.Studio.UI
         {
             TryResolveRuntimeServices();
             SubscribeServices();
+            EnsureLeadInputField();
             EnsureProjectInfoBar();
             RefreshProjectInfoBar();
             ApplyPendingProjectTransitionStateAsync().Forget();
@@ -306,6 +307,8 @@ namespace Gwt.Studio.UI
 
         private void EnsureProjectInfoBar()
         {
+            EnsureLeadInputField();
+
             if (_projectInfoBar == null)
                 _projectInfoBar = GetComponentInChildren<ProjectInfoBar>(true);
 
@@ -328,6 +331,32 @@ namespace Gwt.Studio.UI
             _projectInfoBar.TerminalRequested += HandleProjectInfoBarTerminalRequested;
             _projectInfoBar.SearchRequested -= HandleProjectInfoBarSearchRequested;
             _projectInfoBar.SearchRequested += HandleProjectInfoBarSearchRequested;
+        }
+
+        private void EnsureLeadInputField()
+        {
+            if (_leadInputField == null)
+                _leadInputField = GetComponentInChildren<LeadInputField>(true);
+
+            if (_leadInputField != null)
+            {
+                _leadInputField.OnLeadCommand -= HandleLeadCommand;
+                _leadInputField.OnLeadCommand += HandleLeadCommand;
+            }
+        }
+
+        private void EnsureIssueDetailPanel()
+        {
+            if (_issueDetailPanel == null)
+                _issueDetailPanel = GetComponentInChildren<IssueDetailPanel>(true);
+
+            if (_issueDetailPanel == null)
+            {
+                var panelObject = new GameObject("IssueDetailPanel");
+                panelObject.transform.SetParent(transform, false);
+                _issueDetailPanel = panelObject.AddComponent<IssueDetailPanel>();
+                _issueDetailPanel.Close();
+            }
         }
 
         private void EnsureTerminalOverlayPanel()
@@ -364,6 +393,14 @@ namespace Gwt.Studio.UI
         private void HandleProjectInfoBarSearchRequested()
         {
             HandleSearchRequestedAsync().Forget();
+        }
+
+        private void HandleLeadCommand(string commandText)
+        {
+            if (!TryParseSearchCommand(commandText, out var query))
+                return;
+
+            HandleSearchQueryAsync(query).Forget();
         }
 
         private void HandleProjectSwitchEntryInvoked()
@@ -680,6 +717,35 @@ namespace Gwt.Studio.UI
             }
 
             RefreshMetaStatus();
+        }
+
+        private async UniTaskVoid HandleSearchQueryAsync(string query)
+        {
+            TryResolveRuntimeServices();
+            EnsureIssueDetailPanel();
+
+            if (_projectIndexService == null || _issueDetailPanel == null || string.IsNullOrWhiteSpace(query))
+                return;
+
+            var currentProjectPath = _projectLifecycleService?.CurrentProject?.Path ?? string.Empty;
+            try
+            {
+                var status = _projectIndexService.GetStatus();
+                if ((status == null || status.IndexedFileCount <= 0) && !string.IsNullOrWhiteSpace(currentProjectPath))
+                    await _projectIndexService.BuildIndexAsync(currentProjectPath);
+
+                var results = _projectIndexService.SearchAllSemantic(query, 5);
+                if ((results?.Files.Count ?? 0) == 0 && (results?.Issues.Count ?? 0) == 0)
+                    results = _projectIndexService.SearchAll(query);
+
+                _issueDetailPanel.SetIssue($"Search: {query}", BuildSearchSummary(results));
+                OpenPanel(_issueDetailPanel);
+            }
+            catch (System.Exception e)
+            {
+                _issueDetailPanel.SetIssue($"Search: {query}", $"Search failed: {e.Message}");
+                OpenPanel(_issueDetailPanel);
+            }
         }
 
         private async UniTaskVoid RefreshProjectEnvironmentAsync(string projectPath, int refreshVersion)
@@ -1151,6 +1217,48 @@ namespace Gwt.Studio.UI
             return $"Terminal: {title} ({_terminalPaneManager.PaneCount})";
         }
 
+        private static bool TryParseSearchCommand(string commandText, out string query)
+        {
+            query = string.Empty;
+            if (string.IsNullOrWhiteSpace(commandText))
+                return false;
+
+            var trimmed = commandText.Trim();
+            const string slashPrefix = "/search ";
+            const string plainPrefix = "search ";
+            if (trimmed.StartsWith(slashPrefix, System.StringComparison.OrdinalIgnoreCase))
+                query = trimmed.Substring(slashPrefix.Length).Trim();
+            else if (trimmed.StartsWith(plainPrefix, System.StringComparison.OrdinalIgnoreCase))
+                query = trimmed.Substring(plainPrefix.Length).Trim();
+
+            return !string.IsNullOrWhiteSpace(query);
+        }
+
+        private static string BuildSearchSummary(SearchResultGroup results)
+        {
+            if (results == null || ((results.Files?.Count ?? 0) == 0 && (results.Issues?.Count ?? 0) == 0))
+                return "No results";
+
+            var lines = new List<string>();
+            if (results.Files != null && results.Files.Count > 0)
+            {
+                lines.Add("Files:");
+                foreach (var file in results.Files.GetRange(0, Mathf.Min(3, results.Files.Count)))
+                    lines.Add($"- {file.RelativePath}");
+            }
+
+            if (results.Issues != null && results.Issues.Count > 0)
+            {
+                if (lines.Count > 0)
+                    lines.Add(string.Empty);
+                lines.Add("Issues:");
+                foreach (var issue in results.Issues.GetRange(0, Mathf.Min(3, results.Issues.Count)))
+                    lines.Add($"- #{issue.Number} {issue.Title}");
+            }
+
+            return string.Join("\n", lines);
+        }
+
         private void OnDestroy()
         {
             if (_projectLifecycleService != null)
@@ -1178,6 +1286,9 @@ namespace Gwt.Studio.UI
                 _projectInfoBar.TerminalRequested -= HandleProjectInfoBarTerminalRequested;
                 _projectInfoBar.SearchRequested -= HandleProjectInfoBarSearchRequested;
             }
+
+            if (_leadInputField != null)
+                _leadInputField.OnLeadCommand -= HandleLeadCommand;
 
             if (_projectSwitchOverlayPanel != null)
                 _projectSwitchOverlayPanel.EntryInvoked -= HandleProjectSwitchEntryInvoked;

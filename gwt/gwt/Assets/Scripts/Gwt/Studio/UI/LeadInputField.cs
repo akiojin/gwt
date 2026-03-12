@@ -39,6 +39,17 @@ namespace Gwt.Studio.UI
                 _inputField.DeactivateInputField();
         }
 
+        public void SubmitText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return;
+
+            if (_inputField != null)
+                _inputField.text = text;
+
+            OnLeadCommand?.Invoke(text.Trim());
+        }
+
         private void Submit()
         {
             if (_inputField == null) return;
