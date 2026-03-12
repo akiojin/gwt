@@ -55,6 +55,16 @@
       __gwtWindowsPtyBuildNumber?: number;
     };
 
+  function refreshTerminalViewport() {
+    if (!terminal) return;
+    const lastRow = Math.max((terminal.rows ?? 1) - 1, 0);
+    try {
+      terminal.refresh(0, lastRow);
+    } catch {
+      // Ignore refresh errors in non-interactive contexts.
+    }
+  }
+
   function scheduleFitAndNotify() {
     if (!active) return;
     requestAnimationFrame(() => {
@@ -207,6 +217,8 @@
     } catch {
       // Ignore fit errors in unstable resize phases.
     }
+
+    refreshTerminalViewport();
 
     await notifyResize(term.rows, term.cols);
 
@@ -402,11 +414,13 @@
     const handleWindowFocus = () => {
       if (hasFocusedModalOutsideTerminal(rootEl)) return;
       focusTerminalIfNeeded(rootEl, true);
+      scheduleFitAndNotify();
     };
     const handleVisibilityChange = () => {
       if (document.hidden) return;
       if (hasFocusedModalOutsideTerminal(rootEl)) return;
       focusTerminalIfNeeded(rootEl);
+      scheduleFitAndNotify();
     };
 
     rootEl.addEventListener("pointerdown", handleRootPointerDown, { capture: true });

@@ -87,6 +87,7 @@ vi.mock("@xterm/xterm", () => ({
     onBinary = vi.fn();
     getSelection = vi.fn(() => "");
     write = vi.fn();
+    refresh = vi.fn();
     dispose = vi.fn();
     scrollLines = vi.fn((amount: number) => {
       const newY = this._viewportY + amount;
@@ -726,6 +727,30 @@ describe("TerminalView", () => {
     }
   });
 
+  it("re-fits on window focus while active", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-refit",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    window.dispatchEvent(new Event("focus"));
+
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+      expect(term.refresh).toHaveBeenCalled();
+    });
+  });
+
   it("does not steal focus from an active modal on visibility restore", async () => {
     await renderTerminalView({
       paneId: "pane-focus-visibility-modal",
@@ -767,6 +792,44 @@ describe("TerminalView", () => {
         Reflect.deleteProperty(document, "hidden");
       }
       overlay.remove();
+    }
+  });
+
+  it("re-fits on visibility restore while active", async () => {
+    await renderTerminalView({
+      paneId: "pane-visibility-refit",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      await waitFor(() => {
+        expect(fit).toHaveBeenCalled();
+        expect(term.refresh).toHaveBeenCalled();
+      });
+    } finally {
+      if (hiddenDescriptor) {
+        Object.defineProperty(document, "hidden", hiddenDescriptor);
+      } else {
+        Reflect.deleteProperty(document, "hidden");
+      }
     }
   });
 
