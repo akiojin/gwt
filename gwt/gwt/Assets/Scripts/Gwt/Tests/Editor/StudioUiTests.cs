@@ -1448,6 +1448,69 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectOpen_ClearsStaleSearchContextForPreviousProject() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+            SetPrivateField(manager, "_projectInfoBar", bar);
+
+            var indexService = new FakeProjectIndexService
+            {
+                Status = new IndexStatus
+                {
+                    IndexedFileCount = 7,
+                    IndexedIssueCount = 2,
+                    HasEmbeddings = true
+                },
+                SemanticResults = new SearchResultGroup
+                {
+                    Files = new List<FileIndexEntry>
+                    {
+                        new() { RelativePath = "Assets/Scripts/Auth/LoginService.cs", FileName = "LoginService.cs" }
+                    },
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug" }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+            Assert.AreEqual("Search: semantic / 1 issue / 1 file", bar.CurrentSearchStatus);
+            Assert.AreEqual("Hire Codex", issuePanel.CurrentHireLabel);
+            Assert.IsTrue(issuePanel.IsHireEnabled);
+
+            lifecycle.OpenProjectAsync("/tmp/project-b").GetAwaiter().GetResult();
+            await UniTask.Yield();
+
+            Assert.AreEqual("project-b", bar.CurrentProjectName);
+            Assert.AreEqual("Index: 7 files / 2 issues / semantic", bar.CurrentSearchStatus);
+            Assert.AreEqual("Search stale", issuePanel.CurrentHireLabel);
+            Assert.IsFalse(issuePanel.IsHireEnabled);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_IssueDetailPanelHireButton_HiresAgentForTopIssueSearch() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();

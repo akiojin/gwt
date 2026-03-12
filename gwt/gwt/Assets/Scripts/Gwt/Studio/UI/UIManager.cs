@@ -65,6 +65,7 @@ namespace Gwt.Studio.UI
         private FileIndexEntry _lastSearchTopFile;
         private DetectedAgentType? _lastSearchHireAgentType;
         private string _lastSearchStatusText = string.Empty;
+        private string _lastSearchProjectPath = string.Empty;
 
         public ConsolePanel Console => _consolePanel;
         public LeadInputField LeadInput => _leadInputField;
@@ -492,6 +493,7 @@ namespace Gwt.Studio.UI
             var currentProject = _projectLifecycleService?.CurrentProject;
             if (currentProject == null)
             {
+                ClearSearchContext(clearPanelState: true);
                 ClearPreparedUpdate();
                 _projectInfoBar.SetProjectName("No Project");
                 _projectInfoBar.SetBranch(string.Empty);
@@ -500,7 +502,14 @@ namespace Gwt.Studio.UI
                 _projectInfoBar.SetUpdateState(string.Empty);
                 _projectInfoBar.SetUpdateButtonLabel("Update");
                 _projectInfoBar.SetReportState(string.Empty);
+                _projectInfoBar.SetSearchState(string.Empty);
                 return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_lastSearchProjectPath) &&
+                !string.Equals(_lastSearchProjectPath, currentProject.Path, System.StringComparison.Ordinal))
+            {
+                ClearSearchContext(clearPanelState: true);
             }
 
             if (_preparedUpdatePlan != null &&
@@ -785,6 +794,7 @@ namespace Gwt.Studio.UI
                 _lastSearchTopIssue = results?.Issues != null && results.Issues.Count > 0 ? results.Issues[0] : null;
                 _lastSearchTopFile = _lastSearchTopIssue == null && results?.Files != null && results.Files.Count > 0 ? results.Files[0] : null;
                 _lastSearchStatusText = BuildSearchStatus(results, usedLexicalFallback);
+                _lastSearchProjectPath = currentProjectPath;
                 var (title, body) = BuildSearchPresentation(query, results, usedLexicalFallback);
                 _lastSearchHireAgentType = await ResolveSearchHireAgentTypeAsync();
                 var canHire = _lastSearchHireAgentType.HasValue;
@@ -804,6 +814,7 @@ namespace Gwt.Studio.UI
                 _lastSearchTopFile = null;
                 _lastSearchHireAgentType = null;
                 _lastSearchStatusText = "Search failed";
+                _lastSearchProjectPath = currentProjectPath;
                 _issueDetailPanel.SetIssue($"Search: {query}", $"Search failed: {e.Message}");
                 _issueDetailPanel.SetHireState(false, "Hire");
                 RefreshMetaStatus();
@@ -1481,6 +1492,21 @@ namespace Gwt.Studio.UI
             var fileCount = results?.Files?.Count ?? 0;
             var mode = usedLexicalFallback ? "lexical fallback" : "semantic";
             return $"Search: {mode} / {issueCount} {(issueCount == 1 ? "issue" : "issues")} / {fileCount} {(fileCount == 1 ? "file" : "files")}";
+        }
+
+        private void ClearSearchContext(bool clearPanelState)
+        {
+            _lastSearchQuery = string.Empty;
+            _lastSearchTopIssue = null;
+            _lastSearchTopFile = null;
+            _lastSearchHireAgentType = null;
+            _lastSearchStatusText = string.Empty;
+            _lastSearchProjectPath = string.Empty;
+
+            if (!clearPanelState || _issueDetailPanel == null)
+                return;
+
+            _issueDetailPanel.SetHireState(false, "Search stale");
         }
 
         private string FormatTerminalStatus()
