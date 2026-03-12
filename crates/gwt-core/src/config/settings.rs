@@ -4,8 +4,11 @@
 //!
 //! Global config: `~/.gwt/config.toml`
 
-use super::migration::{auto_migrate, ensure_config_dir, write_atomic};
+use super::agent_config::AgentConfig;
+use super::migration::{ensure_config_dir, write_atomic};
 use super::profile::ProfilesConfig;
+use super::recent_projects::RecentProjectsConfig;
+use super::tools::ToolsConfig;
 use crate::error::{GwtError, Result};
 use figment::{
     providers::{Env, Format, Toml},
@@ -13,7 +16,10 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tracing::{debug, error, info};
+
+static GLOBAL_SETTINGS_UPDATE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +52,15 @@ pub struct Settings {
     /// Global profiles configuration.
     #[serde(default)]
     pub profiles: ProfilesConfig,
+    /// Agent-specific runtime preferences stored in config.toml.
+    #[serde(default)]
+    pub agent_config: AgentConfig,
+    /// Custom coding agent definitions stored in config.toml.
+    #[serde(default)]
+    pub tools: ToolsConfig,
+    /// Recent project history stored in config.toml.
+    #[serde(default)]
+    pub recent_projects: RecentProjectsConfig,
 }
 
 impl Default for Settings {
@@ -68,6 +83,9 @@ impl Default for Settings {
             voice_input: VoiceInputSettings::default(),
             terminal: TerminalSettings::default(),
             profiles: ProfilesConfig::default(),
+            agent_config: AgentConfig::default(),
+            tools: ToolsConfig::default(),
+            recent_projects: RecentProjectsConfig::default(),
         }
     }
 }
@@ -182,11 +200,96 @@ impl Default for VoiceInputSettings {
 }
 
 impl Settings {
+    fn is_global_config_path(path: &Path) -> bool {
+        Self::global_config_path().as_deref() == Some(path)
+    }
+
+    fn strip_global_only_sections(&mut self) {
+        self.agent_config = AgentConfig::default();
+        self.tools = ToolsConfig::default();
+        self.recent_projects = RecentProjectsConfig::default();
+    }
+
     fn settings_env_provider() -> Env {
         // Limit Figment env extraction to scalar keys we actually support via direct mapping.
         // This avoids runtime variables such as GWT_AGENT (set for terminal panes) from
         // colliding with nested settings structs during deserialization.
         Env::prefixed("GWT_").split("_").only(&["debug"])
+    }
+
+    fn apply_runtime_env_overrides(mut settings: Settings) -> Settings {
+        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.docker.force_host = parsed;
+            }
+        }
+
+        settings
+    }
+
+    fn load_global_internal(apply_env_overrides: bool) -> Result<Self> {
+        debug!(
+            category = "config",
+            apply_env_overrides, "Loading global settings"
+        );
+
+        let config_path = Self::global_config_path().filter(|p| p.exists());
+
+        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
+
+        if let Some(ref path) = config_path {
+            debug!(
+                category = "config",
+                config_path = %path.display(),
+                "Merging global config file"
+            );
+            figment = figment.merge(Toml::file(path));
+        }
+
+        if apply_env_overrides {
+            figment = figment.merge(Self::settings_env_provider());
+        }
+
+        let mut settings: Settings = figment.extract().map_err(|e| {
+            error!(
+                category = "config",
+                error = %e,
+                "Failed to parse global config"
+            );
+            GwtError::ConfigParseError {
+                reason: e.to_string(),
+            }
+        })?;
+
+        if apply_env_overrides {
+            settings = Self::apply_runtime_env_overrides(settings);
+        }
+        settings.profiles.normalize_loaded();
+
+        info!(
+            category = "config",
+            operation = if apply_env_overrides {
+                "load_global"
+            } else {
+                "load_global_raw"
+            },
+            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
+            debug = settings.debug,
+            worktree_root = %settings.worktree_root,
+            "Global settings loaded"
+        );
+
+        Ok(settings)
+    }
+
+    pub fn load_global_raw() -> Result<Self> {
+        Self::load_global_internal(false)
     }
 
     /// Load settings from configuration files and environment
@@ -196,8 +299,6 @@ impl Settings {
             repo_root = %repo_root.display(),
             "Loading settings"
         );
-
-        auto_migrate(repo_root)?;
 
         let config_path = Self::find_config_file(repo_root);
 
@@ -225,15 +326,13 @@ impl Settings {
             }
         })?;
 
-        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.agent.auto_install_deps = parsed;
-            }
-        }
-
-        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.docker.force_host = parsed;
+        settings = Self::apply_runtime_env_overrides(settings);
+        if let Some(path) = config_path.as_ref() {
+            if !Self::is_global_config_path(path) {
+                let global_settings = Self::load_global().unwrap_or_default();
+                settings.agent_config = global_settings.agent_config;
+                settings.tools = global_settings.tools;
+                settings.recent_projects = global_settings.recent_projects;
             }
         }
         settings.profiles.normalize_loaded();
@@ -254,57 +353,7 @@ impl Settings {
     ///
     /// Reads `~/.gwt/config.toml`. Falls back to defaults when the file does not exist.
     pub fn load_global() -> Result<Self> {
-        debug!(category = "config", "Loading global settings");
-
-        let config_path = Self::global_config_path().filter(|p| p.exists());
-
-        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
-
-        if let Some(ref path) = config_path {
-            debug!(
-                category = "config",
-                config_path = %path.display(),
-                "Merging global config file"
-            );
-            figment = figment.merge(Toml::file(path));
-        }
-
-        figment = figment.merge(Self::settings_env_provider());
-
-        let mut settings: Settings = figment.extract().map_err(|e| {
-            error!(
-                category = "config",
-                error = %e,
-                "Failed to parse global config"
-            );
-            GwtError::ConfigParseError {
-                reason: e.to_string(),
-            }
-        })?;
-
-        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.agent.auto_install_deps = parsed;
-            }
-        }
-
-        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.docker.force_host = parsed;
-            }
-        }
-        settings.profiles.normalize_loaded();
-
-        info!(
-            category = "config",
-            operation = "load_global",
-            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
-            debug = settings.debug,
-            worktree_root = %settings.worktree_root,
-            "Global settings loaded"
-        );
-
-        Ok(settings)
+        Self::load_global_internal(true)
     }
 
     /// Get default TOML configuration
@@ -398,7 +447,12 @@ impl Settings {
             "Saving settings"
         );
 
-        let content = toml::to_string_pretty(self).map_err(|e| {
+        let mut persisted = self.clone();
+        if !Self::is_global_config_path(path) {
+            persisted.strip_global_only_sections();
+        }
+
+        let content = toml::to_string_pretty(&persisted).map_err(|e| {
             error!(
                 category = "config",
                 path = %path.display(),
@@ -427,10 +481,28 @@ impl Settings {
 
     /// Save settings to the new global config path (~/.gwt/config.toml)
     pub fn save_global(&self) -> Result<()> {
+        let _guard = GLOBAL_SETTINGS_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = Self::global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
             reason: "Could not determine global config path".to_string(),
         })?;
         self.save(&path)
+    }
+
+    pub fn update_global<F>(mutate: F) -> Result<()>
+    where
+        F: FnOnce(&mut Self) -> Result<()>,
+    {
+        let _guard = GLOBAL_SETTINGS_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = Self::global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
+            reason: "Could not determine global config path".to_string(),
+        })?;
+        let mut settings = Self::load_global_raw()?;
+        mutate(&mut settings)?;
+        settings.save(&path)
     }
 
     /// Create default config file
@@ -488,20 +560,19 @@ mod tests {
     }
 
     #[test]
-    fn test_load_auto_migrates_json() {
+    fn test_load_ignores_unrelated_legacy_file() {
         let temp = TempDir::new().unwrap();
-        let json_path = temp.path().join(".gwt.json");
-        let toml_path = temp.path().join(".gwt.toml");
+        let legacy_path = temp.path().join(".gwt.json");
 
         std::fs::write(
-            &json_path,
+            &legacy_path,
             r#"{"default_base_branch":"develop","worktree_root":".worktrees"}"#,
         )
         .unwrap();
 
         let settings = Settings::load(temp.path()).unwrap();
-        assert!(toml_path.exists());
-        assert_eq!(settings.default_base_branch, "develop");
+        assert_ne!(settings.default_base_branch, "develop");
+        assert!(!temp.path().join(".gwt.toml").exists());
     }
 
     #[test]

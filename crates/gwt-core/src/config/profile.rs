@@ -1,16 +1,10 @@
-//! Profile management for environment variables (gwt-spec issue)
-//!
-//! Manages environment profiles with automatic migration from legacy profile files.
-//! - Current format: ~/.gwt/config.toml [profiles]
-//! - Legacy format: ~/.gwt/profiles.toml, ~/.gwt/profiles.yaml
+//! Profile management for environment variables in `~/.gwt/config.toml`.
 
 use super::settings::Settings;
-use crate::config::migration::backup_broken_file;
 use crate::error::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Environment profile
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -173,14 +167,6 @@ fn default_profile() -> Profile {
     profile
 }
 
-fn is_default_profile_ai_placeholder(settings: &AISettings) -> bool {
-    settings.endpoint.trim() == default_endpoint()
-        && settings.api_key.trim().is_empty()
-        && settings.model.trim().is_empty()
-        && normalize_ai_language(&settings.language) == default_ai_language()
-        && settings.summary_enabled == default_summary_enabled()
-}
-
 fn normalize_ai_language(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "ja" => "ja".to_string(),
@@ -198,144 +184,18 @@ pub struct ProfilesConfig {
     /// Active profile name
     #[serde(default)]
     pub active: Option<String>,
-    /// Default AI settings (profile fallback)
-    #[serde(default, skip_serializing)]
-    pub default_ai: Option<AISettings>,
     /// Profiles map
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
 }
 
 impl ProfilesConfig {
-    /// Legacy TOML profiles config file path (~/.gwt/profiles.toml)
-    ///
-    /// Profiles are now persisted in `~/.gwt/config.toml` under `[profiles]`.
-    /// This path is retained for one-time migration compatibility.
-    pub fn toml_path() -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".gwt").join("profiles.toml")
-    }
-
-    /// Legacy YAML profiles config file path (~/.gwt/profiles.yaml)
-    pub fn yaml_path() -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".gwt").join("profiles.yaml")
-    }
-
-    /// Load profiles from global settings with automatic legacy migration.
-    ///
-    /// Priority:
-    /// 1. `~/.gwt/config.toml` `[profiles]` section
-    /// 2. legacy `~/.gwt/profiles.toml`
-    /// 3. legacy `~/.gwt/profiles.yaml`
-    /// 4. Default profile
+    /// Load profiles from `~/.gwt/config.toml`.
     pub fn load() -> Result<Self> {
-        let mut settings = Settings::load_global()?;
-        let has_profiles_in_global = Self::global_config_has_profiles_section();
-
-        if !has_profiles_in_global {
-            if let Some(mut legacy) = Self::load_legacy_fallback()? {
-                legacy.normalize_loaded();
-                settings.profiles = legacy.clone();
-                settings.save_global()?;
-                info!(
-                    category = "config",
-                    path = %Settings::global_config_path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "<unknown>".to_string()),
-                    "Migrated legacy profiles into global config"
-                );
-                return Ok(legacy);
-            }
-        }
-
+        let settings = Settings::load_global()?;
         let mut profiles = settings.profiles;
         profiles.normalize_loaded();
         Ok(profiles)
-    }
-
-    /// Load profiles from TOML file
-    fn load_toml(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: ProfilesConfig =
-            toml::from_str(&content).map_err(|e| GwtError::ConfigParseError {
-                reason: format!("Failed to parse TOML: {}", e),
-            })?;
-        Ok(config)
-    }
-
-    /// Load profiles from YAML file
-    fn load_yaml(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: ProfilesConfig =
-            serde_yaml::from_str(&content).map_err(|e| GwtError::ConfigParseError {
-                reason: format!("Failed to parse YAML: {}", e),
-            })?;
-        Ok(config)
-    }
-
-    fn global_config_path() -> Option<PathBuf> {
-        Settings::global_config_path().filter(|p| p.exists())
-    }
-
-    fn global_config_has_profiles_section() -> bool {
-        let Some(path) = Self::global_config_path() else {
-            return false;
-        };
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return false;
-        };
-        let Ok(value) = content.parse::<toml::Value>() else {
-            return false;
-        };
-        value
-            .as_table()
-            .is_some_and(|table| table.contains_key("profiles"))
-    }
-
-    fn load_legacy_fallback() -> Result<Option<Self>> {
-        let toml_path = Self::toml_path();
-        if toml_path.exists() {
-            debug!(
-                category = "config",
-                path = %toml_path.display(),
-                "Loading legacy profiles from TOML"
-            );
-            match Self::load_toml(&toml_path) {
-                Ok(config) => return Ok(Some(config)),
-                Err(e) => {
-                    warn!(
-                        category = "config",
-                        path = %toml_path.display(),
-                        error = %e,
-                        "Failed to load legacy TOML profiles, trying YAML fallback"
-                    );
-                    let _ = backup_broken_file(&toml_path);
-                }
-            }
-        }
-
-        let yaml_path = Self::yaml_path();
-        if yaml_path.exists() {
-            debug!(
-                category = "config",
-                path = %yaml_path.display(),
-                "Loading legacy profiles from YAML"
-            );
-            match Self::load_yaml(&yaml_path) {
-                Ok(config) => return Ok(Some(config)),
-                Err(e) => {
-                    warn!(
-                        category = "config",
-                        path = %yaml_path.display(),
-                        error = %e,
-                        "Failed to load legacy YAML profiles"
-                    );
-                    let _ = backup_broken_file(&yaml_path);
-                }
-            }
-        }
-        Ok(None)
     }
 
     /// Save profiles to disk in TOML format (gwt-spec issue FR-006)
@@ -346,46 +206,16 @@ impl ProfilesConfig {
         let mut normalized = self.clone();
         normalized.normalize_for_save()?;
 
-        let mut settings = Settings::load_global()?;
-        settings.profiles = normalized;
-        settings.save_global()?;
+        Settings::update_global(|settings| {
+            settings.profiles = normalized.clone();
+            Ok(())
+        })?;
 
         let path = Settings::global_config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
         info!(category = "config", path = %path, "Saved profiles in config.toml");
         Ok(())
-    }
-
-    /// Check if migration from YAML to TOML is needed
-    pub fn needs_migration() -> bool {
-        let has_profiles_in_global = Self::global_config_has_profiles_section();
-        let has_global_config = Settings::global_config_path().is_some_and(|p| p.exists());
-        let yaml_path = Self::yaml_path();
-        yaml_path.exists() && !has_profiles_in_global && !has_global_config
-    }
-
-    /// Migrate from YAML to TOML if needed
-    pub fn migrate_if_needed() -> Result<bool> {
-        if !Self::needs_migration() {
-            return Ok(false);
-        }
-
-        info!(
-            category = "config",
-            operation = "migration",
-            "Migrating legacy profiles into config.toml"
-        );
-
-        let config = Self::load()?;
-        config.save()?;
-
-        info!(
-            category = "config",
-            operation = "migration",
-            "Profiles migration completed"
-        );
-        Ok(true)
     }
 
     /// Get active profile
@@ -399,7 +229,6 @@ impl ProfilesConfig {
     ///
     /// Rules:
     /// - Active profile `ai` is the single source of truth.
-    /// - `default_ai` is legacy input only and must not be used as runtime fallback.
     pub fn resolve_active_ai_settings(&self) -> ActiveAISettingsResolution {
         if let Some(profile) = self.active_profile() {
             if let Some(settings) = profile.ai.as_ref() {
@@ -427,7 +256,7 @@ impl ProfilesConfig {
         self.active = name;
     }
 
-    /// Ensure defaults and absorb legacy fields.
+    /// Ensure defaults for config.toml-backed profiles.
     pub(crate) fn ensure_defaults(&mut self) {
         if self.version == 0 {
             self.version = 1;
@@ -440,17 +269,7 @@ impl ProfilesConfig {
 
         if let Some(default) = self.profiles.get_mut("default") {
             if default.ai.is_none() {
-                default.ai = Some(
-                    self.default_ai
-                        .clone()
-                        .unwrap_or_else(default_profile_ai_settings),
-                );
-            } else if let (Some(profile_ai), Some(default_ai)) =
-                (default.ai.as_ref(), self.default_ai.as_ref())
-            {
-                if is_default_profile_ai_placeholder(profile_ai) {
-                    default.ai = Some(default_ai.clone());
-                }
+                default.ai = Some(default_profile_ai_settings());
             }
         }
 
@@ -461,9 +280,6 @@ impl ProfilesConfig {
         {
             self.active = Some("default".to_string());
         }
-
-        // Legacy compatibility: after migration, runtime must not read/write default_ai.
-        self.default_ai = None;
     }
 
     pub(crate) fn normalize_loaded(&mut self) {
@@ -512,7 +328,6 @@ impl ProfilesConfig {
         Self {
             version: 1,
             active: Some("default".to_string()),
-            default_ai: None,
             profiles,
         }
     }
@@ -578,147 +393,6 @@ mod tests {
         let loaded = ProfilesConfig::load().unwrap();
         assert_eq!(loaded.active.as_deref(), Some("dev"));
         assert!(loaded.profiles.contains_key("dev"));
-    }
-
-    #[test]
-    fn test_load_yaml_fallback() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        // Create YAML file manually
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-        let yaml_path = gwt_dir.join("profiles.yaml");
-        std::fs::write(
-            &yaml_path,
-            r#"
-version: 1
-active: legacy
-profiles:
-  legacy:
-    name: legacy
-    env:
-      KEY: value
-"#,
-        )
-        .unwrap();
-
-        let loaded = ProfilesConfig::load().unwrap();
-        assert_eq!(loaded.active.as_deref(), Some("legacy"));
-        assert!(loaded.profiles.contains_key("legacy"));
-    }
-
-    #[test]
-    fn test_toml_priority_over_yaml() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-
-        // Create both YAML and TOML
-        let yaml_path = gwt_dir.join("profiles.yaml");
-        std::fs::write(
-            &yaml_path,
-            r#"
-version: 1
-active: yaml-profile
-profiles:
-  yaml-profile:
-    name: yaml-profile
-"#,
-        )
-        .unwrap();
-
-        // Create TOML with proper profile structure
-        let toml_path = gwt_dir.join("profiles.toml");
-        std::fs::write(
-            &toml_path,
-            r#"version = 1
-active = "toml-profile"
-
-[profiles.toml-profile]
-name = "toml-profile"
-description = ""
-
-[profiles.toml-profile.env]
-"#,
-        )
-        .unwrap();
-
-        // TOML should be loaded (priority)
-        let loaded = ProfilesConfig::load().unwrap();
-        assert_eq!(loaded.active.as_deref(), Some("toml-profile"));
-    }
-
-    #[test]
-    fn test_needs_migration() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        // No files - no migration needed
-        assert!(!ProfilesConfig::needs_migration());
-
-        // Create YAML only
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-        std::fs::write(gwt_dir.join("profiles.yaml"), "version: 1").unwrap();
-        assert!(ProfilesConfig::needs_migration());
-
-        // Create config with profiles section - no longer needs migration
-        std::fs::write(
-            gwt_dir.join("config.toml"),
-            r#"[profiles]
-version = 1
-active = "default"
-"#,
-        )
-        .unwrap();
-        assert!(!ProfilesConfig::needs_migration());
-    }
-
-    #[test]
-    fn test_migrate_if_needed() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-
-        // Create YAML file
-        std::fs::write(
-            gwt_dir.join("profiles.yaml"),
-            r#"
-version: 1
-active: migrate-me
-profiles:
-  migrate-me:
-    name: migrate-me
-    env:
-      MIGRATED: "true"
-"#,
-        )
-        .unwrap();
-
-        // Migrate
-        let migrated = ProfilesConfig::migrate_if_needed().unwrap();
-        assert!(migrated);
-
-        // config.toml should now exist
-        let config_path = gwt_dir.join("config.toml");
-        assert!(config_path.exists());
-
-        // Load should work
-        let loaded = ProfilesConfig::load().unwrap();
-        assert_eq!(loaded.active.as_deref(), Some("migrate-me"));
-
-        // Second migration should be no-op
-        let migrated_again = ProfilesConfig::migrate_if_needed().unwrap();
-        assert!(!migrated_again);
     }
 
     #[test]
@@ -880,7 +554,6 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
             profiles,
         };
 
@@ -902,7 +575,6 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
             profiles,
         };
 
@@ -924,7 +596,6 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
             profiles,
         };
 
@@ -943,7 +614,6 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
             profiles,
         };
 
@@ -959,7 +629,6 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: None,
-            default_ai: None,
             profiles: HashMap::new(),
         };
 
@@ -1045,35 +714,6 @@ profiles:
         assert_eq!(ai.api_key, "sk-default-persisted");
         assert_eq!(ai.endpoint, "https://api.openai.com/v1");
         assert_eq!(ai.language, "ja");
-    }
-
-    #[test]
-    fn save_and_load_keeps_default_ai_only_configuration_effective() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let config = ProfilesConfig {
-            default_ai: Some(AISettings {
-                endpoint: "https://api.openai.com/v1".to_string(),
-                api_key: String::new(),
-                model: "gpt-4o-mini".to_string(),
-                language: "en".to_string(),
-                summary_enabled: true,
-            }),
-            ..ProfilesConfig::default()
-        };
-        config.save().unwrap();
-
-        let loaded = ProfilesConfig::load().unwrap();
-        let resolved = loaded.resolve_active_ai_settings();
-        assert!(resolved.ai_enabled);
-        assert_eq!(resolved.resolved.unwrap().model, "gpt-4o-mini");
-        assert!(loaded.default_ai.is_none());
-
-        let config_path = Settings::global_config_path().unwrap();
-        let saved = std::fs::read_to_string(config_path).unwrap();
-        assert!(!saved.contains("default_ai"));
     }
 
     #[test]
