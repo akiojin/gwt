@@ -389,10 +389,7 @@ namespace Gwt.Infra.Services
 
             try
             {
-                return _processStarter(BuildLauncherProcessStartInfo(
-                    scriptPath,
-                    plan.LauncherExecutablePath,
-                    plan.LauncherArguments)) != null;
+                return _processStarter(BuildLauncherProcessStartInfo(plan, scriptPath)) != null;
             }
             catch
             {
@@ -514,14 +511,14 @@ namespace Gwt.Infra.Services
         }
 
         private static ProcessStartInfo BuildLauncherProcessStartInfo(
-            string scriptPath,
-            string launcherExecutablePath,
-            string launcherArguments)
+            PreparedUpdatePlan plan,
+            string scriptPath)
         {
             var workingDirectory = Path.GetDirectoryName(scriptPath) ?? Directory.GetCurrentDirectory();
+            var launcherExecutablePath = plan?.LauncherExecutablePath;
             if (!string.IsNullOrWhiteSpace(launcherExecutablePath))
             {
-                return new ProcessStartInfo(launcherExecutablePath, BuildLauncherArguments(scriptPath, launcherArguments))
+                return new ProcessStartInfo(launcherExecutablePath, BuildLauncherArguments(plan, scriptPath))
                 {
                     WorkingDirectory = workingDirectory,
                     UseShellExecute = false,
@@ -547,15 +544,26 @@ namespace Gwt.Infra.Services
             };
         }
 
-        private static string BuildLauncherArguments(string scriptPath, string launcherArguments)
+        private static string BuildLauncherArguments(PreparedUpdatePlan plan, string scriptPath)
         {
-            var quotedScriptPath = $"\"{scriptPath}\"";
+            var launcherArguments = plan?.LauncherArguments;
+            var quotedScriptPath = QuoteProcessArgument(scriptPath);
             if (string.IsNullOrWhiteSpace(launcherArguments))
                 return quotedScriptPath;
 
+            var resolved = launcherArguments
+                .Replace("{script}", quotedScriptPath, StringComparison.Ordinal)
+                .Replace("{artifact}", QuoteProcessArgument(plan?.DownloadedArtifactPath), StringComparison.Ordinal)
+                .Replace("{version}", QuoteProcessArgument(plan?.Candidate?.Version), StringComparison.Ordinal);
+
             return launcherArguments.Contains("{script}", StringComparison.Ordinal)
-                ? launcherArguments.Replace("{script}", quotedScriptPath, StringComparison.Ordinal)
-                : $"{launcherArguments} {quotedScriptPath}";
+                ? resolved
+                : $"{resolved} {quotedScriptPath}";
+        }
+
+        private static string QuoteProcessArgument(string value)
+        {
+            return $"\"{(value ?? string.Empty).Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
         }
 
         private static async UniTask<string> ReadSourceTextAsync(string source, CancellationToken ct)

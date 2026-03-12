@@ -1562,6 +1562,43 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void BuildService_LaunchPreparedUpdateAsync_ReplacesLauncherArgumentPlaceholders()
+        {
+            WithTempProject(tempDir =>
+            {
+                System.Diagnostics.ProcessStartInfo captured = null;
+                var service = BuildService.CreateForTests(psi =>
+                {
+                    captured = psi;
+                    return new System.Diagnostics.Process();
+                });
+
+                var scriptPath = Path.Combine(tempDir, "apply-update.sh");
+                var artifactPath = Path.Combine(tempDir, "gwt-1.2.3.zip");
+                File.WriteAllText(scriptPath, "#!/bin/sh\nexit 0\n");
+                File.WriteAllText(artifactPath, "artifact");
+
+                var launched = service.LaunchPreparedUpdateAsync(new PreparedUpdatePlan
+                {
+                    ShouldApply = true,
+                    LauncherScriptPath = scriptPath,
+                    LauncherExecutablePath = "/usr/local/bin/gwt-updater",
+                    LauncherArguments = "--script {script} --artifact {artifact} --version {version}",
+                    DownloadedArtifactPath = artifactPath,
+                    Candidate = new UpdateInfo { Version = "1.2.3" },
+                    ApplyCommand = "echo ok"
+                }).GetAwaiter().GetResult();
+
+                Assert.IsTrue(launched);
+                Assert.IsNotNull(captured);
+                Assert.AreEqual("/usr/local/bin/gwt-updater", captured.FileName);
+                Assert.That(captured.Arguments, Does.Contain(scriptPath));
+                Assert.That(captured.Arguments, Does.Contain(artifactPath));
+                Assert.That(captured.Arguments, Does.Contain("1.2.3"));
+            });
+        }
+
+        [Test]
         public void BuildService_LaunchPreparedUpdateAsync_ProcessStarterReturnsNull_ReturnsFalse()
         {
             WithTempProject(tempDir =>
