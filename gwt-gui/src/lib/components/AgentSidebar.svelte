@@ -24,7 +24,7 @@
     preferredLanguage?: SettingsData["app_language"];
   } = $props();
 
-  let sidebarView: AgentSidebarView = $state({ specId: null, tasks: [] });
+  let sidebarView: AgentSidebarView = $state({ issueNumber: null, tasks: [] });
   let sidebarLoading = $state(false);
   let sidebarError: string | null = $state(null);
   let selectedTaskId: string | null = $state(null);
@@ -149,14 +149,14 @@
       const view = await invoke<AgentSidebarView>("get_agent_sidebar_view", {
         projectPath,
       });
-      sidebarView = view ?? { specId: null, tasks: [] };
+      sidebarView = view ?? { issueNumber: null, tasks: [] };
       const hasSelected =
         !!selectedTaskId && sidebarView.tasks.some((t) => t.id === selectedTaskId);
       if (!hasSelected) {
         selectedTaskId = sidebarView.tasks[0]?.id ?? null;
       }
     } catch (err) {
-      sidebarView = { specId: null, tasks: [] };
+      sidebarView = { issueNumber: null, tasks: [] };
       sidebarError = `Failed to load tasks: ${toErrorMessage(err)}`;
       selectedTaskId = null;
     } finally {
@@ -291,8 +291,8 @@
         {/if}
       </div>
     </div>
-    {#if sidebarView.specId}
-      <div class="spec-id">{sidebarView.specId}</div>
+    {#if sidebarView.issueNumber}
+      <div class="issue-number">#{sidebarView.issueNumber}</div>
     {/if}
   </div>
 
@@ -424,7 +424,7 @@
     word-break: break-word;
   }
 
-  .spec-id {
+  .issue-number {
     font-size: var(--ui-font-xs);
     color: var(--text-muted);
     font-family: monospace;

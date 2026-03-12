@@ -368,7 +368,7 @@ impl Remote {
         }
     }
 
-    /// Get default remote name (SPEC-b3f1a4e2 FR-002)
+    /// Get default remote name (gwt-spec issue FR-002)
     ///
     /// Returns "origin" if it exists, otherwise the first remote name,
     /// or `None` if no remotes are configured.
@@ -446,7 +446,7 @@ mod tests {
         assert!(!Remote::exists(temp.path(), "origin").unwrap());
     }
 
-    // SPEC-b3f1a4e2: Test default_name prefers "origin"
+    // gwt-spec issue: Test default_name prefers "origin"
     #[test]
     fn test_default_name_prefers_origin() {
         let temp = create_test_repo();
@@ -462,7 +462,7 @@ mod tests {
         assert_eq!(name, Some("origin".to_string()));
     }
 
-    // SPEC-b3f1a4e2: Test default_name falls back to first remote
+    // gwt-spec issue: Test default_name falls back to first remote
     #[test]
     fn test_default_name_falls_back_to_first() {
         let temp = create_test_repo();
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(name, Some("my-remote".to_string()));
     }
 
-    // SPEC-b3f1a4e2: Test default_name returns None when no remotes
+    // gwt-spec issue: Test default_name returns None when no remotes
     #[test]
     fn test_default_name_returns_none_when_no_remotes() {
         let temp = create_test_repo();

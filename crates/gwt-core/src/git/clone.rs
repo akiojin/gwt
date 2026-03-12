@@ -1,4 +1,4 @@
-//! Git clone operations (SPEC-a70a1ece)
+//! Git clone operations (gwt-spec issue)
 //!
 //! Provides bare repository cloning functionality.
 
@@ -6,7 +6,7 @@ use crate::error::{GwtError, Result};
 use std::path::Path;
 use tracing::{debug, info};
 
-/// Clone configuration (SPEC-a70a1ece T301)
+/// Clone configuration (gwt-spec issue T301)
 #[derive(Debug, Clone)]
 pub struct CloneConfig {
     /// Repository URL to clone
@@ -41,7 +41,7 @@ impl CloneConfig {
     }
 }
 
-/// Extract repository name from URL (SPEC-a70a1ece)
+/// Extract repository name from URL (gwt-spec issue)
 ///
 /// Examples:
 /// - `https://github.com/user/repo.git` -> `repo.git`
@@ -65,7 +65,7 @@ pub fn extract_repo_name(url: &str) -> String {
     }
 }
 
-/// Clone a repository as bare (SPEC-a70a1ece T302)
+/// Clone a repository as bare (gwt-spec issue T302)
 ///
 /// Clones a repository in bare format, suitable for worktree-based workflow.
 ///
@@ -132,7 +132,7 @@ pub fn clone_bare(config: &CloneConfig) -> Result<std::path::PathBuf> {
 
     info!(path = %bare_path.display(), "Repository cloned successfully");
 
-    // SPEC-a70a1ece: For shallow clones, fetch all branch references
+    // gwt-spec issue: For shallow clones, fetch all branch references
     // Shallow clone only downloads the default branch. We need to configure
     // the remote to track all branches and fetch their references.
     if config.depth.is_some() {

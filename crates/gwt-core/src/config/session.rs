@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use std::path::{Path, PathBuf};
 
-/// Agent status for state visualization (SPEC-861d8cdf FR-100a)
+/// Agent status for state visualization (gwt-spec issue FR-100a)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
@@ -61,10 +61,10 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     /// Last updated timestamp
     pub updated_at: DateTime<Utc>,
-    /// Agent status (SPEC-861d8cdf FR-100a)
+    /// Agent status (gwt-spec issue FR-100a)
     #[serde(default)]
     pub status: AgentStatus,
-    /// Last activity timestamp (SPEC-861d8cdf FR-100b)
+    /// Last activity timestamp (gwt-spec issue FR-100b)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<DateTime<Utc>>,
 }
@@ -95,7 +95,7 @@ impl Session {
         }
     }
 
-    /// Idle timeout in seconds (SPEC-861d8cdf FR-100c)
+    /// Idle timeout in seconds (gwt-spec issue FR-100c)
     const IDLE_TIMEOUT_SECS: i64 = 60;
 
     /// Check if session should be marked as stopped due to inactivity
@@ -161,7 +161,7 @@ impl Session {
         })
     }
 
-    /// Get the global sessions directory (SPEC-ba3f610c FR-010)
+    /// Get the global sessions directory (gwt-spec issue FR-010)
     /// Falls back to config_dir or temp_dir if home_dir is unavailable
     /// Can be overridden via GWT_SESSIONS_DIR environment variable (for testing)
     pub fn sessions_dir() -> PathBuf {
@@ -176,7 +176,7 @@ impl Session {
     }
 
     /// Get the session file path for a worktree (global storage)
-    /// Uses Base64 encoding of worktree path as filename (SPEC-ba3f610c FR-010)
+    /// Uses Base64 encoding of worktree path as filename (gwt-spec issue FR-010)
     pub fn session_path(worktree_path: &Path) -> PathBuf {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
@@ -218,7 +218,7 @@ impl Session {
     }
 
     /// Migrate local TOML session file to global storage and delete local
-    /// (SPEC-ba3f610c FR-010)
+    /// (gwt-spec issue FR-010)
     pub fn migrate_local_to_global(worktree_path: &Path) -> Result<()> {
         let local_path = Self::local_session_path(worktree_path);
         let global_path = Self::session_path(worktree_path);
@@ -557,7 +557,7 @@ mod tests {
         );
     }
 
-    // SPEC-861d8cdf T-100 tests
+    // gwt-spec issue T-100 tests
 
     #[test]
     fn test_agent_status_default() {
@@ -778,7 +778,7 @@ updated_at = "2026-01-20T00:00:00Z"
         assert!(loaded.last_activity_at.is_some());
     }
 
-    // -- infer_agent_status tests (SPEC-b80e7996 T-014) --
+    // -- infer_agent_status tests (gwt-spec issue T-014) --
 
     #[test]
     fn infer_stopped_when_process_dead() {

@@ -1,6 +1,49 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.6.0] - 2026-03-12
+
+### Features
+
+- **skills:** Add issue resolve workflow (#1582)
+
+### Refactor
+
+- **skills:** Narrow embedded issue workflows (#1583)
+
+## [8.5.7] - 2026-03-10
+
+### Bug Fixes
+
+- **pty:** Avoid broken Windows cmd cwd injection (#1575)
+
+## [8.5.6] - 2026-03-10
+
+### Bug Fixes
+
+- **windows:** Normalize worktree paths for agent startup (#1572)
+
+## [8.5.5] - 2026-03-10
+
+### Bug Fixes
+
+- **skills:** Repair project-local skill registration (#1559)
+- **skills:** Add deterministic gwt-pr-check logic (#1561)
+
+## [8.5.4] - 2026-03-09
+
+### Bug Fixes
+
+- **skills:** Align post-merge pr fallback rules (#1529)
+- **project-index:** Handle Windows Python launcher fallback (#1533)
+- **project-index:** Accept valid store Python launchers (#1534)
+- **gui:** Show project index Python install guidance (#1536)
+- **terminal:** Stabilize Windows agent rendering on PowerShell (#1523)
+
+### Refactor
+
+- **skills:** Align issue-first skill workflows (#1535)
+
 ## [8.5.3] - 2026-03-09
 
 ### Bug Fixes

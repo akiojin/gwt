@@ -72,7 +72,6 @@
       void fitAndNotifyCurrent();
     });
   }
-
   function isTerminalFocused(rootEl: HTMLElement): boolean {
     const el = document.activeElement;
     return !!el && rootEl.contains(el);

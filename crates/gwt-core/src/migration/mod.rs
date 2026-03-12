@@ -1,4 +1,4 @@
-//! Migration module for converting .worktrees/ method to bare method (SPEC-a70a1ece US7-US9)
+//! Migration module for converting .worktrees/ method to bare method (gwt-spec issue US7-US9)
 //!
 //! This module provides functionality to migrate existing repositories using the
 //! `.worktrees/` subdirectory method to the bare repository + sibling worktree method.

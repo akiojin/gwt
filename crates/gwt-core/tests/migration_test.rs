@@ -1,4 +1,4 @@
-//! Integration tests for migration workflow (SPEC-a70a1ece T1102-T1103)
+//! Integration tests for migration workflow (gwt-spec issue T1102-T1103)
 //!
 //! These tests verify the migration from .worktrees/ method to bare method.
 
@@ -198,7 +198,7 @@ fn test_permission_error_handling() {
 }
 
 /// Test: All migrated worktrees have correct .git file (not directory)
-/// SPEC-a70a1ece US9-S10: マイグレーション後のworktreeはすべてgit worktree addで新規作成
+/// gwt-spec issue US9-S10: マイグレーション後のworktreeはすべてgit worktree addで新規作成
 #[test]
 fn test_migrated_worktrees_have_git_file_not_directory() {
     let (temp, repo_path) = setup_worktrees_style_repo();
@@ -245,7 +245,7 @@ fn test_migrated_worktrees_have_git_file_not_directory() {
 }
 
 /// Test: git worktree list shows all migrated worktrees correctly
-/// SPEC-a70a1ece FR-203: worktreeが正しく認識される
+/// gwt-spec issue FR-203: worktreeが正しく認識される
 #[test]
 fn test_git_worktree_list_shows_migrated_worktrees() {
     let (temp, repo_path) = setup_worktrees_style_repo();
@@ -318,7 +318,7 @@ fn test_git_worktree_list_shows_migrated_worktrees() {
 }
 
 /// Test: Original repo's main branch is converted to worktree
-/// SPEC-a70a1ece: 元のリポジトリのメインブランチもworktreeとして再作成
+/// gwt-spec issue: 元のリポジトリのメインブランチもworktreeとして再作成
 #[test]
 fn test_original_repo_main_branch_becomes_worktree() {
     let temp = TempDir::new().expect("Failed to create temp directory");
@@ -404,7 +404,7 @@ fn test_original_repo_main_branch_becomes_worktree() {
 }
 
 /// Test: Full migration with multiple worktrees in .worktrees/
-/// SPEC-a70a1ece: 完全なマイグレーションテスト
+/// gwt-spec issue: 完全なマイグレーションテスト
 #[test]
 fn test_full_migration_with_worktrees() {
     init_tracing();

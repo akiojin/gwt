@@ -257,8 +257,8 @@ mod tests {
         assert_eq!(out.checked_files, vec![CLAUDE_MD, AGENTS_MD, GEMINI_MD]);
         assert_eq!(out.updated_files, vec![CLAUDE_MD, AGENTS_MD, GEMINI_MD]);
         let expected_worktree_path =
-            std::fs::canonicalize(&worktree_path).expect("canonicalize expected worktree path");
-        let actual_worktree_path = std::fs::canonicalize(Path::new(&out.worktree_path))
+            dunce::canonicalize(&worktree_path).expect("canonicalize expected worktree path");
+        let actual_worktree_path = dunce::canonicalize(Path::new(&out.worktree_path))
             .expect("canonicalize actual worktree path");
         assert_eq!(actual_worktree_path, expected_worktree_path);
 

@@ -1,7 +1,7 @@
-//! Issue-first Spec Kit operations for GitHub Issues.
+//! Issue-first spec operations for GitHub Issues.
 //!
 //! These helpers keep Spec/Plan/Tasks and related artifacts in a single
-//! GitHub Issue body instead of local markdown files.
+//! GitHub Issue body as the canonical spec bundle.
 
 use super::gh_cli::run_gh_output_with_repair;
 use serde::{Deserialize, Serialize};
@@ -91,7 +91,6 @@ pub struct SpecIssueDetail {
     pub title: String,
     pub url: String,
     pub updated_at: String,
-    pub spec_id: Option<String>,
     pub labels: Vec<String>,
     pub etag: String,
     pub body: String,
@@ -143,17 +142,14 @@ pub fn create_spec_issue(
     }
 
     let checklist = SpecIssueChecklist::default();
-    // New issues use issue number as spec id (placeholder until created).
-    let placeholder_id = "new";
-    let body = render_issue_body(placeholder_id, sections, &checklist);
+    let body = render_issue_body("#NEW", sections, &checklist);
 
-    let number = gh_issue_create(repo_path, title, &body, None)?;
-    // Re-render with the actual issue number as spec id.
-    let spec_id = format!("#{number}");
-    let body = render_issue_body(&spec_id, sections, &checklist);
-    let edit_result = gh_issue_edit(repo_path, number, title, &body, None);
-    let detail_result = get_spec_issue_detail(repo_path, number);
-    finalize_created_issue(number, edit_result, detail_result)
+    let number = gh_issue_create(repo_path, title, &body)?;
+    let body = render_issue_body(&format!("#{number}"), sections, &checklist);
+    gh_issue_edit(repo_path, number, title, &body)
+        .map_err(|e| format!("Issue #{number} was created, but follow-up update failed: {e}"))?;
+    get_spec_issue_detail(repo_path, number)
+        .map_err(|e| format!("Issue #{number} was created and updated, but fetch failed: {e}"))
 }
 
 /// Update an existing spec issue by issue number. Returns the updated issue detail.
@@ -173,43 +169,28 @@ pub fn update_spec_issue(
     check_etag(expected_etag, &existing.etag)?;
 
     let checklist = parse_acceptance_checklist_from_body(&existing.body);
-    let spec_id = format!("#{issue_number}");
-    let body = render_issue_body(&spec_id, sections, &checklist);
+    let body = render_issue_body(&format!("#{issue_number}"), sections, &checklist);
 
-    gh_issue_edit(repo_path, issue_number, title, &body, None)?;
+    gh_issue_edit(repo_path, issue_number, title, &body)?;
     get_spec_issue_detail(repo_path, issue_number)
 }
 
-/// Backward-compatible upsert: finds by spec_id label, creates or updates.
 pub fn upsert_spec_issue(
     repo_path: &Path,
-    spec_id: &str,
+    issue_number: Option<u64>,
     title: &str,
     sections: &SpecIssueSections,
     expected_etag: Option<&str>,
 ) -> Result<SpecIssueDetail, String> {
-    if spec_id.trim().is_empty() {
-        return Err("spec_id is required".to_string());
-    }
     if title.trim().is_empty() {
         return Err("title is required".to_string());
     }
 
-    let existing = find_spec_issue_by_spec_id(repo_path, spec_id)?;
-    let checklist = existing
-        .as_ref()
-        .map(|issue| parse_acceptance_checklist_from_body(&issue.body))
-        .unwrap_or_default();
-    let body = render_issue_body(spec_id, sections, &checklist);
-
-    if let Some(issue) = existing.as_ref() {
-        check_etag(expected_etag, &issue.etag)?;
-        gh_issue_edit(repo_path, issue.number, title, &body, Some(spec_id))?;
-        return get_spec_issue_detail(repo_path, issue.number);
+    if let Some(issue_number) = issue_number {
+        return update_spec_issue(repo_path, issue_number, title, sections, expected_etag);
     }
 
-    let number = gh_issue_create(repo_path, title, &body, Some(spec_id))?;
-    get_spec_issue_detail(repo_path, number)
+    create_spec_issue(repo_path, title, sections)
 }
 
 pub fn get_spec_issue_detail(
@@ -235,40 +216,6 @@ pub fn get_spec_issue_detail(
     }
 
     parse_issue_detail_json(&String::from_utf8_lossy(&output.stdout))
-}
-
-pub fn find_spec_issue_by_spec_id(
-    repo_path: &Path,
-    spec_id: &str,
-) -> Result<Option<SpecIssueDetail>, String> {
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue", "list", "--state", "all", "--label", spec_id, "--json", "number", "--limit",
-            "1",
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue list: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh issue list failed: {}", stderr.trim()));
-    }
-
-    let parsed: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Invalid issue list JSON: {e}"))?;
-    let Some(items) = parsed.as_array() else {
-        return Ok(None);
-    };
-    let Some(number) = items
-        .first()
-        .and_then(|v| v.get("number"))
-        .and_then(Value::as_u64)
-    else {
-        return Ok(None);
-    };
-
-    get_spec_issue_detail(repo_path, number).map(Some)
 }
 
 pub fn list_spec_issue_artifact_comments(
@@ -612,12 +559,12 @@ fn select_project_id_from_owner_projects(value: &Value, repo_slug: &str) -> Opti
 }
 
 fn render_issue_body(
-    spec_id: &str,
+    issue_ref: &str,
     sections: &SpecIssueSections,
     checklist: &SpecIssueChecklist,
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("<!-- GWT_SPEC_ID:{} -->\n\n", spec_id));
+    out.push_str(&format!("<!-- GWT_SPEC_ID:{} -->\n\n", issue_ref));
     out.push_str(&format!(
         "## {}\n\n{}\n\n",
         SECTION_SPEC,
@@ -714,34 +661,10 @@ fn check_etag(expected: Option<&str>, actual: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn finalize_created_issue(
-    issue_number: u64,
-    edit_result: Result<(), String>,
-    detail_result: Result<SpecIssueDetail, String>,
-) -> Result<SpecIssueDetail, String> {
-    match detail_result {
-        Ok(detail) => Ok(detail),
-        Err(detail_err) => match edit_result {
-            Ok(()) => Err(detail_err),
-            Err(edit_err) => Err(format!(
-                "Issue #{issue_number} was created, but follow-up update and fetch failed (edit: {edit_err}; fetch: {detail_err})"
-            )),
-        },
-    }
-}
-
-fn gh_issue_create(
-    repo_path: &Path,
-    title: &str,
-    body: &str,
-    extra_label: Option<&str>,
-) -> Result<u64, String> {
-    let mut args = vec![
+fn gh_issue_create(repo_path: &Path, title: &str, body: &str) -> Result<u64, String> {
+    let args = vec![
         "issue", "create", "--title", title, "--body", body, "--label", SPEC_LABEL,
     ];
-    if let Some(label) = extra_label {
-        args.extend(["--label", label]);
-    }
 
     let output = run_gh_output_with_repair(repo_path, args)
         .map_err(|e| format!("Failed to execute gh issue create: {e}"))?;
@@ -760,21 +683,9 @@ fn gh_issue_edit(
     issue_number: u64,
     title: &str,
     body: &str,
-    extra_label: Option<&str>,
 ) -> Result<(), String> {
     let issue_number = issue_number.to_string();
-    let mut args = vec![
-        "issue",
-        "edit",
-        issue_number.as_str(),
-        "--title",
-        title,
-        "--body",
-        body,
-    ];
-    if let Some(label) = extra_label {
-        args.extend(["--add-label", SPEC_LABEL, "--add-label", label]);
-    }
+    let args = build_issue_edit_args(issue_number.as_str(), title, body);
 
     let output = run_gh_output_with_repair(repo_path, args)
         .map_err(|e| format!("Failed to execute gh issue edit: {e}"))?;
@@ -784,6 +695,20 @@ fn gh_issue_edit(
         return Err(format!("gh issue edit failed: {}", stderr.trim()));
     }
     Ok(())
+}
+
+fn build_issue_edit_args<'a>(issue_number: &'a str, title: &'a str, body: &'a str) -> Vec<&'a str> {
+    vec![
+        "issue",
+        "edit",
+        issue_number,
+        "--title",
+        title,
+        "--body",
+        body,
+        "--add-label",
+        SPEC_LABEL,
+    ]
 }
 
 #[derive(Debug, Clone)]
@@ -1083,15 +1008,6 @@ fn parse_issue_detail_json(json: &str) -> Result<SpecIssueDetail, String> {
         })
         .unwrap_or_default();
 
-    let spec_id = labels
-        .iter()
-        .find(|label| {
-            label.len() == 13
-                && label.starts_with("SPEC-")
-                && label[5..].chars().all(|c| c.is_ascii_hexdigit())
-        })
-        .cloned();
-
     let sections = parse_sections_from_body(&body);
     let etag = build_etag(&updated_at, &body);
 
@@ -1100,7 +1016,6 @@ fn parse_issue_detail_json(json: &str) -> Result<SpecIssueDetail, String> {
         title,
         url,
         updated_at,
-        spec_id,
         labels,
         etag,
         body,
@@ -1454,6 +1369,13 @@ mod tests {
     }
 
     #[test]
+    fn build_issue_edit_args_always_reapplies_spec_label() {
+        let args = build_issue_edit_args("42", "title", "body");
+        assert!(args.contains(&"--add-label"));
+        assert!(args.contains(&SPEC_LABEL));
+    }
+
+    #[test]
     fn parse_acceptance_checklist_preserves_checked_items() {
         let body = "## Acceptance Checklist\n\n- [x] done\n- [ ] pending\n";
         let checklist = parse_acceptance_checklist_from_body(body);
@@ -1462,8 +1384,7 @@ mod tests {
             vec!["- [x] done".to_string(), "- [ ] pending".to_string()]
         );
 
-        let rendered =
-            render_issue_body("SPEC-1234abcd", &SpecIssueSections::default(), &checklist);
+        let rendered = render_issue_body("#1234", &SpecIssueSections::default(), &checklist);
         assert!(rendered.contains("- [x] done"));
         assert!(rendered.contains("- [ ] pending"));
     }
@@ -1601,44 +1522,5 @@ mod tests {
         let err =
             select_project_status_field_and_option(&nodes, "Done").expect_err("status field error");
         assert_eq!(err, "Status field not found in project");
-    }
-
-    #[test]
-    fn finalize_created_issue_returns_detail_even_when_edit_failed() {
-        let detail = SpecIssueDetail {
-            number: 42,
-            title: "created".to_string(),
-            url: "https://example.com/issues/42".to_string(),
-            updated_at: "2026-03-01T00:00:00Z".to_string(),
-            spec_id: None,
-            labels: vec![],
-            etag: "etag".to_string(),
-            body: "body".to_string(),
-            sections: SpecIssueSections::default(),
-        };
-
-        let result = finalize_created_issue(
-            42,
-            Err("gh issue edit failed: transient".to_string()),
-            Ok(detail.clone()),
-        )
-        .expect("should return created issue detail");
-
-        assert_eq!(result.number, detail.number);
-        assert_eq!(result.title, detail.title);
-    }
-
-    #[test]
-    fn finalize_created_issue_reports_created_issue_when_follow_up_fails() {
-        let err = finalize_created_issue(
-            77,
-            Err("gh issue edit failed".to_string()),
-            Err("gh issue view failed".to_string()),
-        )
-        .expect_err("should fail with contextual message");
-
-        assert!(err.contains("Issue #77 was created"));
-        assert!(err.contains("edit: gh issue edit failed"));
-        assert!(err.contains("fetch: gh issue view failed"));
     }
 }

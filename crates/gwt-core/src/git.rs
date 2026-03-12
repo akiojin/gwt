@@ -36,8 +36,8 @@ pub use issue::{
 };
 pub use issue_spec::{
     append_contract_comment, close_spec_issue, create_spec_issue,
-    delete_spec_issue_artifact_comment, find_spec_issue_by_spec_id, get_spec_issue_detail,
-    list_spec_issue_artifact_comments, sync_issue_to_project, update_spec_issue, upsert_spec_issue,
+    delete_spec_issue_artifact_comment, get_spec_issue_detail, list_spec_issue_artifact_comments,
+    sync_issue_to_project, update_spec_issue, upsert_spec_issue,
     upsert_spec_issue_artifact_comment, ProjectSyncResult, SpecIssueArtifactComment,
     SpecIssueArtifactKind, SpecIssueChecklist, SpecIssueDetail, SpecIssueSections,
     SpecProjectPhase,

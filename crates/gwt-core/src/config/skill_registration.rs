@@ -27,9 +27,9 @@ struct ManagedAsset {
 
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
-    "gwt-fix-issue",
+    "gwt-issue-resolve",
     "gwt-fix-pr",
-    "gwt-issue-spec-ops",
+    "gwt-spec-ops",
     "gwt-pr",
     "gwt-pr-check",
     "gwt-project-index",
@@ -39,21 +39,21 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
 
 const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
-        relative_path: "skills/gwt-fix-issue/SKILL.md",
+        relative_path: "skills/gwt-issue-resolve/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-issue/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-issue-resolve/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-issue/scripts/inspect_issue.py",
+        relative_path: "skills/gwt-issue-resolve/scripts/inspect_issue.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-issue/scripts/inspect_issue.py"
+            "/../../plugins/gwt/skills/gwt-issue-resolve/scripts/inspect_issue.py"
         )),
-        executable: false,
+        executable: true,
         rewrite_for_project: false,
     },
     ManagedAsset {
@@ -75,10 +75,10 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-issue-spec-ops/SKILL.md",
+        relative_path: "skills/gwt-spec-ops/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-spec-ops/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -109,6 +109,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         )),
         executable: false,
         rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-pr-check/scripts/check_pr_status.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pr-check/scripts/check_pr_status.py"
+        )),
+        executable: false,
+        rewrite_for_project: false,
     },
     ManagedAsset {
         relative_path: "skills/gwt-project-index/SKILL.md",
@@ -166,10 +175,10 @@ const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
 
 const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
-        relative_path: "commands/gwt-fix-issue.md",
+        relative_path: "commands/gwt-issue-resolve.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-fix-issue.md"
+            "/../../plugins/gwt/commands/gwt-issue-resolve.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -179,15 +188,6 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/gwt/commands/gwt-fix-pr.md"
-        )),
-        executable: false,
-        rewrite_for_project: true,
-    },
-    ManagedAsset {
-        relative_path: "commands/gwt-issue-spec-ops.md",
-        body: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-issue-spec-ops.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -276,6 +276,13 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
         executable: true,
         rewrite_for_project: false,
     },
+];
+
+const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
+    "skills/gwt-fix-issue",
+    "skills/gwt-issue-spec-ops",
+    "commands/gwt-fix-issue.md",
+    "commands/gwt-issue-spec-ops.md",
 ];
 
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
@@ -408,6 +415,15 @@ fn project_asset_missing_items(agent_root_name: &str) -> Vec<String> {
         .collect()
 }
 
+fn skill_registration_enabled(settings: &Settings) -> bool {
+    settings
+        .agent
+        .skill_registration
+        .as_ref()
+        .map(|prefs| prefs.enabled)
+        .unwrap_or(true)
+}
+
 fn skills_root_for(agent: SkillAgentType, project_root: Option<&Path>) -> Option<PathBuf> {
     let project_root = project_root?;
     match agent {
@@ -475,8 +491,35 @@ fn write_managed_assets<'a>(
         ),
     })?;
 
+    cleanup_legacy_managed_assets(root)?;
+
     for asset in assets {
         write_managed_asset(root, asset, root_name)?;
+    }
+
+    Ok(())
+}
+
+fn cleanup_legacy_managed_assets(root: &Path) -> Result<(), GwtError> {
+    for relative_path in LEGACY_MANAGED_ASSET_PATHS {
+        let path = root.join(relative_path);
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to remove legacy managed asset {}: {}",
+                    path.display(),
+                    e
+                ),
+            })?;
+        } else if path.is_file() {
+            std::fs::remove_file(&path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to remove legacy managed asset {}: {}",
+                    path.display(),
+                    e
+                ),
+            })?;
+        }
     }
 
     Ok(())
@@ -1092,7 +1135,7 @@ pub fn register_agent_skills_with_settings_at_project_root(
     project_root: Option<&Path>,
 ) -> Result<(), GwtError> {
     // Force registration is no longer needed with project-scoped assets.
-    if settings.agent.skill_registration.is_none() {
+    if !skill_registration_enabled(settings) {
         return Err(GwtError::ConfigWriteError {
             reason: SCOPE_NOT_CONFIGURED_MESSAGE.to_string(),
         });
@@ -1161,7 +1204,7 @@ fn status_for(
     settings: &Settings,
     project_root: Option<&Path>,
 ) -> SkillAgentRegistrationStatus {
-    if settings.agent.skill_registration.is_none() {
+    if !skill_registration_enabled(settings) {
         return scope_unconfigured_status(agent);
     }
 
@@ -1321,7 +1364,7 @@ pub fn repair_skill_registration_with_settings_at_project_root(
     settings: &Settings,
     project_root: Option<&Path>,
 ) -> SkillRegistrationStatus {
-    if settings.agent.skill_registration.is_some() {
+    if skill_registration_enabled(settings) {
         if let Err(err) = register_all_skills_with_settings_at_project_root(settings, project_root)
         {
             warn!(
@@ -1351,7 +1394,8 @@ mod tests {
 
     fn registration_settings() -> Settings {
         let mut settings = Settings::default();
-        settings.agent.skill_registration = Some(crate::config::SkillRegistrationPreferences {});
+        settings.agent.skill_registration =
+            Some(crate::config::SkillRegistrationPreferences::default());
         settings
     }
 
@@ -1404,6 +1448,13 @@ mod tests {
             .join("gwt-spec-to-issue-migration")
             .join("scripts")
             .join("migrate-specs-to-issues.sh")
+            .exists());
+        assert!(tmp
+            .path()
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
             .exists());
     }
 
@@ -1460,10 +1511,13 @@ mod tests {
     }
 
     #[test]
-    fn status_for_reports_scope_not_configured() {
+    fn status_for_reports_scope_not_configured_when_explicitly_disabled() {
         let tmp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.agent.skill_registration =
+            Some(crate::config::SkillRegistrationPreferences { enabled: false });
         let status = get_skill_registration_status_with_settings_at_project_root(
-            &Settings::default(),
+            &settings,
             Some(tmp.path()),
         );
         assert_eq!(status.overall, "failed");
@@ -1508,14 +1562,36 @@ mod tests {
     }
 
     #[test]
-    fn register_with_settings_requires_scope_configuration() {
+    fn register_with_settings_respects_explicit_disable() {
         let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.agent.skill_registration =
+            Some(crate::config::SkillRegistrationPreferences { enabled: false });
+        let result = register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn register_with_default_settings_is_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        init_test_git_dir(temp.path());
         let result = register_agent_skills_with_settings_at_project_root(
             SkillAgentType::Codex,
             &Settings::default(),
             Some(temp.path()),
         );
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-resolve")
+            .join("SKILL.md")
+            .exists());
     }
 
     #[test]
@@ -1558,6 +1634,22 @@ mod tests {
             .join("gwt-spec-to-issue-migration")
             .join("scripts")
             .join("migrate-specs-to-issues.sh")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".gemini")
+            .join("skills")
+            .join("gwt-pr-check")
+            .join("scripts")
+            .join("check_pr_status.py")
             .exists());
 
         assert!(temp
@@ -1773,21 +1865,39 @@ mod tests {
             temp.path()
                 .join(".codex")
                 .join("skills")
-                .join("gwt-issue-spec-ops")
+                .join("gwt-spec-ops")
                 .join("SKILL.md"),
         )
         .unwrap();
         assert!(issue_spec_skill.contains("search existing spec first"));
         assert!(issue_spec_skill.contains("gwt-project-index"));
 
-        let issue_spec_command = std::fs::read_to_string(
+        let issue_resolve_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-issue-resolve")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(issue_resolve_skill.contains("Direct fix path"));
+        assert!(issue_resolve_skill.contains("gwt-project-index"));
+
+        let issue_resolve_command = std::fs::read_to_string(
             temp.path()
                 .join(".claude")
                 .join("commands")
-                .join("gwt-issue-spec-ops.md"),
+                .join("gwt-issue-resolve.md"),
         )
         .unwrap();
-        assert!(issue_spec_command.contains("use `gwt-project-index` Issue search"));
+        assert!(issue_resolve_command.contains("direct fix"));
+        assert!(issue_resolve_command.contains("existing SPEC"));
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-spec-ops.md")
+            .exists());
     }
 
     #[test]
@@ -2057,13 +2167,8 @@ another-pattern
 
         let exclude_path = git_path_for_project_root(&worktree_root, "info/exclude").unwrap();
         assert_eq!(
-            exclude_path.canonicalize().unwrap(),
-            repo_root
-                .join(".git")
-                .join("info")
-                .join("exclude")
-                .canonicalize()
-                .unwrap()
+            dunce::canonicalize(&exclude_path).unwrap(),
+            dunce::canonicalize(repo_root.join(".git").join("info").join("exclude")).unwrap()
         );
         let exclude = std::fs::read_to_string(exclude_path).unwrap();
         assert!(exclude.contains(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER));

@@ -1,8 +1,8 @@
-//! Migration state machine (SPEC-a70a1ece T703)
+//! Migration state machine (gwt-spec issue T703)
 
 use serde::{Deserialize, Serialize};
 
-/// Migration state (SPEC-a70a1ece FR-224)
+/// Migration state (gwt-spec issue FR-224)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MigrationState {
     /// Initial state - waiting for user confirmation

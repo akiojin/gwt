@@ -641,9 +641,9 @@ describe("PrStatusSection", () => {
     });
   });
 
-  // --- SPEC-merge-pr: Mergeable badge button tests ---
+  // --- gwt-spec issue: Mergeable badge button tests ---
 
-  describe("Mergeable badge button (SPEC-merge-pr)", () => {
+  describe("Mergeable badge button (gwt-spec issue)", () => {
     it("renders button when state=OPEN, mergeable=MERGEABLE, and onMerge is provided", async () => {
       const onMerge = vi.fn();
       const pr = makePrDetail({ state: "OPEN", mergeable: "MERGEABLE" });

@@ -152,7 +152,7 @@ fn resolve_common_dir_from_gitdir(gitdir: &Path) -> Option<PathBuf> {
         gitdir.join(common)
     };
 
-    Some(resolved.canonicalize().unwrap_or(resolved))
+    Some(dunce::canonicalize(&resolved).unwrap_or(resolved))
 }
 
 fn resolve_gitdir_from_dot_git_file(dot_git_path: &Path) -> Option<PathBuf> {
@@ -548,7 +548,7 @@ impl Branch {
     }
 
     /// List remote branches using ls-remote (for bare repositories)
-    /// SPEC-a70a1ece: Bare repositories don't have refs/remotes/, so we use ls-remote
+    /// gwt-spec issue: Bare repositories don't have refs/remotes/, so we use ls-remote
     pub fn list_remote_from_origin(repo_path: &Path) -> Result<Vec<Branch>> {
         Self::list_remote_from_remote(repo_path, "origin")
     }
@@ -783,7 +783,7 @@ impl Branch {
         Ok(Branch::new(name, commit))
     }
 
-    /// Set upstream tracking configuration for a branch (SPEC-b3f1a4e2 FR-001)
+    /// Set upstream tracking configuration for a branch (gwt-spec issue FR-001)
     ///
     /// Runs `git config branch.<name>.remote <remote>` and
     /// `git config branch.<name>.merge refs/heads/<name>`.
@@ -1046,8 +1046,8 @@ impl Branch {
             return Ok(true);
         }
 
-        // SPEC-a70a1ece FR-124: For bare repos, check via ls-remote
-        // SPEC-013cd65c FR-001: Use run_git_with_timeout for GIT_TERMINAL_PROMPT=0 and timeout
+        // gwt-spec issue FR-124: For bare repos, check via ls-remote
+        // gwt-spec issue FR-001: Use run_git_with_timeout for GIT_TERMINAL_PROMPT=0 and timeout
         let ls_output = match run_git_with_timeout(
             repo_path,
             "ls-remote",
@@ -1236,7 +1236,7 @@ mod tests {
     }
 
     fn canonicalize_or_self(path: &Path) -> PathBuf {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
     fn create_repo_with_remote() -> (TempDir, String) {
@@ -1629,7 +1629,7 @@ mod tests {
         );
     }
 
-    // SPEC-b3f1a4e2: Test set_upstream_config sets remote and merge
+    // gwt-spec issue: Test set_upstream_config sets remote and merge
     #[test]
     fn test_set_upstream_config_sets_remote_and_merge() {
         let temp = create_test_repo();
@@ -1659,7 +1659,7 @@ mod tests {
         );
     }
 
-    // SPEC-b3f1a4e2: Test set_upstream_config works without remote ref existing
+    // gwt-spec issue: Test set_upstream_config works without remote ref existing
     #[test]
     fn test_set_upstream_config_no_remote_ref_needed() {
         let temp = create_test_repo();

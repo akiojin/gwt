@@ -26,7 +26,7 @@ const BROKEN_GH_MERGE_BASE_KEY: &str = "branch..gh-merge-base";
 /// Used by `classify_delete_branch_error` (producer) and `cleanup.rs` (consumer).
 pub const PROTECTED_BRANCH_PREFIX: &str = "Protected:";
 
-/// PR status for cleanup safety judgment (SPEC-ad1ac432)
+/// PR status for cleanup safety judgment (gwt-spec issue)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PrStatus {
@@ -364,7 +364,7 @@ pub fn is_gh_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Check if gh CLI is authenticated (SPEC-ad1ac432 T003-T004).
+/// Check if gh CLI is authenticated (gwt-spec issue T003-T004).
 ///
 /// Runs `gh auth status` with a 5-second timeout.
 /// Returns `true` only when the command exits successfully within the timeout.
@@ -388,7 +388,7 @@ pub fn check_auth() -> bool {
     }
 }
 
-/// Delete a remote branch via GitHub API (SPEC-ad1ac432 T005-T006).
+/// Delete a remote branch via GitHub API (gwt-spec issue T005-T006).
 ///
 /// Uses `gh api -X DELETE repos/{owner}/{repo}/git/refs/heads/{branch}`.
 /// Timeout: 10 seconds.
@@ -457,7 +457,7 @@ fn has_deletion_rule(rule_types_output: &str) -> bool {
         .any(|rule_type| rule_type.eq_ignore_ascii_case("deletion"))
 }
 
-/// Get PR statuses for all branches (SPEC-ad1ac432 T007-T008).
+/// Get PR statuses for all branches (gwt-spec issue T007-T008).
 ///
 /// Runs `gh pr list --state all --json headRefName,state,mergedAt --limit 200`.
 /// Returns a map of branch name to PrStatus.
@@ -634,7 +634,7 @@ fn parse_ref_sha(json_str: &str) -> Result<String, String> {
         .ok_or_else(|| "Missing object.sha in response".to_string())
 }
 
-/// Resolve the SHA of a remote branch via GitHub API (SPEC-a4fb2db2 FR-002).
+/// Resolve the SHA of a remote branch via GitHub API (gwt-spec issue FR-002).
 ///
 /// Uses `gh api repos/{owner}/{repo}/git/ref/heads/{branch}`.
 /// Returns the commit SHA on success.
@@ -717,7 +717,7 @@ fn classify_create_branch_error(combined: &str, branch: &str) -> String {
     }
 }
 
-/// Create a remote branch via GitHub API (SPEC-a4fb2db2 FR-001).
+/// Create a remote branch via GitHub API (gwt-spec issue FR-001).
 ///
 /// Uses `gh api --method POST repos/{owner}/{repo}/git/refs`.
 /// Timeout: 10 seconds.
@@ -753,7 +753,7 @@ pub fn create_remote_branch(repo_path: &Path, branch: &str, sha: &str) -> Result
     }
 }
 
-/// Fetch PR list via `gh pr list` (SPEC-prlist).
+/// Fetch PR list via `gh pr list` (gwt-spec issue).
 ///
 /// `state` should be "open", "closed", "merged", or "all".
 /// Returns a JSON array of PR objects.
@@ -789,7 +789,7 @@ pub fn fetch_pr_list(
     Ok(parsed)
 }
 
-/// Fetch authenticated GitHub user login via `gh api user` (SPEC-prlist).
+/// Fetch authenticated GitHub user login via `gh api user` (gwt-spec issue).
 pub fn fetch_authenticated_user(repo_path: &Path) -> Result<String, String> {
     let output = run_gh_output_with_repair(repo_path, ["api", "user", "--jq", ".login"])
         .map_err(|e| format!("Failed to run gh api user: {}", e))?;
@@ -806,7 +806,7 @@ pub fn fetch_authenticated_user(repo_path: &Path) -> Result<String, String> {
     Ok(login)
 }
 
-/// Merge a PR via `gh pr merge` (SPEC-prlist).
+/// Merge a PR via `gh pr merge` (gwt-spec issue).
 ///
 /// `method` should be "merge", "squash", or "rebase".
 fn split_merge_commit_message(message: &str) -> Option<(String, Option<String>)> {
@@ -874,7 +874,7 @@ pub fn merge_pr(
     Ok(stdout)
 }
 
-/// Review a PR via `gh pr review` (SPEC-prlist).
+/// Review a PR via `gh pr review` (gwt-spec issue).
 ///
 /// `action` should be "approve", "request-changes", or "comment".
 pub fn review_pr(
@@ -909,7 +909,7 @@ pub fn review_pr(
     Ok(stdout)
 }
 
-/// Mark a draft PR as ready for review via `gh pr ready` (SPEC-prlist).
+/// Mark a draft PR as ready for review via `gh pr ready` (gwt-spec issue).
 pub fn mark_pr_ready(repo_path: &Path, pr_number: u64) -> Result<String, String> {
     let pr_number = pr_number.to_string();
     let output = run_gh_output_with_repair(repo_path, ["pr", "ready", pr_number.as_str()])
@@ -1166,7 +1166,7 @@ mod tests {
             wait_with_timeout;
     }
 
-    // -- SPEC-a4fb2db2: create_remote_branch / resolve_remote_branch_sha tests --
+    // -- gwt-spec issue: create_remote_branch / resolve_remote_branch_sha tests --
 
     #[test]
     fn create_remote_branch_returns_result() {
@@ -1231,7 +1231,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // -- SPEC-a4fb2db2: classify_create_branch_error tests --
+    // -- gwt-spec issue: classify_create_branch_error tests --
 
     #[test]
     fn classify_error_422_reference_already_exists() {
