@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.6.3] - 2026-03-12
+
+### Bug Fixes
+
+- Replace .sh hook scripts with .mjs for Windows compatibility (#1589) (#1591)
+
+## [8.6.2] - 2026-03-12
+
+### Bug Fixes
+
+- **gui:** Flush xterm write buffer before refreshing on window reactivation (#1587)
+- **gui:** Reduce window focus jitter (#1588)
+
+## [8.6.1] - 2026-03-12
+
+### Bug Fixes
+
+- **gui:** Refresh terminal when focus returns (#1585)
+
+## [8.6.0] - 2026-03-12
+
+### Features
+
+- **skills:** Add issue resolve workflow (#1582)
+
+### Refactor
+
+- **skills:** Narrow embedded issue workflows (#1583)
+
 ## [8.5.7] - 2026-03-10
 
 ### Bug Fixes

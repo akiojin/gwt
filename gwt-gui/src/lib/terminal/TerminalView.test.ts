@@ -18,6 +18,8 @@ let callOrder: string[] = [];
 const terminalInstances: any[] = [];
 const fitAddonInstances: any[] = [];
 const resizeObserverInstances: Array<{ __trigger: () => void }> = [];
+let fontSetReadyResolve: (() => void) | null = null;
+let fontSetLoadingDoneHandler: (() => void) | null = null;
 
 function setNavigatorPlatform(platform: string, userAgentDataPlatform: string | null = null) {
   Object.defineProperty(navigator, "platform", {
@@ -84,7 +86,10 @@ vi.mock("@xterm/xterm", () => ({
     onData = vi.fn();
     onBinary = vi.fn();
     getSelection = vi.fn(() => "");
-    write = vi.fn();
+    write = vi.fn((_data: any, callback?: () => void) => {
+      if (callback) setTimeout(callback, 0);
+    });
+    refresh = vi.fn();
     dispose = vi.fn();
     scrollLines = vi.fn((amount: number) => {
       const newY = this._viewportY + amount;
@@ -128,6 +133,48 @@ function triggerResizeObserver(index = 0) {
   observer.__trigger();
 }
 
+function installElementSize(
+  el: Element,
+  size: { width: number; height: number },
+) {
+  Object.defineProperty(el, "clientWidth", {
+    configurable: true,
+    get: () => size.width,
+  });
+  Object.defineProperty(el, "clientHeight", {
+    configurable: true,
+    get: () => size.height,
+  });
+}
+
+function installFontSetStub() {
+  fontSetReadyResolve = null;
+  fontSetLoadingDoneHandler = null;
+  let resolveReady: (() => void) | null = null;
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
+
+  Object.defineProperty(document, "fonts", {
+    configurable: true,
+    value: {
+      ready,
+      addEventListener: vi.fn((event: string, handler: () => void) => {
+        if (event === "loadingdone") {
+          fontSetLoadingDoneHandler = handler;
+        }
+      }),
+      removeEventListener: vi.fn((event: string, handler: () => void) => {
+        if (event === "loadingdone" && fontSetLoadingDoneHandler === handler) {
+          fontSetLoadingDoneHandler = null;
+        }
+      }),
+    },
+  });
+
+  fontSetReadyResolve = resolveReady;
+}
+
 async function renderTerminalView(props: any) {
   const { default: TerminalView } = await import("./TerminalView.svelte");
   return render(TerminalView, { props });
@@ -149,9 +196,12 @@ describe("TerminalView", () => {
     terminalOutputHandler = null;
     webLinksClickHandler = null;
     callOrder = [];
+    fontSetReadyResolve = null;
+    fontSetLoadingDoneHandler = null;
     delete (window as any).__gwtTerminalFontSize;
     delete (window as any).__gwtTerminalFontFamily;
     delete (window as any).__gwtWindowsPtyBuildNumber;
+    delete (document as any).fonts;
     setNavigatorPlatform("MacIntel");
     listenMock.mockImplementation(
       async (eventName: string, handler?: unknown) => {
@@ -244,6 +294,43 @@ describe("TerminalView", () => {
       expect((window as any).__gwtTerminalFontFamily).toBe(
         '"SF Mono", Menlo, Monaco, Consolas, monospace'
       );
+    });
+  });
+
+  it("re-fits when document fonts become ready while active", async () => {
+    installFontSetStub();
+
+    await renderTerminalView({ paneId: "pane-fonts-ready", active: true });
+
+    await waitFor(() => {
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+    const fit = fitAddonInstances[0].fit;
+    const beforeFitCalls = fit.mock.calls.length;
+
+    fontSetReadyResolve?.();
+
+    await waitFor(() => {
+      expect(fit.mock.calls.length).toBeGreaterThan(beforeFitCalls);
+    });
+  });
+
+  it("re-fits when document fonts finish loading while active", async () => {
+    installFontSetStub();
+
+    await renderTerminalView({ paneId: "pane-fonts-loadingdone", active: true });
+
+    await waitFor(() => {
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+      expect(fontSetLoadingDoneHandler).not.toBeNull();
+    });
+    const fit = fitAddonInstances[0].fit;
+    const beforeFitCalls = fit.mock.calls.length;
+
+    fontSetLoadingDoneHandler?.();
+
+    await waitFor(() => {
+      expect(fit.mock.calls.length).toBeGreaterThan(beforeFitCalls);
     });
   });
 
@@ -466,20 +553,30 @@ describe("TerminalView", () => {
     });
 
     await Promise.resolve();
-    expect(term.write).not.toHaveBeenCalled();
+    // The only write at this point should be the activation buffer flush
+    // (empty string with callback). No real terminal data should have been
+    // written because terminal_ready has not resolved yet.
+    const dataWrites = term.write.mock.calls.filter(
+      (c: any[]) => c[0] !== "",
+    );
+    expect(dataWrites).toHaveLength(0);
 
     // Resolve terminal_ready with initial data first, then flush buffered output.
     resolveReady!(Array.from(new TextEncoder().encode("history\n")));
 
     await waitFor(() => {
-      expect(term.write).toHaveBeenCalledTimes(2);
+      const dw = term.write.mock.calls.filter((c: any[]) => c[0] !== "");
+      expect(dw).toHaveLength(2);
     });
 
-    const readyChunk = term.write.mock.calls[0][0];
+    const dataCalls = term.write.mock.calls.filter(
+      (c: any[]) => c[0] !== "",
+    );
+    const readyChunk = dataCalls[0][0];
     expect(readyChunk).toBeInstanceOf(Uint8Array);
     expect(new TextDecoder().decode(readyChunk)).toBe("history\n");
 
-    const liveChunk = term.write.mock.calls[1][0];
+    const liveChunk = dataCalls[1][0];
     expect(liveChunk).toBeInstanceOf(Uint8Array);
     expect(new TextDecoder().decode(liveChunk)).toBe("LIVE\n");
 
@@ -491,9 +588,13 @@ describe("TerminalView", () => {
       },
     });
     await waitFor(() => {
-      expect(term.write).toHaveBeenCalledTimes(3);
+      const dw = term.write.mock.calls.filter((c: any[]) => c[0] !== "");
+      expect(dw).toHaveLength(3);
     });
-    const afterChunk = term.write.mock.calls[2][0];
+    const allDataCalls = term.write.mock.calls.filter(
+      (c: any[]) => c[0] !== "",
+    );
+    const afterChunk = allDataCalls[2][0];
     expect(afterChunk).toBeInstanceOf(Uint8Array);
     expect(new TextDecoder().decode(afterChunk)).toBe("AFTER\n");
   });
@@ -656,6 +757,111 @@ describe("TerminalView", () => {
     }
   });
 
+  it("does not re-fit on window focus while layout is unchanged", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-focus-refit",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    installElementSize(rootEl, { width: 800, height: 600 });
+    triggerResizeObserver(0);
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+    });
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    window.dispatchEvent(new Event("focus"));
+
+    await Promise.resolve();
+
+    expect(fit).not.toHaveBeenCalled();
+    expect(term.refresh).not.toHaveBeenCalled();
+  });
+
+  it("flushes xterm write buffer before refreshing on window focus", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-flush",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+    term.refresh.mockClear();
+    term.write.mockClear();
+
+    window.dispatchEvent(new Event("focus"));
+
+    await waitFor(() => {
+      // write('', callback) must be called to flush pending buffer
+      expect(term.write).toHaveBeenCalledWith("", expect.any(Function));
+      expect(fit).toHaveBeenCalled();
+      expect(term.refresh).toHaveBeenCalled();
+    });
+
+    // Verify write flush happened before fit
+    const writeCallIndex = term.write.mock.invocationCallOrder[0];
+    const fitCallIndex = fit.mock.invocationCallOrder[0];
+    expect(writeCallIndex).toBeLessThan(fitCallIndex);
+  });
+
+  it("flushes xterm write buffer before refreshing on visibility restore", async () => {
+    await renderTerminalView({
+      paneId: "pane-visibility-flush",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+    term.refresh.mockClear();
+    term.write.mockClear();
+
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith("", expect.any(Function));
+        expect(fit).toHaveBeenCalled();
+        expect(term.refresh).toHaveBeenCalled();
+      });
+    } finally {
+      if (hiddenDescriptor) {
+        Object.defineProperty(document, "hidden", hiddenDescriptor);
+      } else {
+        Reflect.deleteProperty(document, "hidden");
+      }
+    }
+  });
+
   it("does not steal focus from an active modal on visibility restore", async () => {
     await renderTerminalView({
       paneId: "pane-focus-visibility-modal",
@@ -697,6 +903,132 @@ describe("TerminalView", () => {
         Reflect.deleteProperty(document, "hidden");
       }
       overlay.remove();
+    }
+  });
+
+  it("does not re-fit on visibility restore while layout is unchanged", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-visibility-refit",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+    term.refresh.mockClear();
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    installElementSize(rootEl, { width: 800, height: 600 });
+    triggerResizeObserver(0);
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+    });
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      await Promise.resolve();
+
+      expect(fit).not.toHaveBeenCalled();
+      expect(term.refresh).not.toHaveBeenCalled();
+    } finally {
+      if (hiddenDescriptor) {
+        Object.defineProperty(document, "hidden", hiddenDescriptor);
+      } else {
+        Reflect.deleteProperty(document, "hidden");
+      }
+    }
+  });
+
+  it("re-fits on window focus when layout changed while active", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-focus-layout-changed",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const size = { width: 800, height: 600 };
+    installElementSize(rootEl, size);
+    triggerResizeObserver(0);
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+    });
+
+    fit.mockClear();
+    term.refresh.mockClear();
+    size.width = 801;
+
+    window.dispatchEvent(new Event("focus"));
+
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+      expect(term.refresh).toHaveBeenCalled();
+    });
+  });
+
+  it("re-fits on visibility restore when layout changed while active", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-visibility-layout-changed",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const size = { width: 800, height: 600 };
+    installElementSize(rootEl, size);
+    triggerResizeObserver(0);
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+    });
+
+    fit.mockClear();
+    term.refresh.mockClear();
+    size.height = 601;
+
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      await waitFor(() => {
+        expect(fit).toHaveBeenCalled();
+        expect(term.refresh).toHaveBeenCalled();
+      });
+    } finally {
+      if (hiddenDescriptor) {
+        Object.defineProperty(document, "hidden", hiddenDescriptor);
+      } else {
+        Reflect.deleteProperty(document, "hidden");
+      }
     }
   });
 

@@ -141,6 +141,8 @@ pub struct AppState {
     pub gh_available: AtomicBool,
     /// MRU (most-recently-used) window focus history. Front = most recent.
     pub window_focus_history: Mutex<Vec<String>>,
+    /// Last focused window label, including non-project windows.
+    pub last_focused_window_label: Mutex<Option<String>>,
     /// Persistent storage for agent sessions (Branch Mode & Project Mode).
     pub session_store: SessionStore,
 }
@@ -182,6 +184,7 @@ impl AppState {
             update_manager: UpdateManager::new(),
             gh_available: AtomicBool::new(false),
             window_focus_history: Mutex::new(Vec::new()),
+            last_focused_window_label: Mutex::new(None),
             session_store: SessionStore::new(),
         }
     }
@@ -203,7 +206,7 @@ impl AppState {
         self.is_os_env_ready()
     }
 
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg_attr(any(test, not(unix)), allow(dead_code))]
     pub fn begin_os_env_capture(&self) -> bool {
         let started = self
             .os_env_capture_inflight
@@ -498,6 +501,28 @@ impl AppState {
         if let Ok(mut history) = self.window_focus_history.lock() {
             history.retain(|l| l != label);
             history.insert(0, label.to_string());
+        }
+    }
+
+    /// Record the last focused window, including non-project windows.
+    pub fn set_last_focused_window(&self, label: &str) {
+        if let Ok(mut slot) = self.last_focused_window_label.lock() {
+            *slot = Some(label.to_string());
+        }
+    }
+
+    /// Get the last focused window label.
+    pub fn last_focused_window(&self) -> Option<String> {
+        let slot = self.last_focused_window_label.lock().ok()?;
+        slot.clone()
+    }
+
+    /// Clear the last focused window if it matches the given label.
+    pub fn clear_last_focused_window(&self, label: &str) {
+        if let Ok(mut slot) = self.last_focused_window_label.lock() {
+            if slot.as_deref() == Some(label) {
+                *slot = None;
+            }
         }
     }
 
@@ -1188,5 +1213,23 @@ mod tests {
         // History: [B]
 
         assert_eq!(state.most_recent_window(), Some("B".to_string()));
+    }
+
+    #[test]
+    fn last_focused_window_tracks_non_project_windows() {
+        let state = AppState::new();
+        assert_eq!(state.last_focused_window(), None);
+
+        state.set_last_focused_window("main");
+        assert_eq!(state.last_focused_window(), Some("main".to_string()));
+
+        state.set_last_focused_window("project-2");
+        assert_eq!(state.last_focused_window(), Some("project-2".to_string()));
+
+        state.clear_last_focused_window("other");
+        assert_eq!(state.last_focused_window(), Some("project-2".to_string()));
+
+        state.clear_last_focused_window("project-2");
+        assert_eq!(state.last_focused_window(), None);
     }
 }
