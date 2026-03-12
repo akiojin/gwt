@@ -1544,6 +1544,119 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_IssueDetailPanelHireButton_ReevaluatesBestAvailableAgentAtClickTime() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var agentService = new FakeAgentService
+            {
+                AvailableAgents = new List<DetectedAgent>
+                {
+                    new() { Type = DetectedAgentType.Codex, IsAvailable = true },
+                    new() { Type = DetectedAgentType.Claude, IsAvailable = false }
+                }
+            };
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug", Body = "Investigate auth failures", Labels = new List<string> { "bug", "auth" } }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService,
+                agentService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+            Assert.AreEqual("Hire Codex", issuePanel.CurrentHireLabel);
+
+            agentService.AvailableAgents = new List<DetectedAgent>
+            {
+                new() { Type = DetectedAgentType.Codex, IsAvailable = false },
+                new() { Type = DetectedAgentType.Claude, IsAvailable = true }
+            };
+
+            issuePanel.HireButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => agentService.HireCallCount == 1, cancellationToken: default);
+
+            Assert.AreEqual(DetectedAgentType.Claude, agentService.LastAgentType);
+            Assert.AreEqual("Hired", issuePanel.CurrentHireLabel);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_IssueDetailPanelHireButton_ShowsUnavailableWhenAgentsDisappearBeforeClick() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var agentService = new FakeAgentService();
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug", Body = "Investigate auth failures", Labels = new List<string> { "bug", "auth" } }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService,
+                agentService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+            Assert.AreEqual("Hire Codex", issuePanel.CurrentHireLabel);
+
+            agentService.AvailableAgents = new List<DetectedAgent>();
+
+            issuePanel.HireButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => issuePanel.CurrentHireLabel == "No agent available", cancellationToken: default);
+
+            Assert.AreEqual(0, agentService.HireCallCount);
+            Assert.IsFalse(issuePanel.IsHireEnabled);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_IssueDetailPanelActionButton_OpensGitDetailPanel_ForFileTopHit() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();

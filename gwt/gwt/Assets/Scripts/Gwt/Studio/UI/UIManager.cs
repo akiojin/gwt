@@ -848,12 +848,19 @@ namespace Gwt.Studio.UI
                 return;
             }
 
-            if (_agentService == null || currentProject == null || _lastSearchTopIssue == null || !_lastSearchHireAgentType.HasValue)
+            if (_agentService == null || currentProject == null || _lastSearchTopIssue == null)
                 return;
 
             try
             {
-                _issueDetailPanel?.SetHireState(false, "Hiring...");
+                _lastSearchHireAgentType = await ResolveSearchHireAgentTypeAsync();
+                if (!_lastSearchHireAgentType.HasValue)
+                {
+                    _issueDetailPanel?.SetHireState(false, "No agent available");
+                    return;
+                }
+
+                _issueDetailPanel?.SetHireState(false, $"Hiring {RandomNameGenerator.GetAgentTypeLabel(_lastSearchHireAgentType.Value)}...");
                 var instructions = BuildIssueHireInstructions(_lastSearchQuery, _lastSearchTopIssue);
                 var session = await _agentService.HireAgentAsync(
                     _lastSearchHireAgentType.Value,
