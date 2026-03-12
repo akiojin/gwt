@@ -26,8 +26,9 @@ Use this command as the main entrypoint for GitHub Issues. It should not stop at
    - direct fix
    - existing SPEC
    - new SPEC
-5. For SPEC-needed paths, use `gwt-project-index` Issue search before choosing or creating the destination.
-6. Continue toward implementation or SPEC execution instead of stopping at triage.
+5. For SPEC-needed paths, use `gwt-project-index` Issue search before choosing the destination.
+6. If no canonical SPEC exists, switch to `gwt-spec-register` to create it.
+7. Continue toward implementation or SPEC execution instead of stopping at triage.
 
 ## Proactive Trigger Examples
 

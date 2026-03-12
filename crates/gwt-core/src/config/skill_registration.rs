@@ -28,6 +28,7 @@ struct ManagedAsset {
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-issue-resolve",
+    "gwt-spec-register",
     "gwt-fix-pr",
     "gwt-spec-ops",
     "gwt-pr",
@@ -55,6 +56,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         )),
         executable: true,
         rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-register/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-register/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
     },
     ManagedAsset {
         relative_path: "skills/gwt-fix-pr/SKILL.md",
@@ -179,6 +189,15 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/gwt/commands/gwt-issue-resolve.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-register.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-register.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -1886,6 +1905,17 @@ mod tests {
         assert!(issue_resolve_skill.contains("Direct fix path"));
         assert!(issue_resolve_skill.contains("gwt-project-index"));
 
+        let spec_register_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-register")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_register_skill.contains("Create a new GitHub Issue-first SPEC"));
+        assert!(spec_register_skill.contains("gwt-project-index"));
+
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
                 .join(".claude")
@@ -1895,6 +1925,17 @@ mod tests {
         .unwrap();
         assert!(issue_resolve_command.contains("direct fix"));
         assert!(issue_resolve_command.contains("existing SPEC"));
+
+        let spec_register_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-register.md"),
+        )
+        .unwrap();
+        assert!(spec_register_command.contains("Create a new Issue-first SPEC"));
+        assert!(spec_register_command.contains("gwt-project-index"));
+
         assert!(!temp
             .path()
             .join(".claude")
