@@ -32,6 +32,7 @@ pub const MENU_ID_WINDOW_PREVIOUS_TAB: &str = "window-previous-tab";
 pub const MENU_ID_WINDOW_NEXT_TAB: &str = "window-next-tab";
 pub const MENU_ID_WINDOW_NEXT_WINDOW: &str = "window-next-window";
 pub const MENU_ID_WINDOW_PREVIOUS_WINDOW: &str = "window-previous-window";
+pub const MENU_ID_WINDOW_SUBMENU: &str = "window-submenu";
 #[cfg(target_os = "macos")]
 pub const MENU_ID_WINDOW_MINIMIZE: &str = "window-minimize";
 #[cfg(target_os = "macos")]
@@ -103,13 +104,15 @@ pub fn rebuild_menu(app: &AppHandle<Wry>) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn refresh_window_tab_checkmarks(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<()> {
+pub fn refresh_window_tab_checkmarks_for_label(
+    app: &AppHandle<Wry>,
+    state: &AppState,
+    focused_label: &str,
+) -> tauri::Result<()> {
     let Some(menu) = app.menu() else {
         return Ok(());
     };
-
-    let focused_label = focused_window_label(app);
-    let window_tabs = state.window_agent_tabs_for_window(&focused_label);
+    let window_tabs = state.window_agent_tabs_for_window(focused_label);
     let active_tab_id = window_tabs.active_tab_id;
 
     for tab in window_tabs.tabs {
@@ -125,6 +128,58 @@ pub fn refresh_window_tab_checkmarks(app: &AppHandle<Wry>, state: &AppState) -> 
     }
 
     Ok(())
+}
+
+pub fn refresh_window_submenu_for_label(
+    app: &AppHandle<Wry>,
+    state: &AppState,
+    focused_label: &str,
+) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else {
+        return Ok(());
+    };
+
+    refresh_version_history_menu_item(&menu, state.project_for_window(focused_label).is_some())?;
+
+    let Some(item) = menu.get(MENU_ID_WINDOW_SUBMENU) else {
+        return rebuild_menu(app);
+    };
+    let Some(window_submenu) = item.as_submenu() else {
+        return rebuild_menu(app);
+    };
+
+    let replacement = build_window_submenu_for_label(app, state, focused_label)?;
+    replace_submenu_items(window_submenu, replacement)
+}
+
+fn replace_submenu_items(
+    target: &tauri::menu::Submenu<Wry>,
+    replacement: tauri::menu::Submenu<Wry>,
+) -> tauri::Result<()> {
+    let existing_count = target.items()?.len();
+    for _ in 0..existing_count {
+        let _ = target.remove_at(0)?;
+    }
+
+    let replacement_count = replacement.items()?.len();
+    for _ in 0..replacement_count {
+        let Some(item) = replacement.remove_at(0)? else {
+            continue;
+        };
+        target.append(&item)?;
+    }
+
+    Ok(())
+}
+
+fn refresh_version_history_menu_item(menu: &Menu<Wry>, enabled: bool) -> tauri::Result<()> {
+    let Some(item) = menu.get(MENU_ID_GIT_VERSION_HISTORY) else {
+        return Ok(());
+    };
+    let Some(menu_item) = item.as_menuitem() else {
+        return Ok(());
+    };
+    menu_item.set_enabled(enabled)
 }
 
 pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<Wry>> {
@@ -205,17 +260,14 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     )?;
     let git_issues = MenuItem::with_id(app, MENU_ID_GIT_ISSUES, "Issues", true, None::<&str>)?;
     let mut git_builder = SubmenuBuilder::new(app, "Git");
-
-    if should_show_version_history_menu(app, state) {
-        let version_history = MenuItem::with_id(
-            app,
-            MENU_ID_GIT_VERSION_HISTORY,
-            "Version History...",
-            true,
-            None::<&str>,
-        )?;
-        git_builder = git_builder.item(&version_history).separator();
-    }
+    let version_history = MenuItem::with_id(
+        app,
+        MENU_ID_GIT_VERSION_HISTORY,
+        "Version History...",
+        should_show_version_history_menu(app, state),
+        None::<&str>,
+    )?;
+    git_builder = git_builder.item(&version_history).separator();
 
     let git = git_builder
         .item(&git_pull_requests)
@@ -375,10 +427,19 @@ fn build_window_submenu(
     app: &AppHandle<Wry>,
     state: &AppState,
 ) -> tauri::Result<tauri::menu::Submenu<Wry>> {
-    let tab_entries = collect_agent_tab_entries(app, state);
-    let window_entries = collect_window_entries(app, state);
+    let focused_label = focused_window_label(app);
+    build_window_submenu_for_label(app, state, &focused_label)
+}
 
-    let mut builder = SubmenuBuilder::new(app, "Window");
+fn build_window_submenu_for_label(
+    app: &AppHandle<Wry>,
+    state: &AppState,
+    focused_label: &str,
+) -> tauri::Result<tauri::menu::Submenu<Wry>> {
+    let tab_entries = collect_agent_tab_entries_for_window(state, focused_label);
+    let window_entries = collect_window_entries(app, state, focused_label);
+
+    let mut builder = SubmenuBuilder::with_id(app, MENU_ID_WINDOW_SUBMENU, "Window");
 
     // 1. Tab switching items
     let previous_tab = MenuItem::with_id(
@@ -500,9 +561,11 @@ fn build_window_submenu(
     builder.build()
 }
 
-fn collect_agent_tab_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<WindowTabMenuEntry> {
-    let focused_label = focused_window_label(app);
-    let window_tabs = state.window_agent_tabs_for_window(&focused_label);
+fn collect_agent_tab_entries_for_window(
+    state: &AppState,
+    focused_label: &str,
+) -> Vec<WindowTabMenuEntry> {
+    let window_tabs = state.window_agent_tabs_for_window(focused_label);
     let active_tab_id = window_tabs.active_tab_id;
 
     window_tabs
@@ -519,7 +582,11 @@ fn collect_agent_tab_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<Wind
         .collect()
 }
 
-fn collect_window_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<WindowMenuEntry> {
+fn collect_window_entries(
+    app: &AppHandle<Wry>,
+    state: &AppState,
+    focused_label: &str,
+) -> Vec<WindowMenuEntry> {
     let projects = match state.window_projects.lock() {
         Ok(m) => m.clone(),
         Err(_) => HashMap::new(),
@@ -529,9 +596,6 @@ fn collect_window_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<WindowM
     if projects.is_empty() && migrations.is_empty() {
         return vec![];
     }
-
-    // Determine focused window by scanning (stable API).
-    let focused_label = focused_window_label(app);
 
     let mut project_raw: Vec<(String, String)> = Vec::new();
     for (label, path) in &projects {
