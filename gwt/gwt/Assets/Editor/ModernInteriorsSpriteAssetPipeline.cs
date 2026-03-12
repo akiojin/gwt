@@ -157,6 +157,7 @@ namespace Gwt.Editor
                    fileName.IndexOf("tileset", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    fileName.IndexOf("spritesheet", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    assetPath.IndexOf("/Animated_Spritesheets/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   assetPath.IndexOf("/Character_Generator/", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    fileName.StartsWith("UI_", StringComparison.OrdinalIgnoreCase) ||
                    fileName.StartsWith("Modern_Office_", StringComparison.OrdinalIgnoreCase) ||
                    fileName.StartsWith("Room_Builder_", StringComparison.OrdinalIgnoreCase);

@@ -172,6 +172,12 @@ namespace Gwt.Editor
                 return;
             }
 
+            // Ensure character spritesheets are configured as Multiple with grid slicing
+            foreach (var sheetPath in characterPaths)
+            {
+                ModernInteriorsSpriteAssetPipeline.ConfigureSourceSpriteImporter(sheetPath);
+            }
+
             EnsureFolder(GeneratedAnimationsRoot);
 
             foreach (var sheetPath in characterPaths)

@@ -217,6 +217,13 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void IsLikelySheetAsset_CharacterGeneratorReturnsTrue()
+        {
+            Assert.IsTrue(ModernInteriorsSpriteAssetPipeline.IsLikelySheetAsset(
+                "Assets/Graphics/moderninteriors-win/2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_01.png"));
+        }
+
+        [Test]
         public void OfficeAtlasDefinition_UsesExpectedRoots()
         {
             var office = ModernInteriorsSpriteAssetPipeline.GetOfficeAtlasDefinition();
