@@ -1798,6 +1798,50 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_ExpiresPreparedUpdate_WhenArtifactMissing() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
+            SetPrivateField(manager, "_projectInfoBar", bar);
+            SetPrivateField(manager, "_preparedUpdatePlan", new PreparedUpdatePlan
+            {
+                Candidate = new UpdateInfo { Version = "1.1.0", DownloadUrl = "file:///tmp/gwt-1.1.0.zip" },
+                DownloadedArtifactPath = "/tmp/missing-gwt-1.1.0.zip",
+                ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
+                LauncherScriptPath = "/tmp/apply-update.sh",
+                ShouldApply = true
+            });
+            SetPrivateField(manager, "_preparedUpdateProjectPath", "/tmp/project-a");
+            SetPrivateField(manager, "_preparedUpdateLaunchReady", true);
+
+            var buildService = new FakeBuildService();
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                buildService,
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService());
+
+            var updateButton = bar.GetComponentsInChildren<Button>(true)
+                .FirstOrDefault(candidate => candidate.gameObject.name == "UpdateButton");
+            Assert.IsNotNull(updateButton);
+
+            updateButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update artifact missing", cancellationToken: default);
+
+            Assert.AreEqual("Update artifact missing", bar.CurrentUpdateStatus);
+            Assert.AreEqual("Update", bar.CurrentUpdateButtonLabel);
+            Assert.AreEqual(0, buildService.LaunchCallCount);
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator UIManager_ProjectInfoBarUpdateButton_BlocksRealLaunchInEditor() => UniTask.ToCoroutine(async () =>
         {
             var lifecycle = new FakeProjectLifecycleService();
@@ -2155,6 +2199,53 @@ namespace Gwt.Tests.Editor
                     RestartCommand = "open /Applications/GWT.app",
                     StagingDirectory = "/tmp",
                     LauncherScriptPath = "/tmp/missing-apply-update.sh",
+                    ShouldApply = true
+                };
+                File.WriteAllText(statePath, JsonUtility.ToJson(persisted));
+
+                using var scope = new UiScope();
+                var manager = scope.Root.AddComponent<UIManager>();
+                var bar = scope.Root.AddComponent<ProjectInfoBar>();
+                SetPrivateField(manager, "_projectInfoBar", bar);
+                manager.Construct(lifecycle, new MultiProjectService(lifecycle), new TerminalPaneManager(), null, new FakeBuildService(), new VoiceService(), new SoundService(), new GamificationService());
+
+                Assert.AreEqual("Update state expired", bar.CurrentUpdateStatus);
+                Assert.AreEqual("Update", bar.CurrentUpdateButtonLabel);
+                Assert.IsFalse(File.Exists(statePath));
+            }
+            finally
+            {
+                if (File.Exists(statePath))
+                    File.Delete(statePath);
+            }
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_Construct_DropsPersistedPreparedUpdateState_WhenDownloadedArtifactMissing() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            var statePath = GetPreparedUpdateStatePath();
+            Directory.CreateDirectory(Path.GetDirectoryName(statePath)!);
+
+            try
+            {
+                var persisted = new PersistedPreparedUpdateStateFixture
+                {
+                    ProjectPath = "/tmp/project-a",
+                    LaunchReady = true,
+                    StatusText = "Update staged",
+                    ButtonLabel = "Launch",
+                    DisplayCommand = "/tmp/apply-update.sh",
+                    CandidateVersion = "1.1.0",
+                    CandidateDownloadUrl = "file:///tmp/gwt-1.1.0.zip",
+                    ManifestSource = "/tmp/manifest.json",
+                    DownloadedArtifactPath = "/tmp/missing-gwt-1.1.0.zip",
+                    ApplyCommand = "cp /tmp/gwt-1.1.0.zip /Applications/GWT.app",
+                    RestartCommand = "open /Applications/GWT.app",
+                    StagingDirectory = "/tmp",
+                    LauncherScriptPath = "/tmp/apply-update.sh",
                     ShouldApply = true
                 };
                 File.WriteAllText(statePath, JsonUtility.ToJson(persisted));

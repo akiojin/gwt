@@ -1620,6 +1620,28 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public void BuildService_LaunchPreparedUpdateAsync_MissingDownloadedArtifact_ReturnsFalse()
+        {
+            WithTempProject(tempDir =>
+            {
+                var service = BuildService.CreateForTests(_ => new System.Diagnostics.Process());
+
+                var scriptPath = Path.Combine(tempDir, "apply-update.sh");
+                File.WriteAllText(scriptPath, "#!/bin/sh\nexit 0\n");
+
+                var launched = service.LaunchPreparedUpdateAsync(new PreparedUpdatePlan
+                {
+                    ShouldApply = true,
+                    LauncherScriptPath = scriptPath,
+                    DownloadedArtifactPath = Path.Combine(tempDir, "missing-update.zip"),
+                    ApplyCommand = "echo ok"
+                }).GetAwaiter().GetResult();
+
+                Assert.IsFalse(launched);
+            });
+        }
+
+        [Test]
         public void BuildArtifactInfo_Serialization_RoundTrip()
         {
             var artifact = new BuildArtifactInfo

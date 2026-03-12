@@ -380,6 +380,12 @@ namespace Gwt.Infra.Services
             if (plan == null || !plan.ShouldApply)
                 return false;
 
+            if (!string.IsNullOrWhiteSpace(plan.DownloadedArtifactPath) &&
+                !File.Exists(plan.DownloadedArtifactPath))
+            {
+                return false;
+            }
+
             var scriptPath = plan.LauncherScriptPath;
             if (string.IsNullOrWhiteSpace(scriptPath) || !File.Exists(scriptPath))
                 scriptPath = await WritePreparedUpdateScriptAsync(plan, ct);

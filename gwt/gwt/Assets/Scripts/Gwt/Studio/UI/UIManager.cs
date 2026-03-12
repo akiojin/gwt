@@ -580,6 +580,9 @@ namespace Gwt.Studio.UI
                 !string.IsNullOrWhiteSpace(currentProjectPath) &&
                 string.Equals(_preparedUpdateProjectPath, currentProjectPath, System.StringComparison.Ordinal))
             {
+                if (TryExpirePreparedUpdateWhenArtifactMissing())
+                    return;
+
                 _soundService?.PlaySfx(SfxType.ButtonClick);
                 if (!_preparedUpdateLaunchReady)
                 {
@@ -1161,6 +1164,24 @@ namespace Gwt.Studio.UI
                 !(updateSettings?.AllowLaunchInEditor ?? false);
         }
 
+        private bool TryExpirePreparedUpdateWhenArtifactMissing()
+        {
+            if (_projectInfoBar == null || _preparedUpdatePlan == null)
+                return false;
+
+            if (string.IsNullOrWhiteSpace(_preparedUpdatePlan.DownloadedArtifactPath) ||
+                File.Exists(_preparedUpdatePlan.DownloadedArtifactPath))
+            {
+                return false;
+            }
+
+            ClearPreparedUpdate();
+            _projectInfoBar.SetUpdateState("Update artifact missing");
+            _projectInfoBar.SetUpdateButtonLabel("Update");
+            RefreshMetaStatus();
+            return true;
+        }
+
         private void RestorePreparedUpdateStateIfNeeded()
         {
             if (_projectInfoBar == null || _projectLifecycleService?.CurrentProject == null)
@@ -1201,6 +1222,12 @@ namespace Gwt.Studio.UI
         {
             if (payload == null || !payload.ShouldApply)
                 return true;
+
+            if (!string.IsNullOrWhiteSpace(payload.DownloadedArtifactPath) &&
+                !File.Exists(payload.DownloadedArtifactPath))
+            {
+                return true;
+            }
 
             if (payload.LaunchReady &&
                 (string.IsNullOrWhiteSpace(payload.LauncherScriptPath) || !File.Exists(payload.LauncherScriptPath)))
