@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using Gwt.Agent.Services;
 using Gwt.AI.Services;
 using Cysharp.Threading.Tasks;
 using Gwt.Core.Models;
@@ -44,6 +45,7 @@ namespace Gwt.Studio.UI
         private IDockerService _dockerService;
         private IBuildService _buildService;
         private IProjectIndexService _projectIndexService;
+        private IAgentService _agentService;
         private IConfigService _configService;
         private IVoiceService _voiceService;
         private ISoundService _soundService;
@@ -57,6 +59,8 @@ namespace Gwt.Studio.UI
         private bool _previousUpPressed;
         private bool _previousConfirmPressed;
         private int _projectInfoRefreshVersion;
+        private string _lastSearchQuery = string.Empty;
+        private IssueIndexEntry _lastSearchTopIssue;
 
         public ConsolePanel Console => _consolePanel;
         public LeadInputField LeadInput => _leadInputField;
@@ -73,7 +77,8 @@ namespace Gwt.Studio.UI
             ISoundService soundService = null,
             IGamificationService gamificationService = null,
             IConfigService configService = null,
-            IProjectIndexService projectIndexService = null)
+            IProjectIndexService projectIndexService = null,
+            IAgentService agentService = null)
         {
             _projectLifecycleService = projectLifecycleService;
             _multiProjectService = multiProjectService;
@@ -81,6 +86,7 @@ namespace Gwt.Studio.UI
             _dockerService = dockerService;
             _buildService = buildService;
             _projectIndexService = projectIndexService;
+            _agentService = agentService;
             _configService = configService;
             _voiceService = voiceService;
             _soundService = soundService;
@@ -357,6 +363,9 @@ namespace Gwt.Studio.UI
                 _issueDetailPanel = panelObject.AddComponent<IssueDetailPanel>();
                 _issueDetailPanel.Close();
             }
+
+            _issueDetailPanel.HireRequested -= HandleIssueDetailHireRequested;
+            _issueDetailPanel.HireRequested += HandleIssueDetailHireRequested;
         }
 
         private void EnsureTerminalOverlayPanel()
@@ -401,6 +410,11 @@ namespace Gwt.Studio.UI
                 return;
 
             HandleSearchQueryAsync(query).Forget();
+        }
+
+        private void HandleIssueDetailHireRequested()
+        {
+            HandleIssueDetailHireRequestedAsync().Forget();
         }
 
         private void HandleProjectSwitchEntryInvoked()
@@ -739,14 +753,45 @@ namespace Gwt.Studio.UI
                 if ((results?.Files.Count ?? 0) == 0 && (results?.Issues.Count ?? 0) == 0)
                     results = _projectIndexService.SearchAll(query);
 
+                _lastSearchQuery = query;
+                _lastSearchTopIssue = results?.Issues != null && results.Issues.Count > 0 ? results.Issues[0] : null;
                 var (title, body) = BuildSearchPresentation(query, results);
-                _issueDetailPanel.SetIssue(title, body);
+                _issueDetailPanel.SetIssue(title, body, _lastSearchTopIssue != null && _agentService != null && _projectLifecycleService?.CurrentProject != null);
                 OpenPanel(_issueDetailPanel);
             }
             catch (System.Exception e)
             {
+                _lastSearchQuery = query;
+                _lastSearchTopIssue = null;
                 _issueDetailPanel.SetIssue($"Search: {query}", $"Search failed: {e.Message}");
                 OpenPanel(_issueDetailPanel);
+            }
+        }
+
+        private async UniTaskVoid HandleIssueDetailHireRequestedAsync()
+        {
+            TryResolveRuntimeServices();
+            var currentProject = _projectLifecycleService?.CurrentProject;
+            if (_agentService == null || currentProject == null || _lastSearchTopIssue == null)
+                return;
+
+            try
+            {
+                var instructions = BuildIssueHireInstructions(_lastSearchQuery, _lastSearchTopIssue);
+                var session = await _agentService.HireAgentAsync(
+                    DetectedAgentType.Codex,
+                    currentProject.Path,
+                    currentProject.DefaultBranch,
+                    instructions);
+                _soundService?.PlaySfx(SfxType.AgentHire);
+                _gamificationService?.AddExperience(20);
+
+                if (!string.IsNullOrWhiteSpace(session?.Id))
+                    OpenTerminalForAgent(session.Id);
+            }
+            catch (System.Exception e)
+            {
+                _issueDetailPanel?.SetIssue(_issueDetailPanel.CurrentTitle, $"{_issueDetailPanel.CurrentBody}\n\nHire failed: {e.Message}", canHire: true);
             }
         }
 
@@ -848,6 +893,14 @@ namespace Gwt.Studio.UI
             try
             {
                 _projectIndexService ??= container.Resolve<IProjectIndexService>();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _agentService ??= container.Resolve<IAgentService>();
             }
             catch
             {
@@ -1367,6 +1420,24 @@ namespace Gwt.Studio.UI
             }
         }
 
+        private static string BuildIssueHireInstructions(string query, IssueIndexEntry issue)
+        {
+            var lines = new List<string>
+            {
+                $"Investigate issue #{issue.Number}: {issue.Title}"
+            };
+
+            if (!string.IsNullOrWhiteSpace(query))
+                lines.Add($"Search query: {query}");
+            if (!string.IsNullOrWhiteSpace(issue.Body))
+            {
+                lines.Add(string.Empty);
+                lines.Add(issue.Body.Trim());
+            }
+
+            return string.Join("\n", lines);
+        }
+
         private void OnDestroy()
         {
             if (_projectLifecycleService != null)
@@ -1397,6 +1468,9 @@ namespace Gwt.Studio.UI
 
             if (_leadInputField != null)
                 _leadInputField.OnLeadCommand -= HandleLeadCommand;
+
+            if (_issueDetailPanel != null)
+                _issueDetailPanel.HireRequested -= HandleIssueDetailHireRequested;
 
             if (_projectSwitchOverlayPanel != null)
                 _projectSwitchOverlayPanel.EntryInvoked -= HandleProjectSwitchEntryInvoked;

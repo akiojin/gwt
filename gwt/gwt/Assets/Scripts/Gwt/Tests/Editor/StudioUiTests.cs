@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.IO;
 using Cysharp.Threading.Tasks;
 using Gwt.AI.Services;
+using Gwt.Agent.Services;
 using Gwt.Core.Models;
 using Gwt.Core.Services.Pty;
 using Gwt.Core.Services.Terminal;
@@ -1273,6 +1274,7 @@ namespace Gwt.Tests.Editor
             Assert.That(issuePanel.CurrentBody, Does.Contain("Labels:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("LoginService.cs"));
+            Assert.IsTrue(issuePanel.IsHireEnabled);
         });
 
         [UnityTest]
@@ -1320,6 +1322,59 @@ namespace Gwt.Tests.Editor
             Assert.That(issuePanel.CurrentBody, Does.Contain("handles authentication requests"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("SessionStore.cs"));
+            Assert.IsFalse(issuePanel.IsHireEnabled);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_IssueDetailPanelHireButton_HiresAgentForTopIssueSearch() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var agentService = new FakeAgentService();
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug", Body = "Investigate auth failures", Labels = new List<string> { "bug", "auth" } }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService,
+                agentService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+
+            Assert.IsTrue(issuePanel.IsHireEnabled);
+            issuePanel.HireButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => agentService.HireCallCount == 1, cancellationToken: default);
+
+            Assert.AreEqual(DetectedAgentType.Codex, agentService.LastAgentType);
+            Assert.AreEqual("/tmp/project-a", agentService.LastWorktreePath);
+            Assert.AreEqual("main", agentService.LastBranch);
+            Assert.That(agentService.LastInstructions, Does.Contain("#42"));
+            Assert.That(agentService.LastInstructions, Does.Contain("authentication"));
         });
 
         [UnityTest]
@@ -2514,6 +2569,47 @@ namespace Gwt.Tests.Editor
             public UniTask SaveIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
             public UniTask LoadIndexAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
             public IndexStatus GetStatus() => Status;
+        }
+
+        private sealed class FakeAgentService : IAgentService
+        {
+            public int HireCallCount { get; private set; }
+            public DetectedAgentType LastAgentType { get; private set; }
+            public string LastWorktreePath { get; private set; }
+            public string LastBranch { get; private set; }
+            public string LastInstructions { get; private set; }
+
+            public int ActiveSessionCount => HireCallCount;
+            public event Action<AgentSessionData> OnAgentStatusChanged;
+            public event Action<string, string> OnAgentOutput;
+
+            public UniTask<List<DetectedAgent>> GetAvailableAgentsAsync(System.Threading.CancellationToken ct = default)
+                => UniTask.FromResult(new List<DetectedAgent>());
+
+            public UniTask<AgentSessionData> HireAgentAsync(DetectedAgentType agentType, string worktreePath, string branch, string instructions, System.Threading.CancellationToken ct = default)
+            {
+                HireCallCount++;
+                LastAgentType = agentType;
+                LastWorktreePath = worktreePath;
+                LastBranch = branch;
+                LastInstructions = instructions;
+                var session = new AgentSessionData
+                {
+                    Id = "agent-session",
+                    WorktreePath = worktreePath,
+                    Branch = branch,
+                    Status = "running"
+                };
+                OnAgentStatusChanged?.Invoke(session);
+                return UniTask.FromResult(session);
+            }
+
+            public UniTask FireAgentAsync(string sessionId, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask SendInstructionAsync(string sessionId, string instruction, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask<AgentSessionData> GetSessionAsync(string sessionId, System.Threading.CancellationToken ct = default) => UniTask.FromResult<AgentSessionData>(null);
+            public UniTask<List<AgentSessionData>> ListSessionsAsync(string projectRoot, System.Threading.CancellationToken ct = default) => UniTask.FromResult(new List<AgentSessionData>());
+            public UniTask<AgentSessionData> RestoreSessionAsync(string sessionId, System.Threading.CancellationToken ct = default) => UniTask.FromResult<AgentSessionData>(null);
+            public UniTask SaveAllSessionsAsync(System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
         }
 
         [System.Serializable]
