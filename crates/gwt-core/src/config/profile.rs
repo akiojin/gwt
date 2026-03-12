@@ -206,9 +206,10 @@ impl ProfilesConfig {
         let mut normalized = self.clone();
         normalized.normalize_for_save()?;
 
-        let mut settings = Settings::load_global()?;
-        settings.profiles = normalized;
-        settings.save_global()?;
+        Settings::update_global(|settings| {
+            settings.profiles = normalized.clone();
+            Ok(())
+        })?;
 
         let path = Settings::global_config_path()
             .map(|p| p.display().to_string())

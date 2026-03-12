@@ -217,6 +217,78 @@ impl Settings {
         Env::prefixed("GWT_").split("_").only(&["debug"])
     }
 
+    fn apply_runtime_env_overrides(mut settings: Settings) -> Settings {
+        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.docker.force_host = parsed;
+            }
+        }
+
+        settings
+    }
+
+    fn load_global_internal(apply_env_overrides: bool) -> Result<Self> {
+        debug!(category = "config", apply_env_overrides, "Loading global settings");
+
+        let config_path = Self::global_config_path().filter(|p| p.exists());
+
+        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
+
+        if let Some(ref path) = config_path {
+            debug!(
+                category = "config",
+                config_path = %path.display(),
+                "Merging global config file"
+            );
+            figment = figment.merge(Toml::file(path));
+        }
+
+        if apply_env_overrides {
+            figment = figment.merge(Self::settings_env_provider());
+        }
+
+        let mut settings: Settings = figment.extract().map_err(|e| {
+            error!(
+                category = "config",
+                error = %e,
+                "Failed to parse global config"
+            );
+            GwtError::ConfigParseError {
+                reason: e.to_string(),
+            }
+        })?;
+
+        if apply_env_overrides {
+            settings = Self::apply_runtime_env_overrides(settings);
+        }
+        settings.profiles.normalize_loaded();
+
+        info!(
+            category = "config",
+            operation = if apply_env_overrides {
+                "load_global"
+            } else {
+                "load_global_raw"
+            },
+            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
+            debug = settings.debug,
+            worktree_root = %settings.worktree_root,
+            "Global settings loaded"
+        );
+
+        Ok(settings)
+    }
+
+    pub fn load_global_raw() -> Result<Self> {
+        Self::load_global_internal(false)
+    }
+
     /// Load settings from configuration files and environment
     pub fn load(repo_root: &Path) -> Result<Self> {
         debug!(
@@ -251,17 +323,7 @@ impl Settings {
             }
         })?;
 
-        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.agent.auto_install_deps = parsed;
-            }
-        }
-
-        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.docker.force_host = parsed;
-            }
-        }
+        settings = Self::apply_runtime_env_overrides(settings);
         if let Some(path) = config_path.as_ref() {
             if !Self::is_global_config_path(path) {
                 let global_settings = Self::load_global().unwrap_or_default();
@@ -288,57 +350,7 @@ impl Settings {
     ///
     /// Reads `~/.gwt/config.toml`. Falls back to defaults when the file does not exist.
     pub fn load_global() -> Result<Self> {
-        debug!(category = "config", "Loading global settings");
-
-        let config_path = Self::global_config_path().filter(|p| p.exists());
-
-        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
-
-        if let Some(ref path) = config_path {
-            debug!(
-                category = "config",
-                config_path = %path.display(),
-                "Merging global config file"
-            );
-            figment = figment.merge(Toml::file(path));
-        }
-
-        figment = figment.merge(Self::settings_env_provider());
-
-        let mut settings: Settings = figment.extract().map_err(|e| {
-            error!(
-                category = "config",
-                error = %e,
-                "Failed to parse global config"
-            );
-            GwtError::ConfigParseError {
-                reason: e.to_string(),
-            }
-        })?;
-
-        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.agent.auto_install_deps = parsed;
-            }
-        }
-
-        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.docker.force_host = parsed;
-            }
-        }
-        settings.profiles.normalize_loaded();
-
-        info!(
-            category = "config",
-            operation = "load_global",
-            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
-            debug = settings.debug,
-            worktree_root = %settings.worktree_root,
-            "Global settings loaded"
-        );
-
-        Ok(settings)
+        Self::load_global_internal(true)
     }
 
     /// Get default TOML configuration
@@ -485,7 +497,7 @@ impl Settings {
         let path = Self::global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
             reason: "Could not determine global config path".to_string(),
         })?;
-        let mut settings = Self::load_global()?;
+        let mut settings = Self::load_global_raw()?;
         mutate(&mut settings)?;
         settings.save(&path)
     }
@@ -547,7 +559,7 @@ mod tests {
     #[test]
     fn test_load_ignores_unrelated_legacy_file() {
         let temp = TempDir::new().unwrap();
-        let legacy_path = temp.path().join(".legacy-config");
+        let legacy_path = temp.path().join(".gwt.json");
 
         std::fs::write(
             &legacy_path,

@@ -26,9 +26,8 @@ pub struct RecentProjectsConfig {
 /// Load recent projects from `~/.gwt/config.toml`.
 ///
 /// Returns entries sorted by `last_opened` descending (most recent first).
-/// Non-existent paths are automatically removed and the config is rewritten.
 pub fn load_recent_projects() -> Vec<RecentProject> {
-    let settings = match Settings::load_global() {
+    let settings = match Settings::load_global_raw() {
         Ok(settings) => settings,
         Err(e) => {
             warn!(
@@ -48,17 +47,14 @@ pub fn load_recent_projects() -> Vec<RecentProject> {
         .filter(|p| std::path::Path::new(&p.path).exists())
         .collect();
 
-    // Sort by last_opened descending.
     projects.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
 
-    // Rewrite file if stale entries were removed.
     if projects.len() != before_count {
         debug!(
             category = "config",
             removed = before_count - projects.len(),
             "Cleaned stale recent project entries"
         );
-        let _ = save_recent_projects(&projects);
     }
 
     projects
@@ -86,17 +82,18 @@ pub fn record_recent_project(path: &str) -> Result<()> {
 
 /// Load raw entries without filtering non-existent paths.
 fn load_recent_projects_raw() -> Vec<RecentProject> {
-    Settings::load_global()
+    Settings::load_global_raw()
         .map(|settings| settings.recent_projects.projects)
         .unwrap_or_default()
 }
 
 fn save_recent_projects(projects: &[RecentProject]) -> Result<()> {
-    let mut settings = Settings::load_global()?;
-    settings.recent_projects = RecentProjectsConfig {
-        projects: projects.to_vec(),
-    };
-    settings.save_global()
+    Settings::update_global(|settings| {
+        settings.recent_projects = RecentProjectsConfig {
+            projects: projects.to_vec(),
+        };
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -150,6 +147,27 @@ mod tests {
         assert!(second_time >= first_time);
         // Still only one entry
         assert_eq!(load_recent_projects().len(), 1);
+    }
+
+    #[test]
+    fn record_recent_project_does_not_persist_env_overrides() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = TestEnvGuard::new(temp.path());
+
+        let gwt_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&gwt_dir).unwrap();
+
+        let project_dir = temp.path().join("my-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
+        record_recent_project(&project_dir.to_string_lossy()).unwrap();
+        std::env::remove_var("GWT_DOCKER_FORCE_HOST");
+
+        let raw = Settings::load_global_raw().unwrap();
+        assert!(!raw.docker.force_host);
+        assert_eq!(raw.recent_projects.projects.len(), 1);
     }
 
     #[test]

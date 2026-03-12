@@ -268,17 +268,18 @@ impl ToolsConfig {
 
     /// Save configuration into `~/.gwt/config.toml`.
     pub fn save_global(&self) -> std::io::Result<()> {
-        let mut settings =
-            Settings::load_global().map_err(|e| std::io::Error::other(e.to_string()))?;
-        settings.tools = self.clone();
-        settings
-            .save_global()
-            .map_err(|e| std::io::Error::other(e.to_string()))
+        Settings::update_global(|settings| {
+            settings.tools = self.clone();
+            Ok(())
+        })
+        .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     /// Project-local custom agent files are no longer supported.
     pub fn save_local(&self, _repo_root: &Path) -> std::io::Result<()> {
-        self.save_global()
+        Err(std::io::Error::other(
+            "project-local custom agent files are no longer supported; use save_global()",
+        ))
     }
 
     /// Add a new agent
@@ -653,6 +654,17 @@ arg = "--model gpt-4"
         let content = std::fs::read_to_string(config_path).unwrap();
         assert!(content.contains("[tools]"));
         assert!(content.contains("[[tools.custom_coding_agents]]"));
+    }
+
+    #[test]
+    fn test_save_local_returns_explicit_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ToolsConfig::empty();
+
+        let err = config.save_local(temp_dir.path()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("project-local custom agent files are no longer supported"));
     }
 
     // T302: Add/update/delete tests

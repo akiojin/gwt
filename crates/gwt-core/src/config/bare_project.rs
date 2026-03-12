@@ -75,7 +75,7 @@ impl BareProjectConfig {
                         category = "config",
                         path = %toml_path.display(),
                         error = %e,
-                        "Failed to load TOML bare project config, trying JSON fallback"
+                        "Failed to load TOML bare project config"
                     );
                 }
             }

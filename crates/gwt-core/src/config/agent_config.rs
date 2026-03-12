@@ -108,9 +108,10 @@ impl AgentConfig {
     }
 
     pub fn save(&self) -> Result<()> {
-        let mut settings = Settings::load_global()?;
-        settings.agent_config = self.clone();
-        settings.save_global()?;
+        Settings::update_global(|settings| {
+            settings.agent_config = self.clone();
+            Ok(())
+        })?;
 
         info!(
             category = "config",
