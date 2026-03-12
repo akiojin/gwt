@@ -140,10 +140,16 @@ namespace Gwt.Studio.UI
             if (_hireButton == null)
                 return;
 
-            _hireButton.gameObject.SetActive(enabled);
+            var keepVisibleWhenDisabled = !string.IsNullOrWhiteSpace(CurrentHireLabel) &&
+                !string.Equals(CurrentHireLabel, "Hire", System.StringComparison.Ordinal);
+            _hireButton.gameObject.SetActive(enabled || keepVisibleWhenDisabled);
             _hireButton.interactable = enabled;
             if (_hireButtonText != null)
                 _hireButtonText.text = CurrentHireLabel;
+            if (_hireButton.targetGraphic is Image image)
+                image.color = enabled
+                    ? new Color(0.18f, 0.32f, 0.18f, 0.95f)
+                    : new Color(0.24f, 0.24f, 0.24f, 0.9f);
         }
 
         private void InvokeHireRequested()

@@ -1330,6 +1330,8 @@ namespace Gwt.Tests.Editor
 
             Assert.IsFalse(issuePanel.IsHireEnabled);
             Assert.AreEqual("No agent available", issuePanel.CurrentHireLabel);
+            Assert.IsTrue(issuePanel.HireButton.gameObject.activeSelf);
+            Assert.IsFalse(issuePanel.HireButton.interactable);
         });
 
         [UnityTest]
@@ -1382,6 +1384,8 @@ namespace Gwt.Tests.Editor
 
             Assert.IsTrue(issuePanel.IsHireEnabled);
             Assert.AreEqual("Hire Claude Code", issuePanel.CurrentHireLabel);
+            Assert.IsTrue(issuePanel.HireButton.gameObject.activeSelf);
+            Assert.IsTrue(issuePanel.HireButton.interactable);
         });
 
         [UnityTest]
@@ -1433,6 +1437,8 @@ namespace Gwt.Tests.Editor
             Assert.That(issuePanel.CurrentBody, Does.Contain("SessionStore.cs"));
             Assert.IsTrue(issuePanel.IsHireEnabled);
             Assert.AreEqual("Open Detail", issuePanel.CurrentHireLabel);
+            Assert.IsTrue(issuePanel.HireButton.gameObject.activeSelf);
+            Assert.IsTrue(issuePanel.HireButton.interactable);
         });
 
         [UnityTest]
