@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -360,6 +361,30 @@ namespace Gwt.Tests.Editor
         }
 
         [Test]
+        public async Task WriteAsync_NonWritableStandardInput_DoesNotThrow()
+        {
+            using var process = StartLongRunningProcess(redirectStandardInput: false);
+            using var session = new PtySession("no-stdin-write", process, GetTempDir(), 24, 80);
+            RegisterSession(session);
+
+            Assert.DoesNotThrowAsync(async () =>
+                await _service.WriteAsync(session.Id, "echo test\n", CancellationToken.None));
+        }
+
+        [Test]
+        public async Task ResizeAsync_NonWritableStandardInput_DoesNotThrow()
+        {
+            using var process = StartLongRunningProcess(redirectStandardInput: false);
+            using var session = new PtySession("no-stdin-resize", process, GetTempDir(), 24, 80, usesPseudoTerminal: true);
+            RegisterSession(session);
+
+            Assert.DoesNotThrowAsync(async () =>
+                await _service.ResizeAsync(session.Id, 40, 120, CancellationToken.None));
+            Assert.That(session.Rows, Is.EqualTo(40));
+            Assert.That(session.Cols, Is.EqualTo(120));
+        }
+
+        [Test]
         public async Task Dispose_CleansUpAllSessions()
         {
             var service = new PtyService(_shellDetector);
@@ -406,6 +431,41 @@ namespace Gwt.Tests.Editor
             {
                 psi.ArgumentList.Add("test");
             }
+        }
+
+        private void RegisterSession(PtySession session)
+        {
+            var field = typeof(PtyService).GetField("_sessions", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var sessions = (ConcurrentDictionary<string, PtySession>)field.GetValue(_service);
+            sessions[session.Id] = session;
+        }
+
+        private static System.Diagnostics.Process StartLongRunningProcess(bool redirectStandardInput)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cmd.exe" : "/bin/sh",
+                RedirectStandardInput = redirectStandardInput,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                psi.ArgumentList.Add("/c");
+                psi.ArgumentList.Add("ping -n 6 127.0.0.1 >nul");
+            }
+            else
+            {
+                psi.ArgumentList.Add("-c");
+                psi.ArgumentList.Add("sleep 5");
+            }
+
+            var process = new System.Diagnostics.Process { StartInfo = psi };
+            process.Start();
+            return process;
         }
     }
 }

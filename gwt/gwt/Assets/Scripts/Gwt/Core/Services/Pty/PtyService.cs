@@ -84,10 +84,17 @@ namespace Gwt.Core.Services.Pty
             try
             {
                 if (!TryGetStandardInput(session.Process, out var writer))
-                    throw new InvalidOperationException("PTY session input stream is not writable.");
+                    return;
 
-                await writer.WriteAsync(data.AsMemory(), ct);
-                await writer.FlushAsync();
+                try
+                {
+                    await writer.WriteAsync(data.AsMemory(), ct);
+                    await writer.FlushAsync();
+                }
+                catch (Exception e) when (IsIgnorableStandardInputException(e))
+                {
+                    return;
+                }
             }
             finally
             {
@@ -112,8 +119,15 @@ namespace Gwt.Core.Services.Pty
                 if (!TryGetStandardInput(session.Process, out var writer))
                     return;
 
-                await writer.WriteAsync($"stty rows {rows} cols {cols}\n".AsMemory(), ct);
-                await writer.FlushAsync();
+                try
+                {
+                    await writer.WriteAsync($"stty rows {rows} cols {cols}\n".AsMemory(), ct);
+                    await writer.FlushAsync();
+                }
+                catch (Exception e) when (IsIgnorableStandardInputException(e))
+                {
+                    return;
+                }
             }
             finally
             {
@@ -360,6 +374,28 @@ namespace Gwt.Core.Services.Pty
             {
                 return false;
             }
+        }
+
+        private static bool IsIgnorableStandardInputException(Exception exception)
+        {
+            if (exception is ObjectDisposedException)
+                return true;
+
+            if (exception is InvalidOperationException && IsIgnorableStandardInputMessage(exception.Message))
+                return true;
+
+            return exception?.InnerException != null && IsIgnorableStandardInputException(exception.InnerException);
+        }
+
+        private static bool IsIgnorableStandardInputMessage(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return false;
+
+            return message.IndexOf("StandardIn has not been redirected", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("Standard input has not been redirected", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("input stream is not writable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("cannot write to a closed", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string SanitizeOutput(string output)

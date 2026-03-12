@@ -80,9 +80,27 @@ namespace Gwt.Studio.UI
                 }
                 catch (Exception e)
                 {
+                    if (IsIgnorablePtyWriteException(e))
+                        return;
+
                     Debug.LogWarning($"Failed to write to PTY: {e.Message}");
                 }
             }
+        }
+
+        private static bool IsIgnorablePtyWriteException(Exception exception)
+        {
+            if (exception is ObjectDisposedException)
+                return true;
+
+            if (string.IsNullOrWhiteSpace(exception?.Message))
+                return exception?.InnerException != null && IsIgnorablePtyWriteException(exception.InnerException);
+
+            var message = exception.Message;
+            return message.IndexOf("StandardIn has not been redirected", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("Standard input has not been redirected", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("input stream is not writable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                (exception.InnerException != null && IsIgnorablePtyWriteException(exception.InnerException));
         }
     }
 }

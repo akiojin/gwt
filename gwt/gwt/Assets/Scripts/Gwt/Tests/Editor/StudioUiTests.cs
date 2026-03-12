@@ -977,6 +977,23 @@ namespace Gwt.Tests.Editor
         });
 
         [UnityTest]
+        public System.Collections.IEnumerator TerminalInputField_SubmitText_IgnoresBenignWriteFailures() => UniTask.ToCoroutine(async () =>
+        {
+            using var scope = new UiScope();
+            var input = scope.Root.AddComponent<TerminalInputField>();
+            var pty = new FakePtyService
+            {
+                WriteException = new InvalidOperationException("StandardIn has not been redirected.")
+            };
+            input.Initialize(pty);
+            input.SetActivePtySession("pty-a");
+
+            await input.SubmitText("echo test");
+
+            LogAssert.NoUnexpectedReceived();
+        });
+
+        [UnityTest]
         public System.Collections.IEnumerator TerminalOverlayPanel_Open_UsesDockerExecWhenProjectHasDockerContext() => UniTask.ToCoroutine(async () =>
         {
             await WithTempProjectRootAsync(async root =>
@@ -2202,6 +2219,7 @@ namespace Gwt.Tests.Editor
             public int LastResizeCols { get; private set; }
             public int ResizeCallCount { get; private set; }
             public Exception ResizeException { get; set; }
+            public Exception WriteException { get; set; }
 
             public UniTask<string> SpawnAsync(string command, string[] args, string workingDir, int rows, int cols, System.Threading.CancellationToken ct = default)
             {
@@ -2210,7 +2228,12 @@ namespace Gwt.Tests.Editor
                 return UniTask.FromResult(Guid.NewGuid().ToString("N"));
             }
 
-            public UniTask WriteAsync(string paneId, string data, System.Threading.CancellationToken ct = default) => UniTask.CompletedTask;
+            public UniTask WriteAsync(string paneId, string data, System.Threading.CancellationToken ct = default)
+            {
+                if (WriteException != null)
+                    return UniTask.FromException(WriteException);
+                return UniTask.CompletedTask;
+            }
             public UniTask ResizeAsync(string paneId, int rows, int cols, System.Threading.CancellationToken ct = default)
             {
                 LastResizedPaneId = paneId;
