@@ -1276,6 +1276,7 @@ namespace Gwt.Tests.Editor
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("LoginService.cs"));
             Assert.IsTrue(issuePanel.IsHireEnabled);
+            Assert.AreEqual("Hire Codex", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]
@@ -1326,6 +1327,7 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
 
             Assert.IsFalse(issuePanel.IsHireEnabled);
+            Assert.AreEqual("Codex unavailable", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]
@@ -1374,6 +1376,7 @@ namespace Gwt.Tests.Editor
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("SessionStore.cs"));
             Assert.IsFalse(issuePanel.IsHireEnabled);
+            Assert.AreEqual("Hire", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]

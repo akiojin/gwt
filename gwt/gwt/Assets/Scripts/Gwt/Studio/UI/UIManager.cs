@@ -758,6 +758,9 @@ namespace Gwt.Studio.UI
                 var (title, body) = BuildSearchPresentation(query, results);
                 var canHire = await CanHireSearchIssueAsync();
                 _issueDetailPanel.SetIssue(title, body, canHire);
+                _issueDetailPanel.SetHireState(
+                    canHire,
+                    _lastSearchTopIssue == null ? "Hire" : canHire ? "Hire Codex" : "Codex unavailable");
                 OpenPanel(_issueDetailPanel);
             }
             catch (System.Exception e)
@@ -765,6 +768,7 @@ namespace Gwt.Studio.UI
                 _lastSearchQuery = query;
                 _lastSearchTopIssue = null;
                 _issueDetailPanel.SetIssue($"Search: {query}", $"Search failed: {e.Message}");
+                _issueDetailPanel.SetHireState(false, "Hire");
                 OpenPanel(_issueDetailPanel);
             }
         }
