@@ -423,6 +423,7 @@ namespace Gwt.Studio.UI
         {
             RefreshProjectInfoBar();
             RestoreCurrentProjectSnapshot();
+            RefreshMetaStatus();
             try
             {
                 if (_projectSwitchOverlayPanel != null && _projectSwitchOverlayPanel.IsOpen)
@@ -1311,6 +1312,7 @@ namespace Gwt.Studio.UI
             RestoreCurrentProjectSnapshot();
             if (_terminalOverlayPanel != null)
                 await _terminalOverlayPanel.RefreshActivePaneTitleForCurrentProjectAsync();
+            RefreshMetaStatus();
             return true;
         }
 
@@ -1384,7 +1386,8 @@ namespace Gwt.Studio.UI
             RefreshProjectInfoBar();
             RestoreCurrentProjectSnapshot();
             if (_terminalOverlayPanel != null)
-                _terminalOverlayPanel.RefreshActivePaneTitleForCurrentProjectAsync().Forget();
+                await _terminalOverlayPanel.RefreshActivePaneTitleForCurrentProjectAsync();
+            RefreshMetaStatus();
         }
 
         private void RestoreTerminalSnapshot(ProjectSwitchSnapshot snapshot)
