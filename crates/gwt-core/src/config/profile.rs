@@ -173,14 +173,6 @@ fn default_profile() -> Profile {
     profile
 }
 
-fn is_default_profile_ai_placeholder(settings: &AISettings) -> bool {
-    settings.endpoint.trim() == default_endpoint()
-        && settings.api_key.trim().is_empty()
-        && settings.model.trim().is_empty()
-        && normalize_ai_language(&settings.language) == default_ai_language()
-        && settings.summary_enabled == default_summary_enabled()
-}
-
 fn normalize_ai_language(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "ja" => "ja".to_string(),
@@ -232,25 +224,46 @@ impl ProfilesConfig {
     pub fn load() -> Result<Self> {
         let mut settings = Settings::load_global()?;
         let has_profiles_in_global = Self::global_config_has_profiles_section();
+        let mut profiles = settings.profiles.clone();
+        profiles.normalize_loaded();
+
+        let Some(mut legacy) = Self::load_legacy_fallback()? else {
+            return Ok(profiles);
+        };
+
+        legacy.normalize_loaded();
 
         if !has_profiles_in_global {
-            if let Some(mut legacy) = Self::load_legacy_fallback()? {
-                legacy.normalize_loaded();
-                settings.profiles = legacy.clone();
-                settings.save_global()?;
-                info!(
-                    category = "config",
-                    path = %Settings::global_config_path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "<unknown>".to_string()),
-                    "Migrated legacy profiles into global config"
-                );
-                return Ok(legacy);
-            }
+            let persisted = Self::persist_profiles_into_global_settings(&mut settings, &legacy)?;
+            Self::delete_legacy_files()?;
+            info!(
+                category = "config",
+                path = %Settings::global_config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+                "Migrated legacy profiles into global config"
+            );
+            return Ok(persisted);
         }
 
-        let mut profiles = settings.profiles;
-        profiles.normalize_loaded();
+        let mut merged = profiles.clone();
+        let merged_legacy = merged.merge_missing_fields_from_legacy(&legacy);
+        if merged_legacy {
+            merged = Self::persist_profiles_into_global_settings(&mut settings, &merged)?;
+            info!(
+                category = "config",
+                path = %Settings::global_config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+                "Merged legacy profiles into global config"
+            );
+        }
+
+        Self::delete_legacy_files()?;
+        if merged_legacy {
+            return Ok(merged);
+        }
+
         Ok(profiles)
     }
 
@@ -285,12 +298,15 @@ impl ProfilesConfig {
         let Ok(content) = std::fs::read_to_string(&path) else {
             return false;
         };
-        let Ok(value) = content.parse::<toml::Value>() else {
-            return false;
-        };
-        value
-            .as_table()
-            .is_some_and(|table| table.contains_key("profiles"))
+        content.lines().map(str::trim).any(|line| {
+            line == "[profiles]"
+                || (line.starts_with("[profiles.") && line.ends_with(']'))
+                || (line.starts_with("[profiles]") && line.ends_with(']'))
+        })
+    }
+
+    fn legacy_paths() -> [PathBuf; 2] {
+        [Self::toml_path(), Self::yaml_path()]
     }
 
     fn load_legacy_fallback() -> Result<Option<Self>> {
@@ -338,6 +354,34 @@ impl ProfilesConfig {
         Ok(None)
     }
 
+    fn delete_legacy_files() -> Result<()> {
+        for path in Self::legacy_paths() {
+            if !path.exists() {
+                continue;
+            }
+
+            std::fs::remove_file(&path)?;
+            info!(
+                category = "config",
+                path = %path.display(),
+                "Removed legacy profiles file"
+            );
+        }
+
+        Ok(())
+    }
+
+    fn persist_profiles_into_global_settings(
+        settings: &mut Settings,
+        profiles: &ProfilesConfig,
+    ) -> Result<Self> {
+        let mut normalized = profiles.clone();
+        normalized.normalize_for_save()?;
+        settings.profiles = normalized.clone();
+        settings.save_global()?;
+        Ok(normalized)
+    }
+
     /// Save profiles to disk in TOML format (gwt-spec issue FR-006)
     ///
     /// Persists profiles under `[profiles]` in `~/.gwt/config.toml`.
@@ -349,6 +393,7 @@ impl ProfilesConfig {
         let mut settings = Settings::load_global()?;
         settings.profiles = normalized;
         settings.save_global()?;
+        Self::delete_legacy_files()?;
 
         let path = Settings::global_config_path()
             .map(|p| p.display().to_string())
@@ -357,15 +402,12 @@ impl ProfilesConfig {
         Ok(())
     }
 
-    /// Check if migration from YAML to TOML is needed
+    /// Check if any legacy profiles file still needs to be folded into config.toml.
     pub fn needs_migration() -> bool {
-        let has_profiles_in_global = Self::global_config_has_profiles_section();
-        let has_global_config = Settings::global_config_path().is_some_and(|p| p.exists());
-        let yaml_path = Self::yaml_path();
-        yaml_path.exists() && !has_profiles_in_global && !has_global_config
+        Self::legacy_paths().iter().any(|path| path.exists())
     }
 
-    /// Migrate from YAML to TOML if needed
+    /// Migrate legacy profiles files into config.toml if needed.
     pub fn migrate_if_needed() -> Result<bool> {
         if !Self::needs_migration() {
             return Ok(false);
@@ -377,8 +419,7 @@ impl ProfilesConfig {
             "Migrating legacy profiles into config.toml"
         );
 
-        let config = Self::load()?;
-        config.save()?;
+        let _ = Self::load()?;
 
         info!(
             category = "config",
@@ -446,11 +487,9 @@ impl ProfilesConfig {
                         .unwrap_or_else(default_profile_ai_settings),
                 );
             } else if let (Some(profile_ai), Some(default_ai)) =
-                (default.ai.as_ref(), self.default_ai.as_ref())
+                (default.ai.as_mut(), self.default_ai.as_ref())
             {
-                if is_default_profile_ai_placeholder(profile_ai) {
-                    default.ai = Some(default_ai.clone());
-                }
+                merge_missing_ai_fields(profile_ai, default_ai);
             }
         }
 
@@ -468,6 +507,39 @@ impl ProfilesConfig {
 
     pub(crate) fn normalize_loaded(&mut self) {
         self.ensure_defaults();
+    }
+
+    fn merge_missing_fields_from_legacy(&mut self, legacy: &ProfilesConfig) -> bool {
+        let mut changed = false;
+
+        for (key, legacy_profile) in &legacy.profiles {
+            match self.profiles.get_mut(key) {
+                Some(current_profile) => {
+                    changed |= merge_missing_profile_fields(current_profile, legacy_profile);
+                }
+                None => {
+                    self.profiles.insert(key.clone(), legacy_profile.clone());
+                    changed = true;
+                }
+            }
+        }
+
+        if self
+            .active
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            if let Some(active) = legacy
+                .active
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                self.active = Some(active.clone());
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     fn normalize_for_save(&mut self) -> Result<()> {
@@ -516,6 +588,75 @@ impl ProfilesConfig {
             profiles,
         }
     }
+}
+
+fn merge_missing_ai_fields(current: &mut AISettings, legacy: &AISettings) -> bool {
+    let mut changed = false;
+
+    if current.endpoint.trim().is_empty() && !legacy.endpoint.trim().is_empty() {
+        current.endpoint = legacy.endpoint.clone();
+        changed = true;
+    }
+    if current.api_key.trim().is_empty() && !legacy.api_key.trim().is_empty() {
+        current.api_key = legacy.api_key.clone();
+        changed = true;
+    }
+    if current.model.trim().is_empty() && !legacy.model.trim().is_empty() {
+        current.model = legacy.model.clone();
+        changed = true;
+    }
+    if current.language.trim().is_empty() && !legacy.language.trim().is_empty() {
+        current.language = legacy.language.clone();
+        changed = true;
+    }
+
+    changed
+}
+
+fn merge_missing_profile_fields(current: &mut Profile, legacy: &Profile) -> bool {
+    let mut changed = false;
+
+    if current.name.trim().is_empty() && !legacy.name.trim().is_empty() {
+        current.name = legacy.name.clone();
+        changed = true;
+    }
+
+    if current.description.trim().is_empty() && !legacy.description.trim().is_empty() {
+        current.description = legacy.description.clone();
+        changed = true;
+    }
+
+    for (key, value) in &legacy.env {
+        if !current.env.contains_key(key) {
+            current.env.insert(key.clone(), value.clone());
+            changed = true;
+        }
+    }
+
+    for key in &legacy.disabled_env {
+        if !current.disabled_env.contains(key) {
+            current.disabled_env.push(key.clone());
+            changed = true;
+        }
+    }
+
+    match (current.ai.as_mut(), legacy.ai.as_ref()) {
+        (Some(current_ai), Some(legacy_ai)) => {
+            changed |= merge_missing_ai_fields(current_ai, legacy_ai);
+        }
+        (None, Some(legacy_ai)) => {
+            current.ai = Some(legacy_ai.clone());
+            changed = true;
+        }
+        _ => {}
+    }
+
+    if current.ai_enabled.is_none() && legacy.ai_enabled.is_some() {
+        current.ai_enabled = legacy.ai_enabled;
+        changed = true;
+    }
+
+    changed
 }
 
 impl Default for ProfilesConfig {
@@ -668,7 +809,7 @@ description = ""
         std::fs::write(gwt_dir.join("profiles.yaml"), "version: 1").unwrap();
         assert!(ProfilesConfig::needs_migration());
 
-        // Create config with profiles section - no longer needs migration
+        // Legacy file should still be migrated even when config.toml already exists.
         std::fs::write(
             gwt_dir.join("config.toml"),
             r#"[profiles]
@@ -677,7 +818,7 @@ active = "default"
 "#,
         )
         .unwrap();
-        assert!(!ProfilesConfig::needs_migration());
+        assert!(ProfilesConfig::needs_migration());
     }
 
     #[test]
@@ -719,6 +860,43 @@ profiles:
         // Second migration should be no-op
         let migrated_again = ProfilesConfig::migrate_if_needed().unwrap();
         assert!(!migrated_again);
+    }
+
+    #[test]
+    fn ensure_defaults_merges_missing_fields_from_default_ai() {
+        let mut profiles = HashMap::new();
+        let mut default = Profile::new("default");
+        default.ai = Some(AISettings {
+            endpoint: "http://192.168.0.10:11434/v1".to_string(),
+            api_key: String::new(),
+            model: String::new(),
+            language: "ja".to_string(),
+            summary_enabled: true,
+        });
+        profiles.insert("default".to_string(), default);
+
+        let mut config = ProfilesConfig {
+            version: 1,
+            active: Some("default".to_string()),
+            default_ai: Some(AISettings {
+                endpoint: "http://192.168.0.10:11434/v1".to_string(),
+                api_key: "sk-legacy-default".to_string(),
+                model: "gpt-oss:20b".to_string(),
+                language: "en".to_string(),
+                summary_enabled: true,
+            }),
+            profiles,
+        };
+
+        config.normalize_loaded();
+
+        let default = config.profiles.get("default").unwrap();
+        let ai = default.ai.as_ref().unwrap();
+        assert_eq!(ai.endpoint, "http://192.168.0.10:11434/v1");
+        assert_eq!(ai.api_key, "sk-legacy-default");
+        assert_eq!(ai.model, "gpt-oss:20b");
+        assert_eq!(ai.language, "ja");
+        assert!(config.default_ai.is_none());
     }
 
     #[test]
@@ -1045,6 +1223,120 @@ profiles:
         assert_eq!(ai.api_key, "sk-default-persisted");
         assert_eq!(ai.endpoint, "https://api.openai.com/v1");
         assert_eq!(ai.language, "ja");
+    }
+
+    #[test]
+    fn load_merges_legacy_default_ai_into_existing_global_profiles_and_deletes_legacy_file() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let gwt_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&gwt_dir).unwrap();
+
+        let mut settings = Settings::default();
+        if let Some(default) = settings.profiles.profiles.get_mut("default") {
+            default.ai = Some(AISettings {
+                endpoint: "http://192.168.100.235:32768/v1".to_string(),
+                api_key: String::new(),
+                model: String::new(),
+                language: "ja".to_string(),
+                summary_enabled: true,
+            });
+        }
+        settings.save_global().unwrap();
+
+        let legacy_path = gwt_dir.join("profiles.toml");
+        std::fs::write(
+            &legacy_path,
+            r#"version = 1
+active = "default"
+
+[default_ai]
+endpoint = "http://192.168.100.235:32768/v1"
+api_key = "sk-legacy-migrated"
+model = "gpt-oss:20b"
+language = "en"
+summary_enabled = true
+
+[profiles.default]
+name = "default"
+disabled_env = []
+description = ""
+
+[profiles.default.env]
+
+[profiles.default.ai]
+endpoint = "http://192.168.100.235:32768/v1"
+api_key = ""
+model = ""
+language = "ja"
+summary_enabled = true
+"#,
+        )
+        .unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        let default = loaded.profiles.get("default").unwrap();
+        let ai = default.ai.as_ref().unwrap();
+
+        assert_eq!(ai.endpoint, "http://192.168.100.235:32768/v1");
+        assert_eq!(ai.api_key, "sk-legacy-migrated");
+        assert_eq!(ai.model, "gpt-oss:20b");
+        assert_eq!(ai.language, "ja");
+        assert!(!legacy_path.exists());
+
+        let persisted = std::fs::read_to_string(gwt_dir.join("config.toml")).unwrap();
+        assert!(persisted.contains("api_key = \"sk-legacy-migrated\""));
+        assert!(persisted.contains("model = \"gpt-oss:20b\""));
+        assert!(!persisted.contains("[default_ai]"));
+    }
+
+    #[test]
+    fn load_prefers_existing_global_profile_values_over_legacy_values() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let gwt_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&gwt_dir).unwrap();
+
+        let mut settings = Settings::default();
+        if let Some(default) = settings.profiles.profiles.get_mut("default") {
+            default.ai = Some(AISettings {
+                endpoint: "http://192.168.100.235:32768/v1".to_string(),
+                api_key: "sk-current".to_string(),
+                model: "gpt-current".to_string(),
+                language: "ja".to_string(),
+                summary_enabled: true,
+            });
+        }
+        settings.save_global().unwrap();
+
+        let legacy_path = gwt_dir.join("profiles.toml");
+        std::fs::write(
+            &legacy_path,
+            r#"version = 1
+active = "default"
+
+[default_ai]
+endpoint = "http://192.168.100.235:32768/v1"
+api_key = "sk-legacy"
+model = "gpt-legacy"
+language = "en"
+summary_enabled = true
+"#,
+        )
+        .unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        let default = loaded.profiles.get("default").unwrap();
+        let ai = default.ai.as_ref().unwrap();
+
+        assert_eq!(ai.api_key, "sk-current");
+        assert_eq!(ai.model, "gpt-current");
+        assert_eq!(ai.language, "ja");
+        assert!(!legacy_path.exists());
     }
 
     #[test]
