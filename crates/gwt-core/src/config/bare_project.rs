@@ -1,11 +1,6 @@
-//! Bare project configuration (gwt-spec issue US5, gwt-spec issue)
+//! Bare project configuration (gwt-spec issue US5, gwt-spec issue).
 //!
-//! Manages configuration for bare repository based projects with automatic
-//! migration from JSON to TOML format.
-//!
-//! File locations:
-//! - New format: .gwt/project.toml
-//! - Legacy format: .gwt/project.json
+//! Configuration is stored only in `.gwt/project.toml`.
 
 use crate::config::migration::{ensure_config_dir, write_atomic};
 use crate::error::{GwtError, Result};
@@ -15,9 +10,6 @@ use tracing::{debug, info, warn};
 
 /// New TOML configuration file name
 const CONFIG_FILE_NAME_TOML: &str = "project.toml";
-
-/// Legacy JSON configuration file name
-const CONFIG_FILE_NAME_JSON: &str = "project.json";
 
 /// Configuration directory name
 const CONFIG_DIR_NAME: &str = ".gwt";
@@ -67,22 +59,8 @@ impl BareProjectConfig {
         Self::config_dir(project_root).join(CONFIG_FILE_NAME_TOML)
     }
 
-    /// Get the JSON config file path (legacy format)
-    pub fn json_config_path(project_root: &Path) -> PathBuf {
-        Self::config_dir(project_root).join(CONFIG_FILE_NAME_JSON)
-    }
-
-    /// Get the config file path for a project root (deprecated)
-    #[deprecated(note = "Use toml_config_path() for new code")]
-    pub fn config_path(project_root: &Path) -> PathBuf {
-        Self::json_config_path(project_root)
-    }
-
-    /// Load configuration from a project root with format auto-detection (gwt-spec issue FR-005)
-    ///
-    /// Priority: TOML > JSON
+    /// Load configuration from `.gwt/project.toml`.
     pub fn load(project_root: &Path) -> Result<Option<Self>> {
-        // Try TOML first (new format)
         let toml_path = Self::toml_config_path(project_root);
         if toml_path.exists() {
             debug!(
@@ -103,43 +81,6 @@ impl BareProjectConfig {
             }
         }
 
-        // Try JSON fallback (legacy format)
-        let json_path = Self::json_config_path(project_root);
-        if json_path.exists() {
-            debug!(
-                category = "config",
-                path = %json_path.display(),
-                "Loading bare project config from JSON (legacy)"
-            );
-            match Self::load_from_json(&json_path) {
-                Ok(config) => {
-                    // Auto-migrate: save as TOML for next time (gwt-spec issue)
-                    if let Err(e) = config.save(project_root) {
-                        warn!(
-                            category = "config",
-                            error = %e,
-                            "Failed to auto-migrate project.json to TOML"
-                        );
-                    } else {
-                        info!(
-                            category = "config",
-                            operation = "auto_migrate",
-                            "Auto-migrated project.json to project.toml"
-                        );
-                    }
-                    return Ok(Some(config));
-                }
-                Err(e) => {
-                    warn!(
-                        category = "config",
-                        path = %json_path.display(),
-                        error = %e,
-                        "Failed to load JSON bare project config"
-                    );
-                }
-            }
-        }
-
         Ok(None)
     }
 
@@ -152,20 +93,6 @@ impl BareProjectConfig {
         let config: Self = toml::from_str(&content).map_err(|e| GwtError::ConfigParseError {
             reason: format!("Failed to parse TOML bare project config: {}", e),
         })?;
-
-        Ok(config)
-    }
-
-    /// Load configuration from JSON file (legacy)
-    fn load_from_json(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| GwtError::ConfigParseError {
-            reason: format!("Failed to read {}: {}", path.display(), e),
-        })?;
-
-        let config: Self =
-            serde_json::from_str(&content).map_err(|e| GwtError::ConfigParseError {
-                reason: format!("Failed to parse JSON bare project config: {}", e),
-            })?;
 
         Ok(config)
     }
@@ -189,39 +116,6 @@ impl BareProjectConfig {
         );
 
         Ok(())
-    }
-
-    /// Check if migration from JSON to TOML is needed
-    pub fn needs_migration(project_root: &Path) -> bool {
-        let toml_path = Self::toml_config_path(project_root);
-        let json_path = Self::json_config_path(project_root);
-        json_path.exists() && !toml_path.exists()
-    }
-
-    /// Migrate from JSON to TOML if needed
-    pub fn migrate_if_needed(project_root: &Path) -> Result<bool> {
-        if !Self::needs_migration(project_root) {
-            return Ok(false);
-        }
-
-        info!(
-            category = "config",
-            operation = "migration",
-            project_root = %project_root.display(),
-            "Migrating bare project config from JSON to TOML"
-        );
-
-        if let Some(config) = Self::load(project_root)? {
-            config.save(project_root)?;
-            info!(
-                category = "config",
-                operation = "migration",
-                "Bare project config migration completed"
-            );
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 
     /// Extract bare repository name from URL (gwt-spec issue T505)
@@ -297,128 +191,10 @@ mod tests {
     }
 
     #[test]
-    fn test_load_json_fallback() {
-        let temp = TempDir::new().unwrap();
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-
-        // Create JSON file manually
-        let json_path = gwt_dir.join("project.json");
-        std::fs::write(
-            &json_path,
-            r#"{
-                "bare_repo_name": "legacy.git",
-                "remote_url": "https://example.com/legacy.git",
-                "location": "sibling",
-                "created_at": "2026-01-01T00:00:00Z"
-            }"#,
-        )
-        .unwrap();
-
-        let loaded = BareProjectConfig::load(temp.path()).unwrap().unwrap();
-        assert_eq!(loaded.bare_repo_name, "legacy.git");
-    }
-
-    #[test]
-    fn test_toml_priority_over_json() {
-        let temp = TempDir::new().unwrap();
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-
-        // Create both JSON and TOML
-        let json_path = gwt_dir.join("project.json");
-        std::fs::write(
-            &json_path,
-            r#"{
-                "bare_repo_name": "json.git",
-                "location": "sibling",
-                "created_at": "2026-01-01T00:00:00Z"
-            }"#,
-        )
-        .unwrap();
-
-        let toml_path = gwt_dir.join("project.toml");
-        std::fs::write(
-            &toml_path,
-            r#"
-bare_repo_name = "toml.git"
-location = "sibling"
-created_at = "2026-01-01T00:00:00Z"
-"#,
-        )
-        .unwrap();
-
-        // TOML should be loaded
-        let loaded = BareProjectConfig::load(temp.path()).unwrap().unwrap();
-        assert_eq!(loaded.bare_repo_name, "toml.git");
-    }
-
-    #[test]
     fn test_load_missing() {
         let temp = TempDir::new().unwrap();
         let result = BareProjectConfig::load(temp.path()).unwrap();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_needs_migration() {
-        let temp = TempDir::new().unwrap();
-
-        // No files - no migration needed
-        assert!(!BareProjectConfig::needs_migration(temp.path()));
-
-        // Create JSON only
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-        std::fs::write(
-            gwt_dir.join("project.json"),
-            r#"{"bare_repo_name":"test.git","location":"sibling","created_at":"2026-01-01T00:00:00Z"}"#,
-        )
-        .unwrap();
-        assert!(BareProjectConfig::needs_migration(temp.path()));
-
-        // Create TOML - no longer needs migration
-        std::fs::write(
-            gwt_dir.join("project.toml"),
-            "bare_repo_name = \"test.git\"\nlocation = \"sibling\"\ncreated_at = \"2026-01-01T00:00:00Z\"",
-        )
-        .unwrap();
-        assert!(!BareProjectConfig::needs_migration(temp.path()));
-    }
-
-    #[test]
-    fn test_migrate_if_needed() {
-        let temp = TempDir::new().unwrap();
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-
-        // Create JSON file
-        std::fs::write(
-            gwt_dir.join("project.json"),
-            r#"{
-                "bare_repo_name": "migrate.git",
-                "remote_url": "https://example.com/migrate.git",
-                "location": "sibling",
-                "created_at": "2026-01-01T00:00:00Z"
-            }"#,
-        )
-        .unwrap();
-
-        // Migrate
-        let migrated = BareProjectConfig::migrate_if_needed(temp.path()).unwrap();
-        assert!(migrated);
-
-        // TOML should now exist
-        let toml_path = gwt_dir.join("project.toml");
-        assert!(toml_path.exists());
-
-        // Load should work
-        let loaded = BareProjectConfig::load(temp.path()).unwrap().unwrap();
-        assert_eq!(loaded.bare_repo_name, "migrate.git");
-
-        // Second migration should be no-op
-        let migrated_again = BareProjectConfig::migrate_if_needed(temp.path()).unwrap();
-        assert!(!migrated_again);
     }
 
     #[test]

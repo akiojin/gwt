@@ -4,8 +4,11 @@
 //!
 //! Global config: `~/.gwt/config.toml`
 
-use super::migration::{auto_migrate, ensure_config_dir, write_atomic};
+use super::agent_config::AgentConfig;
+use super::migration::{ensure_config_dir, write_atomic};
 use super::profile::ProfilesConfig;
+use super::recent_projects::RecentProjectsConfig;
+use super::tools::ToolsConfig;
 use crate::error::{GwtError, Result};
 use figment::{
     providers::{Env, Format, Toml},
@@ -46,6 +49,15 @@ pub struct Settings {
     /// Global profiles configuration.
     #[serde(default)]
     pub profiles: ProfilesConfig,
+    /// Agent-specific runtime preferences stored in config.toml.
+    #[serde(default)]
+    pub agent_config: AgentConfig,
+    /// Custom coding agent definitions stored in config.toml.
+    #[serde(default)]
+    pub tools: ToolsConfig,
+    /// Recent project history stored in config.toml.
+    #[serde(default)]
+    pub recent_projects: RecentProjectsConfig,
 }
 
 impl Default for Settings {
@@ -68,6 +80,9 @@ impl Default for Settings {
             voice_input: VoiceInputSettings::default(),
             terminal: TerminalSettings::default(),
             profiles: ProfilesConfig::default(),
+            agent_config: AgentConfig::default(),
+            tools: ToolsConfig::default(),
+            recent_projects: RecentProjectsConfig::default(),
         }
     }
 }
@@ -196,8 +211,6 @@ impl Settings {
             repo_root = %repo_root.display(),
             "Loading settings"
         );
-
-        auto_migrate(repo_root)?;
 
         let config_path = Self::find_config_file(repo_root);
 
@@ -488,20 +501,19 @@ mod tests {
     }
 
     #[test]
-    fn test_load_auto_migrates_json() {
+    fn test_load_ignores_unrelated_legacy_file() {
         let temp = TempDir::new().unwrap();
-        let json_path = temp.path().join(".gwt.json");
-        let toml_path = temp.path().join(".gwt.toml");
+        let legacy_path = temp.path().join(".legacy-config");
 
         std::fs::write(
-            &json_path,
+            &legacy_path,
             r#"{"default_base_branch":"develop","worktree_root":".worktrees"}"#,
         )
         .unwrap();
 
         let settings = Settings::load(temp.path()).unwrap();
-        assert!(toml_path.exists());
-        assert_eq!(settings.default_base_branch, "develop");
+        assert_eq!(settings.default_base_branch, "main");
+        assert!(!temp.path().join(".gwt.toml").exists());
     }
 
     #[test]

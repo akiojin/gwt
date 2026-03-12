@@ -2,11 +2,10 @@
 //!
 //! Currently used for storing Claude Code provider settings (e.g. GLM/z.ai manual config).
 
-use crate::config::migration::{backup_broken_file, ensure_config_dir, write_atomic};
-use crate::error::{GwtError, Result};
+use super::settings::Settings;
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 fn default_glm_base_url() -> String {
     // z.ai DevPack manual configuration
@@ -103,66 +102,22 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    /// TOML config file path (~/.gwt/agents.toml)
-    pub fn toml_path() -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".gwt").join("agents.toml")
-    }
-
     pub fn load() -> Result<Self> {
-        let path = Self::toml_path();
-
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-
-        debug!(
-            category = "config",
-            path = %path.display(),
-            "Loading agent config (TOML)"
-        );
-
-        match Self::load_toml(&path) {
-            Ok(config) => Ok(config),
-            Err(e) => {
-                warn!(
-                    category = "config",
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to load agent config; falling back to defaults"
-                );
-                let _ = backup_broken_file(&path);
-                Ok(Self::default())
-            }
-        }
-    }
-
-    fn load_toml(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let cfg: AgentConfig =
-            toml::from_str(&content).map_err(|e| GwtError::ConfigParseError {
-                reason: format!("Failed to parse TOML: {}", e),
-            })?;
-        Ok(cfg)
+        debug!(category = "config", "Loading agent config from config.toml");
+        Ok(Settings::load_global()?.agent_config)
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = Self::toml_path();
-
-        if let Some(parent) = path.parent() {
-            ensure_config_dir(parent)?;
-        }
-
-        let content = toml::to_string_pretty(self).map_err(|e| GwtError::ConfigWriteError {
-            reason: format!("Failed to serialize to TOML: {}", e),
-        })?;
-
-        write_atomic(&path, &content)?;
+        let mut settings = Settings::load_global()?;
+        settings.agent_config = self.clone();
+        settings.save_global()?;
 
         info!(
             category = "config",
-            path = %path.display(),
-            "Saved agent config (TOML)"
+            path = %Settings::global_config_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            "Saved agent config in config.toml"
         );
         Ok(())
     }
@@ -182,33 +137,13 @@ mod tests {
         let cfg = AgentConfig::default();
         cfg.save().unwrap();
 
-        let path = AgentConfig::toml_path();
+        let path = Settings::global_config_path().unwrap();
         assert!(path.exists());
-        assert!(path.to_string_lossy().ends_with("agents.toml"));
+        assert!(path.to_string_lossy().ends_with("config.toml"));
 
         let loaded = AgentConfig::load().unwrap();
         assert_eq!(loaded.version, 1);
         assert_eq!(loaded.claude.provider, ClaudeAgentProvider::Anthropic);
         assert_eq!(loaded.claude.glm.base_url, default_glm_base_url());
-    }
-
-    #[test]
-    fn agent_config_backs_up_broken_file() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let path = AgentConfig::toml_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, "this is not toml ==").unwrap();
-
-        let loaded = AgentConfig::load().unwrap();
-        assert_eq!(loaded.version, 1);
-
-        let broken = path.with_extension("broken");
-        assert!(broken.exists());
-        assert!(!path.exists());
     }
 }

@@ -232,28 +232,6 @@ pub fn get_cleanup_candidates() -> Vec<CleanupCandidate> {
     if let Some(home) = &home {
         let gwt_dir = home.join(".gwt");
 
-        // profiles.yaml -> profiles.toml
-        let yaml_path = gwt_dir.join("profiles.yaml");
-        let toml_path = gwt_dir.join("profiles.toml");
-        if yaml_path.exists() && toml_path.exists() {
-            candidates.push(CleanupCandidate {
-                old_path: yaml_path,
-                new_path: toml_path,
-                format_change: "YAML → TOML".to_string(),
-            });
-        }
-
-        // tools.json -> tools.toml
-        let json_path = gwt_dir.join("tools.json");
-        let toml_path = gwt_dir.join("tools.toml");
-        if json_path.exists() && toml_path.exists() {
-            candidates.push(CleanupCandidate {
-                old_path: json_path,
-                new_path: toml_path,
-                format_change: "JSON → TOML".to_string(),
-            });
-        }
-
         // agent-history.json -> agent-history.toml
         let json_path = gwt_dir.join("agent-history.json");
         let toml_path = gwt_dir.join("agent-history.toml");
@@ -316,51 +294,6 @@ impl CleanupCandidate {
         );
 
         Ok(())
-    }
-}
-
-/// Check if migration is needed
-pub fn needs_migration(repo_root: &Path) -> bool {
-    let json_path = repo_root.join(".gwt.json");
-    let toml_path = repo_root.join(".gwt.toml");
-
-    let needs = json_path.exists() && !toml_path.exists();
-    debug!(
-        category = "config",
-        repo_root = %repo_root.display(),
-        json_exists = json_path.exists(),
-        toml_exists = toml_path.exists(),
-        needs_migration = needs,
-        "Checked migration status"
-    );
-    needs
-}
-
-/// Auto-migrate if needed
-pub fn auto_migrate(repo_root: &Path) -> Result<bool> {
-    if needs_migration(repo_root) {
-        debug!(
-            category = "config",
-            repo_root = %repo_root.display(),
-            "Auto-migration triggered"
-        );
-        let json_path = repo_root.join(".gwt.json");
-        let toml_path = repo_root.join(".gwt.toml");
-        migrate_json_to_toml(&json_path, &toml_path)?;
-        info!(
-            category = "config",
-            operation = "auto_migrate",
-            repo_root = %repo_root.display(),
-            "Auto-migration completed"
-        );
-        Ok(true)
-    } else {
-        debug!(
-            category = "config",
-            repo_root = %repo_root.display(),
-            "Auto-migration skipped (not needed)"
-        );
-        Ok(false)
     }
 }
 
@@ -453,22 +386,6 @@ profiles:
 
         assert!(dir.exists());
         assert!(dir.is_dir());
-    }
-
-    #[test]
-    fn test_needs_migration() {
-        let temp = TempDir::new().unwrap();
-
-        // No files - no migration needed
-        assert!(!needs_migration(temp.path()));
-
-        // JSON only - migration needed
-        std::fs::write(temp.path().join(".gwt.json"), "{}").unwrap();
-        assert!(needs_migration(temp.path()));
-
-        // Both files - no migration needed
-        std::fs::write(temp.path().join(".gwt.toml"), "").unwrap();
-        assert!(!needs_migration(temp.path()));
     }
 
     #[test]

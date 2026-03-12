@@ -222,7 +222,6 @@ export interface Profile {
 export interface ProfilesConfig {
   version: number;
   active?: string | null;
-  default_ai?: AISettings | null;
   profiles: Record<string, Profile>;
 }
 
