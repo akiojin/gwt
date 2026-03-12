@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.6.0] - 2026-03-12
+
+### Features
+
+- **skills:** Add issue resolve workflow (#1582)
+
+### Refactor
+
+- **skills:** Narrow embedded issue workflows (#1583)
+
 ## [8.5.7] - 2026-03-10
 
 ### Bug Fixes

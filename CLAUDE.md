@@ -48,7 +48,8 @@
   - 機能要件（FR-*）
   - 成功基準
 - Issue body の `## Plan`、`## Tasks` セクションも策定してから実装に入る
-- `gwt-spec-ops` スキルに従って Issue を作成・更新する
+- 通常の GitHub Issue から開始する場合は `gwt-issue-resolve` で、直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
+- 対象の `gwt-spec` Issue が確定した後は `gwt-spec-ops` に従って Spec/Plan/Tasks を更新し、実装進行を管理する
 
 #### 2. TDD（テストファースト）
 
