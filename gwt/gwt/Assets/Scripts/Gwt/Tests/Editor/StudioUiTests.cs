@@ -1272,6 +1272,8 @@ namespace Gwt.Tests.Editor
 
             Assert.AreEqual("authentication", indexService.LastSemanticQuery);
             Assert.AreEqual("#42 Authentication search bug", issuePanel.CurrentTitle);
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Mode: semantic"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Results: 1 issue / 1 file"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Labels:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("LoginService.cs"));
@@ -1424,6 +1426,8 @@ namespace Gwt.Tests.Editor
 
             Assert.AreEqual("authentication", indexService.LastSemanticQuery);
             Assert.AreEqual("Search: Assets/Scripts/Auth/LoginService.cs", issuePanel.CurrentTitle);
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Mode: lexical fallback"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Results: 0 issues / 2 files"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("handles authentication requests"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("SessionStore.cs"));

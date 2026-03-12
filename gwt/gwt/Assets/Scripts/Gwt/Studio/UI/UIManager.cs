@@ -770,13 +770,17 @@ namespace Gwt.Studio.UI
                     await _projectIndexService.BuildIndexAsync(currentProjectPath);
 
                 var results = _projectIndexService.SearchAllSemantic(query, 5);
+                var usedLexicalFallback = false;
                 if ((results?.Files.Count ?? 0) == 0 && (results?.Issues.Count ?? 0) == 0)
+                {
                     results = _projectIndexService.SearchAll(query);
+                    usedLexicalFallback = true;
+                }
 
                 _lastSearchQuery = query;
                 _lastSearchTopIssue = results?.Issues != null && results.Issues.Count > 0 ? results.Issues[0] : null;
                 _lastSearchTopFile = _lastSearchTopIssue == null && results?.Files != null && results.Files.Count > 0 ? results.Files[0] : null;
-                var (title, body) = BuildSearchPresentation(query, results);
+                var (title, body) = BuildSearchPresentation(query, results, usedLexicalFallback);
                 _lastSearchHireAgentType = await ResolveSearchHireAgentTypeAsync();
                 var canHire = _lastSearchHireAgentType.HasValue;
                 _issueDetailPanel.SetIssue(title, body, canHire);
@@ -1488,15 +1492,25 @@ namespace Gwt.Studio.UI
             return !string.IsNullOrWhiteSpace(query);
         }
 
-        private static (string title, string body) BuildSearchPresentation(string query, SearchResultGroup results)
+        private static (string title, string body) BuildSearchPresentation(string query, SearchResultGroup results, bool usedLexicalFallback)
         {
             if (results == null || ((results.Files?.Count ?? 0) == 0 && (results.Issues?.Count ?? 0) == 0))
                 return ($"Search: {query}", "No results");
 
+            var fileCount = results.Files?.Count ?? 0;
+            var issueCount = results.Issues?.Count ?? 0;
+            var modeLabel = usedLexicalFallback ? "lexical fallback" : "semantic";
+            var summaryLines = new List<string>
+            {
+                $"Mode: {modeLabel}",
+                $"Results: {issueCount} {(issueCount == 1 ? "issue" : "issues")} / {fileCount} {(fileCount == 1 ? "file" : "files")}"
+            };
+
             if (results.Issues != null && results.Issues.Count > 0)
             {
                 var issue = results.Issues[0];
-                var lines = new List<string>();
+                var lines = new List<string>(summaryLines);
+                lines.Add(string.Empty);
                 if (!string.IsNullOrWhiteSpace(issue.Body))
                     lines.Add(issue.Body.Trim());
                 if (issue.Labels != null && issue.Labels.Count > 0)
@@ -1506,7 +1520,8 @@ namespace Gwt.Studio.UI
             }
 
             var file = results.Files[0];
-            var bodyLines = new List<string>();
+            var bodyLines = new List<string>(summaryLines);
+            bodyLines.Add(string.Empty);
             bodyLines.Add($"Path: {file.RelativePath}");
             if (!string.IsNullOrWhiteSpace(file.PreviewText))
                 bodyLines.Add(file.PreviewText.Trim());
