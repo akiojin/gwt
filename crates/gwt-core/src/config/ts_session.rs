@@ -1,27 +1,17 @@
-//! TypeScript session file compatibility (FR-069, FR-070, gwt-spec issue)
+//! TypeScript session file compatibility (FR-069, FR-070, gwt-spec issue).
 //!
-//! Reads and writes session history from/to session files.
-//! Supports both TOML (new) and JSON (legacy) formats.
-//!
-//! File locations:
-//! - New: ~/.gwt/sessions/{repoName}_{hash}.toml (gwt-spec issue FR-014)
-//! - Legacy: ~/.config/gwt/sessions/{repoName}_{hash}.json
-//!
-//! Migration strategy:
-//! - TOML format is preferred for reading if it exists
-//! - JSON format is read as fallback
-//! - Writes always use TOML format to ~/.gwt/sessions/
+//! Reads and writes session history from/to TOML files under `~/.gwt/sessions/`.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
-/// Tool session entry from TypeScript format (FR-069, FR-070, gwt-spec issue)
+/// Tool session entry from TypeScript format (FR-069, FR-070, gwt-spec issue).
 ///
-/// Supports both camelCase (JSON legacy) and snake_case (TOML new) via serde aliases.
+/// Supports both older camelCase fields and current snake_case fields via serde aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSessionEntry {
     pub branch: String,
@@ -200,9 +190,9 @@ fn canonical_tool_id(tool_id: &str) -> String {
     }
 }
 
-/// TypeScript session data structure (gwt-spec issue)
+/// TypeScript session data structure (gwt-spec issue).
 ///
-/// Supports both camelCase (JSON legacy) and snake_case (TOML new) via serde aliases.
+/// Supports both older camelCase fields and current snake_case fields via serde aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TsSessionData {
     #[serde(
@@ -267,91 +257,12 @@ pub fn get_ts_session_toml_path(repo_root: &Path) -> PathBuf {
     session_dir.join(format!("{}_{}.toml", repo_name, hash_safe))
 }
 
-/// Get the legacy JSON session file path for a repository
-/// Path: ~/.config/gwt/sessions/{repoName}_{hash}.json
-pub fn get_ts_session_json_path(repo_root: &Path) -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let session_dir = home.join(".config").join("gwt").join("sessions");
-    let (repo_name, hash_safe) = get_session_file_components(repo_root);
-    session_dir.join(format!("{}_{}.json", repo_name, hash_safe))
-}
-
-/// Get the TypeScript session file path for a repository (legacy JSON path)
-/// Deprecated: Use get_ts_session_toml_path for new code
 pub fn get_ts_session_path(repo_root: &Path) -> PathBuf {
-    get_ts_session_json_path(repo_root)
+    get_ts_session_toml_path(repo_root)
 }
 
-/// Check if migration is needed for a repository's session file (gwt-spec issue)
-pub fn needs_ts_session_migration(repo_root: &Path) -> bool {
-    let toml_path = get_ts_session_toml_path(repo_root);
-    let json_path = get_ts_session_json_path(repo_root);
-    json_path.exists() && !toml_path.exists()
-}
-
-/// Migrate JSON session to TOML if needed (gwt-spec issue FR-014)
-pub fn migrate_ts_session_if_needed(repo_root: &Path) -> Result<bool, std::io::Error> {
-    if !needs_ts_session_migration(repo_root) {
-        return Ok(false);
-    }
-
-    let json_path = get_ts_session_json_path(repo_root);
-    let toml_path = get_ts_session_toml_path(repo_root);
-
-    debug!(
-        category = "config",
-        json_path = %json_path.display(),
-        toml_path = %toml_path.display(),
-        "Starting TS session JSON to TOML migration"
-    );
-
-    // Read and parse JSON
-    let json_content = std::fs::read_to_string(&json_path)?;
-    let session: TsSessionData = serde_json::from_str(&json_content).map_err(|e| {
-        warn!(
-            category = "config",
-            json_path = %json_path.display(),
-            error = %e,
-            "Failed to parse JSON session file"
-        );
-        std::io::Error::other(format!("Failed to parse JSON: {}", e))
-    })?;
-
-    // Convert to TOML
-    let toml_content = toml::to_string_pretty(&session).map_err(|e| {
-        warn!(
-            category = "config",
-            error = %e,
-            "Failed to convert session to TOML"
-        );
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
-
-    // Ensure parent directory exists
-    if let Some(parent) = toml_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Write TOML file atomically
-    crate::config::write_atomic(&toml_path, &toml_content)
-        .map_err(|e| std::io::Error::other(format!("Failed to write TOML: {}", e)))?;
-
-    info!(
-        category = "config",
-        operation = "migration",
-        json_path = %json_path.display(),
-        toml_path = %toml_path.display(),
-        "TS session migration completed successfully"
-    );
-
-    Ok(true)
-}
-
-/// Load TypeScript session data for a repository (gwt-spec issue)
-///
-/// Priority: TOML (new) > JSON (legacy)
+/// Load TypeScript session data for a repository (gwt-spec issue).
 pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
-    // Try TOML first (new format)
     let toml_path = get_ts_session_toml_path(repo_root);
     if let Ok(content) = std::fs::read_to_string(&toml_path) {
         if let Ok(session) = toml::from_str::<TsSessionData>(&content) {
@@ -361,34 +272,6 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
                 "Loaded session from TOML"
             );
             return Some(normalize_and_persist_session(toml_path, session, true));
-        }
-    }
-
-    // Fallback to JSON (legacy format) and auto-migrate
-    let json_path = get_ts_session_json_path(repo_root);
-    if let Ok(content) = std::fs::read_to_string(&json_path) {
-        if let Ok(session) = serde_json::from_str::<TsSessionData>(&content) {
-            debug!(
-                category = "config",
-                path = %json_path.display(),
-                "Loaded session from JSON (legacy)"
-            );
-            // Auto-migrate: save as TOML for next time (gwt-spec issue)
-            if let Ok(toml_content) = toml::to_string_pretty(&session) {
-                if let Some(parent) = toml_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if crate::config::write_atomic(&toml_path, &toml_content).is_ok() {
-                    info!(
-                        category = "config",
-                        operation = "auto_migrate",
-                        "Auto-migrated session history JSON to TOML"
-                    );
-                    // Return from TOML path after migration
-                    return Some(normalize_and_persist_session(toml_path, session, true));
-                }
-            }
-            return Some(normalize_and_persist_session(json_path, session, false));
         }
     }
 
@@ -425,40 +308,6 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
                     .unwrap_or(true);
                 if should_update {
                     latest = Some((session, path, true));
-                }
-            }
-        }
-    }
-
-    // If no TOML found, search in JSON directory
-    if latest.is_none() {
-        let json_dir = json_path.parent()?;
-        if json_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(json_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                        Some(name) => name,
-                        None => continue,
-                    };
-                    if !file_name.starts_with(&prefix) || !file_name.ends_with(".json") {
-                        continue;
-                    }
-                    let content = match std::fs::read_to_string(&path) {
-                        Ok(content) => content,
-                        Err(_) => continue,
-                    };
-                    let session: TsSessionData = match serde_json::from_str(&content) {
-                        Ok(session) => session,
-                        Err(_) => continue,
-                    };
-                    let should_update = latest
-                        .as_ref()
-                        .map(|current| session.timestamp > current.0.timestamp)
-                        .unwrap_or(true);
-                    if should_update {
-                        latest = Some((session, path, false));
-                    }
                 }
             }
         }
@@ -756,7 +605,7 @@ mod tests {
         let path = get_ts_session_path(&repo);
         assert!(path.to_string_lossy().contains("sessions"));
         assert!(path.to_string_lossy().contains("myrepo_"));
-        assert!(path.to_string_lossy().ends_with(".json"));
+        assert!(path.to_string_lossy().ends_with(".toml"));
     }
 
     #[test]
@@ -764,39 +613,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = load_ts_session(temp.path());
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_load_session_fallback_by_repo_name() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let session_dir = temp.path().join(".config").join("gwt").join("sessions");
-        std::fs::create_dir_all(&session_dir).unwrap();
-
-        let repo_root = PathBuf::from("/workspaces/sample-repo");
-        let session = TsSessionData {
-            last_worktree_path: None,
-            last_branch: Some("feature/test".to_string()),
-            last_used_tool: Some("codex-cli".to_string()),
-            last_session_id: None,
-            tool_label: Some("Codex".to_string()),
-            tool_version: Some("latest".to_string()),
-            model: Some("gpt-5.2-codex".to_string()),
-            timestamp: 1_700_000_000_000,
-            repository_root: "/workspaces/other-path".to_string(),
-            history: Vec::new(),
-        };
-
-        // Create a file with a different hash but the same repo name prefix.
-        let fallback_path = session_dir.join("sample-repo_other.json");
-        let content = serde_json::to_string_pretty(&session).unwrap();
-        std::fs::write(&fallback_path, content).unwrap();
-
-        let loaded = load_ts_session(&repo_root).expect("fallback session should load");
-        assert_eq!(loaded.timestamp, session.timestamp);
-        assert_eq!(loaded.last_branch, session.last_branch);
     }
 
     #[test]
@@ -825,7 +641,7 @@ mod tests {
         if let Some(parent) = session_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let content = serde_json::to_string_pretty(&session).unwrap();
+        let content = toml::to_string_pretty(&session).unwrap();
         std::fs::write(&session_path, content).unwrap();
 
         let entries = get_branch_tool_history(&repo_root, "feature/test");
@@ -908,7 +724,7 @@ mod tests {
         if let Some(parent) = session_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let content = serde_json::to_string_pretty(&session).unwrap();
+        let content = toml::to_string_pretty(&session).unwrap();
         std::fs::write(&session_path, content).unwrap();
 
         let entries = get_branch_tool_history(&repo_root, "feature/test");
@@ -986,7 +802,7 @@ mod tests {
         if let Some(parent) = session_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let content = serde_json::to_string_pretty(&session).unwrap();
+        let content = toml::to_string_pretty(&session).unwrap();
         std::fs::write(&session_path, content).unwrap();
 
         let entries = get_branch_tool_history(&repo_root, "feature/test");
@@ -1053,7 +869,7 @@ mod tests {
         if let Some(parent) = session_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let content = serde_json::to_string_pretty(&session).unwrap();
+        let content = toml::to_string_pretty(&session).unwrap();
         std::fs::write(&session_path, content).unwrap();
 
         let loaded = load_ts_session(&repo_root).unwrap();
@@ -1189,139 +1005,13 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_ts_session_migration() {
+    fn test_load_ts_session_uses_toml() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let repo_root = temp.path().join("sample-repo");
         std::fs::create_dir_all(&repo_root).unwrap();
-
-        // No files - no migration needed
-        assert!(!needs_ts_session_migration(&repo_root));
-
-        // Create JSON session file
-        let json_path = get_ts_session_json_path(&repo_root);
-        if let Some(parent) = json_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let session = TsSessionData {
-            last_worktree_path: None,
-            last_branch: Some("main".to_string()),
-            last_used_tool: Some("claude-code".to_string()),
-            last_session_id: None,
-            tool_label: Some("Claude".to_string()),
-            tool_version: None,
-            model: None,
-            timestamp: 1_700_000_000_000,
-            repository_root: repo_root.to_string_lossy().to_string(),
-            history: Vec::new(),
-        };
-        let content = serde_json::to_string_pretty(&session).unwrap();
-        std::fs::write(&json_path, content).unwrap();
-
-        // JSON only - migration needed
-        assert!(needs_ts_session_migration(&repo_root));
-
-        // Create TOML session file
-        let toml_path = get_ts_session_toml_path(&repo_root);
-        if let Some(parent) = toml_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let toml_content = toml::to_string_pretty(&session).unwrap();
-        std::fs::write(&toml_path, toml_content).unwrap();
-
-        // Both files - no migration needed (TOML exists)
-        assert!(!needs_ts_session_migration(&repo_root));
-    }
-
-    #[test]
-    fn test_migrate_ts_session_if_needed() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let repo_root = temp.path().join("sample-repo");
-        std::fs::create_dir_all(&repo_root).unwrap();
-
-        // Create JSON session file with camelCase fields
-        let json_path = get_ts_session_json_path(&repo_root);
-        if let Some(parent) = json_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let json_content = r#"{
-            "lastWorktreePath": "/path/to/wt",
-            "lastBranch": "feature/test",
-            "lastUsedTool": "claude-code",
-            "lastSessionId": "session-123",
-            "toolLabel": "Claude",
-            "toolVersion": "1.0.0",
-            "model": "opus",
-            "timestamp": 1700000000000,
-            "repositoryRoot": "/tmp/repo",
-            "history": [
-                {
-                    "branch": "feature/test",
-                    "worktreePath": "/path/to/wt",
-                    "toolId": "claude-code",
-                    "toolLabel": "Claude",
-                    "timestamp": 1700000000000
-                }
-            ]
-        }"#;
-        std::fs::write(&json_path, json_content).unwrap();
-
-        // Perform migration
-        let result = migrate_ts_session_if_needed(&repo_root);
-        assert!(result.is_ok());
-        assert!(result.unwrap()); // Should return true (migration performed)
-
-        // Verify TOML file was created
-        let toml_path = get_ts_session_toml_path(&repo_root);
-        assert!(toml_path.exists());
-
-        // Load from TOML and verify data
-        let toml_content = std::fs::read_to_string(&toml_path).unwrap();
-        let session: TsSessionData = toml::from_str(&toml_content).unwrap();
-        assert_eq!(session.last_branch.as_deref(), Some("feature/test"));
-        assert_eq!(session.last_used_tool.as_deref(), Some("claude-code"));
-        assert_eq!(session.history.len(), 1);
-        assert_eq!(session.history[0].branch, "feature/test");
-
-        // Second migration should be skipped
-        let result2 = migrate_ts_session_if_needed(&repo_root);
-        assert!(result2.is_ok());
-        assert!(!result2.unwrap()); // Should return false (no migration needed)
-    }
-
-    #[test]
-    fn test_load_ts_session_prefers_toml() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let repo_root = temp.path().join("sample-repo");
-        std::fs::create_dir_all(&repo_root).unwrap();
-
-        // Create JSON session file (older timestamp)
-        let json_path = get_ts_session_json_path(&repo_root);
-        if let Some(parent) = json_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let json_session = TsSessionData {
-            last_worktree_path: None,
-            last_branch: Some("json-branch".to_string()),
-            last_used_tool: Some("codex-cli".to_string()),
-            last_session_id: None,
-            tool_label: Some("Codex".to_string()),
-            tool_version: None,
-            model: None,
-            timestamp: 1_600_000_000_000,
-            repository_root: repo_root.to_string_lossy().to_string(),
-            history: Vec::new(),
-        };
-        let json_content = serde_json::to_string_pretty(&json_session).unwrap();
-        std::fs::write(&json_path, json_content).unwrap();
 
         // Create TOML session file (newer timestamp)
         let toml_path = get_ts_session_toml_path(&repo_root);
@@ -1343,7 +1033,6 @@ mod tests {
         let toml_content = toml::to_string_pretty(&toml_session).unwrap();
         std::fs::write(&toml_path, toml_content).unwrap();
 
-        // Load should prefer TOML
         let loaded = load_ts_session(&repo_root).expect("should load session");
         assert_eq!(loaded.last_branch.as_deref(), Some("toml-branch"));
         assert_eq!(loaded.last_used_tool.as_deref(), Some("claude-code"));
@@ -1384,12 +1073,9 @@ mod tests {
         let result = save_session_entry(&repo_root, entry);
         assert!(result.is_ok());
 
-        // Verify TOML file was created (not JSON)
+        // Verify TOML file was created
         let toml_path = get_ts_session_toml_path(&repo_root);
         assert!(toml_path.exists());
-
-        let json_path = get_ts_session_json_path(&repo_root);
-        assert!(!json_path.exists()); // JSON should not be created
 
         // Verify content
         let content = std::fs::read_to_string(&toml_path).unwrap();
