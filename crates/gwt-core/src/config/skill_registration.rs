@@ -148,12 +148,12 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh",
+        relative_path: "skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh"
+            "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
         )),
-        executable: true,
+        executable: false,
         rewrite_for_project: false,
     },
 ];
@@ -172,6 +172,11 @@ const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
     "block-cd-command.sh",
     "block-file-ops.sh",
     "block-git-dir-override.sh",
+    "gwt-forward-hook.sh",
+    "gwt-block-git-branch-ops.sh",
+    "gwt-block-cd-command.sh",
+    "gwt-block-file-ops.sh",
+    "gwt-block-git-dir-override.sh",
 ];
 
 const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
@@ -233,48 +238,48 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
 
 const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
     ManagedAsset {
-        relative_path: "hooks/scripts/gwt-forward-hook.sh",
+        relative_path: "hooks/scripts/gwt-forward-hook.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-forward-hook.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-forward-hook.mjs"
         )),
-        executable: true,
+        executable: false,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/gwt-block-git-branch-ops.sh",
+        relative_path: "hooks/scripts/gwt-block-git-branch-ops.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-block-git-branch-ops.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-git-branch-ops.mjs"
         )),
-        executable: true,
+        executable: false,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/gwt-block-cd-command.sh",
+        relative_path: "hooks/scripts/gwt-block-cd-command.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-block-cd-command.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-cd-command.mjs"
         )),
-        executable: true,
+        executable: false,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/gwt-block-file-ops.sh",
+        relative_path: "hooks/scripts/gwt-block-file-ops.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-block-file-ops.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-file-ops.mjs"
         )),
-        executable: true,
+        executable: false,
         rewrite_for_project: false,
     },
     ManagedAsset {
-        relative_path: "hooks/scripts/gwt-block-git-dir-override.sh",
+        relative_path: "hooks/scripts/gwt-block-git-dir-override.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-block-git-dir-override.sh"
+            "/../../plugins/gwt/hooks/scripts/gwt-block-git-dir-override.mjs"
         )),
-        executable: true,
+        executable: false,
         rewrite_for_project: false,
     },
 ];
@@ -299,7 +304,7 @@ const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.gemini/skills/gwt-*/",
     "/.claude/skills/gwt-*/",
     "/.claude/commands/gwt-*.md",
-    "/.claude/hooks/scripts/gwt-*.sh",
+    "/.claude/hooks/scripts/gwt-*.mjs",
 ];
 const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".gwt/",
@@ -313,6 +318,7 @@ const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".claude/commands/gwt-*.md",
     ".claude/hooks/",
     ".claude/hooks/scripts/gwt-*.sh",
+    "/.claude/hooks/scripts/gwt-*.sh",
 ];
 
 /// Agent types that support skill registration.
@@ -761,7 +767,7 @@ fn managed_hooks_definition() -> Value {
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit"
+                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
                 }]
             }],
             "PreToolUse": [
@@ -769,7 +775,7 @@ fn managed_hooks_definition() -> Value {
                     "matcher": "*",
                     "hooks": [{
                         "type": "command",
-                        "command": ".claude/hooks/scripts/gwt-forward-hook.sh PreToolUse"
+                        "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PreToolUse"
                     }]
                 },
                 {
@@ -777,19 +783,19 @@ fn managed_hooks_definition() -> Value {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": ".claude/hooks/scripts/gwt-block-git-branch-ops.sh"
+                            "command": "node .claude/hooks/scripts/gwt-block-git-branch-ops.mjs"
                         },
                         {
                             "type": "command",
-                            "command": ".claude/hooks/scripts/gwt-block-cd-command.sh"
+                            "command": "node .claude/hooks/scripts/gwt-block-cd-command.mjs"
                         },
                         {
                             "type": "command",
-                            "command": ".claude/hooks/scripts/gwt-block-file-ops.sh"
+                            "command": "node .claude/hooks/scripts/gwt-block-file-ops.mjs"
                         },
                         {
                             "type": "command",
-                            "command": ".claude/hooks/scripts/gwt-block-git-dir-override.sh"
+                            "command": "node .claude/hooks/scripts/gwt-block-git-dir-override.mjs"
                         }
                     ]
                 }
@@ -798,21 +804,21 @@ fn managed_hooks_definition() -> Value {
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh PostToolUse"
+                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PostToolUse"
                 }]
             }],
             "Notification": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh Notification"
+                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs Notification"
                 }]
             }],
             "Stop": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh Stop"
+                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs Stop"
                 }]
             }]
         }
@@ -1448,7 +1454,7 @@ mod tests {
             .join("skills")
             .join("gwt-spec-to-issue-migration")
             .join("scripts")
-            .join("migrate-specs-to-issues.sh")
+            .join("migrate-specs-to-issues.mjs")
             .exists());
         assert!(tmp
             .path()
@@ -1470,10 +1476,10 @@ mod tests {
     #[test]
     fn managed_hook_detection_uses_exact_template_commands() {
         let managed_hook_commands =
-            vec![".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit".to_string()];
+            vec!["node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()];
 
         assert!(is_managed_hook_command(
-            ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit",
+            "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit",
             &managed_hook_commands
         ));
         assert!(!is_managed_hook_command(
@@ -1503,7 +1509,7 @@ mod tests {
     #[test]
     fn prune_managed_hook_entries_preserves_user_hook_that_mentions_gwt_hook() {
         let managed_hook_commands =
-            vec![".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit".to_string()];
+            vec!["node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()];
         let mut value = serde_json::json!(["echo gwt hook UserPromptSubmit"]);
 
         prune_managed_hook_entries(&mut value, &managed_hook_commands);
@@ -1634,7 +1640,7 @@ mod tests {
             .join("skills")
             .join("gwt-spec-to-issue-migration")
             .join("scripts")
-            .join("migrate-specs-to-issues.sh")
+            .join("migrate-specs-to-issues.mjs")
             .exists());
         assert!(temp
             .path()
@@ -1671,7 +1677,7 @@ mod tests {
             .join(".claude")
             .join("hooks")
             .join("scripts")
-            .join("gwt-forward-hook.sh")
+            .join("gwt-forward-hook.mjs")
             .exists());
         assert!(!temp
             .path()
@@ -1682,8 +1688,8 @@ mod tests {
 
         let settings_path = temp.path().join(".claude").join("settings.json");
         let content = std::fs::read_to_string(settings_path).unwrap();
-        assert!(content.contains("gwt-forward-hook.sh"));
-        assert!(content.contains("gwt-block-git-branch-ops.sh"));
+        assert!(content.contains("gwt-forward-hook.mjs"));
+        assert!(content.contains("gwt-block-git-branch-ops.mjs"));
         assert!(!content.contains("CLAUDE_PLUGIN_ROOT"));
 
         let exclude =
@@ -1694,7 +1700,7 @@ mod tests {
         assert!(exclude.contains("/.gemini/skills/gwt-*/"));
         assert!(exclude.contains("/.claude/skills/gwt-*/"));
         assert!(exclude.contains("/.claude/commands/gwt-*.md"));
-        assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.sh"));
+        assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.mjs"));
     }
 
     #[test]
@@ -1762,7 +1768,7 @@ mod tests {
         .unwrap();
         assert!(!gemini_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
         assert!(gemini_skill_content.contains(
-            ".gemini/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh"
+            ".gemini/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
         ));
     }
 
@@ -1935,7 +1941,7 @@ mod tests {
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit"
+                                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
                                 }
                             ]
                         }
@@ -1968,7 +1974,7 @@ mod tests {
         assert!(claude_root
             .join("hooks")
             .join("scripts")
-            .join("gwt-forward-hook.sh")
+            .join("gwt-forward-hook.mjs")
             .exists());
 
         let settings_content = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
@@ -2173,7 +2179,7 @@ another-pattern
         );
         let exclude = std::fs::read_to_string(exclude_path).unwrap();
         assert!(exclude.contains(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER));
-        assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.sh"));
+        assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.mjs"));
     }
 
     #[test]

@@ -12,7 +12,7 @@ Use this skill only for repositories that still carry legacy local spec trees fr
 Migrate local `specs/SPEC-*` directories to GitHub Issues (`gwt-spec` label), then remove the legacy local source of truth.
 
 This skill uses:
-- `${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh`
+- `${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs`
 - `crates/gwt-core/src/git/issue_spec.rs`
 
 ## Preconditions
@@ -35,19 +35,19 @@ This skill uses:
 ### Dry-run
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh" --dry-run
+node "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs" --dry-run
 ```
 
 ### Dry-run with explicit specs directory
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh" --dry-run --specs-dir "<path-to-specs>"
+node "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs" --dry-run --specs-dir "<path-to-specs>"
 ```
 
 ### Execute migration
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.sh"
+node "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
 ```
 
 ### Verify report
