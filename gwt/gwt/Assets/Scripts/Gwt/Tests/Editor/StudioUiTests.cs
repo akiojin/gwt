@@ -1807,7 +1807,7 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update 1.1.0 ready", cancellationToken: default);
 
             Assert.AreEqual("Update 1.1.0 ready", bar.CurrentUpdateStatus);
-            Assert.AreEqual("Apply", bar.CurrentUpdateButtonLabel);
+            Assert.AreEqual("Apply 1.1.0", bar.CurrentUpdateButtonLabel);
             Assert.AreEqual("1.1.0", bar.LastUpdateVersion);
             Assert.That(bar.LastUpdateCommand, Does.Contain("/tmp/gwt-1.1.0.zip"));
             Assert.That(bar.CurrentAudioStatus, Does.Contain("ButtonClick"));
@@ -1849,7 +1849,7 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Update staged", cancellationToken: default);
 
             Assert.AreEqual("Update staged", bar.CurrentUpdateStatus);
-            Assert.AreEqual("Launch", bar.CurrentUpdateButtonLabel);
+            Assert.AreEqual("Launch 1.1.0", bar.CurrentUpdateButtonLabel);
             Assert.AreEqual("/tmp/apply-update.sh", bar.LastUpdateCommand);
             Assert.AreEqual(1, buildService.PrepareCallCount);
             Assert.AreEqual(1, buildService.WriteScriptCallCount);
@@ -1949,7 +1949,7 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => bar.CurrentUpdateStatus == "Launch blocked in editor", cancellationToken: default);
 
             Assert.AreEqual("Launch blocked in editor", bar.CurrentUpdateStatus);
-            Assert.AreEqual("Launch", bar.CurrentUpdateButtonLabel);
+            Assert.AreEqual("Launch 1.1.0", bar.CurrentUpdateButtonLabel);
             Assert.AreEqual("/tmp/apply-update.sh", bar.LastUpdateCommand);
         });
 
@@ -2231,7 +2231,7 @@ namespace Gwt.Tests.Editor
                 InvokePrivateMethod(restoredManager, "RestorePreparedUpdateStateIfNeeded");
 
                 Assert.AreEqual("Update staged", restoredBar.CurrentUpdateStatus);
-                Assert.AreEqual("Launch", restoredBar.CurrentUpdateButtonLabel);
+                Assert.AreEqual("Launch 1.1.0", restoredBar.CurrentUpdateButtonLabel);
                 Assert.AreEqual("1.1.0", restoredBar.LastUpdateVersion);
                 Assert.AreEqual("/tmp/apply-update.sh", restoredBar.LastUpdateCommand);
             }
@@ -2258,7 +2258,7 @@ namespace Gwt.Tests.Editor
                     ProjectPath = "/tmp/project-a",
                     LaunchReady = true,
                     StatusText = "Update staged",
-                    ButtonLabel = "Launch",
+                    ButtonLabel = "Launch 1.1.0",
                     DisplayCommand = "/tmp/missing-apply-update.sh",
                     CandidateVersion = "1.1.0",
                     CandidateDownloadUrl = "file:///tmp/gwt-1.1.0.zip",
@@ -2305,7 +2305,7 @@ namespace Gwt.Tests.Editor
                     ProjectPath = "/tmp/project-a",
                     LaunchReady = true,
                     StatusText = "Update staged",
-                    ButtonLabel = "Launch",
+                    ButtonLabel = "Launch 1.1.0",
                     DisplayCommand = "/tmp/apply-update.sh",
                     CandidateVersion = "1.1.0",
                     CandidateDownloadUrl = "file:///tmp/gwt-1.1.0.zip",
@@ -2464,7 +2464,7 @@ namespace Gwt.Tests.Editor
                     ProjectPath = "/tmp/project-a",
                     LaunchReady = true,
                     StatusText = "Update staged",
-                    ButtonLabel = "Launch",
+                    ButtonLabel = "Launch 1.1.0",
                     DisplayCommand = scriptPath,
                     CandidateVersion = "1.1.0",
                     CandidateDownloadUrl = "file:///tmp/gwt-1.1.0.zip",
@@ -2510,7 +2510,7 @@ namespace Gwt.Tests.Editor
                     }));
 
                 Assert.AreEqual("Update staged", bar.CurrentUpdateStatus);
-                Assert.AreEqual("Launch", bar.CurrentUpdateButtonLabel);
+                Assert.AreEqual("Launch 1.1.0", bar.CurrentUpdateButtonLabel);
                 Assert.AreEqual(scriptPath, bar.LastUpdateCommand);
 
                 var updateButton = bar.GetComponentsInChildren<Button>(true)
