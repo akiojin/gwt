@@ -16,7 +16,10 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tracing::{debug, error, info};
+
+static GLOBAL_SETTINGS_UPDATE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +200,16 @@ impl Default for VoiceInputSettings {
 }
 
 impl Settings {
+    fn is_global_config_path(path: &Path) -> bool {
+        Self::global_config_path().as_deref() == Some(path)
+    }
+
+    fn strip_global_only_sections(&mut self) {
+        self.agent_config = AgentConfig::default();
+        self.tools = ToolsConfig::default();
+        self.recent_projects = RecentProjectsConfig::default();
+    }
+
     fn settings_env_provider() -> Env {
         // Limit Figment env extraction to scalar keys we actually support via direct mapping.
         // This avoids runtime variables such as GWT_AGENT (set for terminal panes) from
@@ -247,6 +260,14 @@ impl Settings {
         if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
             if let Some(parsed) = parse_env_bool(&value) {
                 settings.docker.force_host = parsed;
+            }
+        }
+        if let Some(path) = config_path.as_ref() {
+            if !Self::is_global_config_path(path) {
+                let global_settings = Self::load_global().unwrap_or_default();
+                settings.agent_config = global_settings.agent_config;
+                settings.tools = global_settings.tools;
+                settings.recent_projects = global_settings.recent_projects;
             }
         }
         settings.profiles.normalize_loaded();
@@ -411,7 +432,12 @@ impl Settings {
             "Saving settings"
         );
 
-        let content = toml::to_string_pretty(self).map_err(|e| {
+        let mut persisted = self.clone();
+        if !Self::is_global_config_path(path) {
+            persisted.strip_global_only_sections();
+        }
+
+        let content = toml::to_string_pretty(&persisted).map_err(|e| {
             error!(
                 category = "config",
                 path = %path.display(),
@@ -440,10 +466,28 @@ impl Settings {
 
     /// Save settings to the new global config path (~/.gwt/config.toml)
     pub fn save_global(&self) -> Result<()> {
+        let _guard = GLOBAL_SETTINGS_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = Self::global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
             reason: "Could not determine global config path".to_string(),
         })?;
         self.save(&path)
+    }
+
+    pub fn update_global<F>(mutate: F) -> Result<()>
+    where
+        F: FnOnce(&mut Self) -> Result<()>,
+    {
+        let _guard = GLOBAL_SETTINGS_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = Self::global_config_path().ok_or_else(|| GwtError::ConfigWriteError {
+            reason: "Could not determine global config path".to_string(),
+        })?;
+        let mut settings = Self::load_global()?;
+        mutate(&mut settings)?;
+        settings.save(&path)
     }
 
     /// Create default config file
