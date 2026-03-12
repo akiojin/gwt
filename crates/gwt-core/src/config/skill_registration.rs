@@ -29,6 +29,7 @@ struct ManagedAsset {
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-issue-resolve",
+    "gwt-spec-register",
     "gwt-fix-pr",
     "gwt-spec-ops",
     "gwt-pr",
@@ -56,6 +57,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         )),
         executable: true,
         rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-register/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-register/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
     },
     ManagedAsset {
         relative_path: "skills/gwt-fix-pr/SKILL.md",
@@ -190,6 +200,15 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
+        relative_path: "commands/gwt-spec-register.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-register.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
         relative_path: "commands/gwt-fix-pr.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -286,9 +305,12 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
 
 const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
     "skills/gwt-fix-issue",
+    "skills/gwt-issue-ops",
     "skills/gwt-issue-spec-ops",
     "commands/gwt-fix-issue.md",
+    "commands/gwt-issue-ops.md",
     "commands/gwt-issue-spec-ops.md",
+    "commands/gwt-spec-ops.md",
 ];
 
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
@@ -1890,6 +1912,17 @@ mod tests {
         assert!(issue_resolve_skill.contains("Direct fix path"));
         assert!(issue_resolve_skill.contains("gwt-project-index"));
 
+        let spec_register_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-register")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_register_skill.contains("Create a new GitHub Issue-first SPEC"));
+        assert!(spec_register_skill.contains("gwt-project-index"));
+
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
                 .join(".claude")
@@ -1899,11 +1932,80 @@ mod tests {
         .unwrap();
         assert!(issue_resolve_command.contains("direct fix"));
         assert!(issue_resolve_command.contains("existing SPEC"));
+
+        let spec_register_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-register.md"),
+        )
+        .unwrap();
+        assert!(spec_register_command.contains("Create a new Issue-first SPEC"));
+        assert!(spec_register_command.contains("gwt-project-index"));
+
         assert!(!temp
             .path()
             .join(".claude")
             .join("commands")
             .join("gwt-spec-ops.md")
+            .exists());
+    }
+
+    #[test]
+    fn registration_removes_retired_issue_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        let codex_issue_ops_dir = temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-ops");
+        std::fs::create_dir_all(&codex_issue_ops_dir).unwrap();
+        std::fs::write(codex_issue_ops_dir.join("SKILL.md"), "legacy").unwrap();
+
+        let claude_commands_dir = temp.path().join(".claude").join("commands");
+        std::fs::create_dir_all(&claude_commands_dir).unwrap();
+        std::fs::write(claude_commands_dir.join("gwt-issue-ops.md"), "legacy").unwrap();
+        std::fs::write(claude_commands_dir.join("gwt-spec-ops.md"), "legacy").unwrap();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        assert!(!temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-ops")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-issue-ops.md")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-spec-ops.md")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-resolve")
+            .join("SKILL.md")
             .exists());
     }
 
