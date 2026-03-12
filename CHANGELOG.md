@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.6.2] - 2026-03-12
+
+### Bug Fixes
+
+- **gui:** Flush xterm write buffer before refreshing on window reactivation (#1587)
+- **gui:** Reduce window focus jitter (#1588)
+
 ## [8.6.1] - 2026-03-12
 
 ### Bug Fixes
