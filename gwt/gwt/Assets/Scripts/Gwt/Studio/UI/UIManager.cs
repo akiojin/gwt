@@ -64,6 +64,7 @@ namespace Gwt.Studio.UI
         private IssueIndexEntry _lastSearchTopIssue;
         private FileIndexEntry _lastSearchTopFile;
         private DetectedAgentType? _lastSearchHireAgentType;
+        private string _lastSearchStatusText = string.Empty;
 
         public ConsolePanel Console => _consolePanel;
         public LeadInputField LeadInput => _leadInputField;
@@ -734,10 +735,12 @@ namespace Gwt.Studio.UI
             var currentProjectPath = _projectLifecycleService?.CurrentProject?.Path ?? string.Empty;
             if (_projectIndexService == null || string.IsNullOrWhiteSpace(currentProjectPath))
             {
+                _lastSearchStatusText = string.Empty;
                 _projectInfoBar.SetSearchState("Index unavailable");
                 return;
             }
 
+            _lastSearchStatusText = string.Empty;
             _projectInfoBar.SetSearchState("Indexing...");
             _soundService?.PlaySfx(SfxType.ButtonClick);
 
@@ -781,6 +784,7 @@ namespace Gwt.Studio.UI
                 _lastSearchQuery = query;
                 _lastSearchTopIssue = results?.Issues != null && results.Issues.Count > 0 ? results.Issues[0] : null;
                 _lastSearchTopFile = _lastSearchTopIssue == null && results?.Files != null && results.Files.Count > 0 ? results.Files[0] : null;
+                _lastSearchStatusText = BuildSearchStatus(results, usedLexicalFallback);
                 var (title, body) = BuildSearchPresentation(query, results, usedLexicalFallback);
                 _lastSearchHireAgentType = await ResolveSearchHireAgentTypeAsync();
                 var canHire = _lastSearchHireAgentType.HasValue;
@@ -790,6 +794,7 @@ namespace Gwt.Studio.UI
                     _lastSearchTopIssue == null
                         ? _lastSearchTopFile != null ? "Open Detail" : "Hire"
                         : canHire ? $"Hire {RandomNameGenerator.GetAgentTypeLabel(_lastSearchHireAgentType.Value)}" : "No agent available");
+                RefreshMetaStatus();
                 OpenPanel(_issueDetailPanel);
             }
             catch (System.Exception e)
@@ -798,8 +803,10 @@ namespace Gwt.Studio.UI
                 _lastSearchTopIssue = null;
                 _lastSearchTopFile = null;
                 _lastSearchHireAgentType = null;
+                _lastSearchStatusText = "Search failed";
                 _issueDetailPanel.SetIssue($"Search: {query}", $"Search failed: {e.Message}");
                 _issueDetailPanel.SetHireState(false, "Hire");
+                RefreshMetaStatus();
                 OpenPanel(_issueDetailPanel);
             }
         }
@@ -1458,11 +1465,22 @@ namespace Gwt.Studio.UI
             if (status.IsRunning)
                 return $"Index: {status.IndexedFileCount} files / {status.PendingFiles} pending";
 
+            if (!string.IsNullOrWhiteSpace(_lastSearchStatusText))
+                return _lastSearchStatusText;
+
             var embeddings = status.HasEmbeddings ? " / semantic" : string.Empty;
             if (status.IndexedFileCount <= 0 && status.IndexedIssueCount <= 0)
                 return $"Index: idle{embeddings}";
 
             return $"Index: {status.IndexedFileCount} files / {status.IndexedIssueCount} issues{embeddings}";
+        }
+
+        private static string BuildSearchStatus(SearchResultGroup results, bool usedLexicalFallback)
+        {
+            var issueCount = results?.Issues?.Count ?? 0;
+            var fileCount = results?.Files?.Count ?? 0;
+            var mode = usedLexicalFallback ? "lexical fallback" : "semantic";
+            return $"Search: {mode} / {issueCount} {(issueCount == 1 ? "issue" : "issues")} / {fileCount} {(fileCount == 1 ? "file" : "files")}";
         }
 
         private string FormatTerminalStatus()

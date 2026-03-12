@@ -1237,8 +1237,10 @@ namespace Gwt.Tests.Editor
             var manager = scope.Root.AddComponent<UIManager>();
             var leadInput = scope.Root.AddComponent<LeadInputField>();
             var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
             SetPrivateField(manager, "_leadInputField", leadInput);
             SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+            SetPrivateField(manager, "_projectInfoBar", bar);
 
             var indexService = new FakeProjectIndexService
             {
@@ -1274,6 +1276,7 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("#42 Authentication search bug", issuePanel.CurrentTitle);
             Assert.That(issuePanel.CurrentBody, Does.Contain("Mode: semantic"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Results: 1 issue / 1 file"));
+            Assert.AreEqual("Search: semantic / 1 issue / 1 file", bar.CurrentSearchStatus);
             Assert.That(issuePanel.CurrentBody, Does.Contain("Labels:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("LoginService.cs"));
@@ -1398,8 +1401,10 @@ namespace Gwt.Tests.Editor
             var manager = scope.Root.AddComponent<UIManager>();
             var leadInput = scope.Root.AddComponent<LeadInputField>();
             var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            var bar = scope.Root.AddComponent<ProjectInfoBar>();
             SetPrivateField(manager, "_leadInputField", leadInput);
             SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+            SetPrivateField(manager, "_projectInfoBar", bar);
 
             var indexService = new FakeProjectIndexService
             {
@@ -1432,6 +1437,7 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("Search: Assets/Scripts/Auth/LoginService.cs", issuePanel.CurrentTitle);
             Assert.That(issuePanel.CurrentBody, Does.Contain("Mode: lexical fallback"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Results: 0 issues / 2 files"));
+            Assert.AreEqual("Search: lexical fallback / 0 issues / 2 files", bar.CurrentSearchStatus);
             Assert.That(issuePanel.CurrentBody, Does.Contain("handles authentication requests"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("SessionStore.cs"));
