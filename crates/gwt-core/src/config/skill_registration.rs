@@ -21,6 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 struct ManagedAsset {
     relative_path: &'static str,
     body: &'static str,
+    #[cfg_attr(not(unix), allow(dead_code))]
     executable: bool,
     rewrite_for_project: bool,
 }

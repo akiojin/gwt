@@ -206,7 +206,7 @@ impl AppState {
         self.is_os_env_ready()
     }
 
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg_attr(any(test, not(unix)), allow(dead_code))]
     pub fn begin_os_env_capture(&self) -> bool {
         let started = self
             .os_env_capture_inflight

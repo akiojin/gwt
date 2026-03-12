@@ -50,6 +50,7 @@ fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
     env.get("PATH")
         .map(|v| v.trim())
@@ -57,7 +58,7 @@ fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
         .map(str::to_string)
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, not(unix)), allow(dead_code))]
 pub(crate) fn apply_captured_path_to_process_env(env: &HashMap<String, String>) -> bool {
     let Some(path) = captured_path_from_env(env) else {
         return false;
@@ -66,6 +67,7 @@ pub(crate) fn apply_captured_path_to_process_env(env: &HashMap<String, String>) 
     true
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[cfg(not(test))]
 pub(crate) fn spawn_login_shell_env_capture(app_handle: tauri::AppHandle<tauri::Wry>) {
     {

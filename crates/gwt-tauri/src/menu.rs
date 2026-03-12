@@ -112,7 +112,7 @@ pub fn refresh_window_tab_checkmarks_for_label(
     let Some(menu) = app.menu() else {
         return Ok(());
     };
-    let window_tabs = state.window_agent_tabs_for_window(&focused_label);
+    let window_tabs = state.window_agent_tabs_for_window(focused_label);
     let active_tab_id = window_tabs.active_tab_id;
 
     for tab in window_tabs.tabs {
@@ -565,7 +565,7 @@ fn collect_agent_tab_entries_for_window(
     state: &AppState,
     focused_label: &str,
 ) -> Vec<WindowTabMenuEntry> {
-    let window_tabs = state.window_agent_tabs_for_window(&focused_label);
+    let window_tabs = state.window_agent_tabs_for_window(focused_label);
     let active_tab_id = window_tabs.active_tab_id;
 
     window_tabs

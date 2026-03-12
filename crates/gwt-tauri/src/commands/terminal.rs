@@ -2254,7 +2254,6 @@ fn should_launch_agent_with_wsl_shell(shell_id: Option<&str>) -> bool {
 fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
-        use gwt_core::terminal::shell::WindowsShell;
         if let Some(id) = shell_id {
             match id {
                 "powershell" => {

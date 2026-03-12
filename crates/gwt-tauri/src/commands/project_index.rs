@@ -283,7 +283,7 @@ fn run_chroma_runner(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let mut exit_detail = format!("{}", output.status);
+        let exit_detail = format!("{}", output.status);
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
