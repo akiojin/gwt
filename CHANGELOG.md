@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.6.3] - 2026-03-12
+
+### Bug Fixes
+
+- Replace .sh hook scripts with .mjs for Windows compatibility (#1589) (#1591)
+
 ## [8.6.2] - 2026-03-12
 
 ### Bug Fixes
