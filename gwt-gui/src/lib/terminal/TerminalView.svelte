@@ -55,6 +55,14 @@
       __gwtWindowsPtyBuildNumber?: number;
     };
 
+  function scheduleFitAndNotify() {
+    if (!active) return;
+    requestAnimationFrame(() => {
+      if (!active) return;
+      void fitAndNotifyCurrent();
+    });
+  }
+
   function isTerminalFocused(rootEl: HTMLElement): boolean {
     const el = document.activeElement;
     return !!el && rootEl.contains(el);
@@ -547,26 +555,37 @@
 
     // ResizeObserver for auto-fitting when root size changes.
     const observer = new ResizeObserver(() => {
-      if (!active) return;
-      requestAnimationFrame(() => {
-        if (!active) return;
-        void fitAndNotifyCurrent();
-      });
+      scheduleFitAndNotify();
     });
     observer.observe(rootEl);
 
     // On Windows, viewport width can change when scrollbar visibility toggles
     // even if the root container size stays the same.
     const viewportObserver = new ResizeObserver(() => {
-      if (!active) return;
-      requestAnimationFrame(() => {
-        if (!active) return;
-        void fitAndNotifyCurrent();
-      });
+      scheduleFitAndNotify();
     });
     const viewportEl = rootEl.querySelector<HTMLElement>(".xterm-viewport");
     if (viewportEl) {
       viewportObserver.observe(viewportEl);
+    }
+
+    const fontSet = typeof document !== "undefined" ? document.fonts : undefined;
+    const handleFontMetricsChanged = () => {
+      scheduleFitAndNotify();
+    };
+    const removeFontListener =
+      fontSet && typeof fontSet.addEventListener === "function"
+        ? (() => {
+            fontSet.addEventListener("loadingdone", handleFontMetricsChanged);
+            return () =>
+              fontSet.removeEventListener("loadingdone", handleFontMetricsChanged);
+          })()
+        : null;
+    if (fontSet?.ready) {
+      void Promise.resolve(fontSet.ready).then(() => {
+        if (cancelled) return;
+        handleFontMetricsChanged();
+      });
     }
 
     terminal = term;
@@ -611,6 +630,7 @@
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       window.removeEventListener("gwt-terminal-font-family", handleFontFamilyChange);
+      removeFontListener?.();
       delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
       viewportObserver.disconnect();
