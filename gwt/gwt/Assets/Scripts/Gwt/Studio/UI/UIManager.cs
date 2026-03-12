@@ -1030,6 +1030,14 @@ namespace Gwt.Studio.UI
                 if (!string.Equals(payload.ProjectPath, _projectLifecycleService.CurrentProject.Path, System.StringComparison.Ordinal))
                     return;
 
+                if (ShouldDiscardPreparedUpdateState(payload))
+                {
+                    ClearPreparedUpdate();
+                    _projectInfoBar.SetUpdateState("Update state expired");
+                    _projectInfoBar.SetUpdateButtonLabel("Update");
+                    return;
+                }
+
                 _preparedUpdatePlan = payload.ToPreparedUpdatePlan();
                 _preparedUpdateProjectPath = payload.ProjectPath;
                 _preparedUpdateLaunchReady = payload.LaunchReady;
@@ -1039,6 +1047,71 @@ namespace Gwt.Studio.UI
             catch
             {
             }
+        }
+
+        private bool ShouldDiscardPreparedUpdateState(PersistedPreparedUpdateState payload)
+        {
+            if (payload == null || !payload.ShouldApply)
+                return true;
+
+            if (payload.LaunchReady &&
+                (string.IsNullOrWhiteSpace(payload.LauncherScriptPath) || !File.Exists(payload.LauncherScriptPath)))
+            {
+                return true;
+            }
+
+            if (_buildService == null)
+                return false;
+
+            var currentVersion = _buildService.GetSystemInfo()?.AppVersion;
+            if (string.IsNullOrWhiteSpace(currentVersion))
+                currentVersion = Application.version;
+
+            var candidate = payload.ToPreparedUpdatePlan().Candidate;
+            if (!_buildService.ShouldApplyUpdate(currentVersion, candidate))
+                return true;
+
+            if (TryResolveLocalManifestPath(payload.ManifestSource, out var manifestPath))
+            {
+                try
+                {
+                    var candidates = _buildService.LoadUpdateManifestAsync(manifestPath).GetAwaiter().GetResult();
+                    var latest = _buildService.GetLatestUpdate(currentVersion, candidates);
+                    if (latest == null)
+                        return true;
+
+                    return !string.Equals(latest.Version, candidate?.Version, System.StringComparison.OrdinalIgnoreCase);
+                }
+                catch
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryResolveLocalManifestPath(string manifestSource, out string manifestPath)
+        {
+            manifestPath = string.Empty;
+            if (string.IsNullOrWhiteSpace(manifestSource))
+                return false;
+
+            if (File.Exists(manifestSource))
+            {
+                manifestPath = manifestSource;
+                return true;
+            }
+
+            if (System.Uri.TryCreate(manifestSource, System.UriKind.Absolute, out var uri) &&
+                uri.IsFile &&
+                File.Exists(uri.LocalPath))
+            {
+                manifestPath = uri.LocalPath;
+                return true;
+            }
+
+            return false;
         }
 
         private void PersistPreparedUpdateState(string statusText, string buttonLabel, string displayCommand)
