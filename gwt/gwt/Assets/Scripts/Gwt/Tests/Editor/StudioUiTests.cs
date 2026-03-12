@@ -1327,7 +1327,59 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
 
             Assert.IsFalse(issuePanel.IsHireEnabled);
-            Assert.AreEqual("Codex unavailable", issuePanel.CurrentHireLabel);
+            Assert.AreEqual("No agent available", issuePanel.CurrentHireLabel);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_LeadInputFieldSearchCommand_UsesBestAvailableAgentLabel() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var agentService = new FakeAgentService
+            {
+                AvailableAgents = new List<DetectedAgent>
+                {
+                    new() { Type = DetectedAgentType.Codex, IsAvailable = false },
+                    new() { Type = DetectedAgentType.Claude, IsAvailable = true }
+                }
+            };
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug", Body = "Investigate auth failures", Labels = new List<string> { "bug", "auth" } }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService,
+                agentService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+
+            Assert.IsTrue(issuePanel.IsHireEnabled);
+            Assert.AreEqual("Hire Claude Code", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]
@@ -1432,6 +1484,63 @@ namespace Gwt.Tests.Editor
             Assert.That(issuePanel.CurrentBody, Does.Contain("Agent hired: agent-session"));
             Assert.IsFalse(issuePanel.IsHireEnabled);
             Assert.AreEqual("Hired", issuePanel.CurrentHireLabel);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_IssueDetailPanelHireButton_UsesBestAvailableAgentTypeForTopIssueSearch() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var agentService = new FakeAgentService
+            {
+                AvailableAgents = new List<DetectedAgent>
+                {
+                    new() { Type = DetectedAgentType.Codex, IsAvailable = false },
+                    new() { Type = DetectedAgentType.Claude, IsAvailable = true }
+                }
+            };
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug", Body = "Investigate auth failures", Labels = new List<string> { "bug", "auth" } }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService,
+                agentService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+
+            Assert.AreEqual("Hire Claude Code", issuePanel.CurrentHireLabel);
+            issuePanel.HireButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => agentService.HireCallCount == 1, cancellationToken: default);
+
+            Assert.AreEqual(DetectedAgentType.Claude, agentService.LastAgentType);
+            Assert.That(agentService.LastInstructions, Does.Contain("#42"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Agent hired: agent-session"));
         });
 
         [UnityTest]

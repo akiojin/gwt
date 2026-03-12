@@ -7,6 +7,7 @@ using Gwt.Core.Models;
 using Gwt.Core.Services.Terminal;
 using Gwt.Infra.Services;
 using Gwt.Lifecycle.Services;
+using Gwt.Studio.Entity;
 using Gwt.Shared;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
@@ -62,6 +63,7 @@ namespace Gwt.Studio.UI
         private string _lastSearchQuery = string.Empty;
         private IssueIndexEntry _lastSearchTopIssue;
         private FileIndexEntry _lastSearchTopFile;
+        private DetectedAgentType? _lastSearchHireAgentType;
 
         public ConsolePanel Console => _consolePanel;
         public LeadInputField LeadInput => _leadInputField;
@@ -772,13 +774,14 @@ namespace Gwt.Studio.UI
                 _lastSearchTopIssue = results?.Issues != null && results.Issues.Count > 0 ? results.Issues[0] : null;
                 _lastSearchTopFile = _lastSearchTopIssue == null && results?.Files != null && results.Files.Count > 0 ? results.Files[0] : null;
                 var (title, body) = BuildSearchPresentation(query, results);
-                var canHire = await CanHireSearchIssueAsync();
+                _lastSearchHireAgentType = await ResolveSearchHireAgentTypeAsync();
+                var canHire = _lastSearchHireAgentType.HasValue;
                 _issueDetailPanel.SetIssue(title, body, canHire);
                 _issueDetailPanel.SetHireState(
                     canHire || _lastSearchTopFile != null,
                     _lastSearchTopIssue == null
                         ? _lastSearchTopFile != null ? "Open Detail" : "Hire"
-                        : canHire ? "Hire Codex" : "Codex unavailable");
+                        : canHire ? $"Hire {RandomNameGenerator.GetAgentTypeLabel(_lastSearchHireAgentType.Value)}" : "No agent available");
                 OpenPanel(_issueDetailPanel);
             }
             catch (System.Exception e)
@@ -786,25 +789,45 @@ namespace Gwt.Studio.UI
                 _lastSearchQuery = query;
                 _lastSearchTopIssue = null;
                 _lastSearchTopFile = null;
+                _lastSearchHireAgentType = null;
                 _issueDetailPanel.SetIssue($"Search: {query}", $"Search failed: {e.Message}");
                 _issueDetailPanel.SetHireState(false, "Hire");
                 OpenPanel(_issueDetailPanel);
             }
         }
 
-        private async UniTask<bool> CanHireSearchIssueAsync()
+        private async UniTask<DetectedAgentType?> ResolveSearchHireAgentTypeAsync()
         {
             if (_lastSearchTopIssue == null || _agentService == null || _projectLifecycleService?.CurrentProject == null)
-                return false;
+                return null;
 
             try
             {
                 var agents = await _agentService.GetAvailableAgentsAsync();
-                return agents != null && agents.Exists(agent => agent.Type == DetectedAgentType.Codex && agent.IsAvailable);
+                if (agents == null)
+                    return null;
+
+                var priority = new[]
+                {
+                    DetectedAgentType.Codex,
+                    DetectedAgentType.Claude,
+                    DetectedAgentType.Gemini,
+                    DetectedAgentType.OpenCode,
+                    DetectedAgentType.GithubCopilot,
+                    DetectedAgentType.Custom
+                };
+
+                foreach (var type in priority)
+                {
+                    if (agents.Exists(agent => agent.Type == type && agent.IsAvailable))
+                        return type;
+                }
+
+                return null;
             }
             catch
             {
-                return false;
+                return null;
             }
         }
 
@@ -825,7 +848,7 @@ namespace Gwt.Studio.UI
                 return;
             }
 
-            if (_agentService == null || currentProject == null || _lastSearchTopIssue == null)
+            if (_agentService == null || currentProject == null || _lastSearchTopIssue == null || !_lastSearchHireAgentType.HasValue)
                 return;
 
             try
@@ -833,7 +856,7 @@ namespace Gwt.Studio.UI
                 _issueDetailPanel?.SetHireState(false, "Hiring...");
                 var instructions = BuildIssueHireInstructions(_lastSearchQuery, _lastSearchTopIssue);
                 var session = await _agentService.HireAgentAsync(
-                    DetectedAgentType.Codex,
+                    _lastSearchHireAgentType.Value,
                     currentProject.Path,
                     currentProject.DefaultBranch,
                     instructions);
