@@ -863,7 +863,8 @@ namespace Gwt.Studio.UI
                     return;
                 }
 
-                _issueDetailPanel?.SetHireState(false, $"Hiring {RandomNameGenerator.GetAgentTypeLabel(_lastSearchHireAgentType.Value)}...");
+                var agentLabel = RandomNameGenerator.GetAgentTypeLabel(_lastSearchHireAgentType.Value);
+                _issueDetailPanel?.SetHireState(false, $"Hiring {agentLabel}...");
                 var instructions = BuildIssueHireInstructions(_lastSearchQuery, _lastSearchTopIssue);
                 var session = await _agentService.HireAgentAsync(
                     _lastSearchHireAgentType.Value,
@@ -878,9 +879,9 @@ namespace Gwt.Studio.UI
                     var sessionId = string.IsNullOrWhiteSpace(session?.Id) ? "unknown" : session.Id;
                     _issueDetailPanel.SetIssue(
                         _issueDetailPanel.CurrentTitle,
-                        $"{_issueDetailPanel.CurrentBody}\n\nAgent hired: {sessionId}",
+                        $"{_issueDetailPanel.CurrentBody}\n\n{agentLabel} hired: {sessionId}",
                         canHire: false);
-                    _issueDetailPanel.SetHireState(false, "Hired");
+                    _issueDetailPanel.SetHireState(false, $"Hired {agentLabel}");
                 }
 
                 if (!string.IsNullOrWhiteSpace(session?.Id))
@@ -888,8 +889,11 @@ namespace Gwt.Studio.UI
             }
             catch (System.Exception e)
             {
-                _issueDetailPanel?.SetIssue(_issueDetailPanel.CurrentTitle, $"{_issueDetailPanel.CurrentBody}\n\nHire failed: {e.Message}", canHire: true);
-                _issueDetailPanel?.SetHireState(true, "Retry Hire");
+                var retryLabel = _lastSearchHireAgentType.HasValue
+                    ? RandomNameGenerator.GetAgentTypeLabel(_lastSearchHireAgentType.Value)
+                    : "Agent";
+                _issueDetailPanel?.SetIssue(_issueDetailPanel.CurrentTitle, $"{_issueDetailPanel.CurrentBody}\n\n{retryLabel} hire failed: {e.Message}", canHire: true);
+                _issueDetailPanel?.SetHireState(true, $"Retry {retryLabel}");
             }
         }
 

@@ -1481,9 +1481,9 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("main", agentService.LastBranch);
             Assert.That(agentService.LastInstructions, Does.Contain("#42"));
             Assert.That(agentService.LastInstructions, Does.Contain("authentication"));
-            Assert.That(issuePanel.CurrentBody, Does.Contain("Agent hired: agent-session"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Codex hired: agent-session"));
             Assert.IsFalse(issuePanel.IsHireEnabled);
-            Assert.AreEqual("Hired", issuePanel.CurrentHireLabel);
+            Assert.AreEqual("Hired Codex", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]
@@ -1540,7 +1540,8 @@ namespace Gwt.Tests.Editor
 
             Assert.AreEqual(DetectedAgentType.Claude, agentService.LastAgentType);
             Assert.That(agentService.LastInstructions, Does.Contain("#42"));
-            Assert.That(issuePanel.CurrentBody, Does.Contain("Agent hired: agent-session"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Claude Code hired: agent-session"));
+            Assert.AreEqual("Hired Claude Code", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]
@@ -1602,7 +1603,7 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => agentService.HireCallCount == 1, cancellationToken: default);
 
             Assert.AreEqual(DetectedAgentType.Claude, agentService.LastAgentType);
-            Assert.AreEqual("Hired", issuePanel.CurrentHireLabel);
+            Assert.AreEqual("Hired Claude Code", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]
@@ -1654,6 +1655,64 @@ namespace Gwt.Tests.Editor
 
             Assert.AreEqual(0, agentService.HireCallCount);
             Assert.IsFalse(issuePanel.IsHireEnabled);
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_IssueDetailPanelHireButton_ShowsAgentSpecificRetryLabel_OnFailure() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var agentService = new FakeAgentService
+            {
+                AvailableAgents = new List<DetectedAgent>
+                {
+                    new() { Type = DetectedAgentType.Codex, IsAvailable = false },
+                    new() { Type = DetectedAgentType.Claude, IsAvailable = true }
+                },
+                HireException = new InvalidOperationException("agent launch failed")
+            };
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Issues = new List<IssueIndexEntry>
+                    {
+                        new() { Number = 42, Title = "Authentication search bug", Body = "Investigate auth failures", Labels = new List<string> { "bug", "auth" } }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService,
+                agentService);
+
+            leadInput.SubmitText("/search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+            Assert.AreEqual("Hire Claude Code", issuePanel.CurrentHireLabel);
+
+            issuePanel.HireButton.onClick.Invoke();
+            await UniTask.WaitUntil(() => issuePanel.CurrentHireLabel == "Retry Claude Code", cancellationToken: default);
+
+            Assert.AreEqual(1, agentService.HireCallCount);
+            Assert.IsTrue(issuePanel.IsHireEnabled);
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Claude Code hire failed: agent launch failed"));
         });
 
         [UnityTest]
@@ -3000,6 +3059,7 @@ namespace Gwt.Tests.Editor
             public string LastWorktreePath { get; private set; }
             public string LastBranch { get; private set; }
             public string LastInstructions { get; private set; }
+            public System.Exception HireException { get; set; }
             public List<DetectedAgent> AvailableAgents { get; set; } = new()
             {
                 new DetectedAgent { Type = DetectedAgentType.Codex, IsAvailable = true }
@@ -3019,6 +3079,8 @@ namespace Gwt.Tests.Editor
                 LastWorktreePath = worktreePath;
                 LastBranch = branch;
                 LastInstructions = instructions;
+                if (HireException != null)
+                    return UniTask.FromException<AgentSessionData>(HireException);
                 var session = new AgentSessionData
                 {
                     Id = "agent-session",
