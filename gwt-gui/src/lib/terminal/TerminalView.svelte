@@ -120,6 +120,35 @@
       void fitAndNotifyCurrent({ rootEl });
     });
   }
+
+  /**
+   * Flush xterm's internal write buffer before optionally running fit + refresh.
+   *
+   * When the window is inactive, the browser throttles requestAnimationFrame,
+   * so xterm accumulates unprocessed writes. Writing an empty string pushes a
+   * no-op to the end of xterm's write queue; its callback fires only after
+   * every preceding write has been processed.
+   *
+   * We still avoid layout work unless the terminal geometry actually changed,
+   * which keeps focus switches cheap while preserving the buffered write fix.
+   */
+  function scheduleFitAfterBufferFlush(options?: {
+    force?: boolean;
+    rootEl?: HTMLElement;
+  }) {
+    if (!active) return;
+    if (!terminal) return;
+    const rootEl = options?.rootEl ?? containerEl;
+    terminal.write("", () => {
+      if (!active) return;
+      if (!options?.force) {
+        if (!rootEl) return;
+        if (!layoutSnapshotChanged(rootEl)) return;
+      }
+      void fitAndNotifyCurrent({ rootEl });
+    });
+  }
+
   function isTerminalFocused(rootEl: HTMLElement): boolean {
     const el = document.activeElement;
     return !!el && rootEl.contains(el);
@@ -226,17 +255,19 @@
     activationSerial = currentSerial;
     const rootEl = containerEl;
 
-    const rafId = requestAnimationFrame(() => {
+    // Flush xterm's write buffer before the first fit + refresh on
+    // tab activation. While the tab was inactive, writes may have
+    // accumulated without being fully processed (e.g. window was
+    // also inactive and rAF was throttled).
+    term.write("", () => {
+      if (!active) return;
+      if (activationSerial !== currentSerial) return;
       void fitAndNotifyCurrent({
         emitReady: true,
         expectedActivationSerial: currentSerial,
         rootEl,
       });
     });
-
-    return () => {
-      cancelAnimationFrame(rafId);
-    };
   });
 
   function getInitialTerminalFontSize(): number {
@@ -466,19 +497,39 @@
     const handleWindowFocus = () => {
       if (hasFocusedModalOutsideTerminal(rootEl)) return;
       focusTerminalIfNeeded(rootEl, true);
-      scheduleFitAndNotify({ rootEl });
+      scheduleFitAfterBufferFlush({ rootEl });
     };
     const handleVisibilityChange = () => {
       if (document.hidden) return;
       if (hasFocusedModalOutsideTerminal(rootEl)) return;
       focusTerminalIfNeeded(rootEl);
-      scheduleFitAndNotify({ rootEl });
+      scheduleFitAfterBufferFlush({ rootEl });
     };
 
     rootEl.addEventListener("pointerdown", handleRootPointerDown, { capture: true });
     rootEl.addEventListener("wheel", handleWheel, { passive: false, capture: true });
     window.addEventListener("focus", handleWindowFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    // Tauri's native window focus event is more reliable than the DOM
+    // `window.focus` event on Windows—taskbar clicks and some Alt-Tab
+    // transitions may not propagate to the WebView.
+    let unlistenTauriFocus: (() => void) | null = null;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        unlistenTauriFocus = await getCurrentWindow().listen(
+          "tauri://focus",
+          () => {
+            if (hasFocusedModalOutsideTerminal(rootEl)) return;
+            focusTerminalIfNeeded(rootEl, true);
+            scheduleFitAfterBufferFlush({ rootEl });
+          },
+        );
+      } catch {
+        // Not running inside Tauri runtime (tests / dev server).
+      }
+    })();
 
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
@@ -696,6 +747,7 @@
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       window.removeEventListener("gwt-terminal-font-family", handleFontFamilyChange);
+      unlistenTauriFocus?.();
       removeFontListener?.();
       delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
