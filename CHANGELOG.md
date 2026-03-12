@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.6.1] - 2026-03-12
+
+### Bug Fixes
+
+- **gui:** Refresh terminal when focus returns (#1585)
+
 ## [8.6.0] - 2026-03-12
 
 ### Features
