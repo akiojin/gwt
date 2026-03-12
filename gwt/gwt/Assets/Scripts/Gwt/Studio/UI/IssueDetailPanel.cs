@@ -15,6 +15,7 @@ namespace Gwt.Studio.UI
         public Button HireButton => _hireButton;
         public string CurrentTitle { get; private set; } = string.Empty;
         public string CurrentBody { get; private set; } = string.Empty;
+        public string CurrentHireLabel { get; private set; } = "Hire";
         public bool IsHireEnabled => _hireButton != null && _hireButton.gameObject.activeSelf && _hireButton.interactable;
 
         public void SetIssue(string title, string body, bool canHire = false)
@@ -25,6 +26,15 @@ namespace Gwt.Studio.UI
             if (_titleText != null) _titleText.text = CurrentTitle;
             if (_bodyText != null) _bodyText.text = CurrentBody;
             SetHireEnabled(canHire);
+        }
+
+        public void SetHireState(bool enabled, string label = "Hire")
+        {
+            CurrentHireLabel = string.IsNullOrWhiteSpace(label) ? "Hire" : label;
+            EnsureUi();
+            if (_hireButtonText != null)
+                _hireButtonText.text = CurrentHireLabel;
+            SetHireEnabled(enabled);
         }
 
         private void EnsureUi()
@@ -132,6 +142,8 @@ namespace Gwt.Studio.UI
 
             _hireButton.gameObject.SetActive(enabled);
             _hireButton.interactable = enabled;
+            if (_hireButtonText != null)
+                _hireButtonText.text = CurrentHireLabel;
         }
 
         private void InvokeHireRequested()

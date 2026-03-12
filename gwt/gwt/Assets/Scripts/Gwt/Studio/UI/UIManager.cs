@@ -777,6 +777,7 @@ namespace Gwt.Studio.UI
 
             try
             {
+                _issueDetailPanel?.SetHireState(false, "Hiring...");
                 var instructions = BuildIssueHireInstructions(_lastSearchQuery, _lastSearchTopIssue);
                 var session = await _agentService.HireAgentAsync(
                     DetectedAgentType.Codex,
@@ -786,12 +787,23 @@ namespace Gwt.Studio.UI
                 _soundService?.PlaySfx(SfxType.AgentHire);
                 _gamificationService?.AddExperience(20);
 
+                if (_issueDetailPanel != null)
+                {
+                    var sessionId = string.IsNullOrWhiteSpace(session?.Id) ? "unknown" : session.Id;
+                    _issueDetailPanel.SetIssue(
+                        _issueDetailPanel.CurrentTitle,
+                        $"{_issueDetailPanel.CurrentBody}\n\nAgent hired: {sessionId}",
+                        canHire: false);
+                    _issueDetailPanel.SetHireState(false, "Hired");
+                }
+
                 if (!string.IsNullOrWhiteSpace(session?.Id))
                     OpenTerminalForAgent(session.Id);
             }
             catch (System.Exception e)
             {
                 _issueDetailPanel?.SetIssue(_issueDetailPanel.CurrentTitle, $"{_issueDetailPanel.CurrentBody}\n\nHire failed: {e.Message}", canHire: true);
+                _issueDetailPanel?.SetHireState(true, "Retry Hire");
             }
         }
 

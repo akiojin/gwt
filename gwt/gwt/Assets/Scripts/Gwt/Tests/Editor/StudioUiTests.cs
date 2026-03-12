@@ -1375,6 +1375,9 @@ namespace Gwt.Tests.Editor
             Assert.AreEqual("main", agentService.LastBranch);
             Assert.That(agentService.LastInstructions, Does.Contain("#42"));
             Assert.That(agentService.LastInstructions, Does.Contain("authentication"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Agent hired: agent-session"));
+            Assert.IsFalse(issuePanel.IsHireEnabled);
+            Assert.AreEqual("Hired", issuePanel.CurrentHireLabel);
         });
 
         [UnityTest]
