@@ -1252,9 +1252,57 @@ namespace Gwt.Tests.Editor
             await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
 
             Assert.AreEqual("authentication", indexService.LastSemanticQuery);
-            Assert.AreEqual("Search: authentication", issuePanel.CurrentTitle);
+            Assert.AreEqual("#42 Authentication search bug", issuePanel.CurrentTitle);
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Labels:"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
             Assert.That(issuePanel.CurrentBody, Does.Contain("LoginService.cs"));
-            Assert.That(issuePanel.CurrentBody, Does.Contain("#42 Authentication search bug"));
+        });
+
+        [UnityTest]
+        public System.Collections.IEnumerator UIManager_LeadInputFieldSearchCommand_ShowsTopFilePreview_WhenNoIssueMatches() => UniTask.ToCoroutine(async () =>
+        {
+            var lifecycle = new FakeProjectLifecycleService();
+            lifecycle.OpenProjectAsync("/tmp/project-a").GetAwaiter().GetResult();
+
+            using var scope = new UiScope();
+            var manager = scope.Root.AddComponent<UIManager>();
+            var leadInput = scope.Root.AddComponent<LeadInputField>();
+            var issuePanel = scope.Root.AddComponent<IssueDetailPanel>();
+            SetPrivateField(manager, "_leadInputField", leadInput);
+            SetPrivateField(manager, "_issueDetailPanel", issuePanel);
+
+            var indexService = new FakeProjectIndexService
+            {
+                SemanticResults = new SearchResultGroup
+                {
+                    Files = new List<FileIndexEntry>
+                    {
+                        new() { RelativePath = "Assets/Scripts/Auth/LoginService.cs", FileName = "LoginService.cs", PreviewText = "handles authentication requests" },
+                        new() { RelativePath = "Assets/Scripts/Auth/SessionStore.cs", FileName = "SessionStore.cs" }
+                    }
+                }
+            };
+
+            manager.Construct(
+                lifecycle,
+                new MultiProjectService(lifecycle),
+                new TerminalPaneManager(),
+                null,
+                new FakeBuildService(),
+                new VoiceService(),
+                new SoundService(),
+                new GamificationService(),
+                new FakeConfigService(new Settings()),
+                indexService);
+
+            leadInput.SubmitText("search authentication");
+            await UniTask.WaitUntil(() => issuePanel.IsOpen, cancellationToken: default);
+
+            Assert.AreEqual("authentication", indexService.LastSemanticQuery);
+            Assert.AreEqual("Search: Assets/Scripts/Auth/LoginService.cs", issuePanel.CurrentTitle);
+            Assert.That(issuePanel.CurrentBody, Does.Contain("handles authentication requests"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("Other file matches:"));
+            Assert.That(issuePanel.CurrentBody, Does.Contain("SessionStore.cs"));
         });
 
         [UnityTest]

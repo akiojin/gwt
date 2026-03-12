@@ -739,7 +739,8 @@ namespace Gwt.Studio.UI
                 if ((results?.Files.Count ?? 0) == 0 && (results?.Issues.Count ?? 0) == 0)
                     results = _projectIndexService.SearchAll(query);
 
-                _issueDetailPanel.SetIssue($"Search: {query}", BuildSearchSummary(results));
+                var (title, body) = BuildSearchPresentation(query, results);
+                _issueDetailPanel.SetIssue(title, body);
                 OpenPanel(_issueDetailPanel);
             }
             catch (System.Exception e)
@@ -1235,29 +1236,62 @@ namespace Gwt.Studio.UI
             return !string.IsNullOrWhiteSpace(query);
         }
 
-        private static string BuildSearchSummary(SearchResultGroup results)
+        private static (string title, string body) BuildSearchPresentation(string query, SearchResultGroup results)
         {
             if (results == null || ((results.Files?.Count ?? 0) == 0 && (results.Issues?.Count ?? 0) == 0))
-                return "No results";
-
-            var lines = new List<string>();
-            if (results.Files != null && results.Files.Count > 0)
-            {
-                lines.Add("Files:");
-                foreach (var file in results.Files.GetRange(0, Mathf.Min(3, results.Files.Count)))
-                    lines.Add($"- {file.RelativePath}");
-            }
+                return ($"Search: {query}", "No results");
 
             if (results.Issues != null && results.Issues.Count > 0)
             {
-                if (lines.Count > 0)
-                    lines.Add(string.Empty);
-                lines.Add("Issues:");
-                foreach (var issue in results.Issues.GetRange(0, Mathf.Min(3, results.Issues.Count)))
-                    lines.Add($"- #{issue.Number} {issue.Title}");
+                var issue = results.Issues[0];
+                var lines = new List<string>();
+                if (!string.IsNullOrWhiteSpace(issue.Body))
+                    lines.Add(issue.Body.Trim());
+                if (issue.Labels != null && issue.Labels.Count > 0)
+                    lines.Add($"Labels: {string.Join(", ", issue.Labels)}");
+                AppendOtherMatches(lines, results, skipFirstIssue: true, skipFirstFile: false);
+                return ($"#{issue.Number} {issue.Title}", string.Join("\n", lines));
             }
 
-            return string.Join("\n", lines);
+            var file = results.Files[0];
+            var bodyLines = new List<string>();
+            bodyLines.Add($"Path: {file.RelativePath}");
+            if (!string.IsNullOrWhiteSpace(file.PreviewText))
+                bodyLines.Add(file.PreviewText.Trim());
+            AppendOtherMatches(bodyLines, results, skipFirstIssue: false, skipFirstFile: true);
+            return ($"Search: {file.RelativePath}", string.Join("\n", bodyLines));
+        }
+
+        private static void AppendOtherMatches(List<string> lines, SearchResultGroup results, bool skipFirstIssue, bool skipFirstFile)
+        {
+            var otherFiles = results.Files == null
+                ? new List<FileIndexEntry>()
+                : results.Files.GetRange(skipFirstFile ? 1 : 0, Mathf.Max(0, results.Files.Count - (skipFirstFile ? 1 : 0)));
+            var otherIssues = results.Issues == null
+                ? new List<IssueIndexEntry>()
+                : results.Issues.GetRange(skipFirstIssue ? 1 : 0, Mathf.Max(0, results.Issues.Count - (skipFirstIssue ? 1 : 0)));
+
+            if (otherFiles.Count == 0 && otherIssues.Count == 0)
+                return;
+
+            if (lines.Count > 0)
+                lines.Add(string.Empty);
+
+            if (otherFiles.Count > 0)
+            {
+                lines.Add("Other file matches:");
+                foreach (var file in otherFiles.GetRange(0, Mathf.Min(3, otherFiles.Count)))
+                    lines.Add($"- {file.RelativePath}");
+            }
+
+            if (otherIssues.Count > 0)
+            {
+                if (lines.Count > 0)
+                    lines.Add(string.Empty);
+                lines.Add("Other issue matches:");
+                foreach (var issue in otherIssues.GetRange(0, Mathf.Min(3, otherIssues.Count)))
+                    lines.Add($"- #{issue.Number} {issue.Title}");
+            }
         }
 
         private void OnDestroy()
