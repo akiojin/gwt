@@ -18,6 +18,8 @@ let callOrder: string[] = [];
 const terminalInstances: any[] = [];
 const fitAddonInstances: any[] = [];
 const resizeObserverInstances: Array<{ __trigger: () => void }> = [];
+let fontSetReadyResolve: (() => void) | null = null;
+let fontSetLoadingDoneHandler: (() => void) | null = null;
 
 function setNavigatorPlatform(platform: string, userAgentDataPlatform: string | null = null) {
   Object.defineProperty(navigator, "platform", {
@@ -85,6 +87,7 @@ vi.mock("@xterm/xterm", () => ({
     onBinary = vi.fn();
     getSelection = vi.fn(() => "");
     write = vi.fn();
+    refresh = vi.fn();
     dispose = vi.fn();
     scrollLines = vi.fn((amount: number) => {
       const newY = this._viewportY + amount;
@@ -128,6 +131,34 @@ function triggerResizeObserver(index = 0) {
   observer.__trigger();
 }
 
+function installFontSetStub() {
+  fontSetReadyResolve = null;
+  fontSetLoadingDoneHandler = null;
+  let resolveReady: (() => void) | null = null;
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
+
+  Object.defineProperty(document, "fonts", {
+    configurable: true,
+    value: {
+      ready,
+      addEventListener: vi.fn((event: string, handler: () => void) => {
+        if (event === "loadingdone") {
+          fontSetLoadingDoneHandler = handler;
+        }
+      }),
+      removeEventListener: vi.fn((event: string, handler: () => void) => {
+        if (event === "loadingdone" && fontSetLoadingDoneHandler === handler) {
+          fontSetLoadingDoneHandler = null;
+        }
+      }),
+    },
+  });
+
+  fontSetReadyResolve = resolveReady;
+}
+
 async function renderTerminalView(props: any) {
   const { default: TerminalView } = await import("./TerminalView.svelte");
   return render(TerminalView, { props });
@@ -149,9 +180,12 @@ describe("TerminalView", () => {
     terminalOutputHandler = null;
     webLinksClickHandler = null;
     callOrder = [];
+    fontSetReadyResolve = null;
+    fontSetLoadingDoneHandler = null;
     delete (window as any).__gwtTerminalFontSize;
     delete (window as any).__gwtTerminalFontFamily;
     delete (window as any).__gwtWindowsPtyBuildNumber;
+    delete (document as any).fonts;
     setNavigatorPlatform("MacIntel");
     listenMock.mockImplementation(
       async (eventName: string, handler?: unknown) => {
@@ -244,6 +278,43 @@ describe("TerminalView", () => {
       expect((window as any).__gwtTerminalFontFamily).toBe(
         '"SF Mono", Menlo, Monaco, Consolas, monospace'
       );
+    });
+  });
+
+  it("re-fits when document fonts become ready while active", async () => {
+    installFontSetStub();
+
+    await renderTerminalView({ paneId: "pane-fonts-ready", active: true });
+
+    await waitFor(() => {
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+    const fit = fitAddonInstances[0].fit;
+    const beforeFitCalls = fit.mock.calls.length;
+
+    fontSetReadyResolve?.();
+
+    await waitFor(() => {
+      expect(fit.mock.calls.length).toBeGreaterThan(beforeFitCalls);
+    });
+  });
+
+  it("re-fits when document fonts finish loading while active", async () => {
+    installFontSetStub();
+
+    await renderTerminalView({ paneId: "pane-fonts-loadingdone", active: true });
+
+    await waitFor(() => {
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+      expect(fontSetLoadingDoneHandler).not.toBeNull();
+    });
+    const fit = fitAddonInstances[0].fit;
+    const beforeFitCalls = fit.mock.calls.length;
+
+    fontSetLoadingDoneHandler?.();
+
+    await waitFor(() => {
+      expect(fit.mock.calls.length).toBeGreaterThan(beforeFitCalls);
     });
   });
 
@@ -656,6 +727,30 @@ describe("TerminalView", () => {
     }
   });
 
+  it("re-fits on window focus while active", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-refit",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    window.dispatchEvent(new Event("focus"));
+
+    await waitFor(() => {
+      expect(fit).toHaveBeenCalled();
+      expect(term.refresh).toHaveBeenCalled();
+    });
+  });
+
   it("does not steal focus from an active modal on visibility restore", async () => {
     await renderTerminalView({
       paneId: "pane-focus-visibility-modal",
@@ -697,6 +792,44 @@ describe("TerminalView", () => {
         Reflect.deleteProperty(document, "hidden");
       }
       overlay.remove();
+    }
+  });
+
+  it("re-fits on visibility restore while active", async () => {
+    await renderTerminalView({
+      paneId: "pane-visibility-refit",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(fitAddonInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    const fit = fitAddonInstances[0].fit;
+    fit.mockClear();
+    term.refresh.mockClear();
+
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      await waitFor(() => {
+        expect(fit).toHaveBeenCalled();
+        expect(term.refresh).toHaveBeenCalled();
+      });
+    } finally {
+      if (hiddenDescriptor) {
+        Object.defineProperty(document, "hidden", hiddenDescriptor);
+      } else {
+        Reflect.deleteProperty(document, "hidden");
+      }
     }
   });
 
