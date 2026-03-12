@@ -66,6 +66,8 @@ namespace Gwt.Studio.UI
         private DetectedAgentType? _lastSearchHireAgentType;
         private string _lastSearchStatusText = string.Empty;
         private string _lastSearchProjectPath = string.Empty;
+        private SearchResultGroup _lastSearchResults;
+        private bool _lastSearchUsedLexicalFallback;
 
         public ConsolePanel Console => _consolePanel;
         public LeadInputField LeadInput => _leadInputField;
@@ -791,6 +793,8 @@ namespace Gwt.Studio.UI
                 }
 
                 _lastSearchQuery = query;
+                _lastSearchResults = results;
+                _lastSearchUsedLexicalFallback = usedLexicalFallback;
                 _lastSearchTopIssue = results?.Issues != null && results.Issues.Count > 0 ? results.Issues[0] : null;
                 _lastSearchTopFile = _lastSearchTopIssue == null && results?.Files != null && results.Files.Count > 0 ? results.Files[0] : null;
                 _lastSearchStatusText = BuildSearchStatus(results, usedLexicalFallback);
@@ -810,6 +814,8 @@ namespace Gwt.Studio.UI
             catch (System.Exception e)
             {
                 _lastSearchQuery = query;
+                _lastSearchResults = null;
+                _lastSearchUsedLexicalFallback = false;
                 _lastSearchTopIssue = null;
                 _lastSearchTopFile = null;
                 _lastSearchHireAgentType = null;
@@ -867,9 +873,10 @@ namespace Gwt.Studio.UI
                 if (_gitDetailPanel == null)
                     return;
 
-                _gitDetailPanel.SetBranch("Search Result");
-                _gitDetailPanel.SetCommits(_lastSearchTopFile.RelativePath);
-                _gitDetailPanel.SetDiff(_lastSearchTopFile.PreviewText ?? string.Empty);
+                var (branch, commits, diff) = BuildGitDetailFromLastSearchFile();
+                _gitDetailPanel.SetBranch(branch);
+                _gitDetailPanel.SetCommits(commits);
+                _gitDetailPanel.SetDiff(diff);
                 OpenPanel(_gitDetailPanel);
                 return;
             }
@@ -1494,9 +1501,40 @@ namespace Gwt.Studio.UI
             return $"Search: {mode} / {issueCount} {(issueCount == 1 ? "issue" : "issues")} / {fileCount} {(fileCount == 1 ? "file" : "files")}";
         }
 
+        private (string branch, string commits, string diff) BuildGitDetailFromLastSearchFile()
+        {
+            var modeLabel = _lastSearchUsedLexicalFallback ? "Search: lexical fallback" : "Search: semantic";
+            var filePath = _lastSearchTopFile?.RelativePath ?? string.Empty;
+            var lines = new List<string>();
+            if (!string.IsNullOrWhiteSpace(_lastSearchStatusText))
+                lines.Add(_lastSearchStatusText);
+            if (!string.IsNullOrWhiteSpace(_lastSearchTopFile?.PreviewText))
+            {
+                if (lines.Count > 0)
+                    lines.Add(string.Empty);
+                lines.Add(_lastSearchTopFile.PreviewText.Trim());
+            }
+
+            var otherFiles = _lastSearchResults?.Files != null && _lastSearchResults.Files.Count > 1
+                ? _lastSearchResults.Files.GetRange(1, Mathf.Min(3, _lastSearchResults.Files.Count - 1))
+                : null;
+            if (otherFiles != null && otherFiles.Count > 0)
+            {
+                if (lines.Count > 0)
+                    lines.Add(string.Empty);
+                lines.Add("Other file matches:");
+                foreach (var file in otherFiles)
+                    lines.Add($"- {file.RelativePath}");
+            }
+
+            return (modeLabel, filePath, string.Join("\n", lines));
+        }
+
         private void ClearSearchContext(bool clearPanelState)
         {
             _lastSearchQuery = string.Empty;
+            _lastSearchResults = null;
+            _lastSearchUsedLexicalFallback = false;
             _lastSearchTopIssue = null;
             _lastSearchTopFile = null;
             _lastSearchHireAgentType = null;

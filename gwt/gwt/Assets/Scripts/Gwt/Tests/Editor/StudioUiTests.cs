@@ -1815,7 +1815,8 @@ namespace Gwt.Tests.Editor
                 {
                     Files = new List<FileIndexEntry>
                     {
-                        new() { RelativePath = "Assets/Scripts/Auth/LoginService.cs", FileName = "LoginService.cs", PreviewText = "handles authentication requests" }
+                        new() { RelativePath = "Assets/Scripts/Auth/LoginService.cs", FileName = "LoginService.cs", PreviewText = "handles authentication requests" },
+                        new() { RelativePath = "Assets/Scripts/Auth/SessionStore.cs", FileName = "SessionStore.cs" }
                     }
                 }
             };
@@ -1841,9 +1842,12 @@ namespace Gwt.Tests.Editor
             await UniTask.Yield();
 
             Assert.IsTrue(gitPanel.IsOpen);
-            Assert.AreEqual("Search Result", gitPanel.CurrentBranch);
+            Assert.AreEqual("Search: semantic", gitPanel.CurrentBranch);
             Assert.AreEqual("Assets/Scripts/Auth/LoginService.cs", gitPanel.CurrentCommits);
+            Assert.That(gitPanel.CurrentDiff, Does.Contain("Search: semantic / 0 issues / 2 files"));
             Assert.That(gitPanel.CurrentDiff, Does.Contain("handles authentication requests"));
+            Assert.That(gitPanel.CurrentDiff, Does.Contain("Other file matches:"));
+            Assert.That(gitPanel.CurrentDiff, Does.Contain("Assets/Scripts/Auth/SessionStore.cs"));
         });
 
         [UnityTest]
