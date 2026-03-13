@@ -550,9 +550,10 @@ impl PtyHandle {
         };
         let launch_mode = if cfg!(windows) {
             if spawn_command.eq_ignore_ascii_case("cmd.exe")
-                && spawn_args.iter().take(3).any(|arg| {
-                    arg.eq_ignore_ascii_case("/c") || arg.eq_ignore_ascii_case("/k")
-                })
+                && spawn_args
+                    .iter()
+                    .take(3)
+                    .any(|arg| arg.eq_ignore_ascii_case("/c") || arg.eq_ignore_ascii_case("/k"))
             {
                 "cmd-wrapper"
             } else if spawn_args.iter().any(|arg| arg == "-Command") {
