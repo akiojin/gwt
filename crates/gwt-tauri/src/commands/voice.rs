@@ -161,23 +161,63 @@ fn find_python_override() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
+#[cfg(windows)]
+const SYSTEM_PYTHON_CANDIDATES: &[&str] = &[
+    "python3.13",
+    "python3.12",
+    "python3.11",
+    "python3",
+    "python",
+    "py",
+];
+#[cfg(not(windows))]
+const SYSTEM_PYTHON_CANDIDATES: &[&str] = &[
+    "python3.13",
+    "python3.12",
+    "python3.11",
+    "python3",
+    "python",
+];
+
+#[cfg(windows)]
+fn is_windowsapps_python_alias(path: &Path) -> bool {
+    let lower = path.to_string_lossy().to_lowercase();
+    lower.contains("\\windowsapps\\") || lower.contains("/windowsapps/")
+}
+
+#[cfg(not(windows))]
+fn is_windowsapps_python_alias(_path: &Path) -> bool {
+    false
+}
+
+fn should_skip_system_python_candidate(candidate: &str, path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        !candidate.eq_ignore_ascii_case("py") && is_windowsapps_python_alias(path)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = candidate;
+        let _ = path;
+        false
+    }
+}
+
 fn find_system_python_binary() -> Result<PathBuf, String> {
-    for candidate in [
-        "python3.13",
-        "python3.12",
-        "python3.11",
-        "python3",
-        "python",
-    ] {
+    for candidate in SYSTEM_PYTHON_CANDIDATES {
         if let Ok(path) = which::which(candidate) {
+            if should_skip_system_python_candidate(candidate, &path) {
+                continue;
+            }
             return Ok(path);
         }
     }
 
-    Err(
-        "Python runtime not found (checked python3.13/python3.12/python3.11/python3/python)"
-            .to_string(),
-    )
+    Err(format!(
+        "Python runtime not found (checked {})",
+        SYSTEM_PYTHON_CANDIDATES.join("/")
+    ))
 }
 
 fn find_managed_python_binary() -> Result<PathBuf, String> {
@@ -860,5 +900,28 @@ mod tests {
         assert!(model_ready_in_cache("Qwen/Qwen3-ASR-1.7B"));
 
         std::env::remove_var("HF_HOME");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_system_python_candidates_include_py_launcher() {
+        assert!(SYSTEM_PYTHON_CANDIDATES.contains(&"py"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windowsapps_python_aliases_are_skipped_for_python_commands() {
+        let alias =
+            PathBuf::from(r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python.exe");
+        let python3_alias =
+            PathBuf::from(r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.exe");
+        let launcher = PathBuf::from(r"C:\Windows\py.exe");
+
+        assert!(should_skip_system_python_candidate("python", &alias));
+        assert!(should_skip_system_python_candidate(
+            "python3",
+            &python3_alias
+        ));
+        assert!(!should_skip_system_python_candidate("py", &launcher));
     }
 }

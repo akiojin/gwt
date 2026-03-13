@@ -53,6 +53,7 @@ describe("agentLaunchDefaults", () => {
         agentVersionByAgent: { codex: "latest" },
         skipPermissions: true,
         reasoningLevel: "high",
+        fastMode: true,
         resumeSessionId: "session-123",
         showAdvanced: true,
         extraArgsText: "--foo",
@@ -75,6 +76,7 @@ describe("agentLaunchDefaults", () => {
       agentVersionByAgent: { codex: "latest" },
       skipPermissions: true,
       reasoningLevel: "high",
+      fastMode: true,
       resumeSessionId: "session-123",
       showAdvanced: true,
       extraArgsText: "--foo",
@@ -102,6 +104,55 @@ describe("agentLaunchDefaults", () => {
     expect(loadLaunchDefaults(store)).toBeNull();
   });
 
+  it("defaults fastMode to false when older stored data does not include it", () => {
+    store.setItem(
+      AGENT_LAUNCH_DEFAULTS_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        data: {
+          selectedAgent: "codex",
+          sessionMode: "normal",
+          modelByAgent: { codex: "gpt-5.4" },
+          agentVersionByAgent: { codex: "latest" },
+          skipPermissions: false,
+          reasoningLevel: "",
+          resumeSessionId: "",
+          showAdvanced: false,
+          extraArgsText: "",
+          envOverridesText: "",
+          runtimeTarget: "host",
+          dockerService: "",
+          dockerBuild: false,
+          dockerRecreate: false,
+          dockerKeep: false,
+          selectedShell: "",
+          branchNamingMode: "ai-suggest",
+        },
+      }),
+    );
+
+    expect(loadLaunchDefaults(store)).toEqual({
+      selectedAgent: "codex",
+      sessionMode: "normal",
+      modelByAgent: { codex: "gpt-5.4" },
+      agentVersionByAgent: { codex: "latest" },
+      skipPermissions: false,
+      reasoningLevel: "",
+      fastMode: false,
+      resumeSessionId: "",
+      showAdvanced: false,
+      extraArgsText: "",
+      envOverridesText: "",
+      runtimeTarget: "host",
+      dockerService: "",
+      dockerBuild: false,
+      dockerRecreate: false,
+      dockerKeep: false,
+      selectedShell: "",
+      branchNamingMode: "ai-suggest",
+    });
+  });
+
   it("sanitizes invalid values to safe defaults", () => {
     store.setItem(
       AGENT_LAUNCH_DEFAULTS_STORAGE_KEY,
@@ -114,6 +165,7 @@ describe("agentLaunchDefaults", () => {
           agentVersionByAgent: { codex: null, gemini: " installed " },
           skipPermissions: "yes",
           reasoningLevel: 1,
+          fastMode: "yes",
           resumeSessionId: null,
           showAdvanced: "yes",
           extraArgsText: 123,
@@ -134,6 +186,7 @@ describe("agentLaunchDefaults", () => {
       agentVersionByAgent: { gemini: "installed" },
       skipPermissions: false,
       reasoningLevel: "",
+      fastMode: false,
       resumeSessionId: "",
       showAdvanced: false,
       extraArgsText: "",

@@ -1214,19 +1214,32 @@
     removeWindowSession(label);
   }
 
+  async function probeProjectPath(path: string): Promise<ProbePathResult> {
+    const { invoke } = await import("$lib/tauriInvoke");
+    return invoke<ProbePathResult>("probe_path", { path });
+  }
+
   async function openAndNormalizeWindowSession(label: string, projectPath: string) {
     try {
+      const probe = await probeProjectPath(projectPath);
+      if (probe.kind !== "gwtProject" || !probe.projectPath) {
+        removeWindowSession(label);
+        return;
+      }
+
       const { invoke } = await import("$lib/tauriInvoke");
       const openedLabelRaw = await invoke<unknown>("open_gwt_window", { label });
       if (typeof openedLabelRaw !== "string") return;
 
       const openedLabel = openedLabelRaw.trim();
-      if (!openedLabel || openedLabel === label) {
+      if (!openedLabel) {
         return;
       }
 
-      removeWindowSession(label);
-      upsertWindowSession(openedLabel, projectPath);
+      if (openedLabel !== label) {
+        removeWindowSession(label);
+      }
+      upsertWindowSession(openedLabel, probe.projectPath);
     } catch {
       // Ignore restore failures: startup session restore is best-effort.
     }
@@ -1237,7 +1250,18 @@
     if (!session?.projectPath) return false;
 
     try {
-      await openProjectAndApplyCurrentWindow(session.projectPath);
+      const probe = await probeProjectPath(session.projectPath);
+      if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+        migrationSourceRoot = probe.migrationSourceRoot;
+        migrationOpen = true;
+        return true;
+      }
+      if (probe.kind !== "gwtProject" || !probe.projectPath) {
+        removeWindowSession(label);
+        return false;
+      }
+
+      await openProjectAndApplyCurrentWindow(probe.projectPath);
       return true;
     } catch {
       removeWindowSession(label);

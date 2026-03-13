@@ -133,6 +133,8 @@ pub struct LaunchAgentRequest {
     pub skip_permissions: Option<bool>,
     /// Codex reasoning override (e.g. "low", "medium", "high", "xhigh").
     pub reasoning_level: Option<String>,
+    /// Codex Fast mode toggle (`-c service_tier=fast`).
+    pub fast_mode: Option<bool>,
     /// Collaboration modes for Codex. Ignored (always enabled when version supports it).
     /// Kept for deserialization compatibility with older frontends.
     #[allow(dead_code)]
@@ -1638,6 +1640,7 @@ fn build_agent_args(
                 request.reasoning_level.as_deref(),
                 version_for_gates,
                 skip_permissions,
+                request.fast_mode.unwrap_or(false),
                 collaboration,
                 enable_codex_multi_agent,
             ));
@@ -3024,6 +3027,7 @@ mod tests {
             mode: None,
             skip_permissions: None,
             reasoning_level: None,
+            fast_mode: None,
             collaboration_modes: None,
             extra_args: None,
             env_overrides: None,
@@ -3189,6 +3193,16 @@ multi_agent = true
         assert!(args
             .iter()
             .any(|a| a == "model_auto_compact_token_limit=950000"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_fast_mode_adds_service_tier_for_gpt_5_4() {
+        let mut req = make_request("codex");
+        req.model = Some("gpt-5.4".to_string());
+        req.fast_mode = Some(true);
+
+        let args = build_agent_args("codex", &req, Some("0.111.0"), false).unwrap();
+        assert!(args.iter().any(|a| a == "service_tier=fast"));
     }
 
     #[test]
@@ -4774,6 +4788,11 @@ pub(crate) fn launch_agent_for_project_root(
             mode: mode_str.clone(),
             model: model.clone(),
             reasoning_level: reasoning_level.clone(),
+            fast_mode: if agent_id == "codex" {
+                request.fast_mode.unwrap_or(false)
+            } else {
+                false
+            },
             skip_permissions,
             collaboration_modes,
             docker_service: if matches!(docker_mode, DockerExecMode::Compose { .. }) {
