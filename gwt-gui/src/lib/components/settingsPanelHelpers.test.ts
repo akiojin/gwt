@@ -46,7 +46,7 @@ describe("settingsPanelHelpers", () => {
         description: "",
         env: {},
         disabled_env: [],
-        ai: { endpoint: "   ", api_key: "", model: "", language: "en", summary_enabled: true },
+        ai: { endpoint: "   ", api_key: "", model: "", language: "en" },
       }),
     ).toBe(false);
     expect(
@@ -60,7 +60,6 @@ describe("settingsPanelHelpers", () => {
           api_key: "",
           model: "",
           language: "en",
-          summary_enabled: true,
         },
       }),
     ).toBe(true);
