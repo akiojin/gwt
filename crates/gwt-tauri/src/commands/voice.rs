@@ -210,17 +210,46 @@ fn is_windows_store_python_alias(path: &Path) -> bool {
     }
 }
 
-fn can_execute_python(path: &Path) -> bool {
-    match command_os(path)
-        .arg("-c")
-        .arg("import sys; print(sys.version_info[0])")
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim() == "3"
-        }
-        _ => false,
+fn parse_python_version(version_str: &str) -> Result<(u32, u32), String> {
+    let parts: Vec<&str> = version_str.split('.').collect();
+    if parts.len() < 2 {
+        return Err(format!("Unexpected Python version format: {version_str}"));
     }
+
+    let major: u32 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid Python major version: {}", parts[0]))?;
+    let minor: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid Python minor version: {}", parts[1]))?;
+
+    Ok((major, minor))
+}
+
+fn supported_voice_runtime_python_version(major: u32, minor: u32) -> bool {
+    major == 3 && (11..14).contains(&minor)
+}
+
+fn python_version(path: &Path) -> Result<(u32, u32, String), String> {
+    let output = command_os(path)
+        .arg("-c")
+        .arg("import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        .output()
+        .map_err(|e| format!("Failed to check Python version: {e}"))?;
+
+    if !output.status.success() {
+        return Err("Failed to determine Python version".to_string());
+    }
+
+    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let (major, minor) = parse_python_version(&version_str)?;
+    Ok((major, minor, version_str))
+}
+
+fn supports_voice_runtime_python(path: &Path) -> bool {
+    python_version(path)
+        .map(|(major, minor, _)| supported_voice_runtime_python_version(major, minor))
+        .unwrap_or(false)
 }
 
 fn find_system_python_binary() -> Result<PathBuf, String> {
@@ -230,7 +259,7 @@ fn find_system_python_binary() -> Result<PathBuf, String> {
                 continue;
             }
 
-            if can_execute_python(&path) {
+            if supports_voice_runtime_python(&path) {
                 return Ok(path);
             }
         }
@@ -273,28 +302,7 @@ fn find_bootstrap_python_binary() -> Result<PathBuf, String> {
 }
 
 fn validate_python_version(python: &Path) -> Result<(), String> {
-    let output = command_os(python)
-        .arg("-c")
-        .arg("import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-        .output()
-        .map_err(|e| format!("Failed to check Python version: {e}"))?;
-
-    if !output.status.success() {
-        return Err("Failed to determine Python version".to_string());
-    }
-
-    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let parts: Vec<&str> = version_str.split('.').collect();
-    if parts.len() < 2 {
-        return Err(format!("Unexpected Python version format: {version_str}"));
-    }
-
-    let major: u32 = parts[0]
-        .parse()
-        .map_err(|_| format!("Invalid Python major version: {}", parts[0]))?;
-    let minor: u32 = parts[1]
-        .parse()
-        .map_err(|_| format!("Invalid Python minor version: {}", parts[1]))?;
+    let (major, minor, version_str) = python_version(python)?;
 
     if major != 3 || minor < 11 {
         return Err(format!(
@@ -927,6 +935,15 @@ mod tests {
         assert!(!is_windows_store_python_alias(Path::new(
             r"C:\Windows\py.exe"
         )));
+    }
+
+    #[test]
+    fn supported_voice_runtime_python_version_matches_bootstrap_policy() {
+        assert!(!supported_voice_runtime_python_version(3, 10));
+        assert!(supported_voice_runtime_python_version(3, 11));
+        assert!(supported_voice_runtime_python_version(3, 13));
+        assert!(!supported_voice_runtime_python_version(3, 14));
+        assert!(!supported_voice_runtime_python_version(2, 7));
     }
 
     #[test]
