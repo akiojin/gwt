@@ -23,7 +23,7 @@ pub use bare_project::BareProjectConfig;
 pub use claude_hook_events::process_claude_hook_event;
 pub use claude_hooks::is_gwt_hooks_registered;
 pub use claude_plugins::{
-    disable_gwt_plugin_at, enable_worktree_protection_plugin,
+    cleanup_gwt_global_remnants, disable_gwt_plugin_at, enable_worktree_protection_plugin,
     force_enable_worktree_protection_plugin, force_setup_gwt_plugin_at,
     get_global_claude_settings_path, get_known_marketplaces_path, get_local_claude_settings_path,
     is_gwt_marketplace_registered, is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings,
