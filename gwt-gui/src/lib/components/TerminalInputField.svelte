@@ -44,15 +44,11 @@
     };
   });
 
-  // Auto-focus input field and sync resize when tab becomes active
+  // Auto-focus input field when tab becomes active
   $effect(() => {
     if (active && textareaEl) {
       requestAnimationFrame(() => {
         textareaEl?.focus();
-        if (textareaEl) {
-          textareaEl.style.height = "auto";
-          textareaEl.style.height = `${textareaEl.scrollHeight}px`;
-        }
       });
     }
   });
