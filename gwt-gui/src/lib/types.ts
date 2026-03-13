@@ -574,6 +574,7 @@ export interface LaunchAgentRequest {
   mode?: "normal" | "continue" | "resume";
   skipPermissions?: boolean;
   reasoningLevel?: string;
+  fastMode?: boolean;
   extraArgs?: string[];
   envOverrides?: Record<string, string>;
   resumeSessionId?: string;
