@@ -911,6 +911,36 @@ fn persist_session_summary_cache_entry(
     let _ = gwt_core::config::write_atomic(&path, &toml_content);
 }
 
+fn build_scrollback_rolling_context(
+    cache: &SessionSummaryCache,
+    branch: &str,
+    requested_language: &str,
+) -> Option<ScrollbackRollingContext> {
+    let previous = cache.get(branch)?;
+    let previous_markdown = previous.markdown.clone()?;
+    let previous_input = cache.scrollback_input(branch)?.to_string();
+    let session_id = cache.session_id(branch)?.to_string();
+    let cached_language = cache
+        .language(branch)
+        .map(str::to_string)
+        .unwrap_or_default();
+
+    if previous_markdown.trim().is_empty()
+        || previous_input.trim().is_empty()
+        || session_id.trim().is_empty()
+        || cached_language != requested_language
+    {
+        return None;
+    }
+
+    Some(ScrollbackRollingContext {
+        session_id,
+        previous_markdown: Some(previous_markdown),
+        previous_normalized_input: Some(previous_input),
+        rolling_update_count: cache.scrollback_update_count(branch),
+    })
+}
+
 fn scrollback_mtime_for_pane(pane_id: &str) -> Option<SystemTime> {
     let path = ScrollbackFile::scrollback_path_for_pane(pane_id).ok()?;
     let metadata = std::fs::metadata(&path).ok()?;
@@ -1789,28 +1819,8 @@ fn generate_and_cache_scrollback_summary(
         .and_then(|guard| {
             let cache = guard.get(&job.repo_key)?;
             let previous = cache.get(&job.branch).cloned();
-            let previous_markdown = previous
-                .as_ref()
-                .and_then(|summary| summary.markdown.clone());
-            let previous_input = cache.scrollback_input(&job.branch).map(|s| s.to_string());
-            let session_id = cache
-                .session_id(&job.branch)
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-
-            let context = if previous_markdown.is_some()
-                && previous_input.is_some()
-                && !session_id.trim().is_empty()
-            {
-                Some(ScrollbackRollingContext {
-                    session_id,
-                    previous_markdown,
-                    previous_normalized_input: previous_input,
-                    rolling_update_count: cache.scrollback_update_count(&job.branch),
-                })
-            } else {
-                None
-            };
+            let context =
+                build_scrollback_rolling_context(cache, &job.branch, &job.settings.language);
 
             Some((previous, context))
         })
@@ -2713,6 +2723,31 @@ bullet_points = ["- A"]
         let cache = guard.get(&repo_key).expect("cache should be loaded");
         assert!(cache.scrollback_input("main").is_none());
         assert_eq!(cache.scrollback_update_count("main"), 0);
+    }
+
+    #[test]
+    fn scrollback_rolling_context_resets_when_language_changes() {
+        let mut cache = SessionSummaryCache::default();
+        let summary = SessionSummary {
+            markdown: Some(
+                "## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        cache.set_scrollback(
+            "main".to_string(),
+            "codex-cli".to_string(),
+            "pane:xyz".to_string(),
+            "en".to_string(),
+            summary,
+            UNIX_EPOCH + Duration::from_secs(1),
+            "first\nsecond".to_string(),
+            3,
+        );
+
+        assert!(build_scrollback_rolling_context(&cache, "main", "ja").is_none());
+        assert!(build_scrollback_rolling_context(&cache, "main", "en").is_some());
     }
 
     #[test]

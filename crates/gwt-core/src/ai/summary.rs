@@ -189,6 +189,10 @@ impl SessionSummaryCache {
         self.session_ids.get(branch).map(|s| s.as_str())
     }
 
+    pub fn language(&self, branch: &str) -> Option<&str> {
+        self.languages.get(branch).map(|s| s.as_str())
+    }
+
     pub fn scrollback_input(&self, branch: &str) -> Option<&str> {
         self.scrollback_inputs.get(branch).map(|s| s.as_str())
     }
@@ -1064,11 +1068,12 @@ fn clip_text_to_budget_by_line(text: &str, max_chars: usize) -> String {
 
 fn determine_scrollback_summary_mode(
     normalized_input: &str,
+    filtered_input: &str,
     body_budget: usize,
     current_session_id: &str,
     context: Option<&ScrollbackRollingContext>,
 ) -> ScrollbackSummaryMode {
-    if normalized_input.chars().count() <= body_budget {
+    if filtered_input.chars().count() <= body_budget {
         return ScrollbackSummaryMode::FullShort;
     }
 
@@ -1100,6 +1105,7 @@ fn determine_scrollback_summary_mode(
 
 fn build_scrollback_user_prompt(
     normalized_input: &str,
+    filtered_input: &str,
     branch_name: &str,
     derived_purpose: &DerivedPurpose,
     current_session_id: &str,
@@ -1109,6 +1115,7 @@ fn build_scrollback_user_prompt(
     let body_budget = MAX_PROMPT_CHARS.saturating_sub(full_prefix.chars().count());
     let mode = determine_scrollback_summary_mode(
         normalized_input,
+        filtered_input,
         body_budget,
         current_session_id,
         context,
@@ -1116,7 +1123,7 @@ fn build_scrollback_user_prompt(
 
     match mode {
         ScrollbackSummaryMode::FullShort => (
-            format!("{full_prefix}{normalized_input}"),
+            format!("{full_prefix}{filtered_input}"),
             ScrollbackSummaryMode::FullShort,
             0,
         ),
@@ -1444,11 +1451,13 @@ pub fn summarize_scrollback(
     context: Option<&ScrollbackRollingContext>,
 ) -> Result<ScrollbackSummaryBuild, AIError> {
     let normalized = normalize_scrollback_text(scrollback_text);
-    let fallback_language = fallback_purpose_language_for_text(language, &normalized);
+    let filtered = filter_scrollback_noise(&normalized);
+    let fallback_language = fallback_purpose_language_for_text(language, &filtered);
     let derived_purpose =
-        derive_worktree_purpose_from_scrollback(&normalized, branch_name, fallback_language);
+        derive_worktree_purpose_from_scrollback(&filtered, branch_name, fallback_language);
     let (mut user_prompt, mode, next_rolling_update_count) = build_scrollback_user_prompt(
         &normalized,
+        &filtered,
         branch_name,
         &derived_purpose,
         current_session_id,
@@ -2686,8 +2695,42 @@ mod tests {
     }
 
     #[test]
+    fn test_build_scrollback_user_prompt_full_short_uses_filtered_text() {
+        let normalized = normalize_scrollback_text(
+            "Working (30s • esc to interrupt)\nLatest instruction: improve summary quality",
+        );
+        let filtered = filter_scrollback_noise(&normalized);
+        let derived =
+            derive_worktree_purpose_from_scrollback(&filtered, "main", SummaryLanguage::En);
+
+        let (prompt, mode, _) =
+            build_scrollback_user_prompt(&normalized, &filtered, "main", &derived, "pane:1", None);
+
+        assert_eq!(mode, ScrollbackSummaryMode::FullShort);
+        assert!(prompt.contains("Latest instruction: improve summary quality"));
+        assert!(!prompt.contains("Working (30s"));
+    }
+
+    #[test]
+    fn test_derive_scrollback_purpose_from_filtered_text_ignores_terminal_chrome() {
+        let normalized = normalize_scrollback_text(
+            "Working (30s • esc to interrupt)\nStatus: updating\nFix broken summary generation",
+        );
+        let filtered = filter_scrollback_noise(&normalized);
+        let derived = derive_worktree_purpose_from_scrollback(
+            &filtered,
+            "bugfix/issue-1600",
+            SummaryLanguage::En,
+        );
+
+        assert!(!derived.text.contains("Working"));
+        assert!(derived.text.contains("Fix broken summary generation"));
+    }
+
+    #[test]
     fn test_determine_scrollback_summary_mode_full_short_when_budget_allows() {
         let mode = determine_scrollback_summary_mode(
+            "short\nscrollback",
             "short\nscrollback",
             200,
             "pane:abc",
@@ -2705,6 +2748,7 @@ mod tests {
     fn test_determine_scrollback_summary_mode_incremental_for_append_only_growth() {
         let mode = determine_scrollback_summary_mode(
             "line1\nline2\nline3",
+            "line1\nline2\nline3",
             8,
             "pane:abc",
             Some(&ScrollbackRollingContext {
@@ -2720,6 +2764,7 @@ mod tests {
     #[test]
     fn test_determine_scrollback_summary_mode_rebuilds_on_session_change() {
         let mode = determine_scrollback_summary_mode(
+            "line1\nline2\nline3",
             "line1\nline2\nline3",
             8,
             "pane:new",
