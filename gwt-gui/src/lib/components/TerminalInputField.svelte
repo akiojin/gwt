@@ -35,28 +35,32 @@
     history = new InputHistory(paneId);
   });
 
-  // Register textarea as voice input target when it's available
+  // Register textarea as voice input target when it's available and active
   $effect(() => {
-    if (!textareaEl) return;
+    if (!active || !textareaEl) return;
     const unregister = registerInputFieldTarget(paneId, textareaEl);
     return () => {
       unregister();
     };
   });
 
-  // Auto-focus input field when tab becomes active
+  // Auto-focus input field and sync resize when tab becomes active
   $effect(() => {
     if (active && textareaEl) {
       requestAnimationFrame(() => {
         textareaEl?.focus();
+        if (textareaEl) {
+          textareaEl.style.height = "auto";
+          textareaEl.style.height = `${textareaEl.scrollHeight}px`;
+        }
       });
     }
   });
 
-  // Auto-resize textarea
+  // Auto-resize textarea (only when active to avoid reflow on hidden tabs)
   $effect(() => {
     void input;
-    if (!textareaEl) return;
+    if (!active || !textareaEl) return;
     textareaEl.style.height = "auto";
     textareaEl.style.height = `${textareaEl.scrollHeight}px`;
   });
