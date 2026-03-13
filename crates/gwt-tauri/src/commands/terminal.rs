@@ -6150,7 +6150,13 @@ pub async fn get_available_shells() -> Result<Vec<ShellInfo>, StructuredError> {
 /// underscores so it is safe to embed in a file name.
 fn sanitize_filename_part(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -6174,10 +6180,7 @@ pub fn save_clipboard_image(
     }
 
     let home = dirs::home_dir().ok_or_else(|| {
-        StructuredError::internal(
-            "Failed to resolve home directory",
-            "save_clipboard_image",
-        )
+        StructuredError::internal("Failed to resolve home directory", "save_clipboard_image")
     })?;
     let images_dir = home.join(".gwt").join("tmp").join("images");
     std::fs::create_dir_all(&images_dir).map_err(|e| {
