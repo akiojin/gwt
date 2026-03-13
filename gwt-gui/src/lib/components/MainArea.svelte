@@ -510,7 +510,7 @@
                 `.terminal-container[data-pane-id="${tab.paneId}"]`,
               );
               if (el) {
-                const term = (el as any).__gwtTerminal;
+                const term = (el as HTMLDivElement & { __gwtTerminal?: { focus(): void } }).__gwtTerminal;
                 if (term) {
                   try { term.focus(); } catch {}
                 }

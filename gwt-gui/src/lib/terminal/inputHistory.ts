@@ -20,16 +20,15 @@ export class InputHistory {
 
   /** Push a new entry. Resets navigation index. */
   push(text: string): void {
-    const trimmed = text;
-    if (!trimmed) return;
+    if (!text) return;
 
     // Avoid consecutive duplicates
-    if (this.entries.length > 0 && this.entries[this.entries.length - 1] === trimmed) {
+    if (this.entries.length > 0 && this.entries[this.entries.length - 1] === text) {
       this.index = -1;
       return;
     }
 
-    this.entries.push(trimmed);
+    this.entries.push(text);
 
     // Enforce max limit (drop oldest)
     if (this.entries.length > MAX_ENTRIES) {

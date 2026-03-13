@@ -6129,6 +6129,14 @@ pub async fn get_available_shells() -> Result<Vec<ShellInfo>, StructuredError> {
     }
 }
 
+/// Sanitize a string to contain only alphanumeric characters, hyphens, and
+/// underscores so it is safe to embed in a file name.
+fn sanitize_filename_part(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
 /// Save clipboard image data to a temporary file and return its absolute path.
 #[tauri::command]
 pub fn save_clipboard_image(
@@ -6138,6 +6146,16 @@ pub fn save_clipboard_image(
     app_handle: AppHandle,
 ) -> Result<String, StructuredError> {
     let _ = app_handle;
+
+    let safe_pane_id = sanitize_filename_part(&pane_id);
+    let safe_format = sanitize_filename_part(&format);
+    if safe_format.is_empty() {
+        return Err(StructuredError::internal(
+            "Invalid image format",
+            "save_clipboard_image",
+        ));
+    }
+
     let home = dirs::home_dir().ok_or_else(|| {
         StructuredError::internal(
             "Failed to resolve home directory",
@@ -6153,7 +6171,7 @@ pub fn save_clipboard_image(
     })?;
 
     let unique_id = Uuid::new_v4();
-    let filename = format!("{}_{}.{}", pane_id, unique_id, format);
+    let filename = format!("{}_{}.{}", safe_pane_id, unique_id, safe_format);
     let file_path = images_dir.join(&filename);
 
     std::fs::write(&file_path, &data).map_err(|e| {

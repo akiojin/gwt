@@ -264,18 +264,15 @@
           { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] },
         ],
       });
-      if (selected) {
-        const paths = Array.isArray(selected) ? selected : [selected];
-        for (const filePath of paths) {
-          const name = typeof filePath === "string" ? filePath.split(/[\\/]/).pop() ?? "image" : "image";
-          const path = typeof filePath === "string" ? filePath : "";
-          if (path) {
-            attachedImages = [
-              ...attachedImages,
-              { id: crypto.randomUUID(), path, name },
-            ];
-          }
-        }
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      for (const filePath of paths) {
+        if (!filePath) continue;
+        const name = String(filePath).split(/[\\/]/).pop() ?? "image";
+        attachedImages = [
+          ...attachedImages,
+          { id: crypto.randomUUID(), path: String(filePath), name },
+        ];
       }
     } catch (err) {
       console.error("Failed to open file picker:", err);
