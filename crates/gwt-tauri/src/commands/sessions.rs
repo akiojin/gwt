@@ -6,7 +6,8 @@ use crate::state::AppState;
 use gwt_core::ai::{
     format_error_for_display, summarize_scrollback, summarize_session, AIClient, AIError,
     AgentType as AiAgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
-    OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
+    OpenCodeSessionParser, ScrollbackRollingContext, ScrollbackSummaryBuild, SessionParseError,
+    SessionParser, SessionSummary, SessionSummaryCache,
 };
 use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
 use gwt_core::git::{
@@ -1780,13 +1781,40 @@ fn generate_and_cache_scrollback_summary(
 ) -> SessionSummaryResult {
     ensure_persisted_session_summary_cache_loaded(Path::new(&job.repo_key), &job.repo_key, state);
 
-    let previous_any = state.session_summary_cache.lock().ok().and_then(|guard| {
-        guard
-            .get(&job.repo_key)
-            .and_then(|c| c.get(&job.branch).cloned())
-    });
-
     let pane_session = pane_session_id(&job.pane_id);
+    let (previous_any, rolling_context) = state
+        .session_summary_cache
+        .lock()
+        .ok()
+        .and_then(|guard| {
+            let cache = guard.get(&job.repo_key)?;
+            let previous = cache.get(&job.branch).cloned();
+            let previous_markdown = previous
+                .as_ref()
+                .and_then(|summary| summary.markdown.clone());
+            let previous_input = cache.scrollback_input(&job.branch).map(|s| s.to_string());
+            let session_id = cache
+                .session_id(&job.branch)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            let context = if previous_markdown.is_some()
+                && previous_input.is_some()
+                && !session_id.trim().is_empty()
+            {
+                Some(ScrollbackRollingContext {
+                    session_id,
+                    previous_markdown,
+                    previous_normalized_input: previous_input,
+                    rolling_update_count: cache.scrollback_update_count(&job.branch),
+                })
+            } else {
+                None
+            };
+
+            Some((previous, context))
+        })
+        .unwrap_or((None, None));
     let scrollback = match capture_scrollback_tail_from_state(state, &job.pane_id, 0, None) {
         Ok(text) => text,
         Err(err) => {
@@ -1823,8 +1851,20 @@ fn generate_and_cache_scrollback_summary(
         }
     };
 
-    match summarize_scrollback(&client, &scrollback, &job.branch, &job.settings.language) {
-        Ok(summary) => {
+    match summarize_scrollback(
+        &client,
+        &scrollback,
+        &job.branch,
+        &job.settings.language,
+        &pane_session,
+        rolling_context.as_ref(),
+    ) {
+        Ok(ScrollbackSummaryBuild {
+            summary,
+            normalized_input,
+            next_rolling_update_count,
+            ..
+        }) => {
             if is_latest_scrollback_candidate(
                 state,
                 Path::new(&job.repo_key),
@@ -1832,14 +1872,19 @@ fn generate_and_cache_scrollback_summary(
                 &job.pane_id,
             ) {
                 if let Ok(mut cache_guard) = state.session_summary_cache.lock() {
-                    cache_guard.entry(job.repo_key.clone()).or_default().set(
-                        job.branch.clone(),
-                        job.tool_id.clone(),
-                        pane_session.clone(),
-                        job.settings.language.clone(),
-                        summary.clone(),
-                        job.mtime,
-                    );
+                    cache_guard
+                        .entry(job.repo_key.clone())
+                        .or_default()
+                        .set_scrollback(
+                            job.branch.clone(),
+                            job.tool_id.clone(),
+                            pane_session.clone(),
+                            job.settings.language.clone(),
+                            summary.clone(),
+                            job.mtime,
+                            normalized_input,
+                            next_rolling_update_count,
+                        );
                 }
                 persist_session_summary_cache_entry(
                     Path::new(&job.repo_key),
@@ -2623,6 +2668,51 @@ bullet_points = ["- A"]
         assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
         assert_eq!(out.session_id.as_deref(), Some("sess-1"));
         assert!(out.markdown.as_deref().unwrap_or("").contains("Cached"));
+    }
+
+    #[test]
+    fn persisted_session_summary_cache_does_not_restore_scrollback_context() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+
+        let cache_path = summary_cache_path_for_repo(repo.path());
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r###"
+version = 1
+
+[branches.main]
+tool_id = "codex-cli"
+session_id = "pane:xyz"
+input_mtime_ms = 1000
+last_updated_ms = 2000
+markdown = "## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n"
+task_overview = "Cached"
+short_summary = "Cached"
+bullet_points = ["- A"]
+"###,
+        )
+        .unwrap();
+
+        let state = AppState::new();
+        let _ = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            true,
+            &state,
+        )
+        .unwrap();
+
+        let repo_key = repo.path().to_string_lossy().to_string();
+        let guard = state.session_summary_cache.lock().unwrap();
+        let cache = guard.get(&repo_key).expect("cache should be loaded");
+        assert!(cache.scrollback_input("main").is_none());
+        assert_eq!(cache.scrollback_update_count("main"), 0);
     }
 
     #[test]

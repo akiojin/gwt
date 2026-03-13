@@ -2,7 +2,7 @@
 
 use super::client::{AIClient, AIError, ChatMessage};
 use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::SystemTime;
 
 pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## <Purpose heading in the user's language>\n<1 sentence: the worktree/branch objective (why) + key constraints + explicit exclusions>\n\n## <Summary heading in the user's language>\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## <Highlights heading in the user's language>\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nAll headings and all content must be in the user's language.\nDo not output JSON, code fences, or any extra text.\n\nPurpose writing rule:\n- The Purpose section must describe the intended outcome of the worktree/branch.\n- Treat PR/MR creation, PR template filling, merge/push, and status checks as means (how), not purpose (why).\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.\n\nWhen the session language is Japanese, headings must be exactly in this order:\n- ## 目的\n- ## 要約\n- ## ハイライト\nWhen the session language is English, headings must be exactly in this order:\n- ## Purpose\n- ## Summary\n- ## Highlights.";
@@ -14,6 +14,7 @@ const SESSION_SYSTEM_PROMPT_JA: &str = "You are a helpful assistant summarizing 
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_PROMPT_CHARS: usize = 16000;
 const MAX_PURPOSE_TEXT_CHARS: usize = 180;
+const MAX_ROLLING_SCROLLBACK_UPDATES: usize = 5;
 
 const PURPOSE_KEYWORDS: &[&str] = &[
     "目的",
@@ -167,6 +168,8 @@ pub struct SessionSummaryCache {
     session_ids: HashMap<String, String>,
     tool_ids: HashMap<String, String>,
     languages: HashMap<String, String>,
+    scrollback_inputs: HashMap<String, String>,
+    scrollback_update_counts: HashMap<String, usize>,
 }
 
 impl SessionSummaryCache {
@@ -186,6 +189,17 @@ impl SessionSummaryCache {
         self.session_ids.get(branch).map(|s| s.as_str())
     }
 
+    pub fn scrollback_input(&self, branch: &str) -> Option<&str> {
+        self.scrollback_inputs.get(branch).map(|s| s.as_str())
+    }
+
+    pub fn scrollback_update_count(&self, branch: &str) -> usize {
+        self.scrollback_update_counts
+            .get(branch)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn set(
         &mut self,
         branch: String,
@@ -195,11 +209,33 @@ impl SessionSummaryCache {
         summary: SessionSummary,
         mtime: SystemTime,
     ) {
+        let branch_key = branch.clone();
         self.cache.insert(branch.clone(), summary);
         self.last_modified.insert(branch.clone(), mtime);
         self.session_ids.insert(branch.clone(), session_id);
         self.tool_ids.insert(branch.clone(), tool_id);
         self.languages.insert(branch, language);
+        self.scrollback_inputs.remove(&branch_key);
+        self.scrollback_update_counts.remove(&branch_key);
+    }
+
+    pub fn set_scrollback(
+        &mut self,
+        branch: String,
+        tool_id: String,
+        session_id: String,
+        language: String,
+        summary: SessionSummary,
+        mtime: SystemTime,
+        normalized_input: String,
+        rolling_update_count: usize,
+    ) {
+        let branch_key = branch.clone();
+        self.set(branch, tool_id, session_id, language, summary, mtime);
+        self.scrollback_inputs
+            .insert(branch_key.clone(), normalized_input);
+        self.scrollback_update_counts
+            .insert(branch_key, rolling_update_count);
     }
 
     pub fn is_stale(
@@ -237,6 +273,29 @@ struct SessionSummaryFields {
     task_overview: Option<String>,
     short_summary: Option<String>,
     bullet_points: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScrollbackSummaryMode {
+    FullShort,
+    IncrementalLong,
+    FullRebuild,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScrollbackRollingContext {
+    pub session_id: String,
+    pub previous_markdown: Option<String>,
+    pub previous_normalized_input: Option<String>,
+    pub rolling_update_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScrollbackSummaryBuild {
+    pub summary: SessionSummary,
+    pub normalized_input: String,
+    pub mode: ScrollbackSummaryMode,
+    pub next_rolling_update_count: usize,
 }
 
 pub fn build_session_prompt(parsed: &ParsedSession, language: &str) -> Vec<ChatMessage> {
@@ -678,11 +737,13 @@ fn should_preserve_short_status_message(text: &str) -> bool {
 /// Applies the following line-level filters:
 /// - Removes AI thinking indicator lines (e.g. "Musing...", "Thinking...")
 /// - Removes progress bar / spinner lines
+/// - Removes terminal chrome lines (pane headers, UI hints, symbol-heavy status rows)
 /// - Collapses 3+ consecutive identical non-blank lines into 1 + `[repeated N times]`
 /// - Collapses 2+ consecutive blank lines into 1
 /// - Compresses 10+ consecutive build-output lines (Compiling, Downloading, etc.)
 fn filter_scrollback_noise(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
+    let normalized = normalize_scrollback_text(text);
+    let lines: Vec<&str> = normalized.lines().collect();
     if lines.is_empty() {
         return String::new();
     }
@@ -692,7 +753,9 @@ fn filter_scrollback_noise(text: &str) -> String {
         .into_iter()
         .filter(|line| {
             let trimmed = line.trim();
-            !is_ai_thinking_indicator(trimmed) && !is_progress_spinner_line(trimmed)
+            !is_ai_thinking_indicator(trimmed)
+                && !is_progress_spinner_line(trimmed)
+                && !is_terminal_chrome_line(trimmed)
         })
         .collect();
 
@@ -840,27 +903,556 @@ fn is_build_output_line(line: &str) -> bool {
         .any(|prefix| trimmed.starts_with(prefix))
 }
 
+fn normalize_scrollback_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn is_terminal_chrome_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if is_scrollback_summary_heading(trimmed) {
+        return true;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    if trimmed == "--- Status Bar ---"
+        || trimmed.starts_with("--- Pane:")
+        || trimmed.starts_with("────────────────")
+        || trimmed.starts_with("────────")
+        || lowered.starts_with("source: live (scrollback)")
+        || lowered.starts_with("working (")
+        || lowered == "working"
+        || lowered == "plan mode"
+        || lowered.contains("ctrl+o to expand")
+        || lowered.contains("esc to interrupt")
+        || lowered.contains("press enter to confirm")
+        || lowered.contains("tokens left")
+        || lowered.contains("bypass permissions")
+        || lowered.contains("voice: unavailable")
+        || lowered.contains("usebtw to ask")
+        || lowered.contains("without interrupting")
+        || lowered == "goodbye!"
+    {
+        return true;
+    }
+
+    is_symbol_heavy_status_line(trimmed)
+}
+
+fn is_scrollback_summary_heading(line: &str) -> bool {
+    matches!(
+        line,
+        "## Purpose" | "## Summary" | "## Highlights" | "## 目的" | "## 要約" | "## ハイライト"
+    )
+}
+
+fn is_symbol_heavy_status_line(line: &str) -> bool {
+    let chars = line
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<Vec<_>>();
+    if chars.len() < 12 {
+        return false;
+    }
+
+    let alpha_count = chars.iter().filter(|c| c.is_alphabetic()).count();
+    let digit_count = chars.iter().filter(|c| c.is_ascii_digit()).count();
+    let symbol_count = chars
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                '•' | '·'
+                    | '✶'
+                    | '✻'
+                    | '✽'
+                    | '✢'
+                    | '─'
+                    | '│'
+                    | '┌'
+                    | '┐'
+                    | '└'
+                    | '┘'
+                    | '├'
+                    | '┤'
+                    | '┬'
+                    | '┴'
+                    | '┼'
+                    | '═'
+                    | '║'
+                    | '╔'
+                    | '╗'
+                    | '╚'
+                    | '╝'
+                    | '╠'
+                    | '╣'
+                    | '╦'
+                    | '╩'
+                    | '╬'
+                    | '⏵'
+                    | '⎿'
+                    | '*'
+                    | '.'
+                    | '_'
+            )
+        })
+        .count();
+
+    alpha_count == 0 && digit_count <= 2 && symbol_count * 4 >= chars.len() * 3
+}
+
+fn build_scrollback_prompt_prefix(branch_name: &str, derived_purpose: &DerivedPurpose) -> String {
+    format!(
+        "Branch: {branch_name}\nDerived worktree purpose ({}): {}\nPurpose guidance: \
+In the Purpose section, describe the worktree objective (why). \
+Treat PR/MR creation, template filling, merge/push, and status checks as means (how), not purpose.\n\nTerminal session output:\n",
+        derived_purpose.confidence_label(),
+        derived_purpose.text
+    )
+}
+
+fn build_incremental_scrollback_prompt_prefix(
+    branch_name: &str,
+    derived_purpose: &DerivedPurpose,
+) -> String {
+    format!(
+        "Branch: {branch_name}\nDerived worktree purpose ({}): {}\nPurpose guidance: \
+Update the previous summary using only the new terminal output delta. \
+Keep still-correct facts, replace anything contradicted by the delta, and do not repeat terminal chrome or spinner noise.\n\nPrevious summary:\n",
+        derived_purpose.confidence_label(),
+        derived_purpose.text
+    )
+}
+
+fn build_incremental_scrollback_user_prompt(
+    branch_name: &str,
+    derived_purpose: &DerivedPurpose,
+    previous_summary: &str,
+    delta: &str,
+) -> String {
+    let prefix = build_incremental_scrollback_prompt_prefix(branch_name, derived_purpose);
+    let delta_label = "\n\nNew terminal output since the previous summary:\n";
+    let remaining_budget = MAX_PROMPT_CHARS
+        .saturating_sub(prefix.chars().count())
+        .saturating_sub(delta_label.chars().count());
+    let previous_budget = remaining_budget / 3;
+    let delta_budget = remaining_budget.saturating_sub(previous_budget);
+    let previous_text = clip_text_to_budget_by_line(previous_summary, previous_budget);
+    let delta_text = compress_scrollback_text(delta, delta_budget);
+    format!("{prefix}{previous_text}{delta_label}{delta_text}")
+}
+
+fn clip_text_to_budget_by_line(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let lines = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return clip_chars(text, max_chars);
+    }
+
+    take_scrollback_lines_within_budget(&lines, max_chars)
+}
+
+fn determine_scrollback_summary_mode(
+    normalized_input: &str,
+    body_budget: usize,
+    current_session_id: &str,
+    context: Option<&ScrollbackRollingContext>,
+) -> ScrollbackSummaryMode {
+    if normalized_input.chars().count() <= body_budget {
+        return ScrollbackSummaryMode::FullShort;
+    }
+
+    let Some(context) = context else {
+        return ScrollbackSummaryMode::FullRebuild;
+    };
+    let Some(previous_markdown) = context.previous_markdown.as_deref() else {
+        return ScrollbackSummaryMode::FullRebuild;
+    };
+    let Some(previous_input) = context.previous_normalized_input.as_deref() else {
+        return ScrollbackSummaryMode::FullRebuild;
+    };
+    if previous_markdown.trim().is_empty()
+        || previous_input.trim().is_empty()
+        || context.session_id.trim() != current_session_id
+        || context.rolling_update_count >= MAX_ROLLING_SCROLLBACK_UPDATES
+        || !normalized_input.starts_with(previous_input)
+    {
+        return ScrollbackSummaryMode::FullRebuild;
+    }
+
+    let delta = &normalized_input[previous_input.len()..];
+    if delta.trim().is_empty() || delta.chars().count() > body_budget {
+        return ScrollbackSummaryMode::FullRebuild;
+    }
+
+    ScrollbackSummaryMode::IncrementalLong
+}
+
+fn build_scrollback_user_prompt(
+    normalized_input: &str,
+    branch_name: &str,
+    derived_purpose: &DerivedPurpose,
+    current_session_id: &str,
+    context: Option<&ScrollbackRollingContext>,
+) -> (String, ScrollbackSummaryMode, usize) {
+    let full_prefix = build_scrollback_prompt_prefix(branch_name, derived_purpose);
+    let body_budget = MAX_PROMPT_CHARS.saturating_sub(full_prefix.chars().count());
+    let mode = determine_scrollback_summary_mode(
+        normalized_input,
+        body_budget,
+        current_session_id,
+        context,
+    );
+
+    match mode {
+        ScrollbackSummaryMode::FullShort => (
+            format!("{full_prefix}{normalized_input}"),
+            ScrollbackSummaryMode::FullShort,
+            0,
+        ),
+        ScrollbackSummaryMode::IncrementalLong => {
+            let context = context.expect("incremental mode requires context");
+            let previous_input = context
+                .previous_normalized_input
+                .as_deref()
+                .expect("incremental mode requires previous input");
+            let previous_markdown = context
+                .previous_markdown
+                .as_deref()
+                .expect("incremental mode requires previous markdown");
+            let delta = &normalized_input[previous_input.len()..];
+            (
+                build_incremental_scrollback_user_prompt(
+                    branch_name,
+                    derived_purpose,
+                    previous_markdown,
+                    delta,
+                ),
+                ScrollbackSummaryMode::IncrementalLong,
+                context.rolling_update_count + 1,
+            )
+        }
+        ScrollbackSummaryMode::FullRebuild => (
+            format!(
+                "{full_prefix}{}",
+                compress_scrollback_text(normalized_input, body_budget)
+            ),
+            ScrollbackSummaryMode::FullRebuild,
+            0,
+        ),
+    }
+}
+
+fn compress_scrollback_text(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let filtered = filter_scrollback_noise(text);
+    if filtered.chars().count() <= max_chars {
+        return filtered;
+    }
+
+    let lines = filtered
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return clip_chars(&filtered, max_chars);
+    }
+
+    let selected = select_prioritized_scrollback_lines(&lines, max_chars);
+    let rendered = render_scrollback_selection(&lines, &selected);
+    if !rendered.is_empty() {
+        return rendered;
+    }
+
+    take_scrollback_lines_within_budget(&lines, max_chars)
+}
+
+fn select_prioritized_scrollback_lines(lines: &[&str], max_chars: usize) -> BTreeSet<usize> {
+    let mut ranked = lines
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| (idx, scrollback_line_priority(line)))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut selected = BTreeSet::new();
+    for threshold in [95, 80, 65, 45, 20] {
+        for (idx, score) in &ranked {
+            if *score < threshold {
+                continue;
+            }
+            let _ = try_insert_scrollback_line(lines, &mut selected, *idx, max_chars);
+        }
+        if render_scrollback_selection(lines, &selected)
+            .chars()
+            .count()
+            >= max_chars * 9 / 10
+        {
+            break;
+        }
+    }
+
+    selected
+}
+
+fn try_insert_scrollback_line(
+    lines: &[&str],
+    selected: &mut BTreeSet<usize>,
+    idx: usize,
+    max_chars: usize,
+) -> bool {
+    if selected.contains(&idx) {
+        return true;
+    }
+
+    selected.insert(idx);
+    let rendered = render_scrollback_selection(lines, selected);
+    if rendered.chars().count() <= max_chars {
+        true
+    } else {
+        selected.remove(&idx);
+        false
+    }
+}
+
+fn render_scrollback_selection(lines: &[&str], selected: &BTreeSet<usize>) -> String {
+    const OMITTED_MARKER: &str = "[...omitted...]";
+
+    let mut out = String::new();
+    let mut previous: Option<usize> = None;
+    for idx in selected {
+        if let Some(prev) = previous {
+            if *idx > prev + 1 {
+                out.push('\n');
+                out.push_str(OMITTED_MARKER);
+                out.push('\n');
+            } else {
+                out.push('\n');
+            }
+        }
+        out.push_str(lines[*idx]);
+        previous = Some(*idx);
+    }
+    out
+}
+
+fn take_scrollback_lines_within_budget(lines: &[&str], max_chars: usize) -> String {
+    let mut out = String::new();
+    for line in lines {
+        let addition_len = if out.is_empty() {
+            line.chars().count()
+        } else {
+            1 + line.chars().count()
+        };
+        if !out.is_empty() && out.chars().count() + addition_len > max_chars {
+            break;
+        }
+        if out.is_empty() && line.chars().count() > max_chars {
+            return clip_chars(line, max_chars);
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+fn scrollback_line_priority(line: &str) -> u8 {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    if is_ai_thinking_indicator(trimmed)
+        || is_progress_spinner_line(trimmed)
+        || is_terminal_chrome_line(trimmed)
+    {
+        return 0;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let mut score = 20u8;
+
+    if looks_like_error_or_blocker_line(trimmed, &lowered) {
+        score = score.max(100);
+    }
+    if looks_like_instruction_or_decision_line(trimmed, &lowered) {
+        score = score.max(95);
+    }
+    if looks_like_result_or_progress_line(trimmed, &lowered) {
+        score = score.max(80);
+    }
+    if looks_like_test_or_verification_line(trimmed, &lowered) {
+        score = score.max(70);
+    }
+    if looks_like_command_line(trimmed) {
+        score = score.max(45);
+    }
+
+    if is_probable_code_fragment(trimmed) && score < 95 {
+        score = score.min(25);
+    }
+    if is_build_output_line(trimmed) && score < 95 {
+        score = score.min(10);
+    }
+    if trimmed.chars().count() > MAX_MESSAGE_CHARS && score < 95 {
+        score = score.min(55);
+    }
+
+    score
+}
+
+fn looks_like_error_or_blocker_line(text: &str, lowered: &str) -> bool {
+    contains_any_keyword(
+        text,
+        &[
+            "エラー",
+            "失敗",
+            "失敗した",
+            "不具合",
+            "原因",
+            "ブロック",
+            "確認が必要",
+            "warning",
+            "error",
+            "failed",
+            "failure",
+            "panic",
+            "exception",
+            "blocked",
+            "blocking",
+            "timeout",
+        ],
+    ) || lowered.contains("need confirmation")
+}
+
+fn looks_like_instruction_or_decision_line(text: &str, lowered: &str) -> bool {
+    contains_any_keyword(
+        text,
+        &[
+            "依頼",
+            "指示",
+            "最新指示",
+            "元の依頼",
+            "決定事項",
+            "制約",
+            "やらないこと",
+            "必要な入力",
+            "original request",
+            "latest instruction",
+            "decision",
+            "constraint",
+            "needs user input",
+        ],
+    ) || lowered.starts_with("user:")
+}
+
+fn looks_like_result_or_progress_line(text: &str, lowered: &str) -> bool {
+    contains_any_keyword(
+        text,
+        &[
+            "進捗",
+            "ステータス",
+            "完了",
+            "修正",
+            "対応",
+            "実装",
+            "追加",
+            "検証",
+            "progress",
+            "status",
+            "done",
+            "fixed",
+            "resolved",
+            "implemented",
+            "added",
+            "updated",
+            "verification",
+        ],
+    ) || lowered.starts_with("summary:")
+}
+
+fn looks_like_test_or_verification_line(text: &str, lowered: &str) -> bool {
+    contains_any_keyword(
+        text,
+        &[
+            "テスト",
+            "検証",
+            "確認",
+            "passed",
+            "test",
+            "tests",
+            "clippy",
+            "lint",
+            "fmt",
+            "markdownlint",
+        ],
+    ) || lowered.contains("0 failed")
+        || lowered.contains("0 failures")
+}
+
+fn looks_like_command_line(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with('$')
+        || trimmed.starts_with("Bash(")
+        || trimmed.starts_with("● Bash(")
+        || trimmed.starts_with("gh ")
+        || trimmed.starts_with("git ")
+        || trimmed.starts_with("cargo ")
+        || trimmed.starts_with("pnpm ")
+        || trimmed.starts_with("python ")
+}
+
+fn is_probable_code_fragment(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("//!")
+        || trimmed.starts_with("///")
+        || trimmed.starts_with("fn ")
+        || trimmed.starts_with("pub ")
+        || trimmed.starts_with("let ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("match ")
+        || trimmed.starts_with("impl ")
+        || trimmed.contains("→//!")
+        || trimmed.contains("::")
+}
+
 /// Summarizes a terminal scrollback as plain text, bypassing session parsers.
 ///
 /// The scrollback text should already have ANSI sequences stripped.
-/// Large texts are sampled (head 30% + middle 30% + tail 40%) to fit within MAX_PROMPT_CHARS.
+/// Large texts are compressed by prioritizing meaningful lines to fit within MAX_PROMPT_CHARS.
 pub fn summarize_scrollback(
     client: &AIClient,
     scrollback_text: &str,
     branch_name: &str,
     language: &str,
-) -> Result<SessionSummary, AIError> {
-    let filtered = filter_scrollback_noise(scrollback_text);
-    let fallback_language = fallback_purpose_language_for_text(language, &filtered);
+    current_session_id: &str,
+    context: Option<&ScrollbackRollingContext>,
+) -> Result<ScrollbackSummaryBuild, AIError> {
+    let normalized = normalize_scrollback_text(scrollback_text);
+    let fallback_language = fallback_purpose_language_for_text(language, &normalized);
     let derived_purpose =
-        derive_worktree_purpose_from_scrollback(&filtered, branch_name, fallback_language);
-    let sampled = sample_scrollback_text(&filtered);
-    let mut user_prompt = format!(
-        "Branch: {branch_name}\nDerived worktree purpose ({}): {}\nPurpose guidance: \
-In the Purpose section, describe the worktree objective (why). \
-Treat PR/MR creation, template filling, merge/push, and status checks as means (how), not purpose.\n\nTerminal session output:\n{sampled}",
-        derived_purpose.confidence_label(),
-        derived_purpose.text
+        derive_worktree_purpose_from_scrollback(&normalized, branch_name, fallback_language);
+    let (mut user_prompt, mode, next_rolling_update_count) = build_scrollback_user_prompt(
+        &normalized,
+        branch_name,
+        &derived_purpose,
+        current_session_id,
+        context,
     );
     if user_prompt.chars().count() > MAX_PROMPT_CHARS {
         user_prompt = clip_chars(&user_prompt, MAX_PROMPT_CHARS);
@@ -900,50 +1492,19 @@ Treat PR/MR creation, template filling, merge/push, and status checks as means (
         turn_count: 0,
     };
 
-    Ok(SessionSummary {
-        task_overview: task_overview.or(fields.task_overview),
-        short_summary: fields.short_summary,
-        bullet_points: fields.bullet_points,
-        markdown: Some(markdown),
-        metrics,
-        last_updated: Some(SystemTime::now()),
+    Ok(ScrollbackSummaryBuild {
+        summary: SessionSummary {
+            task_overview: task_overview.or(fields.task_overview),
+            short_summary: fields.short_summary,
+            bullet_points: fields.bullet_points,
+            markdown: Some(markdown),
+            metrics,
+            last_updated: Some(SystemTime::now()),
+        },
+        normalized_input: normalized,
+        mode,
+        next_rolling_update_count,
     })
-}
-
-/// Samples scrollback text to fit within MAX_PROMPT_CHARS.
-///
-/// If the text fits, returns it as-is. Otherwise, takes:
-/// - head 30% (initial prompts / requests)
-/// - middle 30% (decision-making / direction changes)
-/// - tail 40% (latest state)
-///   with `\n...[truncated]...\n` separators between sections.
-fn sample_scrollback_text(text: &str) -> String {
-    let char_count = text.chars().count();
-    if char_count <= MAX_PROMPT_CHARS {
-        return text.to_string();
-    }
-    let separator = "\n...[truncated]...\n";
-    let sep_len = separator.chars().count();
-    let budget = MAX_PROMPT_CHARS - sep_len * 2; // two separators
-    let head_chars = budget * 3 / 10; // 30%
-    let middle_chars = budget * 3 / 10; // 30%
-    let tail_chars = budget - head_chars - middle_chars; // 40%
-
-    let head: String = text.chars().take(head_chars).collect();
-
-    // Middle: start from the center of the original text
-    let mid_start = (char_count - middle_chars) / 2;
-    let middle: String = text.chars().skip(mid_start).take(middle_chars).collect();
-
-    let tail: String = text
-        .chars()
-        .rev()
-        .take(tail_chars)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{head}{separator}{middle}{separator}{tail}")
 }
 
 pub fn summarize_session(
@@ -1697,6 +2258,37 @@ mod tests {
     }
 
     #[test]
+    fn test_session_summary_cache_plain_set_clears_scrollback_context() {
+        let mut cache = SessionSummaryCache::default();
+        let summary = SessionSummary::default();
+        let now = SystemTime::now();
+
+        cache.set_scrollback(
+            "main".to_string(),
+            "codex-cli".to_string(),
+            "pane:123".to_string(),
+            "en".to_string(),
+            summary.clone(),
+            now,
+            "first\nsecond".to_string(),
+            2,
+        );
+        assert_eq!(cache.scrollback_input("main"), Some("first\nsecond"));
+        assert_eq!(cache.scrollback_update_count("main"), 2);
+
+        cache.set(
+            "main".to_string(),
+            "codex-cli".to_string(),
+            "sess-2".to_string(),
+            "en".to_string(),
+            summary,
+            now,
+        );
+        assert!(cache.scrollback_input("main").is_none());
+        assert_eq!(cache.scrollback_update_count("main"), 0);
+    }
+
+    #[test]
     fn test_build_session_prompt_caps_length() {
         let long_text = "a".repeat(2000);
         let messages = (0..200)
@@ -2042,31 +2634,103 @@ mod tests {
         assert!(matches!(result, Err(AIError::IncompleteSummary)));
     }
 
-    // --- sample_scrollback_text tests ---
+    // --- normalize_scrollback_text / compress_scrollback_text tests ---
 
     #[test]
-    fn test_sample_scrollback_within_limit() {
-        let text = "a".repeat(100);
-        let result = sample_scrollback_text(&text);
-        assert_eq!(result, text);
+    fn test_normalize_scrollback_text_normalizes_carriage_returns() {
+        let input = "line1\rline2\r\nline3";
+        let result = normalize_scrollback_text(input);
+        assert_eq!(result, "line1\nline2\nline3");
     }
 
     #[test]
-    fn test_sample_scrollback_large_text() {
-        let text = "x".repeat(MAX_PROMPT_CHARS * 2);
-        let result = sample_scrollback_text(&text);
-        assert!(result.chars().count() <= MAX_PROMPT_CHARS);
-        // Should have two truncation separators (head/middle/tail)
-        assert_eq!(result.matches("...[truncated]...").count(), 2);
-        assert!(result.starts_with('x'));
-        assert!(result.ends_with('x'));
+    fn test_compress_scrollback_text_keeps_line_boundaries() {
+        let input = (0..24)
+            .map(|idx| format!("line-{idx:02}-{}", "x".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let original_lines = input.lines().collect::<Vec<_>>();
+
+        let result = compress_scrollback_text(&input, 220);
+        assert!(result.chars().count() <= 220);
+        for line in result.lines() {
+            assert!(
+                line == "[...omitted...]" || original_lines.contains(&line),
+                "unexpected line in compressed output: {line}"
+            );
+        }
     }
 
     #[test]
-    fn test_sample_scrollback_exact_limit() {
-        let text = "y".repeat(MAX_PROMPT_CHARS);
-        let result = sample_scrollback_text(&text);
-        assert_eq!(result, text);
+    fn test_compress_scrollback_text_prioritizes_meaningful_lines() {
+        let input = [
+            "--- Status Bar ---",
+            "Working (30s • esc to interrupt)",
+            "ctrl+o to expand",
+            "Latest instruction: improve summary quality",
+            "error[E0308]: mismatched types",
+            "3→//! This command tree is intentionally hidden from --help.",
+            "Progress: implemented backend filtering",
+            "pnpm test",
+        ]
+        .join("\n");
+
+        let result = compress_scrollback_text(&input, 160);
+        assert!(result.contains("Latest instruction: improve summary quality"));
+        assert!(result.contains("error[E0308]: mismatched types"));
+        assert!(result.contains("Progress: implemented backend filtering"));
+        assert!(!result.contains("Status Bar"));
+        assert!(!result.contains("Working (30s"));
+        assert!(!result.contains("ctrl+o to expand"));
+        assert!(!result.contains("3→//!"));
+    }
+
+    #[test]
+    fn test_determine_scrollback_summary_mode_full_short_when_budget_allows() {
+        let mode = determine_scrollback_summary_mode(
+            "short\nscrollback",
+            200,
+            "pane:abc",
+            Some(&ScrollbackRollingContext {
+                session_id: "pane:abc".to_string(),
+                previous_markdown: Some("## Summary\nold".to_string()),
+                previous_normalized_input: Some("short".to_string()),
+                rolling_update_count: 1,
+            }),
+        );
+        assert_eq!(mode, ScrollbackSummaryMode::FullShort);
+    }
+
+    #[test]
+    fn test_determine_scrollback_summary_mode_incremental_for_append_only_growth() {
+        let mode = determine_scrollback_summary_mode(
+            "line1\nline2\nline3",
+            8,
+            "pane:abc",
+            Some(&ScrollbackRollingContext {
+                session_id: "pane:abc".to_string(),
+                previous_markdown: Some("## Summary\nold".to_string()),
+                previous_normalized_input: Some("line1\nline2".to_string()),
+                rolling_update_count: 2,
+            }),
+        );
+        assert_eq!(mode, ScrollbackSummaryMode::IncrementalLong);
+    }
+
+    #[test]
+    fn test_determine_scrollback_summary_mode_rebuilds_on_session_change() {
+        let mode = determine_scrollback_summary_mode(
+            "line1\nline2\nline3",
+            8,
+            "pane:new",
+            Some(&ScrollbackRollingContext {
+                session_id: "pane:old".to_string(),
+                previous_markdown: Some("## Summary\nold".to_string()),
+                previous_normalized_input: Some("line1\nline2".to_string()),
+                rolling_update_count: 0,
+            }),
+        );
+        assert_eq!(mode, ScrollbackSummaryMode::FullRebuild);
     }
 
     // --- filter_scrollback_noise tests ---
@@ -2094,6 +2758,18 @@ mod tests {
         let input = "Implement the authentication module\nAdd error handling for edge cases";
         let result = filter_scrollback_noise(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_filter_scrollback_noise_normalizes_carriage_returns_and_drops_terminal_chrome() {
+        let input =
+            "start\rWorking (0s • esc to interrupt)\rActual response\r--- Status Bar ---\rend";
+        let result = filter_scrollback_noise(input);
+        assert!(result.contains("start"));
+        assert!(result.contains("Actual response"));
+        assert!(result.contains("end"));
+        assert!(!result.contains("Working (0s"));
+        assert!(!result.contains("Status Bar"));
     }
 
     #[test]
@@ -2150,23 +2826,5 @@ mod tests {
         assert!(result.contains("error[E0308]: mismatched types"));
         assert!(!result.contains("Musing"));
         assert!(!result.contains("Thinking"));
-    }
-
-    #[test]
-    fn test_sample_scrollback_three_sections_contain_middle() {
-        // Build a text: AAA...BBB...CCC... each section large enough to trigger sampling
-        let section_size = MAX_PROMPT_CHARS; // each section is MAX_PROMPT_CHARS chars
-        let a_section = "a".repeat(section_size);
-        let b_section = "b".repeat(section_size);
-        let c_section = "c".repeat(section_size);
-        let text = format!("{a_section}{b_section}{c_section}");
-
-        let result = sample_scrollback_text(&text);
-        assert!(result.chars().count() <= MAX_PROMPT_CHARS);
-        assert_eq!(result.matches("...[truncated]...").count(), 2);
-        // Must contain head (a), middle (b), and tail (c)
-        assert!(result.contains('a'));
-        assert!(result.contains('b'));
-        assert!(result.contains('c'));
     }
 }
