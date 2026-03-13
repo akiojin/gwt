@@ -242,10 +242,11 @@ describe("SettingsPanel", () => {
     await waitFor(() => {
       expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
     });
-    const confirmBtn = rendered.container.querySelector(".modal-overlay .btn-danger") as HTMLButtonElement;
+    const cancelBtn = rendered.container.querySelector(".modal-overlay .btn-cancel") as HTMLButtonElement;
     await waitFor(() => {
-      expect(document.activeElement).toBe(confirmBtn);
+      expect(document.activeElement).toBe(cancelBtn);
     });
+    const confirmBtn = rendered.container.querySelector(".modal-overlay .btn-danger") as HTMLButtonElement;
     await fireEvent.click(confirmBtn);
 
     await waitFor(() => {
