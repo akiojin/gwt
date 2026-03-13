@@ -269,10 +269,20 @@ for NUM in $ALL_REFS; do
     # PR の場合: PR body から Closing Issue 番号を抽出
     PR_BODY=$(gh pr view "$NUM" --json body --jq '.body' 2>/dev/null || true)
     if [ -n "$PR_BODY" ]; then
+      # 既存: キーワード付き参照を収集（PR body 全体）
       FOUND=$(printf '%s\n' "$PR_BODY" \
         | grep -Eio '(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#[0-9]+' \
         | grep -Eo '#[0-9]+' \
         | tr -d '#' || true)
+
+      # 追加: "Closing Issues" セクション内の #N を収集（キーワード不要）
+      SECTION_FOUND=$(printf '%s\n' "$PR_BODY" \
+        | sed -n '/^## Closing Issues/,/^## /p' \
+        | grep -Eo '#[0-9]+' \
+        | tr -d '#' || true)
+
+      # 結合・重複排除
+      FOUND=$(printf '%s\n%s\n' "$FOUND" "$SECTION_FOUND" | awk 'NF' | sort -nu)
       if [ -n "$FOUND" ]; then
         ISSUE_NUMBERS="${ISSUE_NUMBERS}\n${FOUND}"
       fi
