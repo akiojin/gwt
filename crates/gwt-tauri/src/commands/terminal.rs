@@ -3676,7 +3676,6 @@ services:
                 api_key: "sk_test_profile_key".to_string(),
                 model: String::new(),
                 language: "en".to_string(),
-                summary_enabled: true,
             });
         }
         config.save().unwrap();
@@ -3705,7 +3704,6 @@ services:
                 api_key: "sk_test_profile_key".to_string(),
                 model: String::new(),
                 language: "en".to_string(),
-                summary_enabled: true,
             });
         }
         config.save().unwrap();

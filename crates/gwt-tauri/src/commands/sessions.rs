@@ -514,7 +514,7 @@ fn task_status_rank(status: &str) -> u8 {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummaryResult {
-    pub status: String, // "ok" | "ai-not-configured" | "disabled" | "no-session" | "error"
+    pub status: String, // "ok" | "ai-not-configured" | "no-session" | "error"
     pub generating: bool,
     pub tool_id: Option<String>,
     pub session_id: Option<String>,
@@ -1168,12 +1168,7 @@ fn get_branch_session_summary_immediate(
                 None,
             ));
         }
-        if !ai.summary_enabled {
-            return Ok((
-                summary_status("disabled", Some(candidate.tool_id), None, None),
-                None,
-            ));
-        }
+
 
         let settings = ai
             .resolved
@@ -1200,12 +1195,7 @@ fn get_branch_session_summary_immediate(
             None,
         ));
     }
-    if !ai.summary_enabled {
-        return Ok((
-            summary_status("disabled", Some(tool_id), Some(session_id), None),
-            None,
-        ));
-    }
+
 
     let settings = ai
         .resolved
@@ -2338,7 +2328,6 @@ mod tests {
                 api_key: "".to_string(),
                 model: "gpt-4o-mini".to_string(),
                 language: "en".to_string(),
-                summary_enabled: true,
             });
         }
         config.save().unwrap();
@@ -2364,42 +2353,8 @@ mod tests {
         assert!(out.error.is_none());
     }
 
-    #[test]
-    fn session_summary_returns_disabled_when_summary_disabled() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = TempDir::new().unwrap();
-        let _env = TestEnvGuard::new(home.path());
-
-        let mut config = ProfilesConfig::default();
-        if let Some(profile) = config.profiles.get_mut("default") {
-            profile.ai = Some(gwt_core::config::AISettings {
-                endpoint: "https://api.openai.com/v1".to_string(),
-                api_key: "".to_string(),
-                model: "gpt-5.2-codex".to_string(),
-                language: "en".to_string(),
-                summary_enabled: false,
-            });
-        }
-        config.save().unwrap();
-
-        let repo = TempDir::new().unwrap();
-        init_git_repo(repo.path());
-        write_session_entry(repo.path(), "main", "codex-cli", "session-1");
-
-        let state = AppState::new();
-        let (out, job) = get_branch_session_summary_immediate(
-            repo.path().to_str().unwrap(),
-            "main",
-            false,
-            &state,
-        )
-        .unwrap();
-        assert_eq!(out.status, "disabled");
-        assert!(!out.generating);
-        assert!(job.is_none());
-        assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
-        assert_eq!(out.session_id.as_deref(), Some("session-1"));
-    }
+    // session_summary_returns_disabled_when_summary_disabled was removed:
+    // summary_enabled field was removed; session summary is always enabled.
 
     #[test]
     fn session_summary_returns_generating_when_cache_miss_and_session_file_present() {
@@ -2414,7 +2369,6 @@ mod tests {
                 api_key: "".to_string(),
                 model: "gpt-4o-mini".to_string(),
                 language: "en".to_string(),
-                summary_enabled: true,
             });
         }
         config.save().unwrap();
@@ -2461,7 +2415,6 @@ mod tests {
                 api_key: "".to_string(),
                 model: "gpt-4o-mini".to_string(),
                 language: "en".to_string(),
-                summary_enabled: true,
             });
         }
         config.save().unwrap();

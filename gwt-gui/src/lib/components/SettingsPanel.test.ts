@@ -61,7 +61,6 @@ const profilesFixture: ProfilesConfig = {
         api_key: "test-key",
         model: "gpt-4o-mini",
         language: "en",
-        summary_enabled: true,
       },
     },
   },
@@ -148,53 +147,53 @@ describe("SettingsPanel", () => {
       expect(invokeMock).toHaveBeenCalledWith("get_profiles");
       const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
       const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
-      expect(tabNames).toEqual(["Appearance", "Voice Input", "Profiles"]);
+      expect(tabNames).toEqual(["General", "Profiles", "Terminal", "Voice Input"]);
     });
   });
 
-  it("shows Appearance tab content by default", async () => {
+  it("shows General tab content by default", async () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.getByText("Terminal Font Size")).toBeTruthy();
+      expect(rendered.getByText("UI font size")).toBeTruthy();
     });
 
     const activeTab = rendered.container.querySelector(".settings-tab-btn.active");
-    expect(activeTab?.textContent?.trim()).toBe("Appearance");
+    expect(activeTab?.textContent?.trim()).toBe("General");
   });
 
   it("switches tabs and shows only active content", async () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.getByText("Terminal Font Size")).toBeTruthy();
+      expect(rendered.getByText("UI font size")).toBeTruthy();
     });
 
     // Switch to Voice Input
     await switchToTab(rendered, "Voice Input");
     await waitFor(() => {
       expect(rendered.getByText("Enable Voice Input")).toBeTruthy();
-      expect(rendered.queryByText("Terminal Font Size")).toBeNull();
+      expect(rendered.queryByText("UI font size")).toBeNull();
     });
 
     // Switch to Profiles
     await switchToTab(rendered, "Profiles");
     await waitFor(() => {
-      expect(rendered.getByText("Active Profile")).toBeTruthy();
+      expect(rendered.container.querySelector(".profile-select")).toBeTruthy();
     });
 
-    // Switch back to Appearance
-    await switchToTab(rendered, "Appearance");
+    // Switch back to General
+    await switchToTab(rendered, "General");
     await waitFor(() => {
-      expect(rendered.getByText("Terminal Font Size")).toBeTruthy();
-      expect(rendered.queryByText("Active Profile")).toBeNull();
+      expect(rendered.getByText("UI font size")).toBeTruthy();
+      expect(rendered.queryByText("Environment Variables")).toBeNull();
     });
   });
 
   it("adds a protected branch via Enter key", async () => {
     const rendered = await renderSettingsPanel();
 
-    await rendered.findByText("Protected Branches");
+    await rendered.findByText("Protected branches");
     const input = rendered.getByPlaceholderText("Add branch...") as HTMLInputElement;
     await fireEvent.input(input, { target: { value: "release" } });
     await fireEvent.keyDown(input, { key: "Enter" });
@@ -208,36 +207,48 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("New Profile");
-    const newProfileInput = rendered.getByPlaceholderText(
-      "e.g. development"
-    ) as HTMLInputElement;
-    await fireEvent.input(newProfileInput, { target: { value: "staging" } });
+    // Click "+ New" to open CreateProfileDialog
+    const newBtn = rendered.getByRole("button", { name: "+ New" });
+    await fireEvent.click(newBtn);
 
-    const createButton = rendered.getByRole("button", { name: "Create" });
+    // Fill in the dialog
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
+    });
+    const dialogInput = rendered.container.querySelector("#profile-name-input") as HTMLInputElement;
+    await fireEvent.input(dialogInput, { target: { value: "staging" } });
+    const createButton = rendered.container.querySelector(".modal-overlay .btn-save") as HTMLButtonElement;
     await fireEvent.click(createButton);
 
     await waitFor(() => {
-      const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+      const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
       const options = Array.from(
-        rendered.container.querySelectorAll("#active-profile option")
+        rendered.container.querySelectorAll(".profile-select option")
       ).map((o) => o.textContent?.trim());
       expect(options).toContain("staging");
       expect(activeProfile.value).toBe("staging");
     });
 
-    const deleteButton = rendered.getByRole("button", { name: "Delete Active Profile" });
+    // Click "Delete" to open ConfirmDialog
+    const deleteButton = rendered.getByRole("button", { name: "Delete" });
     await fireEvent.click(deleteButton);
 
+    // Confirm deletion in dialog
     await waitFor(() => {
-      const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+      expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
+    });
+    const confirmBtn = rendered.container.querySelector(".modal-overlay .btn-danger") as HTMLButtonElement;
+    await fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
       const options = Array.from(
-        rendered.container.querySelectorAll("#active-profile option")
+        rendered.container.querySelectorAll(".profile-select option")
       ).map((o) => o.textContent?.trim());
       expect(options).not.toContain("staging");
       expect(activeProfile.value).toBe("default");
@@ -248,15 +259,17 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("Active Profile");
 
-    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
+    await waitFor(() => {
+      expect(activeProfile).toBeTruthy();
+    });
     const deleteButton = rendered.getByRole("button", {
-      name: "Delete Active Profile",
+      name: "Delete",
     }) as HTMLButtonElement;
 
     expect(activeProfile.value).toBe("default");
@@ -295,21 +308,30 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("Active Profile");
 
-    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
+    await waitFor(() => {
+      expect(activeProfile).toBeTruthy();
+    });
     const deleteButton = rendered.getByRole("button", {
-      name: "Delete Active Profile",
+      name: "Delete",
     }) as HTMLButtonElement;
 
     expect(activeProfile.value).toBe("default ");
     expect(deleteButton.disabled).toBe(false);
 
     await fireEvent.click(deleteButton);
+
+    // Confirm deletion in dialog
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
+    });
+    const confirmBtn = rendered.container.querySelector(".modal-overlay .btn-danger") as HTMLButtonElement;
+    await fireEvent.click(confirmBtn);
 
     await waitFor(() => {
       const options = Array.from(activeProfile.options).map((opt) => opt.value);
@@ -331,7 +353,6 @@ describe("SettingsPanel", () => {
         api_key: "dev-key",
         model: "gpt-4o-mini",
         language: "en",
-        summary_enabled: true,
       },
     };
     invokeMock.mockImplementation(async (command: string) => {
@@ -347,15 +368,17 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("Active Profile");
 
-    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
+    await waitFor(() => {
+      expect(activeProfile).toBeTruthy();
+    });
     const deleteButton = rendered.getByRole("button", {
-      name: "Delete Active Profile",
+      name: "Delete",
     }) as HTMLButtonElement;
 
     expect(activeProfile.value).toBe("default");
@@ -378,7 +401,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -403,7 +426,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -420,12 +443,12 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    const apiKeyLabel = rendered.getByText("API Key");
+    const apiKeyLabel = rendered.getByText("API key");
     const apiKeyInput = apiKeyLabel.parentElement?.querySelector("input") as HTMLInputElement;
     await fireEvent.input(apiKeyInput, { target: { value: "new-key-1" } });
     await fireEvent.input(apiKeyInput, { target: { value: "new-key-2" } });
@@ -509,40 +532,46 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("New Profile");
-    const newProfileInput = rendered.getByPlaceholderText(
-      "e.g. development"
-    ) as HTMLInputElement;
-    await fireEvent.input(newProfileInput, { target: { value: "Invalid Name" } });
-    await fireEvent.click(rendered.getByRole("button", { name: "Create" }));
+    // Click "+ New" to open CreateProfileDialog
+    const newBtn = rendered.getByRole("button", { name: "+ New" });
+    await fireEvent.click(newBtn);
 
     await waitFor(() => {
-      expect(
-        rendered.getByText("Profile name must be lowercase letters, numbers, or hyphens.")
-      ).toBeTruthy();
+      expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
     });
+    const dialogInput = rendered.container.querySelector("#profile-name-input") as HTMLInputElement;
+    await fireEvent.input(dialogInput, { target: { value: "Invalid Name" } });
+
+    // The Create button should be disabled for invalid names in CreateProfileDialog
+    const createButton = rendered.container.querySelector(".modal-overlay .btn-save") as HTMLButtonElement;
+    expect(createButton.disabled).toBe(true);
   });
 
   it("shows validation error when creating duplicate profile", async () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("New Profile");
-    const newProfileInput = rendered.getByPlaceholderText(
-      "e.g. development"
-    ) as HTMLInputElement;
-    await fireEvent.input(newProfileInput, { target: { value: "default" } });
-    await fireEvent.click(rendered.getByRole("button", { name: "Create" }));
+    // Click "+ New" to open CreateProfileDialog
+    const newBtn = rendered.getByRole("button", { name: "+ New" });
+    await fireEvent.click(newBtn);
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
+    });
+    const dialogInput = rendered.container.querySelector("#profile-name-input") as HTMLInputElement;
+    await fireEvent.input(dialogInput, { target: { value: "default" } });
+    const createButton = rendered.container.querySelector(".modal-overlay .btn-save") as HTMLButtonElement;
+    await fireEvent.click(createButton);
 
     await waitFor(() => {
       expect(rendered.getByText("Profile already exists.")).toBeTruthy();
@@ -552,7 +581,7 @@ describe("SettingsPanel", () => {
   it("removes protected branch from tags", async () => {
     const rendered = await renderSettingsPanel();
 
-    await rendered.findByText("Protected Branches");
+    await rendered.findByText("Protected branches");
     const beforeCount = rendered.container.querySelectorAll(".branch-tag").length;
     const targetTag = Array.from(rendered.container.querySelectorAll(".branch-tag")).find((tag) =>
       (tag.textContent ?? "").includes("develop")
@@ -569,20 +598,19 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("AI Settings (per profile)");
+    await rendered.findByText("AI Configuration");
     expect(rendered.getByText("Endpoint")).toBeTruthy();
-    expect(rendered.getByText("API Key")).toBeTruthy();
+    expect(rendered.getByText("API key")).toBeTruthy();
     expect(rendered.getByText("Model")).toBeTruthy();
-    expect(rendered.getByText("Session Summary")).toBeTruthy();
-    expect(rendered.getByText("Profile Language")).toBeTruthy();
+    expect(rendered.getByText("AI response language")).toBeTruthy();
     expect(rendered.container.querySelector("#ai-enabled")).toBeNull();
 
-    const apiKeyLabel = rendered.getByText("API Key");
+    const apiKeyLabel = rendered.getByText("API key");
     const apiKeyInput = apiKeyLabel.parentElement?.querySelector("input") as HTMLInputElement;
     expect(apiKeyInput.type).toBe("text");
   });
@@ -590,21 +618,12 @@ describe("SettingsPanel", () => {
   it("adjusts font sizes and clamps numeric inputs", async () => {
     const rendered = await renderSettingsPanel();
 
-    await rendered.findByText("Appearance");
-    const controls = Array.from(rendered.container.querySelectorAll(".font-size-control"));
-    const terminalControl = controls[0] as HTMLElement;
-    const uiControl = controls[1] as HTMLElement;
-    const terminalInput = terminalControl.querySelector("input") as HTMLInputElement;
+    // General tab has UI font size
+    await rendered.findByText("General");
+    const uiControls = Array.from(rendered.container.querySelectorAll(".font-size-control"));
+    const uiControl = uiControls[0] as HTMLElement;
     const uiInput = uiControl.querySelector("input") as HTMLInputElement;
-    const terminalButtons = terminalControl.querySelectorAll("button");
     const uiButtons = uiControl.querySelectorAll("button");
-
-    await fireEvent.input(terminalInput, { target: { value: "100" } });
-    await fireEvent.change(terminalInput);
-    await waitFor(() => {
-      expect(terminalInput.value).toBe("24");
-    });
-    expect((terminalButtons[1] as HTMLButtonElement).disabled).toBe(true);
 
     await fireEvent.input(uiInput, { target: { value: "1" } });
     await fireEvent.change(uiInput);
@@ -618,6 +637,23 @@ describe("SettingsPanel", () => {
       expect(uiInput.value).toBe("9");
     });
 
+    // Terminal tab has terminal font size
+    await switchToTab(rendered, "Terminal");
+    await waitFor(() => {
+      expect(rendered.getByText("Terminal font size")).toBeTruthy();
+    });
+    const terminalControls = Array.from(rendered.container.querySelectorAll(".font-size-control"));
+    const terminalControl = terminalControls[0] as HTMLElement;
+    const terminalInput = terminalControl.querySelector("input") as HTMLInputElement;
+    const terminalButtons = terminalControl.querySelectorAll("button");
+
+    await fireEvent.input(terminalInput, { target: { value: "100" } });
+    await fireEvent.change(terminalInput);
+    await waitFor(() => {
+      expect(terminalInput.value).toBe("24");
+    });
+    expect((terminalButtons[1] as HTMLButtonElement).disabled).toBe(true);
+
     await fireEvent.click(terminalButtons[0] as HTMLButtonElement);
     await waitFor(() => {
       expect(terminalInput.value).toBe("23");
@@ -627,21 +663,27 @@ describe("SettingsPanel", () => {
   it("updates font family selects and includes them in saved settings", async () => {
     const rendered = await renderSettingsPanel();
 
-    await rendered.findByText("Appearance");
-    const terminalFontFamily = rendered.container.querySelector(
-      "#terminal-font-family"
-    ) as HTMLSelectElement;
+    await rendered.findByText("General");
     const uiFontFamily = rendered.container.querySelector(
       "#ui-font-family"
     ) as HTMLSelectElement;
 
-    await fireEvent.change(terminalFontFamily, {
-      target: { value: '"Cascadia Mono", "Cascadia Code", Consolas, monospace' },
-    });
     await fireEvent.change(uiFontFamily, {
       target: {
         value: '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
       },
+    });
+
+    // Terminal font family is now in Terminal tab
+    await switchToTab(rendered, "Terminal");
+    await waitFor(() => {
+      expect(rendered.container.querySelector("#terminal-font-family")).toBeTruthy();
+    });
+    const terminalFontFamily = rendered.container.querySelector(
+      "#terminal-font-family"
+    ) as HTMLSelectElement;
+    await fireEvent.change(terminalFontFamily, {
+      target: { value: '"Cascadia Mono", "Cascadia Code", Consolas, monospace' },
     });
 
     await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
@@ -661,7 +703,7 @@ describe("SettingsPanel", () => {
   it("updates app language and persists it to saved settings", async () => {
     const rendered = await renderSettingsPanel();
 
-    await rendered.findByText("Appearance");
+    await rendered.findByText("General");
     const appLanguage = rendered.container.querySelector("#app-language") as HTMLSelectElement;
     expect(appLanguage).toBeTruthy();
 
@@ -697,7 +739,7 @@ describe("SettingsPanel", () => {
     });
 
     const rendered = await renderSettingsPanel();
-    await rendered.findByText("Appearance");
+    await rendered.findByText("General");
 
     await waitFor(() => {
       expect(
@@ -729,22 +771,28 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel({ onClose });
 
-    await rendered.findByText("Appearance");
-    const terminalFontFamily = rendered.container.querySelector(
-      "#terminal-font-family"
-    ) as HTMLSelectElement;
+    await rendered.findByText("General");
     const uiFontFamily = rendered.container.querySelector(
       "#ui-font-family"
     ) as HTMLSelectElement;
 
-    await fireEvent.change(terminalFontFamily, {
-      target: { value: '"SF Mono", Menlo, Monaco, Consolas, monospace' },
-    });
     await fireEvent.change(uiFontFamily, {
       target: {
         value:
           '"Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
       },
+    });
+
+    // Terminal font family is now in Terminal tab
+    await switchToTab(rendered, "Terminal");
+    await waitFor(() => {
+      expect(rendered.container.querySelector("#terminal-font-family")).toBeTruthy();
+    });
+    const terminalFontFamily = rendered.container.querySelector(
+      "#terminal-font-family"
+    ) as HTMLSelectElement;
+    await fireEvent.change(terminalFontFamily, {
+      target: { value: '"SF Mono", Menlo, Monaco, Consolas, monospace' },
     });
 
     await waitFor(() => {
@@ -777,7 +825,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -813,7 +861,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -864,7 +912,6 @@ describe("SettingsPanel", () => {
         api_key: "dev-key",
         model: "gpt-4o-mini",
         language: "en",
-        summary_enabled: true,
       },
     };
     invokeMock.mockImplementation(async (command: string) => {
@@ -879,20 +926,28 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("Active Profile");
-
-    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
+    await waitFor(() => {
+      expect(activeProfile).toBeTruthy();
+    });
     await fireEvent.change(activeProfile, { target: { value: "dev" } });
     await waitFor(() => {
       expect(activeProfile.value).toBe("dev");
     });
 
-    await fireEvent.click(rendered.getByRole("button", { name: "Delete Active Profile" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "Delete" }));
+
+    // Confirm deletion in dialog
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
+    });
+    const confirmBtn = rendered.container.querySelector(".modal-overlay .btn-danger") as HTMLButtonElement;
+    await fireEvent.click(confirmBtn);
 
     await waitFor(() => {
       const activeOptions = Array.from(activeProfile.options).map((opt) => opt.value);
@@ -919,7 +974,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -948,7 +1003,6 @@ describe("SettingsPanel", () => {
       api_key: "test-key",
       model: "custom-model",
       language: "en",
-      summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -960,7 +1014,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -978,7 +1032,6 @@ describe("SettingsPanel", () => {
       api_key: "test-key",
       model: "",
       language: "en",
-      summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -990,7 +1043,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1027,7 +1080,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1084,15 +1137,15 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("AI Settings (per profile)");
+    await rendered.findByText("AI Configuration");
     expect(rendered.getByText("Endpoint")).toBeTruthy();
 
-    const endpointInput = rendered.container.querySelector(".ai-field input") as HTMLInputElement;
+    const endpointInput = rendered.container.querySelector(".settings-section-body .field input") as HTMLInputElement;
     expect(endpointInput.value).toBe("");
   });
 
@@ -1119,19 +1172,26 @@ describe("SettingsPanel", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("hides Terminal tab when no shells are available (macOS/Linux)", async () => {
+  it("always shows Terminal tab even when no shells are available", async () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
     const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
-    expect(tabNames).not.toContain("Terminal");
+    expect(tabNames).toContain("Terminal");
+
+    // Shell section should not appear when no shells
+    await switchToTab(rendered, "Terminal");
+    await waitFor(() => {
+      expect(rendered.getByText("Terminal font size")).toBeTruthy();
+    });
+    expect(rendered.container.querySelector("#default-shell")).toBeNull();
   });
 
-  it("shows Terminal tab when shells are available (Windows)", async () => {
+  it("shows shell dropdown in Terminal tab when shells are available", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
@@ -1149,6 +1209,11 @@ describe("SettingsPanel", () => {
       const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
       expect(tabNames).toContain("Terminal");
     });
+
+    await switchToTab(rendered, "Terminal");
+    await waitFor(() => {
+      expect(rendered.container.querySelector("#default-shell")).toBeTruthy();
+    });
   });
 
   it("falls back to no shells when shell discovery fails", async () => {
@@ -1164,10 +1229,15 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
-      const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
-      expect(tabNames).not.toContain("Terminal");
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
+
+    // Terminal tab is still shown but without shell section
+    await switchToTab(rendered, "Terminal");
+    await waitFor(() => {
+      expect(rendered.getByText("Terminal font size")).toBeTruthy();
+    });
+    expect(rendered.container.querySelector("#default-shell")).toBeNull();
   });
 
   it("shows shell dropdown with version subtext in Terminal tab", async () => {
@@ -1192,7 +1262,7 @@ describe("SettingsPanel", () => {
     await switchToTab(rendered, "Terminal");
 
     await waitFor(() => {
-      expect(rendered.getByText("Default Shell")).toBeTruthy();
+      expect(rendered.getByText("Default shell")).toBeTruthy();
     });
 
     const select = rendered.container.querySelector("#default-shell") as HTMLSelectElement;
@@ -1206,6 +1276,8 @@ describe("SettingsPanel", () => {
   });
 
   it("keeps voice input fields enabled when voice capability is unavailable", async () => {
+    const enabledVoiceSettings = structuredClone(settingsFixture);
+    enabledVoiceSettings.voice_input.enabled = true;
     tauriCoreInvokeMock.mockImplementation(async (command: string) => {
       if (command === "get_voice_capability") {
         return { available: false, reason: "GPU acceleration is not available" };
@@ -1213,9 +1285,10 @@ describe("SettingsPanel", () => {
       return null;
     });
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_settings") return structuredClone(enabledVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -1224,7 +1297,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1247,6 +1320,8 @@ describe("SettingsPanel", () => {
   });
 
   it("saves voice settings when capability is unavailable", async () => {
+    const enabledVoiceSettings = structuredClone(settingsFixture);
+    enabledVoiceSettings.voice_input.enabled = true;
     tauriCoreInvokeMock.mockImplementation(async (command: string) => {
       if (command === "get_voice_capability") {
         return { available: false, reason: "GPU acceleration is not available" };
@@ -1254,9 +1329,10 @@ describe("SettingsPanel", () => {
       return null;
     });
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_settings") return structuredClone(enabledVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -1265,7 +1341,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1296,6 +1372,8 @@ describe("SettingsPanel", () => {
   });
 
   it("shows unavailable reason banner when voice capability is unavailable", async () => {
+    const enabledVoiceSettings = structuredClone(settingsFixture);
+    enabledVoiceSettings.voice_input.enabled = true;
     tauriCoreInvokeMock.mockImplementation(async (command: string) => {
       if (command === "get_voice_capability") {
         return { available: false, reason: "GPU acceleration is not available" };
@@ -1303,9 +1381,10 @@ describe("SettingsPanel", () => {
       return null;
     });
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_settings") return structuredClone(enabledVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -1314,7 +1393,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1329,7 +1408,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1376,7 +1455,6 @@ describe("SettingsPanel", () => {
         api_key: "stage-key",
         model: "gpt-4o-mini",
         language: "en",
-        summary_enabled: true,
       },
     };
     invokeMock.mockImplementation(async (command: string) => {
@@ -1391,14 +1469,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
     await rendered.findByText("Environment Variables");
 
-    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
     await fireEvent.change(activeProfile, { target: { value: "staging" } });
 
     await waitFor(() => {
@@ -1419,7 +1497,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1442,7 +1520,6 @@ describe("SettingsPanel", () => {
       api_key: "test-key",
       model: "",
       language: "en",
-      summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -1455,7 +1532,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1474,7 +1551,7 @@ describe("SettingsPanel", () => {
   it("updates selected AI model and persists it in profile config", async () => {
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1516,7 +1593,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1533,7 +1610,7 @@ describe("SettingsPanel", () => {
   it("shows refresh hint when endpoint changes after models are loaded", async () => {
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1546,7 +1623,7 @@ describe("SettingsPanel", () => {
       expect(options).toContain("gpt-5");
     });
 
-    const endpointField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((field) =>
+    const endpointField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((field) =>
       (field.textContent ?? "").includes("Endpoint")
     ) as HTMLElement | undefined;
     const endpointInput = endpointField?.querySelector("input") as HTMLInputElement;
@@ -1616,14 +1693,13 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
     await waitFor(() => {
-      expect(rendered.getByText("Create a profile to configure AI settings.")).toBeTruthy();
-      expect(rendered.getByText("Create a profile to edit environment variables.")).toBeTruthy();
+      expect(rendered.getByText("Create a profile to configure settings.")).toBeTruthy();
     });
   });
 
@@ -1631,17 +1707,17 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("AI Settings (per profile)");
+    await rendered.findByText("AI Configuration");
 
-    // Find the Profile Language select - it's inside an .ai-field with "Profile Language" label
-    const aiFields = rendered.container.querySelectorAll(".ai-field");
+    // Find the AI response language select - it's inside a .field with "AI response language" label
+    const aiFields = rendered.container.querySelectorAll(".settings-section-body .field");
     const languageField = Array.from(aiFields).find((f) =>
-      (f.textContent ?? "").includes("Profile Language")
+      (f.textContent ?? "").includes("AI response language")
     ) as HTMLElement | undefined;
     expect(languageField).toBeTruthy();
 
@@ -1665,39 +1741,6 @@ describe("SettingsPanel", () => {
     });
   });
 
-  it("toggles AI session summary enabled checkbox", async () => {
-    const rendered = await renderSettingsPanel();
-
-    await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
-    });
-
-    await switchToTab(rendered, "Profiles");
-
-    await rendered.findByText("AI Settings (per profile)");
-
-    const summaryCheckbox = rendered.container.querySelector("#ai-summary") as HTMLInputElement;
-    expect(summaryCheckbox).toBeTruthy();
-    expect(summaryCheckbox.checked).toBe(true); // fixture has summary_enabled: true
-
-    // Uncheck it
-    await fireEvent.change(summaryCheckbox, { target: { checked: false } });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("save_profiles", {
-        config: expect.objectContaining({
-          profiles: expect.objectContaining({
-            default: expect.objectContaining({
-              ai: expect.objectContaining({ summary_enabled: false }),
-            }),
-          }),
-        }),
-      });
-    });
-  });
-
   it("keeps Refresh button disabled when endpoint is empty", async () => {
     const noEndpointProfiles: ProfilesConfig = {
       version: 1,
@@ -1713,8 +1756,7 @@ describe("SettingsPanel", () => {
             api_key: "",
             model: "",
             language: "en",
-            summary_enabled: true,
-          },
+              },
         },
       },
     };
@@ -1730,12 +1772,12 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("AI Settings (per profile)");
+    await rendered.findByText("AI Configuration");
 
     const refreshBtn = rendered.getByRole("button", { name: "Refresh" }) as HTMLButtonElement;
     expect(refreshBtn.disabled).toBe(true);
@@ -1758,7 +1800,6 @@ describe("SettingsPanel", () => {
             model: "gpt-4",
             // language intentionally omitted to trigger ?? 'en' fallback
             language: undefined as any,
-            summary_enabled: undefined as any,
           },
         },
       },
@@ -1775,28 +1816,23 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
 
-    await rendered.findByText("AI Settings (per profile)");
+    await rendered.findByText("AI Configuration");
 
     // Profile Language select should fall back to "en" value
-    const aiFields = rendered.container.querySelectorAll(".ai-field");
+    const aiFields = rendered.container.querySelectorAll(".settings-section-body .field");
     const languageField = Array.from(aiFields).find((f) =>
-      (f.textContent ?? "").includes("Profile Language")
+      (f.textContent ?? "").includes("AI response language")
     ) as HTMLElement | undefined;
     expect(languageField).toBeTruthy();
 
     const languageSelect = languageField!.querySelector("select") as HTMLSelectElement;
     expect(languageSelect).toBeTruthy();
     expect(languageSelect.value).toBe("en");
-
-    // Session Summary checkbox should fall back to false (unchecked)
-    const summaryCheckbox = rendered.container.querySelector("#ai-summary") as HTMLInputElement;
-    expect(summaryCheckbox).toBeTruthy();
-    expect(summaryCheckbox.checked).toBe(false);
   });
 
   it("defaults shell selection to empty string when default_shell is null", async () => {
@@ -1843,6 +1879,8 @@ describe("SettingsPanel", () => {
   });
 
   it("shows voice capability loading message when checking capability", async () => {
+    const enabledVoiceSettings = structuredClone(settingsFixture);
+    enabledVoiceSettings.voice_input.enabled = true;
     let resolveCapability!: (v: any) => void;
     const pendingCapability = new Promise<any>((r) => { resolveCapability = r; });
     tauriCoreInvokeMock.mockImplementation(async (command: string) => {
@@ -1851,11 +1889,19 @@ describe("SettingsPanel", () => {
       }
       return null;
     });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(enabledVoiceSettings);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
 
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1878,7 +1924,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1988,7 +2034,6 @@ describe("SettingsPanel", () => {
       api_key: "test-key",
       model: "",
       language: "en",
-      summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -2001,7 +2046,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2012,7 +2057,7 @@ describe("SettingsPanel", () => {
     });
 
     const endpointField = Array.from(
-      rendered.container.querySelectorAll(".ai-field"),
+      rendered.container.querySelectorAll(".settings-section-body .field"),
     ).find((field) => (field.textContent ?? "").includes("Endpoint")) as HTMLElement | undefined;
     expect(endpointField).toBeTruthy();
     const endpointInput = endpointField?.querySelector("input") as HTMLInputElement;
@@ -2027,17 +2072,27 @@ describe("SettingsPanel", () => {
   });
 
   it("shows default unavailable reason when voice capability reason is null", async () => {
+    const enabledVoiceSettings = structuredClone(settingsFixture);
+    enabledVoiceSettings.voice_input.enabled = true;
     tauriCoreInvokeMock.mockImplementation(async (command: string) => {
       if (command === "get_voice_capability") {
         return { available: false, reason: null };
       }
       return null;
     });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(enabledVoiceSettings);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
 
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -2106,10 +2161,10 @@ describe("SettingsPanel", () => {
         rendered.container.querySelectorAll(".settings-tab-btn"),
       ).map((btn) => btn.textContent?.trim());
       expect(tabNames).toEqual([
-        "Appearance",
-        "Voice Input",
+        "General",
         "Profiles",
         "Terminal",
+        "Voice Input",
       ]);
     });
 
@@ -2149,8 +2204,7 @@ describe("SettingsPanel", () => {
 
     await switchToTab(rendered, "Profiles");
     await waitFor(() => {
-      expect(rendered.getByText("Create a profile to edit environment variables.")).toBeTruthy();
-      expect(rendered.getByText("Create a profile to configure AI settings.")).toBeTruthy();
+      expect(rendered.getByText("Create a profile to configure settings.")).toBeTruthy();
     });
   });
 
@@ -2163,7 +2217,6 @@ describe("SettingsPanel", () => {
       api_key: "",
       model: "gpt-4o-mini",
       language: "en",
-      summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -2177,11 +2230,11 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
     const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
@@ -2198,7 +2251,6 @@ describe("SettingsPanel", () => {
       api_key: "",
       model: "gpt-4o-mini",
       language: "en",
-      summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -2212,14 +2264,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2241,7 +2293,6 @@ describe("SettingsPanel", () => {
       api_key: "",
       model: "gpt-4o-mini",
       language: "en",
-      summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
@@ -2255,14 +2306,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2282,11 +2333,11 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
     const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
@@ -2299,11 +2350,11 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
     const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
@@ -2316,14 +2367,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
@@ -2347,14 +2398,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
@@ -2375,14 +2426,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
@@ -2405,11 +2456,11 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
     const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
     await fireEvent.click(copyBtn);
@@ -2429,11 +2480,11 @@ describe("SettingsPanel", () => {
       const rendered = await renderSettingsPanel();
 
       await waitFor(() => {
-        expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+        expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
       });
 
       await switchToTab(rendered, "Profiles");
-      await rendered.findByText("API Key");
+      await rendered.findByText("API key");
 
       const copyBtn = rendered.container.querySelector(".btn-copy-apikey") as HTMLButtonElement;
       await fireEvent.click(copyBtn);
@@ -2464,14 +2515,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2490,14 +2541,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2524,7 +2575,6 @@ describe("SettingsPanel", () => {
       api_key: "",
       model: "",
       language: "en",
-      summary_enabled: true,
     };
 
     invokeMock.mockImplementation(async (command: string) => {
@@ -2540,14 +2590,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2567,14 +2617,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2600,7 +2650,6 @@ describe("SettingsPanel", () => {
       api_key: "",
       model: "",
       language: "ja",
-      summary_enabled: true,
     };
 
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -2621,14 +2670,14 @@ describe("SettingsPanel", () => {
     const first = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(first, "Profiles");
-    await first.findByText("API Key");
+    await first.findByText("API key");
 
-    const firstApiKeyField = Array.from(first.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const firstApiKeyField = Array.from(first.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const firstApiKeyInput = firstApiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2644,14 +2693,14 @@ describe("SettingsPanel", () => {
     const reopened = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(reopened, "Profiles");
-    await reopened.findByText("API Key");
+    await reopened.findByText("API key");
 
-    const reopenedApiKeyField = Array.from(reopened.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const reopenedApiKeyField = Array.from(reopened.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const reopenedApiKeyInput = reopenedApiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2673,7 +2722,6 @@ describe("SettingsPanel", () => {
       api_key: "",
       model: "",
       language: "ja",
-      summary_enabled: true,
     };
 
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -2694,14 +2742,14 @@ describe("SettingsPanel", () => {
     const first = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(first, "Profiles");
-    await first.findByText("API Key");
+    await first.findByText("API key");
 
-    const firstApiKeyField = Array.from(first.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const firstApiKeyField = Array.from(first.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const firstApiKeyInput = firstApiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2717,14 +2765,14 @@ describe("SettingsPanel", () => {
     const reopened = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(reopened, "Profiles");
-    await reopened.findByText("API Key");
+    await reopened.findByText("API key");
 
-    const reopenedApiKeyField = Array.from(reopened.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const reopenedApiKeyField = Array.from(reopened.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const reopenedApiKeyInput = reopenedApiKeyField.querySelector("input") as HTMLInputElement;
 
@@ -2745,7 +2793,6 @@ describe("SettingsPanel", () => {
       api_key: "",
       model: "gpt-4o-mini",
       language: "en",
-      summary_enabled: true,
     };
     twoProfiles.profiles.dev = {
       name: "dev",
@@ -2758,7 +2805,6 @@ describe("SettingsPanel", () => {
         api_key: "",
         model: "gpt-4o-mini",
         language: "en",
-        summary_enabled: true,
       },
     };
 
@@ -2774,17 +2820,17 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
-    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
 
     await fireEvent.input(apiKeyInput, { target: { value: "sk-unsaved-key" } });
 
@@ -2815,7 +2861,6 @@ describe("SettingsPanel", () => {
       api_key: "",
       model: "gpt-4o-mini",
       language: "en",
-      summary_enabled: true,
     };
     twoProfiles.profiles.dev = {
       name: "dev",
@@ -2828,7 +2873,6 @@ describe("SettingsPanel", () => {
         api_key: "",
         model: "gpt-4o-mini",
         language: "en",
-        summary_enabled: true,
       },
     };
 
@@ -2844,17 +2888,17 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
-    const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
+    const activeProfile = rendered.container.querySelector(".profile-select") as HTMLSelectElement;
 
     await fireEvent.input(apiKeyInput, { target: { value: "sk-profile-a" } });
     await fireEvent.change(activeProfile, { target: { value: "dev" } });
@@ -2889,7 +2933,6 @@ describe("SettingsPanel", () => {
       api_key: "sk_test_ab_cd",
       model: "gpt-4o-mini",
       language: "en",
-      summary_enabled: true,
     };
 
     invokeMock.mockImplementation(async (command: string) => {
@@ -2904,14 +2947,14 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(3);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
     });
 
     await switchToTab(rendered, "Profiles");
-    await rendered.findByText("API Key");
+    await rendered.findByText("API key");
 
-    const apiKeyField = Array.from(rendered.container.querySelectorAll(".ai-field")).find((f) =>
-      (f.textContent ?? "").includes("API Key")
+    const apiKeyField = Array.from(rendered.container.querySelectorAll(".settings-section-body .field")).find((f) =>
+      (f.textContent ?? "").includes("API key")
     ) as HTMLElement;
     const apiKeyInput = apiKeyField.querySelector("input") as HTMLInputElement;
     const peekBtn = rendered.container.querySelector(".btn-peek-apikey") as HTMLButtonElement;
