@@ -137,7 +137,6 @@ export async function restoreCurrentWindowSession(
       probe.kind === "migrationRequired" &&
       normalizeText(probe.migrationSourceRoot)
     ) {
-      clearSession(normalizedLabel, storage);
       return {
         kind: "migrationRequired",
         sourceRoot: normalizeText(probe.migrationSourceRoot)!,
