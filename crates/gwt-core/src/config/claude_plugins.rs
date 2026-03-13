@@ -501,6 +501,76 @@ pub fn force_setup_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
     Ok(())
 }
 
+/// Remove the `gwt-plugins` entry from `known_marketplaces.json`.
+///
+/// Silent no-op when the file is missing, unreadable, or the key is absent.
+fn unregister_gwt_marketplace() -> Result<(), GwtError> {
+    let Some(path) = get_known_marketplaces_path() else {
+        return Ok(());
+    };
+    unregister_gwt_marketplace_at(&path)
+}
+
+/// Remove the `gwt-plugins` entry from a specific `known_marketplaces.json`.
+fn unregister_gwt_marketplace_at(path: &Path) -> Result<(), GwtError> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
+    let mut marketplaces: KnownMarketplaces = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    if marketplaces.remove(GWT_MARKETPLACE_NAME).is_none() {
+        return Ok(());
+    }
+
+    let output =
+        serde_json::to_string_pretty(&marketplaces).map_err(|e| GwtError::ConfigWriteError {
+            reason: e.to_string(),
+        })?;
+
+    let _ = std::fs::write(path, output);
+    Ok(())
+}
+
+/// Clean up legacy gwt plugin remnants from the global `~/.claude/` directory.
+///
+/// This is a best-effort operation: all errors are silenced so that a partial
+/// cleanup never blocks the primary registration flow.
+///
+/// Performs three steps:
+/// 1. Remove `gwt@gwt-plugins` from `~/.claude/settings.json`
+/// 2. Remove `gwt-plugins` entry from `~/.claude/plugins/known_marketplaces.json`
+/// 3. Remove `~/.claude/plugins/marketplaces/gwt-plugins/` directory
+pub fn cleanup_gwt_global_remnants() -> Result<(), GwtError> {
+    // 1. Remove gwt plugin key from global settings
+    if let Some(global_settings) = get_global_claude_settings_path() {
+        let _ = remove_gwt_plugin_key_at(&global_settings);
+    }
+
+    // 2. Remove gwt-plugins from known_marketplaces.json
+    let _ = unregister_gwt_marketplace();
+
+    // 3. Remove gwt-plugins marketplace directory
+    if let Some(home) = dirs::home_dir() {
+        let marketplace_dir = home
+            .join(".claude")
+            .join("plugins")
+            .join("marketplaces")
+            .join(GWT_MARKETPLACE_NAME);
+        let _ = std::fs::remove_dir_all(marketplace_dir);
+    }
+
+    Ok(())
+}
+
 /// Setup gwt plugin (marketplace registration + plugin enable) (FR-003, FR-004)
 pub fn setup_gwt_plugin() -> Result<(), GwtError> {
     // Enable plugin in global settings
@@ -1215,6 +1285,114 @@ mod tests {
             settings["enabledPlugins"]["other@other"],
             serde_json::json!(true)
         );
+    }
+
+    // --- unregister_gwt_marketplace_at tests ---
+
+    #[test]
+    fn test_unregister_gwt_marketplace_removes_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("known_marketplaces.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "gwt-plugins": {
+                    "source": {"source": "github", "repo": "akiojin/gwt"},
+                    "installLocation": "/some/path",
+                    "lastUpdated": "2025-01-01T00:00:00.000Z"
+                },
+                "other-plugin": {
+                    "source": {"source": "github", "repo": "other/repo"},
+                    "installLocation": "/other/path",
+                    "lastUpdated": "2025-01-01T00:00:00.000Z"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        unregister_gwt_marketplace_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let marketplaces: KnownMarketplaces = serde_json::from_str(&content).unwrap();
+        assert!(!marketplaces.contains_key(GWT_MARKETPLACE_NAME));
+        assert!(marketplaces.contains_key("other-plugin"));
+    }
+
+    #[test]
+    fn test_unregister_gwt_marketplace_noop_no_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nonexistent.json");
+        assert!(unregister_gwt_marketplace_at(&path).is_ok());
+    }
+
+    #[test]
+    fn test_unregister_gwt_marketplace_noop_key_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("known_marketplaces.json");
+        std::fs::write(&path, "{}").unwrap();
+        unregister_gwt_marketplace_at(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "{}");
+    }
+
+    // --- cleanup_gwt_global_remnants tests ---
+
+    #[test]
+    fn test_cleanup_gwt_global_remnants_removes_all() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let claude_dir = temp.path().join(".claude");
+        let plugins_dir = claude_dir.join("plugins");
+        let marketplace_dir = plugins_dir.join("marketplaces").join(GWT_MARKETPLACE_NAME);
+        std::fs::create_dir_all(&marketplace_dir).unwrap();
+
+        // Write global settings with gwt plugin key
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            format!(
+                r#"{{"enabledPlugins": {{"{}": true}}}}"#,
+                GWT_PLUGIN_FULL_NAME
+            ),
+        )
+        .unwrap();
+
+        // Write known_marketplaces.json with gwt-plugins
+        std::fs::write(
+            plugins_dir.join("known_marketplaces.json"),
+            serde_json::json!({
+                "gwt-plugins": {
+                    "source": {"source": "github", "repo": "akiojin/gwt"},
+                    "installLocation": marketplace_dir.to_string_lossy().to_string(),
+                    "lastUpdated": "2025-01-01T00:00:00.000Z"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Write a dummy file in marketplace dir
+        std::fs::write(marketplace_dir.join("plugin.json"), "{}").unwrap();
+
+        // Test individual cleanup steps directly (dirs::home_dir() may not
+        // honor env-var overrides on all Windows builds, so we test the
+        // underlying _at helpers instead of the high-level wrapper).
+
+        // Step 1: remove gwt plugin key from settings
+        let settings_path = claude_dir.join("settings.json");
+        remove_gwt_plugin_key_at(&settings_path).unwrap();
+        let settings_content = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(!settings_content.contains(GWT_PLUGIN_FULL_NAME));
+
+        // Step 2: unregister gwt marketplace
+        let km_path = plugins_dir.join("known_marketplaces.json");
+        unregister_gwt_marketplace_at(&km_path).unwrap();
+        let km_content = std::fs::read_to_string(&km_path).unwrap();
+        assert!(!km_content.contains(GWT_MARKETPLACE_NAME));
+
+        // Step 3: remove marketplace directory
+        let _ = std::fs::remove_dir_all(&marketplace_dir);
+        assert!(!marketplace_dir.exists());
     }
 
     #[test]

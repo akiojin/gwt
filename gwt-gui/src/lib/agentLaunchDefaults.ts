@@ -11,6 +11,7 @@ export type LaunchDefaults = {
   agentVersionByAgent: Record<string, string>;
   skipPermissions: boolean;
   reasoningLevel: string;
+  fastMode: boolean;
   resumeSessionId: string;
   showAdvanced: boolean;
   extraArgsText: string;
@@ -79,6 +80,7 @@ function sanitizeLaunchDefaults(value: unknown): LaunchDefaults {
     agentVersionByAgent: sanitizeStringRecord(raw.agentVersionByAgent),
     skipPermissions: raw.skipPermissions === true,
     reasoningLevel: normalizeString(raw.reasoningLevel),
+    fastMode: raw.fastMode === true,
     resumeSessionId: normalizeString(raw.resumeSessionId),
     showAdvanced: raw.showAdvanced === true,
     extraArgsText: normalizeString(raw.extraArgsText),

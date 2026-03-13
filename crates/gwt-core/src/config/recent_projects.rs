@@ -1,17 +1,13 @@
-//! Recent projects persistence (`~/.gwt/recent-projects.toml`)
+//! Recent projects persistence inside `~/.gwt/config.toml`.
 //!
-//! Stores project open history as TOML.
 //! - Entries are deduplicated by path (same path updates `last_opened`).
 //! - Non-existent paths are automatically removed on load.
 
-use crate::config::migration::write_atomic;
+use super::settings::Settings;
 use crate::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use tracing::{debug, warn};
-
-const RECENT_PROJECTS_FILE: &str = "recent-projects.toml";
 
 /// A single recent project entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -20,74 +16,45 @@ pub struct RecentProject {
     pub last_opened: DateTime<Utc>,
 }
 
-/// Top-level TOML structure for `recent-projects.toml`.
+/// Top-level TOML structure for `[recent_projects]`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct RecentProjectsData {
+pub struct RecentProjectsConfig {
     #[serde(default)]
-    projects: Vec<RecentProject>,
+    pub projects: Vec<RecentProject>,
 }
 
-fn recent_projects_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".gwt").join(RECENT_PROJECTS_FILE))
-}
-
-/// Load recent projects from `~/.gwt/recent-projects.toml`.
+/// Load recent projects from `~/.gwt/config.toml`.
 ///
 /// Returns entries sorted by `last_opened` descending (most recent first).
-/// Non-existent paths are automatically removed and the file is rewritten.
 pub fn load_recent_projects() -> Vec<RecentProject> {
-    let Some(path) = recent_projects_path() else {
-        return vec![];
-    };
-
-    if !path.exists() {
-        return vec![];
-    }
-
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
+    let settings = match Settings::load_global_raw() {
+        Ok(settings) => settings,
         Err(e) => {
             warn!(
                 category = "config",
-                path = %path.display(),
                 error = %e,
-                "Failed to read recent projects file"
+                "Failed to load config.toml for recent projects"
             );
             return vec![];
         }
     };
 
-    let data: RecentProjectsData = match toml::from_str(&content) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!(
-                category = "config",
-                path = %path.display(),
-                error = %e,
-                "Failed to parse recent projects file"
-            );
-            return vec![];
-        }
-    };
-
-    let before_count = data.projects.len();
-    let mut projects: Vec<RecentProject> = data
+    let before_count = settings.recent_projects.projects.len();
+    let mut projects: Vec<RecentProject> = settings
+        .recent_projects
         .projects
         .into_iter()
         .filter(|p| std::path::Path::new(&p.path).exists())
         .collect();
 
-    // Sort by last_opened descending.
     projects.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
 
-    // Rewrite file if stale entries were removed.
     if projects.len() != before_count {
         debug!(
             category = "config",
             removed = before_count - projects.len(),
             "Cleaned stale recent project entries"
         );
-        let _ = save_recent_projects(&projects);
     }
 
     projects
@@ -115,41 +82,18 @@ pub fn record_recent_project(path: &str) -> Result<()> {
 
 /// Load raw entries without filtering non-existent paths.
 fn load_recent_projects_raw() -> Vec<RecentProject> {
-    let Some(path) = recent_projects_path() else {
-        return vec![];
-    };
-
-    if !path.exists() {
-        return vec![];
-    }
-
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-
-    let data: RecentProjectsData = match toml::from_str(&content) {
-        Ok(d) => d,
-        Err(_) => return vec![],
-    };
-
-    data.projects
+    Settings::load_global_raw()
+        .map(|settings| settings.recent_projects.projects)
+        .unwrap_or_default()
 }
 
 fn save_recent_projects(projects: &[RecentProject]) -> Result<()> {
-    let Some(path) = recent_projects_path() else {
-        return Ok(());
-    };
-
-    let data = RecentProjectsData {
-        projects: projects.to_vec(),
-    };
-    let content =
-        toml::to_string_pretty(&data).map_err(|e| crate::error::GwtError::ConfigWriteError {
-            reason: format!("Failed to serialize recent projects: {}", e),
-        })?;
-
-    write_atomic(&path, &content)
+    Settings::update_global(|settings| {
+        settings.recent_projects = RecentProjectsConfig {
+            projects: projects.to_vec(),
+        };
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -203,6 +147,27 @@ mod tests {
         assert!(second_time >= first_time);
         // Still only one entry
         assert_eq!(load_recent_projects().len(), 1);
+    }
+
+    #[test]
+    fn record_recent_project_does_not_persist_env_overrides() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = TestEnvGuard::new(temp.path());
+
+        let gwt_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&gwt_dir).unwrap();
+
+        let project_dir = temp.path().join("my-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
+        record_recent_project(&project_dir.to_string_lossy()).unwrap();
+        std::env::remove_var("GWT_DOCKER_FORCE_HOST");
+
+        let raw = Settings::load_global_raw().unwrap();
+        assert!(!raw.docker.force_host);
+        assert_eq!(raw.recent_projects.projects.len(), 1);
     }
 
     #[test]

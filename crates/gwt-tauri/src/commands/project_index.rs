@@ -1229,10 +1229,10 @@ mod tests {
 
         fs::create_dir_all(root.join(".gwt")).expect("create .gwt");
         fs::write(
-            root.join(".gwt/project.json"),
-            r#"{"bare_repo_name":"repo.git","migrated_at":"2026-01-01T00:00:00Z"}"#,
+            root.join(".gwt/project.toml"),
+            "bare_repo_name = \"repo.git\"\nlocation = \"sibling\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n",
         )
-        .expect("write project.json");
+        .expect("write project.toml");
 
         let bare = root.join("repo.git");
         let output = command_os("git")

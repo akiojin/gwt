@@ -133,6 +133,8 @@ pub struct LaunchAgentRequest {
     pub skip_permissions: Option<bool>,
     /// Codex reasoning override (e.g. "low", "medium", "high", "xhigh").
     pub reasoning_level: Option<String>,
+    /// Codex Fast mode toggle (`-c service_tier=fast`).
+    pub fast_mode: Option<bool>,
     /// Collaboration modes for Codex. Ignored (always enabled when version supports it).
     /// Kept for deserialization compatibility with older frontends.
     #[allow(dead_code)]
@@ -1638,6 +1640,7 @@ fn build_agent_args(
                 request.reasoning_level.as_deref(),
                 version_for_gates,
                 skip_permissions,
+                request.fast_mode.unwrap_or(false),
                 collaboration,
                 enable_codex_multi_agent,
             ));
@@ -3024,6 +3027,7 @@ mod tests {
             mode: None,
             skip_permissions: None,
             reasoning_level: None,
+            fast_mode: None,
             collaboration_modes: None,
             extra_args: None,
             env_overrides: None,
@@ -3189,6 +3193,16 @@ multi_agent = true
         assert!(args
             .iter()
             .any(|a| a == "model_auto_compact_token_limit=950000"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_fast_mode_adds_service_tier_for_gpt_5_4() {
+        let mut req = make_request("codex");
+        req.model = Some("gpt-5.4".to_string());
+        req.fast_mode = Some(true);
+
+        let args = build_agent_args("codex", &req, Some("0.111.0"), false).unwrap();
+        assert!(args.iter().any(|a| a == "service_tier=fast"));
     }
 
     #[test]
@@ -3676,7 +3690,6 @@ services:
                 api_key: "sk_test_profile_key".to_string(),
                 model: String::new(),
                 language: "en".to_string(),
-                summary_enabled: true,
             });
         }
         config.save().unwrap();
@@ -3705,7 +3718,6 @@ services:
                 api_key: "sk_test_profile_key".to_string(),
                 model: String::new(),
                 language: "en".to_string(),
-                summary_enabled: true,
             });
         }
         config.save().unwrap();
@@ -4774,6 +4786,11 @@ pub(crate) fn launch_agent_for_project_root(
             mode: mode_str.clone(),
             model: model.clone(),
             reasoning_level: reasoning_level.clone(),
+            fast_mode: if agent_id == "codex" {
+                request.fast_mode.unwrap_or(false)
+            } else {
+                false
+            },
             skip_permissions,
             collaboration_modes,
             docker_service: if matches!(docker_mode, DockerExecMode::Compose { .. }) {
@@ -6127,4 +6144,62 @@ pub async fn get_available_shells() -> Result<Vec<ShellInfo>, StructuredError> {
     {
         Ok(Vec::new())
     }
+}
+
+/// Sanitize a string to contain only alphanumeric characters, hyphens, and
+/// underscores so it is safe to embed in a file name.
+fn sanitize_filename_part(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Save clipboard image data to a temporary file and return its absolute path.
+#[tauri::command]
+pub fn save_clipboard_image(
+    pane_id: String,
+    data: Vec<u8>,
+    format: String,
+    app_handle: AppHandle,
+) -> Result<String, StructuredError> {
+    let _ = app_handle;
+
+    let safe_pane_id = sanitize_filename_part(&pane_id);
+    let safe_format = sanitize_filename_part(&format);
+    if safe_format.is_empty() {
+        return Err(StructuredError::internal(
+            "Invalid image format",
+            "save_clipboard_image",
+        ));
+    }
+
+    let home = dirs::home_dir().ok_or_else(|| {
+        StructuredError::internal("Failed to resolve home directory", "save_clipboard_image")
+    })?;
+    let images_dir = home.join(".gwt").join("tmp").join("images");
+    std::fs::create_dir_all(&images_dir).map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to create images directory: {}", e),
+            "save_clipboard_image",
+        )
+    })?;
+
+    let unique_id = Uuid::new_v4();
+    let filename = format!("{}_{}.{}", safe_pane_id, unique_id, safe_format);
+    let file_path = images_dir.join(&filename);
+
+    std::fs::write(&file_path, &data).map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to write image file: {}", e),
+            "save_clipboard_image",
+        )
+    })?;
+
+    Ok(file_path.to_string_lossy().into_owned())
 }

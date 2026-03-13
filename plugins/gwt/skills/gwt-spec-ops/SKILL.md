@@ -10,6 +10,7 @@ GitHub Issues are the single source of truth for specs. Manage every spec as an 
 `gwt-spec-ops` starts after the target SPEC issue has already been identified.
 
 - If the user starts from a plain Issue, use `gwt-issue-resolve` first.
+- If the user explicitly needs to create a brand-new SPEC and no canonical SPEC exists yet, use `gwt-spec-register`.
 - If the user already has a `gwt-spec` issue number, or the target SPEC destination is already known, continue with this skill.
 
 ## Mandatory preflight: search existing spec first

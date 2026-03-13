@@ -1182,28 +1182,17 @@ fn migrate_stash(source: &Path, _target: &Path) -> Result<(), MigrationError> {
 
 /// Create project config file (gwt-spec issue T905, FR-219)
 fn create_project_config(config: &MigrationConfig) -> Result<(), MigrationError> {
-    let gwt_dir = config.target_root.join(".gwt");
-    std::fs::create_dir_all(&gwt_dir).map_err(|e| MigrationError::IoError {
-        path: gwt_dir.clone(),
-        reason: format!("Failed to create .gwt directory: {}", e),
-    })?;
-
-    let config_path = gwt_dir.join("project.json");
-    let config_content = serde_json::json!({
-        "bare_repo_name": config.bare_repo_name,
-        "migrated_at": chrono::Utc::now().to_rfc3339(),
-    });
-
-    std::fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&config_content).unwrap(),
-    )
+    crate::config::BareProjectConfig {
+        bare_repo_name: config.bare_repo_name.clone(),
+        remote_url: None,
+        location: "sibling".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    }
+    .save(&config.target_root)
     .map_err(|e| MigrationError::IoError {
-        path: config_path,
+        path: config.target_root.join(".gwt").join("project.toml"),
         reason: format!("Failed to write project config: {}", e),
-    })?;
-
-    Ok(())
+    })
 }
 
 /// Preserve tracking relationships (gwt-spec issue T907, FR-221)
@@ -1363,7 +1352,7 @@ mod tests {
         std::fs::create_dir_all(source.join(".git")).unwrap();
         std::fs::write(source.join(".git/config"), "git").unwrap();
         std::fs::create_dir_all(source.join(".gwt")).unwrap();
-        std::fs::write(source.join(".gwt/project.json"), "{\"a\":1}").unwrap();
+        std::fs::write(source.join(".gwt/project.toml"), "a = 1\n").unwrap();
         std::fs::create_dir_all(source.join(".worktrees")).unwrap();
         std::fs::create_dir_all(source.join(".svn/pristine/00")).unwrap();
         std::fs::write(source.join(".svn/pristine/00/a.svn-base"), "svn").unwrap();
@@ -1372,7 +1361,7 @@ mod tests {
         evacuate_main_repo_files(&source, &temp_dir).unwrap();
 
         assert!(source.join(".git/config").exists());
-        assert!(source.join(".gwt/project.json").exists());
+        assert!(source.join(".gwt/project.toml").exists());
         assert!(source.join(".worktrees").exists());
         assert!(!source.join(".svn").exists());
         assert!(!source.join("notes.txt").exists());

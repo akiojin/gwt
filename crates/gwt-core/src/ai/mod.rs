@@ -31,6 +31,7 @@ pub use session_parser::{
 };
 pub use summary::{
     build_session_prompt, parse_summary_lines, summarize_scrollback, summarize_session,
+    ScrollbackCacheEntry, ScrollbackRollingContext, ScrollbackSummaryBuild, ScrollbackSummaryMode,
     SessionMetrics, SessionSummary, SessionSummaryCache, SESSION_SYSTEM_PROMPT_BASE,
 };
 

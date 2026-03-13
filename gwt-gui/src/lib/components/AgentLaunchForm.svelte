@@ -104,6 +104,7 @@
   let resumeSessionId: string = $state("");
   let skipPermissions: boolean = $state(false);
   let reasoningLevel: string = $state("");
+  let fastMode: boolean = $state(false);
 
   let showAdvanced: boolean = $state(false);
   let extraArgsText: string = $state("");
@@ -236,6 +237,7 @@
 
   let supportsModel = $derived(supportsModelFor(selectedAgent));
   let supportsReasoning = $derived(selectedAgent === "codex");
+  let supportsFastMode = $derived(selectedAgent === "codex" && model.trim() === "gpt-5.4");
   let needsResumeSessionId = $derived(
     selectedAgent === "opencode" && sessionMode === "resume"
   );
@@ -314,6 +316,7 @@
     agentVersionByAgent = { ...defaults.agentVersionByAgent };
     skipPermissions = defaults.skipPermissions;
     reasoningLevel = defaults.reasoningLevel;
+    fastMode = defaults.fastMode;
     resumeSessionId = defaults.resumeSessionId;
     showAdvanced = defaults.showAdvanced;
     extraArgsText = defaults.extraArgsText;
@@ -348,6 +351,7 @@
       agentVersionByAgent: nextAgentVersionByAgent,
       skipPermissions,
       reasoningLevel,
+      fastMode,
       resumeSessionId,
       showAdvanced,
       extraArgsText,
@@ -949,6 +953,10 @@
 
       if (supportsReasoning && reasoningLevel.trim()) {
         request.reasoningLevel = reasoningLevel.trim();
+      }
+
+      if (supportsFastMode) {
+        request.fastMode = fastMode;
       }
 
       const extraArgs = parseExtraArgs(extraArgsText);
@@ -1604,6 +1612,19 @@
               <option value="high">high</option>
               <option value="xhigh">xhigh</option>
             </select>
+          </div>
+        {/if}
+
+        {#if supportsFastMode}
+          <div class="field">
+            <span class="field-label">Launch</span>
+            <label class="check-row">
+              <input type="checkbox" bind:checked={fastMode} />
+              <span>Fast mode</span>
+            </label>
+            <span class="field-hint">
+              Adds <code>-c service_tier=fast</code> for `gpt-5.4` launches.
+            </span>
           </div>
         {/if}
 

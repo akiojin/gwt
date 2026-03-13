@@ -207,7 +207,6 @@ export interface AISettings {
   api_key: string;
   model: string;
   language: "auto" | "ja" | "en" | (string & {});
-  summary_enabled: boolean;
 }
 
 export interface Profile {
@@ -222,7 +221,6 @@ export interface Profile {
 export interface ProfilesConfig {
   version: number;
   active?: string | null;
-  default_ai?: AISettings | null;
   profiles: Record<string, Profile>;
 }
 
@@ -575,6 +573,7 @@ export interface LaunchAgentRequest {
   mode?: "normal" | "continue" | "resume";
   skipPermissions?: boolean;
   reasoningLevel?: string;
+  fastMode?: boolean;
   extraArgs?: string[];
   envOverrides?: Record<string, string>;
   resumeSessionId?: string;

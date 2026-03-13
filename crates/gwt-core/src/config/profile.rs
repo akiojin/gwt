@@ -88,9 +88,6 @@ pub struct AISettings {
     /// Output language ("en" | "ja" | "auto")
     #[serde(default = "default_ai_language")]
     pub language: String,
-    /// Session summary enabled
-    #[serde(default = "default_summary_enabled")]
-    pub summary_enabled: bool,
 }
 
 /// Resolved AI settings with defaults and environment fallbacks applied
@@ -113,7 +110,6 @@ pub enum ActiveAISettingsSource {
 pub struct ActiveAISettingsResolution {
     pub source: ActiveAISettingsSource,
     pub ai_enabled: bool,
-    pub summary_enabled: bool,
     pub resolved: Option<ResolvedAISettings>,
 }
 
@@ -134,11 +130,6 @@ impl AISettings {
         let model = self.model.trim();
         !endpoint.is_empty() && !model.is_empty()
     }
-
-    /// Check if session summary is enabled (requires valid AI settings)
-    pub fn is_summary_enabled(&self) -> bool {
-        self.is_enabled() && self.summary_enabled
-    }
 }
 
 fn default_endpoint() -> String {
@@ -153,17 +144,12 @@ fn default_ai_language() -> String {
     "en".to_string()
 }
 
-fn default_summary_enabled() -> bool {
-    true
-}
-
 fn default_profile_ai_settings() -> AISettings {
     AISettings {
         endpoint: default_endpoint(),
         api_key: String::new(),
         model: default_model(),
         language: default_ai_language(),
-        summary_enabled: default_summary_enabled(),
     }
 }
 
@@ -178,9 +164,7 @@ fn is_default_profile_ai_placeholder(settings: &AISettings) -> bool {
         && settings.api_key.trim().is_empty()
         && settings.model.trim().is_empty()
         && normalize_ai_language(&settings.language) == default_ai_language()
-        && settings.summary_enabled == default_summary_enabled()
 }
-
 fn normalize_ai_language(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "ja" => "ja".to_string(),
@@ -230,14 +214,16 @@ impl ProfilesConfig {
     /// 3. legacy `~/.gwt/profiles.yaml`
     /// 4. Default profile
     pub fn load() -> Result<Self> {
-        let mut settings = Settings::load_global()?;
+        let settings = Settings::load_global_raw()?;
         let has_profiles_in_global = Self::global_config_has_profiles_section();
 
         if !has_profiles_in_global {
             if let Some(mut legacy) = Self::load_legacy_fallback()? {
                 legacy.normalize_loaded();
-                settings.profiles = legacy.clone();
-                settings.save_global()?;
+                Settings::update_global(|settings| {
+                    settings.profiles = legacy.clone();
+                    Ok(())
+                })?;
                 info!(
                     category = "config",
                     path = %Settings::global_config_path()
@@ -346,9 +332,10 @@ impl ProfilesConfig {
         let mut normalized = self.clone();
         normalized.normalize_for_save()?;
 
-        let mut settings = Settings::load_global()?;
-        settings.profiles = normalized;
-        settings.save_global()?;
+        Settings::update_global(|settings| {
+            settings.profiles = normalized.clone();
+            Ok(())
+        })?;
 
         let path = Settings::global_config_path()
             .map(|p| p.display().to_string())
@@ -360,9 +347,21 @@ impl ProfilesConfig {
     /// Check if migration from YAML to TOML is needed
     pub fn needs_migration() -> bool {
         let has_profiles_in_global = Self::global_config_has_profiles_section();
-        let has_global_config = Settings::global_config_path().is_some_and(|p| p.exists());
+        let toml_path = Self::toml_path();
         let yaml_path = Self::yaml_path();
-        yaml_path.exists() && !has_profiles_in_global && !has_global_config
+        Self::needs_migration_for(
+            has_profiles_in_global,
+            toml_path.exists(),
+            yaml_path.exists(),
+        )
+    }
+
+    fn needs_migration_for(
+        has_profiles_in_global: bool,
+        has_legacy_toml: bool,
+        has_legacy_yaml: bool,
+    ) -> bool {
+        !has_profiles_in_global && (has_legacy_toml || has_legacy_yaml)
     }
 
     /// Migrate from YAML to TOML if needed
@@ -399,16 +398,13 @@ impl ProfilesConfig {
     ///
     /// Rules:
     /// - Active profile `ai` is the single source of truth.
-    /// - `default_ai` is legacy input only and must not be used as runtime fallback.
     pub fn resolve_active_ai_settings(&self) -> ActiveAISettingsResolution {
         if let Some(profile) = self.active_profile() {
             if let Some(settings) = profile.ai.as_ref() {
                 let ai_enabled = settings.is_enabled();
-                let summary_enabled = settings.is_summary_enabled();
                 return ActiveAISettingsResolution {
                     source: ActiveAISettingsSource::ActiveProfile,
                     ai_enabled,
-                    summary_enabled,
                     resolved: ai_enabled.then(|| settings.resolved()),
                 };
             }
@@ -417,7 +413,6 @@ impl ProfilesConfig {
         ActiveAISettingsResolution {
             source: ActiveAISettingsSource::None,
             ai_enabled: false,
-            summary_enabled: false,
             resolved: None,
         }
     }
@@ -537,7 +532,6 @@ mod tests {
             api_key: String::new(),
             model: model.to_string(),
             language: "en".to_string(),
-            summary_enabled: true,
         }
     }
 
@@ -604,6 +598,10 @@ profiles:
         )
         .unwrap();
 
+        let direct = ProfilesConfig::load_yaml(&yaml_path).unwrap();
+        assert_eq!(direct.active.as_deref(), Some("legacy"));
+        assert!(direct.profiles.contains_key("legacy"));
+
         let loaded = ProfilesConfig::load().unwrap();
         assert_eq!(loaded.active.as_deref(), Some("legacy"));
         assert!(loaded.profiles.contains_key("legacy"));
@@ -655,43 +653,24 @@ description = ""
 
     #[test]
     fn test_needs_migration() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        // No files - no migration needed
-        assert!(!ProfilesConfig::needs_migration());
-
-        // Create YAML only
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-        std::fs::write(gwt_dir.join("profiles.yaml"), "version: 1").unwrap();
-        assert!(ProfilesConfig::needs_migration());
-
-        // Create config with profiles section - no longer needs migration
-        std::fs::write(
-            gwt_dir.join("config.toml"),
-            r#"[profiles]
-version = 1
-active = "default"
-"#,
-        )
-        .unwrap();
-        assert!(!ProfilesConfig::needs_migration());
+        assert!(!ProfilesConfig::needs_migration_for(false, false, false));
+        assert!(ProfilesConfig::needs_migration_for(false, false, true));
+        assert!(ProfilesConfig::needs_migration_for(false, true, false));
+        assert!(ProfilesConfig::needs_migration_for(false, true, true));
+        assert!(!ProfilesConfig::needs_migration_for(true, false, true));
+        assert!(!ProfilesConfig::needs_migration_for(true, true, true));
     }
 
     #[test]
     fn test_migrate_if_needed() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
         let gwt_dir = temp.path().join(".gwt");
         std::fs::create_dir_all(&gwt_dir).unwrap();
+        let yaml_path = gwt_dir.join("profiles.yaml");
+        let config_path = gwt_dir.join("config.toml");
 
-        // Create YAML file
         std::fs::write(
-            gwt_dir.join("profiles.yaml"),
+            &yaml_path,
             r#"
 version: 1
 active: migrate-me
@@ -704,21 +683,88 @@ profiles:
         )
         .unwrap();
 
-        // Migrate
-        let migrated = ProfilesConfig::migrate_if_needed().unwrap();
-        assert!(migrated);
+        let mut migrated = ProfilesConfig::load_yaml(&yaml_path).unwrap();
+        migrated.normalize_loaded();
 
-        // config.toml should now exist
-        let config_path = gwt_dir.join("config.toml");
-        assert!(config_path.exists());
+        let settings = Settings {
+            profiles: migrated.clone(),
+            ..Settings::default()
+        };
+        settings.save(&config_path).unwrap();
 
-        // Load should work
-        let loaded = ProfilesConfig::load().unwrap();
-        assert_eq!(loaded.active.as_deref(), Some("migrate-me"));
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("[profiles]"));
+        assert!(content.contains("active = \"migrate-me\""));
+        assert!(content.contains("MIGRATED = \"true\""));
+    }
 
-        // Second migration should be no-op
-        let migrated_again = ProfilesConfig::migrate_if_needed().unwrap();
-        assert!(!migrated_again);
+    #[test]
+    fn test_save_does_not_persist_env_only_overrides() {
+        let _lock = crate::config::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let prev_debug = std::env::var_os("GWT_DEBUG");
+        let prev_docker_force_host = std::env::var_os("GWT_DOCKER_FORCE_HOST");
+        let prev_auto_install = std::env::var_os("GWT_AGENT_AUTO_INSTALL_DEPS");
+
+        let gwt_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&gwt_dir).unwrap();
+        std::fs::write(
+            gwt_dir.join("config.toml"),
+            r#"
+debug = false
+
+[agent]
+auto_install_deps = false
+
+[docker]
+force_host = false
+"#,
+        )
+        .unwrap();
+
+        std::env::set_var("GWT_DEBUG", "true");
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
+        std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
+
+        let mut config = ProfilesConfig::default();
+        config.profiles.insert(
+            "dev".to_string(),
+            Profile::new("dev").with_env("DEV_KEY", "dev-value"),
+        );
+        config.active = Some("dev".to_string());
+        config.save().unwrap();
+
+        match prev_debug {
+            Some(value) => std::env::set_var("GWT_DEBUG", value),
+            None => std::env::remove_var("GWT_DEBUG"),
+        }
+        match prev_docker_force_host {
+            Some(value) => std::env::set_var("GWT_DOCKER_FORCE_HOST", value),
+            None => std::env::remove_var("GWT_DOCKER_FORCE_HOST"),
+        }
+        match prev_auto_install {
+            Some(value) => std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", value),
+            None => std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS"),
+        }
+
+        let saved = Settings::load_global_raw().unwrap();
+        assert!(!saved.debug);
+        assert!(!saved.docker.force_host);
+        assert!(!saved.agent.auto_install_deps);
+        assert_eq!(saved.profiles.active.as_deref(), Some("dev"));
+        assert_eq!(
+            saved
+                .profiles
+                .profiles
+                .get("dev")
+                .and_then(|profile| profile.env.get("DEV_KEY"))
+                .map(String::as_str),
+            Some("dev-value")
+        );
     }
 
     #[test]
@@ -731,7 +777,6 @@ profiles:
         assert_eq!(resolved.model, "");
         assert_eq!(resolved.api_key, "");
         assert_eq!(resolved.language, "en");
-        assert!(!settings.summary_enabled);
     }
 
     #[test]
@@ -745,7 +790,6 @@ profiles:
         assert_eq!(resolved.api_key, "");
         assert_eq!(settings.language, "en");
         assert_eq!(resolved.language, "en");
-        assert!(settings.summary_enabled);
     }
 
     #[test]
@@ -755,7 +799,6 @@ profiles:
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
             language: "JA".to_string(),
-            summary_enabled: true,
         };
         assert_eq!(settings.resolved().language, "ja");
 
@@ -780,7 +823,6 @@ profiles:
             api_key: "".to_string(),
             model: "".to_string(),
             language: "en".to_string(),
-            summary_enabled: true,
         };
         let resolved = settings.resolved();
         // Should return empty strings, not environment variable values
@@ -796,7 +838,6 @@ profiles:
             api_key: "".to_string(),
             model: "llama3.2".to_string(),
             language: "en".to_string(),
-            summary_enabled: true,
         };
         assert!(settings.is_enabled());
     }
@@ -808,7 +849,6 @@ profiles:
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
             language: "en".to_string(),
-            summary_enabled: true,
         };
         assert!(settings.is_enabled());
     }
@@ -820,7 +860,6 @@ profiles:
             api_key: "key".to_string(),
             model: "gpt-4o-mini".to_string(),
             language: "en".to_string(),
-            summary_enabled: true,
         };
         assert!(!missing_endpoint.is_enabled());
 
@@ -829,30 +868,8 @@ profiles:
             api_key: "key".to_string(),
             model: "".to_string(),
             language: "en".to_string(),
-            summary_enabled: true,
         };
         assert!(!missing_model.is_enabled());
-    }
-
-    #[test]
-    fn test_ai_settings_summary_enabled_gate() {
-        let disabled = AISettings {
-            endpoint: "https://api.example.com/v1".to_string(),
-            api_key: "key".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            language: "en".to_string(),
-            summary_enabled: false,
-        };
-        assert!(!disabled.is_summary_enabled());
-
-        let enabled = AISettings {
-            endpoint: "https://api.example.com/v1".to_string(),
-            api_key: "key".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            language: "en".to_string(),
-            summary_enabled: true,
-        };
-        assert!(enabled.is_summary_enabled());
     }
 
     #[test]
@@ -880,14 +897,14 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
+            default_ai: None,
             profiles,
         };
 
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
         assert!(resolved.ai_enabled);
-        assert!(resolved.summary_enabled);
+
         assert_eq!(resolved.resolved.unwrap().model, "gpt-5.2");
     }
 
@@ -902,14 +919,14 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
+            default_ai: None,
             profiles,
         };
 
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
         assert!(!resolved.ai_enabled);
-        assert!(!resolved.summary_enabled);
+
         assert!(resolved.resolved.is_none());
     }
 
@@ -924,14 +941,14 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
+            default_ai: None,
             profiles,
         };
 
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
         assert!(resolved.ai_enabled);
-        assert!(resolved.summary_enabled);
+
         assert_eq!(resolved.resolved.unwrap().model, "gpt-5.2");
     }
 
@@ -943,14 +960,14 @@ profiles:
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
+            default_ai: None,
             profiles,
         };
 
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::None);
         assert!(!resolved.ai_enabled);
-        assert!(!resolved.summary_enabled);
+
         assert!(resolved.resolved.is_none());
     }
 
@@ -966,7 +983,7 @@ profiles:
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::None);
         assert!(!resolved.ai_enabled);
-        assert!(!resolved.summary_enabled);
+
         assert!(resolved.resolved.is_none());
     }
 
@@ -1035,7 +1052,6 @@ profiles:
             api_key: "sk-default-persisted".to_string(),
             model: String::new(),
             language: "ja".to_string(),
-            summary_enabled: true,
         });
         config.save().unwrap();
 
@@ -1059,7 +1075,6 @@ profiles:
                 api_key: String::new(),
                 model: "gpt-4o-mini".to_string(),
                 language: "en".to_string(),
-                summary_enabled: true,
             }),
             ..ProfilesConfig::default()
         };

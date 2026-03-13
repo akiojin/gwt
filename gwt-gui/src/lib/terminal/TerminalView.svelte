@@ -12,10 +12,12 @@
   let {
     paneId,
     active = false,
+    hasInputField = false,
     onReady,
   }: {
     paneId: string;
     active?: boolean;
+    hasInputField?: boolean;
     onReady?: (paneId: string) => void;
   } = $props();
 
@@ -165,6 +167,20 @@
     return modalHost instanceof HTMLElement;
   }
 
+  function shouldRefocusTerminalOnReactivation(rootEl: HTMLElement): boolean {
+    if (hasInputField) return false;
+    if (hasFocusedModalOutsideTerminal(rootEl)) return false;
+    return true;
+  }
+
+  function refocusTerminalOnReactivation(
+    rootEl: HTMLElement,
+    immediate = false,
+  ) {
+    if (!shouldRefocusTerminalOnReactivation(rootEl)) return;
+    focusTerminalIfNeeded(rootEl, immediate);
+  }
+
   function focusTerminalIfNeeded(rootEl: HTMLElement, immediate = false) {
     if (!active) return;
     if (!terminal) return;
@@ -200,6 +216,10 @@
     const rootEl = containerEl;
     if (!rootEl) return;
     if (!terminal) return;
+
+    // When an input field is present, skip auto-focusing xterm.js on tab
+    // activation so that the input field receives focus instead.
+    if (hasInputField) return;
 
     // Focus can fail if an overlay/modal is still on-screen when the tab becomes active.
     // Retry a few times shortly after activation to make trackpad scrolling reliable.
@@ -495,14 +515,12 @@
       focusTerminalIfNeeded(rootEl, true);
     };
     const handleWindowFocus = () => {
-      if (hasFocusedModalOutsideTerminal(rootEl)) return;
-      focusTerminalIfNeeded(rootEl, true);
+      refocusTerminalOnReactivation(rootEl, true);
       scheduleFitAfterBufferFlush({ rootEl });
     };
     const handleVisibilityChange = () => {
       if (document.hidden) return;
-      if (hasFocusedModalOutsideTerminal(rootEl)) return;
-      focusTerminalIfNeeded(rootEl);
+      refocusTerminalOnReactivation(rootEl);
       scheduleFitAfterBufferFlush({ rootEl });
     };
 
@@ -521,8 +539,7 @@
         unlistenTauriFocus = await getCurrentWindow().listen(
           "tauri://focus",
           () => {
-            if (hasFocusedModalOutsideTerminal(rootEl)) return;
-            focusTerminalIfNeeded(rootEl, true);
+            refocusTerminalOnReactivation(rootEl, true);
             scheduleFitAfterBufferFlush({ rootEl });
           },
         );

@@ -3,7 +3,7 @@
 //! Registration is project-scoped:
 //! - Codex: `<project>/.codex/skills`
 //! - Gemini: `<project>/.gemini/skills`
-//! - Claude: `<project>/.claude/{skills,commands,hooks}` + `<project>/.claude/settings.json`
+//! - Claude: `<project>/.claude/{skills,commands,hooks}` + `<project>/.claude/settings.local.json`
 
 use super::Settings;
 use crate::error::GwtError;
@@ -29,6 +29,7 @@ struct ManagedAsset {
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-issue-resolve",
+    "gwt-spec-register",
     "gwt-fix-pr",
     "gwt-spec-ops",
     "gwt-pr",
@@ -56,6 +57,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         )),
         executable: true,
         rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-register/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-register/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
     },
     ManagedAsset {
         relative_path: "skills/gwt-fix-pr/SKILL.md",
@@ -190,6 +200,15 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
+        relative_path: "commands/gwt-spec-register.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-register.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
         relative_path: "commands/gwt-fix-pr.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -286,9 +305,12 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
 
 const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
     "skills/gwt-fix-issue",
+    "skills/gwt-issue-ops",
     "skills/gwt-issue-spec-ops",
     "commands/gwt-fix-issue.md",
+    "commands/gwt-issue-ops.md",
     "commands/gwt-issue-spec-ops.md",
+    "commands/gwt-spec-ops.md",
 ];
 
 const SCOPE_NOT_CONFIGURED_CODE: &str = "SCOPE_NOT_CONFIGURED";
@@ -305,6 +327,7 @@ const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.claude/skills/gwt-*/",
     "/.claude/commands/gwt-*.md",
     "/.claude/hooks/scripts/gwt-*.mjs",
+    "/.claude/settings.local.json",
 ];
 const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".gwt/",
@@ -408,7 +431,9 @@ fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
     match agent {
         SkillAgentType::Claude => all_claude_assets()
             .map(|asset| format!(".claude/{}", asset.relative_path))
-            .chain(std::iter::once(".claude/settings.json hooks".to_string()))
+            .chain(std::iter::once(
+                ".claude/settings.local.json hooks".to_string(),
+            ))
             .collect(),
         SkillAgentType::Codex => project_asset_missing_items(".codex"),
         SkillAgentType::Gemini => project_asset_missing_items(".gemini"),
@@ -458,7 +483,7 @@ fn claude_root_for(project_root: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
-    claude_root_for(project_root).map(|root| root.join("settings.json"))
+    claude_root_for(project_root).map(|root| root.join("settings.local.json"))
 }
 
 #[cfg(test)]
@@ -466,15 +491,50 @@ fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
     write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")
 }
 
+/// Normalize settings.json to `{}` if it contains only empty/placeholder keys.
+///
+/// After gwt hooks migration, settings.json may be left with `{}` or
+/// `{"hooks": {}}`. This function normalizes such files to a clean `{}` so
+/// they do not confuse users or pollute git diffs.
+fn normalize_empty_settings(settings_path: &Path) {
+    let Ok(content) = std::fs::read_to_string(settings_path) else {
+        return;
+    };
+    let Ok(settings) = serde_json::from_str::<Value>(&content) else {
+        return;
+    };
+    let Some(obj) = settings.as_object() else {
+        return;
+    };
+
+    let is_empty_value = |v: &Value| {
+        matches!(v, Value::Object(o) if o.is_empty())
+            || matches!(v, Value::Array(a) if a.is_empty())
+    };
+    let dominated_by_empty = obj.values().all(is_empty_value);
+
+    if obj.is_empty() || dominated_by_empty {
+        let _ = std::fs::write(settings_path, "{}\n");
+    }
+}
+
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
     let root = project_root.join(".claude");
     let settings_path = root.join("settings.json");
 
+    // 1. Global cleanup (idempotent)
+    let _ = super::claude_plugins::cleanup_gwt_global_remnants();
+
+    // 2. Remove gwt entries from settings.json (migration)
     let _ = super::claude_plugins::remove_gwt_plugin_key_at(&settings_path);
     super::claude_hooks::unregister_gwt_hooks(&settings_path)?;
+    normalize_empty_settings(&settings_path);
     cleanup_legacy_claude_hook_scripts(&root)?;
 
+    // 3. Write file assets
     write_managed_assets(&root, all_claude_assets(), ".claude")?;
+
+    // 4. Merge hooks into settings.local.json
     merge_managed_claude_hooks_into_settings(&root)
 }
 
@@ -826,7 +886,7 @@ fn managed_hooks_definition() -> Value {
 }
 
 fn merge_managed_claude_hooks_into_settings(claude_root: &Path) -> Result<(), GwtError> {
-    let settings_path = claude_root.join("settings.json");
+    let settings_path = claude_root.join("settings.local.json");
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| GwtError::ConfigWriteError {
@@ -1282,8 +1342,8 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         );
     };
 
-    let settings_path =
-        claude_settings_path_for(project_root).unwrap_or_else(|| claude_root.join("settings.json"));
+    let settings_path = claude_settings_path_for(project_root)
+        .unwrap_or_else(|| claude_root.join("settings.local.json"));
 
     let mut missing_items = Vec::new();
 
@@ -1295,10 +1355,10 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
     }
 
     if !settings_path.exists() {
-        missing_items.push(".claude/settings.json".to_string());
+        missing_items.push(".claude/settings.local.json".to_string());
     } else {
         for event in missing_managed_hook_events(&settings_path) {
-            missing_items.push(format!(".claude/settings.json hooks.{event}"));
+            missing_items.push(format!(".claude/settings.local.json hooks.{event}"));
         }
     }
 
@@ -1552,7 +1612,7 @@ mod tests {
         let claude_path = claude_settings_path_for(Some(temp.path())).unwrap();
         assert_eq!(
             claude_path,
-            temp.path().join(".claude").join("settings.json")
+            temp.path().join(".claude").join("settings.local.json")
         );
     }
 
@@ -1686,8 +1746,8 @@ mod tests {
             .join("hooks.json")
             .exists());
 
-        let settings_path = temp.path().join(".claude").join("settings.json");
-        let content = std::fs::read_to_string(settings_path).unwrap();
+        let settings_local_path = temp.path().join(".claude").join("settings.local.json");
+        let content = std::fs::read_to_string(settings_local_path).unwrap();
         assert!(content.contains("gwt-forward-hook.mjs"));
         assert!(content.contains("gwt-block-git-branch-ops.mjs"));
         assert!(!content.contains("CLAUDE_PLUGIN_ROOT"));
@@ -1701,6 +1761,7 @@ mod tests {
         assert!(exclude.contains("/.claude/skills/gwt-*/"));
         assert!(exclude.contains("/.claude/commands/gwt-*.md"));
         assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.mjs"));
+        assert!(exclude.contains("/.claude/settings.local.json"));
     }
 
     #[test]
@@ -1890,6 +1951,17 @@ mod tests {
         assert!(issue_resolve_skill.contains("Direct fix path"));
         assert!(issue_resolve_skill.contains("gwt-project-index"));
 
+        let spec_register_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-register")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_register_skill.contains("Create a new GitHub Issue-first SPEC"));
+        assert!(spec_register_skill.contains("gwt-project-index"));
+
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
                 .join(".claude")
@@ -1899,11 +1971,80 @@ mod tests {
         .unwrap();
         assert!(issue_resolve_command.contains("direct fix"));
         assert!(issue_resolve_command.contains("existing SPEC"));
+
+        let spec_register_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-register.md"),
+        )
+        .unwrap();
+        assert!(spec_register_command.contains("Create a new Issue-first SPEC"));
+        assert!(spec_register_command.contains("gwt-project-index"));
+
         assert!(!temp
             .path()
             .join(".claude")
             .join("commands")
             .join("gwt-spec-ops.md")
+            .exists());
+    }
+
+    #[test]
+    fn registration_removes_retired_issue_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        let codex_issue_ops_dir = temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-ops");
+        std::fs::create_dir_all(&codex_issue_ops_dir).unwrap();
+        std::fs::write(codex_issue_ops_dir.join("SKILL.md"), "legacy").unwrap();
+
+        let claude_commands_dir = temp.path().join(".claude").join("commands");
+        std::fs::create_dir_all(&claude_commands_dir).unwrap();
+        std::fs::write(claude_commands_dir.join("gwt-issue-ops.md"), "legacy").unwrap();
+        std::fs::write(claude_commands_dir.join("gwt-spec-ops.md"), "legacy").unwrap();
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Codex,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        assert!(!temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-ops")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-issue-ops.md")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-spec-ops.md")
+            .exists());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-resolve")
+            .join("SKILL.md")
             .exists());
     }
 
@@ -1977,8 +2118,21 @@ mod tests {
             .join("gwt-forward-hook.mjs")
             .exists());
 
+        // settings.json should have gwt hooks removed and be normalized
         let settings_content = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
         assert!(!settings_content.contains(super::super::claude_plugins::GWT_PLUGIN_FULL_NAME));
+        assert!(
+            !settings_content.contains("gwt-forward-hook"),
+            "gwt hooks should be removed from settings.json"
+        );
+
+        // hooks should be in settings.local.json
+        let local_content =
+            std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
+        assert!(
+            local_content.contains("gwt-forward-hook.mjs"),
+            "hooks should be in settings.local.json"
+        );
 
         let status = status_for_claude(Some(temp.path()));
         assert!(status.registered);
@@ -2205,6 +2359,77 @@ custom-pattern
         assert!(
             err.to_string().contains("missing end marker"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_empty_settings_cleans_empty_hooks() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        std::fs::write(&path, r#"{"hooks": {}}"#).unwrap();
+        normalize_empty_settings(&path);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "{}\n");
+    }
+
+    #[test]
+    fn normalize_empty_settings_preserves_meaningful_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let original = r#"{"hooks": {"PreToolUse": [{"matcher": "Bash"}]}}"#;
+        std::fs::write(&path, original).unwrap();
+        normalize_empty_settings(&path);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, original);
+    }
+
+    #[test]
+    fn migration_removes_gwt_hooks_from_settings_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        let claude_root = temp.path().join(".claude");
+        std::fs::create_dir_all(&claude_root).unwrap();
+
+        // Pre-populate settings.json with gwt hooks
+        std::fs::write(
+            claude_root.join("settings.json"),
+            serde_json::json!({
+                "hooks": {
+                    "UserPromptSubmit": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
+                        }]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        init_test_git_dir(temp.path());
+
+        register_agent_skills_with_settings_at_project_root(
+            SkillAgentType::Claude,
+            &settings,
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        // settings.json should be cleaned (hooks removed)
+        let settings_content = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
+        assert!(
+            !settings_content.contains("gwt-forward-hook"),
+            "gwt hooks should be removed from settings.json"
+        );
+
+        // settings.local.json should have the hooks
+        let local_content =
+            std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
+        assert!(
+            local_content.contains("gwt-forward-hook.mjs"),
+            "hooks should be in settings.local.json"
         );
     }
 }

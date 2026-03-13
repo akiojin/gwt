@@ -186,6 +186,20 @@ async function readFontFamilyPreview(page: Page) {
   }));
 }
 
+async function openSettingsFromMenu(page: Page) {
+  await waitForMenuActionListener(page);
+  await page.evaluate(() => {
+    const globalWindow = window as unknown as {
+      __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
+    };
+    globalWindow.__GWT_MOCK_EMIT_EVENT__?.("menu-action", {
+      action: "open-settings",
+    });
+  });
+
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page, {
     commandResponses: {
@@ -325,7 +339,9 @@ test("saves Settings Terminal default shell via Terminal tab", async ({ page }) 
   expect(savedSettings?.default_shell).toBe("wsl");
 });
 
-test("saves UI and terminal font families from Appearance tab", async ({ page }) => {
+test("saves UI and terminal font families from General and Terminal tabs", async ({
+  page,
+}) => {
   await openProjectAndSelectBranch(page, {
     list_worktree_branches: [branchMain, branchDevelop, branchFeature],
     list_remote_branches: [],
@@ -335,22 +351,13 @@ test("saves UI and terminal font families from Appearance tab", async ({ page })
     get_available_shells: availableShells,
   });
 
-  await waitForMenuActionListener(page);
-  await page.evaluate(() => {
-    const globalWindow = window as unknown as {
-      __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
-    };
-    globalWindow.__GWT_MOCK_EMIT_EVENT__?.("menu-action", {
-      action: "open-settings",
-    });
-  });
+  await openSettingsFromMenu(page);
+  await expect(page.getByRole("button", { name: "General", exact: true })).toHaveClass(/active/);
 
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Appearance", exact: true })).toHaveClass(/active/);
-
-  await page.getByLabel("UI Font Family").selectOption(UI_FONT_FAMILY_INTER);
+  await page.getByLabel("UI font family").selectOption(UI_FONT_FAMILY_INTER);
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
   await page
-    .getByLabel("Terminal Font Family")
+    .getByLabel("Terminal font family")
     .selectOption(TERMINAL_FONT_FAMILY_CASCADIA);
 
   const preview = await readFontFamilyPreview(page);
@@ -388,21 +395,12 @@ test("restores font family preview on Close without saving", async ({ page }) =>
     get_available_shells: availableShells,
   });
 
-  await waitForMenuActionListener(page);
-  await page.evaluate(() => {
-    const globalWindow = window as unknown as {
-      __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
-    };
-    globalWindow.__GWT_MOCK_EMIT_EVENT__?.("menu-action", {
-      action: "open-settings",
-    });
-  });
+  await openSettingsFromMenu(page);
 
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-
-  await page.getByLabel("UI Font Family").selectOption(UI_FONT_FAMILY_INTER);
+  await page.getByLabel("UI font family").selectOption(UI_FONT_FAMILY_INTER);
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
   await page
-    .getByLabel("Terminal Font Family")
+    .getByLabel("Terminal font family")
     .selectOption(TERMINAL_FONT_FAMILY_CASCADIA);
 
   await page.locator(".settings-footer .btn-cancel", { hasText: "Close" }).click();
