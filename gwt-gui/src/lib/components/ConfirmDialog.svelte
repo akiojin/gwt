@@ -31,7 +31,7 @@
         ? document.activeElement
         : null;
       queueMicrotask(() => {
-        confirmButtonEl?.focus();
+        (confirmDanger ? cancelButtonEl : confirmButtonEl)?.focus();
       });
       return;
     }
