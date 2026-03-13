@@ -66,7 +66,6 @@
   import { createSystemMonitor } from "./lib/systemMonitor.svelte";
   import {
     deduplicateByProjectPath,
-    getWindowSession,
     loadWindowSessions,
     pruneWindowSessions,
     removeWindowSession,
@@ -76,6 +75,10 @@
     releaseWindowSessionRestoreLead,
     tryAcquireWindowSessionRestoreLead,
   } from "./lib/windowSessionRestoreLeader";
+  import {
+    openAndNormalizeRestoredWindowSession,
+    restoreCurrentWindowSession,
+  } from "./lib/windowSessionRestore";
   import { collectScreenText } from "./lib/screenCapture";
   import {
     isAllowedExternalHttpUrl,
@@ -651,15 +654,15 @@
       if (isRestoreLeader) {
         try {
           for (const entry of normalizedSessions) {
-            await openAndNormalizeWindowSession(entry.label, entry.projectPath);
+            await openAndNormalizeRestoredWindowSession(entry.label);
           }
           await new Promise<void>((resolve) => setTimeout(resolve, releaseDelayMs));
-          await restoreWindowSessionProject(label);
+          await applyRestoredWindowSession(label);
         } finally {
           await releaseWindowSessionRestoreLead(label);
         }
       } else {
-        await restoreWindowSessionProject(label);
+        await applyRestoredWindowSession(label);
       }
     })();
   });
@@ -1214,35 +1217,28 @@
     removeWindowSession(label);
   }
 
-  async function openAndNormalizeWindowSession(label: string, projectPath: string) {
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const openedLabelRaw = await invoke<unknown>("open_gwt_window", { label });
-      if (typeof openedLabelRaw !== "string") return;
-
-      const openedLabel = openedLabelRaw.trim();
-      if (!openedLabel || openedLabel === label) {
-        return;
-      }
-
-      removeWindowSession(label);
-      upsertWindowSession(openedLabel, projectPath);
-    } catch {
-      // Ignore restore failures: startup session restore is best-effort.
-    }
-  }
-
-  async function restoreWindowSessionProject(label: string) {
-    const session = getWindowSession(label);
-    if (!session?.projectPath) return false;
-
-    try {
-      await openProjectAndApplyCurrentWindow(session.projectPath);
+  async function applyRestoredWindowSession(label: string) {
+    const result = await restoreCurrentWindowSession(label);
+    if (result.kind === "opened") {
+      handleOpenedProjectPath(result.result.info.path);
       return true;
-    } catch {
-      removeWindowSession(label);
+    }
+    if (result.kind === "migrationRequired") {
+      migrationSourceRoot = result.sourceRoot;
+      migrationOpen = true;
+      return true;
+    }
+    if (result.kind === "focusedExisting") {
+      appError = result.focusedWindowLabel
+        ? `Project is already open in window ${result.focusedWindowLabel}.`
+        : "Project is already open in another window.";
       return false;
     }
+    if (result.kind === "error") {
+      appError = `Failed to restore project: ${result.message}`;
+      return false;
+    }
+    return false;
   }
 
   function handleOpenedProjectPath(path: string) {
