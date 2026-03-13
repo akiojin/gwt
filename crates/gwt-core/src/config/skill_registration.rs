@@ -505,11 +505,11 @@ fn normalize_empty_settings(settings_path: &Path) {
         return;
     };
 
-    // Check if all remaining keys are empty objects/arrays
-    let dominated_by_empty = obj.iter().all(|(_, v)| {
-        v.as_object().map(|o| o.is_empty()).unwrap_or(false)
-            || v.as_array().map(|a| a.is_empty()).unwrap_or(false)
-    });
+    let is_empty_value = |v: &Value| {
+        matches!(v, Value::Object(o) if o.is_empty())
+            || matches!(v, Value::Array(a) if a.is_empty())
+    };
+    let dominated_by_empty = obj.values().all(is_empty_value);
 
     if obj.is_empty() || dominated_by_empty {
         let _ = std::fs::write(settings_path, "{}\n");

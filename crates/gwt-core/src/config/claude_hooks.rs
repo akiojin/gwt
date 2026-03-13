@@ -128,7 +128,7 @@ fn is_gwt_hook_command(command: &str) -> bool {
 ///
 /// Matches commands like "node .claude/hooks/scripts/gwt-forward-hook.mjs Event".
 fn is_gwt_node_hook_command(command: &str) -> bool {
-    command.contains(".claude/hooks/scripts/gwt-")
+    command.starts_with("node .claude/hooks/scripts/gwt-")
 }
 
 /// Claude Code settings.json structure (partial)
