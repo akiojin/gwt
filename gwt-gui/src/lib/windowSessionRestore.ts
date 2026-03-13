@@ -1,8 +1,8 @@
 import type { OpenProjectResult, ProbePathResult } from "./types";
 import {
   getWindowSession,
+  renameWindowSession,
   removeWindowSession,
-  upsertWindowSession,
 } from "./windowSessions";
 
 type InvokeFn = <T = unknown>(
@@ -16,6 +16,16 @@ type StaleRestoreReason =
   | "notFound"
   | "notGwtProject";
 
+/**
+ * Result of restoring the current startup window session.
+ *
+ * `opened` means `open_project` succeeded for the probed path, `focusedExisting`
+ * means another window already owned the project, `migrationRequired` means the
+ * stored path must be migrated before opening, `stale` means the stored entry is
+ * invalid and was removed, `error` means a transient invoke failure occurred and
+ * the stored session was preserved for a later retry, and `noSession` means no
+ * usable session was available.
+ */
 export type RestoreCurrentWindowSessionResult =
   | { kind: "noSession" }
   | { kind: "opened"; result: OpenProjectResult }
@@ -24,6 +34,15 @@ export type RestoreCurrentWindowSessionResult =
   | { kind: "stale"; reason: StaleRestoreReason }
   | { kind: "error"; message: string };
 
+/**
+ * Result of opening a secondary restored window during startup recovery.
+ *
+ * `opened` means a new or normalized window label is ready, `migrationRequired`
+ * means the stored project must be migrated first, `stale` means the stored
+ * entry was invalid and removed, `error` means a transient invoke failure
+ * occurred and the session was preserved, and `noSession` means there was no
+ * usable stored session for the requested label.
+ */
 export type OpenAndNormalizeRestoredWindowSessionResult =
   | { kind: "noSession" }
   | { kind: "opened"; openedLabel: string }
@@ -69,6 +88,12 @@ function clearSession(label: string, storage?: Storage | null) {
   removeWindowSession(label, storage);
 }
 
+/**
+ * Restore the current window from the stored startup session.
+ *
+ * This may remove stale sessions, keep transient failures retriable, or surface
+ * migration/focused-existing outcomes without directly mutating App state.
+ */
 export async function restoreCurrentWindowSession(
   label: string,
   invokeFn?: InvokeFn,
@@ -130,11 +155,16 @@ export async function restoreCurrentWindowSession(
       message: probe.message || "Failed to restore project.",
     };
   } catch (err) {
-    clearSession(normalizedLabel, storage);
     return { kind: "error", message: toErrorMessage(err) };
   }
 }
 
+/**
+ * Open and normalize a secondary restored window session during startup.
+ *
+ * This may relabel the stored session atomically, remove stale entries, or keep
+ * transient failures retriable on the next app launch.
+ */
 export async function openAndNormalizeRestoredWindowSession(
   label: string,
   invokeFn?: InvokeFn,
@@ -164,8 +194,12 @@ export async function openAndNormalizeRestoredWindowSession(
       });
       const openedLabel = normalizeText(openedLabelRaw) ?? normalizedLabel;
       if (openedLabel !== normalizedLabel) {
-        clearSession(normalizedLabel, storage);
-        upsertWindowSession(openedLabel, normalizeText(probe.projectPath)!, storage);
+        renameWindowSession(
+          normalizedLabel,
+          openedLabel,
+          normalizeText(probe.projectPath)!,
+          storage,
+        );
       }
       return { kind: "opened", openedLabel };
     }
@@ -192,7 +226,6 @@ export async function openAndNormalizeRestoredWindowSession(
       message: probe.message || "Failed to restore window.",
     };
   } catch (err) {
-    clearSession(normalizedLabel, storage);
     return { kind: "error", message: toErrorMessage(err) };
   }
 }

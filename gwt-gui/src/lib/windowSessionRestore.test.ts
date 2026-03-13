@@ -147,6 +147,22 @@ describe("windowSessionRestore", () => {
     expect(getWindowSession("main", store)).toBeNull();
   });
 
+  it("preserves the current window session when invoke fails transiently", async () => {
+    const store = createMockStorage();
+    upsertWindowSession("main", "/tmp/project", store);
+    const invoke = vi.fn(async () => {
+      throw new Error("temporary invoke failure");
+    });
+
+    const result = await restoreCurrentWindowSession("main", invoke as any, store);
+
+    expect(result).toEqual({
+      kind: "error",
+      message: "temporary invoke failure",
+    });
+    expect(getWindowSession("main", store)?.projectPath).toBe("/tmp/project");
+  });
+
   it("opens a secondary restored window and normalizes its session label", async () => {
     const store = createMockStorage();
     upsertWindowSession("project-1", "/tmp/project", store);
@@ -207,5 +223,25 @@ describe("windowSessionRestore", () => {
     });
     expect(getWindowSession("project-1", store)).toBeNull();
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves secondary window sessions when invoke fails transiently", async () => {
+    const store = createMockStorage();
+    upsertWindowSession("project-1", "/tmp/project", store);
+    const invoke = vi.fn(async () => {
+      throw new Error("temporary invoke failure");
+    });
+
+    const result = await openAndNormalizeRestoredWindowSession(
+      "project-1",
+      invoke as any,
+      store,
+    );
+
+    expect(result).toEqual({
+      kind: "error",
+      message: "temporary invoke failure",
+    });
+    expect(getWindowSession("project-1", store)?.projectPath).toBe("/tmp/project");
   });
 });

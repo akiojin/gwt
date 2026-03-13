@@ -1221,24 +1221,24 @@
     const result = await restoreCurrentWindowSession(label);
     if (result.kind === "opened") {
       handleOpenedProjectPath(result.result.info.path);
-      return true;
+      return;
     }
     if (result.kind === "migrationRequired") {
       migrationSourceRoot = result.sourceRoot;
       migrationOpen = true;
-      return true;
+      return;
     }
     if (result.kind === "focusedExisting") {
       appError = result.focusedWindowLabel
         ? `Project is already open in window ${result.focusedWindowLabel}.`
         : "Project is already open in another window.";
-      return false;
+      return;
     }
     if (result.kind === "error") {
       appError = `Failed to restore project: ${result.message}`;
-      return false;
+      return;
     }
-    return false;
+    return;
   }
 
   function handleOpenedProjectPath(path: string) {
