@@ -29,6 +29,8 @@ pub struct PaneLaunchMeta {
     pub mode: String,
     pub model: Option<String>,
     pub reasoning_level: Option<String>,
+    #[allow(dead_code)]
+    pub fast_mode: bool,
     pub skip_permissions: bool,
     pub collaboration_modes: bool,
     pub docker_service: Option<String>,

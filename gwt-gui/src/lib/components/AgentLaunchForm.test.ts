@@ -391,6 +391,100 @@ describe("AgentLaunchForm", () => {
     expect(request.model).toBe("gpt-5.4");
   });
 
+  it("shows Fast mode only when codex gpt-5.4 is selected", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    expect(rendered.queryByLabelText("Fast mode")).toBeNull();
+
+    const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
+    await fireEvent.change(modelSelect, { target: { value: "gpt-5.4" } });
+
+    await waitFor(() => {
+      expect(rendered.getByLabelText("Fast mode")).toBeTruthy();
+    });
+
+    await fireEvent.change(modelSelect, { target: { value: "gpt-5.3-codex" } });
+
+    await waitFor(() => {
+      expect(rendered.queryByLabelText("Fast mode")).toBeNull();
+    });
+  });
+
+  it("passes enabled Fast mode for codex gpt-5.4 launches", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch,
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
+    await fireEvent.change(modelSelect, { target: { value: "gpt-5.4" } });
+
+    const fastModeCheckbox = await waitFor(
+      () => rendered.getByLabelText("Fast mode") as HTMLInputElement
+    );
+    await fireEvent.click(fastModeCheckbox);
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Launch" }));
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.model).toBe("gpt-5.4");
+    expect(request.fastMode).toBe(true);
+  });
+
   it("disables capitalization and completion helpers for text and textarea inputs", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
@@ -1387,6 +1481,7 @@ describe("AgentLaunchForm", () => {
       agentVersionByAgent: { codex: "installed" },
       skipPermissions: false,
       reasoningLevel: "",
+      fastMode: false,
       resumeSessionId: "",
       showAdvanced: false,
       extraArgsText: "",
@@ -1471,6 +1566,7 @@ describe("AgentLaunchForm", () => {
       agentVersionByAgent: { codex: "installed", "unknown-agent": "latest" },
       skipPermissions: true,
       reasoningLevel: "high",
+      fastMode: false,
       resumeSessionId: "resume-1",
       showAdvanced: true,
       extraArgsText: "--alpha",
@@ -2529,6 +2625,7 @@ describe("AgentLaunchForm", () => {
       agentVersionByAgent: {},
       skipPermissions: false,
       reasoningLevel: "",
+      fastMode: false,
       resumeSessionId: "",
       showAdvanced: false,
       extraArgsText: "",

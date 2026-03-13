@@ -74,7 +74,7 @@ describe("windowSessionRestore", () => {
     expect(getWindowSession("main", store)?.projectPath).toBe("/tmp/project");
   });
 
-  it("opens migration flow for the current window and removes the stale restore session", async () => {
+  it("opens migration flow for the current window and preserves the restore session", async () => {
     const store = createMockStorage();
     upsertWindowSession("main", "/tmp/project", store);
     const invoke = vi.fn(async (command: string) => {
@@ -94,7 +94,7 @@ describe("windowSessionRestore", () => {
       sourceRoot: "/tmp/project",
     });
     expect(invoke).toHaveBeenCalledTimes(1);
-    expect(getWindowSession("main", store)).toBeNull();
+    expect(getWindowSession("main", store)?.projectPath).toBe("/tmp/project");
   });
 
   it("clears the current restore session when the project focuses an existing window", async () => {
