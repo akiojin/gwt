@@ -15,7 +15,7 @@ describe("agentInputProfile", () => {
       const p = getAgentInputProfile("claude");
       expect(p).toBeDefined();
       expect(p!.agentId).toBe("claude");
-      expect(p!.send.suffixBytes).toEqual([0x0d]);
+      expect(p!.send.suffixBytes).toEqual([0x0a]);
     });
 
     it("returns codex profile", () => {
@@ -78,7 +78,7 @@ describe("agentInputProfile", () => {
     it("encodes single-line text with suffix for claude", () => {
       const profile = getAgentInputProfile("claude")!;
       const bytes = buildSendBytes(profile, "hello");
-      const expected = [...new TextEncoder().encode("hello"), 0x0d];
+      const expected = [...new TextEncoder().encode("hello"), 0x0a];
       expect(bytes).toEqual(expected);
     });
 
@@ -92,12 +92,12 @@ describe("agentInputProfile", () => {
     it("converts newlines using profile newlineBytes", () => {
       const profile = getAgentInputProfile("claude")!;
       const bytes = buildSendBytes(profile, "line1\nline2");
-      // claude: newlineBytes = [0x0a], suffix = 0x0d (CR)
+      // claude: newlineBytes = [0x0a], so \n stays as 0x0a
       const expected = [
         ...new TextEncoder().encode("line1"),
         0x0a,
         ...new TextEncoder().encode("line2"),
-        0x0d,
+        0x0a,
       ];
       expect(bytes).toEqual(expected);
     });
@@ -117,13 +117,13 @@ describe("agentInputProfile", () => {
     it("handles empty text", () => {
       const profile = getAgentInputProfile("claude")!;
       const bytes = buildSendBytes(profile, "");
-      expect(bytes).toEqual([0x0d]);
+      expect(bytes).toEqual([0x0a]);
     });
 
     it("handles multi-byte characters (Japanese)", () => {
       const profile = getAgentInputProfile("claude")!;
       const bytes = buildSendBytes(profile, "こんにちは");
-      const expected = [...new TextEncoder().encode("こんにちは"), 0x0d];
+      const expected = [...new TextEncoder().encode("こんにちは"), 0x0a];
       expect(bytes).toEqual(expected);
     });
   });

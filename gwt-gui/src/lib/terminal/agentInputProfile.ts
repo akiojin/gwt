@@ -25,7 +25,7 @@ export interface AgentInputProfile {
 const profiles: Record<string, AgentInputProfile> = {
   claude: {
     agentId: "claude",
-    send: { suffixBytes: [0x0d] },
+    send: { suffixBytes: [0x0a] },
     interrupt: { bytes: [0x1b] },
     imageSupport: { method: "path_reference" },
     newlineBytes: [0x0a],

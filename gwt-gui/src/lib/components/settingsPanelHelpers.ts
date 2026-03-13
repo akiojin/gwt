@@ -75,7 +75,7 @@ export function isDefaultProfileKey(key: string): boolean {
 
 export function isAiEnabled(profile: Profile | null): boolean {
   if (!profile) return false;
-  return !!profile.ai?.endpoint?.trim();
+  return !!profile.ai?.endpoint?.trim() && !!profile.ai?.model?.trim();
 }
 
 export function toErrorMessage(err: unknown): string {

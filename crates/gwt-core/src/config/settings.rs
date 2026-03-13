@@ -329,7 +329,14 @@ impl Settings {
         settings = Self::apply_runtime_env_overrides(settings);
         if let Some(path) = config_path.as_ref() {
             if !Self::is_global_config_path(path) {
-                let global_settings = Self::load_global().unwrap_or_default();
+                let global_settings = Self::load_global().unwrap_or_else(|e| {
+                    tracing::warn!(
+                        category = "config",
+                        error = %e,
+                        "Failed to load global settings, using defaults"
+                    );
+                    Self::default()
+                });
                 settings.agent_config = global_settings.agent_config;
                 settings.tools = global_settings.tools;
                 settings.recent_projects = global_settings.recent_projects;

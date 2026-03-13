@@ -12,7 +12,6 @@
     TERMINAL_FONT_PRESETS,
     getCurrentProfile,
     isDefaultProfileKey,
-    isAiEnabled,
     toErrorMessage,
     detectGpuAvailability,
     normalizeVoiceInputSettings,
@@ -232,7 +231,7 @@
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
 
-    if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
+    if (!profileKey || !ai || !ai?.endpoint?.trim()) {
       if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
         resetAiModelsState();
       }
@@ -320,7 +319,7 @@
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     const apiKey = apiKeyDraft.trim();
-    if (!profileKey || !ai || !endpoint || !isAiEnabled(currentProfile)) {
+    if (!profileKey || !ai || !endpoint) {
       aiModelsError = "Endpoint is required.";
       return;
     }
@@ -387,6 +386,8 @@
       await invoke("save_settings", { settings: plainSettings });
       if (profiles) {
         const plainProfiles = toPlainData(buildProfilesConfigWithApiKeyDraft());
+        const aiInPayload = plainProfiles.profiles?.[selectedProfileKey]?.ai;
+        console.debug("[gwt] save_profiles AI payload:", selectedProfileKey, aiInPayload);
         profiles = plainProfiles;
         await invoke("save_profiles", { config: plainProfiles });
       }
@@ -1107,6 +1108,11 @@
                       currentEndpoint &&
                       aiModelsLoadedKey === currentAiRequestKey}
                       <span class="field-hint">No models returned from /v1/models.</span>
+                    {/if}
+                    {#if currentEndpoint && !(currentAi?.model?.trim())}
+                      <span class="field-hint field-hint-warning">
+                        Both endpoint and model are required to enable AI features.
+                      </span>
                     {/if}
                   </div>
 
