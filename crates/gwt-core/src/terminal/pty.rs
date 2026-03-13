@@ -260,7 +260,8 @@ fn build_cmd_spawn_args(
     windows_force_utf8: bool,
 ) -> Vec<String> {
     if interactive {
-        let expression = format!("{expression} & exit");
+        let mut expression = expression;
+        expression.push_str(" & exit");
         if windows_force_utf8 {
             vec![
                 "/D".to_string(),
