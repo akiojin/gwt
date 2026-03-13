@@ -2,6 +2,7 @@
   import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
+  import TerminalInputField from "./TerminalInputField.svelte";
   import ProjectModePanel from "./ProjectModePanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
@@ -97,6 +98,7 @@
   let draggingTabId: string | null = $state(null);
   let terminalPendingTabId: string | null = $state(null);
   let visibleTerminalTabId: string | null = $state(null);
+  let terminalViewRefs = new Map<string, { focusTerminal: () => void }>();
   let terminalReadyTabIds: Set<string> = $state(new Set());
   let terminalActivationFallbackTimer: ReturnType<typeof setTimeout> | null =
     null;
@@ -490,11 +492,30 @@
 
     <div class="terminal-layer" class:hidden={!showTerminalLayer}>
       {#each agentTabs as tab (tab.id)}
-        <div class="terminal-wrapper" class:active={isTerminalTabVisible(tab.id)}>
-          <TerminalView
+        <div class="terminal-wrapper agent-wrapper" class:active={isTerminalTabVisible(tab.id)}>
+          <div class="terminal-view-area">
+            <TerminalView
+              paneId={tab.paneId}
+              active={activeTabId === tab.id}
+              hasInputField={true}
+              onReady={handleTerminalReady}
+            />
+          </div>
+          <TerminalInputField
             paneId={tab.paneId}
+            agentId={tab.agentId ?? ""}
             active={activeTabId === tab.id}
-            onReady={handleTerminalReady}
+            onFocusTerminal={() => {
+              const el = document.querySelector<HTMLDivElement>(
+                `.terminal-container[data-pane-id="${tab.paneId}"]`,
+              );
+              if (el) {
+                const term = (el as any).__gwtTerminal;
+                if (term) {
+                  try { term.focus(); } catch {}
+                }
+              }
+            }}
           />
         </div>
       {/each}
@@ -663,6 +684,17 @@
   .terminal-wrapper.active {
     visibility: visible;
     pointer-events: auto;
+  }
+
+  .terminal-wrapper.agent-wrapper {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .terminal-view-area {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
   }
 
   .placeholder {

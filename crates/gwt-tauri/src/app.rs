@@ -700,6 +700,7 @@ pub fn build_app(
             crate::commands::terminal::get_captured_environment,
             crate::commands::terminal::is_os_env_ready,
             crate::commands::terminal::get_available_shells,
+            crate::commands::terminal::save_clipboard_image,
             crate::commands::git_view::get_git_change_summary,
             crate::commands::git_view::get_branch_diff_files,
             crate::commands::git_view::get_file_diff,

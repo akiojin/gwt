@@ -12,10 +12,12 @@
   let {
     paneId,
     active = false,
+    hasInputField = false,
     onReady,
   }: {
     paneId: string;
     active?: boolean;
+    hasInputField?: boolean;
     onReady?: (paneId: string) => void;
   } = $props();
 
@@ -200,6 +202,10 @@
     const rootEl = containerEl;
     if (!rootEl) return;
     if (!terminal) return;
+
+    // When an input field is present, skip auto-focusing xterm.js on tab
+    // activation so that the input field receives focus instead.
+    if (hasInputField) return;
 
     // Focus can fail if an overlay/modal is still on-screen when the tab becomes active.
     // Retry a few times shortly after activation to make trackpad scrolling reliable.
@@ -496,7 +502,9 @@
     };
     const handleWindowFocus = () => {
       if (hasFocusedModalOutsideTerminal(rootEl)) return;
-      focusTerminalIfNeeded(rootEl, true);
+      if (!hasInputField) {
+        focusTerminalIfNeeded(rootEl, true);
+      }
       scheduleFitAfterBufferFlush({ rootEl });
     };
     const handleVisibilityChange = () => {

@@ -1,4 +1,4 @@
-import { getFocusedTerminalPaneId } from "./inputTargetRegistry";
+import { getFocusedTerminalPaneId, getInputFieldTarget } from "./inputTargetRegistry";
 
 export interface VoiceControllerSettings {
   enabled: boolean;
@@ -704,6 +704,12 @@ export class VoiceInputController {
   private async insertTranscript(text: string) {
     const focusedTerminalPaneId = getFocusedTerminalPaneId();
     if (focusedTerminalPaneId) {
+      // If the pane has an input field, insert into it instead of PTY
+      const inputField = getInputFieldTarget(focusedTerminalPaneId);
+      if (inputField) {
+        insertIntoTextarea(inputField, text);
+        return;
+      }
       await this.sendToTerminal(focusedTerminalPaneId, text);
       return;
     }
@@ -715,6 +721,13 @@ export class VoiceInputController {
     const paneId = this.options.getFallbackTerminalPaneId();
     if (!paneId) {
       this.setError("No active input target for voice transcript.");
+      return;
+    }
+
+    // Check fallback pane for input field too
+    const fallbackInputField = getInputFieldTarget(paneId);
+    if (fallbackInputField) {
+      insertIntoTextarea(fallbackInputField, text);
       return;
     }
 
