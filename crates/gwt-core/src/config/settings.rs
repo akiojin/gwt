@@ -794,6 +794,61 @@ model = "Qwen/Qwen3-ASR-1.7B"
     }
 
     #[test]
+    fn test_load_global_raw_ignores_env_overrides() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let prev_debug = std::env::var_os("GWT_DEBUG");
+        let prev_docker_force_host = std::env::var_os("GWT_DOCKER_FORCE_HOST");
+        let prev_auto_install = std::env::var_os("GWT_AGENT_AUTO_INSTALL_DEPS");
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            r#"
+debug = false
+
+[agent]
+auto_install_deps = false
+
+[docker]
+force_host = false
+"#,
+        )
+        .unwrap();
+
+        std::env::set_var("GWT_DEBUG", "true");
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
+        std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
+
+        let raw = Settings::load_global_raw().unwrap();
+        let merged = Settings::load_global().unwrap();
+
+        match prev_debug {
+            Some(value) => std::env::set_var("GWT_DEBUG", value),
+            None => std::env::remove_var("GWT_DEBUG"),
+        }
+        match prev_docker_force_host {
+            Some(value) => std::env::set_var("GWT_DOCKER_FORCE_HOST", value),
+            None => std::env::remove_var("GWT_DOCKER_FORCE_HOST"),
+        }
+        match prev_auto_install {
+            Some(value) => std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", value),
+            None => std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS"),
+        }
+
+        assert!(!raw.debug);
+        assert!(!raw.docker.force_host);
+        assert!(!raw.agent.auto_install_deps);
+
+        assert!(merged.debug);
+        assert!(merged.docker.force_host);
+        assert!(merged.agent.auto_install_deps);
+    }
+
+    #[test]
     fn test_load_ignores_runtime_gwt_agent_env() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();

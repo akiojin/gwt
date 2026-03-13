@@ -348,7 +348,7 @@ fn resolve_version_history_ai_settings(
     profiles: &ProfilesConfig,
 ) -> Option<gwt_core::config::ResolvedAISettings> {
     let ai = profiles.resolve_active_ai_settings();
-    if !ai.summary_enabled {
+    if !ai.ai_enabled {
         return None;
     }
     ai.resolved
@@ -1367,13 +1367,20 @@ mod tests {
         assert!(md.contains("### バグ修正"));
     }
 
-    fn ai_settings(summary_enabled: bool) -> AISettings {
+    fn ai_settings(enabled: bool) -> AISettings {
         AISettings {
-            endpoint: "https://api.openai.com/v1".to_string(),
+            endpoint: if enabled {
+                "https://api.openai.com/v1".to_string()
+            } else {
+                String::new()
+            },
             api_key: String::new(),
-            model: "gpt-5.2-codex".to_string(),
+            model: if enabled {
+                "gpt-5.2-codex".to_string()
+            } else {
+                String::new()
+            },
             language: "en".to_string(),
-            summary_enabled,
         }
     }
 
@@ -1690,6 +1697,7 @@ mod tests {
         let config = ProfilesConfig {
             version: 1,
             active: Some("default".to_string()),
+            default_ai: None,
             profiles,
         };
 
@@ -1704,6 +1712,7 @@ mod tests {
         let config = ProfilesConfig {
             version: 1,
             active: Some("default".to_string()),
+            default_ai: None,
             profiles,
         };
 
@@ -1720,6 +1729,7 @@ mod tests {
         let config = ProfilesConfig {
             version: 1,
             active: Some("default".to_string()),
+            default_ai: None,
             profiles,
         };
 
