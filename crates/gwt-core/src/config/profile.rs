@@ -686,8 +686,10 @@ profiles:
         let mut migrated = ProfilesConfig::load_yaml(&yaml_path).unwrap();
         migrated.normalize_loaded();
 
-        let mut settings = Settings::default();
-        settings.profiles = migrated.clone();
+        let settings = Settings {
+            profiles: migrated.clone(),
+            ..Settings::default()
+        };
         settings.save(&config_path).unwrap();
 
         let content = std::fs::read_to_string(&config_path).unwrap();
