@@ -347,9 +347,8 @@ impl ProfilesConfig {
     /// Check if migration from YAML to TOML is needed
     pub fn needs_migration() -> bool {
         let has_profiles_in_global = Self::global_config_has_profiles_section();
-        let has_global_config = Settings::global_config_path().is_some_and(|p| p.exists());
         let yaml_path = Self::yaml_path();
-        yaml_path.exists() && !has_profiles_in_global && !has_global_config
+        yaml_path.exists() && !has_profiles_in_global
     }
 
     /// Migrate from YAML to TOML if needed
@@ -649,14 +648,19 @@ description = ""
         assert!(!ProfilesConfig::needs_migration());
 
         // Create YAML only
-        let gwt_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-        std::fs::write(gwt_dir.join("profiles.yaml"), "version: 1").unwrap();
+        let yaml_path = ProfilesConfig::yaml_path();
+        std::fs::create_dir_all(yaml_path.parent().unwrap()).unwrap();
+        std::fs::write(&yaml_path, "version: 1").unwrap();
+        assert!(ProfilesConfig::needs_migration());
+
+        // Existing config without [profiles] should still migrate legacy YAML.
+        let config_path = Settings::global_config_path().unwrap();
+        std::fs::write(&config_path, "debug = false\n").unwrap();
         assert!(ProfilesConfig::needs_migration());
 
         // Create config with profiles section - no longer needs migration
         std::fs::write(
-            gwt_dir.join("config.toml"),
+            config_path,
             r#"[profiles]
 version = 1
 active = "default"

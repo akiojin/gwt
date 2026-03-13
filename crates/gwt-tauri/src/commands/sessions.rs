@@ -1169,7 +1169,6 @@ fn get_branch_session_summary_immediate(
             ));
         }
 
-
         let settings = ai
             .resolved
             .ok_or_else(|| "AI settings are not configured".to_string())?;
@@ -1195,7 +1194,6 @@ fn get_branch_session_summary_immediate(
             None,
         ));
     }
-
 
     let settings = ai
         .resolved
