@@ -22,6 +22,12 @@
     }
   });
 
+  $effect(() => {
+    if (!open) {
+      name = "";
+    }
+  });
+
   function handleWindowKeydown(e: KeyboardEvent) {
     if (!open) return;
     if (e.key === "Escape") {
@@ -40,7 +46,6 @@
   function handleCreate() {
     if (!isValid) return;
     onCreate(name);
-    name = "";
   }
 
   function handleClose() {

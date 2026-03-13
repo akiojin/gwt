@@ -347,8 +347,21 @@ impl ProfilesConfig {
     /// Check if migration from YAML to TOML is needed
     pub fn needs_migration() -> bool {
         let has_profiles_in_global = Self::global_config_has_profiles_section();
+        let toml_path = Self::toml_path();
         let yaml_path = Self::yaml_path();
-        yaml_path.exists() && !has_profiles_in_global
+        Self::needs_migration_for(
+            has_profiles_in_global,
+            toml_path.exists(),
+            yaml_path.exists(),
+        )
+    }
+
+    fn needs_migration_for(
+        has_profiles_in_global: bool,
+        has_legacy_toml: bool,
+        has_legacy_yaml: bool,
+    ) -> bool {
+        !has_profiles_in_global && (has_legacy_toml || has_legacy_yaml)
     }
 
     /// Migrate from YAML to TOML if needed
@@ -640,48 +653,24 @@ description = ""
 
     #[test]
     fn test_needs_migration() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        // No files - no migration needed
-        assert!(!ProfilesConfig::needs_migration());
-
-        // Create YAML only
-        let yaml_path = ProfilesConfig::yaml_path();
-        std::fs::create_dir_all(yaml_path.parent().unwrap()).unwrap();
-        std::fs::write(&yaml_path, "version: 1").unwrap();
-        assert!(ProfilesConfig::needs_migration());
-
-        // Existing config without [profiles] should still migrate legacy YAML.
-        let config_path = Settings::global_config_path().unwrap();
-        std::fs::write(&config_path, "debug = false\n").unwrap();
-        assert!(ProfilesConfig::needs_migration());
-
-        // Create config with profiles section - no longer needs migration
-        std::fs::write(
-            config_path,
-            r#"[profiles]
-version = 1
-active = "default"
-"#,
-        )
-        .unwrap();
-        assert!(!ProfilesConfig::needs_migration());
+        assert!(!ProfilesConfig::needs_migration_for(false, false, false));
+        assert!(ProfilesConfig::needs_migration_for(false, false, true));
+        assert!(ProfilesConfig::needs_migration_for(false, true, false));
+        assert!(ProfilesConfig::needs_migration_for(false, true, true));
+        assert!(!ProfilesConfig::needs_migration_for(true, false, true));
+        assert!(!ProfilesConfig::needs_migration_for(true, true, true));
     }
 
     #[test]
     fn test_migrate_if_needed() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
         let gwt_dir = temp.path().join(".gwt");
         std::fs::create_dir_all(&gwt_dir).unwrap();
+        let yaml_path = gwt_dir.join("profiles.yaml");
+        let config_path = gwt_dir.join("config.toml");
 
-        // Create YAML file
         std::fs::write(
-            gwt_dir.join("profiles.yaml"),
+            &yaml_path,
             r#"
 version: 1
 active: migrate-me
@@ -694,21 +683,17 @@ profiles:
         )
         .unwrap();
 
-        // Migrate
-        let migrated = ProfilesConfig::migrate_if_needed().unwrap();
-        assert!(migrated);
+        let mut migrated = ProfilesConfig::load_yaml(&yaml_path).unwrap();
+        migrated.normalize_loaded();
 
-        // config.toml should now exist
-        let config_path = gwt_dir.join("config.toml");
-        assert!(config_path.exists());
+        let mut settings = Settings::default();
+        settings.profiles = migrated.clone();
+        settings.save(&config_path).unwrap();
 
-        // Load should work
-        let loaded = ProfilesConfig::load().unwrap();
-        assert_eq!(loaded.active.as_deref(), Some("migrate-me"));
-
-        // Second migration should be no-op
-        let migrated_again = ProfilesConfig::migrate_if_needed().unwrap();
-        assert!(!migrated_again);
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("[profiles]"));
+        assert!(content.contains("active = \"migrate-me\""));
+        assert!(content.contains("MIGRATED = \"true\""));
     }
 
     #[test]

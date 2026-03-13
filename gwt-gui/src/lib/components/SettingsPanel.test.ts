@@ -243,6 +243,9 @@ describe("SettingsPanel", () => {
       expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
     });
     const confirmBtn = rendered.container.querySelector(".modal-overlay .btn-danger") as HTMLButtonElement;
+    await waitFor(() => {
+      expect(document.activeElement).toBe(confirmBtn);
+    });
     await fireEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -576,6 +579,7 @@ describe("SettingsPanel", () => {
     await waitFor(() => {
       expect(rendered.getByText("Profile already exists.")).toBeTruthy();
     });
+    expect(dialogInput.value).toBe("default");
   });
 
   it("removes protected branch from tags", async () => {
