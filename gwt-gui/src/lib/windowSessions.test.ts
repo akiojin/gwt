@@ -5,6 +5,7 @@ import {
   loadWindowSessions,
   persistWindowSessions,
   pruneWindowSessions,
+  renameWindowSession,
   removeWindowSession,
   upsertWindowSession,
   WINDOW_SESSIONS_STORAGE_KEY,
@@ -69,6 +70,19 @@ describe("windowSessions", () => {
 
     removeWindowSession("project-1", store);
     expect(getWindowSession("project-1", store)).toBeNull();
+  });
+
+  it("renames a session label in a single persisted write", () => {
+    const store = createMockStorage();
+
+    upsertWindowSession("project-1", "/tmp/project-1", store);
+    upsertWindowSession("project-1-1", "/tmp/stale", store);
+
+    renameWindowSession("project-1", "project-1-1", "/tmp/project-1", store);
+
+    expect(loadWindowSessions(store)).toEqual([
+      { label: "project-1-1", projectPath: "/tmp/project-1" },
+    ]);
   });
 });
 

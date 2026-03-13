@@ -123,6 +123,29 @@ export function upsertWindowSession(
   persistWindowSessions(sessions, storage);
 }
 
+export function renameWindowSession(
+  oldLabel: string,
+  newLabel: string,
+  projectPath: string,
+  storage?: Storage | null,
+) {
+  const normalizedOldLabel = normalizeLabel(oldLabel);
+  const normalizedNewLabel = normalizeLabel(newLabel);
+  const normalizedPath = normalizeProjectPath(projectPath);
+  if (!normalizedOldLabel || !normalizedNewLabel || !normalizedPath) return;
+
+  const sessions = loadWindowSessions(storage).filter(
+    (session) =>
+      session.label !== normalizedOldLabel &&
+      session.label !== normalizedNewLabel,
+  );
+  sessions.push({
+    label: normalizedNewLabel,
+    projectPath: normalizedPath,
+  });
+  persistWindowSessions(sessions, storage);
+}
+
 export function deduplicateByProjectPath(
   sessions: WindowSessionEntry[],
 ): WindowSessionEntry[] {
