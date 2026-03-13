@@ -226,12 +226,12 @@ fn can_execute_python(path: &Path) -> bool {
 fn find_system_python_binary() -> Result<PathBuf, String> {
     for candidate in system_python_candidates() {
         if let Ok(path) = which::which(candidate) {
-            if can_execute_python(&path) {
-                return Ok(path);
-            }
-
             if is_windows_store_python_alias(&path) {
                 continue;
+            }
+
+            if can_execute_python(&path) {
+                return Ok(path);
             }
         }
     }
