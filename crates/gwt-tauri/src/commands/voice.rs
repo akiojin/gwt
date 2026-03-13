@@ -161,62 +161,113 @@ fn find_python_override() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-#[cfg(windows)]
-const SYSTEM_PYTHON_CANDIDATES: &[&str] = &[
-    "python3.13",
-    "python3.12",
-    "python3.11",
-    "python3",
-    "python",
-    "py",
-];
-#[cfg(not(windows))]
-const SYSTEM_PYTHON_CANDIDATES: &[&str] = &[
-    "python3.13",
-    "python3.12",
-    "python3.11",
-    "python3",
-    "python",
-];
-
-#[cfg(windows)]
-fn is_windowsapps_python_alias(path: &Path) -> bool {
-    let lower = path.to_string_lossy().to_lowercase();
-    lower.contains("\\windowsapps\\") || lower.contains("/windowsapps/")
-}
-
-#[cfg(not(windows))]
-fn is_windowsapps_python_alias(_path: &Path) -> bool {
-    false
-}
-
-fn should_skip_system_python_candidate(candidate: &str, path: &Path) -> bool {
+fn system_python_candidates() -> &'static [&'static str] {
     #[cfg(windows)]
     {
-        !candidate.eq_ignore_ascii_case("py") && is_windowsapps_python_alias(path)
+        &[
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3",
+            "py",
+            "python",
+        ]
     }
 
     #[cfg(not(windows))]
     {
-        let _ = candidate;
+        &[
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3",
+            "python",
+        ]
+    }
+}
+
+fn is_windows_store_python_alias(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized = path
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+
+        normalized.contains("\\appdata\\local\\microsoft\\windowsapps\\")
+            && file_name.starts_with("python")
+            && file_name.ends_with(".exe")
+    }
+
+    #[cfg(not(windows))]
+    {
         let _ = path;
         false
     }
 }
 
+fn parse_python_version(version_str: &str) -> Result<(u32, u32), String> {
+    let parts: Vec<&str> = version_str.split('.').collect();
+    if parts.len() < 2 {
+        return Err(format!("Unexpected Python version format: {version_str}"));
+    }
+
+    let major: u32 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid Python major version: {}", parts[0]))?;
+    let minor: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid Python minor version: {}", parts[1]))?;
+
+    Ok((major, minor))
+}
+
+fn supported_voice_runtime_python_version(major: u32, minor: u32) -> bool {
+    major == 3 && (11..14).contains(&minor)
+}
+
+fn python_version(path: &Path) -> Result<(u32, u32, String), String> {
+    let output = command_os(path)
+        .arg("-c")
+        .arg("import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        .output()
+        .map_err(|e| format!("Failed to check Python version: {e}"))?;
+
+    if !output.status.success() {
+        return Err("Failed to determine Python version".to_string());
+    }
+
+    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let (major, minor) = parse_python_version(&version_str)?;
+    Ok((major, minor, version_str))
+}
+
+fn supports_voice_runtime_python(path: &Path) -> bool {
+    python_version(path)
+        .map(|(major, minor, _)| supported_voice_runtime_python_version(major, minor))
+        .unwrap_or(false)
+}
+
 fn find_system_python_binary() -> Result<PathBuf, String> {
-    for candidate in SYSTEM_PYTHON_CANDIDATES {
+    for candidate in system_python_candidates() {
         if let Ok(path) = which::which(candidate) {
-            if should_skip_system_python_candidate(candidate, &path) {
+            if is_windows_store_python_alias(&path) {
                 continue;
             }
-            return Ok(path);
+
+            if supports_voice_runtime_python(&path) {
+                return Ok(path);
+            }
         }
     }
 
     Err(format!(
         "Python runtime not found (checked {})",
-        SYSTEM_PYTHON_CANDIDATES.join("/")
+        system_python_candidates().join("/")
     ))
 }
 
@@ -251,28 +302,7 @@ fn find_bootstrap_python_binary() -> Result<PathBuf, String> {
 }
 
 fn validate_python_version(python: &Path) -> Result<(), String> {
-    let output = command_os(python)
-        .arg("-c")
-        .arg("import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-        .output()
-        .map_err(|e| format!("Failed to check Python version: {e}"))?;
-
-    if !output.status.success() {
-        return Err("Failed to determine Python version".to_string());
-    }
-
-    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let parts: Vec<&str> = version_str.split('.').collect();
-    if parts.len() < 2 {
-        return Err(format!("Unexpected Python version format: {version_str}"));
-    }
-
-    let major: u32 = parts[0]
-        .parse()
-        .map_err(|_| format!("Invalid Python major version: {}", parts[0]))?;
-    let minor: u32 = parts[1]
-        .parse()
-        .map_err(|_| format!("Invalid Python minor version: {}", parts[1]))?;
+    let (major, minor, version_str) = python_version(python)?;
 
     if major != 3 || minor < 11 {
         return Err(format!(
@@ -843,6 +873,80 @@ mod tests {
     }
 
     #[test]
+    fn system_python_candidates_include_windows_launcher_only_on_windows() {
+        let candidates = system_python_candidates();
+
+        #[cfg(windows)]
+        {
+            let py_index = candidates
+                .iter()
+                .position(|candidate| *candidate == "py")
+                .expect("Windows candidates must include py launcher");
+            let python_index = candidates
+                .iter()
+                .position(|candidate| *candidate == "python")
+                .expect("Windows candidates must include python executable");
+            assert!(
+                py_index < python_index,
+                "py launcher must be tried before bare python to avoid WindowsApps stubs"
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert!(
+                !candidates.contains(&"py"),
+                "non-Windows candidates must not include py launcher"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_store_python_alias_detection_matches_known_alias_paths() {
+        #[cfg(windows)]
+        {
+            assert!(is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python.exe"
+            )));
+            assert!(is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.exe"
+            )));
+            assert!(is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.13.exe"
+            )));
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert!(!is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python.exe"
+            )));
+            assert!(!is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.exe"
+            )));
+            assert!(!is_windows_store_python_alias(Path::new(
+                r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.13.exe"
+            )));
+        }
+
+        assert!(!is_windows_store_python_alias(Path::new(
+            r"C:\Python313\python.exe"
+        )));
+        assert!(!is_windows_store_python_alias(Path::new(
+            r"C:\Windows\py.exe"
+        )));
+    }
+
+    #[test]
+    fn supported_voice_runtime_python_version_matches_bootstrap_policy() {
+        assert!(!supported_voice_runtime_python_version(3, 10));
+        assert!(supported_voice_runtime_python_version(3, 11));
+        assert!(supported_voice_runtime_python_version(3, 13));
+        assert!(!supported_voice_runtime_python_version(3, 14));
+        assert!(!supported_voice_runtime_python_version(2, 7));
+    }
+
+    #[test]
     fn capability_reports_unavailable_without_gpu() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let capability = runtime
@@ -900,28 +1004,5 @@ mod tests {
         assert!(model_ready_in_cache("Qwen/Qwen3-ASR-1.7B"));
 
         std::env::remove_var("HF_HOME");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn windows_system_python_candidates_include_py_launcher() {
-        assert!(SYSTEM_PYTHON_CANDIDATES.contains(&"py"));
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn windowsapps_python_aliases_are_skipped_for_python_commands() {
-        let alias =
-            PathBuf::from(r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python.exe");
-        let python3_alias =
-            PathBuf::from(r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\python3.exe");
-        let launcher = PathBuf::from(r"C:\Windows\py.exe");
-
-        assert!(should_skip_system_python_candidate("python", &alias));
-        assert!(should_skip_system_python_candidate(
-            "python3",
-            &python3_alias
-        ));
-        assert!(!should_skip_system_python_candidate("py", &launcher));
     }
 }
