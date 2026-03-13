@@ -128,7 +128,20 @@ fn is_gwt_hook_command(command: &str) -> bool {
 ///
 /// Matches commands like "node .claude/hooks/scripts/gwt-forward-hook.mjs Event".
 fn is_gwt_node_hook_command(command: &str) -> bool {
-    command.starts_with("node .claude/hooks/scripts/gwt-")
+    const MANAGED_NODE_HOOK_SCRIPTS: &[&str] = &[
+        "node .claude/hooks/scripts/gwt-forward-hook.mjs",
+        "node .claude/hooks/scripts/gwt-block-git-branch-ops.mjs",
+        "node .claude/hooks/scripts/gwt-block-cd-command.mjs",
+        "node .claude/hooks/scripts/gwt-block-file-ops.mjs",
+        "node .claude/hooks/scripts/gwt-block-git-dir-override.mjs",
+    ];
+
+    MANAGED_NODE_HOOK_SCRIPTS.iter().any(|script| {
+        command == *script
+            || command
+                .strip_prefix(script)
+                .is_some_and(|rest| rest.starts_with(' '))
+    })
 }
 
 /// Claude Code settings.json structure (partial)
@@ -421,6 +434,16 @@ mod tests {
         assert!(is_gwt_hook_command(
             "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
         ));
+        assert!(is_gwt_hook_command(
+            "node .claude/hooks/scripts/gwt-block-cd-command.mjs"
+        ));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_command_custom_node_script_not_managed() {
+        assert!(!is_gwt_hook_command(
+            "node .claude/hooks/scripts/gwt-custom-hook.mjs UserPromptSubmit"
+        ));
     }
 
     #[test]
@@ -455,6 +478,14 @@ mod tests {
             "hooks": [{"type": "command", "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"}]
         });
         assert!(is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_custom_node_script_not_managed() {
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "node .claude/hooks/scripts/gwt-custom-hook.mjs UserPromptSubmit"}]
+        });
+        assert!(!is_gwt_hook_entry(&entry));
     }
 
     #[test]
