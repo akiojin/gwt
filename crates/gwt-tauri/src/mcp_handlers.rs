@@ -497,6 +497,7 @@ pub fn handle_launch_agent(id: Value, params: &Value, ctx: &WsContext) -> JsonRp
         mode: None,
         skip_permissions: None,
         reasoning_level: None,
+        fast_mode: None,
         collaboration_modes: None,
         extra_args: None,
         env_overrides: None,
