@@ -21,7 +21,7 @@
       {
         "hooks": [
           {
-            "command": ".claude/hooks/scripts/gwt-forward-hook.sh Notification",
+            "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs Notification",
             "type": "command"
           }
         ],
@@ -32,7 +32,7 @@
       {
         "hooks": [
           {
-            "command": ".claude/hooks/scripts/gwt-forward-hook.sh PostToolUse",
+            "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PostToolUse",
             "type": "command"
           }
         ],
@@ -43,7 +43,7 @@
       {
         "hooks": [
           {
-            "command": ".claude/hooks/scripts/gwt-forward-hook.sh PreToolUse",
+            "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PreToolUse",
             "type": "command"
           }
         ],
@@ -52,19 +52,19 @@
       {
         "hooks": [
           {
-            "command": ".claude/hooks/scripts/gwt-block-git-branch-ops.sh",
+            "command": "node .claude/hooks/scripts/gwt-block-git-branch-ops.mjs",
             "type": "command"
           },
           {
-            "command": ".claude/hooks/scripts/gwt-block-cd-command.sh",
+            "command": "node .claude/hooks/scripts/gwt-block-cd-command.mjs",
             "type": "command"
           },
           {
-            "command": ".claude/hooks/scripts/gwt-block-file-ops.sh",
+            "command": "node .claude/hooks/scripts/gwt-block-file-ops.mjs",
             "type": "command"
           },
           {
-            "command": ".claude/hooks/scripts/gwt-block-git-dir-override.sh",
+            "command": "node .claude/hooks/scripts/gwt-block-git-dir-override.mjs",
             "type": "command"
           }
         ],
@@ -75,7 +75,7 @@
       {
         "hooks": [
           {
-            "command": ".claude/hooks/scripts/gwt-forward-hook.sh Stop",
+            "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs Stop",
             "type": "command"
           }
         ],
@@ -86,7 +86,7 @@
       {
         "hooks": [
           {
-            "command": ".claude/hooks/scripts/gwt-forward-hook.sh UserPromptSubmit",
+            "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit",
             "type": "command"
           }
         ],
