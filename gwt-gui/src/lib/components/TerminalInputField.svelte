@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    getAgentInputProfile,
+    getAgentInputProfileOrDefault,
     buildSendBytes,
     buildQueueBytes,
     buildInterruptBytes,
@@ -29,11 +29,7 @@
   let ignoreEnterAfterComposition = $state(false);
   let attachedImages: { id: string; path: string; name: string }[] = $state([]);
   let history: InputHistory | undefined = $state(undefined);
-  let profile: AgentInputProfile | undefined = $state(undefined);
-
-  $effect(() => {
-    profile = getAgentInputProfile(agentId);
-  });
+  let profile: AgentInputProfile = $derived(getAgentInputProfileOrDefault(agentId));
 
   onMount(() => {
     history = new InputHistory(paneId);
@@ -156,7 +152,6 @@
   }
 
   async function send() {
-    if (!profile) return;
     const text = buildFullText();
     if (!text.trim() && attachedImages.length === 0) return;
 
@@ -171,7 +166,6 @@
   }
 
   async function queue() {
-    if (!profile) return;
     const text = buildFullText();
     if (!text.trim()) return;
 
@@ -187,16 +181,15 @@
   }
 
   async function interrupt() {
-    if (!profile) return;
     const bytes = buildInterruptBytes(profile);
     await writeBytes(bytes);
   }
 
   function buildFullText(): string {
     let text = input;
-    if (attachedImages.length > 0 && profile) {
+    if (attachedImages.length > 0) {
       const refs = attachedImages
-        .map((img) => buildImageReference(profile!, img.path))
+        .map((img) => buildImageReference(profile, img.path))
         .filter((r): r is string => r !== null);
       if (refs.length > 0) {
         text = text ? `${refs.join(" ")} ${text}` : refs.join(" ");
@@ -313,9 +306,9 @@
     attachedImages = attachedImages.filter((img) => img.id !== id);
   }
 
-  /** Expose textarea for voice input injection */
-  export function getTextarea(): HTMLTextAreaElement | undefined {
-    return textareaEl;
+  function startVoiceInput() {
+    // Dispatch event to trigger the existing voice input system
+    window.dispatchEvent(new CustomEvent("gwt-voice-toggle"));
   }
 </script>
 
@@ -346,11 +339,22 @@
       <button
         class="action-btn"
         type="button"
+        onclick={startVoiceInput}
+        title="Voice input"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 1a2 2 0 0 0-2 2v5a2 2 0 1 0 4 0V3a2 2 0 0 0-2-2z"/>
+          <path d="M4.5 7.5a.5.5 0 0 0-1 0A4.5 4.5 0 0 0 7.5 12v2H6a.5.5 0 0 0 0 1h4a.5.5 0 0 0 0-1H8.5v-2A4.5 4.5 0 0 0 12.5 7.5a.5.5 0 0 0-1 0A3.5 3.5 0 1 1 4.5 7.5z"/>
+        </svg>
+      </button>
+      <button
+        class="action-btn"
+        type="button"
         onclick={openFilePicker}
         title="Attach image"
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M4.5 3a2.5 2.5 0 0 0-2.5 2.5v5a2.5 2.5 0 0 0 2.5 2.5h7a2.5 2.5 0 0 0 2.5-2.5v-5a2.5 2.5 0 0 0-2.5-2.5h-7zm6.854 3.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L8 8.793l2.646-2.647a.5.5 0 0 1 .708 0z"/>
+          <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
         </svg>
       </button>
     </div>

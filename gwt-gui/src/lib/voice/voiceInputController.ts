@@ -425,6 +425,15 @@ export class VoiceInputController {
     }
   };
 
+  /** Toggle voice listening on/off. Used by UI mic buttons. */
+  toggleListening() {
+    if (this.state.listening && this.activeMode === "toggle") {
+      void this.stopListening(false);
+    } else {
+      void this.startListening("toggle");
+    }
+  }
+
   private async startListening(mode: CaptureMode) {
     if (this.startInFlight || this.state.listening) return;
 

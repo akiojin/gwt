@@ -2725,7 +2725,14 @@
     voiceController = controller;
     controller.updateSettings();
 
+    // Allow TerminalInputField mic button to toggle voice via custom event
+    const handleVoiceToggle = () => {
+      controller.toggleListening();
+    };
+    window.addEventListener("gwt-voice-toggle", handleVoiceToggle);
+
     return () => {
+      window.removeEventListener("gwt-voice-toggle", handleVoiceToggle);
       controller.dispose();
       if (voiceController === controller) {
         voiceController = null;

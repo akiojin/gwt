@@ -62,11 +62,26 @@ const profiles: Record<string, AgentInputProfile> = {
   },
 };
 
+/** Default profile used when the agent is not recognized. Sends Enter (CR). */
+const defaultProfile: AgentInputProfile = {
+  agentId: "_default",
+  send: { suffixBytes: [0x0d] },
+  interrupt: { bytes: [0x1b] },
+  newlineBytes: [0x0a],
+};
+
 /** Lookup agent profile by agentId. Returns undefined for unknown agents. */
 export function getAgentInputProfile(
   agentId: string,
 ): AgentInputProfile | undefined {
   return profiles[agentId];
+}
+
+/** Lookup agent profile with fallback to a sensible default. */
+export function getAgentInputProfileOrDefault(
+  agentId: string,
+): AgentInputProfile {
+  return profiles[agentId] ?? defaultProfile;
 }
 
 /** Encode text + send suffix as byte array for PTY write. */

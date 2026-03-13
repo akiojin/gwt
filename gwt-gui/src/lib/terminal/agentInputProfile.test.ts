@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   getAgentInputProfile,
+  getAgentInputProfileOrDefault,
   buildSendBytes,
   buildQueueBytes,
   buildInterruptBytes,
@@ -50,6 +51,26 @@ describe("agentInputProfile", () => {
 
     it("returns undefined for empty string", () => {
       expect(getAgentInputProfile("")).toBeUndefined();
+    });
+  });
+
+  describe("getAgentInputProfileOrDefault", () => {
+    it("returns known profile when found", () => {
+      const p = getAgentInputProfileOrDefault("claude");
+      expect(p.agentId).toBe("claude");
+    });
+
+    it("returns default profile for unknown agent", () => {
+      const p = getAgentInputProfileOrDefault("unknown-agent");
+      expect(p.agentId).toBe("_default");
+      expect(p.send.suffixBytes).toEqual([0x0d]);
+      expect(p.interrupt.bytes).toEqual([0x1b]);
+      expect(p.newlineBytes).toEqual([0x0a]);
+    });
+
+    it("returns default profile for empty string", () => {
+      const p = getAgentInputProfileOrDefault("");
+      expect(p.agentId).toBe("_default");
     });
   });
 
