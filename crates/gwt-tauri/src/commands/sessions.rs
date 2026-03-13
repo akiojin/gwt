@@ -6,8 +6,8 @@ use crate::state::AppState;
 use gwt_core::ai::{
     format_error_for_display, summarize_scrollback, summarize_session, AIClient, AIError,
     AgentType as AiAgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
-    OpenCodeSessionParser, ScrollbackRollingContext, ScrollbackSummaryBuild, SessionParseError,
-    SessionParser, SessionSummary, SessionSummaryCache,
+    OpenCodeSessionParser, ScrollbackCacheEntry, ScrollbackRollingContext, ScrollbackSummaryBuild,
+    SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
 };
 use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
 use gwt_core::git::{
@@ -1887,13 +1887,15 @@ fn generate_and_cache_scrollback_summary(
                         .or_default()
                         .set_scrollback(
                             job.branch.clone(),
-                            job.tool_id.clone(),
-                            pane_session.clone(),
-                            job.settings.language.clone(),
-                            summary.clone(),
-                            job.mtime,
-                            normalized_input,
-                            next_rolling_update_count,
+                            ScrollbackCacheEntry {
+                                tool_id: job.tool_id.clone(),
+                                session_id: pane_session.clone(),
+                                language: job.settings.language.clone(),
+                                summary: summary.clone(),
+                                mtime: job.mtime,
+                                normalized_input,
+                                rolling_update_count: next_rolling_update_count,
+                            },
                         );
                 }
                 persist_session_summary_cache_entry(
@@ -2737,13 +2739,15 @@ bullet_points = ["- A"]
 
         cache.set_scrollback(
             "main".to_string(),
-            "codex-cli".to_string(),
-            "pane:xyz".to_string(),
-            "en".to_string(),
-            summary,
-            UNIX_EPOCH + Duration::from_secs(1),
-            "first\nsecond".to_string(),
-            3,
+            ScrollbackCacheEntry {
+                tool_id: "codex-cli".to_string(),
+                session_id: "pane:xyz".to_string(),
+                language: "en".to_string(),
+                summary,
+                mtime: UNIX_EPOCH + Duration::from_secs(1),
+                normalized_input: "first\nsecond".to_string(),
+                rolling_update_count: 3,
+            },
         );
 
         assert!(build_scrollback_rolling_context(&cache, "main", "ja").is_none());

@@ -172,6 +172,17 @@ pub struct SessionSummaryCache {
     scrollback_update_counts: HashMap<String, usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScrollbackCacheEntry {
+    pub tool_id: String,
+    pub session_id: String,
+    pub language: String,
+    pub summary: SessionSummary,
+    pub mtime: SystemTime,
+    pub normalized_input: String,
+    pub rolling_update_count: usize,
+}
+
 impl SessionSummaryCache {
     pub fn get(&self, branch: &str) -> Option<&SessionSummary> {
         self.cache.get(branch)
@@ -223,23 +234,20 @@ impl SessionSummaryCache {
         self.scrollback_update_counts.remove(&branch_key);
     }
 
-    pub fn set_scrollback(
-        &mut self,
-        branch: String,
-        tool_id: String,
-        session_id: String,
-        language: String,
-        summary: SessionSummary,
-        mtime: SystemTime,
-        normalized_input: String,
-        rolling_update_count: usize,
-    ) {
+    pub fn set_scrollback(&mut self, branch: String, entry: ScrollbackCacheEntry) {
         let branch_key = branch.clone();
-        self.set(branch, tool_id, session_id, language, summary, mtime);
+        self.set(
+            branch,
+            entry.tool_id,
+            entry.session_id,
+            entry.language,
+            entry.summary,
+            entry.mtime,
+        );
         self.scrollback_inputs
-            .insert(branch_key.clone(), normalized_input);
+            .insert(branch_key.clone(), entry.normalized_input);
         self.scrollback_update_counts
-            .insert(branch_key, rolling_update_count);
+            .insert(branch_key, entry.rolling_update_count);
     }
 
     pub fn is_stale(
@@ -2274,13 +2282,15 @@ mod tests {
 
         cache.set_scrollback(
             "main".to_string(),
-            "codex-cli".to_string(),
-            "pane:123".to_string(),
-            "en".to_string(),
-            summary.clone(),
-            now,
-            "first\nsecond".to_string(),
-            2,
+            ScrollbackCacheEntry {
+                tool_id: "codex-cli".to_string(),
+                session_id: "pane:123".to_string(),
+                language: "en".to_string(),
+                summary: summary.clone(),
+                mtime: now,
+                normalized_input: "first\nsecond".to_string(),
+                rolling_update_count: 2,
+            },
         );
         assert_eq!(cache.scrollback_input("main"), Some("first\nsecond"));
         assert_eq!(cache.scrollback_update_count("main"), 2);
