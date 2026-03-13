@@ -4,46 +4,12 @@
     currentBranch = "",
     terminalCount = 0,
     osEnvReady = true,
-    voiceInputEnabled = false,
-    voiceInputListening = false,
-    voiceInputPreparing = false,
-    voiceInputSupported = true,
-    voiceInputAvailable = false,
-    voiceInputAvailabilityReason = null,
-    voiceInputError = null,
   }: {
     projectPath: string;
     currentBranch?: string;
     terminalCount?: number;
     osEnvReady?: boolean;
-    voiceInputEnabled?: boolean;
-    voiceInputListening?: boolean;
-    voiceInputPreparing?: boolean;
-    voiceInputSupported?: boolean;
-    voiceInputAvailable?: boolean;
-    voiceInputAvailabilityReason?: string | null;
-    voiceInputError?: string | null;
   } = $props();
-
-  function voiceStatusClass(): string {
-    if (!voiceInputSupported) return "bad";
-    if (!voiceInputAvailable) return "bad";
-    if (!voiceInputEnabled) return "muted";
-    if (voiceInputError) return "warn";
-    if (voiceInputPreparing) return "warn";
-    if (voiceInputListening) return "ok";
-    return "warn";
-  }
-
-  function voiceStatusText(): string {
-    if (!voiceInputSupported) return "Voice: backend unavailable";
-    if (!voiceInputAvailable) return "Voice: unavailable";
-    if (!voiceInputEnabled) return "Voice: off";
-    if (voiceInputError) return "Voice: error";
-    if (voiceInputPreparing) return "Voice: preparing";
-    if (voiceInputListening) return "Voice: listening";
-    return "Voice: idle";
-  }
 
   $effect(() => {
     void projectPath;
@@ -64,12 +30,6 @@
   {#if !osEnvReady}
     <span class="status-loading">Loading environment...</span>
   {/if}
-  <span
-    class={`status-item voice ${voiceStatusClass()}`}
-    title={voiceInputError ?? voiceInputAvailabilityReason ?? ""}
-  >
-    {voiceStatusText()}
-  </span>
   <span class="spacer"></span>
   <span class="status-item path">{projectPath}</span>
 </footer>
@@ -93,26 +53,6 @@
 
   .terminal-count {
     color: var(--accent);
-  }
-
-  .voice {
-    font-size: 10px;
-  }
-
-  .voice.ok {
-    color: var(--green);
-  }
-
-  .voice.warn {
-    color: var(--yellow);
-  }
-
-  .voice.bad {
-    color: var(--red);
-  }
-
-  .voice.muted {
-    color: var(--text-muted);
   }
 
   .spacer {

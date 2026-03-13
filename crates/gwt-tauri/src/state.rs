@@ -24,6 +24,7 @@ pub struct PaneLaunchMeta {
     pub branch: String,
     pub repo_path: PathBuf,
     pub worktree_path: PathBuf,
+    pub runtime_workdir: Option<String>,
     pub tool_label: String,
     pub tool_version: String,
     pub mode: String,

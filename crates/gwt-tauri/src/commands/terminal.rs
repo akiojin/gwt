@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -4776,11 +4776,33 @@ pub(crate) fn launch_agent_for_project_root(
             }
         }
 
+        let runtime_workdir = match &docker_mode {
+            DockerExecMode::Compose { workdir, .. } => {
+                let trimmed = workdir.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            DockerExecMode::DockerRun { workdir, .. } => Some(workdir.clone()),
+            DockerExecMode::None => {
+                let terminal_shell = resolve_shell_id_for_spawn(request.terminal_shell.as_deref());
+                if should_launch_agent_with_wsl_shell(terminal_shell.as_deref()) {
+                    gwt_core::terminal::shell::windows_to_wsl_path(&working_dir.to_string_lossy())
+                        .ok()
+                } else {
+                    Some(working_dir.to_string_lossy().to_string())
+                }
+            }
+        };
+
         let meta = PaneLaunchMeta {
             agent_id: agent_id.to_string(),
             branch: branch_name.clone(),
             repo_path: repo_path.clone(),
             worktree_path: working_dir.clone(),
+            runtime_workdir,
             tool_label: resolved.label.to_string(),
             tool_version: resolved.tool_version.clone(),
             mode: mode_str.clone(),
@@ -6160,22 +6182,131 @@ fn sanitize_filename_part(s: &str) -> String {
         .collect()
 }
 
-/// Save clipboard image data to a temporary file and return its absolute path.
+#[derive(Debug, Clone)]
+struct ImageAttachmentRuntimeContext {
+    worktree_path: PathBuf,
+    runtime_workdir: Option<String>,
+}
+
+fn image_attachment_runtime_context(
+    state: &AppState,
+    pane_id: &str,
+) -> Option<ImageAttachmentRuntimeContext> {
+    state
+        .pane_launch_meta
+        .lock()
+        .ok()
+        .and_then(|map| map.get(pane_id).cloned())
+        .map(|meta| ImageAttachmentRuntimeContext {
+            worktree_path: meta.worktree_path,
+            runtime_workdir: meta.runtime_workdir,
+        })
+}
+
+fn normalized_image_extension(extension: &str) -> Option<String> {
+    let trimmed = extension.trim().trim_start_matches('.');
+    let normalized = sanitize_filename_part(trimmed)
+        .trim_matches('_')
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn sanitized_image_stem(name: &str) -> String {
+    let normalized = sanitize_filename_part(name).trim_matches('_').to_string();
+    if normalized.is_empty() {
+        "image".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn create_staged_image_destination(
+    worktree_path: &Path,
+    pane_id: &str,
+    base_name: &str,
+    extension: &str,
+    command: &str,
+) -> Result<(PathBuf, String), StructuredError> {
+    let safe_extension = normalized_image_extension(extension)
+        .ok_or_else(|| StructuredError::internal("Invalid image format", command))?;
+    let safe_pane_id = sanitized_image_stem(pane_id);
+    let safe_base_name = sanitized_image_stem(base_name);
+
+    let images_dir = worktree_path.join(".gwt").join("tmp").join("images");
+    std::fs::create_dir_all(&images_dir).map_err(|e| {
+        StructuredError::internal(&format!("Failed to create images directory: {e}"), command)
+    })?;
+
+    let filename = format!(
+        "{}_{}_{}.{}",
+        safe_pane_id,
+        safe_base_name,
+        Uuid::new_v4(),
+        safe_extension
+    );
+    let relative_path = format!(".gwt/tmp/images/{filename}");
+    Ok((images_dir.join(&filename), relative_path))
+}
+
+fn build_attachment_prompt_path(runtime_workdir: Option<&str>, relative_path: &str) -> String {
+    let normalized_relative = relative_path
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+
+    let Some(runtime_root) = runtime_workdir.map(str::trim).filter(|s| !s.is_empty()) else {
+        return format!("./{normalized_relative}");
+    };
+
+    if runtime_root.starts_with('/') {
+        return format!(
+            "{}/{}",
+            runtime_root.trim_end_matches('/'),
+            normalized_relative
+        );
+    }
+
+    let mut path = PathBuf::from(runtime_root);
+    for segment in normalized_relative.split('/') {
+        if !segment.is_empty() {
+            path.push(segment);
+        }
+    }
+    path.to_string_lossy().into_owned()
+}
+
+/// Save clipboard image data to a temporary file and return the prompt path.
 #[tauri::command]
 pub fn save_clipboard_image(
     pane_id: String,
     data: Vec<u8>,
     format: String,
-    app_handle: AppHandle,
+    state: State<AppState>,
 ) -> Result<String, StructuredError> {
-    let _ = app_handle;
-
-    let safe_pane_id = sanitize_filename_part(&pane_id);
-    let safe_format = sanitize_filename_part(&format);
-    if safe_format.is_empty() {
-        return Err(StructuredError::internal(
-            "Invalid image format",
+    if let Some(context) = image_attachment_runtime_context(&state, &pane_id) {
+        let (target_path, relative_path) = create_staged_image_destination(
+            &context.worktree_path,
+            &pane_id,
+            "clipboard",
+            &format,
             "save_clipboard_image",
+        )?;
+
+        std::fs::write(&target_path, &data).map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to write image file: {e}"),
+                "save_clipboard_image",
+            )
+        })?;
+
+        return Ok(build_attachment_prompt_path(
+            context.runtime_workdir.as_deref(),
+            &relative_path,
         ));
     }
 
@@ -6185,21 +6316,66 @@ pub fn save_clipboard_image(
     let images_dir = home.join(".gwt").join("tmp").join("images");
     std::fs::create_dir_all(&images_dir).map_err(|e| {
         StructuredError::internal(
-            &format!("Failed to create images directory: {}", e),
+            &format!("Failed to create images directory: {e}"),
             "save_clipboard_image",
         )
     })?;
 
-    let unique_id = Uuid::new_v4();
-    let filename = format!("{}_{}.{}", safe_pane_id, unique_id, safe_format);
+    let safe_pane_id = sanitized_image_stem(&pane_id);
+    let safe_format = normalized_image_extension(&format)
+        .ok_or_else(|| StructuredError::internal("Invalid image format", "save_clipboard_image"))?;
+    let filename = format!("{}_{}.{}", safe_pane_id, Uuid::new_v4(), safe_format);
     let file_path = images_dir.join(&filename);
 
     std::fs::write(&file_path, &data).map_err(|e| {
         StructuredError::internal(
-            &format!("Failed to write image file: {}", e),
+            &format!("Failed to write image file: {e}"),
             "save_clipboard_image",
         )
     })?;
 
     Ok(file_path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod attachment_path_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn build_attachment_prompt_path_uses_runtime_root_for_unix_like_targets() {
+        let prompt_path =
+            build_attachment_prompt_path(Some("/workspace"), ".gwt/tmp/images/example.png");
+        assert_eq!(prompt_path, "/workspace/.gwt/tmp/images/example.png");
+    }
+
+    #[test]
+    fn build_attachment_prompt_path_uses_runtime_root_for_windows_targets() {
+        let prompt_path =
+            build_attachment_prompt_path(Some(r"E:\repo\feature"), ".gwt/tmp/images/example.png");
+        assert_eq!(prompt_path, r"E:\repo\feature\.gwt\tmp\images\example.png");
+    }
+
+    #[test]
+    fn build_attachment_prompt_path_falls_back_to_relative_path_when_runtime_root_is_unknown() {
+        let prompt_path = build_attachment_prompt_path(None, ".gwt/tmp/images/example.png");
+        assert_eq!(prompt_path, "./.gwt/tmp/images/example.png");
+    }
+
+    #[test]
+    fn create_staged_image_destination_places_files_under_worktree_tmp_images() {
+        let temp = TempDir::new().unwrap();
+        let (target_path, relative_path) = create_staged_image_destination(
+            temp.path(),
+            "pane-1",
+            "clipboard image",
+            "png",
+            "test",
+        )
+        .unwrap();
+
+        assert!(target_path.starts_with(temp.path().join(".gwt").join("tmp").join("images")));
+        assert!(relative_path.starts_with(".gwt/tmp/images/"));
+        assert!(target_path.extension().and_then(|ext| ext.to_str()) == Some("png"));
+    }
 }
