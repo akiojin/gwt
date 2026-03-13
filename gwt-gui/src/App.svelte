@@ -98,6 +98,7 @@
     shouldAutoCloseDocsEditorTab,
     type DocsEditorShellId,
   } from "./lib/docsEditor";
+  import { applyMenuPasteText } from "./lib/terminal/menuPaste";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -2048,19 +2049,8 @@
     }
     if (!text) return;
 
-    if (
-      target instanceof HTMLInputElement ||
-      target instanceof HTMLTextAreaElement
-    ) {
-      const start = target.selectionStart ?? target.value.length;
-      const end = target.selectionEnd ?? target.value.length;
-      target.setRangeText(text, start, end, "end");
+    if (applyMenuPasteText(target, text)) {
       return;
-    }
-
-    if (target.isContentEditable) {
-      target.focus();
-      document.execCommand("insertText", false, text);
     }
   }
 
@@ -2725,7 +2715,7 @@
     voiceController = controller;
     controller.updateSettings();
 
-    // Allow TerminalInputField mic button to toggle voice via custom event
+    // Allow terminal overlay voice buttons to toggle the voice controller.
     const handleVoiceToggle = () => {
       controller.toggleListening();
     };
@@ -2907,6 +2897,13 @@
         onWorkOnIssue={handleWorkOnIssueFromTab}
         onSwitchToWorktree={handleSwitchToWorktreeFromTab}
         onIssueCountChange={handleIssueCountChange}
+        voiceInputEnabled={voiceInputSettings.enabled}
+        {voiceInputListening}
+        {voiceInputPreparing}
+        {voiceInputSupported}
+        {voiceInputAvailable}
+        voiceInputAvailabilityReason={voiceInputAvailabilityReason}
+        voiceInputError={voiceInputError}
       />
     </div>
     <StatusBar
@@ -2914,13 +2911,6 @@
       {currentBranch}
       {terminalCount}
       {osEnvReady}
-      voiceInputEnabled={voiceInputSettings.enabled}
-      voiceInputListening={voiceInputListening}
-      voiceInputPreparing={voiceInputPreparing}
-      voiceInputSupported={voiceInputSupported}
-      voiceInputAvailable={voiceInputAvailable}
-      voiceInputAvailabilityReason={voiceInputAvailabilityReason}
-      voiceInputError={voiceInputError}
     />
   </div>
 {/if}
