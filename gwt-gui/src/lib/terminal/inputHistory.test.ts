@@ -48,6 +48,23 @@ describe("InputHistory", () => {
     expect(h.forward()).toBe(""); // back to empty draft
   });
 
+  it("restores the current draft after history navigation", () => {
+    const h = new InputHistory("pane-1", storage);
+    h.push("first");
+    h.push("second");
+
+    expect(h.back("draft in progress")).toBe("second");
+    expect(h.forward()).toBe("draft in progress");
+  });
+
+  it("keeps the current draft when no history entries exist", () => {
+    const h = new InputHistory("pane-1", storage);
+
+    expect(h.back("draft in progress")).toBe("draft in progress");
+    expect(h.forward()).toBe("draft in progress");
+    expect(h.current()).toBe("draft in progress");
+  });
+
   it("does not push duplicate consecutive entries", () => {
     const h = new InputHistory("pane-1", storage);
     h.push("same");

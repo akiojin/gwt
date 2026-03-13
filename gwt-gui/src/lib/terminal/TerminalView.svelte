@@ -167,6 +167,20 @@
     return modalHost instanceof HTMLElement;
   }
 
+  function shouldRefocusTerminalOnReactivation(rootEl: HTMLElement): boolean {
+    if (hasInputField) return false;
+    if (hasFocusedModalOutsideTerminal(rootEl)) return false;
+    return true;
+  }
+
+  function refocusTerminalOnReactivation(
+    rootEl: HTMLElement,
+    immediate = false,
+  ) {
+    if (!shouldRefocusTerminalOnReactivation(rootEl)) return;
+    focusTerminalIfNeeded(rootEl, immediate);
+  }
+
   function focusTerminalIfNeeded(rootEl: HTMLElement, immediate = false) {
     if (!active) return;
     if (!terminal) return;
@@ -501,16 +515,12 @@
       focusTerminalIfNeeded(rootEl, true);
     };
     const handleWindowFocus = () => {
-      if (hasFocusedModalOutsideTerminal(rootEl)) return;
-      if (!hasInputField) {
-        focusTerminalIfNeeded(rootEl, true);
-      }
+      refocusTerminalOnReactivation(rootEl, true);
       scheduleFitAfterBufferFlush({ rootEl });
     };
     const handleVisibilityChange = () => {
       if (document.hidden) return;
-      if (hasFocusedModalOutsideTerminal(rootEl)) return;
-      focusTerminalIfNeeded(rootEl);
+      refocusTerminalOnReactivation(rootEl);
       scheduleFitAfterBufferFlush({ rootEl });
     };
 
@@ -529,8 +539,7 @@
         unlistenTauriFocus = await getCurrentWindow().listen(
           "tauri://focus",
           () => {
-            if (hasFocusedModalOutsideTerminal(rootEl)) return;
-            focusTerminalIfNeeded(rootEl, true);
+            refocusTerminalOnReactivation(rootEl, true);
             scheduleFitAfterBufferFlush({ rootEl });
           },
         );

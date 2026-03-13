@@ -6,6 +6,7 @@ const listenMock = vi.fn();
 const writeTextMock = vi.fn();
 const readTextMock = vi.fn();
 const openExternalUrlMock = vi.fn();
+const tauriWindowListenMock = vi.fn();
 let customKeyEventHandler: ((event: KeyboardEvent) => boolean) | null = null;
 let terminalOutputHandler:
   | ((event: { payload: { pane_id: string; data: number[] } }) => void)
@@ -13,6 +14,7 @@ let terminalOutputHandler:
 let webLinksClickHandler:
   | ((event: MouseEvent, uri: string) => void)
   | null = null;
+let tauriFocusHandler: (() => void) | null = null;
 let callOrder: string[] = [];
 
 const terminalInstances: any[] = [];
@@ -46,6 +48,12 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("../openExternalUrl", () => ({
   openExternalUrl: (...args: unknown[]) => openExternalUrlMock(...args),
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    listen: (...args: unknown[]) => tauriWindowListenMock(...args),
+  }),
 }));
 
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
@@ -195,6 +203,7 @@ describe("TerminalView", () => {
     customKeyEventHandler = null;
     terminalOutputHandler = null;
     webLinksClickHandler = null;
+    tauriFocusHandler = null;
     callOrder = [];
     fontSetReadyResolve = null;
     fontSetLoadingDoneHandler = null;
@@ -210,6 +219,15 @@ describe("TerminalView", () => {
           terminalOutputHandler = handler as (event: {
             payload: { pane_id: string; data: number[] };
           }) => void;
+        }
+        return () => {};
+      },
+    );
+    tauriWindowListenMock.mockReset();
+    tauriWindowListenMock.mockImplementation(
+      async (eventName: string, handler?: unknown) => {
+        if (eventName === "tauri://focus" && typeof handler === "function") {
+          tauriFocusHandler = handler as () => void;
         }
         return () => {};
       },
@@ -757,6 +775,25 @@ describe("TerminalView", () => {
     }
   });
 
+  it("does not refocus terminal when window regains focus and an input field is present", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-window-input",
+      active: true,
+      hasInputField: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    term.focus.mockClear();
+
+    window.dispatchEvent(new Event("focus"));
+
+    expect(term.focus).not.toHaveBeenCalled();
+  });
+
   it("does not re-fit on window focus while layout is unchanged", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-focus-refit",
@@ -904,6 +941,59 @@ describe("TerminalView", () => {
       }
       overlay.remove();
     }
+  });
+
+  it("does not refocus terminal on visibility restore when an input field is present", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-visibility-input",
+      active: true,
+      hasInputField: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    term.focus.mockClear();
+
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      expect(term.focus).not.toHaveBeenCalled();
+    } finally {
+      if (hiddenDescriptor) {
+        Object.defineProperty(document, "hidden", hiddenDescriptor);
+      } else {
+        Reflect.deleteProperty(document, "hidden");
+      }
+    }
+  });
+
+  it("does not refocus terminal on tauri window focus when an input field is present", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-tauri-input",
+      active: true,
+      hasInputField: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(tauriFocusHandler).not.toBeNull();
+    });
+
+    const term = terminalInstances[0];
+    term.focus.mockClear();
+
+    tauriFocusHandler?.();
+
+    expect(term.focus).not.toHaveBeenCalled();
   });
 
   it("does not re-fit on visibility restore while layout is unchanged", async () => {

@@ -9,6 +9,7 @@ export class InputHistory {
   private entries: string[] = [];
   /** Index into entries for navigation. -1 = draft (current input). */
   private index = -1;
+  private draft = "";
   private readonly storageKey: string;
   private readonly storage: Storage;
 
@@ -36,12 +37,17 @@ export class InputHistory {
     }
 
     this.index = -1;
+    this.draft = "";
     this.persist();
   }
 
   /** Navigate to older entry. Returns the entry text. */
-  back(): string {
-    if (this.entries.length === 0) return "";
+  back(draft = ""): string {
+    if (this.index === -1) {
+      this.draft = draft;
+    }
+
+    if (this.entries.length === 0) return this.draft;
 
     if (this.index === -1) {
       // Start from most recent
@@ -56,7 +62,7 @@ export class InputHistory {
 
   /** Navigate to newer entry. Returns entry text or "" for draft. */
   forward(): string {
-    if (this.index === -1) return "";
+    if (this.index === -1) return this.draft;
 
     if (this.index < this.entries.length - 1) {
       this.index++;
@@ -65,12 +71,12 @@ export class InputHistory {
 
     // Back to draft
     this.index = -1;
-    return "";
+    return this.draft;
   }
 
   /** Get current entry at navigation position. */
   current(): string {
-    if (this.index === -1) return "";
+    if (this.index === -1) return this.draft;
     return this.entries[this.index] ?? "";
   }
 
@@ -79,6 +85,7 @@ export class InputHistory {
     this.storage.removeItem(this.storageKey);
     this.entries = [];
     this.index = -1;
+    this.draft = "";
   }
 
   private load(): void {

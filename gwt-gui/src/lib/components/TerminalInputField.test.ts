@@ -3,6 +3,7 @@ import { render, fireEvent } from "@testing-library/svelte";
 import TerminalInputField from "./TerminalInputField.svelte";
 
 const mockInvoke = vi.fn().mockResolvedValue(undefined);
+const openDialogMock = vi.fn().mockResolvedValue(null);
 
 // Mock Tauri invoke
 vi.mock("$lib/tauriInvoke", () => ({
@@ -11,13 +12,14 @@ vi.mock("$lib/tauriInvoke", () => ({
 
 // Mock dialog
 vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn().mockResolvedValue(null),
+  open: (...args: unknown[]) => openDialogMock(...args),
 }));
 
 describe("TerminalInputField", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    openDialogMock.mockResolvedValue(null);
   });
 
   it("renders textarea with placeholder", () => {
@@ -86,6 +88,27 @@ describe("TerminalInputField", () => {
     });
   });
 
+  it("keeps the draft when write_terminal fails", async () => {
+    mockInvoke.mockRejectedValueOnce(new Error("write failed"));
+
+    const { container } = render(TerminalInputField, {
+      props: { paneId: "test-pane", agentId: "claude", active: true },
+    });
+    const textarea = container.querySelector("textarea")!;
+
+    await fireEvent.input(textarea, { target: { value: "hello" } });
+    await fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("write_terminal", {
+        paneId: "test-pane",
+        data: expect.arrayContaining([104, 101, 108, 108, 111]),
+      });
+    });
+
+    expect((textarea as HTMLTextAreaElement).value).toBe("hello");
+  });
+
   it("sends interrupt on Escape", async () => {
     const { container } = render(TerminalInputField, {
       props: { paneId: "test-pane", agentId: "claude", active: true },
@@ -152,6 +175,27 @@ describe("TerminalInputField", () => {
     await vi.waitFor(() => {
       expect(onFocusTerminal).toHaveBeenCalled();
     });
+  });
+
+  it("disables send when only unsupported images are attached", async () => {
+    openDialogMock.mockResolvedValueOnce("C:\\temp\\image.png");
+
+    const { container } = render(TerminalInputField, {
+      props: { paneId: "test-pane", agentId: "opencode", active: true },
+    });
+    const attachBtn = container.querySelector('button[title="Attach image"]')!;
+    const sendBtn = container.querySelector(
+      'button[title="Send (Ctrl+Enter)"]',
+    ) as HTMLButtonElement;
+
+    await fireEvent.click(attachBtn);
+
+    await vi.waitFor(() => {
+      expect(container.querySelector(".image-thumbnails")).toBeTruthy();
+    });
+
+    expect(sendBtn.disabled).toBe(true);
+    expect(mockInvoke).not.toHaveBeenCalled();
   });
 
   it("dispatches voice toggle event on mic button click", async () => {

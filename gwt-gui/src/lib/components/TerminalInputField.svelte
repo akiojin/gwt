@@ -141,7 +141,7 @@
 
   function navigateHistory(direction: "back" | "forward") {
     if (!history) return;
-    const entry = direction === "back" ? history.back() : history.forward();
+    const entry = direction === "back" ? history.back(input) : history.forward();
     input = entry;
     // Move cursor to end
     requestAnimationFrame(() => {
@@ -153,16 +153,19 @@
 
   async function send() {
     const text = buildFullText();
-    if (!text.trim() && attachedImages.length === 0) return;
+    if (!text.trim()) return;
 
     const bytes = buildSendBytes(profile, text);
-    await writeBytes(bytes);
+    const wrote = await writeBytes(bytes);
+    if (!wrote) return;
 
     if (input.trim()) {
       history?.push(input);
     }
     input = "";
-    attachedImages = [];
+    if (profile.imageSupport) {
+      attachedImages = [];
+    }
   }
 
   async function queue() {
@@ -172,12 +175,16 @@
     const bytes = buildQueueBytes(profile, text);
     if (!bytes) return;
 
-    await writeBytes(bytes);
+    const wrote = await writeBytes(bytes);
+    if (!wrote) return;
+
     if (input.trim()) {
       history?.push(input);
     }
     input = "";
-    attachedImages = [];
+    if (profile.imageSupport) {
+      attachedImages = [];
+    }
   }
 
   async function interrupt() {
@@ -203,18 +210,21 @@
       // Write current text to PTY without send suffix
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(input));
-      await writeBytes(bytes);
+      const wrote = await writeBytes(bytes);
+      if (!wrote) return;
       input = "";
     }
     onFocusTerminal?.();
   }
 
-  async function writeBytes(data: number[]) {
+  async function writeBytes(data: number[]): Promise<boolean> {
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       await invoke("write_terminal", { paneId, data });
+      return true;
     } catch (err) {
       console.error("Failed to write to terminal:", err);
+      return false;
     }
   }
 
@@ -372,7 +382,7 @@
         class="action-btn send-btn"
         type="button"
         onclick={() => send()}
-        disabled={!input.trim() && attachedImages.length === 0}
+        disabled={!buildFullText().trim()}
         title="Send (Ctrl+Enter)"
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
