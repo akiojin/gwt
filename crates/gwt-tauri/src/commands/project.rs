@@ -58,11 +58,6 @@ pub struct CloneProgress {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ProjectJsonConfig {
-    pub bare_repo_name: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct ProjectTomlConfig {
     pub bare_repo_name: String,
 }
@@ -76,15 +71,6 @@ fn read_bare_repo_name(project_root: &Path) -> Option<String> {
     let toml_path = gwt_dir.join("project.toml");
     if let Ok(content) = std::fs::read_to_string(&toml_path) {
         if let Ok(cfg) = toml::from_str::<ProjectTomlConfig>(&content) {
-            if !cfg.bare_repo_name.trim().is_empty() {
-                return Some(cfg.bare_repo_name);
-            }
-        }
-    }
-
-    let json_path = gwt_dir.join("project.json");
-    if let Ok(content) = std::fs::read_to_string(&json_path) {
-        if let Ok(cfg) = serde_json::from_str::<ProjectJsonConfig>(&content) {
             if !cfg.bare_repo_name.trim().is_empty() {
                 return Some(cfg.bare_repo_name);
             }
@@ -852,16 +838,16 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_repo_path_for_project_root_from_project_json() {
+    fn test_resolve_repo_path_for_project_root_from_project_toml() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
 
         std::fs::create_dir_all(root.join(".gwt")).expect("create .gwt dir");
         std::fs::write(
-            root.join(".gwt").join("project.json"),
-            r#"{"bare_repo_name":"repo.git","migrated_at":"2026-01-01T00:00:00Z"}"#,
+            root.join(".gwt").join("project.toml"),
+            "bare_repo_name = \"repo.git\"\nlocation = \"sibling\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n",
         )
-        .expect("write project.json");
+        .expect("write project.toml");
 
         let bare = root.join("repo.git");
         let status = gwt_core::process::command("git")

@@ -1,16 +1,10 @@
-//! Custom coding agent configuration management (gwt-spec issue)
-//!
-//! This module handles loading, validating, and managing custom coding agents
-//! with automatic migration from JSON to TOML format.
-//!
-//! File locations:
-//! - Global: ~/.gwt/tools.toml (new) or ~/.gwt/tools.json (legacy)
-//! - Local: .gwt/tools.toml (new) or .gwt/tools.json (legacy)
+//! Custom coding agent configuration management in `~/.gwt/config.toml`.
 
+use super::settings::Settings;
 use crate::config::migration::{ensure_config_dir, write_atomic};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::{debug, info, warn};
 
 /// Agent execution type
@@ -83,7 +77,7 @@ pub struct CustomCodingAgent {
     pub version_command: Option<String>,
 }
 
-/// Tools configuration (tools.json/tools.toml structure)
+/// Tools configuration stored under `[tools]` in config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsConfig {
     /// Schema version (required)
@@ -91,6 +85,12 @@ pub struct ToolsConfig {
     /// Custom coding agents
     #[serde(default, alias = "customCodingAgents")]
     pub custom_coding_agents: Vec<CustomCodingAgent>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 impl ToolsConfig {
@@ -102,122 +102,22 @@ impl ToolsConfig {
         }
     }
 
-    /// Get global TOML tools path (~/.gwt/tools.toml)
-    pub fn global_toml_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| home.join(".gwt").join("tools.toml"))
-    }
-
-    /// Get global JSON tools path (~/.gwt/tools.json) - legacy
-    pub fn global_json_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| home.join(".gwt").join("tools.json"))
-    }
-
-    /// Get global tools.json path (~/.gwt/tools.json) - deprecated
-    #[deprecated(note = "Use global_toml_path() for new code")]
-    pub fn global_path() -> Option<PathBuf> {
-        Self::global_json_path()
-    }
-
-    /// Get local TOML tools path (.gwt/tools.toml)
-    pub fn local_toml_path(repo_root: &Path) -> PathBuf {
-        repo_root.join(".gwt").join("tools.toml")
-    }
-
-    /// Get local JSON tools path (.gwt/tools.json) - legacy
-    pub fn local_json_path(repo_root: &Path) -> PathBuf {
-        repo_root.join(".gwt").join("tools.json")
-    }
-
-    /// Get local tools.json path (.gwt/tools.json) - deprecated
-    #[deprecated(note = "Use local_toml_path() for new code")]
-    pub fn local_path(repo_root: &Path) -> PathBuf {
-        Self::local_json_path(repo_root)
-    }
-
-    /// Load global tools config with format auto-detection (gwt-spec issue FR-005)
-    ///
-    /// Priority: TOML > JSON
-    /// Auto-migrates JSON to TOML on load
+    /// Load global tools config from `~/.gwt/config.toml`.
     pub fn load_global() -> Option<Self> {
-        // Try TOML first
-        if let Some(toml_path) = Self::global_toml_path() {
-            if toml_path.exists() {
-                if let Some(config) = Self::load_from_toml(&toml_path) {
-                    return Some(config);
-                }
-            }
-        }
+        Settings::load_global().ok().map(|settings| settings.tools)
+    }
 
-        // Fall back to JSON and auto-migrate
-        if let Some(json_path) = Self::global_json_path() {
-            if json_path.exists() {
-                if let Some(config) = Self::load_from_json(&json_path) {
-                    // Auto-migrate: save as TOML for next time (gwt-spec issue)
-                    if let Err(e) = config.save_global() {
-                        tracing::warn!(
-                            category = "config",
-                            error = %e,
-                            "Failed to auto-migrate global tools.json to TOML"
-                        );
-                    } else {
-                        tracing::info!(
-                            category = "config",
-                            operation = "auto_migrate",
-                            "Auto-migrated global tools.json to tools.toml"
-                        );
-                    }
-                    return Some(config);
-                }
-            }
-        }
-
+    /// Project-local custom agent files are no longer supported.
+    pub fn load_local(_repo_root: &Path) -> Option<Self> {
         None
     }
 
-    /// Load local tools config from repository root with format auto-detection
-    ///
-    /// Priority: TOML > JSON
-    /// Auto-migrates JSON to TOML on load
-    pub fn load_local(repo_root: &Path) -> Option<Self> {
-        // Try TOML first
-        let toml_path = Self::local_toml_path(repo_root);
-        if toml_path.exists() {
-            if let Some(config) = Self::load_from_toml(&toml_path) {
-                return Some(config);
-            }
-        }
-
-        // Fall back to JSON and auto-migrate
-        let json_path = Self::local_json_path(repo_root);
-        if json_path.exists() {
-            if let Some(config) = Self::load_from_json(&json_path) {
-                // Auto-migrate: save as TOML for next time (gwt-spec issue)
-                if let Err(e) = config.save(&toml_path) {
-                    tracing::warn!(
-                        category = "config",
-                        error = %e,
-                        "Failed to auto-migrate local tools.json to TOML"
-                    );
-                } else {
-                    tracing::info!(
-                        category = "config",
-                        operation = "auto_migrate",
-                        "Auto-migrated local tools.json to tools.toml"
-                    );
-                }
-                return Some(config);
-            }
-        }
-
-        None
-    }
-
-    /// Load configuration from TOML file
+    /// Load configuration from a TOML file.
     fn load_from_toml(path: &Path) -> Option<Self> {
         debug!(
             category = "config",
             path = %path.display(),
-            "Loading tools config from TOML"
+            "Loading tools config from TOML data"
         );
 
         let content = match std::fs::read_to_string(path) {
@@ -227,7 +127,7 @@ impl ToolsConfig {
                     category = "config",
                     path = %path.display(),
                     error = %e,
-                    "Failed to read tools.toml"
+                    "Failed to read tools config file"
                 );
                 return None;
             }
@@ -239,7 +139,7 @@ impl ToolsConfig {
                     warn!(
                         category = "config",
                         path = %path.display(),
-                        "tools.toml missing version field, skipping"
+                        "Tools config missing version field, skipping"
                     );
                     return None;
                 }
@@ -248,7 +148,7 @@ impl ToolsConfig {
                     path = %path.display(),
                     version = %config.version,
                     agent_count = config.custom_coding_agents.len(),
-                    "Loaded tools.toml"
+                    "Loaded tools config"
                 );
                 Some(config)
             }
@@ -257,78 +157,21 @@ impl ToolsConfig {
                     category = "config",
                     path = %path.display(),
                     error = %e,
-                    "Failed to parse tools.toml"
+                    "Failed to parse tools config TOML"
                 );
                 None
             }
         }
     }
 
-    /// Load configuration from JSON file (legacy)
-    fn load_from_json(path: &Path) -> Option<Self> {
-        debug!(
-            category = "config",
-            path = %path.display(),
-            "Loading tools config from JSON (legacy)"
-        );
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(
-                    category = "config",
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to read tools.json"
-                );
-                return None;
-            }
-        };
-
-        match serde_json::from_str::<ToolsConfig>(&content) {
-            Ok(config) => {
-                // Validate version field is present (FR-018)
-                if config.version.is_empty() {
-                    warn!(
-                        category = "config",
-                        path = %path.display(),
-                        "tools.json missing version field, skipping"
-                    );
-                    return None;
-                }
-                debug!(
-                    category = "config",
-                    path = %path.display(),
-                    version = %config.version,
-                    agent_count = config.custom_coding_agents.len(),
-                    "Loaded tools.json"
-                );
-                Some(config)
-            }
-            Err(e) => {
-                warn!(
-                    category = "config",
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to parse tools.json"
-                );
-                None
-            }
-        }
-    }
-
-    /// Load configuration from a specific path (auto-detects format by extension)
+    /// Load configuration from a specific TOML path.
     #[allow(dead_code)]
     fn load_from_path(path: &Path) -> Option<Self> {
-        if path.extension().is_some_and(|ext| ext == "toml") {
-            Self::load_from_toml(path)
-        } else {
-            Self::load_from_json(path)
-        }
+        Self::load_from_toml(path)
     }
 
     /// Load and merge global and local configurations
-    /// Local configuration takes priority for same IDs (FR-003)
+    /// Local configuration is no longer supported; only config.toml is used.
     pub fn load_merged(repo_root: &Path) -> Self {
         let global = Self::load_global();
         let local = Self::load_local(repo_root);
@@ -423,90 +266,20 @@ impl ToolsConfig {
         Ok(())
     }
 
-    /// Save configuration to global path in TOML format (~/.gwt/tools.toml)
+    /// Save configuration into `~/.gwt/config.toml`.
     pub fn save_global(&self) -> std::io::Result<()> {
-        if let Some(path) = Self::global_toml_path() {
-            self.save(&path)
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Could not determine global tools path",
-            ))
-        }
+        Settings::update_global(|settings| {
+            settings.tools = self.clone();
+            Ok(())
+        })
+        .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
-    /// Save configuration to local path in TOML format (.gwt/tools.toml)
-    pub fn save_local(&self, repo_root: &Path) -> std::io::Result<()> {
-        let path = Self::local_toml_path(repo_root);
-        self.save(&path)
-    }
-
-    /// Check if global migration from JSON to TOML is needed
-    pub fn needs_global_migration() -> bool {
-        let toml_path = Self::global_toml_path();
-        let json_path = Self::global_json_path();
-        match (toml_path, json_path) {
-            (Some(toml), Some(json)) => json.exists() && !toml.exists(),
-            _ => false,
-        }
-    }
-
-    /// Check if local migration from JSON to TOML is needed
-    pub fn needs_local_migration(repo_root: &Path) -> bool {
-        let toml_path = Self::local_toml_path(repo_root);
-        let json_path = Self::local_json_path(repo_root);
-        json_path.exists() && !toml_path.exists()
-    }
-
-    /// Migrate global config from JSON to TOML if needed
-    pub fn migrate_global_if_needed() -> std::io::Result<bool> {
-        if !Self::needs_global_migration() {
-            return Ok(false);
-        }
-
-        info!(
-            category = "config",
-            operation = "migration",
-            "Migrating global tools config from JSON to TOML"
-        );
-
-        if let Some(config) = Self::load_global() {
-            config.save_global()?;
-            info!(
-                category = "config",
-                operation = "migration",
-                "Global tools migration completed"
-            );
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Migrate local config from JSON to TOML if needed
-    pub fn migrate_local_if_needed(repo_root: &Path) -> std::io::Result<bool> {
-        if !Self::needs_local_migration(repo_root) {
-            return Ok(false);
-        }
-
-        info!(
-            category = "config",
-            operation = "migration",
-            repo_root = %repo_root.display(),
-            "Migrating local tools config from JSON to TOML"
-        );
-
-        if let Some(config) = Self::load_local(repo_root) {
-            config.save_local(repo_root)?;
-            info!(
-                category = "config",
-                operation = "migration",
-                "Local tools migration completed"
-            );
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+    /// Project-local custom agent files are no longer supported.
+    pub fn save_local(&self, _repo_root: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "project-local custom agent files are no longer supported; use save_global()",
+        ))
     }
 
     /// Add a new agent
@@ -570,33 +343,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // T101: ToolsConfig parse test (JSON)
-    #[test]
-    fn test_tools_config_parse_json() {
-        let json = r#"{
-            "version": "1.0.0",
-            "customCodingAgents": [
-                {
-                    "id": "test-agent",
-                    "displayName": "Test Agent",
-                    "type": "command",
-                    "command": "test-cmd"
-                }
-            ]
-        }"#;
-
-        let config: ToolsConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.version, "1.0.0");
-        assert_eq!(config.custom_coding_agents.len(), 1);
-        assert_eq!(config.custom_coding_agents[0].id, "test-agent");
-        assert_eq!(config.custom_coding_agents[0].display_name, "Test Agent");
-        assert_eq!(
-            config.custom_coding_agents[0].agent_type,
-            AgentType::Command
-        );
-    }
-
-    // T101: ToolsConfig parse test (TOML)
     #[test]
     fn test_tools_config_parse_toml() {
         let toml_str = r#"
@@ -620,36 +366,35 @@ command = "test-cmd"
         );
     }
 
-    // T101: Parse with all fields
     #[test]
     fn test_tools_config_parse_all_fields() {
-        let json = r#"{
-            "version": "1.0.0",
-            "customCodingAgents": [
-                {
-                    "id": "aider",
-                    "displayName": "Aider",
-                    "type": "command",
-                    "command": "aider",
-                    "defaultArgs": ["--no-git"],
-                    "modeArgs": {
-                        "normal": [],
-                        "continue": ["--resume"],
-                        "resume": ["--resume"]
-                    },
-                    "permissionSkipArgs": ["--yes"],
-                    "env": {
-                        "OPENAI_API_KEY": "sk-test"
-                    },
-                    "models": [
-                        {"id": "gpt-4", "label": "GPT-4", "arg": "--model gpt-4"}
-                    ],
-                    "versionCommand": "aider --version"
-                }
-            ]
-        }"#;
+        let toml_str = r#"
+version = "1.0.0"
 
-        let config: ToolsConfig = serde_json::from_str(json).unwrap();
+[[custom_coding_agents]]
+id = "aider"
+display_name = "Aider"
+type = "command"
+command = "aider"
+default_args = ["--no-git"]
+permission_skip_args = ["--yes"]
+version_command = "aider --version"
+
+[custom_coding_agents.env]
+OPENAI_API_KEY = "sk-test"
+
+[custom_coding_agents.mode_args]
+normal = []
+continue = ["--resume"]
+resume = ["--resume"]
+
+[[custom_coding_agents.models]]
+id = "gpt-4"
+label = "GPT-4"
+arg = "--model gpt-4"
+"#;
+
+        let config: ToolsConfig = toml::from_str(toml_str).unwrap();
         let agent = &config.custom_coding_agents[0];
         assert_eq!(agent.default_args, vec!["--no-git"]);
         assert_eq!(
@@ -755,7 +500,6 @@ command = "test-cmd"
         assert!(!ToolsConfig::validate_agent(&agent));
     }
 
-    // T103: Global/local merge test
     #[test]
     fn test_merge_global_local() {
         let global = ToolsConfig {
@@ -827,45 +571,27 @@ command = "test-cmd"
         assert_eq!(shared.agent_type, AgentType::Path);
     }
 
-    // T104: Version undefined error test
     #[test]
     fn test_version_undefined_error() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("tools.json");
-
-        // Write JSON without version field (simulated by empty version)
-        let json = r#"{
-            "customCodingAgents": []
-        }"#;
-        std::fs::write(&path, json).unwrap();
-
-        // This should fail to parse because version is required
-        let result = ToolsConfig::load_from_path(&path);
-        // serde will fail because version is required (not Option)
-        assert!(result.is_none());
+        let path = temp_dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        assert!(ToolsConfig::load_from_path(&path).is_none());
     }
 
-    // T104: Empty version should be rejected
     #[test]
     fn test_empty_version_rejected() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("tools.json");
-
-        let json = r#"{
-            "version": "",
-            "customCodingAgents": []
-        }"#;
-        std::fs::write(&path, json).unwrap();
-
-        let result = ToolsConfig::load_from_path(&path);
-        assert!(result.is_none());
+        let path = temp_dir.path().join("config.toml");
+        std::fs::write(&path, "version = \"\"\n").unwrap();
+        assert!(ToolsConfig::load_from_path(&path).is_none());
     }
 
     // T301: Save test (TOML format)
     #[test]
     fn test_tools_config_save_toml() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("tools.toml");
+        let path = temp_dir.path().join("config.toml");
 
         let config = ToolsConfig {
             version: "1.0.0".to_string(),
@@ -897,130 +623,48 @@ command = "test-cmd"
         assert_eq!(loaded.custom_coding_agents[0].id, "test");
     }
 
-    // Test JSON to TOML migration
     #[test]
-    fn test_tools_json_to_toml_migration() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create JSON file
-        let json_path = temp_dir.path().join("tools.json");
-        std::fs::write(
-            &json_path,
-            r#"{
-                "version": "1.0.0",
-                "customCodingAgents": [
-                    {
-                        "id": "migrate-me",
-                        "displayName": "Migrate Me",
-                        "type": "command",
-                        "command": "migrate"
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        // Load from JSON
-        let config = ToolsConfig::load_from_json(&json_path).unwrap();
-        assert_eq!(config.custom_coding_agents[0].id, "migrate-me");
-
-        // Save as TOML
-        let toml_path = temp_dir.path().join("tools.toml");
-        config.save(&toml_path).unwrap();
-
-        // Verify TOML exists and can be loaded
-        assert!(toml_path.exists());
-        let loaded = ToolsConfig::load_from_toml(&toml_path).unwrap();
-        assert_eq!(loaded.custom_coding_agents[0].id, "migrate-me");
-    }
-
-    // Test TOML priority over JSON
-    #[test]
-    fn test_toml_priority_over_json() {
+    fn test_save_global_uses_config_toml() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::new(temp_dir.path());
 
-        let gwt_dir = temp_dir.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
+        let config = ToolsConfig {
+            version: "1.0.0".to_string(),
+            custom_coding_agents: vec![CustomCodingAgent {
+                id: "global-agent".to_string(),
+                display_name: "Global Agent".to_string(),
+                agent_type: AgentType::Command,
+                command: "global".to_string(),
+                default_args: vec![],
+                mode_args: None,
+                permission_skip_args: vec![],
+                env: HashMap::new(),
+                models: vec![],
+                version_command: None,
+            }],
+        };
+        config.save_global().unwrap();
 
-        // Create both JSON and TOML
-        let json_path = gwt_dir.join("tools.json");
-        std::fs::write(
-            &json_path,
-            r#"{
-                "version": "1.0.0",
-                "customCodingAgents": [
-                    {
-                        "id": "json-agent",
-                        "displayName": "JSON Agent",
-                        "type": "command",
-                        "command": "json"
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
+        let loaded = ToolsConfig::load_global().unwrap();
+        assert_eq!(loaded.custom_coding_agents.len(), 1);
+        assert_eq!(loaded.custom_coding_agents[0].id, "global-agent");
 
-        let toml_path = gwt_dir.join("tools.toml");
-        std::fs::write(
-            &toml_path,
-            r#"
-version = "1.0.0"
-
-[[custom_coding_agents]]
-id = "toml-agent"
-display_name = "TOML Agent"
-type = "command"
-command = "toml"
-"#,
-        )
-        .unwrap();
-
-        // TOML should be loaded
-        let config = ToolsConfig::load_global().unwrap();
-        assert_eq!(config.custom_coding_agents[0].id, "toml-agent");
+        let config_path = Settings::global_config_path().unwrap();
+        let content = std::fs::read_to_string(config_path).unwrap();
+        assert!(content.contains("[tools]"));
+        assert!(content.contains("[[tools.custom_coding_agents]]"));
     }
 
-    // Test needs_global_migration
     #[test]
-    fn test_needs_global_migration() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+    fn test_save_local_returns_explicit_error() {
         let temp_dir = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
+        let config = ToolsConfig::empty();
 
-        // No files - no migration needed
-        assert!(!ToolsConfig::needs_global_migration());
-
-        // Create JSON only
-        let gwt_dir = temp_dir.path().join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-        std::fs::write(gwt_dir.join("tools.json"), r#"{"version": "1.0.0"}"#).unwrap();
-        assert!(ToolsConfig::needs_global_migration());
-
-        // Create TOML - no longer needs migration
-        std::fs::write(gwt_dir.join("tools.toml"), "version = \"1.0.0\"").unwrap();
-        assert!(!ToolsConfig::needs_global_migration());
-    }
-
-    // Test needs_local_migration
-    #[test]
-    fn test_needs_local_migration() {
-        let temp_dir = TempDir::new().unwrap();
-        let repo_root = temp_dir.path();
-
-        // No files - no migration needed
-        assert!(!ToolsConfig::needs_local_migration(repo_root));
-
-        // Create JSON only
-        let gwt_dir = repo_root.join(".gwt");
-        std::fs::create_dir_all(&gwt_dir).unwrap();
-        std::fs::write(gwt_dir.join("tools.json"), r#"{"version": "1.0.0"}"#).unwrap();
-        assert!(ToolsConfig::needs_local_migration(repo_root));
-
-        // Create TOML - no longer needs migration
-        std::fs::write(gwt_dir.join("tools.toml"), "version = \"1.0.0\"").unwrap();
-        assert!(!ToolsConfig::needs_local_migration(repo_root));
+        let err = config.save_local(temp_dir.path()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("project-local custom agent files are no longer supported"));
     }
 
     // T302: Add/update/delete tests

@@ -28,7 +28,7 @@ Use gh to inspect a GitHub Issue and:
 - Detect whether the issue is already a spec issue (`gwt-spec` label, `GWT_SPEC_ID` marker, or spec section structure)
 - Classify the work as BUG / FEATURE / ENHANCEMENT / DOCUMENTATION / QUESTION / UNCLASSIFIED
 - Search the codebase for relevant files
-- Decide whether to fix directly, update an existing SPEC, or create a new SPEC
+- Decide whether to fix directly, update an existing SPEC, or register a new SPEC
 - Continue toward resolution instead of stopping at triage
 
 If the issue is already a spec issue, switch to `gwt-spec-ops`.
@@ -156,7 +156,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py
    - Use `gwt-project-index` Issue search before creating or updating any SPEC.
    - Search with at least 2 semantic queries derived from the Issue.
    - If a canonical existing SPEC is found, update that destination and hand off to `gwt-spec-ops`.
-   - If no suitable SPEC exists, create a new `gwt-spec` Issue with the built-in spec tooling when available, or the documented gh fallback when the built-in path is unavailable.
+   - If no suitable SPEC exists, switch to `gwt-spec-register` to create the new `gwt-spec` Issue.
    - After the target SPEC exists, hand off to `gwt-spec-ops`.
 
 8. **Produce Issue Analysis Report for non-SPEC issues before execution.**

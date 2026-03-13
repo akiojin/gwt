@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.7.0] - 2026-03-12
+
+### Bug Fixes
+
+- **config:** Consolidate app settings into config.toml (#1594)
+
+### Features
+
+- **skills:** Add spec register workflow (#1595)
+
 ## [8.6.3] - 2026-03-12
 
 ### Bug Fixes

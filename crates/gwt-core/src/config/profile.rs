@@ -165,7 +165,6 @@ fn is_default_profile_ai_placeholder(settings: &AISettings) -> bool {
         && settings.model.trim().is_empty()
         && normalize_ai_language(&settings.language) == default_ai_language()
 }
-
 fn normalize_ai_language(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "ja" => "ja".to_string(),
@@ -215,16 +214,16 @@ impl ProfilesConfig {
     /// 3. legacy `~/.gwt/profiles.yaml`
     /// 4. Default profile
     pub fn load() -> Result<Self> {
-        // Migrate legacy profiles onto the raw on-disk config so temporary env
-        // overrides are not serialized into config.toml.
-        let mut settings = Settings::load_global_raw()?;
+        let settings = Settings::load_global_raw()?;
         let has_profiles_in_global = Self::global_config_has_profiles_section();
 
         if !has_profiles_in_global {
             if let Some(mut legacy) = Self::load_legacy_fallback()? {
                 legacy.normalize_loaded();
-                settings.profiles = legacy.clone();
-                settings.save_global()?;
+                Settings::update_global(|settings| {
+                    settings.profiles = legacy.clone();
+                    Ok(())
+                })?;
                 info!(
                     category = "config",
                     path = %Settings::global_config_path()
@@ -333,11 +332,10 @@ impl ProfilesConfig {
         let mut normalized = self.clone();
         normalized.normalize_for_save()?;
 
-        // Persist profiles onto the raw on-disk config so temporary env
-        // overrides are not serialized into config.toml.
-        let mut settings = Settings::load_global_raw()?;
-        settings.profiles = normalized;
-        settings.save_global()?;
+        Settings::update_global(|settings| {
+            settings.profiles = normalized.clone();
+            Ok(())
+        })?;
 
         let path = Settings::global_config_path()
             .map(|p| p.display().to_string())
@@ -388,7 +386,6 @@ impl ProfilesConfig {
     ///
     /// Rules:
     /// - Active profile `ai` is the single source of truth.
-    /// - `default_ai` is legacy input only and must not be used as runtime fallback.
     pub fn resolve_active_ai_settings(&self) -> ActiveAISettingsResolution {
         if let Some(profile) = self.active_profile() {
             if let Some(settings) = profile.ai.as_ref() {
@@ -588,6 +585,10 @@ profiles:
 "#,
         )
         .unwrap();
+
+        let direct = ProfilesConfig::load_yaml(&yaml_path).unwrap();
+        assert_eq!(direct.active.as_deref(), Some("legacy"));
+        assert!(direct.profiles.contains_key("legacy"));
 
         let loaded = ProfilesConfig::load().unwrap();
         assert_eq!(loaded.active.as_deref(), Some("legacy"));
@@ -905,7 +906,7 @@ force_host = false
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
+            default_ai: None,
             profiles,
         };
 
@@ -927,7 +928,7 @@ force_host = false
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
+            default_ai: None,
             profiles,
         };
 
@@ -949,7 +950,7 @@ force_host = false
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
+            default_ai: None,
             profiles,
         };
 
@@ -968,7 +969,7 @@ force_host = false
         let config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
-            default_ai: Some(ai_settings("gpt-5.1")),
+            default_ai: None,
             profiles,
         };
 

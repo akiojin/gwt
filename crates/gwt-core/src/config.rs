@@ -1,6 +1,6 @@
-//! Configuration management module
+//! Configuration management module.
 //!
-//! Handles TOML configuration files with automatic migration from JSON.
+//! App settings are stored in TOML, centered on `~/.gwt/config.toml`.
 
 mod agent_config;
 mod bare_project;
@@ -31,10 +31,7 @@ pub use claude_plugins::{
     remove_gwt_plugin_key_at, setup_gwt_plugin, setup_gwt_plugin_at, GWT_MARKETPLACE_NAME,
     GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
 };
-pub use migration::{
-    backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
-    migrate_yaml_to_toml, write_atomic, CleanupCandidate,
-};
+pub use migration::{backup_broken_file, ensure_config_dir, write_atomic};
 pub use os_env::{capture_login_shell_env, EnvSource, OsEnvResult, ShellType};
 pub use profile::{
     AISettings, ActiveAISettingsResolution, ActiveAISettingsSource, Profile, ProfilesConfig,
@@ -55,9 +52,8 @@ pub use skill_registration::{
 };
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
-    get_branch_tool_history, get_last_tool_usage_map, get_ts_session_json_path,
-    get_ts_session_path, get_ts_session_toml_path, load_ts_session, migrate_ts_session_if_needed,
-    needs_ts_session_migration, save_session_entry, ToolSessionEntry, TsSessionData,
+    get_branch_tool_history, get_last_tool_usage_map, get_ts_session_path,
+    get_ts_session_toml_path, load_ts_session, save_session_entry, ToolSessionEntry, TsSessionData,
 };
 
 #[cfg(test)]

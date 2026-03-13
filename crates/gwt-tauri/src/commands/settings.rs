@@ -1,6 +1,7 @@
 //! Settings management commands
 
 use gwt_core::config::{Settings, SkillRegistrationPreferences};
+use gwt_core::GwtError;
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -312,18 +313,13 @@ pub fn get_settings() -> Result<SettingsData, StructuredError> {
 #[tauri::command]
 pub fn save_settings(settings: SettingsData) -> Result<(), StructuredError> {
     with_panic_guard("saving settings", "save_settings", || {
-        // Save onto the raw on-disk config so temporary env overrides do not
-        // get serialized into config.toml.
-        let mut core_settings = Settings::load_global_raw()
-            .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
-
-        settings
-            .apply_to_settings(&mut core_settings)
-            .map_err(|e| StructuredError::internal(&e, "save_settings"))?;
-
-        core_settings
-            .save_global()
-            .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
+        Settings::update_global(|core_settings| {
+            settings
+                .apply_to_settings(core_settings)
+                .map_err(|e| GwtError::ConfigWriteError { reason: e })?;
+            Ok(())
+        })
+        .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
 
         Ok(())
     })

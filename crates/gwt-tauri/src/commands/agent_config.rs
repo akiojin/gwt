@@ -26,7 +26,7 @@ fn with_panic_guard<T>(
     }
 }
 
-/// Get current agent config (global: ~/.gwt/agents.toml)
+/// Get current agent config from ~/.gwt/config.toml
 #[tauri::command]
 pub fn get_agent_config() -> Result<AgentConfig, StructuredError> {
     with_panic_guard("loading agent config", "get_agent_config", || {
@@ -34,7 +34,7 @@ pub fn get_agent_config() -> Result<AgentConfig, StructuredError> {
     })
 }
 
-/// Save agent config (always writes TOML: ~/.gwt/agents.toml)
+/// Save agent config into ~/.gwt/config.toml
 #[tauri::command]
 pub fn save_agent_config(config: AgentConfig) -> Result<(), StructuredError> {
     with_panic_guard("saving agent config", "save_agent_config", || {
