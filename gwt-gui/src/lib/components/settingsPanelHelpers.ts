@@ -175,3 +175,6 @@ export function normalizeTerminalFontFamily(value: string | null | undefined): s
 export function clampFontSize(v: number): number {
   return Math.max(8, Math.min(24, Math.round(v)));
 }
+
+/** Valid profile name: lowercase letters, numbers, and hyphens. */
+export const PROFILE_NAME_PATTERN = /^[a-z0-9-]+$/;

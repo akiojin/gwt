@@ -31,7 +31,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
-    class="overlay modal-overlay"
+    class="modal-overlay"
     onclick={onClose}
     role="dialog"
     aria-modal="true"
@@ -40,7 +40,7 @@
   >
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div class="dialog" onclick={(e) => e.stopPropagation()}>
+    <div class="dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
       <div class="dialog-header">
         <h2>{title}</h2>
         <button class="close-btn" onclick={onClose} aria-label="Close">&times;</button>
@@ -64,29 +64,12 @@
 {/if}
 
 <style>
-  .overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: var(--z-modal-base);
-  }
-
   .dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
     max-width: 480px;
     width: 90vw;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
   }
 
   .dialog-header {

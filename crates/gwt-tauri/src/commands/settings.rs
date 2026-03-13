@@ -312,7 +312,9 @@ pub fn get_settings() -> Result<SettingsData, StructuredError> {
 #[tauri::command]
 pub fn save_settings(settings: SettingsData) -> Result<(), StructuredError> {
     with_panic_guard("saving settings", "save_settings", || {
-        let mut core_settings = Settings::load_global()
+        // Save onto the raw on-disk config so temporary env overrides do not
+        // get serialized into config.toml.
+        let mut core_settings = Settings::load_global_raw()
             .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
 
         settings

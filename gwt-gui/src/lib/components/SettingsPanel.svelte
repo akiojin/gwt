@@ -20,12 +20,12 @@
     normalizeUiFontFamily,
     normalizeTerminalFontFamily,
     clampFontSize,
+    PROFILE_NAME_PATTERN,
   } from "./settingsPanelHelpers";
-
-  let { onClose }: { onClose: () => void } = $props();
-
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import CreateProfileDialog from "./CreateProfileDialog.svelte";
+
+  let { onClose }: { onClose: () => void } = $props();
 
   type SettingsTabId =
     | "general"
@@ -496,7 +496,7 @@
     if (!profiles) return;
     const trimmed = name.trim().toLowerCase();
     if (!trimmed) return;
-    if (!/^[a-z0-9-]+$/.test(trimmed)) {
+    if (!PROFILE_NAME_PATTERN.test(trimmed)) {
       saveMessage = "Profile name must be lowercase letters, numbers, or hyphens.";
       return;
     }
@@ -1654,12 +1654,6 @@
     font-family: monospace;
     outline: none;
     width: 100%;
-  }
-
-  .field input[type="text"].env-value,
-  .field input[type="text"].env-key-input,
-  .field input[type="text"].env-value-input {
-    max-width: none;
   }
 
   .env-add-row {

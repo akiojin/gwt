@@ -13,6 +13,84 @@ import {
   getInvokeArgs,
 } from "./support/helpers";
 
+function generalTab(page: Parameters<typeof test>[0]["page"]) {
+  return page.getByRole("button", { name: "General", exact: true });
+}
+
+function profilesTab(page: Parameters<typeof test>[0]["page"]) {
+  return page.getByRole("button", { name: "Profiles", exact: true });
+}
+
+function terminalTab(page: Parameters<typeof test>[0]["page"]) {
+  return page.getByRole("button", { name: "Terminal", exact: true });
+}
+
+function voiceInputTab(page: Parameters<typeof test>[0]["page"]) {
+  return page.getByRole("button", { name: "Voice Input", exact: true });
+}
+
+function fieldByLabel(
+  page: Parameters<typeof test>[0]["page"],
+  label: RegExp,
+) {
+  return page
+    .locator(".field")
+    .filter({ has: page.locator("label", { hasText: label }) })
+    .first();
+}
+
+function uiFontSizeInput(page: Parameters<typeof test>[0]["page"]) {
+  return fieldByLabel(page, /^UI font size$/i).locator('input[type="number"]');
+}
+
+function terminalFontSizeInput(page: Parameters<typeof test>[0]["page"]) {
+  return fieldByLabel(page, /^Terminal font size$/i).locator(
+    'input[type="number"]',
+  );
+}
+
+function profileSelect(page: Parameters<typeof test>[0]["page"]) {
+  return page.locator(".profile-select");
+}
+
+function profileDeleteButton(page: Parameters<typeof test>[0]["page"]) {
+  return page
+    .locator(".profile-header")
+    .getByRole("button", { name: "Delete", exact: true });
+}
+
+function profileNewButton(page: Parameters<typeof test>[0]["page"]) {
+  return page
+    .locator(".profile-header")
+    .getByRole("button", { name: "+ New", exact: true });
+}
+
+function apiKeyField(page: Parameters<typeof test>[0]["page"]) {
+  return fieldByLabel(page, /^API key$/i);
+}
+
+function apiKeyInput(page: Parameters<typeof test>[0]["page"]) {
+  return apiKeyField(page).locator(".ai-apikey-row input");
+}
+
+function voiceEnabledSettings() {
+  return {
+    ...settingsFixture,
+    voice_input: {
+      ...settingsFixture.voice_input,
+      enabled: true,
+    },
+  };
+}
+
+async function enableVoiceInput(page: Parameters<typeof test>[0]["page"]) {
+  const checkbox = page.locator("#voice-input-enabled");
+  await expect(checkbox).toBeVisible();
+  if (!(await checkbox.isChecked())) {
+    await checkbox.check();
+  }
+}
+
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page, {
     commandResponses: {
@@ -29,37 +107,31 @@ test("opens Settings panel from menu action", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("Settings Appearance tab is active by default", async ({ page }) => {
+test("Settings General tab is active by default", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
-  await expect(
-    page.getByRole("button", { name: "Appearance", exact: true }),
-  ).toHaveClass(/active/);
+  await expect(generalTab(page)).toHaveClass(/active/);
 });
 
 test("Settings shows UI Font Size field", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
-  await expect(page.getByText("UI Font Size")).toBeVisible();
+  await expect(fieldByLabel(page, /^UI font size$/i)).toBeVisible();
 });
 
 test("Settings shows Terminal Font Size field", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
-  await expect(page.getByText("Terminal Font Size")).toBeVisible();
+  await terminalTab(page).click();
+  await expect(fieldByLabel(page, /^Terminal font size$/i)).toBeVisible();
 });
 
 test("changes UI font size via spinbutton and saves", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  // Find the UI Font Size spinbutton and clear + fill
-  const uiFontSpinbutton = page
-    .locator(".settings-tab-content")
-    .getByRole("spinbutton")
-    .nth(1);
-  await expect(uiFontSpinbutton).toBeVisible();
-  await uiFontSpinbutton.fill("16");
+  await expect(uiFontSizeInput(page)).toBeVisible();
+  await uiFontSizeInput(page).fill("16");
 
   await page.getByRole("button", { name: "Save" }).click();
   await waitForInvokeCommand(page, "save_settings");
@@ -76,13 +148,9 @@ test("changes terminal font size via spinbutton and saves", async ({
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  // Terminal Font Size is the first spinbutton
-  const termFontSpinbutton = page
-    .locator(".settings-tab-content")
-    .getByRole("spinbutton")
-    .nth(0);
-  await expect(termFontSpinbutton).toBeVisible();
-  await termFontSpinbutton.fill("18");
+  await terminalTab(page).click();
+  await expect(terminalFontSizeInput(page)).toBeVisible();
+  await terminalFontSizeInput(page).fill("18");
 
   await page.getByRole("button", { name: "Save" }).click();
   await waitForInvokeCommand(page, "save_settings");
@@ -97,22 +165,22 @@ test("Voice Input tab shows fields", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  await page
-    .getByRole("button", { name: "Voice Input", exact: true })
-    .click();
+  await voiceInputTab(page).click();
 
   await expect(page.locator("#voice-input-enabled")).toBeVisible();
+  await enableVoiceInput(page);
   await expect(page.locator("#voice-hotkey")).toBeVisible();
   await expect(page.locator("#voice-language")).toBeVisible();
 });
 
 test("Voice Input hotkey can be changed", async ({ page }) => {
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses());
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_settings: voiceEnabledSettings() }),
+  );
 
-  await page
-    .getByRole("button", { name: "Voice Input", exact: true })
-    .click();
+  await voiceInputTab(page).click();
 
   await page.locator("#voice-hotkey").fill("Ctrl+Shift+V");
   await page.getByRole("button", { name: "Save" }).click();
@@ -128,11 +196,12 @@ test("Voice Input hotkey can be changed", async ({ page }) => {
 
 test("Voice Input language can be changed", async ({ page }) => {
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses());
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_settings: voiceEnabledSettings() }),
+  );
 
-  await page
-    .getByRole("button", { name: "Voice Input", exact: true })
-    .click();
+  await voiceInputTab(page).click();
 
   await page.locator("#voice-language").selectOption("ja");
   await page.getByRole("button", { name: "Save" }).click();
@@ -163,47 +232,37 @@ test("Profiles tab shows default profile", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  await expect(page.locator("#active-profile")).toHaveValue("default");
+  await expect(profileSelect(page)).toHaveValue("default");
 });
 
 test("default profile delete button is disabled", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  const deleteButton = page.getByRole("button", { name: "Delete Active Profile" });
-  await expect(page.locator("#active-profile")).toHaveValue("default");
+  const deleteButton = profileDeleteButton(page);
+  await expect(profileSelect(page)).toHaveValue("default");
   await expect(deleteButton).toBeDisabled();
-  await expect(deleteButton).toHaveCSS("background-color", "rgb(49, 50, 68)");
-  await expect(deleteButton).toHaveCSS("color", "rgb(108, 112, 134)");
-  await expect(deleteButton).toHaveCSS("cursor", "not-allowed");
 
   const invokeLog = await getInvokeLog(page);
   expect(invokeLog).not.toContain("save_profiles");
 });
 
-test("Profiles tab uses Active Profile selector only and shows config.toml hint", async ({
+test("Profiles tab shows selector and profile actions from the refactored header", async ({
   page,
 }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  await expect(page.locator("#active-profile")).toBeVisible();
+  await expect(profileSelect(page)).toBeVisible();
   await expect(page.locator("#profile-edit")).toHaveCount(0);
-  await expect(
-    page.getByText("Saved in ~/.gwt/config.toml ([profiles])."),
-  ).toBeVisible();
+  await expect(profileDeleteButton(page)).toBeVisible();
+  await expect(profileNewButton(page)).toBeVisible();
 });
 
 test("creating a profile makes it active and save_profiles persists active profile edits", async ({
@@ -212,13 +271,12 @@ test("creating a profile makes it active and save_profiles persists active profi
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  await page.locator("#new-profile").fill("staging");
-  await page.getByRole("button", { name: "Create" }).click();
-  await expect(page.locator("#active-profile")).toHaveValue("staging");
+  await profileNewButton(page).click();
+  await page.getByRole("dialog", { name: "Create Profile" }).getByLabel("Profile Name").fill("staging");
+  await page.getByRole("dialog", { name: "Create Profile" }).getByRole("button", { name: "Create", exact: true }).click();
+  await expect(profileSelect(page)).toHaveValue("staging");
 
   await page.locator(".env-add-row .env-key-input").fill("STAGE_KEY");
   await page.locator(".env-add-row .env-value-input").fill("stage-value");
@@ -270,15 +328,17 @@ test("deleting active non-default profile falls back to default", async ({
   await page.goto("/");
   await openSettings(page, standardSettingsResponses({ get_profiles: twoProfiles }));
 
+  await profilesTab(page).click();
+
+  await expect(profileSelect(page)).toHaveValue("dev");
+  await profileDeleteButton(page).click();
   await page
-    .getByRole("button", { name: "Profiles", exact: true })
+    .getByRole("dialog", { name: "Delete Profile" })
+    .getByRole("button", { name: "Delete", exact: true })
     .click();
 
-  await expect(page.locator("#active-profile")).toHaveValue("dev");
-  await page.getByRole("button", { name: "Delete Active Profile" }).click();
-
-  await expect(page.locator("#active-profile")).toHaveValue("default");
-  await expect(page.locator("#active-profile option[value='dev']")).toHaveCount(0);
+  await expect(profileSelect(page)).toHaveValue("default");
+  await expect(profileSelect(page).locator("option[value='dev']")).toHaveCount(0);
 });
 
 test("Profiles tab shows API key peek/copy controls and preserves underscore key on peek", async ({
@@ -304,30 +364,28 @@ test("Profiles tab shows API key peek/copy controls and preserves underscore key
   await page.goto("/");
   await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithApiKey }));
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
-  const apiKeyInput = apiKeyField.locator("input").first();
-  const peekButton = apiKeyField.locator(".btn-peek-apikey");
-  const copyButton = apiKeyField.locator(".btn-copy-apikey");
+  const keyField = apiKeyField(page);
+  const keyInput = apiKeyInput(page);
+  const peekButton = keyField.locator(".btn-peek-apikey");
+  const copyButton = keyField.locator(".btn-copy-apikey");
 
   await expect(peekButton).toBeVisible();
   await expect(copyButton).toBeVisible();
   await expect(peekButton.locator("svg")).toBeVisible();
   await expect(copyButton.locator("svg")).toBeVisible();
-  await expect(apiKeyInput).toHaveAttribute("type", "text");
-  await expect(apiKeyInput).toHaveClass(/\bapi-key-masked\b/);
+  await expect(keyInput).toHaveAttribute("type", "text");
+  await expect(keyInput).toHaveClass(/\bapi-key-masked\b/);
 
   await peekButton.dispatchEvent("mousedown");
-  await expect(apiKeyInput).toHaveAttribute("type", "text");
-  await expect(apiKeyInput).not.toHaveClass(/\bapi-key-masked\b/);
-  await expect(apiKeyInput).toHaveValue("sk_test_ab_cd");
+  await expect(keyInput).toHaveAttribute("type", "text");
+  await expect(keyInput).not.toHaveClass(/\bapi-key-masked\b/);
+  await expect(keyInput).toHaveValue("sk_test_ab_cd");
 
   await peekButton.dispatchEvent("mouseup");
-  await expect(apiKeyInput).toHaveAttribute("type", "text");
-  await expect(apiKeyInput).toHaveClass(/\bapi-key-masked\b/);
+  await expect(keyInput).toHaveAttribute("type", "text");
+  await expect(keyInput).toHaveClass(/\bapi-key-masked\b/);
 });
 
 test("copy API key button writes plaintext value and shows copied feedback", async ({
@@ -367,12 +425,9 @@ test("copy API key button writes plaintext value and shows copied feedback", asy
   await page.goto("/");
   await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithApiKey }));
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
-  const copyButton = apiKeyField.locator(".btn-copy-apikey");
+  const copyButton = apiKeyField(page).locator(".btn-copy-apikey");
 
   await expect(copyButton).toBeVisible();
   await copyButton.click();
@@ -395,14 +450,10 @@ test("Profiles API key value with underscores is persisted on save_profiles", as
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
   const apiKeyValue = "sk_test_ab_cd";
-  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
-  const apiKeyInput = apiKeyField.locator("input").first();
-  await apiKeyInput.fill(apiKeyValue);
+  await apiKeyInput(page).fill(apiKeyValue);
 
   await page.getByRole("button", { name: "Save" }).click();
   await waitForInvokeCommand(page, "save_profiles");
@@ -440,18 +491,15 @@ test("Profiles API key peek and copy buttons appear after typing", async ({
   await page.goto("/");
   await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
-  const apiKeyInput = apiKeyField.locator("input").first();
-  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeHidden();
-  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeHidden();
-  await apiKeyInput.fill("sk-typed-key");
+  const keyField = apiKeyField(page);
+  await expect(keyField.locator(".btn-peek-apikey")).toBeHidden();
+  await expect(keyField.locator(".btn-copy-apikey")).toBeHidden();
+  await apiKeyInput(page).fill("sk-typed-key");
 
-  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeVisible();
-  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeVisible();
+  await expect(keyField.locator(".btn-peek-apikey")).toBeVisible();
+  await expect(keyField.locator(".btn-copy-apikey")).toBeVisible();
 });
 
 test("Profiles API key typed value is sent to list_ai_models on Refresh", async ({
@@ -477,13 +525,9 @@ test("Profiles API key typed value is sent to list_ai_models on Refresh", async 
   await page.goto("/");
   await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
-  const apiKeyInput = apiKeyField.locator("input").first();
-  await apiKeyInput.fill("sk-refresh-check-123");
+  await apiKeyInput(page).fill("sk-refresh-check-123");
 
   await page.getByRole("button", { name: "Refresh" }).click();
   await waitForInvokeCommand(page, "list_ai_models");
@@ -518,14 +562,9 @@ test("Profiles pasted API key shows actions and is sent to list_ai_models on Ref
   await page.goto("/");
   await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
-  const apiKeyInput = apiKeyField.locator("input").first();
-
-  await apiKeyInput.evaluate((input, pasted) => {
+  await apiKeyInput(page).evaluate((input, pasted) => {
     const element = input as HTMLInputElement;
     element.focus();
     const cursor = element.value.length;
@@ -543,8 +582,8 @@ test("Profiles pasted API key shows actions and is sent to list_ai_models on Ref
     element.dispatchEvent(pasteEvent);
   }, "sk-pasted-e2e-refresh");
 
-  await expect(apiKeyField.locator(".btn-peek-apikey")).toBeVisible();
-  await expect(apiKeyField.locator(".btn-copy-apikey")).toBeVisible();
+  await expect(apiKeyField(page).locator(".btn-peek-apikey")).toBeVisible();
+  await expect(apiKeyField(page).locator(".btn-copy-apikey")).toBeVisible();
 
   await page.getByRole("button", { name: "Refresh" }).click();
   await waitForInvokeCommand(page, "list_ai_models");
@@ -579,14 +618,9 @@ test("Profiles pasted API key is sent to save_profiles on Save", async ({
   await page.goto("/");
   await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
 
-  await page
-    .getByRole("button", { name: "Profiles", exact: true })
-    .click();
+  await profilesTab(page).click();
 
-  const apiKeyField = page.locator(".ai-field").filter({ hasText: "API Key" });
-  const apiKeyInput = apiKeyField.locator("input").first();
-
-  await apiKeyInput.evaluate((input, pasted) => {
+  await apiKeyInput(page).evaluate((input, pasted) => {
     const element = input as HTMLInputElement;
     element.focus();
     const cursor = element.value.length;
@@ -619,7 +653,7 @@ test("UI Font Family selector shows presets", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  const selector = page.getByLabel("UI Font Family");
+  const selector = page.getByLabel("UI font family");
   await expect(selector).toBeVisible();
   const options = selector.locator("option");
   await expect(options).not.toHaveCount(0);
@@ -629,7 +663,8 @@ test("Terminal Font Family selector shows presets", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
-  const selector = page.getByLabel("Terminal Font Family");
+  await terminalTab(page).click();
+  const selector = page.getByLabel("Terminal font family");
   await expect(selector).toBeVisible();
   const options = selector.locator("option");
   await expect(options).not.toHaveCount(0);
@@ -643,7 +678,7 @@ test("changing UI font family updates CSS variable preview", async ({
 
   const interValue =
     '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
-  await page.getByLabel("UI Font Family").selectOption(interValue);
+  await page.getByLabel("UI font family").selectOption(interValue);
 
   const uiFont = await page.evaluate(() =>
     getComputedStyle(document.documentElement)
@@ -663,7 +698,7 @@ test("closing Settings without saving restores original font preview", async ({
   const interValue =
     '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
 
-  await page.getByLabel("UI Font Family").selectOption(interValue);
+  await page.getByLabel("UI font family").selectOption(interValue);
 
   await page
     .locator(".settings-footer .btn-cancel", { hasText: "Close" })
@@ -693,33 +728,28 @@ test("navigating between settings tabs preserves changed values", async ({
   // Change UI font family in Appearance
   const interValue =
     '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
-  await page.getByLabel("UI Font Family").selectOption(interValue);
+  await page.getByLabel("UI font family").selectOption(interValue);
 
   // Navigate to Voice Input and back
-  await page
-    .getByRole("button", { name: "Voice Input", exact: true })
-    .click();
-  await page
-    .getByRole("button", { name: "Appearance", exact: true })
-    .click();
+  await voiceInputTab(page).click();
+  await generalTab(page).click();
 
   // Value should be preserved
-  await expect(page.getByLabel("UI Font Family")).toHaveValue(interValue);
+  await expect(page.getByLabel("UI font family")).toHaveValue(interValue);
 });
 
 test("Voice Input unavailable reason banner is shown", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, {
     ...standardSettingsResponses(),
+    get_settings: voiceEnabledSettings(),
     get_voice_capability: {
       available: false,
       reason: "GPU acceleration is not available",
     },
   });
 
-  await page
-    .getByRole("button", { name: "Voice Input", exact: true })
-    .click();
+  await voiceInputTab(page).click();
 
   await expect(
     page.getByText("GPU acceleration is not available"),
@@ -729,13 +759,13 @@ test("Voice Input unavailable reason banner is shown", async ({ page }) => {
 test("Log Retention days field is visible", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
-  await expect(page.getByText("Log Retention (days)")).toBeVisible();
+  await expect(page.getByLabel("Log retention")).toBeVisible();
 });
 
 test("Protected Branches section is visible", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
-  await expect(page.getByText("Protected Branches")).toBeVisible();
+  await expect(page.getByText("Protected branches")).toBeVisible();
   await expect(
     page.locator(".branch-tags .branch-tag").filter({ hasText: "main" }),
   ).toBeVisible();

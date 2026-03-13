@@ -250,10 +250,7 @@ impl Settings {
         Ok(settings)
     }
 
-    /// Load settings from global configuration file and environment.
-    ///
-    /// Reads `~/.gwt/config.toml`. Falls back to defaults when the file does not exist.
-    pub fn load_global() -> Result<Self> {
+    fn load_global_impl(include_env_overrides: bool) -> Result<Self> {
         debug!(category = "config", "Loading global settings");
 
         let config_path = Self::global_config_path().filter(|p| p.exists());
@@ -269,7 +266,9 @@ impl Settings {
             figment = figment.merge(Toml::file(path));
         }
 
-        figment = figment.merge(Self::settings_env_provider());
+        if include_env_overrides {
+            figment = figment.merge(Self::settings_env_provider());
+        }
 
         let mut settings: Settings = figment.extract().map_err(|e| {
             error!(
@@ -282,22 +281,28 @@ impl Settings {
             }
         })?;
 
-        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.agent.auto_install_deps = parsed;
+        if include_env_overrides {
+            if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
+                if let Some(parsed) = parse_env_bool(&value) {
+                    settings.agent.auto_install_deps = parsed;
+                }
             }
-        }
 
-        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.docker.force_host = parsed;
+            if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
+                if let Some(parsed) = parse_env_bool(&value) {
+                    settings.docker.force_host = parsed;
+                }
             }
         }
         settings.profiles.normalize_loaded();
 
         info!(
             category = "config",
-            operation = "load_global",
+            operation = if include_env_overrides {
+                "load_global"
+            } else {
+                "load_global_raw"
+            },
             config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
             debug = settings.debug,
             worktree_root = %settings.worktree_root,
@@ -305,6 +310,21 @@ impl Settings {
         );
 
         Ok(settings)
+    }
+
+    /// Load settings from global configuration file and environment.
+    ///
+    /// Reads `~/.gwt/config.toml`. Falls back to defaults when the file does not exist.
+    pub fn load_global() -> Result<Self> {
+        Self::load_global_impl(true)
+    }
+
+    /// Load settings from `~/.gwt/config.toml` without applying environment overrides.
+    ///
+    /// Use this before persisting changes so temporary `GWT_*` overrides are not
+    /// written back into the config file.
+    pub fn load_global_raw() -> Result<Self> {
+        Self::load_global_impl(false)
     }
 
     /// Get default TOML configuration
@@ -720,6 +740,61 @@ model = "Qwen/Qwen3-ASR-1.7B"
             Some(value) => std::env::set_var("GWT_AGENT", value),
             None => std::env::remove_var("GWT_AGENT"),
         }
+    }
+
+    #[test]
+    fn test_load_global_raw_ignores_env_overrides() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let prev_debug = std::env::var_os("GWT_DEBUG");
+        let prev_docker_force_host = std::env::var_os("GWT_DOCKER_FORCE_HOST");
+        let prev_auto_install = std::env::var_os("GWT_AGENT_AUTO_INSTALL_DEPS");
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            r#"
+debug = false
+
+[agent]
+auto_install_deps = false
+
+[docker]
+force_host = false
+"#,
+        )
+        .unwrap();
+
+        std::env::set_var("GWT_DEBUG", "true");
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
+        std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
+
+        let raw = Settings::load_global_raw().unwrap();
+        let merged = Settings::load_global().unwrap();
+
+        match prev_debug {
+            Some(value) => std::env::set_var("GWT_DEBUG", value),
+            None => std::env::remove_var("GWT_DEBUG"),
+        }
+        match prev_docker_force_host {
+            Some(value) => std::env::set_var("GWT_DOCKER_FORCE_HOST", value),
+            None => std::env::remove_var("GWT_DOCKER_FORCE_HOST"),
+        }
+        match prev_auto_install {
+            Some(value) => std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", value),
+            None => std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS"),
+        }
+
+        assert!(!raw.debug);
+        assert!(!raw.docker.force_host);
+        assert!(!raw.agent.auto_install_deps);
+
+        assert!(merged.debug);
+        assert!(merged.docker.force_host);
+        assert!(merged.agent.auto_install_deps);
     }
 
     #[test]

@@ -130,7 +130,6 @@ impl AISettings {
         let model = self.model.trim();
         !endpoint.is_empty() && !model.is_empty()
     }
-
 }
 
 fn default_endpoint() -> String {
@@ -216,7 +215,9 @@ impl ProfilesConfig {
     /// 3. legacy `~/.gwt/profiles.yaml`
     /// 4. Default profile
     pub fn load() -> Result<Self> {
-        let mut settings = Settings::load_global()?;
+        // Migrate legacy profiles onto the raw on-disk config so temporary env
+        // overrides are not serialized into config.toml.
+        let mut settings = Settings::load_global_raw()?;
         let has_profiles_in_global = Self::global_config_has_profiles_section();
 
         if !has_profiles_in_global {
@@ -332,7 +333,9 @@ impl ProfilesConfig {
         let mut normalized = self.clone();
         normalized.normalize_for_save()?;
 
-        let mut settings = Settings::load_global()?;
+        // Persist profiles onto the raw on-disk config so temporary env
+        // overrides are not serialized into config.toml.
+        let mut settings = Settings::load_global_raw()?;
         settings.profiles = normalized;
         settings.save_global()?;
 
@@ -701,6 +704,75 @@ profiles:
         // Second migration should be no-op
         let migrated_again = ProfilesConfig::migrate_if_needed().unwrap();
         assert!(!migrated_again);
+    }
+
+    #[test]
+    fn test_save_does_not_persist_env_only_overrides() {
+        let _lock = crate::config::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let prev_debug = std::env::var_os("GWT_DEBUG");
+        let prev_docker_force_host = std::env::var_os("GWT_DOCKER_FORCE_HOST");
+        let prev_auto_install = std::env::var_os("GWT_AGENT_AUTO_INSTALL_DEPS");
+
+        let gwt_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&gwt_dir).unwrap();
+        std::fs::write(
+            gwt_dir.join("config.toml"),
+            r#"
+debug = false
+
+[agent]
+auto_install_deps = false
+
+[docker]
+force_host = false
+"#,
+        )
+        .unwrap();
+
+        std::env::set_var("GWT_DEBUG", "true");
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
+        std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
+
+        let mut config = ProfilesConfig::default();
+        config.profiles.insert(
+            "dev".to_string(),
+            Profile::new("dev").with_env("DEV_KEY", "dev-value"),
+        );
+        config.active = Some("dev".to_string());
+        config.save().unwrap();
+
+        match prev_debug {
+            Some(value) => std::env::set_var("GWT_DEBUG", value),
+            None => std::env::remove_var("GWT_DEBUG"),
+        }
+        match prev_docker_force_host {
+            Some(value) => std::env::set_var("GWT_DOCKER_FORCE_HOST", value),
+            None => std::env::remove_var("GWT_DOCKER_FORCE_HOST"),
+        }
+        match prev_auto_install {
+            Some(value) => std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", value),
+            None => std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS"),
+        }
+
+        let saved = Settings::load_global_raw().unwrap();
+        assert!(!saved.debug);
+        assert!(!saved.docker.force_host);
+        assert!(!saved.agent.auto_install_deps);
+        assert_eq!(saved.profiles.active.as_deref(), Some("dev"));
+        assert_eq!(
+            saved
+                .profiles
+                .profiles
+                .get("dev")
+                .and_then(|profile| profile.env.get("DEV_KEY"))
+                .map(String::as_str),
+            Some("dev-value")
+        );
     }
 
     #[test]
