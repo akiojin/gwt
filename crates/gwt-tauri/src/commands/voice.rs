@@ -261,7 +261,9 @@ fn find_system_python_binary() -> Result<PathBuf, String> {
                 if supported_voice_runtime_python_version(major, minor) {
                     return Ok(path);
                 }
-                found_versions.push(version_str);
+                if !found_versions.contains(&version_str) {
+                    found_versions.push(version_str);
+                }
             }
         }
     }
@@ -272,7 +274,6 @@ fn find_system_python_binary() -> Result<PathBuf, String> {
             system_python_candidates().join("/")
         ))
     } else {
-        found_versions.dedup();
         Err(format!(
             "Python {} found but not supported (requires 3.11\u{2013}3.14)",
             found_versions.join(", ")
