@@ -117,10 +117,18 @@ fn gwt_hook_commands_from_value(value: &serde_json::Value) -> Vec<String> {
 
 /// Check if a command string is a gwt hook command (FR-102j)
 ///
-/// Matches standard format ("gwt hook"), Windows ".exe" paths, and build binary
-/// format (".../gwt-<hash> hook <Event>").
+/// Matches standard format ("gwt hook"), Windows ".exe" paths, build binary
+/// format (".../gwt-<hash> hook <Event>"), and node-based hook scripts
+/// ("node .claude/hooks/scripts/gwt-*.mjs ...").
 fn is_gwt_hook_command(command: &str) -> bool {
-    parse_gwt_hook_command(command).is_some()
+    parse_gwt_hook_command(command).is_some() || is_gwt_node_hook_command(command)
+}
+
+/// Check if a command invokes a gwt node-based hook script.
+///
+/// Matches commands like "node .claude/hooks/scripts/gwt-forward-hook.mjs Event".
+fn is_gwt_node_hook_command(command: &str) -> bool {
+    command.starts_with("node .claude/hooks/scripts/gwt-")
 }
 
 /// Claude Code settings.json structure (partial)
@@ -409,6 +417,13 @@ mod tests {
     }
 
     #[test]
+    fn test_is_gwt_hook_command_node_script() {
+        assert!(is_gwt_hook_command(
+            "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
+        ));
+    }
+
+    #[test]
     fn test_is_gwt_hook_command_not_gwt() {
         // Should not match non-gwt commands
         assert!(!is_gwt_hook_command("echo hello"));
@@ -430,6 +445,14 @@ mod tests {
         // Should detect build binary format (FR-102j)
         let entry = serde_json::json!({
             "hooks": [{"type": "command", "command": "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"}]
+        });
+        assert!(is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_node_script_format() {
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"}]
         });
         assert!(is_gwt_hook_entry(&entry));
     }
