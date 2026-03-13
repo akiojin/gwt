@@ -417,6 +417,13 @@ mod tests {
     }
 
     #[test]
+    fn test_is_gwt_hook_command_node_script() {
+        assert!(is_gwt_hook_command(
+            "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
+        ));
+    }
+
+    #[test]
     fn test_is_gwt_hook_command_not_gwt() {
         // Should not match non-gwt commands
         assert!(!is_gwt_hook_command("echo hello"));
@@ -438,6 +445,14 @@ mod tests {
         // Should detect build binary format (FR-102j)
         let entry = serde_json::json!({
             "hooks": [{"type": "command", "command": "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"}]
+        });
+        assert!(is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_node_script_format() {
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"}]
         });
         assert!(is_gwt_hook_entry(&entry));
     }

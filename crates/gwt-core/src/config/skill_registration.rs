@@ -431,7 +431,9 @@ fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
     match agent {
         SkillAgentType::Claude => all_claude_assets()
             .map(|asset| format!(".claude/{}", asset.relative_path))
-            .chain(std::iter::once(".claude/settings.local.json hooks".to_string()))
+            .chain(std::iter::once(
+                ".claude/settings.local.json hooks".to_string(),
+            ))
             .collect(),
         SkillAgentType::Codex => project_asset_missing_items(".codex"),
         SkillAgentType::Gemini => project_asset_missing_items(".gemini"),
@@ -1340,8 +1342,8 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         );
     };
 
-    let settings_path =
-        claude_settings_path_for(project_root).unwrap_or_else(|| claude_root.join("settings.local.json"));
+    let settings_path = claude_settings_path_for(project_root)
+        .unwrap_or_else(|| claude_root.join("settings.local.json"));
 
     let mut missing_items = Vec::new();
 
@@ -2119,11 +2121,18 @@ mod tests {
         // settings.json should have gwt hooks removed and be normalized
         let settings_content = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
         assert!(!settings_content.contains(super::super::claude_plugins::GWT_PLUGIN_FULL_NAME));
-        assert!(!settings_content.contains("gwt-forward-hook"), "gwt hooks should be removed from settings.json");
+        assert!(
+            !settings_content.contains("gwt-forward-hook"),
+            "gwt hooks should be removed from settings.json"
+        );
 
         // hooks should be in settings.local.json
-        let local_content = std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
-        assert!(local_content.contains("gwt-forward-hook.mjs"), "hooks should be in settings.local.json");
+        let local_content =
+            std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
+        assert!(
+            local_content.contains("gwt-forward-hook.mjs"),
+            "hooks should be in settings.local.json"
+        );
 
         let status = status_for_claude(Some(temp.path()));
         assert!(status.registered);
@@ -2409,8 +2418,7 @@ custom-pattern
         .unwrap();
 
         // settings.json should be cleaned (hooks removed)
-        let settings_content =
-            std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
+        let settings_content = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
         assert!(
             !settings_content.contains("gwt-forward-hook"),
             "gwt hooks should be removed from settings.json"
