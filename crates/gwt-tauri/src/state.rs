@@ -151,10 +151,11 @@ pub struct AppState {
     /// Persistent storage for agent sessions (Branch Mode & Project Mode).
     #[allow(dead_code)]
     pub session_store: SessionStore,
-    /// Assistant Mode engine (active conversation + LLM state).
-    pub assistant_engine: Mutex<Option<crate::assistant_engine::AssistantEngine>>,
-    /// Assistant Mode monitor handle (background polling task).
-    pub assistant_monitor_handle: Mutex<Option<crate::assistant_monitor::AssistantMonitorHandle>>,
+    /// Assistant Mode engine per window label.
+    pub assistant_engine: Mutex<HashMap<String, crate::assistant_engine::AssistantEngine>>,
+    /// Assistant Mode monitor handle per window label.
+    pub assistant_monitor_handle:
+        Mutex<HashMap<String, crate::assistant_monitor::AssistantMonitorHandle>>,
 }
 
 impl AppState {
@@ -196,8 +197,8 @@ impl AppState {
             window_focus_history: Mutex::new(Vec::new()),
             last_focused_window_label: Mutex::new(None),
             session_store: SessionStore::new(),
-            assistant_engine: Mutex::new(None),
-            assistant_monitor_handle: Mutex::new(None),
+            assistant_engine: Mutex::new(HashMap::new()),
+            assistant_monitor_handle: Mutex::new(HashMap::new()),
         }
     }
 
@@ -302,6 +303,7 @@ impl AppState {
         if let Ok(mut map) = self.window_agent_tabs.lock() {
             map.remove(window_label);
         }
+        self.clear_assistant_session_for_window(window_label);
         self.remove_window_from_history(window_label);
     }
 
@@ -328,6 +330,15 @@ impl AppState {
     pub fn project_for_window(&self, window_label: &str) -> Option<String> {
         let map = self.window_projects.lock().ok()?;
         map.get(window_label).cloned()
+    }
+
+    pub fn clear_assistant_session_for_window(&self, window_label: &str) {
+        if let Ok(mut map) = self.assistant_engine.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.assistant_monitor_handle.lock() {
+            map.remove(window_label);
+        }
     }
 
     fn now_millis() -> u64 {
@@ -582,6 +593,8 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant_engine::AssistantEngine;
+    use std::path::PathBuf;
 
     #[test]
     fn version_history_semaphore_has_three_permits() {
@@ -798,6 +811,26 @@ mod tests {
             WindowAgentTabsState::default()
         );
         assert!(state.window_migrations_snapshot().contains_key("main"));
+    }
+
+    #[test]
+    fn clear_project_for_window_removes_assistant_session() {
+        let state = AppState::new();
+        let claim = state.claim_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(claim, Ok(()));
+
+        state.assistant_engine.lock().unwrap().insert(
+            "main".to_string(),
+            AssistantEngine::new(PathBuf::from("/tmp/repo"), "main".to_string()),
+        );
+
+        state.clear_project_for_window("main");
+
+        assert!(!state.assistant_engine.lock().unwrap().contains_key("main"));
     }
 
     #[test]

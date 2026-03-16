@@ -15,13 +15,58 @@
     messagesEndRef?.scrollIntoView({ behavior: "smooth" });
   }
 
+  async function loadAssistantState(): Promise<AssistantState | null> {
+    try {
+      return await invoke<AssistantState>("assistant_get_state");
+    } catch {
+      return null;
+    }
+  }
+
+  async function initializeAssistant() {
+    const state = await loadAssistantState();
+    if (!state) {
+      return;
+    }
+
+    assistantState = state;
+    if (!state.aiReady || state.sessionId) {
+      return;
+    }
+
+    try {
+      await invoke("assistant_start");
+      assistantState = (await loadAssistantState()) ?? state;
+    } catch (err) {
+      console.error("Failed to start assistant session:", err);
+    }
+  }
+
+  async function loadDashboard() {
+    try {
+      dashboard = await invoke<DashboardData>("assistant_get_dashboard");
+    } catch {
+      // AI backend not available (e.g. test environment)
+    }
+  }
+
   async function sendMessage() {
     if (isComposing) return;
     const text = inputText.trim();
     if (!text) return;
-    inputText = "";
+
     try {
-      await invoke("assistant_send_message", { input: text });
+      if (!assistantState?.sessionId) {
+        await initializeAssistant();
+      }
+      if (!assistantState?.sessionId) {
+        return;
+      }
+
+      inputText = "";
+      assistantState = await invoke<AssistantState>("assistant_send_message", {
+        input: text,
+      });
     } catch (err) {
       console.error("Failed to send assistant message:", err);
     }
@@ -35,13 +80,8 @@
   }
 
   onMount(() => {
-    invoke<AssistantState>("assistant_get_state")
-      .then((state) => {
-        assistantState = state;
-      })
-      .catch(() => {
-        // AI backend not available (e.g. test environment)
-      });
+    void initializeAssistant();
+    void loadDashboard();
 
     let unlistenState: Promise<() => void> | undefined;
     let unlistenDashboard: Promise<() => void> | undefined;
@@ -125,14 +165,18 @@
           onkeydown={handleKeydown}
           oncompositionstart={() => (isComposing = true)}
           oncompositionend={() => (isComposing = false)}
-          disabled={!assistantState?.aiReady}
+          disabled={!assistantState?.aiReady || !assistantState?.sessionId}
           rows={1}
         ></textarea>
         <button
           class="send-btn"
           type="button"
           onclick={sendMessage}
-          disabled={!assistantState?.aiReady || !inputText.trim()}
+          disabled={
+            !assistantState?.aiReady ||
+            !assistantState?.sessionId ||
+            !inputText.trim()
+          }
         >
           Send
         </button>

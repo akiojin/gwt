@@ -278,6 +278,7 @@ pub fn open_project(
     };
 
     let current_window_label = window.label().to_string();
+    let previous_project_path = state.project_for_window(&current_window_label);
     for _attempt in 0..2 {
         match state.claim_project_for_window_with_identity(
             &current_window_label,
@@ -285,6 +286,9 @@ pub fn open_project(
             project_identity.clone(),
         ) {
             Ok(()) => {
+                if previous_project_path.as_deref() != Some(project_root_str.as_str()) {
+                    state.clear_assistant_session_for_window(&current_window_label);
+                }
                 state.push_window_focus(&current_window_label);
                 repair_project_skill_registration(&state, &project_root);
                 // Record to recent projects history

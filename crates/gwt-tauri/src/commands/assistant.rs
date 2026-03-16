@@ -2,11 +2,12 @@
 //! Assistant Mode Tauri commands
 
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 use crate::assistant_engine::AssistantEngine;
 use crate::state::AppState;
-
-// ── Response types ──────────────────────────────────────────────────
+use gwt_core::git::{self, Branch};
+use gwt_core::worktree::WorktreeManager;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,147 +52,114 @@ pub struct DashboardResponse {
     pub git: GitDashboard,
 }
 
-// ── Commands ────────────────────────────────────────────────────────
-
 #[tauri::command]
 pub async fn assistant_get_state(
+    window: tauri::Window,
     state: tauri::State<'_, AppState>,
 ) -> Result<AssistantStateResponse, String> {
+    let window_label = window.label().to_string();
     let engine_guard = state
         .assistant_engine
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
 
-    match engine_guard.as_ref() {
-        Some(engine) => {
-            let messages = build_messages_from_conversation(engine);
-            Ok(AssistantStateResponse {
-                messages,
-                ai_ready: true,
-                is_thinking: false,
-                session_id: Some("active".to_string()),
-                llm_call_count: engine.llm_call_count,
-                estimated_tokens: engine.estimated_tokens,
-            })
-        }
-        None => Ok(AssistantStateResponse {
-            messages: Vec::new(),
-            ai_ready: check_ai_configured(),
-            is_thinking: false,
-            session_id: None,
-            llm_call_count: 0,
-            estimated_tokens: 0,
-        }),
+    match engine_guard.get(&window_label) {
+        Some(engine) => Ok(build_assistant_state_response(engine, Some(window_label))),
+        None => Ok(build_empty_assistant_state_response()),
     }
 }
 
 #[tauri::command]
 pub async fn assistant_send_message(
+    window: tauri::Window,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
     input: String,
 ) -> Result<AssistantStateResponse, String> {
+    let window_label = window.label().to_string();
     let input = input.trim().to_string();
     if input.is_empty() {
         return Err("Message cannot be empty".to_string());
     }
 
-    // Extract what we need from state before the blocking operation
-    let (mut engine, _project_path) = {
+    let mut engine = {
         let mut engine_guard = state
             .assistant_engine
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
 
-        let engine = engine_guard
-            .take()
-            .ok_or_else(|| "Assistant not started. Call assistant_start first.".to_string())?;
-
-        let window_label = get_window_label_from_app(&app);
-        let project_path = state
-            .project_for_window(&window_label)
-            .unwrap_or_default();
-
-        (engine, project_path)
+        engine_guard
+            .remove(&window_label)
+            .ok_or_else(|| "Assistant not started. Call assistant_start first.".to_string())?
     };
 
-    // Clone the state reference for the blocking call
-    // We need to pass AppState to the engine, so we create it fresh
     let state_ref: &AppState = &state;
-
-    // Run the LLM loop (this may be slow)
     let result = engine.handle_user_message(&input, state_ref);
 
-    // Put the engine back
     {
         let mut engine_guard = state
             .assistant_engine
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        *engine_guard = Some(engine);
+        engine_guard.insert(window_label.clone(), engine);
     }
 
-    // Build response
-    result.map(|_response| {
-        let engine_guard = state.assistant_engine.lock().unwrap();
-        let engine = engine_guard.as_ref().unwrap();
-        let messages = build_messages_from_conversation(engine);
-        AssistantStateResponse {
-            messages,
-            ai_ready: true,
-            is_thinking: false,
-            session_id: Some("active".to_string()),
-            llm_call_count: engine.llm_call_count,
-            estimated_tokens: engine.estimated_tokens,
-        }
-    })
+    result?;
+
+    let engine_guard = state
+        .assistant_engine
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    let engine = engine_guard
+        .get(&window_label)
+        .ok_or_else(|| "Assistant session disappeared after send.".to_string())?;
+
+    Ok(build_assistant_state_response(engine, Some(window_label)))
 }
 
 #[tauri::command]
 pub async fn assistant_start(
+    window: tauri::Window,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let window_label = get_window_label_from_app(&app);
+    let window_label = window.label().to_string();
     let project_path = state
         .project_for_window(&window_label)
         .ok_or_else(|| "No project opened. Open a project first.".to_string())?;
 
-    let engine = AssistantEngine::new(
-        std::path::PathBuf::from(&project_path),
-        window_label,
-    );
+    state.clear_assistant_session_for_window(&window_label);
+
+    let engine = AssistantEngine::new(PathBuf::from(&project_path), window_label.clone());
 
     let mut engine_guard = state
         .assistant_engine
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
-    *engine_guard = Some(engine);
+    engine_guard.insert(window_label, engine);
 
     Ok(())
 }
 
 #[tauri::command]
 pub async fn assistant_stop(
+    window: tauri::Window,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    // Stop the engine
+    let window_label = window.label().to_string();
+
     {
         let mut engine_guard = state
             .assistant_engine
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        *engine_guard = None;
+        engine_guard.remove(&window_label);
     }
 
-    // Stop the monitor
     {
         let mut monitor_guard = state
             .assistant_monitor_handle
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        if let Some(handle) = monitor_guard.take() {
-            // Fire-and-forget stop since we can't .await in sync context easily
+        if let Some(handle) = monitor_guard.remove(&window_label) {
             tokio::spawn(async move {
                 handle.stop().await;
             });
@@ -203,8 +171,10 @@ pub async fn assistant_stop(
 
 #[tauri::command]
 pub async fn assistant_get_dashboard(
+    window: tauri::Window,
     state: tauri::State<'_, AppState>,
 ) -> Result<DashboardResponse, String> {
+    let window_label = window.label().to_string();
     let panes = {
         let mgr = state
             .pane_manager
@@ -220,18 +190,99 @@ pub async fn assistant_get_dashboard(
             .collect::<Vec<_>>()
     };
 
-    // Git status would require project path; return defaults for now
     Ok(DashboardResponse {
         panes,
-        git: GitDashboard {
-            branch: String::new(),
-            uncommitted_count: 0,
-            unpushed_count: 0,
-        },
+        git: build_git_dashboard(&state, &window_label)?,
     })
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+fn build_assistant_state_response(
+    engine: &AssistantEngine,
+    session_id: Option<String>,
+) -> AssistantStateResponse {
+    AssistantStateResponse {
+        messages: build_messages_from_conversation(engine),
+        ai_ready: true,
+        is_thinking: false,
+        session_id,
+        llm_call_count: engine.llm_call_count,
+        estimated_tokens: engine.estimated_tokens,
+    }
+}
+
+fn build_empty_assistant_state_response() -> AssistantStateResponse {
+    AssistantStateResponse {
+        messages: Vec::new(),
+        ai_ready: check_ai_configured(),
+        is_thinking: false,
+        session_id: None,
+        llm_call_count: 0,
+        estimated_tokens: 0,
+    }
+}
+
+fn build_git_dashboard(state: &AppState, window_label: &str) -> Result<GitDashboard, String> {
+    let Some(project_path) = state.project_for_window(window_label) else {
+        return Ok(GitDashboard {
+            branch: String::new(),
+            uncommitted_count: 0,
+            unpushed_count: 0,
+        });
+    };
+
+    let repo_path =
+        crate::commands::project::resolve_repo_path_for_project_root(Path::new(&project_path))
+            .map_err(|e| format!("Failed to resolve repository path: {}", e))?;
+
+    let current_branch = Branch::current(&repo_path)
+        .map_err(|e| format!("Failed to resolve current branch: {}", e))?;
+
+    let (branch, unpushed_count) = current_branch
+        .as_ref()
+        .map(|branch| {
+            (
+                branch.name.clone(),
+                branch.ahead.min(u32::MAX as usize) as u32,
+            )
+        })
+        .unwrap_or_else(|| (String::new(), 0));
+
+    let uncommitted_count = resolve_dashboard_worktree_path(&repo_path, current_branch.as_ref())
+        .and_then(|path| git::get_working_tree_status(&path).ok())
+        .map(|entries| entries.len().min(u32::MAX as usize) as u32)
+        .unwrap_or(0);
+
+    Ok(GitDashboard {
+        branch,
+        uncommitted_count,
+        unpushed_count,
+    })
+}
+
+fn resolve_dashboard_worktree_path(
+    repo_path: &Path,
+    current_branch: Option<&Branch>,
+) -> Option<PathBuf> {
+    if !git::is_bare_repository(repo_path) {
+        return Some(repo_path.to_path_buf());
+    }
+
+    let manager = WorktreeManager::new(repo_path).ok()?;
+    let worktrees = manager.list_basic().ok()?;
+
+    if let Some(branch_name) = current_branch.map(|branch| branch.name.as_str()) {
+        if let Some(worktree) = worktrees.iter().find(|worktree| {
+            worktree.is_active() && worktree.branch.as_deref() == Some(branch_name)
+        }) {
+            return Some(worktree.path.clone());
+        }
+    }
+
+    worktrees
+        .iter()
+        .find(|worktree| worktree.is_active() && !worktree.is_main)
+        .map(|worktree| worktree.path.clone())
+}
 
 fn build_messages_from_conversation(engine: &AssistantEngine) -> Vec<AssistantMessage> {
     let now = chrono::Utc::now().timestamp();
@@ -240,7 +291,6 @@ fn build_messages_from_conversation(engine: &AssistantEngine) -> Vec<AssistantMe
         .iter()
         .filter_map(|msg| {
             let content = msg.content.as_deref().unwrap_or("");
-            // Skip system messages and tool messages from the UI view
             if msg.role == "system" || msg.role == "tool" {
                 return None;
             }
@@ -264,13 +314,4 @@ fn check_ai_configured() -> bool {
         .ok()
         .map(|profiles| profiles.resolve_active_ai_settings().resolved.is_some())
         .unwrap_or(false)
-}
-
-fn get_window_label_from_app(app: &tauri::AppHandle) -> String {
-    use tauri::Manager;
-    app.webview_windows()
-        .keys()
-        .next()
-        .cloned()
-        .unwrap_or_else(|| "main".to_string())
 }
