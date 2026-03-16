@@ -181,7 +181,7 @@ fn normalize_ai_language(value: &str) -> String {
     }
 }
 
-/// Profiles configuration stored on disk
+/// Runtime model for the extracted `[profiles]` section from `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfilesConfig {
     /// Schema version

@@ -17,7 +17,7 @@ use tracing::{debug, error, info};
 
 static GLOBAL_SETTINGS_UPDATE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Application settings
+/// Runtime application settings assembled from config files and env overrides.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -59,16 +59,17 @@ pub struct Settings {
     pub recent_projects: RecentProjectsConfig,
 }
 
+/// TOML DTO for the `[profiles]` section inside `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-struct DiskProfilesConfig {
+struct ProfilesSectionToml {
     version: u8,
     active: Option<String>,
     #[serde(flatten)]
     profiles: std::collections::HashMap<String, Profile>,
 }
 
-impl From<ProfilesConfig> for DiskProfilesConfig {
+impl From<ProfilesConfig> for ProfilesSectionToml {
     fn from(value: ProfilesConfig) -> Self {
         Self {
             version: value.version,
@@ -78,8 +79,8 @@ impl From<ProfilesConfig> for DiskProfilesConfig {
     }
 }
 
-impl From<DiskProfilesConfig> for ProfilesConfig {
-    fn from(value: DiskProfilesConfig) -> Self {
+impl From<ProfilesSectionToml> for ProfilesConfig {
+    fn from(value: ProfilesSectionToml) -> Self {
         Self {
             version: value.version,
             active: value.active,
@@ -88,9 +89,10 @@ impl From<DiskProfilesConfig> for ProfilesConfig {
     }
 }
 
+/// TOML DTO for the canonical `~/.gwt/config.toml` file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-struct SettingsFile {
+struct ConfigToml {
     protected_branches: Vec<String>,
     default_base_branch: String,
     worktree_root: String,
@@ -103,20 +105,21 @@ struct SettingsFile {
     app_language: String,
     voice_input: VoiceInputSettings,
     terminal: TerminalSettings,
-    profiles: DiskProfilesConfig,
+    profiles: ProfilesSectionToml,
     agent_config: AgentConfig,
     tools: ToolsConfig,
     recent_projects: RecentProjectsConfig,
 }
 
-impl Default for SettingsFile {
+impl Default for ConfigToml {
     fn default() -> Self {
         Settings::default().into()
     }
 }
 
+/// TOML DTO for repo-local config files that must not include global-only sections.
 #[derive(Debug, Clone, Serialize)]
-struct LocalSettingsFile {
+struct LocalConfigToml {
     protected_branches: Vec<String>,
     default_base_branch: String,
     worktree_root: String,
@@ -131,7 +134,7 @@ struct LocalSettingsFile {
     terminal: TerminalSettings,
 }
 
-impl From<Settings> for SettingsFile {
+impl From<Settings> for ConfigToml {
     fn from(value: Settings) -> Self {
         Self {
             protected_branches: value.protected_branches,
@@ -154,7 +157,7 @@ impl From<Settings> for SettingsFile {
     }
 }
 
-impl From<Settings> for LocalSettingsFile {
+impl From<Settings> for LocalConfigToml {
     fn from(value: Settings) -> Self {
         Self {
             protected_branches: value.protected_branches,
@@ -173,8 +176,8 @@ impl From<Settings> for LocalSettingsFile {
     }
 }
 
-impl From<SettingsFile> for Settings {
-    fn from(value: SettingsFile) -> Self {
+impl From<ConfigToml> for Settings {
+    fn from(value: ConfigToml) -> Self {
         Self {
             protected_branches: value.protected_branches,
             default_base_branch: value.default_base_branch,
@@ -379,7 +382,7 @@ impl Settings {
             }
         })?;
 
-        toml::from_str::<SettingsFile>(&content)
+        toml::from_str::<ConfigToml>(&content)
             .map(Into::into)
             .map_err(|e| {
                 error!(
@@ -580,9 +583,9 @@ impl Settings {
         }
 
         let content = if Self::is_global_config_path(path) {
-            toml::to_string_pretty(&SettingsFile::from(persisted))
+            toml::to_string_pretty(&ConfigToml::from(persisted))
         } else {
-            toml::to_string_pretty(&LocalSettingsFile::from(persisted))
+            toml::to_string_pretty(&LocalConfigToml::from(persisted))
         }
         .map_err(|e| {
             error!(
