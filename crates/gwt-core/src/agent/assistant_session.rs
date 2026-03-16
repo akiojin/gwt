@@ -49,8 +49,7 @@ mod tests {
 
     #[test]
     fn test_assistant_session_new() {
-        let session =
-            AssistantSession::new(PathBuf::from("/repo"), "main".to_string());
+        let session = AssistantSession::new(PathBuf::from("/repo"), "main".to_string());
         assert_eq!(session.status, SessionStatus::Active);
         assert_eq!(session.base_branch, "main");
         assert_eq!(session.llm_call_count, 0);

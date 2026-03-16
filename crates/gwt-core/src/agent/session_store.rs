@@ -371,5 +371,4 @@ mod tests {
         let meta = std::fs::metadata(&path).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
-
 }

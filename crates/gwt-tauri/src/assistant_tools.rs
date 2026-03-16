@@ -3,7 +3,6 @@
 
 use serde_json::json;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use crate::state::AppState;
@@ -12,6 +11,7 @@ use crate::tool_helpers::{
     shared_tool_definitions,
 };
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
+use gwt_core::process::command as process_command;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -196,11 +196,7 @@ pub fn execute_assistant_tool(
             run_command_in_dir(
                 project_path,
                 "git",
-                &[
-                    "log",
-                    "--oneline",
-                    &format!("-{}", count.min(50)),
-                ],
+                &["log", "--oneline", &format!("-{}", count.min(50))],
             )
         }
         TOOL_GIT_DIFF => run_command_in_dir(project_path, "git", &["diff"]),
@@ -216,7 +212,7 @@ pub fn execute_assistant_tool(
 // ── helpers (assistant-specific) ─────────────────────────────────────
 
 fn run_command_in_dir(dir: &str, program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    let output = process_command(program)
         .args(args)
         .current_dir(dir)
         .output()
@@ -228,19 +224,22 @@ fn run_command_in_dir(dir: &str, program: &str, args: &[&str]) -> Result<String,
     if output.status.success() {
         Ok(stdout.to_string())
     } else {
-        Ok(format!("Exit code: {}\nstdout:\n{}\nstderr:\n{}", output.status, stdout, stderr))
+        Ok(format!(
+            "Exit code: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status, stdout, stderr
+        ))
     }
 }
 
-fn run_shell_command(dir: &str, command: &str) -> Result<String, String> {
+fn run_shell_command(dir: &str, shell_command: &str) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     let (shell, flag) = ("cmd", "/C");
     #[cfg(not(target_os = "windows"))]
     let (shell, flag) = ("sh", "-c");
 
-    let mut child = Command::new(shell)
+    let mut child = process_command(shell)
         .arg(flag)
-        .arg(command)
+        .arg(shell_command)
         .current_dir(dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

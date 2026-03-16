@@ -360,7 +360,9 @@ mod tests {
         let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
         // Add messages up to exactly MAX_CONVERSATION_MESSAGES (system + 49 user)
         for i in 0..(MAX_CONVERSATION_MESSAGES - 1) {
-            engine.conversation.push(make_msg("user", &format!("msg {}", i)));
+            engine
+                .conversation
+                .push(make_msg("user", &format!("msg {}", i)));
         }
         assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
         engine.prune_conversation();
@@ -373,7 +375,9 @@ mod tests {
         let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
         // Add 60 user messages (total = 61 with system)
         for i in 0..60 {
-            engine.conversation.push(make_msg("user", &format!("msg {}", i)));
+            engine
+                .conversation
+                .push(make_msg("user", &format!("msg {}", i)));
         }
         assert_eq!(engine.conversation.len(), 61);
         engine.prune_conversation();
@@ -395,7 +399,9 @@ mod tests {
         // [system, user*10, assistant(with tool_calls), tool, tool, user*40]
         // Total: 1 + 10 + 1 + 2 + 40 = 54
         for i in 0..10 {
-            engine.conversation.push(make_msg("user", &format!("early {}", i)));
+            engine
+                .conversation
+                .push(make_msg("user", &format!("early {}", i)));
         }
         // Assistant message with tool_calls
         engine.conversation.push(ChatCompletionsToolMessage {
@@ -418,7 +424,9 @@ mod tests {
             tool_call_id: Some("call2".to_string()),
         });
         for i in 0..40 {
-            engine.conversation.push(make_msg("user", &format!("late {}", i)));
+            engine
+                .conversation
+                .push(make_msg("user", &format!("late {}", i)));
         }
         assert_eq!(engine.conversation.len(), 54);
         engine.prune_conversation();

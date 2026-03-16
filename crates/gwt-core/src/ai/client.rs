@@ -503,8 +503,7 @@ impl AIClient {
                     let resp_headers = resp.headers().clone();
                     let body = resp.text().unwrap_or_default();
                     if status == StatusCode::OK {
-                        let (text, tool_calls, usage) =
-                            parse_chat_completion_with_tools(&body)?;
+                        let (text, tool_calls, usage) = parse_chat_completion_with_tools(&body)?;
                         if let Some(tokens) = usage {
                             self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
                         }
@@ -944,9 +943,10 @@ fn parse_chat_completion_with_tools(
     let parsed: ChatCompletionsResponse = serde_json::from_str(body)
         .map_err(|e| AIError::ParseError(format!("Invalid chat completion response: {}", e)))?;
 
-    let choice = parsed.choices.into_iter().next().ok_or_else(|| {
-        AIError::ParseError("No choices in chat completion response".to_string())
-    })?;
+    let choice =
+        parsed.choices.into_iter().next().ok_or_else(|| {
+            AIError::ParseError("No choices in chat completion response".to_string())
+        })?;
 
     let text = choice
         .message

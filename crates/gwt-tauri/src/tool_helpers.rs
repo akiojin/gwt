@@ -8,9 +8,7 @@ use serde_json::{json, Value};
 use crate::commands::issue_spec::{
     get_spec_issue_detail_cmd, upsert_spec_issue_cmd, SpecIssueSectionsData,
 };
-use crate::commands::terminal::{
-    capture_scrollback_tail_from_state, send_keys_to_pane_from_state,
-};
+use crate::commands::terminal::{capture_scrollback_tail_from_state, send_keys_to_pane_from_state};
 use crate::state::AppState;
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 
@@ -298,8 +296,7 @@ pub fn execute_shared_tool(
         }
         TOOL_GET_SPEC_ISSUE => {
             let result = (|| {
-                let issue_number =
-                    get_required_u64_any(args, &["issue_number", "issueNumber"])?;
+                let issue_number = get_required_u64_any(args, &["issue_number", "issueNumber"])?;
                 let detail = get_spec_issue_detail_cmd(project_path.to_string(), issue_number)
                     .map_err(|e| e.message)?;
                 serde_json::to_string(&detail)
@@ -309,8 +306,7 @@ pub fn execute_shared_tool(
         }
         TOOL_UPSERT_SPEC_ISSUE => {
             let result = (|| {
-                let issue_number =
-                    get_optional_u64_any(args, &["issue_number", "issueNumber"]);
+                let issue_number = get_optional_u64_any(args, &["issue_number", "issueNumber"]);
                 let title = get_required_string_any(args, &["title"])?;
                 let sections = get_required_object_any(args, &["sections"])?;
                 let expected_etag =
