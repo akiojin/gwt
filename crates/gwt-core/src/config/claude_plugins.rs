@@ -1,8 +1,8 @@
-//! Legacy Claude Code plugin marketplace utilities.
+//! Claude Code plugin marketplace utilities for project-local registration.
 //!
-//! gwt no longer relies on `gwt@gwt-plugins` as the primary delivery mechanism for
-//! Claude Code. Project-local `.claude/*` assets are the canonical path, and the
-//! helpers in this module are kept only for migration / cleanup compatibility.
+//! gwt registers Claude plugin state through the project-local
+//! `.claude/settings.local.json` file. This module manages plugin enable/disable
+//! state for that file and the shared `known_marketplaces.json` registry.
 //!
 //! Marketplace registration format in `~/.claude/plugins/known_marketplaces.json`:
 //! ```json
@@ -463,14 +463,9 @@ pub fn remove_gwt_plugin_key_at(settings_path: &Path) -> Result<(), GwtError> {
     Ok(())
 }
 
-/// Get the path to global Claude settings
-pub fn get_global_claude_settings_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".claude").join("settings.json"))
-}
-
 /// Get the path to local Claude settings
 pub fn get_local_claude_settings_path() -> PathBuf {
-    PathBuf::from(".claude").join("settings.json")
+    PathBuf::from(".claude").join("settings.local.json")
 }
 
 /// Setup gwt plugin for a specific Claude settings file.
@@ -501,17 +496,8 @@ pub fn force_setup_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
     Ok(())
 }
 
-/// Remove the `gwt-plugins` entry from `known_marketplaces.json`.
-///
-/// Silent no-op when the file is missing, unreadable, or the key is absent.
-fn unregister_gwt_marketplace() -> Result<(), GwtError> {
-    let Some(path) = get_known_marketplaces_path() else {
-        return Ok(());
-    };
-    unregister_gwt_marketplace_at(&path)
-}
-
 /// Remove the `gwt-plugins` entry from a specific `known_marketplaces.json`.
+#[cfg(test)]
 fn unregister_gwt_marketplace_at(path: &Path) -> Result<(), GwtError> {
     if !path.exists() {
         return Ok(());
@@ -542,43 +528,8 @@ fn unregister_gwt_marketplace_at(path: &Path) -> Result<(), GwtError> {
 
 /// Clean up legacy gwt plugin remnants from the global `~/.claude/` directory.
 ///
-/// This is a best-effort operation: all errors are silenced so that a partial
-/// cleanup never blocks the primary registration flow.
-///
-/// Performs three steps:
-/// 1. Remove `gwt@gwt-plugins` from `~/.claude/settings.json`
-/// 2. Remove `gwt-plugins` entry from `~/.claude/plugins/known_marketplaces.json`
-/// 3. Remove `~/.claude/plugins/marketplaces/gwt-plugins/` directory
-pub fn cleanup_gwt_global_remnants() -> Result<(), GwtError> {
-    // 1. Remove gwt plugin key from global settings
-    if let Some(global_settings) = get_global_claude_settings_path() {
-        let _ = remove_gwt_plugin_key_at(&global_settings);
-    }
-
-    // 2. Remove gwt-plugins from known_marketplaces.json
-    let _ = unregister_gwt_marketplace();
-
-    // 3. Remove gwt-plugins marketplace directory
-    if let Some(home) = dirs::home_dir() {
-        let marketplace_dir = home
-            .join(".claude")
-            .join("plugins")
-            .join("marketplaces")
-            .join(GWT_MARKETPLACE_NAME);
-        let _ = std::fs::remove_dir_all(marketplace_dir);
-    }
-
-    Ok(())
-}
-
 /// Setup gwt plugin (marketplace registration + plugin enable) (FR-003, FR-004)
 pub fn setup_gwt_plugin() -> Result<(), GwtError> {
-    // Enable plugin in global settings
-    if let Some(global_path) = get_global_claude_settings_path() {
-        setup_gwt_plugin_at(&global_path)?;
-    }
-
-    // Enable plugin in local settings
     let local_path = get_local_claude_settings_path();
     setup_gwt_plugin_at(&local_path)?;
     Ok(())
@@ -725,7 +676,7 @@ mod tests {
     #[test]
     fn test_enable_worktree_protection_plugin_adds_to_enabled_plugins() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         enable_worktree_protection_plugin(&path).unwrap();
 
@@ -741,7 +692,7 @@ mod tests {
     #[test]
     fn test_enable_worktree_protection_plugin_preserves_existing() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         let content = r#"{"enabledPlugins": {"other-plugin@other": true}}"#;
         std::fs::write(&path, content).unwrap();
@@ -764,7 +715,7 @@ mod tests {
     #[test]
     fn test_enable_worktree_protection_plugin_migrates_legacy_key() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": true}}}}"#,
@@ -791,7 +742,7 @@ mod tests {
     #[test]
     fn test_enable_worktree_protection_plugin_preserves_legacy_disable_state() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": false}}}}"#,
@@ -818,7 +769,7 @@ mod tests {
     #[test]
     fn test_enable_worktree_protection_plugin_migrates_worktree_hooks_legacy_key() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": true}}}}"#,
@@ -845,7 +796,7 @@ mod tests {
     #[test]
     fn test_enable_worktree_protection_plugin_removes_legacy_key_when_new_exists() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": false, "{}": true}}}}"#,
@@ -920,7 +871,7 @@ mod tests {
     #[test]
     fn test_does_not_reenable_disabled_plugin() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         // User explicitly disabled the plugin
         let content = format!(
@@ -944,7 +895,7 @@ mod tests {
     #[test]
     fn test_is_plugin_explicitly_disabled() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         // Not disabled (doesn't exist)
         assert!(!is_plugin_explicitly_disabled(&path));
@@ -969,7 +920,7 @@ mod tests {
     #[test]
     fn test_is_plugin_enabled_in_settings() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         // Not enabled (doesn't exist)
         assert!(!is_plugin_enabled_in_settings(&path));
@@ -1021,7 +972,7 @@ mod tests {
     #[test]
     fn test_enable_plugin_with_settings_without_enabled_plugins() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         // Write settings without enabledPlugins
         std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
@@ -1042,7 +993,7 @@ mod tests {
     #[test]
     fn test_enable_plugin_with_empty_settings_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         // Write empty JSON object
         std::fs::write(&path, "{}").unwrap();
@@ -1059,9 +1010,9 @@ mod tests {
     }
 
     #[test]
-    fn test_enable_plugin_with_invalid_settings_json() {
+    fn test_enable_plugin_with_invalid_settings_local_json() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         // Write invalid JSON
         std::fs::write(&path, "not valid json").unwrap();
@@ -1101,7 +1052,7 @@ mod tests {
     #[test]
     fn test_disable_gwt_plugin_at_sets_false() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": true}}}}"#,
             GWT_PLUGIN_FULL_NAME
@@ -1129,7 +1080,7 @@ mod tests {
     #[test]
     fn test_disable_gwt_plugin_at_noop_no_section() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
         std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
 
         disable_gwt_plugin_at(&path).unwrap();
@@ -1142,7 +1093,7 @@ mod tests {
     #[test]
     fn test_disable_gwt_plugin_at_noop_key_absent() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
         std::fs::write(&path, r#"{"enabledPlugins": {"other@other": true}}"#).unwrap();
 
         disable_gwt_plugin_at(&path).unwrap();
@@ -1161,7 +1112,7 @@ mod tests {
     #[test]
     fn test_disable_gwt_plugin_at_preserves_others() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": true, "other@other": true}}}}"#,
             GWT_PLUGIN_FULL_NAME
@@ -1187,7 +1138,7 @@ mod tests {
     #[test]
     fn test_force_enable_overrides_false() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
 
         // Plugin explicitly set to false
         let content = format!(
@@ -1211,7 +1162,7 @@ mod tests {
     #[test]
     fn test_remove_gwt_plugin_key_at_removes_key() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": true}}}}"#,
             GWT_PLUGIN_FULL_NAME
@@ -1230,7 +1181,7 @@ mod tests {
     #[test]
     fn test_remove_gwt_plugin_key_at_preserves_others() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
         let content = format!(
             r#"{{"enabledPlugins": {{"{}": true, "other@other": true}}}}"#,
             GWT_PLUGIN_FULL_NAME
@@ -1261,7 +1212,7 @@ mod tests {
     #[test]
     fn test_remove_gwt_plugin_key_at_noop_no_section() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
         std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
 
         remove_gwt_plugin_key_at(&path).unwrap();
@@ -1274,7 +1225,7 @@ mod tests {
     #[test]
     fn test_remove_gwt_plugin_key_at_noop_key_absent() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("settings.json");
+        let path = temp_dir.path().join("settings.local.json");
         std::fs::write(&path, r#"{"enabledPlugins": {"other@other": true}}"#).unwrap();
 
         remove_gwt_plugin_key_at(&path).unwrap();
@@ -1336,72 +1287,13 @@ mod tests {
         assert_eq!(content, "{}");
     }
 
-    // --- cleanup_gwt_global_remnants tests ---
-
-    #[test]
-    fn test_cleanup_gwt_global_remnants_removes_all() {
-        let temp = tempfile::tempdir().unwrap();
-
-        let claude_dir = temp.path().join(".claude");
-        let plugins_dir = claude_dir.join("plugins");
-        let marketplace_dir = plugins_dir.join("marketplaces").join(GWT_MARKETPLACE_NAME);
-        std::fs::create_dir_all(&marketplace_dir).unwrap();
-
-        // Write global settings with gwt plugin key
-        std::fs::write(
-            claude_dir.join("settings.json"),
-            format!(
-                r#"{{"enabledPlugins": {{"{}": true}}}}"#,
-                GWT_PLUGIN_FULL_NAME
-            ),
-        )
-        .unwrap();
-
-        // Write known_marketplaces.json with gwt-plugins
-        std::fs::write(
-            plugins_dir.join("known_marketplaces.json"),
-            serde_json::json!({
-                "gwt-plugins": {
-                    "source": {"source": "github", "repo": "akiojin/gwt"},
-                    "installLocation": marketplace_dir.to_string_lossy().to_string(),
-                    "lastUpdated": "2025-01-01T00:00:00.000Z"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        // Write a dummy file in marketplace dir
-        std::fs::write(marketplace_dir.join("plugin.json"), "{}").unwrap();
-
-        // Test individual cleanup steps directly (dirs::home_dir() may not
-        // honor env-var overrides on all Windows builds, so we test the
-        // underlying _at helpers instead of the high-level wrapper).
-
-        // Step 1: remove gwt plugin key from settings
-        let settings_path = claude_dir.join("settings.json");
-        remove_gwt_plugin_key_at(&settings_path).unwrap();
-        let settings_content = std::fs::read_to_string(&settings_path).unwrap();
-        assert!(!settings_content.contains(GWT_PLUGIN_FULL_NAME));
-
-        // Step 2: unregister gwt marketplace
-        let km_path = plugins_dir.join("known_marketplaces.json");
-        unregister_gwt_marketplace_at(&km_path).unwrap();
-        let km_content = std::fs::read_to_string(&km_path).unwrap();
-        assert!(!km_content.contains(GWT_MARKETPLACE_NAME));
-
-        // Step 3: remove marketplace directory
-        let _ = std::fs::remove_dir_all(&marketplace_dir);
-        assert!(!marketplace_dir.exists());
-    }
-
     #[test]
     fn test_setup_gwt_plugin_at_unregisters_legacy_settings_hooks() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::new(temp_dir.path());
 
-        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        let settings_path = temp_dir.path().join(".claude").join("settings.local.json");
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         let legacy_hooks = serde_json::json!({
             "hooks": {

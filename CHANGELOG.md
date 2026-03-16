@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.8.1] - 2026-03-16
+
+### Bug Fixes
+
+- **core:** Consolidate config persistence and claude local settings (#1637)
+
+### Miscellaneous Tasks
+
+- **deps-dev:** Bump @commitlint/cli from 20.4.4 to 20.5.0 (#1625)
+- **deps-dev:** Bump prettier-plugin-svelte in /gwt-gui (#1635)
+- **deps-dev:** Bump @tauri-apps/cli from 2.10.0 to 2.10.1 in /gwt-gui (#1634)
+- **deps-dev:** Bump @tsconfig/svelte from 5.0.7 to 5.0.8 in /gwt-gui (#1633)
+- **deps-dev:** Bump svelte-check from 4.3.6 to 4.4.5 in /gwt-gui (#1632)
+- **deps-dev:** Bump @sveltejs/vite-plugin-svelte in /gwt-gui (#1631)
+- **deps-dev:** Bump jsdom from 28.0.0 to 29.0.0 in /gwt-gui (#1629)
+- **deps-dev:** Bump @commitlint/config-conventional (#1626)
+- **deps-dev:** Bump svelte from 5.53.5 to 5.53.12 in /gwt-gui (#1628)
+
 ## [8.8.0] - 2026-03-16
 
 ### Bug Fixes

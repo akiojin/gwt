@@ -9,7 +9,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "8.8.0"
+version = "8.8.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -40,7 +40,6 @@ gix = { version = "0.80", default-features = false, features = [
 tokio = { version = "1", features = ["full"] }
 
 # Configuration
-figment = { version = "0.10", features = ["toml", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1.0"
 serde_json = "1"

@@ -6,14 +6,10 @@
 
 use super::agent_config::AgentConfig;
 use super::migration::{ensure_config_dir, write_atomic};
-use super::profile::ProfilesConfig;
+use super::profile::{Profile, ProfilesConfig};
 use super::recent_projects::RecentProjectsConfig;
 use super::tools::ToolsConfig;
 use crate::error::{GwtError, Result};
-use figment::{
-    providers::{Env, Format, Toml},
-    Figment,
-};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -21,7 +17,7 @@ use tracing::{debug, error, info};
 
 static GLOBAL_SETTINGS_UPDATE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Application settings
+/// Runtime application settings assembled from config files and env overrides.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -61,6 +57,146 @@ pub struct Settings {
     /// Recent project history stored in config.toml.
     #[serde(default)]
     pub recent_projects: RecentProjectsConfig,
+}
+
+/// TOML DTO for the `[profiles]` section inside `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct ProfilesSectionToml {
+    version: u8,
+    active: Option<String>,
+    #[serde(flatten)]
+    profiles: std::collections::HashMap<String, Profile>,
+}
+
+impl From<ProfilesConfig> for ProfilesSectionToml {
+    fn from(value: ProfilesConfig) -> Self {
+        Self {
+            version: value.version,
+            active: value.active,
+            profiles: value.profiles,
+        }
+    }
+}
+
+impl From<ProfilesSectionToml> for ProfilesConfig {
+    fn from(value: ProfilesSectionToml) -> Self {
+        Self {
+            version: value.version,
+            active: value.active,
+            profiles: value.profiles,
+        }
+    }
+}
+
+/// TOML DTO for the canonical `~/.gwt/config.toml` file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct ConfigToml {
+    protected_branches: Vec<String>,
+    default_base_branch: String,
+    worktree_root: String,
+    debug: bool,
+    log_dir: Option<PathBuf>,
+    log_retention_days: u32,
+    agent: AgentSettings,
+    docker: DockerSettings,
+    appearance: AppearanceSettings,
+    app_language: String,
+    voice_input: VoiceInputSettings,
+    terminal: TerminalSettings,
+    profiles: ProfilesSectionToml,
+    agent_config: AgentConfig,
+    tools: ToolsConfig,
+    recent_projects: RecentProjectsConfig,
+}
+
+impl Default for ConfigToml {
+    fn default() -> Self {
+        Settings::default().into()
+    }
+}
+
+/// TOML DTO for repo-local config files that must not include global-only sections.
+#[derive(Debug, Clone, Serialize)]
+struct LocalConfigToml {
+    protected_branches: Vec<String>,
+    default_base_branch: String,
+    worktree_root: String,
+    debug: bool,
+    log_dir: Option<PathBuf>,
+    log_retention_days: u32,
+    agent: AgentSettings,
+    docker: DockerSettings,
+    appearance: AppearanceSettings,
+    app_language: String,
+    voice_input: VoiceInputSettings,
+    terminal: TerminalSettings,
+}
+
+impl From<Settings> for ConfigToml {
+    fn from(value: Settings) -> Self {
+        Self {
+            protected_branches: value.protected_branches,
+            default_base_branch: value.default_base_branch,
+            worktree_root: value.worktree_root,
+            debug: value.debug,
+            log_dir: value.log_dir,
+            log_retention_days: value.log_retention_days,
+            agent: value.agent,
+            docker: value.docker,
+            appearance: value.appearance,
+            app_language: value.app_language,
+            voice_input: value.voice_input,
+            terminal: value.terminal,
+            profiles: value.profiles.into(),
+            agent_config: value.agent_config,
+            tools: value.tools,
+            recent_projects: value.recent_projects,
+        }
+    }
+}
+
+impl From<Settings> for LocalConfigToml {
+    fn from(value: Settings) -> Self {
+        Self {
+            protected_branches: value.protected_branches,
+            default_base_branch: value.default_base_branch,
+            worktree_root: value.worktree_root,
+            debug: value.debug,
+            log_dir: value.log_dir,
+            log_retention_days: value.log_retention_days,
+            agent: value.agent,
+            docker: value.docker,
+            appearance: value.appearance,
+            app_language: value.app_language,
+            voice_input: value.voice_input,
+            terminal: value.terminal,
+        }
+    }
+}
+
+impl From<ConfigToml> for Settings {
+    fn from(value: ConfigToml) -> Self {
+        Self {
+            protected_branches: value.protected_branches,
+            default_base_branch: value.default_base_branch,
+            worktree_root: value.worktree_root,
+            debug: value.debug,
+            log_dir: value.log_dir,
+            log_retention_days: value.log_retention_days,
+            agent: value.agent,
+            docker: value.docker,
+            appearance: value.appearance,
+            app_language: value.app_language,
+            voice_input: value.voice_input,
+            terminal: value.terminal,
+            profiles: value.profiles.into(),
+            agent_config: value.agent_config,
+            tools: value.tools,
+            recent_projects: value.recent_projects,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -205,19 +341,19 @@ impl Settings {
     }
 
     fn strip_global_only_sections(&mut self) {
+        self.profiles = ProfilesConfig::default();
         self.agent_config = AgentConfig::default();
         self.tools = ToolsConfig::default();
         self.recent_projects = RecentProjectsConfig::default();
     }
 
-    fn settings_env_provider() -> Env {
-        // Limit Figment env extraction to scalar keys we actually support via direct mapping.
-        // This avoids runtime variables such as GWT_AGENT (set for terminal panes) from
-        // colliding with nested settings structs during deserialization.
-        Env::prefixed("GWT_").split("_").only(&["debug"])
-    }
-
     fn apply_runtime_env_overrides(mut settings: Settings) -> Settings {
+        if let Ok(value) = std::env::var("GWT_DEBUG") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.debug = parsed;
+            }
+        }
+
         if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
             if let Some(parsed) = parse_env_bool(&value) {
                 settings.agent.auto_install_deps = parsed;
@@ -233,6 +369,34 @@ impl Settings {
         settings
     }
 
+    fn load_from_path(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            error!(
+                category = "config",
+                path = %path.display(),
+                error = %e,
+                "Failed to read config file"
+            );
+            GwtError::ConfigParseError {
+                reason: e.to_string(),
+            }
+        })?;
+
+        toml::from_str::<ConfigToml>(&content)
+            .map(Into::into)
+            .map_err(|e| {
+                error!(
+                    category = "config",
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to parse config"
+                );
+                GwtError::ConfigParseError {
+                    reason: e.to_string(),
+                }
+            })
+    }
+
     fn load_global_internal(apply_env_overrides: bool) -> Result<Self> {
         debug!(
             category = "config",
@@ -240,37 +404,21 @@ impl Settings {
         );
 
         let config_path = Self::global_config_path().filter(|p| p.exists());
-
-        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
-
-        if let Some(ref path) = config_path {
+        let mut settings = if let Some(ref path) = config_path {
             debug!(
                 category = "config",
                 config_path = %path.display(),
-                "Merging global config file"
+                "Loading global config file"
             );
-            figment = figment.merge(Toml::file(path));
-        }
-
-        if apply_env_overrides {
-            figment = figment.merge(Self::settings_env_provider());
-        }
-
-        let mut settings: Settings = figment.extract().map_err(|e| {
-            error!(
-                category = "config",
-                error = %e,
-                "Failed to parse global config"
-            );
-            GwtError::ConfigParseError {
-                reason: e.to_string(),
-            }
-        })?;
+            Self::load_from_path(path)?
+        } else {
+            Settings::default()
+        };
 
         if apply_env_overrides {
             settings = Self::apply_runtime_env_overrides(settings);
         }
-        settings.profiles.normalize_loaded();
+        settings.profiles.normalize_loaded()?;
 
         info!(
             category = "config",
@@ -301,48 +449,28 @@ impl Settings {
         );
 
         let config_path = Self::find_config_file(repo_root);
-
-        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
-
-        if let Some(ref path) = config_path {
+        let mut settings = if let Some(ref path) = config_path {
             debug!(
                 category = "config",
                 config_path = %path.display(),
-                "Merging config file"
+                "Loading config file"
             );
-            figment = figment.merge(Toml::file(path));
-        }
-
-        figment = figment.merge(Self::settings_env_provider());
-
-        let mut settings: Settings = figment.extract().map_err(|e| {
-            error!(
-                category = "config",
-                error = %e,
-                "Failed to parse config"
-            );
-            GwtError::ConfigParseError {
-                reason: e.to_string(),
-            }
-        })?;
+            Self::load_from_path(path)?
+        } else {
+            Settings::default()
+        };
 
         settings = Self::apply_runtime_env_overrides(settings);
         if let Some(path) = config_path.as_ref() {
             if !Self::is_global_config_path(path) {
-                let global_settings = Self::load_global().unwrap_or_else(|e| {
-                    tracing::warn!(
-                        category = "config",
-                        error = %e,
-                        "Failed to load global settings, using defaults"
-                    );
-                    Self::default()
-                });
+                let global_settings = Self::load_global().unwrap_or_default();
+                settings.profiles = global_settings.profiles;
                 settings.agent_config = global_settings.agent_config;
                 settings.tools = global_settings.tools;
                 settings.recent_projects = global_settings.recent_projects;
             }
         }
-        settings.profiles.normalize_loaded();
+        settings.profiles.normalize_loaded()?;
 
         info!(
             category = "config",
@@ -361,11 +489,6 @@ impl Settings {
     /// Reads `~/.gwt/config.toml`. Falls back to defaults when the file does not exist.
     pub fn load_global() -> Result<Self> {
         Self::load_global_internal(true)
-    }
-
-    /// Get default TOML configuration
-    fn default_toml() -> String {
-        toml::to_string_pretty(&Self::default()).unwrap_or_default()
     }
 
     /// Find the configuration file (gwt-spec issue FR-013)
@@ -459,7 +582,12 @@ impl Settings {
             persisted.strip_global_only_sections();
         }
 
-        let content = toml::to_string_pretty(&persisted).map_err(|e| {
+        let content = if Self::is_global_config_path(path) {
+            toml::to_string_pretty(&ConfigToml::from(persisted))
+        } else {
+            toml::to_string_pretty(&LocalConfigToml::from(persisted))
+        }
+        .map_err(|e| {
             error!(
                 category = "config",
                 path = %path.display(),
@@ -749,6 +877,58 @@ default_base_branch = "new-global"
         let content = std::fs::read_to_string(&new_path).unwrap();
         assert!(content.contains("debug = true"));
         assert!(content.contains("save-global-test"));
+    }
+
+    #[test]
+    fn test_local_save_strips_global_only_profiles_and_load_uses_global_profiles() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            r#"
+[profiles]
+version = 1
+active = "default"
+
+[profiles.default.env]
+OPENAI_API_KEY = "global-key"
+"#,
+        )
+        .unwrap();
+
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let local_path = repo.join(".gwt.toml");
+
+        let mut local_settings = Settings::default();
+        local_settings.profiles.profiles.insert(
+            "dev".to_string(),
+            Profile::new("dev").with_env("LOCAL_ONLY", "1"),
+        );
+        local_settings.save(&local_path).unwrap();
+
+        let local_content = std::fs::read_to_string(&local_path).unwrap();
+        assert!(!local_content.contains("[profiles]"));
+        assert!(!local_content.contains("[agent_config]"));
+        assert!(!local_content.contains("[tools]"));
+        assert!(!local_content.contains("[recent_projects]"));
+
+        let loaded = Settings::load(&repo).unwrap();
+        assert_eq!(loaded.profiles.active.as_deref(), Some("default"));
+        assert_eq!(
+            loaded
+                .profiles
+                .profiles
+                .get("default")
+                .and_then(|profile| profile.env.get("OPENAI_API_KEY"))
+                .map(String::as_str),
+            Some("global-key")
+        );
+        assert!(!loaded.profiles.profiles.contains_key("dev"));
     }
 
     #[test]
