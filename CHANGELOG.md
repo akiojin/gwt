@@ -1,6 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.8.0] - 2026-03-16
+
+### Bug Fixes
+
+- **ci:** Add dependabot npm entry for gwt-gui directory
+- **test:** Update ConfirmDialog focus assertion for cancel-first behavior
+- **gui,voice:** Fix AI settings validation and add Python 3.14 support (#1616)
+
+### Features
+
+- **gui:** Move terminal input actions into overlay (#1617)
+
+### Miscellaneous Tasks
+
+- **deps-dev:** Bump @commitlint/config-conventional (#1619)
+- **deps-dev:** Bump @commitlint/cli from 20.4.3 to 20.4.4 (#1620)
+
 ## [8.7.0] - 2026-03-13
 
 ### Bug Fixes

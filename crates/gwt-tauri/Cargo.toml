@@ -43,7 +43,7 @@ notify.workspace = true
 notify-debouncer-mini.workspace = true
 fs2.workspace = true
 semver.workspace = true
-whisper-rs = { version = "0.15.1", default-features = false }
+whisper-rs = { version = "0.16.0", default-features = false }
 hound = "3.5"
 
 [build-dependencies]

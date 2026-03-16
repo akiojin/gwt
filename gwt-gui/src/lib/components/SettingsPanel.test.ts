@@ -242,10 +242,11 @@ describe("SettingsPanel", () => {
     await waitFor(() => {
       expect(rendered.container.querySelector(".modal-overlay")).toBeTruthy();
     });
-    const confirmBtn = rendered.container.querySelector(".modal-overlay .btn-danger") as HTMLButtonElement;
+    const cancelBtn = rendered.container.querySelector(".modal-overlay .btn-cancel") as HTMLButtonElement;
     await waitFor(() => {
-      expect(document.activeElement).toBe(confirmBtn);
+      expect(document.activeElement).toBe(cancelBtn);
     });
+    const confirmBtn = rendered.container.querySelector(".modal-overlay .btn-danger") as HTMLButtonElement;
     await fireEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -459,7 +460,7 @@ describe("SettingsPanel", () => {
     expect(invokeMock.mock.calls.some(([command]) => command === "list_ai_models")).toBe(false);
   });
 
-  it("saves settings and profiles", async () => {
+  it("saves settings and profiles with correct AI payload", async () => {
     const onClose = vi.fn();
     const rendered = await renderSettingsPanel({ onClose });
 
@@ -470,9 +471,11 @@ describe("SettingsPanel", () => {
       expect(invokeMock).toHaveBeenCalledWith("save_settings", {
         settings: expect.any(Object),
       });
-      expect(invokeMock).toHaveBeenCalledWith("save_profiles", {
-        config: expect.any(Object),
-      });
+      const saveCall = invokeMock.mock.calls.find((args: unknown[]) => args[0] === "save_profiles");
+      expect(saveCall).toBeTruthy();
+      const savedConfig = saveCall![1].config as ProfilesConfig;
+      expect(savedConfig.profiles.default.ai?.api_key).toBe("test-key");
+      expect(savedConfig.profiles.default.ai?.model).toBe("gpt-4o-mini");
       expect(rendered.getByText("Settings saved.")).toBeTruthy();
     });
   });

@@ -38,7 +38,7 @@ describe("settingsPanelHelpers", () => {
     expect(getCurrentProfile(cfg, "default")).toEqual(profile);
   });
 
-  it("checks AI endpoint enablement", () => {
+  it("checks AI endpoint+model enablement", () => {
     expect(isAiEnabled(null)).toBe(false);
     expect(
       isAiEnabled({
@@ -49,6 +49,7 @@ describe("settingsPanelHelpers", () => {
         ai: { endpoint: "   ", api_key: "", model: "", language: "en" },
       }),
     ).toBe(false);
+    // endpoint only → false (model required)
     expect(
       isAiEnabled({
         name: "p",
@@ -59,6 +60,21 @@ describe("settingsPanelHelpers", () => {
           endpoint: "https://api.openai.com/v1",
           api_key: "",
           model: "",
+          language: "en",
+        },
+      }),
+    ).toBe(false);
+    // endpoint + model → true
+    expect(
+      isAiEnabled({
+        name: "p",
+        description: "",
+        env: {},
+        disabled_env: [],
+        ai: {
+          endpoint: "https://api.openai.com/v1",
+          api_key: "",
+          model: "gpt-4o",
           language: "en",
         },
       }),

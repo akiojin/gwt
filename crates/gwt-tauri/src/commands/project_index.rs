@@ -122,6 +122,7 @@ fn system_python_candidates() -> &'static [&'static str] {
     #[cfg(windows)]
     {
         &[
+            "python3.14",
             "python3.13",
             "python3.12",
             "python3.11",
@@ -134,6 +135,7 @@ fn system_python_candidates() -> &'static [&'static str] {
     #[cfg(not(windows))]
     {
         &[
+            "python3.14",
             "python3.13",
             "python3.12",
             "python3.11",

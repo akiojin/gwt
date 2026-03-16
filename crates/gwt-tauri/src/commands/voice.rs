@@ -165,6 +165,7 @@ fn system_python_candidates() -> &'static [&'static str] {
     #[cfg(windows)]
     {
         &[
+            "python3.14",
             "python3.13",
             "python3.12",
             "python3.11",
@@ -177,6 +178,7 @@ fn system_python_candidates() -> &'static [&'static str] {
     #[cfg(not(windows))]
     {
         &[
+            "python3.14",
             "python3.13",
             "python3.12",
             "python3.11",
@@ -227,7 +229,7 @@ fn parse_python_version(version_str: &str) -> Result<(u32, u32), String> {
 }
 
 fn supported_voice_runtime_python_version(major: u32, minor: u32) -> bool {
-    major == 3 && (11..14).contains(&minor)
+    major == 3 && (11..15).contains(&minor)
 }
 
 fn python_version(path: &Path) -> Result<(u32, u32, String), String> {
@@ -246,29 +248,37 @@ fn python_version(path: &Path) -> Result<(u32, u32, String), String> {
     Ok((major, minor, version_str))
 }
 
-fn supports_voice_runtime_python(path: &Path) -> bool {
-    python_version(path)
-        .map(|(major, minor, _)| supported_voice_runtime_python_version(major, minor))
-        .unwrap_or(false)
-}
-
 fn find_system_python_binary() -> Result<PathBuf, String> {
+    let mut found_versions: Vec<String> = Vec::new();
+
     for candidate in system_python_candidates() {
         if let Ok(path) = which::which(candidate) {
             if is_windows_store_python_alias(&path) {
                 continue;
             }
 
-            if supports_voice_runtime_python(&path) {
-                return Ok(path);
+            if let Ok((major, minor, version_str)) = python_version(&path) {
+                if supported_voice_runtime_python_version(major, minor) {
+                    return Ok(path);
+                }
+                if !found_versions.contains(&version_str) {
+                    found_versions.push(version_str);
+                }
             }
         }
     }
 
-    Err(format!(
-        "Python runtime not found (checked {})",
-        system_python_candidates().join("/")
-    ))
+    if found_versions.is_empty() {
+        Err(format!(
+            "Python runtime not found (checked {})",
+            system_python_candidates().join("/")
+        ))
+    } else {
+        Err(format!(
+            "Python {} found but not supported (requires 3.11\u{2013}3.14)",
+            found_versions.join(", ")
+        ))
+    }
 }
 
 fn find_managed_python_binary() -> Result<PathBuf, String> {
@@ -309,9 +319,9 @@ fn validate_python_version(python: &Path) -> Result<(), String> {
             "Python {version_str} is too old; 3.11 or newer is required"
         ));
     }
-    if minor >= 14 {
+    if minor >= 15 {
         return Err(format!(
-            "Python {version_str} is not yet supported by PyTorch; use 3.11–3.13"
+            "Python {version_str} is not yet supported by PyTorch; use 3.11\u{2013}3.14"
         ));
     }
 
@@ -942,7 +952,8 @@ mod tests {
         assert!(!supported_voice_runtime_python_version(3, 10));
         assert!(supported_voice_runtime_python_version(3, 11));
         assert!(supported_voice_runtime_python_version(3, 13));
-        assert!(!supported_voice_runtime_python_version(3, 14));
+        assert!(supported_voice_runtime_python_version(3, 14));
+        assert!(!supported_voice_runtime_python_version(3, 15));
         assert!(!supported_voice_runtime_python_version(2, 7));
     }
 

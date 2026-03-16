@@ -2,7 +2,6 @@
   import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
-  import TerminalInputField from "./TerminalInputField.svelte";
   import ProjectModePanel from "./ProjectModePanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
@@ -40,6 +39,13 @@
     onWorkOnIssue,
     onSwitchToWorktree,
     onIssueCountChange,
+    voiceInputEnabled = false,
+    voiceInputListening = false,
+    voiceInputPreparing = false,
+    voiceInputSupported = true,
+    voiceInputAvailable = false,
+    voiceInputAvailabilityReason = null,
+    voiceInputError = null,
   }: {
     tabs: Tab[];
     activeTabId: string;
@@ -57,6 +63,13 @@
     onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
     onSwitchToWorktree?: (branchName: string) => void;
     onIssueCountChange?: (count: number) => void;
+    voiceInputEnabled?: boolean;
+    voiceInputListening?: boolean;
+    voiceInputPreparing?: boolean;
+    voiceInputSupported?: boolean;
+    voiceInputAvailable?: boolean;
+    voiceInputAvailabilityReason?: string | null;
+    voiceInputError?: string | null;
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
@@ -492,30 +505,19 @@
 
     <div class="terminal-layer" class:hidden={!showTerminalLayer}>
       {#each agentTabs as tab (tab.id)}
-        <div class="terminal-wrapper agent-wrapper" class:active={isTerminalTabVisible(tab.id)}>
-          <div class="terminal-view-area">
-            <TerminalView
-              paneId={tab.paneId}
-              active={activeTabId === tab.id}
-              hasInputField={true}
-              onReady={handleTerminalReady}
-            />
-          </div>
-          <TerminalInputField
+        <div class="terminal-wrapper" class:active={isTerminalTabVisible(tab.id)}>
+          <TerminalView
             paneId={tab.paneId}
-            agentId={tab.agentId ?? ""}
             active={activeTabId === tab.id}
-            onFocusTerminal={() => {
-              const el = document.querySelector<HTMLDivElement>(
-                `.terminal-container[data-pane-id="${tab.paneId}"]`,
-              );
-              if (el) {
-                const term = (el as HTMLDivElement & { __gwtTerminal?: { focus(): void } }).__gwtTerminal;
-                if (term) {
-                  try { term.focus(); } catch {}
-                }
-              }
-            }}
+            agentId={tab.agentId ?? null}
+            {voiceInputEnabled}
+            {voiceInputListening}
+            {voiceInputPreparing}
+            {voiceInputSupported}
+            {voiceInputAvailable}
+            {voiceInputAvailabilityReason}
+            {voiceInputError}
+            onReady={handleTerminalReady}
           />
         </div>
       {/each}
@@ -524,6 +526,14 @@
           <TerminalView
             paneId={tab.paneId}
             active={activeTabId === tab.id}
+            agentId={null}
+            {voiceInputEnabled}
+            {voiceInputListening}
+            {voiceInputPreparing}
+            {voiceInputSupported}
+            {voiceInputAvailable}
+            {voiceInputAvailabilityReason}
+            {voiceInputError}
             onReady={handleTerminalReady}
           />
         </div>
@@ -684,17 +694,6 @@
   .terminal-wrapper.active {
     visibility: visible;
     pointer-events: auto;
-  }
-
-  .terminal-wrapper.agent-wrapper {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .terminal-view-area {
-    flex: 1;
-    overflow: hidden;
-    position: relative;
   }
 
   .placeholder {

@@ -835,7 +835,7 @@ fn evaluate_quality(
     let mut context_params = WhisperContextParameters::new();
     context_params.use_gpu(use_gpu);
 
-    let context = WhisperContext::new_with_params(&model_path.to_string_lossy(), context_params)
+    let context = WhisperContext::new_with_params(&model_path, context_params)
         .map_err(|e| format!("Failed to load whisper model {}: {e}", model_path.display()))?;
 
     let mut sample_reports = Vec::<SampleMetrics>::with_capacity(loaded_samples.len());

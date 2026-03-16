@@ -1,7 +1,7 @@
 //! Terminal/PTY management commands for xterm.js integration
 
 use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::state::{AppState, PaneLaunchMeta};
+use crate::state::{AppState, PaneLaunchMeta, PaneRuntimeContext};
 use chrono::Utc;
 use gwt_core::ai::SessionParser;
 use gwt_core::config::stats::Stats;
@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -836,14 +836,39 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
+fn register_pane_runtime_context(state: &AppState, pane_id: &str, launch_workdir: &Path) {
+    if let Ok(mut map) = state.pane_runtime_contexts.lock() {
+        map.insert(
+            pane_id.to_string(),
+            PaneRuntimeContext {
+                launch_workdir: launch_workdir.to_path_buf(),
+            },
+        );
+    }
+}
+
+fn remove_pane_runtime_context(state: &AppState, pane_id: &str) {
+    if let Ok(mut map) = state.pane_runtime_contexts.lock() {
+        map.remove(pane_id);
+    }
+}
+
+fn pane_runtime_context(state: &AppState, pane_id: &str) -> Option<PaneRuntimeContext> {
+    state
+        .pane_runtime_contexts
+        .lock()
+        .ok()
+        .and_then(|map| map.get(pane_id).cloned())
+}
+
 const DOCKER_WORKDIR: &str = "/workspace";
 
-fn docker_compose_exec_workdir(workspace_folder: Option<&str>) -> String {
+fn docker_compose_exec_workdir(workspace_folder: Option<&str>, working_dir: &Path) -> String {
     workspace_folder
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .unwrap_or_default()
+        .unwrap_or_else(|| docker_mount_target_path(&working_dir.to_string_lossy()))
 }
 
 fn build_docker_compose_up_args(
@@ -1763,6 +1788,7 @@ fn launch_with_config(
     app_handle: AppHandle,
 ) -> Result<String, String> {
     let agent_name_for_stream = config.agent_name.clone();
+    let launch_workdir = config.working_dir.clone();
     let pane_id = {
         let mut manager = state
             .pane_manager
@@ -1772,6 +1798,8 @@ fn launch_with_config(
             .launch_agent(repo_path, config, 24, 80)
             .map_err(|e| format!("Failed to launch terminal: {}", e))?
     };
+
+    register_pane_runtime_context(state, &pane_id, &launch_workdir);
 
     if let Some(meta) = meta {
         if let Ok(mut map) = state.pane_launch_meta.lock() {
@@ -2075,6 +2103,8 @@ fn launch_with_wsl_pty_write(
             .map_err(|e| format!("Failed to launch WSL terminal: {e}"))?
     };
 
+    register_pane_runtime_context(state, &pane_id, &working_dir);
+
     if let Some(ref meta) = meta {
         if let Ok(mut map) = state.pane_launch_meta.lock() {
             map.insert(pane_id.clone(), meta.clone());
@@ -2120,6 +2150,7 @@ fn launch_with_wsl_pty_write(
     if let Ok(mut map) = state.pane_launch_meta.lock() {
         map.remove(&pane_id);
     }
+    remove_pane_runtime_context(state, &pane_id);
 
     // Build non-interactive command: wsl.exe -e bash -lc 'export ...; cd ...; exec agent args...'
     let fallback_cmd =
@@ -2351,6 +2382,8 @@ pub fn spawn_shell(
                 StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
             })?
     };
+
+    register_pane_runtime_context(&state, &pane_id, &resolved_dir);
 
     let reader = {
         let manager = state.pane_manager.lock().map_err(|e| {
@@ -3528,17 +3561,29 @@ services:
     }
 
     #[test]
-    fn docker_compose_exec_workdir_is_empty_without_workspace_folder() {
-        assert_eq!(docker_compose_exec_workdir(None), "");
+    fn docker_compose_exec_workdir_falls_back_to_mount_target_without_workspace_folder() {
+        assert_eq!(
+            docker_compose_exec_workdir(None, Path::new("D:/Repository/GE/GrimoireEngine.git")),
+            "/Repository/GE/GrimoireEngine.git"
+        );
     }
 
     #[test]
     fn docker_compose_exec_workdir_uses_workspace_folder_when_present() {
         assert_eq!(
-            docker_compose_exec_workdir(Some("/workspace")),
+            docker_compose_exec_workdir(
+                Some("/workspace"),
+                Path::new("D:/Repository/GE/GrimoireEngine.git"),
+            ),
             "/workspace"
         );
-        assert_eq!(docker_compose_exec_workdir(Some("  /app  ")), "/app");
+        assert_eq!(
+            docker_compose_exec_workdir(
+                Some("  /app  "),
+                Path::new("D:/Repository/GE/GrimoireEngine.git"),
+            ),
+            "/app"
+        );
     }
 
     #[test]
@@ -4491,7 +4536,7 @@ pub(crate) fn launch_agent_for_project_root(
                     docker_env = Some(env);
                     docker_mode = DockerExecMode::Compose {
                         service,
-                        workdir: docker_compose_exec_workdir(None),
+                        workdir: docker_compose_exec_workdir(None, &working_dir),
                         compose_args,
                     };
                 }
@@ -4585,7 +4630,10 @@ pub(crate) fn launch_agent_for_project_root(
                         docker_env = Some(env);
                         docker_mode = DockerExecMode::Compose {
                             service,
-                            workdir: docker_compose_exec_workdir(cfg.workspace_folder.as_deref()),
+                            workdir: docker_compose_exec_workdir(
+                                cfg.workspace_folder.as_deref(),
+                                &working_dir,
+                            ),
                             compose_args,
                         };
                     } else if let Some(image) = cfg
@@ -5392,6 +5440,7 @@ fn stream_pty_output(
         .lock()
         .ok()
         .and_then(|mut map| map.remove(&pane_id));
+    remove_pane_runtime_context(&state, &pane_id);
     if let Some(meta) = meta {
         let docker_container_name = meta.docker_container_name.clone();
         let docker_compose_args = meta.docker_compose_args.clone();
@@ -5647,6 +5696,7 @@ pub fn write_terminal(
         })?;
 
     manager.close_pane(index);
+    remove_pane_runtime_context(&state, &pane_id);
     let _ = app_handle.emit(
         "terminal-closed",
         &TerminalClosedPayload {
@@ -6160,46 +6210,144 @@ fn sanitize_filename_part(s: &str) -> String {
         .collect()
 }
 
-/// Save clipboard image data to a temporary file and return its absolute path.
+fn normalized_image_extension(extension: &str) -> Option<String> {
+    let trimmed = extension.trim().trim_start_matches('.');
+    let normalized = sanitize_filename_part(trimmed)
+        .trim_matches('_')
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn sanitized_image_stem(name: &str) -> String {
+    let normalized = sanitize_filename_part(name).trim_matches('_').to_string();
+    if normalized.is_empty() {
+        "image".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn create_staged_image_destination(
+    launch_workdir: &Path,
+    pane_id: &str,
+    base_name: &str,
+    extension: &str,
+    command: &str,
+) -> Result<(PathBuf, String), StructuredError> {
+    let safe_extension = normalized_image_extension(extension)
+        .ok_or_else(|| StructuredError::internal("Invalid image format", command))?;
+    let safe_pane_id = sanitized_image_stem(pane_id);
+    let safe_base_name = sanitized_image_stem(base_name);
+
+    let images_dir = launch_workdir.join(".tmp").join("images");
+    std::fs::create_dir_all(&images_dir).map_err(|e| {
+        StructuredError::internal(&format!("Failed to create images directory: {e}"), command)
+    })?;
+
+    let filename = format!(
+        "{}_{}_{}.{}",
+        safe_pane_id,
+        safe_base_name,
+        Uuid::new_v4(),
+        safe_extension
+    );
+    let relative_path = format!("./.tmp/images/{filename}");
+    Ok((images_dir.join(&filename), relative_path))
+}
+
+fn validate_clipboard_image_data(data: &[u8]) -> Result<(), StructuredError> {
+    if data.is_empty() {
+        return Err(StructuredError::internal(
+            "Clipboard image is empty",
+            "save_clipboard_image",
+        ));
+    }
+    Ok(())
+}
+
+/// Save clipboard image data to a temporary file and return the prompt path.
 #[tauri::command]
 pub fn save_clipboard_image(
     pane_id: String,
     data: Vec<u8>,
     format: String,
-    app_handle: AppHandle,
+    state: State<AppState>,
 ) -> Result<String, StructuredError> {
-    let _ = app_handle;
+    validate_clipboard_image_data(&data)?;
 
-    let safe_pane_id = sanitize_filename_part(&pane_id);
-    let safe_format = sanitize_filename_part(&format);
-    if safe_format.is_empty() {
-        return Err(StructuredError::internal(
-            "Invalid image format",
+    let context = pane_runtime_context(&state, &pane_id).ok_or_else(|| {
+        StructuredError::internal(
+            &format!("Pane runtime context not found: {pane_id}"),
             "save_clipboard_image",
-        ));
+        )
+    })?;
+
+    let (target_path, relative_path) = create_staged_image_destination(
+        &context.launch_workdir,
+        &pane_id,
+        "clipboard",
+        &format,
+        "save_clipboard_image",
+    )?;
+
+    std::fs::write(&target_path, &data).map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to write image file: {e}"),
+            "save_clipboard_image",
+        )
+    })?;
+
+    Ok(relative_path)
+}
+
+#[cfg(test)]
+mod attachment_path_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn create_staged_image_destination_places_files_under_launch_tmp_images() {
+        let temp = TempDir::new().unwrap();
+        let (target_path, relative_path) = create_staged_image_destination(
+            temp.path(),
+            "pane-1",
+            "clipboard image",
+            "png",
+            "test",
+        )
+        .unwrap();
+
+        assert!(target_path.starts_with(temp.path().join(".tmp").join("images")));
+        assert!(relative_path.starts_with("./.tmp/images/"));
+        assert!(target_path.extension().and_then(|ext| ext.to_str()) == Some("png"));
     }
 
-    let home = dirs::home_dir().ok_or_else(|| {
-        StructuredError::internal("Failed to resolve home directory", "save_clipboard_image")
-    })?;
-    let images_dir = home.join(".gwt").join("tmp").join("images");
-    std::fs::create_dir_all(&images_dir).map_err(|e| {
-        StructuredError::internal(
-            &format!("Failed to create images directory: {}", e),
-            "save_clipboard_image",
-        )
-    })?;
+    #[test]
+    fn pane_runtime_context_registration_round_trips_launch_workdir() {
+        let state = AppState::new();
+        let launch_workdir = TempDir::new().unwrap();
 
-    let unique_id = Uuid::new_v4();
-    let filename = format!("{}_{}.{}", safe_pane_id, unique_id, safe_format);
-    let file_path = images_dir.join(&filename);
+        register_pane_runtime_context(&state, "pane-1", launch_workdir.path());
+        let context = pane_runtime_context(&state, "pane-1").expect("context should exist");
 
-    std::fs::write(&file_path, &data).map_err(|e| {
-        StructuredError::internal(
-            &format!("Failed to write image file: {}", e),
-            "save_clipboard_image",
-        )
-    })?;
+        assert_eq!(context.launch_workdir, launch_workdir.path());
 
-    Ok(file_path.to_string_lossy().into_owned())
+        remove_pane_runtime_context(&state, "pane-1");
+        assert!(pane_runtime_context(&state, "pane-1").is_none());
+    }
+
+    #[test]
+    fn validate_clipboard_image_data_rejects_empty_payload() {
+        let err = validate_clipboard_image_data(&[]).expect_err("empty payload must fail");
+        assert!(err.message.contains("Clipboard image is empty"));
+    }
+
+    #[test]
+    fn validate_clipboard_image_data_accepts_non_empty_payload() {
+        validate_clipboard_image_data(&[1, 2, 3]).expect("non-empty payload should pass");
+    }
 }
