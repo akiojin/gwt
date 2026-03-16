@@ -10,8 +10,10 @@ use tracing::info;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Profile {
     /// Profile name
+    #[serde(default)]
     pub name: String,
     /// Environment variables
+    #[serde(default)]
     pub env: HashMap<String, String>,
     /// Disabled OS environment variables
     #[serde(default)]
@@ -167,6 +169,10 @@ fn default_profile() -> Profile {
     profile
 }
 
+fn is_reserved_profile_key(value: &str) -> bool {
+    matches!(value, "active" | "version" | "profiles")
+}
+
 fn normalize_ai_language(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "ja" => "ja".to_string(),
@@ -194,7 +200,7 @@ impl ProfilesConfig {
     pub fn load() -> Result<Self> {
         let settings = Settings::load_global()?;
         let mut profiles = settings.profiles;
-        profiles.normalize_loaded();
+        profiles.normalize_loaded()?;
         Ok(profiles)
     }
 
@@ -282,8 +288,10 @@ impl ProfilesConfig {
         }
     }
 
-    pub(crate) fn normalize_loaded(&mut self) {
+    pub(crate) fn normalize_loaded(&mut self) -> Result<()> {
+        self.normalize_profile_keys_to_lowercase()?;
         self.ensure_defaults();
+        Ok(())
     }
 
     fn normalize_for_save(&mut self) -> Result<()> {
@@ -299,6 +307,14 @@ impl ProfilesConfig {
             if normalized_key.is_empty() {
                 return Err(GwtError::ConfigWriteError {
                     reason: "Profile name must not be empty".to_string(),
+                });
+            }
+            if is_reserved_profile_key(&normalized_key) {
+                return Err(GwtError::ConfigWriteError {
+                    reason: format!(
+                        "Profile name uses reserved key in config.toml: {}",
+                        normalized_key
+                    ),
                 });
             }
             if normalized_profiles.contains_key(&normalized_key) {
@@ -374,9 +390,15 @@ mod tests {
         let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let mut config = ProfilesConfig::default();
-        config
-            .profiles
-            .insert("dev".to_string(), Profile::new("dev"));
+        let mut dev = Profile::new("dev").with_env("OPENAI_API_KEY", "profile-env-key");
+        dev.ai = Some(AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "sk-dev-config".to_string(),
+            model: "gpt-5".to_string(),
+            language: "ja".to_string(),
+            summary_enabled: true,
+        });
+        config.profiles.insert("dev".to_string(), dev);
         config.active = Some("dev".to_string());
         config.save().unwrap();
 
@@ -389,10 +411,54 @@ mod tests {
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("[profiles]"));
         assert!(content.contains("active = \"dev\""));
+        assert!(content.contains("[profiles.dev]"));
+        assert!(content.contains("[profiles.dev.env]"));
+        assert!(content.contains("[profiles.dev.ai]"));
+        assert!(!content.contains("[profiles.profiles.dev]"));
 
         let loaded = ProfilesConfig::load().unwrap();
         assert_eq!(loaded.active.as_deref(), Some("dev"));
         assert!(loaded.profiles.contains_key("dev"));
+        let profile = loaded.profiles.get("dev").unwrap();
+        assert_eq!(
+            profile.env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("profile-env-key")
+        );
+        let ai = profile.ai.as_ref().unwrap();
+        assert_eq!(ai.api_key, "sk-dev-config");
+        assert_eq!(ai.model, "gpt-5");
+        assert_eq!(ai.language, "ja");
+    }
+
+    #[test]
+    fn load_accepts_flat_profiles_without_name_or_env_fields() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let config_path = Settings::global_config_path().unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"
+[profiles]
+version = 1
+active = "Dev"
+
+[profiles.Dev.ai]
+endpoint = "https://api.example.com/v1"
+api_key = "sk-flat"
+model = "gpt-5"
+"#,
+        )
+        .unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        assert_eq!(loaded.active.as_deref(), Some("dev"));
+        let dev = loaded.profiles.get("dev").unwrap();
+        assert_eq!(dev.name, "dev");
+        assert!(dev.env.is_empty());
+        assert_eq!(dev.ai.as_ref().unwrap().api_key, "sk-flat");
     }
 
     #[test]
@@ -761,5 +827,24 @@ mod tests {
             crate::error::GwtError::ConfigWriteError { .. }
         ));
         assert!(err.to_string().contains("collision"));
+    }
+
+    #[test]
+    fn save_rejects_reserved_profile_name() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let mut config = ProfilesConfig::default();
+        config
+            .profiles
+            .insert("profiles".to_string(), Profile::new("profiles"));
+
+        let err = config.save().unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::GwtError::ConfigWriteError { .. }
+        ));
+        assert!(err.to_string().contains("reserved key"));
     }
 }
