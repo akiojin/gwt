@@ -2,7 +2,7 @@
 PR Body Template — gwt-pr skill
 
 Rules:
-- REQUIRED sections: Summary, Changes, Testing, Related Issues, Checklist
+- REQUIRED sections: Summary, Changes, Testing, Closing Issues, Related Issues, Checklist
 - CONDITIONAL sections: Context, Risk/Impact, Screenshots, Deployment
 - OPTIONAL sections: Notes
 - Remove CONDITIONAL sections entirely if not applicable
@@ -28,9 +28,18 @@ Rules:
 
 - [ ] `{command}` — {expected result}
 
+## Closing Issues
+
+<!-- GUIDE: Issues to auto-close when this change is released to main.
+     Use "Closes #N" syntax (one per line). Write "None" if no issues to close.
+     Note: develop PRs do NOT auto-close issues directly;
+     the release workflow re-collects these into the Release PR. -->
+
+- Closes #{issue number}
+
 ## Related Issues / Links
 
-<!-- GUIDE: Use #number or full URL. Write "None" if no related issues. -->
+<!-- GUIDE: Reference-only links (NOT auto-closed). Use #number or URL. Write "None" if none. -->
 
 - {#issue or URL or "None"}
 

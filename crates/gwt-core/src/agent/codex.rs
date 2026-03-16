@@ -16,6 +16,7 @@ const DEFAULT_CODEX_MODEL_LEGACY: &str = "gpt-5.2-codex";
 const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_GPT_5_4_CONTEXT_WINDOW: &str = "1000000";
 const CODEX_GPT_5_4_AUTO_COMPACT_TOKEN_LIMIT: &str = "950000";
+const CODEX_SERVICE_TIER_FAST: &str = "fast";
 const CODEX_GPT_5_4_DEFAULT_FROM: &str = "0.111.0";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
@@ -76,6 +77,7 @@ impl CodexAgent {
                 None,
                 None,
                 version.as_deref(),
+                false,
                 false,
                 false,
                 false,
@@ -188,6 +190,10 @@ fn codex_uses_gpt_5_4_context_overrides(model: &str) -> bool {
     model.eq_ignore_ascii_case(DEFAULT_CODEX_MODEL_LATEST)
 }
 
+fn codex_uses_fast_mode(model: &str, fast_mode: bool) -> bool {
+    fast_mode && codex_uses_gpt_5_4_context_overrides(model)
+}
+
 /// Check if Codex version supports collaboration_modes (gwt-spec issue)
 ///
 /// Returns true if version is v0.91.0 or later.
@@ -279,6 +285,7 @@ pub fn codex_default_args(
     reasoning_override: Option<&str>,
     skills_flag_version: Option<&str>,
     bypass_sandbox: bool,
+    fast_mode: bool,
     collaboration_modes: bool,
     enable_multi_agent: bool,
 ) -> Vec<String> {
@@ -303,6 +310,13 @@ pub fn codex_default_args(
                 "model_auto_compact_token_limit={}",
                 CODEX_GPT_5_4_AUTO_COMPACT_TOKEN_LIMIT
             ),
+        ]);
+    }
+
+    if codex_uses_fast_mode(model, fast_mode) {
+        args.extend([
+            "-c".to_string(),
+            format!("service_tier={}", CODEX_SERVICE_TIER_FAST),
         ]);
     }
 
@@ -459,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_defaults() {
-        let args = codex_default_args(None, None, None, false, false, false);
+        let args = codex_default_args(None, None, None, false, false, false, false);
         // Unknown version defaults to config-based web_search
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"web_search=live".to_string()));
@@ -469,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_latest_uses_gpt_5_4() {
-        let args = codex_default_args(None, None, Some("latest"), false, false, false);
+        let args = codex_default_args(None, None, Some("latest"), false, false, false, false);
         assert!(args.contains(&"--model=gpt-5.4".to_string()));
         assert!(args.contains(&"model_context_window=1000000".to_string()));
         assert!(args.contains(&"model_auto_compact_token_limit=950000".to_string()));
@@ -477,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_modern_resolved_versions_use_gpt_5_4() {
-        let args = codex_default_args(None, None, Some("0.111.0"), false, false, false);
+        let args = codex_default_args(None, None, Some("0.111.0"), false, false, false, false);
         assert!(args.contains(&"--model=gpt-5.4".to_string()));
         assert!(args.contains(&"model_context_window=1000000".to_string()));
         assert!(args.contains(&"model_auto_compact_token_limit=950000".to_string()));
@@ -485,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_legacy_resolved_versions_keep_legacy_default() {
-        let args = codex_default_args(None, None, Some("0.110.0"), false, false, false);
+        let args = codex_default_args(None, None, Some("0.110.0"), false, false, false, false);
         assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
         assert!(!args.contains(&"--model=gpt-5.4".to_string()));
         assert!(!args.contains(&"model_context_window=1000000".to_string()));
@@ -494,7 +508,15 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_overrides() {
-        let args = codex_default_args(Some("gpt-5.2"), Some("xhigh"), None, false, false, false);
+        let args = codex_default_args(
+            Some("gpt-5.2"),
+            Some("xhigh"),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(args.contains(&"--model=gpt-5.2".to_string()));
         assert!(args.contains(&"model_reasoning_effort=xhigh".to_string()));
         assert!(!args.contains(&"model_context_window=1000000".to_string()));
@@ -503,21 +525,57 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_gpt_5_4_override_enables_context_overrides() {
-        let args = codex_default_args(Some("gpt-5.4"), None, Some("0.111.0"), false, false, false);
+        let args = codex_default_args(
+            Some("gpt-5.4"),
+            None,
+            Some("0.111.0"),
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(args.contains(&"--model=gpt-5.4".to_string()));
         assert!(args.contains(&"model_context_window=1000000".to_string()));
         assert!(args.contains(&"model_auto_compact_token_limit=950000".to_string()));
     }
 
     #[test]
+    fn test_codex_default_args_fast_mode_adds_service_tier_for_gpt_5_4() {
+        let args = codex_default_args(
+            Some("gpt-5.4"),
+            None,
+            Some("0.111.0"),
+            false,
+            true,
+            false,
+            false,
+        );
+        assert!(args.contains(&"service_tier=fast".to_string()));
+    }
+
+    #[test]
+    fn test_codex_default_args_fast_mode_omits_service_tier_when_disabled() {
+        let args = codex_default_args(
+            Some("gpt-5.4"),
+            None,
+            Some("0.111.0"),
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(!args.contains(&"service_tier=fast".to_string()));
+    }
+
+    #[test]
     fn test_codex_skills_flag_version_gate() {
-        let args_old = codex_default_args(None, None, Some("0.79.0"), false, false, false);
+        let args_old = codex_default_args(None, None, Some("0.79.0"), false, false, false, false);
         let skills_present_old = args_old.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args_old.get(idx + 1).is_some_and(|v| v == "skills")
         });
         assert!(skills_present_old);
 
-        let args_new = codex_default_args(None, None, Some("0.80.0"), false, false, false);
+        let args_new = codex_default_args(None, None, Some("0.80.0"), false, false, false, false);
         let skills_present_new = args_new.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args_new.get(idx + 1).is_some_and(|v| v == "skills")
         });
@@ -526,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_bypass_sandbox() {
-        let args = codex_default_args(None, None, None, true, false, false);
+        let args = codex_default_args(None, None, None, true, false, false, false);
         assert!(!args.contains(&"--sandbox".to_string()));
         assert!(!args.contains(&"sandbox_workspace_write.network_access=true".to_string()));
     }
@@ -554,7 +612,7 @@ mod tests {
     #[test]
     fn test_codex_default_args_with_collaboration_modes() {
         // collaboration_modes=true should add --enable collaboration_modes
-        let args = codex_default_args(None, None, None, false, true, false);
+        let args = codex_default_args(None, None, None, false, false, true, false);
         let has_collab = args.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable"
                 && args
@@ -564,7 +622,7 @@ mod tests {
         assert!(has_collab);
 
         // collaboration_modes=false should not add the flags
-        let args_disabled = codex_default_args(None, None, None, false, false, false);
+        let args_disabled = codex_default_args(None, None, None, false, false, false, false);
         let has_collab_disabled = args_disabled.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable"
                 && args_disabled
@@ -668,8 +726,15 @@ mod tests {
     #[test]
     fn test_codex_default_args_web_search_version_gate() {
         // Date-based version should use "-c web_search=live"
-        let args_config =
-            codex_default_args(None, None, Some("0.1.2025013100"), false, false, false);
+        let args_config = codex_default_args(
+            None,
+            None,
+            Some("0.1.2025013100"),
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(args_config.contains(&"web_search=live".to_string()));
         assert!(
             !args_config.contains(&"--enable".to_string())
@@ -679,24 +744,24 @@ mod tests {
         );
 
         // v0.90.0 should use "--enable web_search"
-        let args_new = codex_default_args(None, None, Some("0.90.0"), false, false, false);
+        let args_new = codex_default_args(None, None, Some("0.90.0"), false, false, false, false);
         assert!(args_new.contains(&"web_search".to_string()));
         assert!(!args_new.contains(&"web_search_request".to_string()));
         assert!(!args_new.contains(&"web_search=live".to_string()));
 
         // v0.89.x should use "--enable web_search_request"
-        let args_old = codex_default_args(None, None, Some("0.89.0"), false, false, false);
+        let args_old = codex_default_args(None, None, Some("0.89.0"), false, false, false, false);
         assert!(args_old.contains(&"web_search_request".to_string()));
         assert!(!args_old.iter().any(|a| a == "web_search"));
 
         // None (unknown version) should default to "-c web_search=live"
-        let args_default = codex_default_args(None, None, None, false, false, false);
+        let args_default = codex_default_args(None, None, None, false, false, false, false);
         assert!(args_default.contains(&"web_search=live".to_string()));
     }
 
     #[test]
     fn test_codex_default_args_with_multi_agent() {
-        let args = codex_default_args(None, None, None, false, false, true);
+        let args = codex_default_args(None, None, None, false, false, false, true);
         let has_multi_agent = args.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args.get(idx + 1).is_some_and(|v| v == "multi_agent")
         });

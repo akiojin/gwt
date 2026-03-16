@@ -248,6 +248,42 @@ fn build_powershell_wrapped_args(expression: String) -> Vec<String> {
     ]
 }
 
+/// Build `cmd.exe` argument list for spawning a command.
+///
+/// For interactive sessions, uses `/K` (interactive mode) with `& exit` appended
+/// so that cmd.exe properly forwards terminal input (arrow keys, escape sequences)
+/// through ConPTY, then exits when the child command finishes.
+/// For non-interactive sessions, uses `/C` as before.
+fn build_cmd_spawn_args(
+    expression: String,
+    interactive: bool,
+    windows_force_utf8: bool,
+) -> Vec<String> {
+    if interactive {
+        let mut expression = expression;
+        expression.push_str(" & exit");
+        if windows_force_utf8 {
+            vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/K".to_string(),
+                expression,
+            ]
+        } else {
+            vec!["/K".to_string(), expression]
+        }
+    } else if windows_force_utf8 {
+        vec![
+            "/D".to_string(),
+            "/S".to_string(),
+            "/C".to_string(),
+            expression,
+        ]
+    } else {
+        vec!["/C".to_string(), expression]
+    }
+}
+
 fn is_cmd_executable(command: &str) -> bool {
     let normalized = normalize_spawn_command_token(command);
     let lower = normalized.to_ascii_lowercase();
@@ -356,16 +392,8 @@ where
                     } else {
                         build_cmd_command_expression(&normalized_command, args)
                     };
-                    let cmd_args = if windows_force_utf8 {
-                        vec![
-                            "/D".to_string(),
-                            "/S".to_string(),
-                            "/C".to_string(),
-                            expression,
-                        ]
-                    } else {
-                        vec!["/C".to_string(), expression]
-                    };
+                    let cmd_args =
+                        build_cmd_spawn_args(expression, interactive, windows_force_utf8);
                     return ("cmd.exe".to_string(), cmd_args);
                 }
                 // "wsl": command and args are already set by the caller (launch_with_wsl_pty_write
@@ -386,7 +414,7 @@ where
             }
         }
 
-        // Auto shell + batch command (`*.cmd`/`*.bat`) must run via `cmd.exe /C`
+        // Auto shell + batch command (`*.cmd`/`*.bat`) must run via `cmd.exe`
         // to keep Windows interactive PTY behavior stable across agents.
         if is_windows_batch_command_for_platform(&normalized_command, &mut resolve_command_path) {
             let expression = if windows_force_utf8 {
@@ -394,16 +422,7 @@ where
             } else {
                 build_cmd_command_expression(&normalized_command, args)
             };
-            let cmd_args = if windows_force_utf8 {
-                vec![
-                    "/D".to_string(),
-                    "/S".to_string(),
-                    "/C".to_string(),
-                    expression,
-                ]
-            } else {
-                vec!["/C".to_string(), expression]
-            };
+            let cmd_args = build_cmd_spawn_args(expression, interactive, windows_force_utf8);
             return ("cmd.exe".to_string(), cmd_args);
         }
 
@@ -415,15 +434,8 @@ where
 
         if windows_force_utf8 {
             let expression = build_cmd_utf8_command_expression(&normalized_command, args);
-            return (
-                "cmd.exe".to_string(),
-                vec![
-                    "/D".to_string(),
-                    "/S".to_string(),
-                    "/C".to_string(),
-                    expression,
-                ],
-            );
+            let cmd_args = build_cmd_spawn_args(expression, interactive, windows_force_utf8);
+            return ("cmd.exe".to_string(), cmd_args);
         }
 
         let shell = resolve_windows_shell();
@@ -540,8 +552,9 @@ impl PtyHandle {
         let launch_mode = if cfg!(windows) {
             if spawn_command.eq_ignore_ascii_case("cmd.exe")
                 && spawn_args
-                    .first()
-                    .is_some_and(|arg| arg.eq_ignore_ascii_case("/c"))
+                    .iter()
+                    .take(3)
+                    .any(|arg| arg.eq_ignore_ascii_case("/c") || arg.eq_ignore_ascii_case("/k"))
             {
                 "cmd-wrapper"
             } else if spawn_args.iter().any(|arg| arg == "-Command") {
@@ -820,13 +833,14 @@ mod tests {
             true,
         );
         assert_eq!(program, "cmd.exe");
+        // interactive=true uses /K with "& exit" for proper ConPTY input forwarding.
         assert_eq!(
             resolved_args,
             vec![
                 "/D".to_string(),
                 "/S".to_string(),
-                "/C".to_string(),
-                "chcp 65001 > nul && codex --version".to_string(),
+                "/K".to_string(),
+                "chcp 65001 > nul && codex --version & exit".to_string(),
             ]
         );
     }
@@ -1212,13 +1226,14 @@ mod tests {
             true,
         );
         assert_eq!(program, "cmd.exe");
+        // interactive=true uses /K with "& exit" for proper ConPTY input forwarding.
         assert_eq!(
             resolved_args,
             vec![
                 "/D".to_string(),
                 "/S".to_string(),
-                "/C".to_string(),
-                "chcp 65001 > nul && codex --version".to_string(),
+                "/K".to_string(),
+                "chcp 65001 > nul && codex --version & exit".to_string(),
             ]
         );
     }
@@ -1245,14 +1260,78 @@ mod tests {
             true,
         );
         assert_eq!(program, "cmd.exe");
+        // interactive=true uses /K with "& exit" for proper ConPTY input forwarding.
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/K".to_string(),
+                "chcp 65001 > nul && claude --dangerously-skip-permissions & exit".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_non_interactive_batch_force_utf8_still_uses_cmd_c() {
+        let args = vec!["--full-auto".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform_with(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            |name| {
+                if name == "codex" {
+                    Some(PathBuf::from(
+                        "C:\\Users\\user\\AppData\\Roaming\\npm\\codex.cmd",
+                    ))
+                } else {
+                    None
+                }
+            },
+            None,
+            false,
+            true,
+        );
+        assert_eq!(program, "cmd.exe");
+        // interactive=false keeps /C (non-interactive mode).
         assert_eq!(
             resolved_args,
             vec![
                 "/D".to_string(),
                 "/S".to_string(),
                 "/C".to_string(),
-                "chcp 65001 > nul && claude --dangerously-skip-permissions".to_string(),
+                "chcp 65001 > nul && codex --full-auto".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_command_interactive_batch_no_utf8_uses_cmd_k() {
+        let args = vec!["--full-auto".to_string()];
+        let (program, resolved_args) = resolve_spawn_command_for_platform_with(
+            "codex",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            |name| {
+                if name == "codex" {
+                    Some(PathBuf::from(
+                        "C:\\Users\\user\\AppData\\Roaming\\npm\\codex.cmd",
+                    ))
+                } else {
+                    None
+                }
+            },
+            None,
+            true,
+            false,
+        );
+        assert_eq!(program, "cmd.exe");
+        // interactive=true uses /K with "& exit" even without UTF-8 forcing.
+        assert_eq!(
+            resolved_args,
+            vec!["/K".to_string(), "codex --full-auto & exit".to_string(),]
         );
     }
 
@@ -1750,11 +1829,12 @@ mod tests {
             false,
         );
         assert_eq!(program, "cmd.exe");
+        // interactive=true uses /K with "& exit" for proper ConPTY input forwarding.
         assert_eq!(
             resolved_args,
             vec![
-                "/C".to_string(),
-                "claude --dangerously-skip-permissions".to_string()
+                "/K".to_string(),
+                "claude --dangerously-skip-permissions & exit".to_string()
             ]
         );
     }
@@ -1775,11 +1855,12 @@ mod tests {
             false,
         );
         assert_eq!(program, "cmd.exe");
+        // interactive=true uses /K with "& exit" for proper ConPTY input forwarding.
         assert_eq!(
             resolved_args,
             vec![
-                "/C".to_string(),
-                "C:\\Users\\user\\.bun\\bin\\bunx.cmd --yes @anthropic/claude-code@latest"
+                "/K".to_string(),
+                "C:\\Users\\user\\.bun\\bin\\bunx.cmd --yes @anthropic/claude-code@latest & exit"
                     .to_string(),
             ]
         );

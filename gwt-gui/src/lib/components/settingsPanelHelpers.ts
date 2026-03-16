@@ -75,7 +75,7 @@ export function isDefaultProfileKey(key: string): boolean {
 
 export function isAiEnabled(profile: Profile | null): boolean {
   if (!profile) return false;
-  return !!profile.ai?.endpoint?.trim();
+  return !!profile.ai?.endpoint?.trim() && !!profile.ai?.model?.trim();
 }
 
 export function toErrorMessage(err: unknown): string {
@@ -175,3 +175,6 @@ export function normalizeTerminalFontFamily(value: string | null | undefined): s
 export function clampFontSize(v: number): number {
   return Math.max(8, Math.min(24, Math.round(v)));
 }
+
+/** Valid profile name: lowercase letters, numbers, and hyphens. */
+export const PROFILE_NAME_PATTERN = /^[a-z0-9-]+$/;

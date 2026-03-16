@@ -172,7 +172,6 @@ fn default_profile() -> Profile {
 fn is_reserved_profile_key(value: &str) -> bool {
     matches!(value, "active" | "version" | "profiles")
 }
-
 fn normalize_ai_language(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "ja" => "ja".to_string(),
@@ -575,27 +574,6 @@ model = "gpt-5"
     }
 
     #[test]
-    fn test_ai_settings_summary_enabled_gate() {
-        let disabled = AISettings {
-            endpoint: "https://api.example.com/v1".to_string(),
-            api_key: "key".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            language: "en".to_string(),
-            summary_enabled: false,
-        };
-        assert!(!disabled.is_summary_enabled());
-
-        let enabled = AISettings {
-            endpoint: "https://api.example.com/v1".to_string(),
-            api_key: "key".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            language: "en".to_string(),
-            summary_enabled: true,
-        };
-        assert!(enabled.is_summary_enabled());
-    }
-
-    #[test]
     fn test_profile_ai_enabled_requires_settings() {
         let profile = Profile::new("dev");
         assert!(!profile.ai_enabled());
@@ -626,7 +604,7 @@ model = "gpt-5"
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
         assert!(resolved.ai_enabled);
-        assert!(resolved.summary_enabled);
+
         assert_eq!(resolved.resolved.unwrap().model, "gpt-5.2");
     }
 
@@ -647,7 +625,7 @@ model = "gpt-5"
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
         assert!(!resolved.ai_enabled);
-        assert!(!resolved.summary_enabled);
+
         assert!(resolved.resolved.is_none());
     }
 
@@ -668,7 +646,7 @@ model = "gpt-5"
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
         assert!(resolved.ai_enabled);
-        assert!(resolved.summary_enabled);
+
         assert_eq!(resolved.resolved.unwrap().model, "gpt-5.2");
     }
 
@@ -686,7 +664,7 @@ model = "gpt-5"
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::None);
         assert!(!resolved.ai_enabled);
-        assert!(!resolved.summary_enabled);
+
         assert!(resolved.resolved.is_none());
     }
 
@@ -701,7 +679,7 @@ model = "gpt-5"
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::None);
         assert!(!resolved.ai_enabled);
-        assert!(!resolved.summary_enabled);
+
         assert!(resolved.resolved.is_none());
     }
 
@@ -847,4 +825,24 @@ model = "gpt-5"
         ));
         assert!(err.to_string().contains("reserved key"));
     }
+}
+#[test]
+fn test_ai_settings_summary_enabled_gate() {
+    let disabled = AISettings {
+        endpoint: "https://api.example.com/v1".to_string(),
+        api_key: "key".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        language: "en".to_string(),
+        summary_enabled: false,
+    };
+    assert!(!disabled.is_summary_enabled());
+
+    let enabled = AISettings {
+        endpoint: "https://api.example.com/v1".to_string(),
+        api_key: "key".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        language: "en".to_string(),
+        summary_enabled: true,
+    };
+    assert!(enabled.is_summary_enabled());
 }

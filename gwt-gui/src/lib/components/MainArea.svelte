@@ -39,6 +39,13 @@
     onWorkOnIssue,
     onSwitchToWorktree,
     onIssueCountChange,
+    voiceInputEnabled = false,
+    voiceInputListening = false,
+    voiceInputPreparing = false,
+    voiceInputSupported = true,
+    voiceInputAvailable = false,
+    voiceInputAvailabilityReason = null,
+    voiceInputError = null,
   }: {
     tabs: Tab[];
     activeTabId: string;
@@ -56,6 +63,13 @@
     onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
     onSwitchToWorktree?: (branchName: string) => void;
     onIssueCountChange?: (count: number) => void;
+    voiceInputEnabled?: boolean;
+    voiceInputListening?: boolean;
+    voiceInputPreparing?: boolean;
+    voiceInputSupported?: boolean;
+    voiceInputAvailable?: boolean;
+    voiceInputAvailabilityReason?: string | null;
+    voiceInputError?: string | null;
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
@@ -97,6 +111,7 @@
   let draggingTabId: string | null = $state(null);
   let terminalPendingTabId: string | null = $state(null);
   let visibleTerminalTabId: string | null = $state(null);
+  let terminalViewRefs = new Map<string, { focusTerminal: () => void }>();
   let terminalReadyTabIds: Set<string> = $state(new Set());
   let terminalActivationFallbackTimer: ReturnType<typeof setTimeout> | null =
     null;
@@ -494,6 +509,14 @@
           <TerminalView
             paneId={tab.paneId}
             active={activeTabId === tab.id}
+            agentId={tab.agentId ?? null}
+            {voiceInputEnabled}
+            {voiceInputListening}
+            {voiceInputPreparing}
+            {voiceInputSupported}
+            {voiceInputAvailable}
+            {voiceInputAvailabilityReason}
+            {voiceInputError}
             onReady={handleTerminalReady}
           />
         </div>
@@ -503,6 +526,14 @@
           <TerminalView
             paneId={tab.paneId}
             active={activeTabId === tab.id}
+            agentId={null}
+            {voiceInputEnabled}
+            {voiceInputListening}
+            {voiceInputPreparing}
+            {voiceInputSupported}
+            {voiceInputAvailable}
+            {voiceInputAvailabilityReason}
+            {voiceInputError}
             onReady={handleTerminalReady}
           />
         </div>

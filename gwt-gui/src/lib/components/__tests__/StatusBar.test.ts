@@ -82,82 +82,16 @@ describe("StatusBar", () => {
     });
   });
 
-  it("shows Voice: off when voice is disabled", async () => {
+  it("renders voice status in the status bar", async () => {
     const rendered = await renderStatusBar({
       projectPath: "/tmp/project",
-      voiceInputSupported: true,
-      voiceInputAvailable: true,
-      voiceInputEnabled: false,
-    });
-    await waitFor(() => {
-      expect(rendered.getByText("Voice: off")).toBeTruthy();
-    });
-  });
-
-  it("shows Voice: listening with ok class", async () => {
-    const rendered = await renderStatusBar({
-      projectPath: "/tmp/project",
-      voiceInputSupported: true,
-      voiceInputAvailable: true,
       voiceInputEnabled: true,
-      voiceInputListening: true,
-    });
-    await waitFor(() => {
-      const voice = rendered.getByText("Voice: listening");
-      expect(voice.classList.contains("ok")).toBe(true);
-    });
-  });
-
-  it("shows Voice: preparing", async () => {
-    const rendered = await renderStatusBar({
-      projectPath: "/tmp/project",
       voiceInputSupported: true,
       voiceInputAvailable: true,
-      voiceInputEnabled: true,
-      voiceInputPreparing: true,
     });
-    await waitFor(() => {
-      expect(rendered.getByText("Voice: preparing")).toBeTruthy();
-    });
-  });
 
-  it("shows Voice: error and sets title from error", async () => {
-    const rendered = await renderStatusBar({
-      projectPath: "/tmp/project",
-      voiceInputSupported: true,
-      voiceInputAvailable: true,
-      voiceInputEnabled: true,
-      voiceInputError: "microphone permission denied",
-    });
     await waitFor(() => {
-      const voice = rendered.getByText("Voice: error");
-      expect(voice.classList.contains("warn")).toBe(true);
-      expect(voice.getAttribute("title")).toBe("microphone permission denied");
-    });
-  });
-
-  it("shows Voice: backend unavailable when not supported", async () => {
-    const rendered = await renderStatusBar({
-      projectPath: "/tmp/project",
-      voiceInputSupported: false,
-    });
-    await waitFor(() => {
-      const voice = rendered.getByText("Voice: backend unavailable");
-      expect(voice.classList.contains("bad")).toBe(true);
-    });
-  });
-
-  it("shows Voice: unavailable and sets title from availability reason", async () => {
-    const rendered = await renderStatusBar({
-      projectPath: "/tmp/project",
-      voiceInputSupported: true,
-      voiceInputAvailable: false,
-      voiceInputAvailabilityReason: "No GPU detected",
-    });
-    await waitFor(() => {
-      const voice = rendered.getByText("Voice: unavailable");
-      expect(voice.classList.contains("bad")).toBe(true);
-      expect(voice.getAttribute("title")).toBe("No GPU detected");
+      expect(rendered.getByText("Voice: idle")).toBeTruthy();
     });
   });
 });

@@ -4,18 +4,40 @@
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
+  import {
+    buildImageReference,
+    getAgentInputProfileOrDefault,
+    type AgentInputProfile,
+  } from "./agentInputProfile";
   import { isCopyShortcut, isPasteShortcut } from "./shortcuts";
   import { resolveWindowsPtyOptions } from "./windowsPty";
   import { registerTerminalInputTarget } from "../voice/inputTargetRegistry";
   import { openExternalUrl } from "../openExternalUrl";
+  import { toastBus } from "../toastBus";
 
   let {
     paneId,
     active = false,
+    agentId = null,
+    voiceInputEnabled = false,
+    voiceInputListening = false,
+    voiceInputPreparing = false,
+    voiceInputSupported = true,
+    voiceInputAvailable = false,
+    voiceInputAvailabilityReason = null,
+    voiceInputError = null,
     onReady,
   }: {
     paneId: string;
     active?: boolean;
+    agentId?: string | null;
+    voiceInputEnabled?: boolean;
+    voiceInputListening?: boolean;
+    voiceInputPreparing?: boolean;
+    voiceInputSupported?: boolean;
+    voiceInputAvailable?: boolean;
+    voiceInputAvailabilityReason?: string | null;
+    voiceInputError?: string | null;
     onReady?: (paneId: string) => void;
   } = $props();
 
@@ -30,6 +52,10 @@
   let resizeInFlight = false;
   let queuedResize: { rows: number; cols: number } | null = null;
   let lastLayoutSnapshot: LayoutSnapshot | null = null;
+  const MAX_CLIPBOARD_IMAGE_BYTES = 10 * 1024 * 1024;
+  let profile: AgentInputProfile | null = $derived(
+    agentId ? getAgentInputProfileOrDefault(agentId) : null,
+  );
 
   type WheelScrollState = {
     axis: "vertical" | "horizontal" | null;
@@ -163,6 +189,19 @@
       '[role="dialog"][aria-modal="true"], dialog[open], .modal-overlay',
     );
     return modalHost instanceof HTMLElement;
+  }
+
+  function shouldRefocusTerminalOnReactivation(rootEl: HTMLElement): boolean {
+    if (hasFocusedModalOutsideTerminal(rootEl)) return false;
+    return true;
+  }
+
+  function refocusTerminalOnReactivation(
+    rootEl: HTMLElement,
+    immediate = false,
+  ) {
+    if (!shouldRefocusTerminalOnReactivation(rootEl)) return;
+    focusTerminalIfNeeded(rootEl, immediate);
   }
 
   function focusTerminalIfNeeded(rootEl: HTMLElement, immediate = false) {
@@ -416,6 +455,114 @@
     return terminal.buffer.active.viewportY !== beforeY;
   }
 
+  function buildImageInsertText(imagePath: string): string {
+    const reference = profile
+      ? (buildImageReference(profile, imagePath) ?? imagePath)
+      : imagePath;
+    return `${reference} `;
+  }
+
+  function voiceButtonDisabled(): boolean {
+    return (
+      voiceInputPreparing ||
+      !voiceInputSupported ||
+      !voiceInputAvailable ||
+      !voiceInputEnabled
+    );
+  }
+
+  function voiceButtonTitle(): string {
+    if (!voiceInputSupported) {
+      return voiceInputAvailabilityReason ?? "Voice input is unavailable.";
+    }
+    if (!voiceInputAvailable) {
+      return voiceInputAvailabilityReason ?? "Voice input is unavailable.";
+    }
+    if (!voiceInputEnabled) {
+      return "Voice input is disabled in settings.";
+    }
+    if (voiceInputError) {
+      return voiceInputError;
+    }
+    if (voiceInputPreparing) {
+      return "Voice input is preparing.";
+    }
+    if (voiceInputListening) {
+      return "Stop voice input";
+    }
+    return "Start voice input";
+  }
+
+  function pasteButtonTitle(): string {
+    return "Paste image from clipboard";
+  }
+
+  async function handlePasteImageClick() {
+    if (!active) return;
+    if (!navigator.clipboard?.read) {
+      toastBus.emit({
+        message: "Image clipboard paste is unavailable in this environment.",
+      });
+      requestTerminalFocus(true);
+      return;
+    }
+
+    try {
+      const items = await navigator.clipboard.read();
+      const imageItem = items.find((item) =>
+        item.types.some((type) => type.startsWith("image/")),
+      );
+      if (!imageItem) {
+        toastBus.emit({ message: "Clipboard does not contain an image." });
+        requestTerminalFocus(true);
+        return;
+      }
+
+      const imageType =
+        imageItem.types.find((type) => type.startsWith("image/")) ?? "image/png";
+      const blob = await imageItem.getType(imageType);
+      if (blob.size > MAX_CLIPBOARD_IMAGE_BYTES) {
+        toastBus.emit({
+          message: "Clipboard image is too large (max 10 MB).",
+        });
+        requestTerminalFocus(true);
+        return;
+      }
+      const bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
+      const format = imageType.split("/")[1] || "png";
+      const { invoke } = await import("$lib/tauriInvoke");
+      const imagePath = await invoke<string>("save_clipboard_image", {
+        paneId,
+        data: bytes,
+        format,
+      });
+      if (!imagePath) {
+        toastBus.emit({ message: "Failed to stage clipboard image." });
+        requestTerminalFocus(true);
+        return;
+      }
+
+      const wrote = await writeToTerminal(buildImageInsertText(imagePath));
+      if (!wrote) {
+        toastBus.emit({ message: "Failed to paste image into terminal." });
+        return;
+      }
+      requestTerminalFocus(true);
+    } catch (err) {
+      console.error("Failed to paste image from clipboard:", err);
+      toastBus.emit({
+        message: `Failed to paste image: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      requestTerminalFocus(true);
+    }
+  }
+
+  function handleVoiceButtonClick() {
+    if (voiceInputPreparing || voiceButtonDisabled()) return;
+    window.dispatchEvent(new CustomEvent("gwt-voice-toggle"));
+    requestTerminalFocus(true);
+  }
+
   onMount(() => {
     const rootEl = containerEl;
     if (!rootEl) return;
@@ -495,14 +642,12 @@
       focusTerminalIfNeeded(rootEl, true);
     };
     const handleWindowFocus = () => {
-      if (hasFocusedModalOutsideTerminal(rootEl)) return;
-      focusTerminalIfNeeded(rootEl, true);
+      refocusTerminalOnReactivation(rootEl, true);
       scheduleFitAfterBufferFlush({ rootEl });
     };
     const handleVisibilityChange = () => {
       if (document.hidden) return;
-      if (hasFocusedModalOutsideTerminal(rootEl)) return;
-      focusTerminalIfNeeded(rootEl);
+      refocusTerminalOnReactivation(rootEl);
       scheduleFitAfterBufferFlush({ rootEl });
     };
 
@@ -521,8 +666,7 @@
         unlistenTauriFocus = await getCurrentWindow().listen(
           "tauri://focus",
           () => {
-            if (hasFocusedModalOutsideTerminal(rootEl)) return;
-            focusTerminalIfNeeded(rootEl, true);
+            refocusTerminalOnReactivation(rootEl, true);
             scheduleFitAfterBufferFlush({ rootEl });
           },
         );
@@ -783,14 +927,16 @@
     }
   }
 
-  async function writeToTerminal(data: string) {
+  async function writeToTerminal(data: string): Promise<boolean> {
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
       await invoke("write_terminal", { paneId, data: bytes });
+      return true;
     } catch (err) {
       console.error("Failed to write to terminal:", err);
+      return false;
     }
   }
 
@@ -851,17 +997,101 @@
   }
 </script>
 
-<div
-  class="terminal-container"
-  data-pane-id={paneId}
-  bind:this={containerEl}
-></div>
+<div class="terminal-shell">
+  <div
+    class="terminal-container"
+    data-pane-id={paneId}
+    bind:this={containerEl}
+  ></div>
+  <div class="terminal-actions" aria-label="Terminal actions">
+    <button
+      class="terminal-action-btn"
+      type="button"
+      title={pasteButtonTitle()}
+      onclick={handlePasteImageClick}
+    >
+      Paste
+    </button>
+    <button
+      class:active={voiceInputListening}
+      class:busy={voiceInputPreparing}
+      class:disabled={voiceButtonDisabled()}
+      class="terminal-action-btn"
+      disabled={voiceButtonDisabled()}
+      type="button"
+      title={voiceButtonTitle()}
+      onclick={handleVoiceButtonClick}
+    >
+      Voice
+    </button>
+  </div>
+</div>
 
 <style>
+  .terminal-shell {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+
   .terminal-container {
     width: 100%;
     height: 100%;
     overflow: hidden;
+  }
+
+  .terminal-actions {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    z-index: 2;
+    display: flex;
+    gap: 8px;
+    pointer-events: none;
+  }
+
+  .terminal-action-btn {
+    pointer-events: auto;
+    min-width: 58px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, white 18%);
+    background: color-mix(in srgb, var(--bg-secondary) 88%, black 12%);
+    color: var(--text-muted);
+    border-radius: 999px;
+    padding: 5px 10px;
+    font-size: var(--ui-font-xs);
+    line-height: 1;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease,
+      transform 120ms ease;
+  }
+
+  .terminal-action-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-color) 55%);
+    transform: translateY(-1px);
+  }
+
+  .terminal-action-btn.active {
+    color: var(--green);
+    border-color: color-mix(in srgb, var(--green) 55%, var(--border-color) 45%);
+  }
+
+  .terminal-action-btn.busy {
+    color: var(--yellow);
+    border-color: color-mix(in srgb, var(--yellow) 55%, var(--border-color) 45%);
+  }
+
+  .terminal-action-btn.disabled,
+  .terminal-action-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.65;
+    box-shadow: none;
+    transform: none;
   }
 
   .terminal-container :global(.xterm) {

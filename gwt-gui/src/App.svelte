@@ -66,7 +66,6 @@
   import { createSystemMonitor } from "./lib/systemMonitor.svelte";
   import {
     deduplicateByProjectPath,
-    getWindowSession,
     loadWindowSessions,
     pruneWindowSessions,
     removeWindowSession,
@@ -76,6 +75,10 @@
     releaseWindowSessionRestoreLead,
     tryAcquireWindowSessionRestoreLead,
   } from "./lib/windowSessionRestoreLeader";
+  import {
+    openAndNormalizeRestoredWindowSession,
+    restoreCurrentWindowSession,
+  } from "./lib/windowSessionRestore";
   import { collectScreenText } from "./lib/screenCapture";
   import {
     isAllowedExternalHttpUrl,
@@ -95,6 +98,7 @@
     shouldAutoCloseDocsEditorTab,
     type DocsEditorShellId,
   } from "./lib/docsEditor";
+  import { applyMenuPasteText } from "./lib/terminal/menuPaste";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -651,15 +655,15 @@
       if (isRestoreLeader) {
         try {
           for (const entry of normalizedSessions) {
-            await openAndNormalizeWindowSession(entry.label, entry.projectPath);
+            await openAndNormalizeRestoredWindowSession(entry.label);
           }
           await new Promise<void>((resolve) => setTimeout(resolve, releaseDelayMs));
-          await restoreWindowSessionProject(label);
+          await applyRestoredWindowSession(label);
         } finally {
           await releaseWindowSessionRestoreLead(label);
         }
       } else {
-        await restoreWindowSessionProject(label);
+        await applyRestoredWindowSession(label);
       }
     })();
   });
@@ -1214,35 +1218,28 @@
     removeWindowSession(label);
   }
 
-  async function openAndNormalizeWindowSession(label: string, projectPath: string) {
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const openedLabelRaw = await invoke<unknown>("open_gwt_window", { label });
-      if (typeof openedLabelRaw !== "string") return;
-
-      const openedLabel = openedLabelRaw.trim();
-      if (!openedLabel || openedLabel === label) {
-        return;
-      }
-
-      removeWindowSession(label);
-      upsertWindowSession(openedLabel, projectPath);
-    } catch {
-      // Ignore restore failures: startup session restore is best-effort.
+  async function applyRestoredWindowSession(label: string) {
+    const result = await restoreCurrentWindowSession(label);
+    if (result.kind === "opened") {
+      handleOpenedProjectPath(result.result.info.path);
+      return;
     }
-  }
-
-  async function restoreWindowSessionProject(label: string) {
-    const session = getWindowSession(label);
-    if (!session?.projectPath) return false;
-
-    try {
-      await openProjectAndApplyCurrentWindow(session.projectPath);
-      return true;
-    } catch {
-      removeWindowSession(label);
-      return false;
+    if (result.kind === "migrationRequired") {
+      migrationSourceRoot = result.sourceRoot;
+      migrationOpen = true;
+      return;
     }
+    if (result.kind === "focusedExisting") {
+      appError = result.focusedWindowLabel
+        ? `Project is already open in window ${result.focusedWindowLabel}.`
+        : "Project is already open in another window.";
+      return;
+    }
+    if (result.kind === "error") {
+      appError = `Failed to restore project: ${result.message}`;
+      return;
+    }
+    return;
   }
 
   function handleOpenedProjectPath(path: string) {
@@ -2052,19 +2049,8 @@
     }
     if (!text) return;
 
-    if (
-      target instanceof HTMLInputElement ||
-      target instanceof HTMLTextAreaElement
-    ) {
-      const start = target.selectionStart ?? target.value.length;
-      const end = target.selectionEnd ?? target.value.length;
-      target.setRangeText(text, start, end, "end");
+    if (applyMenuPasteText(target, text)) {
       return;
-    }
-
-    if (target.isContentEditable) {
-      target.focus();
-      document.execCommand("insertText", false, text);
     }
   }
 
@@ -2729,7 +2715,14 @@
     voiceController = controller;
     controller.updateSettings();
 
+    // Allow terminal overlay voice buttons to toggle the voice controller.
+    const handleVoiceToggle = () => {
+      controller.toggleListening();
+    };
+    window.addEventListener("gwt-voice-toggle", handleVoiceToggle);
+
     return () => {
+      window.removeEventListener("gwt-voice-toggle", handleVoiceToggle);
       controller.dispose();
       if (voiceController === controller) {
         voiceController = null;
@@ -2904,6 +2897,13 @@
         onWorkOnIssue={handleWorkOnIssueFromTab}
         onSwitchToWorktree={handleSwitchToWorktreeFromTab}
         onIssueCountChange={handleIssueCountChange}
+        voiceInputEnabled={voiceInputSettings.enabled}
+        {voiceInputListening}
+        {voiceInputPreparing}
+        {voiceInputSupported}
+        {voiceInputAvailable}
+        voiceInputAvailabilityReason={voiceInputAvailabilityReason}
+        voiceInputError={voiceInputError}
       />
     </div>
     <StatusBar

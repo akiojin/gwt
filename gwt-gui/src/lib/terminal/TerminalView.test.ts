@@ -5,7 +5,10 @@ const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const writeTextMock = vi.fn();
 const readTextMock = vi.fn();
+const readClipboardItemsMock = vi.fn();
 const openExternalUrlMock = vi.fn();
+const tauriWindowListenMock = vi.fn();
+const toastEmitMock = vi.fn();
 let customKeyEventHandler: ((event: KeyboardEvent) => boolean) | null = null;
 let terminalOutputHandler:
   | ((event: { payload: { pane_id: string; data: number[] } }) => void)
@@ -13,6 +16,7 @@ let terminalOutputHandler:
 let webLinksClickHandler:
   | ((event: MouseEvent, uri: string) => void)
   | null = null;
+let tauriFocusHandler: (() => void) | null = null;
 let callOrder: string[] = [];
 
 const terminalInstances: any[] = [];
@@ -46,6 +50,18 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("../openExternalUrl", () => ({
   openExternalUrl: (...args: unknown[]) => openExternalUrlMock(...args),
+}));
+
+vi.mock("../toastBus", () => ({
+  toastBus: {
+    emit: (...args: unknown[]) => toastEmitMock(...args),
+  },
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    listen: (...args: unknown[]) => tauriWindowListenMock(...args),
+  }),
 }));
 
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
@@ -191,10 +207,13 @@ describe("TerminalView", () => {
     listenMock.mockReset();
     writeTextMock.mockReset();
     readTextMock.mockReset();
+    readClipboardItemsMock.mockReset();
     openExternalUrlMock.mockReset();
+    toastEmitMock.mockReset();
     customKeyEventHandler = null;
     terminalOutputHandler = null;
     webLinksClickHandler = null;
+    tauriFocusHandler = null;
     callOrder = [];
     fontSetReadyResolve = null;
     fontSetLoadingDoneHandler = null;
@@ -214,12 +233,22 @@ describe("TerminalView", () => {
         return () => {};
       },
     );
+    tauriWindowListenMock.mockReset();
+    tauriWindowListenMock.mockImplementation(
+      async (eventName: string, handler?: unknown) => {
+        if (eventName === "tauri://focus" && typeof handler === "function") {
+          tauriFocusHandler = handler as () => void;
+        }
+        return () => {};
+      },
+    );
 
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: {
         writeText: writeTextMock,
         readText: readTextMock,
+        read: readClipboardItemsMock,
       },
     });
 
@@ -1698,6 +1727,268 @@ describe("TerminalView", () => {
 
     const result = handler(event);
     expect(result).toBe(true);
+  });
+
+  it("renders Paste and Voice overlay buttons", async () => {
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-actions",
+      active: true,
+    });
+
+    expect(getByRole("button", { name: "Paste" })).toBeTruthy();
+    expect(getByRole("button", { name: "Voice" })).toBeTruthy();
+  });
+
+  it("pastes a staged image reference for agent terminals", async () => {
+    readClipboardItemsMock.mockResolvedValue([
+      {
+        types: ["image/png"],
+        getType: vi.fn(async () => ({
+          arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+        })),
+      },
+    ]);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "terminal_ready") {
+        return Array.from(new TextEncoder().encode("hello\n"));
+      }
+      if (command === "save_clipboard_image") {
+        return "./.tmp/images/clipboard.png";
+      }
+      return null;
+    });
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-agent-paste-image",
+      active: true,
+      agentId: "gemini",
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_clipboard_image", {
+        paneId: "pane-agent-paste-image",
+        data: [1, 2, 3],
+        format: "png",
+      });
+      expect(invokeMock).toHaveBeenCalledWith("write_terminal", {
+        paneId: "pane-agent-paste-image",
+        data: expect.any(Array),
+      });
+    });
+
+    const writeCall = invokeMock.mock.calls.find((call) => call[0] === "write_terminal");
+    expect(writeCall).toBeTruthy();
+    const payload = writeCall?.[1] as { data: number[] };
+    const written = new TextDecoder().decode(Uint8Array.from(payload.data));
+    expect(written).toBe("@./.tmp/images/clipboard.png ");
+  });
+
+  it("pastes the raw staged image path for plain terminals", async () => {
+    readClipboardItemsMock.mockResolvedValue([
+      {
+        types: ["image/png"],
+        getType: vi.fn(async () => ({
+          arrayBuffer: async () => Uint8Array.from([9, 8]).buffer,
+        })),
+      },
+    ]);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "terminal_ready") {
+        return Array.from(new TextEncoder().encode("hello\n"));
+      }
+      if (command === "save_clipboard_image") {
+        return "./.tmp/images/clipboard.png";
+      }
+      return null;
+    });
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-plain-paste-image",
+      active: true,
+      agentId: null,
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("write_terminal", {
+        paneId: "pane-plain-paste-image",
+        data: expect.any(Array),
+      });
+    });
+
+    const writeCall = invokeMock.mock.calls.find((call) => call[0] === "write_terminal");
+    expect(writeCall).toBeTruthy();
+    const payload = writeCall?.[1] as { data: number[] };
+    const written = new TextDecoder().decode(Uint8Array.from(payload.data));
+    expect(written).toBe("./.tmp/images/clipboard.png ");
+  });
+
+  it("pastes the raw staged image path for agents without explicit image support", async () => {
+    readClipboardItemsMock.mockResolvedValue([
+      {
+        types: ["image/png"],
+        getType: vi.fn(async () => ({
+          arrayBuffer: async () => Uint8Array.from([5, 4, 3]).buffer,
+        })),
+      },
+    ]);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "terminal_ready") {
+        return Array.from(new TextEncoder().encode("hello\n"));
+      }
+      if (command === "save_clipboard_image") {
+        return "./.tmp/images/clipboard.png";
+      }
+      return null;
+    });
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-unsupported-agent-paste-image",
+      active: true,
+      agentId: "opencode",
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("write_terminal", {
+        paneId: "pane-unsupported-agent-paste-image",
+        data: expect.any(Array),
+      });
+    });
+
+    const writeCall = invokeMock.mock.calls.find((call) => call[0] === "write_terminal");
+    expect(writeCall).toBeTruthy();
+    const payload = writeCall?.[1] as { data: number[] };
+    const written = new TextDecoder().decode(Uint8Array.from(payload.data));
+    expect(written).toBe("./.tmp/images/clipboard.png ");
+  });
+
+  it("shows a toast when image clipboard data is unavailable", async () => {
+    readClipboardItemsMock.mockResolvedValue([]);
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-no-image",
+      active: true,
+    });
+    const term = terminalInstances[0];
+    const focusCallsBeforeClick = term.focus.mock.calls.length;
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(toastEmitMock).toHaveBeenCalledWith({
+        message: "Clipboard does not contain an image.",
+      });
+    });
+    expect(term.focus.mock.calls.length).toBeGreaterThan(focusCallsBeforeClick);
+  });
+
+  it("shows a toast when clipboard image is too large", async () => {
+    readClipboardItemsMock.mockResolvedValue([
+      {
+        types: ["image/png"],
+        getType: vi.fn(async () => ({
+          size: 10 * 1024 * 1024 + 1,
+          arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+        })),
+      },
+    ]);
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-image-too-large",
+      active: true,
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(toastEmitMock).toHaveBeenCalledWith({
+        message: "Clipboard image is too large (max 10 MB).",
+      });
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("save_clipboard_image", expect.anything());
+  });
+
+  it("shows a toast when writing the staged image path fails", async () => {
+    readClipboardItemsMock.mockResolvedValue([
+      {
+        types: ["image/png"],
+        getType: vi.fn(async () => ({
+          size: 3,
+          arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+        })),
+      },
+    ]);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "terminal_ready") {
+        return Array.from(new TextEncoder().encode("hello\n"));
+      }
+      if (command === "save_clipboard_image") {
+        return "./.tmp/images/clipboard.png";
+      }
+      if (command === "write_terminal") {
+        throw new Error("write failed");
+      }
+      return null;
+    });
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-write-fails",
+      active: true,
+      agentId: "gemini",
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(toastEmitMock).toHaveBeenCalledWith({
+        message: "Failed to paste image into terminal.",
+      });
+    });
+  });
+
+  it("dispatches voice toggle from the overlay button", async () => {
+    const handler = vi.fn();
+    window.addEventListener("gwt-voice-toggle", handler);
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-voice-action",
+      active: true,
+      voiceInputEnabled: true,
+      voiceInputSupported: true,
+      voiceInputAvailable: true,
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Voice" }));
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    window.removeEventListener("gwt-voice-toggle", handler);
+  });
+
+  it("disables voice toggle while preparing", async () => {
+    const handler = vi.fn();
+    window.addEventListener("gwt-voice-toggle", handler);
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-voice-preparing",
+      active: true,
+      voiceInputEnabled: true,
+      voiceInputSupported: true,
+      voiceInputAvailable: true,
+      voiceInputPreparing: true,
+    });
+
+    const voiceButton = getByRole("button", { name: "Voice" });
+    expect((voiceButton as HTMLButtonElement).disabled).toBe(true);
+
+    await fireEvent.click(voiceButton);
+
+    expect(handler).not.toHaveBeenCalled();
+    window.removeEventListener("gwt-voice-toggle", handler);
   });
 
   it("handles paste via clipboard event on rootEl", async () => {

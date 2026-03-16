@@ -170,6 +170,18 @@ async function openSettings(
   ).toBeVisible();
 }
 
+async function openVoiceInputTab(page: Page) {
+  await page.getByRole("button", { name: "Voice Input", exact: true }).click();
+}
+
+async function enableVoiceInput(page: Page) {
+  const enabledCheckbox = page.locator("#voice-input-enabled");
+  await expect(enabledCheckbox).toBeVisible();
+  if (!(await enabledCheckbox.isChecked())) {
+    await enabledCheckbox.check();
+  }
+}
+
 const sharedCommandResponses = {
   list_worktree_branches: [branchMain, branchFeature],
   list_remote_branches: [],
@@ -195,9 +207,8 @@ test("voice input fields are enabled when capability is unavailable", async ({
 }) => {
   await openSettings(page, sharedCommandResponses);
 
-  await page
-    .getByRole("button", { name: "Voice Input", exact: true })
-    .click();
+  await openVoiceInputTab(page);
+  await enableVoiceInput(page);
 
   const enabledCheckbox = page.locator("#voice-input-enabled");
   const hotkeyInput = page.locator("#voice-hotkey");
@@ -217,9 +228,8 @@ test("voice input settings can be changed and saved when capability is unavailab
 }) => {
   await openSettings(page, sharedCommandResponses);
 
-  await page
-    .getByRole("button", { name: "Voice Input", exact: true })
-    .click();
+  await openVoiceInputTab(page);
+  await enableVoiceInput(page);
 
   await expect(page.locator("#voice-hotkey")).toBeEnabled();
 
@@ -254,9 +264,8 @@ test("shows unavailable reason banner with settings-still-configurable note", as
 }) => {
   await openSettings(page, sharedCommandResponses);
 
-  await page
-    .getByRole("button", { name: "Voice Input", exact: true })
-    .click();
+  await openVoiceInputTab(page);
+  await enableVoiceInput(page);
 
   await expect(
     page.getByText("GPU acceleration is not available"),

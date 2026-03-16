@@ -1,6 +1,46 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.8.0] - 2026-03-16
+
+### Bug Fixes
+
+- **ci:** Add dependabot npm entry for gwt-gui directory
+- **test:** Update ConfirmDialog focus assertion for cancel-first behavior
+- **gui,voice:** Fix AI settings validation and add Python 3.14 support (#1616)
+
+### Features
+
+- **gui:** Move terminal input actions into overlay (#1617)
+
+### Miscellaneous Tasks
+
+- **deps-dev:** Bump @commitlint/config-conventional (#1619)
+- **deps-dev:** Bump @commitlint/cli from 20.4.3 to 20.4.4 (#1620)
+
+## [8.7.0] - 2026-03-13
+
+### Bug Fixes
+
+- **config:** Consolidate app settings into config.toml (#1594)
+- **voice:** Harden windows python runtime detection (#1602)
+- **gui:** Harden startup window session restore (#1603)
+- **voice:** Tighten windows python candidate validation (#1605)
+- **launch:** Add codex fast mode and restore regressions (#1610)
+- **summary:** Add rolling scrollback updates (#1609)
+- **settings:** Redesign panel and avoid env save regressions (#1606)
+- **pty:** Use cmd.exe /K for interactive sessions to fix ConPTY input forwarding (#1608)
+
+### Documentation
+
+- セッション履歴の知見をCLAUDE.mdに反映
+
+### Features
+
+- **skills:** Add spec register workflow (#1595)
+- **config:** Migrate Claude hooks to settings.local.json (#1611)
+- **gui:** Add terminal input field for agent tabs (#1613)
+
 ## [8.6.3] - 2026-03-12
 
 ### Bug Fixes

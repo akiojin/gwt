@@ -497,7 +497,10 @@ fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
     let root = project_root.join(".claude");
     cleanup_legacy_claude_hook_scripts(&root)?;
 
+    // 3. Write file assets
     write_managed_assets(&root, all_claude_assets(), ".claude")?;
+
+    // 4. Merge hooks into settings.local.json
     merge_managed_claude_hooks_into_settings(&root)
 }
 
@@ -1737,6 +1740,7 @@ mod tests {
         assert!(exclude.contains("/.claude/skills/gwt-*/"));
         assert!(exclude.contains("/.claude/commands/gwt-*.md"));
         assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.mjs"));
+        assert!(exclude.contains("/.claude/settings.local.json"));
     }
 
     #[test]

@@ -29,6 +29,8 @@ pub struct PaneLaunchMeta {
     pub mode: String,
     pub model: Option<String>,
     pub reasoning_level: Option<String>,
+    #[allow(dead_code)]
+    pub fast_mode: bool,
     pub skip_permissions: bool,
     pub collaboration_modes: bool,
     pub docker_service: Option<String>,
@@ -39,6 +41,11 @@ pub struct PaneLaunchMeta {
     pub docker_container_name: Option<String>,
     pub docker_compose_args: Option<Vec<String>>,
     pub started_at_millis: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneRuntimeContext {
+    pub launch_workdir: PathBuf,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -117,6 +124,7 @@ pub struct AppState {
     /// Semaphore to limit concurrent AI summary generation (max 3).
     pub version_history_semaphore: Arc<Semaphore>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
+    pub pane_runtime_contexts: Mutex<HashMap<String, PaneRuntimeContext>>,
     /// Single-process leader lock for startup multi-window restore.
     pub window_session_restore_leader: Mutex<Option<WindowSessionRestoreLeaderState>>,
     /// Launch job cancellation flags keyed by job id.
@@ -169,6 +177,7 @@ impl AppState {
             project_issue_list_inflight: Mutex::new(HashSet::new()),
             version_history_semaphore: Arc::new(Semaphore::new(3)),
             pane_launch_meta: Mutex::new(HashMap::new()),
+            pane_runtime_contexts: Mutex::new(HashMap::new()),
             window_session_restore_leader: Mutex::new(None),
             launch_jobs: Mutex::new(HashMap::new()),
             launch_results: Mutex::new(HashMap::new()),
