@@ -4,8 +4,7 @@
 use std::path::PathBuf;
 
 use gwt_core::ai::{
-    AIClient, ChatCompletionsToolCallFunction, ChatCompletionsToolCallRef,
-    ChatCompletionsToolMessage,
+    ChatCompletionsToolCallFunction, ChatCompletionsToolCallRef, ChatCompletionsToolMessage,
 };
 use serde::Serialize;
 use tracing::{info, warn};
@@ -43,7 +42,6 @@ pub struct AssistantResponse {
 
 pub struct AssistantEngine {
     conversation: Vec<ChatCompletionsToolMessage>,
-    system_prompt: String,
     project_path: PathBuf,
     window_label: String,
     pub llm_call_count: u64,
@@ -61,7 +59,6 @@ impl AssistantEngine {
 
         Self {
             conversation,
-            system_prompt: SYSTEM_PROMPT.to_string(),
             project_path,
             window_label,
             llm_call_count: 0,
@@ -137,23 +134,31 @@ impl AssistantEngine {
         let tools = assistant_tools::assistant_tool_definitions();
         let mut actions_taken = Vec::new();
 
+        // Load AI settings once before the loop to avoid repeated config reads.
+        let ai_settings = resolve_ai_settings()?;
+
         for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
-            let ai_client = build_ai_client(state)?;
             let messages = self.conversation.clone();
             let tools_clone = tools.clone();
+            let settings = ai_settings.clone();
 
-            // Run the blocking AI call on a blocking thread
-            let response = std::thread::spawn(move || {
-                ai_client.create_chat_completion_with_tools(
-                    messages,
-                    tools_clone,
-                    ASSISTANT_MAX_TOKENS,
-                    ASSISTANT_TEMPERATURE,
-                )
+            // Run the blocking AI call on a separate thread.
+            // AIClient is created per-thread because it cannot be sent across threads
+            // (contains non-Send AtomicU64), but the settings are loaded only once.
+            let response = std::thread::spawn(move || -> Result<_, String> {
+                let client = gwt_core::ai::AIClient::new(settings)
+                    .map_err(|e| format!("Failed to create AI client: {}", e))?;
+                client
+                    .create_chat_completion_with_tools(
+                        messages,
+                        tools_clone,
+                        ASSISTANT_MAX_TOKENS,
+                        ASSISTANT_TEMPERATURE,
+                    )
+                    .map_err(|e| format!("LLM call failed: {}", e))
             })
             .join()
-            .map_err(|_| "LLM call panicked".to_string())?
-            .map_err(|e| format!("LLM call failed: {}", e))?;
+            .map_err(|_| "LLM call panicked".to_string())??;
 
             self.llm_call_count += 1;
             if let Some(tokens) = response.usage_tokens {
@@ -247,27 +252,25 @@ impl AssistantEngine {
 }
 
 /// Truncate tool results to avoid exceeding context limits.
+/// Uses char boundary to avoid panicking on multi-byte UTF-8 characters.
 fn truncate_tool_result(text: &str) -> String {
     const MAX_TOOL_RESULT_CHARS: usize = 32_000;
     if text.len() <= MAX_TOOL_RESULT_CHARS {
         text.to_string()
     } else {
-        let truncated = &text[..MAX_TOOL_RESULT_CHARS];
+        let truncated: String = text.chars().take(MAX_TOOL_RESULT_CHARS).collect();
         format!("{}...\n[truncated, {} total chars]", truncated, text.len())
     }
 }
 
-/// Build an AIClient from the current profile settings.
-fn build_ai_client(_state: &AppState) -> Result<AIClient, String> {
+/// Resolve AI settings from the current profile (loaded once, reused across loop iterations).
+fn resolve_ai_settings() -> Result<gwt_core::config::ResolvedAISettings, String> {
     let profiles = gwt_core::config::ProfilesConfig::load()
         .map_err(|e| format!("Failed to load profiles: {}", e))?;
 
     let ai = profiles.resolve_active_ai_settings();
-    let settings = ai
-        .resolved
-        .ok_or_else(|| "AI is not configured. Please configure AI settings first.".to_string())?;
-
-    AIClient::new(settings).map_err(|e| format!("Failed to create AI client: {}", e))
+    ai.resolved
+        .ok_or_else(|| "AI is not configured. Please configure AI settings first.".to_string())
 }
 
 #[cfg(test)]
@@ -286,6 +289,15 @@ mod tests {
         let result = truncate_tool_result(&text);
         assert!(result.len() < 40_000);
         assert!(result.contains("[truncated"));
+    }
+
+    #[test]
+    fn test_truncate_tool_result_multibyte() {
+        // Japanese text: each char is 3 bytes in UTF-8
+        let text = "あ".repeat(40_000);
+        let result = truncate_tool_result(&text);
+        assert!(result.contains("[truncated"));
+        // Should not panic
     }
 
     #[test]

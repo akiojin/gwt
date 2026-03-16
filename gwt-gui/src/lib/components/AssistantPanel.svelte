@@ -21,7 +21,7 @@
     if (!text) return;
     inputText = "";
     try {
-      await invoke("assistant_send_message", { message: text });
+      await invoke("assistant_send_message", { input: text });
     } catch (err) {
       console.error("Failed to send assistant message:", err);
     }
@@ -90,11 +90,10 @@
             class:user={msg.role === "user"}
             class:assistant={msg.role === "assistant"}
             class:system={msg.role === "system" || msg.role === "tool"}
-            class:thought={msg.kind === "thought"}
-            class:action={msg.kind === "action"}
+            class:tool-use={msg.kind === "tool_use"}
           >
             <div class="message-content">
-              {#if msg.kind === "action"}
+              {#if msg.kind === "tool_use"}
                 <span class="action-icon">&#9654;</span>
               {/if}
               {msg.content}
@@ -102,7 +101,7 @@
           </div>
         {/each}
 
-        {#if assistantState.is_thinking}
+        {#if assistantState.isThinking}
           <div class="message assistant thinking">
             <div class="spinner"></div>
             <span>Thinking...</span>
@@ -115,7 +114,7 @@
     </div>
 
     <div class="input-area">
-      {#if assistantState && !assistantState.ai_ready}
+      {#if assistantState && !assistantState.aiReady}
         <div class="ai-not-ready">AI not configured</div>
       {/if}
       <div class="input-row">
@@ -126,14 +125,14 @@
           onkeydown={handleKeydown}
           oncompositionstart={() => (isComposing = true)}
           oncompositionend={() => (isComposing = false)}
-          disabled={!assistantState?.ai_ready}
+          disabled={!assistantState?.aiReady}
           rows={1}
         ></textarea>
         <button
           class="send-btn"
           type="button"
           onclick={sendMessage}
-          disabled={!assistantState?.ai_ready || !inputText.trim()}
+          disabled={!assistantState?.aiReady || !inputText.trim()}
         >
           Send
         </button>
@@ -195,12 +194,12 @@
     text-align: center;
   }
 
-  .message.thought {
+  .message.tool-use {
     font-style: italic;
     opacity: 0.8;
   }
 
-  .message.action .message-content {
+  .message.tool-use .message-content {
     font-weight: 600;
   }
 

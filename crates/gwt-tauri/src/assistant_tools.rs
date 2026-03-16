@@ -217,6 +217,16 @@ pub fn execute_assistant_tool(
         TOOL_READ_FILE => {
             let rel_path = get_required_string(&args, "path")?;
             let full_path = Path::new(project_path).join(rel_path);
+            const MAX_FILE_SIZE: u64 = 64 * 1024; // 64KB
+            let meta = std::fs::metadata(&full_path)
+                .map_err(|e| format!("Failed to read file {}: {}", full_path.display(), e))?;
+            if meta.len() > MAX_FILE_SIZE {
+                return Err(format!(
+                    "File too large ({} bytes, max {}). Use grep_file for targeted search.",
+                    meta.len(),
+                    MAX_FILE_SIZE
+                ));
+            }
             std::fs::read_to_string(&full_path)
                 .map_err(|e| format!("Failed to read file {}: {}", full_path.display(), e))
         }
@@ -374,26 +384,61 @@ fn run_shell_command(dir: &str, command: &str) -> Result<String, String> {
     #[cfg(not(target_os = "windows"))]
     let (shell, flag) = ("sh", "-c");
 
-    let child = Command::new(shell)
+    let mut child = Command::new(shell)
         .arg(flag)
         .arg(command)
         .current_dir(dir)
-        .output();
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run command: {}", e))?;
 
-    match child {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if output.status.success() {
-                Ok(stdout.to_string())
-            } else {
-                Ok(format!(
-                    "Exit code: {}\nstdout:\n{}\nstderr:\n{}",
-                    output.status, stdout, stderr
-                ))
+    // Poll with timeout
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = String::new();
+                        use std::io::Read;
+                        let _ = s.read_to_string(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = String::new();
+                        use std::io::Read;
+                        let _ = s.read_to_string(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
+                return if status.success() {
+                    Ok(stdout)
+                } else {
+                    Ok(format!(
+                        "Exit code: {}\nstdout:\n{}\nstderr:\n{}",
+                        status, stdout, stderr
+                    ))
+                };
             }
+            Ok(None) => {
+                if start.elapsed() >= COMMAND_TIMEOUT {
+                    let _ = child.kill();
+                    return Err(format!(
+                        "Command timed out after {} seconds",
+                        COMMAND_TIMEOUT.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("Failed to wait for command: {}", e)),
         }
-        Err(e) => Err(format!("Failed to run command: {}", e)),
     }
 }
 

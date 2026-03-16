@@ -16,10 +16,10 @@
       <div class="git-info">
         <span class="git-branch">{dashboard.git.branch}</span>
         <span class="git-stat">
-          {dashboard.git.uncommitted_count} uncommitted
+          {dashboard.git.uncommittedCount} uncommitted
         </span>
         <span class="git-stat">
-          {dashboard.git.unpushed_count} unpushed
+          {dashboard.git.unpushedCount} unpushed
         </span>
       </div>
     </div>
@@ -39,8 +39,8 @@
                 class:error={pane.status === "error"}
               ></span>
               <div class="pane-info">
-                <span class="pane-agent">{pane.agent_name}</span>
-                <span class="pane-id">{pane.pane_id}</span>
+                <span class="pane-agent">{pane.agentName}</span>
+                <span class="pane-id">{pane.paneId}</span>
               </div>
               <span class="pane-status">{pane.status}</span>
             </div>

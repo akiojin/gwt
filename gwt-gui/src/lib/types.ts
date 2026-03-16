@@ -687,21 +687,21 @@ export interface GitHubUserResponse {
 
 export interface AssistantMessage {
   role: "user" | "assistant" | "system" | "tool";
-  kind: "message" | "thought" | "action" | "notification";
+  kind: "text" | "tool_use" | (string & {});
   content: string;
   timestamp: number;
 }
 
 export interface PaneDashboard {
-  pane_id: string;
-  agent_name: string;
+  paneId: string;
+  agentName: string;
   status: string;
 }
 
 export interface GitDashboard {
   branch: string;
-  uncommitted_count: number;
-  unpushed_count: number;
+  uncommittedCount: number;
+  unpushedCount: number;
 }
 
 export interface DashboardData {
@@ -711,9 +711,9 @@ export interface DashboardData {
 
 export interface AssistantState {
   messages: AssistantMessage[];
-  ai_ready: boolean;
-  is_thinking: boolean;
-  session_id?: string | null;
-  llm_call_count: number;
-  estimated_tokens: number;
+  aiReady: boolean;
+  isThinking: boolean;
+  sessionId?: string | null;
+  llmCallCount: number;
+  estimatedTokens: number;
 }
