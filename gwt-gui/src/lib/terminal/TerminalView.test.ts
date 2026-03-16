@@ -1753,7 +1753,7 @@ describe("TerminalView", () => {
         return Array.from(new TextEncoder().encode("hello\n"));
       }
       if (command === "save_clipboard_image") {
-        return "/workspace/.gwt/tmp/images/clipboard.png";
+        return "./.tmp/images/clipboard.png";
       }
       return null;
     });
@@ -1782,7 +1782,7 @@ describe("TerminalView", () => {
     expect(writeCall).toBeTruthy();
     const payload = writeCall?.[1] as { data: number[] };
     const written = new TextDecoder().decode(Uint8Array.from(payload.data));
-    expect(written).toBe("@/workspace/.gwt/tmp/images/clipboard.png");
+    expect(written).toBe("@./.tmp/images/clipboard.png ");
   });
 
   it("pastes the raw staged image path for plain terminals", async () => {
@@ -1799,7 +1799,7 @@ describe("TerminalView", () => {
         return Array.from(new TextEncoder().encode("hello\n"));
       }
       if (command === "save_clipboard_image") {
-        return "./.gwt/tmp/images/clipboard.png";
+        return "./.tmp/images/clipboard.png";
       }
       return null;
     });
@@ -1823,7 +1823,48 @@ describe("TerminalView", () => {
     expect(writeCall).toBeTruthy();
     const payload = writeCall?.[1] as { data: number[] };
     const written = new TextDecoder().decode(Uint8Array.from(payload.data));
-    expect(written).toBe("./.gwt/tmp/images/clipboard.png");
+    expect(written).toBe("./.tmp/images/clipboard.png ");
+  });
+
+  it("pastes the raw staged image path for agents without explicit image support", async () => {
+    readClipboardItemsMock.mockResolvedValue([
+      {
+        types: ["image/png"],
+        getType: vi.fn(async () => ({
+          arrayBuffer: async () => Uint8Array.from([5, 4, 3]).buffer,
+        })),
+      },
+    ]);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "terminal_ready") {
+        return Array.from(new TextEncoder().encode("hello\n"));
+      }
+      if (command === "save_clipboard_image") {
+        return "./.tmp/images/clipboard.png";
+      }
+      return null;
+    });
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-unsupported-agent-paste-image",
+      active: true,
+      agentId: "opencode",
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("write_terminal", {
+        paneId: "pane-unsupported-agent-paste-image",
+        data: expect.any(Array),
+      });
+    });
+
+    const writeCall = invokeMock.mock.calls.find((call) => call[0] === "write_terminal");
+    expect(writeCall).toBeTruthy();
+    const payload = writeCall?.[1] as { data: number[] };
+    const written = new TextDecoder().decode(Uint8Array.from(payload.data));
+    expect(written).toBe("./.tmp/images/clipboard.png ");
   });
 
   it("shows a toast when image clipboard data is unavailable", async () => {

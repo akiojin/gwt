@@ -455,7 +455,10 @@
   }
 
   function buildImageInsertText(imagePath: string): string {
-    return profile ? (buildImageReference(profile, imagePath) ?? imagePath) : imagePath;
+    const reference = profile
+      ? (buildImageReference(profile, imagePath) ?? imagePath)
+      : imagePath;
+    return `${reference} `;
   }
 
   function voiceButtonDisabled(): boolean {
