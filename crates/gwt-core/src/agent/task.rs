@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::developer::DeveloperState;
 use super::sub_agent::SubAgent;
 use super::types::TaskId;
 use super::worktree::WorktreeRef;
@@ -78,9 +77,6 @@ pub struct Task {
     /// Associated pull request (after PR creation)
     #[serde(default)]
     pub pull_request: Option<PullRequestRef>,
-    /// Assigned developers (Project Mode model)
-    #[serde(default)]
-    pub developers: Vec<DeveloperState>,
 }
 
 impl Task {
@@ -101,7 +97,6 @@ impl Task {
             test_status: None,
             retry_count: 0,
             pull_request: None,
-            developers: Vec::new(),
         }
     }
 }
@@ -116,36 +111,14 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Pending);
         assert_eq!(task.worktree_strategy, WorktreeStrategy::New);
         assert!(task.dependencies.is_empty());
-        assert!(task.developers.is_empty());
     }
 
     #[test]
-    fn test_task_developers_default_empty_on_deserialize() {
-        // Simulate old JSON without "developers" field
-        let json = serde_json::json!({
-            "id": "task-1",
-            "name": "test task",
-            "description": "desc",
-            "status": "Pending",
-            "dependencies": [],
-            "worktree_strategy": "New",
-            "assigned_worktree": null,
-            "sub_agent": null,
-            "created_at": "2026-01-01T00:00:00Z",
-            "started_at": null,
-            "completed_at": null,
-            "result": null
-        });
-        let task: Task = serde_json::from_value(json).unwrap();
-        assert!(task.developers.is_empty());
-    }
-
-    #[test]
-    fn test_task_serde_roundtrip_with_developers() {
-        let task = Task::new(TaskId("task-2".to_string()), "with devs", "desc");
+    fn test_task_serde_roundtrip() {
+        let task = Task::new(TaskId("task-2".to_string()), "roundtrip", "desc");
         let json = serde_json::to_string(&task).unwrap();
         let deserialized: Task = serde_json::from_str(&json).unwrap();
-        assert!(deserialized.developers.is_empty());
         assert_eq!(deserialized.id, TaskId("task-2".to_string()));
+        assert_eq!(deserialized.status, TaskStatus::Pending);
     }
 }

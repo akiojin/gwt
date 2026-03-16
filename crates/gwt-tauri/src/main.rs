@@ -2,16 +2,19 @@
 #![allow(clippy::result_large_err)]
 
 mod agent_logger;
-mod agent_master;
+#[allow(dead_code)]
 mod agent_tools;
 mod app;
+mod assistant_engine;
+mod assistant_monitor;
+mod assistant_tools;
 mod commands;
-pub mod context_summarizer;
 mod menu;
 mod pty_skills;
 mod session_watcher;
 mod single_instance;
 mod state;
+mod tool_helpers;
 
 use state::AppState;
 use std::io::Read;

@@ -1,5 +1,6 @@
 pub mod agent_config;
 pub mod agents;
+pub mod assistant;
 pub mod branch_suggest;
 pub mod branches;
 pub mod clause_docs;
@@ -11,7 +12,6 @@ pub mod issue_spec;
 pub mod profiles;
 pub mod project;
 pub mod project_index;
-pub mod project_mode;
 pub mod pullrequest;
 pub mod recent_projects;
 pub mod report;

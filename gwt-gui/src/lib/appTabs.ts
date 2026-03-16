@@ -1,7 +1,7 @@
 import type { Tab } from "./types";
 
 const DEFAULT_APP_TABS: Tab[] = [
-  { id: "projectMode", label: "Project Mode", type: "projectMode" },
+  { id: "assistant", label: "Assistant", type: "assistant" },
 ];
 export type TabDropPosition = "before" | "after";
 
@@ -10,7 +10,7 @@ export function defaultAppTabs(): Tab[] {
 }
 
 export function shouldAllowRestoredActiveTab(activeTabId: string): boolean {
-  return activeTabId === "projectMode";
+  return activeTabId === "assistant";
 }
 
 export function reorderTabsByDrop(
