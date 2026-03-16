@@ -64,10 +64,11 @@
         return;
       }
 
-      inputText = "";
-      assistantState = await invoke<AssistantState>("assistant_send_message", {
+      const nextState = await invoke<AssistantState>("assistant_send_message", {
         input: text,
       });
+      assistantState = nextState;
+      inputText = "";
     } catch (err) {
       console.error("Failed to send assistant message:", err);
     }

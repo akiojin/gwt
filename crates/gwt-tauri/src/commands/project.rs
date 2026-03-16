@@ -278,7 +278,9 @@ pub fn open_project(
     };
 
     let current_window_label = window.label().to_string();
-    let previous_project_path = state.project_for_window(&current_window_label);
+    let previous_project_identity = state
+        .project_for_window(&current_window_label)
+        .map(|path| canonical_project_identity(Path::new(&path)));
     for _attempt in 0..2 {
         match state.claim_project_for_window_with_identity(
             &current_window_label,
@@ -286,7 +288,7 @@ pub fn open_project(
             project_identity.clone(),
         ) {
             Ok(()) => {
-                if previous_project_path.as_deref() != Some(project_root_str.as_str()) {
+                if previous_project_identity.as_deref() != Some(project_identity.as_str()) {
                     state.clear_assistant_session_for_window(&current_window_label);
                 }
                 state.push_window_focus(&current_window_label);

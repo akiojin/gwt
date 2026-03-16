@@ -43,6 +43,7 @@ pub struct AssistantResponse {
 
 pub struct AssistantEngine {
     conversation: Vec<ChatCompletionsToolMessage>,
+    message_timestamps: Vec<i64>,
     project_path: PathBuf,
     window_label: String,
     pub llm_call_count: u64,
@@ -51,6 +52,7 @@ pub struct AssistantEngine {
 
 impl AssistantEngine {
     pub fn new(project_path: PathBuf, window_label: String) -> Self {
+        let now = Self::now_ts();
         let conversation = vec![ChatCompletionsToolMessage {
             role: "system".to_string(),
             content: Some(SYSTEM_PROMPT.to_string()),
@@ -60,6 +62,7 @@ impl AssistantEngine {
 
         Self {
             conversation,
+            message_timestamps: vec![now],
             project_path,
             window_label,
             llm_call_count: 0,
@@ -72,13 +75,26 @@ impl AssistantEngine {
         &self.conversation
     }
 
+    pub fn message_timestamps(&self) -> &[i64] {
+        &self.message_timestamps
+    }
+
+    fn now_ts() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
+    fn push_conversation_message(&mut self, message: ChatCompletionsToolMessage) {
+        self.conversation.push(message);
+        self.message_timestamps.push(Self::now_ts());
+    }
+
     /// Handle a user message: add to conversation, run LLM loop, return response.
     pub fn handle_user_message(
         &mut self,
         input: &str,
         state: &AppState,
     ) -> Result<AssistantResponse, String> {
-        self.conversation.push(ChatCompletionsToolMessage {
+        self.push_conversation_message(ChatCompletionsToolMessage {
             role: "user".to_string(),
             content: Some(input.to_string()),
             tool_calls: None,
@@ -115,8 +131,8 @@ impl AssistantEngine {
         }
 
         let summary = summaries.join("\n");
-        self.conversation.push(ChatCompletionsToolMessage {
-            role: "user".to_string(),
+        self.push_conversation_message(ChatCompletionsToolMessage {
+            role: "system".to_string(),
             content: Some(format!(
                 "[System Monitor Update]\n{}\n\nAnalyze the current state and report any issues or suggestions.",
                 summary
@@ -156,9 +172,13 @@ impl AssistantEngine {
 
         // Build pruned conversation: system prompt + messages from cut onward
         let mut pruned = Vec::with_capacity(1 + self.conversation.len() - cut);
+        let mut pruned_timestamps = Vec::with_capacity(1 + self.message_timestamps.len() - cut);
         pruned.push(self.conversation[0].clone());
+        pruned_timestamps.push(self.message_timestamps[0]);
         pruned.extend_from_slice(&self.conversation[cut..]);
+        pruned_timestamps.extend_from_slice(&self.message_timestamps[cut..]);
         self.conversation = pruned;
+        self.message_timestamps = pruned_timestamps;
     }
 
     /// Run the LLM tool-use loop: call LLM, execute tool calls, repeat until
@@ -203,7 +223,7 @@ impl AssistantEngine {
 
             if response.tool_calls.is_empty() {
                 // No tool calls — this is the final text response
-                self.conversation.push(ChatCompletionsToolMessage {
+                self.push_conversation_message(ChatCompletionsToolMessage {
                     role: "assistant".to_string(),
                     content: Some(response.text.clone()),
                     tool_calls: None,
@@ -231,7 +251,7 @@ impl AssistantEngine {
                 .collect();
 
             // Add the assistant message with tool_calls
-            self.conversation.push(ChatCompletionsToolMessage {
+            self.push_conversation_message(ChatCompletionsToolMessage {
                 role: "assistant".to_string(),
                 content: if response.text.is_empty() {
                     None
@@ -264,7 +284,7 @@ impl AssistantEngine {
                 };
 
                 let call_id = tc.call_id.clone().unwrap_or_default();
-                self.conversation.push(ChatCompletionsToolMessage {
+                self.push_conversation_message(ChatCompletionsToolMessage {
                     role: "tool".to_string(),
                     content: Some(truncate_tool_result(&result_text)),
                     tool_calls: None,
@@ -280,8 +300,17 @@ impl AssistantEngine {
         }
 
         warn!("Assistant tool loop reached max iterations");
+        let fallback =
+            "Maximum tool call iterations reached. Please try again with a more specific request."
+                .to_string();
+        self.push_conversation_message(ChatCompletionsToolMessage {
+            role: "assistant".to_string(),
+            content: Some(fallback.clone()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
         Ok(AssistantResponse {
-            text: "Maximum tool call iterations reached. Please try again with a more specific request.".to_string(),
+            text: fallback,
             actions_taken,
         })
     }
@@ -291,11 +320,12 @@ impl AssistantEngine {
 /// Uses char boundary to avoid panicking on multi-byte UTF-8 characters.
 fn truncate_tool_result(text: &str) -> String {
     const MAX_TOOL_RESULT_CHARS: usize = 32_000;
-    if text.len() <= MAX_TOOL_RESULT_CHARS {
+    let char_count = text.chars().count();
+    if char_count <= MAX_TOOL_RESULT_CHARS {
         text.to_string()
     } else {
         let truncated: String = text.chars().take(MAX_TOOL_RESULT_CHARS).collect();
-        format!("{}...\n[truncated, {} total chars]", truncated, text.len())
+        format!("{}...\n[truncated, {} total chars]", truncated, char_count)
     }
 }
 

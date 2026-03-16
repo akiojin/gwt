@@ -1,16 +1,24 @@
 #![allow(dead_code)]
-//! Assistant Mode monitor — polls pane and git state, emits change events.
+//! Assistant Mode monitor: polls pane and git state, emits change events.
 
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
+use gwt_core::git::{self, Branch};
+use gwt_core::terminal::pane::PaneStatus;
+use gwt_core::worktree::WorktreeManager;
+use tauri::Manager;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
+const MONITOR_SCROLLBACK_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PaneSnapshot {
@@ -88,20 +96,157 @@ impl AssistantMonitorHandle {
     pub async fn stop(&self) {
         let _ = self.stop_tx.send(()).await;
     }
+
+    pub fn stop_now(&self) {
+        let _ = self.stop_tx.try_send(());
+    }
+}
+
+pub(crate) fn resolve_project_repo_path(
+    state: &AppState,
+    window_label: &str,
+) -> Result<Option<PathBuf>, String> {
+    let Some(project_path) = state.project_for_window(window_label) else {
+        return Ok(None);
+    };
+
+    resolve_repo_path_for_project_root(Path::new(&project_path))
+        .map(Some)
+        .map_err(|e| format!("Failed to resolve repository path: {}", e))
+}
+
+fn pane_status_label(status: &PaneStatus) -> String {
+    match status {
+        PaneStatus::Running => "running".to_string(),
+        PaneStatus::Completed(code) => format!("completed({})", code),
+        PaneStatus::Error(message) => format!("error: {}", message),
+    }
+}
+
+fn collect_pane_snapshots(
+    state: &AppState,
+    repo_path: Option<&Path>,
+) -> Result<Vec<PaneSnapshot>, String> {
+    let Some(repo_path) = repo_path else {
+        return Ok(Vec::new());
+    };
+
+    let pane_meta = {
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        manager
+            .panes_mut()
+            .iter_mut()
+            .filter(|pane| pane.project_root() == repo_path)
+            .map(|pane| {
+                let _ = pane.check_status();
+                (
+                    pane.pane_id().to_string(),
+                    pane.agent_name().to_string(),
+                    pane_status_label(pane.status()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut panes = Vec::with_capacity(pane_meta.len());
+    for (pane_id, agent_name, status) in pane_meta {
+        let scrollback = capture_scrollback_tail_from_state(
+            state,
+            &pane_id,
+            MONITOR_SCROLLBACK_BYTES,
+            Some(repo_path),
+        )
+        .unwrap_or_default();
+        panes.push(PaneSnapshot {
+            pane_id,
+            agent_name,
+            status,
+            scrollback_hash: hash_scrollback(&scrollback),
+        });
+    }
+
+    Ok(panes)
+}
+
+fn resolve_worktree_path(repo_path: &Path, current_branch: Option<&Branch>) -> Option<PathBuf> {
+    if !git::is_bare_repository(repo_path) {
+        return Some(repo_path.to_path_buf());
+    }
+
+    let manager = WorktreeManager::new(repo_path).ok()?;
+    let worktrees = manager.list_basic().ok()?;
+
+    if let Some(branch_name) = current_branch.map(|branch| branch.name.as_str()) {
+        if let Some(worktree) = worktrees.iter().find(|worktree| {
+            worktree.is_active() && worktree.branch.as_deref() == Some(branch_name)
+        }) {
+            return Some(worktree.path.clone());
+        }
+    }
+
+    worktrees
+        .iter()
+        .find(|worktree| worktree.is_active() && !worktree.is_main)
+        .map(|worktree| worktree.path.clone())
+}
+
+fn build_git_snapshot(repo_path: Option<&Path>) -> Result<GitStatusSnapshot, String> {
+    let Some(repo_path) = repo_path else {
+        return Ok(GitStatusSnapshot {
+            branch: String::new(),
+            uncommitted_count: 0,
+            unpushed_count: 0,
+        });
+    };
+
+    let current_branch = Branch::current(repo_path)
+        .map_err(|e| format!("Failed to resolve current branch: {}", e))?;
+
+    let (branch, unpushed_count) = current_branch
+        .as_ref()
+        .map(|branch| {
+            (
+                branch.name.clone(),
+                branch.ahead.min(u32::MAX as usize) as u32,
+            )
+        })
+        .unwrap_or_else(|| (String::new(), 0));
+
+    let uncommitted_count = resolve_worktree_path(repo_path, current_branch.as_ref())
+        .and_then(|path| git::get_working_tree_status(&path).ok())
+        .map(|entries| entries.len().min(u32::MAX as usize) as u32)
+        .unwrap_or(0);
+
+    Ok(GitStatusSnapshot {
+        branch,
+        uncommitted_count,
+        unpushed_count,
+    })
+}
+
+pub(crate) fn build_snapshot_for_window(
+    state: &AppState,
+    window_label: &str,
+) -> Result<MonitorSnapshot, String> {
+    let repo_path = resolve_project_repo_path(state, window_label)?;
+    Ok(MonitorSnapshot {
+        panes: collect_pane_snapshots(state, repo_path.as_deref())?,
+        git: build_git_snapshot(repo_path.as_deref())?,
+        timestamp: chrono::Utc::now().timestamp(),
+    })
 }
 
 /// Start the assistant monitor polling loop.
 pub fn start_monitor(
-    state: &AppState,
+    app_handle: tauri::AppHandle<tauri::Wry>,
+    window_label: String,
     event_tx: mpsc::Sender<MonitorEvent>,
 ) -> AssistantMonitorHandle {
     let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
 
-    // Clone what we need from state for the spawned task
-    // AppState is not Send, so the monitor task will be integrated
-    // with Tauri's state management in Phase 5. For now, spawn a
-    // polling task that emits default snapshots.
-    let _ = state;
     tokio::spawn(async move {
         let mut detector = ChangeDetector::new();
         let mut interval = tokio::time::interval(POLL_INTERVAL);
@@ -112,16 +257,13 @@ pub fn start_monitor(
                     break;
                 }
                 _ = interval.tick() => {
-                    // In the actual integration, this will capture pane state
-                    // and git status from AppState. For now, emit a default snapshot.
-                    let snapshot = MonitorSnapshot {
-                        panes: Vec::new(),
-                        git: GitStatusSnapshot {
-                            branch: String::new(),
-                            uncommitted_count: 0,
-                            unpushed_count: 0,
-                        },
-                        timestamp: chrono::Utc::now().timestamp(),
+                    let state = app_handle.state::<AppState>();
+                    let snapshot = match build_snapshot_for_window(&state, &window_label) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            warn!(%error, %window_label, "Failed to build assistant monitor snapshot");
+                            continue;
+                        }
                     };
 
                     if detector.detect_change(&snapshot)
@@ -180,7 +322,6 @@ mod tests {
             timestamp: 0,
         };
         detector.detect_change(&snapshot);
-        // Same content, different timestamp — should not trigger
         let snapshot2 = MonitorSnapshot {
             panes: Vec::new(),
             git: GitStatusSnapshot {

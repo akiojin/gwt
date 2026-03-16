@@ -160,11 +160,12 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
 
   if (
     type === "assistant" ||
+    type === "projectMode" ||
     type === "settings" ||
     type === "versionHistory" ||
     type === "issues"
   ) {
-    const canonicalType = type === "assistant" ? "assistant" : type;
+    const canonicalType = type === "projectMode" ? "assistant" : type;
     const fallbackId =
       canonicalType === "assistant"
         ? "assistant"
@@ -188,7 +189,8 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
         : idRaw || fallbackId;
     const labelRaw = typeof obj.label === "string" ? obj.label.trim() : "";
     const label =
-      canonicalType === "assistant" && (type === "assistant" || !labelRaw)
+      canonicalType === "assistant" &&
+      (type === "assistant" || type === "projectMode" || !labelRaw)
         ? "Assistant"
         : labelRaw || fallbackLabel;
     return { type: canonicalType, id, label };
@@ -219,7 +221,11 @@ function sanitizeProjectTabsEntry(rawEntry: unknown): StoredProjectTabs | null {
     tabs.push(tab);
   }
 
-  const activeTabId = normalizeString(entry.activeTabId) || null;
+  const activeTabIdRaw = normalizeString(entry.activeTabId);
+  const activeTabId =
+    activeTabIdRaw === "projectMode"
+      ? "assistant"
+      : activeTabIdRaw || null;
   return { tabs, activeTabId };
 }
 
@@ -466,7 +472,9 @@ export function buildRestoredProjectTabs(
 
   const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
   const normalizedActiveTabId =
-    stored.activeTabId === "assistant" ? "assistant" : stored.activeTabId;
+    stored.activeTabId === "assistant" || stored.activeTabId === "projectMode"
+      ? "assistant"
+      : stored.activeTabId;
   const activeTabId =
     normalizedActiveTabId && restoredIds.has(normalizedActiveTabId)
       ? normalizedActiveTabId

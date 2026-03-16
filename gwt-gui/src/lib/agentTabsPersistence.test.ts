@@ -632,6 +632,33 @@ describe("agentTabsPersistence", () => {
     ]);
   });
 
+  it("migrates legacy projectMode tab entries and active tab id to assistant", () => {
+    store.setItem(
+      PROJECT_TABS_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/repo": {
+            tabs: [
+              { type: "projectMode", id: "projectMode", label: "Project Mode" },
+              { type: "settings", id: "settings", label: "Settings" },
+            ],
+            activeTabId: "projectMode",
+          },
+        },
+      }),
+    );
+
+    const loaded = loadStoredProjectTabs("/repo", store);
+    expect(loaded).toEqual({
+      tabs: [
+        { type: "assistant", id: "assistant", label: "Assistant" },
+        { type: "settings", id: "settings", label: "Settings" },
+      ],
+      activeTabId: "assistant",
+    });
+  });
+
   it("parseStoredProjectTab handles agent tab with known agentId", () => {
     store.setItem(
       PROJECT_TABS_STORAGE_KEY,

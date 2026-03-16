@@ -2,12 +2,15 @@
 //! Assistant Mode Tauri commands
 
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::assistant_engine::AssistantEngine;
+use crate::assistant_monitor::{
+    build_snapshot_for_window, start_monitor, MonitorEvent, MonitorSnapshot,
+};
 use crate::state::AppState;
-use gwt_core::git::{self, Branch};
-use gwt_core::worktree::WorktreeManager;
+use tauri::{Emitter, Manager};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,12 +132,64 @@ pub async fn assistant_start(
     state.clear_assistant_session_for_window(&window_label);
 
     let engine = AssistantEngine::new(PathBuf::from(&project_path), window_label.clone());
+    let (event_tx, mut event_rx) = mpsc::channel::<MonitorEvent>(8);
+    let app_handle = window.app_handle().clone();
+    let receiver_window_label = window_label.clone();
+    let monitor_handle = start_monitor(app_handle.clone(), window_label.clone(), event_tx);
 
-    let mut engine_guard = state
-        .assistant_engine
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    engine_guard.insert(window_label, engine);
+    {
+        let mut engine_guard = state
+            .assistant_engine
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        engine_guard.insert(window_label.clone(), engine);
+    }
+    {
+        let mut monitor_guard = state
+            .assistant_monitor_handle
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        monitor_guard.insert(window_label.clone(), monitor_handle);
+    }
+
+    tokio::spawn(async move {
+        while let Some(first_event) = event_rx.recv().await {
+            let mut events = vec![first_event];
+            while let Ok(event) = event_rx.try_recv() {
+                events.push(event);
+            }
+
+            let state = app_handle.state::<AppState>();
+            let mut engine = {
+                let mut engine_guard = match state.assistant_engine.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => continue,
+                };
+                let Some(engine) = engine_guard.remove(&receiver_window_label) else {
+                    continue;
+                };
+                engine
+            };
+
+            let _ = engine.handle_monitor_batch(events, &state);
+            let assistant_state =
+                build_assistant_state_response(&engine, Some(receiver_window_label.clone()));
+            let dashboard = build_snapshot_for_window(&state, &receiver_window_label)
+                .ok()
+                .map(build_dashboard_response);
+
+            if let Ok(mut engine_guard) = state.assistant_engine.lock() {
+                engine_guard.insert(receiver_window_label.clone(), engine);
+            }
+
+            if let Some(window) = app_handle.get_webview_window(&receiver_window_label) {
+                let _ = window.emit("assistant-state-updated", &assistant_state);
+                if let Some(dashboard) = dashboard.as_ref() {
+                    let _ = window.emit("assistant-dashboard-updated", dashboard);
+                }
+            }
+        }
+    });
 
     Ok(())
 }
@@ -160,9 +215,7 @@ pub async fn assistant_stop(
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
         if let Some(handle) = monitor_guard.remove(&window_label) {
-            tokio::spawn(async move {
-                handle.stop().await;
-            });
+            handle.stop_now();
         }
     }
 
@@ -174,26 +227,27 @@ pub async fn assistant_get_dashboard(
     window: tauri::Window,
     state: tauri::State<'_, AppState>,
 ) -> Result<DashboardResponse, String> {
-    let window_label = window.label().to_string();
-    let panes = {
-        let mgr = state
-            .pane_manager
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        mgr.panes()
-            .iter()
-            .map(|pane| PaneDashboard {
-                pane_id: pane.pane_id().to_string(),
-                agent_name: pane.agent_name().to_string(),
-                status: format!("{:?}", pane.status()),
-            })
-            .collect::<Vec<_>>()
-    };
+    let snapshot = build_snapshot_for_window(&state, window.label())?;
+    Ok(build_dashboard_response(snapshot))
+}
 
-    Ok(DashboardResponse {
-        panes,
-        git: build_git_dashboard(&state, &window_label)?,
-    })
+fn build_dashboard_response(snapshot: MonitorSnapshot) -> DashboardResponse {
+    DashboardResponse {
+        panes: snapshot
+            .panes
+            .into_iter()
+            .map(|pane| PaneDashboard {
+                pane_id: pane.pane_id,
+                agent_name: pane.agent_name,
+                status: pane.status,
+            })
+            .collect(),
+        git: GitDashboard {
+            branch: snapshot.git.branch,
+            uncommitted_count: snapshot.git.uncommitted_count,
+            unpushed_count: snapshot.git.unpushed_count,
+        },
+    }
 }
 
 fn build_assistant_state_response(
@@ -202,7 +256,7 @@ fn build_assistant_state_response(
 ) -> AssistantStateResponse {
     AssistantStateResponse {
         messages: build_messages_from_conversation(engine),
-        ai_ready: true,
+        ai_ready: check_ai_configured(),
         is_thinking: false,
         session_id,
         llm_call_count: engine.llm_call_count,
@@ -221,75 +275,12 @@ fn build_empty_assistant_state_response() -> AssistantStateResponse {
     }
 }
 
-fn build_git_dashboard(state: &AppState, window_label: &str) -> Result<GitDashboard, String> {
-    let Some(project_path) = state.project_for_window(window_label) else {
-        return Ok(GitDashboard {
-            branch: String::new(),
-            uncommitted_count: 0,
-            unpushed_count: 0,
-        });
-    };
-
-    let repo_path =
-        crate::commands::project::resolve_repo_path_for_project_root(Path::new(&project_path))
-            .map_err(|e| format!("Failed to resolve repository path: {}", e))?;
-
-    let current_branch = Branch::current(&repo_path)
-        .map_err(|e| format!("Failed to resolve current branch: {}", e))?;
-
-    let (branch, unpushed_count) = current_branch
-        .as_ref()
-        .map(|branch| {
-            (
-                branch.name.clone(),
-                branch.ahead.min(u32::MAX as usize) as u32,
-            )
-        })
-        .unwrap_or_else(|| (String::new(), 0));
-
-    let uncommitted_count = resolve_dashboard_worktree_path(&repo_path, current_branch.as_ref())
-        .and_then(|path| git::get_working_tree_status(&path).ok())
-        .map(|entries| entries.len().min(u32::MAX as usize) as u32)
-        .unwrap_or(0);
-
-    Ok(GitDashboard {
-        branch,
-        uncommitted_count,
-        unpushed_count,
-    })
-}
-
-fn resolve_dashboard_worktree_path(
-    repo_path: &Path,
-    current_branch: Option<&Branch>,
-) -> Option<PathBuf> {
-    if !git::is_bare_repository(repo_path) {
-        return Some(repo_path.to_path_buf());
-    }
-
-    let manager = WorktreeManager::new(repo_path).ok()?;
-    let worktrees = manager.list_basic().ok()?;
-
-    if let Some(branch_name) = current_branch.map(|branch| branch.name.as_str()) {
-        if let Some(worktree) = worktrees.iter().find(|worktree| {
-            worktree.is_active() && worktree.branch.as_deref() == Some(branch_name)
-        }) {
-            return Some(worktree.path.clone());
-        }
-    }
-
-    worktrees
-        .iter()
-        .find(|worktree| worktree.is_active() && !worktree.is_main)
-        .map(|worktree| worktree.path.clone())
-}
-
 fn build_messages_from_conversation(engine: &AssistantEngine) -> Vec<AssistantMessage> {
-    let now = chrono::Utc::now().timestamp();
     engine
         .conversation()
         .iter()
-        .filter_map(|msg| {
+        .enumerate()
+        .filter_map(|(index, msg)| {
             let content = msg.content.as_deref().unwrap_or("");
             if msg.role == "system" || msg.role == "tool" {
                 return None;
@@ -303,7 +294,11 @@ fn build_messages_from_conversation(engine: &AssistantEngine) -> Vec<AssistantMe
                 role: msg.role.clone(),
                 kind,
                 content: content.to_string(),
-                timestamp: now,
+                timestamp: engine
+                    .message_timestamps()
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
             })
         })
         .collect()

@@ -2,7 +2,9 @@
 //! Built-in tool definitions for Assistant Mode LLM tool-call dispatch.
 
 use serde_json::json;
+use std::io::Read;
 use std::path::Path;
+use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use crate::state::AppState;
@@ -166,11 +168,27 @@ pub fn execute_assistant_tool(
             let pattern = get_required_string_any(&args, &["pattern"])?;
             let rel_path = get_required_string_any(&args, &["path"])?;
             let full_path = Path::new(project_path).join(rel_path);
-            run_command_in_dir(
-                project_path,
-                "grep",
-                &["-rn", pattern, &full_path.to_string_lossy()],
-            )
+            #[cfg(target_os = "windows")]
+            {
+                let search_path = if full_path.is_dir() {
+                    format!(r"{}\*", full_path.display())
+                } else {
+                    full_path.to_string_lossy().to_string()
+                };
+                run_command_in_dir(
+                    project_path,
+                    "findstr",
+                    &["/N", "/R", "/S", pattern, &search_path],
+                )
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                run_command_in_dir(
+                    project_path,
+                    "grep",
+                    &["-rn", pattern, &full_path.to_string_lossy()],
+                )
+            }
         }
         TOOL_LIST_DIRECTORY => {
             let rel_path = get_required_string_any(&args, &["path"])?;
@@ -212,23 +230,14 @@ pub fn execute_assistant_tool(
 // ── helpers (assistant-specific) ─────────────────────────────────────
 
 fn run_command_in_dir(dir: &str, program: &str, args: &[&str]) -> Result<String, String> {
-    let output = process_command(program)
+    let child = process_command(program)
         .args(args)
         .current_dir(dir)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to run {}: {}", program, e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if output.status.success() {
-        Ok(stdout.to_string())
-    } else {
-        Ok(format!(
-            "Exit code: {}\nstdout:\n{}\nstderr:\n{}",
-            output.status, stdout, stderr
-        ))
-    }
+    run_child_with_timeout(child, program)
 }
 
 fn run_shell_command(dir: &str, shell_command: &str) -> Result<String, String> {
@@ -237,39 +246,42 @@ fn run_shell_command(dir: &str, shell_command: &str) -> Result<String, String> {
     #[cfg(not(target_os = "windows"))]
     let (shell, flag) = ("sh", "-c");
 
-    let mut child = process_command(shell)
+    let child = process_command(shell)
         .arg(flag)
         .arg(shell_command)
         .current_dir(dir)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to run command: {}", e))?;
+    run_child_with_timeout(child, shell)
+}
 
-    // Poll with timeout
+fn run_child_with_timeout(mut child: Child, label: &str) -> Result<String, String> {
+    let stdout_handle = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = stdout.read_to_string(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            buf
+        })
+    });
+
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = child
-                    .stdout
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = String::new();
-                        use std::io::Read;
-                        let _ = s.read_to_string(&mut buf);
-                        buf
-                    })
+                let stdout = stdout_handle
+                    .map(|handle| handle.join().unwrap_or_default())
                     .unwrap_or_default();
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = String::new();
-                        use std::io::Read;
-                        let _ = s.read_to_string(&mut buf);
-                        buf
-                    })
+                let stderr = stderr_handle
+                    .map(|handle| handle.join().unwrap_or_default())
                     .unwrap_or_default();
                 return if status.success() {
                     Ok(stdout)
@@ -283,14 +295,24 @@ fn run_shell_command(dir: &str, shell_command: &str) -> Result<String, String> {
             Ok(None) => {
                 if start.elapsed() >= COMMAND_TIMEOUT {
                     let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.map(|handle| handle.join());
+                    let _ = stderr_handle.map(|handle| handle.join());
                     return Err(format!(
-                        "Command timed out after {} seconds",
-                        COMMAND_TIMEOUT.as_secs()
+                        "{} timed out after {} seconds",
+                        label,
+                        COMMAND_TIMEOUT.as_secs(),
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => return Err(format!("Failed to wait for command: {}", e)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.map(|handle| handle.join());
+                let _ = stderr_handle.map(|handle| handle.join());
+                return Err(format!("Failed to wait for command: {}", e));
+            }
         }
     }
 }

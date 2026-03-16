@@ -337,7 +337,9 @@ impl AppState {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.assistant_monitor_handle.lock() {
-            map.remove(window_label);
+            if let Some(handle) = map.remove(window_label) {
+                handle.stop_now();
+            }
         }
     }
 
