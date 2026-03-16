@@ -23,22 +23,25 @@
     }
   }
 
-  async function initializeAssistant() {
+  async function initializeAssistant(): Promise<AssistantState | null> {
     const state = await loadAssistantState();
     if (!state) {
-      return;
+      return null;
     }
 
     assistantState = state;
     if (!state.aiReady || state.sessionId) {
-      return;
+      return state;
     }
 
     try {
       await invoke("assistant_start");
-      assistantState = (await loadAssistantState()) ?? state;
+      const startedState = (await loadAssistantState()) ?? state;
+      assistantState = startedState;
+      return startedState;
     } catch (err) {
       console.error("Failed to start assistant session:", err);
+      return state;
     }
   }
 
@@ -56,10 +59,8 @@
     if (!text) return;
 
     try {
-      if (!assistantState?.sessionId) {
-        await initializeAssistant();
-      }
-      if (!assistantState?.sessionId) {
+      const readyState = await initializeAssistant();
+      if (!readyState?.sessionId) {
         return;
       }
 

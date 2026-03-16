@@ -257,7 +257,7 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state(defaultAppTabs());
-  let activeTabId: string = $state("summary");
+  let activeTabId: string = $state("assistant");
   let lastWindowMenuTabsSignature: string | null = null;
   let lastWindowMenuActiveTabId: string | null = null;
   let agentPasteHintDismissed = loadAgentPasteHintDismissed();
