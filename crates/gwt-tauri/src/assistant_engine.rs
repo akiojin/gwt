@@ -16,6 +16,7 @@ use crate::state::AppState;
 const MAX_TOOL_LOOP_ITERATIONS: usize = 10;
 const ASSISTANT_MAX_TOKENS: u32 = 4096;
 const ASSISTANT_TEMPERATURE: f32 = 0.3;
+const MAX_CONVERSATION_MESSAGES: usize = 50;
 
 const SYSTEM_PROMPT: &str = r#"あなたは gwt (Git Worktree Manager) のアシスタントです。
 プロアクティブな参謀として、ユーザーの開発作業を支援します。
@@ -128,6 +129,38 @@ impl AssistantEngine {
         Ok(Some(response))
     }
 
+    /// Prune conversation to stay within the sliding window limit.
+    /// Keeps the system prompt (index 0) and the most recent messages.
+    /// Ensures the cut point does not orphan tool result messages.
+    fn prune_conversation(&mut self) {
+        if self.conversation.len() <= MAX_CONVERSATION_MESSAGES {
+            return;
+        }
+
+        // Always keep message[0] (system prompt).
+        // Keep the last (MAX_CONVERSATION_MESSAGES - 1) messages from the tail.
+        let keep_tail = MAX_CONVERSATION_MESSAGES - 1;
+        let mut cut = self.conversation.len() - keep_tail;
+
+        // Ensure cut point doesn't orphan a "tool" role message (tool result without
+        // the preceding assistant tool_calls message). Walk forward from the cut point
+        // to find the first message that is NOT a "tool" role.
+        while cut < self.conversation.len() && self.conversation[cut].role == "tool" {
+            cut += 1;
+        }
+
+        if cut >= self.conversation.len() {
+            // Edge case: all remaining messages are tool results — keep everything
+            return;
+        }
+
+        // Build pruned conversation: system prompt + messages from cut onward
+        let mut pruned = Vec::with_capacity(1 + self.conversation.len() - cut);
+        pruned.push(self.conversation[0].clone());
+        pruned.extend_from_slice(&self.conversation[cut..]);
+        self.conversation = pruned;
+    }
+
     /// Run the LLM tool-use loop: call LLM, execute tool calls, repeat until
     /// the LLM returns a text response (no tool calls) or max iterations reached.
     fn run_llm_loop(&mut self, state: &AppState) -> Result<AssistantResponse, String> {
@@ -136,6 +169,9 @@ impl AssistantEngine {
 
         // Load AI settings once before the loop to avoid repeated config reads.
         let ai_settings = resolve_ai_settings()?;
+
+        // Prune conversation before sending to LLM to avoid context window overflow.
+        self.prune_conversation();
 
         for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
             let messages = self.conversation.clone();
@@ -308,5 +344,89 @@ mod tests {
         // Conversation should have system message
         assert_eq!(engine.conversation.len(), 1);
         assert_eq!(engine.conversation[0].role, "system");
+    }
+
+    fn make_msg(role: &str, content: &str) -> ChatCompletionsToolMessage {
+        ChatCompletionsToolMessage {
+            role: role.to_string(),
+            content: Some(content.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_prune_conversation_under_limit() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        // Add messages up to exactly MAX_CONVERSATION_MESSAGES (system + 49 user)
+        for i in 0..(MAX_CONVERSATION_MESSAGES - 1) {
+            engine.conversation.push(make_msg("user", &format!("msg {}", i)));
+        }
+        assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
+        engine.prune_conversation();
+        // Should not change
+        assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
+    }
+
+    #[test]
+    fn test_prune_conversation_over_limit() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        // Add 60 user messages (total = 61 with system)
+        for i in 0..60 {
+            engine.conversation.push(make_msg("user", &format!("msg {}", i)));
+        }
+        assert_eq!(engine.conversation.len(), 61);
+        engine.prune_conversation();
+        // Should be MAX_CONVERSATION_MESSAGES
+        assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
+        // First message is always system
+        assert_eq!(engine.conversation[0].role, "system");
+        // Last message should be the most recent
+        assert_eq!(
+            engine.conversation.last().unwrap().content.as_deref(),
+            Some("msg 59")
+        );
+    }
+
+    #[test]
+    fn test_prune_conversation_tool_boundary() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        // Build a conversation that would cut in the middle of tool results:
+        // [system, user*10, assistant(with tool_calls), tool, tool, user*40]
+        // Total: 1 + 10 + 1 + 2 + 40 = 54
+        for i in 0..10 {
+            engine.conversation.push(make_msg("user", &format!("early {}", i)));
+        }
+        // Assistant message with tool_calls
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![]),
+            tool_call_id: None,
+        });
+        // Tool results
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "tool".to_string(),
+            content: Some("result1".to_string()),
+            tool_calls: None,
+            tool_call_id: Some("call1".to_string()),
+        });
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "tool".to_string(),
+            content: Some("result2".to_string()),
+            tool_calls: None,
+            tool_call_id: Some("call2".to_string()),
+        });
+        for i in 0..40 {
+            engine.conversation.push(make_msg("user", &format!("late {}", i)));
+        }
+        assert_eq!(engine.conversation.len(), 54);
+        engine.prune_conversation();
+        // First should be system
+        assert_eq!(engine.conversation[0].role, "system");
+        // No orphaned tool messages at the start of the kept window
+        assert_ne!(engine.conversation[1].role, "tool");
+        // Should have been pruned
+        assert!(engine.conversation.len() <= MAX_CONVERSATION_MESSAGES);
     }
 }

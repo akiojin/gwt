@@ -14,6 +14,7 @@ mod pty_skills;
 mod session_watcher;
 mod single_instance;
 mod state;
+mod tool_helpers;
 
 use state::AppState;
 use std::io::Read;

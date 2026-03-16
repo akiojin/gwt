@@ -295,23 +295,7 @@ impl AIClient {
         let mut retries = 0usize;
 
         loop {
-            let mut headers = HeaderMap::new();
-            if !self.api_key.trim().is_empty() {
-                if is_azure_endpoint(&url) {
-                    headers.insert(
-                        "api-key",
-                        HeaderValue::from_str(self.api_key.trim())
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                } else {
-                    let value = format!("Bearer {}", self.api_key.trim());
-                    headers.insert(
-                        AUTHORIZATION,
-                        HeaderValue::from_str(&value)
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                }
-            }
+            let headers = self.build_auth_headers(&url)?;
 
             let response = self
                 .client
@@ -418,23 +402,7 @@ impl AIClient {
         let mut retries = 0usize;
 
         loop {
-            let mut headers = HeaderMap::new();
-            if !self.api_key.trim().is_empty() {
-                if is_azure_endpoint(&url) {
-                    headers.insert(
-                        "api-key",
-                        HeaderValue::from_str(self.api_key.trim())
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                } else {
-                    let value = format!("Bearer {}", self.api_key.trim());
-                    headers.insert(
-                        AUTHORIZATION,
-                        HeaderValue::from_str(&value)
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                }
-            }
+            let headers = self.build_auth_headers(&url)?;
 
             let response = self
                 .client
@@ -624,23 +592,7 @@ impl AIClient {
             let request_body =
                 build_chat_completions_request(&body_messages, &self.model, reasoning);
 
-            let mut headers = HeaderMap::new();
-            if !self.api_key.trim().is_empty() {
-                if is_azure_endpoint(&url) {
-                    headers.insert(
-                        "api-key",
-                        HeaderValue::from_str(self.api_key.trim())
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                } else {
-                    let value = format!("Bearer {}", self.api_key.trim());
-                    headers.insert(
-                        AUTHORIZATION,
-                        HeaderValue::from_str(&value)
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                }
-            }
+            let headers = self.build_auth_headers(&url)?;
 
             let response = self
                 .client
