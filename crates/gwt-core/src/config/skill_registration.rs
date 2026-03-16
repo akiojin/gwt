@@ -3,7 +3,7 @@
 //! Registration is project-scoped:
 //! - Codex: `<project>/.codex/skills`
 //! - Gemini: `<project>/.gemini/skills`
-//! - Claude: `<project>/.claude/{skills,commands,hooks}` + `<project>/.claude/settings.json`
+//! - Claude: `<project>/.claude/{skills,commands,hooks}` + `<project>/.claude/settings.local.json`
 
 use super::Settings;
 use crate::error::GwtError;
@@ -327,6 +327,7 @@ const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.claude/skills/gwt-*/",
     "/.claude/commands/gwt-*.md",
     "/.claude/hooks/scripts/gwt-*.mjs",
+    "/.claude/settings.local.json",
 ];
 const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".gwt/",
@@ -341,6 +342,8 @@ const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".claude/hooks/",
     ".claude/hooks/scripts/gwt-*.sh",
     "/.claude/hooks/scripts/gwt-*.sh",
+    ".claude/settings.json",
+    "/.claude/settings.json",
 ];
 
 /// Agent types that support skill registration.
@@ -430,7 +433,9 @@ fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
     match agent {
         SkillAgentType::Claude => all_claude_assets()
             .map(|asset| format!(".claude/{}", asset.relative_path))
-            .chain(std::iter::once(".claude/settings.json hooks".to_string()))
+            .chain(std::iter::once(
+                ".claude/settings.local.json hooks".to_string(),
+            ))
             .collect(),
         SkillAgentType::Codex => project_asset_missing_items(".codex"),
         SkillAgentType::Gemini => project_asset_missing_items(".gemini"),
@@ -480,7 +485,7 @@ fn claude_root_for(project_root: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
-    claude_root_for(project_root).map(|root| root.join("settings.json"))
+    claude_root_for(project_root).map(|root| root.join("settings.local.json"))
 }
 
 #[cfg(test)]
@@ -490,10 +495,6 @@ fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
 
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
     let root = project_root.join(".claude");
-    let settings_path = root.join("settings.json");
-
-    let _ = super::claude_plugins::remove_gwt_plugin_key_at(&settings_path);
-    super::claude_hooks::unregister_gwt_hooks(&settings_path)?;
     cleanup_legacy_claude_hook_scripts(&root)?;
 
     write_managed_assets(&root, all_claude_assets(), ".claude")?;
@@ -848,7 +849,7 @@ fn managed_hooks_definition() -> Value {
 }
 
 fn merge_managed_claude_hooks_into_settings(claude_root: &Path) -> Result<(), GwtError> {
-    let settings_path = claude_root.join("settings.json");
+    let settings_path = claude_root.join("settings.local.json");
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| GwtError::ConfigWriteError {
@@ -861,8 +862,21 @@ fn merge_managed_claude_hooks_into_settings(claude_root: &Path) -> Result<(), Gw
     }
 
     let mut settings = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
-        serde_json::from_str::<Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
+        let content =
+            std::fs::read_to_string(&settings_path).map_err(|e| GwtError::ConfigWriteError {
+                reason: format!(
+                    "Failed to read Claude settings {}: {}",
+                    settings_path.display(),
+                    e
+                ),
+            })?;
+        serde_json::from_str::<Value>(&content).map_err(|e| GwtError::ConfigParseError {
+            reason: format!(
+                "Failed to parse Claude settings {}: {}",
+                settings_path.display(),
+                e
+            ),
+        })?
     } else {
         serde_json::json!({})
     };
@@ -1304,8 +1318,8 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         );
     };
 
-    let settings_path =
-        claude_settings_path_for(project_root).unwrap_or_else(|| claude_root.join("settings.json"));
+    let settings_path = claude_settings_path_for(project_root)
+        .unwrap_or_else(|| claude_root.join("settings.local.json"));
 
     let mut missing_items = Vec::new();
 
@@ -1317,10 +1331,10 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
     }
 
     if !settings_path.exists() {
-        missing_items.push(".claude/settings.json".to_string());
+        missing_items.push(".claude/settings.local.json".to_string());
     } else {
         for event in missing_managed_hook_events(&settings_path) {
-            missing_items.push(format!(".claude/settings.json hooks.{event}"));
+            missing_items.push(format!(".claude/settings.local.json hooks.{event}"));
         }
     }
 
@@ -1574,7 +1588,7 @@ mod tests {
         let claude_path = claude_settings_path_for(Some(temp.path())).unwrap();
         assert_eq!(
             claude_path,
-            temp.path().join(".claude").join("settings.json")
+            temp.path().join(".claude").join("settings.local.json")
         );
     }
 
@@ -1708,7 +1722,7 @@ mod tests {
             .join("hooks.json")
             .exists());
 
-        let settings_path = temp.path().join(".claude").join("settings.json");
+        let settings_path = temp.path().join(".claude").join("settings.local.json");
         let content = std::fs::read_to_string(settings_path).unwrap();
         assert!(content.contains("gwt-forward-hook.mjs"));
         assert!(content.contains("gwt-block-git-branch-ops.mjs"));
@@ -2032,7 +2046,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            claude_root.join("settings.json"),
+            claude_root.join("settings.local.json"),
             serde_json::json!({
                 "enabledPlugins": {
                     super::super::claude_plugins::GWT_PLUGIN_FULL_NAME: true
@@ -2079,8 +2093,9 @@ mod tests {
             .join("gwt-forward-hook.mjs")
             .exists());
 
-        let settings_content = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
-        assert!(!settings_content.contains(super::super::claude_plugins::GWT_PLUGIN_FULL_NAME));
+        let settings_content =
+            std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
+        assert!(settings_content.contains(super::super::claude_plugins::GWT_PLUGIN_FULL_NAME));
 
         let status = status_for_claude(Some(temp.path()));
         assert!(status.registered);
@@ -2113,19 +2128,19 @@ mod tests {
     }
 
     #[test]
-    fn claude_registration_propagates_invalid_settings_json() {
+    fn claude_registration_propagates_invalid_settings_local_json() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
         let claude_root = temp.path().join(".claude");
         std::fs::create_dir_all(&claude_root).unwrap();
-        std::fs::write(claude_root.join("settings.json"), "{invalid").unwrap();
+        std::fs::write(claude_root.join("settings.local.json"), "{invalid").unwrap();
 
         let err = register_agent_skills_with_settings_at_project_root(
             SkillAgentType::Claude,
             &settings,
             Some(temp.path()),
         )
-        .expect_err("invalid settings.json should abort registration");
+        .expect_err("invalid settings.local.json should abort registration");
 
         let reason = err.to_string();
         assert!(

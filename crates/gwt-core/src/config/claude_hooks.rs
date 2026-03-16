@@ -1,9 +1,8 @@
-//! Legacy Claude Code Hook detection and cleanup (gwt-spec issue)
+//! Claude Code hook detection and cleanup for project-local settings.
 //!
-//! Before the gwt-integration plugin migration, gwt registered hooks directly
-//! into `~/.claude/settings.json`.  This module retains only the detection
-//! (`is_gwt_hooks_registered`) and removal (`unregister_gwt_hooks`) helpers so
-//! that the plugin setup path can automatically clean up leftover legacy entries.
+//! gwt manages Claude hooks inside `<project>/.claude/settings.local.json`.
+//! This module provides detection and removal helpers for gwt-managed hook
+//! entries in that file.
 
 use crate::error::GwtError;
 use serde::{Deserialize, Serialize};
@@ -123,7 +122,7 @@ fn is_gwt_hook_command(command: &str) -> bool {
     parse_gwt_hook_command(command).is_some()
 }
 
-/// Claude Code settings.json structure (partial)
+/// Claude Code settings.local.json structure (partial)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClaudeSettings {
     #[serde(default)]
@@ -148,7 +147,7 @@ pub fn all_hook_events() -> impl Iterator<Item = &'static str> {
         .copied()
 }
 
-/// Check if gwt hooks are already registered in settings.json
+/// Check if gwt hooks are already registered in settings.local.json
 pub fn is_gwt_hooks_registered(settings_path: &Path) -> bool {
     if !settings_path.exists() {
         return false;
@@ -189,7 +188,7 @@ fn is_gwt_hook_entry(entry: &serde_json::Value) -> bool {
     }
 }
 
-/// Unregister gwt hooks from Claude Code settings.json
+/// Unregister gwt hooks from Claude Code settings.local.json
 pub fn unregister_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
     if !settings_path.exists() {
         return Ok(());
@@ -246,7 +245,7 @@ mod tests {
     #[test]
     fn test_detect_missing_gwt_hooks() {
         let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        let settings_path = temp_dir.path().join(".claude").join("settings.local.json");
 
         let result = is_gwt_hooks_registered(&settings_path);
 
@@ -256,7 +255,7 @@ mod tests {
     #[test]
     fn test_detect_existing_gwt_hooks_new_format() {
         let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        let settings_path = temp_dir.path().join(".claude").join("settings.local.json");
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
 
         let content = r#"{"hooks": {"UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "gwt hook UserPromptSubmit"}]}]}}"#;
@@ -270,7 +269,7 @@ mod tests {
     #[test]
     fn test_detect_existing_gwt_hooks_legacy_format() {
         let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        let settings_path = temp_dir.path().join(".claude").join("settings.local.json");
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
 
         // Legacy format (string) should still be detected
@@ -285,7 +284,7 @@ mod tests {
     #[test]
     fn test_detect_existing_gwt_hooks_windows_exe_format() {
         let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        let settings_path = temp_dir.path().join(".claude").join("settings.local.json");
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
 
         let content = serde_json::json!({
@@ -312,7 +311,7 @@ mod tests {
     #[test]
     fn test_unregister_gwt_hooks() {
         let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        let settings_path = temp_dir.path().join(".claude").join("settings.local.json");
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
 
         // Write a fixture with gwt hooks and a custom hook directly

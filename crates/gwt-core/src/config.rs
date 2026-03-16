@@ -25,11 +25,11 @@ pub use claude_hooks::is_gwt_hooks_registered;
 pub use claude_plugins::{
     disable_gwt_plugin_at, enable_worktree_protection_plugin,
     force_enable_worktree_protection_plugin, force_setup_gwt_plugin_at,
-    get_global_claude_settings_path, get_known_marketplaces_path, get_local_claude_settings_path,
-    is_gwt_marketplace_registered, is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings,
-    is_plugin_explicitly_disabled, register_gwt_marketplace, register_gwt_marketplace_at,
-    remove_gwt_plugin_key_at, setup_gwt_plugin, setup_gwt_plugin_at, GWT_MARKETPLACE_NAME,
-    GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
+    get_known_marketplaces_path, get_local_claude_settings_path, is_gwt_marketplace_registered,
+    is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings, is_plugin_explicitly_disabled,
+    register_gwt_marketplace, register_gwt_marketplace_at, remove_gwt_plugin_key_at,
+    setup_gwt_plugin, setup_gwt_plugin_at, GWT_MARKETPLACE_NAME, GWT_MARKETPLACE_REPO,
+    GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
 };
 pub use migration::{backup_broken_file, ensure_config_dir, write_atomic};
 pub use os_env::{capture_login_shell_env, EnvSource, OsEnvResult, ShellType};
