@@ -1381,6 +1381,7 @@ mod tests {
                 String::new()
             },
             language: "en".to_string(),
+            summary_enabled: true,
         }
     }
 
@@ -1697,7 +1698,6 @@ mod tests {
         let config = ProfilesConfig {
             version: 1,
             active: Some("default".to_string()),
-            default_ai: None,
             profiles,
         };
 
@@ -1712,7 +1712,6 @@ mod tests {
         let config = ProfilesConfig {
             version: 1,
             active: Some("default".to_string()),
-            default_ai: None,
             profiles,
         };
 
@@ -1729,7 +1728,6 @@ mod tests {
         let config = ProfilesConfig {
             version: 1,
             active: Some("default".to_string()),
-            default_ai: None,
             profiles,
         };
 

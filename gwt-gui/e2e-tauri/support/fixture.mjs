@@ -34,12 +34,14 @@ function writeRecentProjects(homeDir, projectRoot) {
   const gwtDir = path.join(homeDir, ".gwt");
   mkdirSync(gwtDir, { recursive: true });
   const content = [
-    "[[projects]]",
+    "[recent_projects]",
+    "",
+    "[[recent_projects.projects]]",
     `path = "${escapeTomlString(projectRoot)}"`,
     "last_opened = 2026-03-09T00:00:00Z",
     "",
   ].join("\n");
-  writeFileSync(path.join(gwtDir, "recent-projects.toml"), content, "utf8");
+  writeFileSync(path.join(gwtDir, "config.toml"), content, "utf8");
 }
 
 function writeProjectConfig(projectRoot) {
