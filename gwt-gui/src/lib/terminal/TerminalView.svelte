@@ -52,6 +52,7 @@
   let resizeInFlight = false;
   let queuedResize: { rows: number; cols: number } | null = null;
   let lastLayoutSnapshot: LayoutSnapshot | null = null;
+  const MAX_CLIPBOARD_IMAGE_BYTES = 10 * 1024 * 1024;
   let profile: AgentInputProfile | null = $derived(
     agentId ? getAgentInputProfileOrDefault(agentId) : null,
   );
@@ -462,7 +463,12 @@
   }
 
   function voiceButtonDisabled(): boolean {
-    return !voiceInputSupported || !voiceInputAvailable || !voiceInputEnabled;
+    return (
+      voiceInputPreparing ||
+      !voiceInputSupported ||
+      !voiceInputAvailable ||
+      !voiceInputEnabled
+    );
   }
 
   function voiceButtonTitle(): string {
@@ -497,6 +503,7 @@
       toastBus.emit({
         message: "Image clipboard paste is unavailable in this environment.",
       });
+      requestTerminalFocus(true);
       return;
     }
 
@@ -507,12 +514,20 @@
       );
       if (!imageItem) {
         toastBus.emit({ message: "Clipboard does not contain an image." });
+        requestTerminalFocus(true);
         return;
       }
 
       const imageType =
         imageItem.types.find((type) => type.startsWith("image/")) ?? "image/png";
       const blob = await imageItem.getType(imageType);
+      if (blob.size > MAX_CLIPBOARD_IMAGE_BYTES) {
+        toastBus.emit({
+          message: "Clipboard image is too large (max 10 MB).",
+        });
+        requestTerminalFocus(true);
+        return;
+      }
       const bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
       const format = imageType.split("/")[1] || "png";
       const { invoke } = await import("$lib/tauriInvoke");
@@ -523,21 +538,27 @@
       });
       if (!imagePath) {
         toastBus.emit({ message: "Failed to stage clipboard image." });
+        requestTerminalFocus(true);
         return;
       }
 
-      await writeToTerminal(buildImageInsertText(imagePath));
+      const wrote = await writeToTerminal(buildImageInsertText(imagePath));
+      if (!wrote) {
+        toastBus.emit({ message: "Failed to paste image into terminal." });
+        return;
+      }
       requestTerminalFocus(true);
     } catch (err) {
       console.error("Failed to paste image from clipboard:", err);
       toastBus.emit({
         message: `Failed to paste image: ${err instanceof Error ? err.message : String(err)}`,
       });
+      requestTerminalFocus(true);
     }
   }
 
   function handleVoiceButtonClick() {
-    if (voiceButtonDisabled()) return;
+    if (voiceInputPreparing || voiceButtonDisabled()) return;
     window.dispatchEvent(new CustomEvent("gwt-voice-toggle"));
     requestTerminalFocus(true);
   }
@@ -906,14 +927,16 @@
     }
   }
 
-  async function writeToTerminal(data: string) {
+  async function writeToTerminal(data: string): Promise<boolean> {
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
       await invoke("write_terminal", { paneId, data: bytes });
+      return true;
     } catch (err) {
       console.error("Failed to write to terminal:", err);
+      return false;
     }
   }
 

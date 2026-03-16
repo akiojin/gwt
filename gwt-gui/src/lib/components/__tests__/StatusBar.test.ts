@@ -7,6 +7,13 @@ type StatusBarProps = {
   currentBranch?: string;
   terminalCount?: number;
   osEnvReady?: boolean;
+  voiceInputEnabled?: boolean;
+  voiceInputListening?: boolean;
+  voiceInputPreparing?: boolean;
+  voiceInputSupported?: boolean;
+  voiceInputAvailable?: boolean;
+  voiceInputAvailabilityReason?: string | null;
+  voiceInputError?: string | null;
 };
 
 async function renderStatusBar(props: StatusBarProps) {
@@ -72,6 +79,19 @@ describe("StatusBar", () => {
     });
     await waitFor(() => {
       expect(rendered.getByText("Loading environment...")).toBeTruthy();
+    });
+  });
+
+  it("renders voice status in the status bar", async () => {
+    const rendered = await renderStatusBar({
+      projectPath: "/tmp/project",
+      voiceInputEnabled: true,
+      voiceInputSupported: true,
+      voiceInputAvailable: true,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Voice: idle")).toBeTruthy();
     });
   });
 });

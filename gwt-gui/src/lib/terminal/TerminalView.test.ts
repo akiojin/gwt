@@ -1874,12 +1874,79 @@ describe("TerminalView", () => {
       paneId: "pane-no-image",
       active: true,
     });
+    const term = terminalInstances[0];
+    const focusCallsBeforeClick = term.focus.mock.calls.length;
 
     await fireEvent.click(getByRole("button", { name: "Paste" }));
 
     await waitFor(() => {
       expect(toastEmitMock).toHaveBeenCalledWith({
         message: "Clipboard does not contain an image.",
+      });
+    });
+    expect(term.focus.mock.calls.length).toBeGreaterThan(focusCallsBeforeClick);
+  });
+
+  it("shows a toast when clipboard image is too large", async () => {
+    readClipboardItemsMock.mockResolvedValue([
+      {
+        types: ["image/png"],
+        getType: vi.fn(async () => ({
+          size: 10 * 1024 * 1024 + 1,
+          arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+        })),
+      },
+    ]);
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-image-too-large",
+      active: true,
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(toastEmitMock).toHaveBeenCalledWith({
+        message: "Clipboard image is too large (max 10 MB).",
+      });
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("save_clipboard_image", expect.anything());
+  });
+
+  it("shows a toast when writing the staged image path fails", async () => {
+    readClipboardItemsMock.mockResolvedValue([
+      {
+        types: ["image/png"],
+        getType: vi.fn(async () => ({
+          size: 3,
+          arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+        })),
+      },
+    ]);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "terminal_ready") {
+        return Array.from(new TextEncoder().encode("hello\n"));
+      }
+      if (command === "save_clipboard_image") {
+        return "./.tmp/images/clipboard.png";
+      }
+      if (command === "write_terminal") {
+        throw new Error("write failed");
+      }
+      return null;
+    });
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-write-fails",
+      active: true,
+      agentId: "gemini",
+    });
+
+    await fireEvent.click(getByRole("button", { name: "Paste" }));
+
+    await waitFor(() => {
+      expect(toastEmitMock).toHaveBeenCalledWith({
+        message: "Failed to paste image into terminal.",
       });
     });
   });
@@ -1899,6 +1966,28 @@ describe("TerminalView", () => {
     await fireEvent.click(getByRole("button", { name: "Voice" }));
 
     expect(handler).toHaveBeenCalledTimes(1);
+    window.removeEventListener("gwt-voice-toggle", handler);
+  });
+
+  it("disables voice toggle while preparing", async () => {
+    const handler = vi.fn();
+    window.addEventListener("gwt-voice-toggle", handler);
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-voice-preparing",
+      active: true,
+      voiceInputEnabled: true,
+      voiceInputSupported: true,
+      voiceInputAvailable: true,
+      voiceInputPreparing: true,
+    });
+
+    const voiceButton = getByRole("button", { name: "Voice" });
+    expect((voiceButton as HTMLButtonElement).disabled).toBe(true);
+
+    await fireEvent.click(voiceButton);
+
+    expect(handler).not.toHaveBeenCalled();
     window.removeEventListener("gwt-voice-toggle", handler);
   });
 

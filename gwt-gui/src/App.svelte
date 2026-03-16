@@ -2911,6 +2911,13 @@
       {currentBranch}
       {terminalCount}
       {osEnvReady}
+      voiceInputEnabled={voiceInputSettings.enabled}
+      voiceInputListening={voiceInputListening}
+      voiceInputPreparing={voiceInputPreparing}
+      voiceInputSupported={voiceInputSupported}
+      voiceInputAvailable={voiceInputAvailable}
+      voiceInputAvailabilityReason={voiceInputAvailabilityReason}
+      voiceInputError={voiceInputError}
     />
   </div>
 {/if}

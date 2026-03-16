@@ -2150,7 +2150,7 @@ fn launch_with_wsl_pty_write(
     if let Ok(mut map) = state.pane_launch_meta.lock() {
         map.remove(&pane_id);
     }
-    remove_pane_runtime_context(&state, &pane_id);
+    remove_pane_runtime_context(state, &pane_id);
 
     // Build non-interactive command: wsl.exe -e bash -lc 'export ...; cd ...; exec agent args...'
     let fallback_cmd =
@@ -6259,6 +6259,16 @@ fn create_staged_image_destination(
     Ok((images_dir.join(&filename), relative_path))
 }
 
+fn validate_clipboard_image_data(data: &[u8]) -> Result<(), StructuredError> {
+    if data.is_empty() {
+        return Err(StructuredError::internal(
+            "Clipboard image is empty",
+            "save_clipboard_image",
+        ));
+    }
+    Ok(())
+}
+
 /// Save clipboard image data to a temporary file and return the prompt path.
 #[tauri::command]
 pub fn save_clipboard_image(
@@ -6267,6 +6277,8 @@ pub fn save_clipboard_image(
     format: String,
     state: State<AppState>,
 ) -> Result<String, StructuredError> {
+    validate_clipboard_image_data(&data)?;
+
     let context = pane_runtime_context(&state, &pane_id).ok_or_else(|| {
         StructuredError::internal(
             &format!("Pane runtime context not found: {pane_id}"),
@@ -6326,5 +6338,16 @@ mod attachment_path_tests {
 
         remove_pane_runtime_context(&state, "pane-1");
         assert!(pane_runtime_context(&state, "pane-1").is_none());
+    }
+
+    #[test]
+    fn validate_clipboard_image_data_rejects_empty_payload() {
+        let err = validate_clipboard_image_data(&[]).expect_err("empty payload must fail");
+        assert!(err.message.contains("Clipboard image is empty"));
+    }
+
+    #[test]
+    fn validate_clipboard_image_data_accepts_non_empty_payload() {
+        validate_clipboard_image_data(&[1, 2, 3]).expect("non-empty payload should pass");
     }
 }
