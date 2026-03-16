@@ -119,7 +119,7 @@
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
-  type SidebarMode = "branch" | "projectMode";
+  type SidebarMode = "branch";
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
     enabled: false,
@@ -168,9 +168,6 @@
     if (typeof window === "undefined") return "branch";
     try {
       const raw = window.localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY);
-      if (raw === "projectMode") {
-        return "projectMode";
-      }
       return raw === "branch" ? "branch" : "branch";
     } catch {
       return "branch";
@@ -260,7 +257,7 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state(defaultAppTabs());
-  let activeTabId: string = $state("projectMode");
+  let activeTabId: string = $state("summary");
   let lastWindowMenuTabsSignature: string | null = null;
   let lastWindowMenuActiveTabId: string | null = null;
   let agentPasteHintDismissed = loadAgentPasteHintDismissed();
@@ -1296,24 +1293,20 @@
     persistSidebarWidth(next);
   }
 
-  function ensureProjectModeTab() {
-    const existing = tabs.find((t) => t.type === "projectMode" || t.id === "projectMode");
+  function ensureAssistantTab() {
+    const existing = tabs.find((t) => t.type === "assistant" || t.id === "assistant");
     if (existing) return;
 
     const tab: Tab = {
-      id: "projectMode",
-      label: "Project Mode",
-      type: "projectMode",
+      id: "assistant",
+      label: "Assistant",
+      type: "assistant",
     };
     tabs = [...tabs, tab];
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
     if (sidebarMode === next) return;
-    if (next === "projectMode") {
-      ensureProjectModeTab();
-      activeTabId = "projectMode";
-    }
     sidebarMode = next;
     persistSidebarMode(next);
   }
@@ -1610,12 +1603,12 @@
   }
 
   function normalizePrimaryTab(tab: Tab): Tab {
-    if (tab.type === "projectMode" || tab.id === "projectMode") {
+    if (tab.type === "assistant" || tab.id === "assistant") {
       return {
         ...tab,
-        id: "projectMode",
-        label: "Project Mode",
-        type: "projectMode",
+        id: "assistant",
+        label: "Assistant",
+        type: "assistant",
       };
     }
     return tab;
@@ -1633,11 +1626,11 @@
       merged.push(normalized);
     }
 
-    if (!merged.some((tab) => tab.id === "projectMode")) {
+    if (!merged.some((tab) => tab.id === "assistant")) {
       merged.unshift({
-        id: "projectMode",
-        label: "Project Mode",
-        type: "projectMode",
+        id: "assistant",
+        label: "Assistant",
+        type: "assistant",
       });
     }
 
@@ -2264,7 +2257,7 @@
           projectPath = null;
           void updateWindowSession(null);
           tabs = defaultAppTabs();
-          activeTabId = "projectMode";
+          activeTabId = "assistant";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -2568,7 +2561,7 @@
         }
       }
     } else if (!mergedTabs.some((tab) => tab.id === activeTabId)) {
-      activeTabId = mergedTabs[0]?.id ?? "projectMode";
+      activeTabId = mergedTabs[0]?.id ?? "assistant";
     }
 
     agentTabsHydratedProjectPath = targetProjectPath;
@@ -2621,15 +2614,15 @@
         continue;
       }
       if (
-        tab.type === "projectMode" ||
+        tab.type === "assistant" ||
         tab.type === "settings" ||
         tab.type === "versionHistory" ||
         tab.type === "issues"
       ) {
-        const staticType = tab.type === "projectMode" ? "projectMode" : tab.type;
-        const staticId = tab.id === "projectMode" ? "projectMode" : tab.id;
+        const staticType = tab.type === "assistant" ? "assistant" : tab.type;
+        const staticId = tab.id === "assistant" ? "assistant" : tab.id;
         const staticLabel =
-          tab.type === "projectMode" ? "Project Mode" : tab.label;
+          tab.type === "assistant" ? "Assistant" : tab.label;
         storedTabs.push({
           type: staticType,
           id: staticId,

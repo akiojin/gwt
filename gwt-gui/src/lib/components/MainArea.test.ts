@@ -117,37 +117,37 @@ describe("MainArea", () => {
 
   it("renders without Session Summary tab", async () => {
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
     ];
-    const rendered = await renderMainArea({ tabs, activeTabId: "projectMode" });
+    const rendered = await renderMainArea({ tabs, activeTabId: "assistant" });
 
     expect(rendered.queryByText("Session Summary")).toBeNull();
     const tabLabels = Array.from(
       rendered.container.querySelectorAll(".tab-bar .tab-label"),
     ).map((el) => el.textContent?.trim());
-    expect(tabLabels).toEqual(["Project Mode"]);
+    expect(tabLabels).toEqual(["Assistant"]);
   });
 
-  it("keeps Project Mode pinned (no close button)", async () => {
+  it("keeps Assistant pinned (no close button)", async () => {
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
     ];
-    const rendered = await renderMainArea({ tabs, activeTabId: "projectMode" });
+    const rendered = await renderMainArea({ tabs, activeTabId: "assistant" });
 
-    const projectModeTab = rendered.container.querySelector(".tab-bar .tab");
-    expect(projectModeTab).toBeTruthy();
-    expect(projectModeTab?.querySelector(".tab-close")).toBeNull();
+    const assistantTab = rendered.container.querySelector(".tab-bar .tab");
+    expect(assistantTab).toBeTruthy();
+    expect(assistantTab?.querySelector(".tab-close")).toBeNull();
   });
 
   it("shows close button for non-pinned tabs and emits close callback", async () => {
     const onTabClose = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabClose,
     });
 
@@ -165,7 +165,7 @@ describe("MainArea", () => {
     const onTabClose = vi.fn();
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -175,7 +175,7 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabClose,
       onTabReorder,
     });
@@ -224,7 +224,7 @@ describe("MainArea", () => {
   it("emits onTabReorder during dragover with before/after positions", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -234,7 +234,7 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabReorder,
     });
 
@@ -297,12 +297,12 @@ describe("MainArea", () => {
   it("does not emit onTabReorder when dragging over the same tab", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabReorder,
     });
 
@@ -329,7 +329,7 @@ describe("MainArea", () => {
   it("emits onTabReorder via pointer drag fallback", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -339,7 +339,7 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabReorder,
     });
 
@@ -398,7 +398,7 @@ describe("MainArea", () => {
   it("emits onTabReorder when pointermove is dispatched on window", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -408,7 +408,7 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabReorder,
     });
 
@@ -727,13 +727,13 @@ describe("MainArea", () => {
   it("supports text/plain drag fallback and ignores dragStart without dataTransfer", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabReorder,
     });
 
@@ -767,7 +767,7 @@ describe("MainArea", () => {
 
   it("shows settings and versionHistory panel content", async () => {
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
@@ -788,12 +788,12 @@ describe("MainArea", () => {
   it("handles tab select callback on tab click", async () => {
     const onTabSelect = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabSelect,
     });
 
@@ -805,12 +805,12 @@ describe("MainArea", () => {
   it("ignores pointer drag when button is not left-click", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabReorder,
     });
 
@@ -1025,13 +1025,13 @@ describe("MainArea", () => {
   it("resets pointer drag state on pointercancel", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "projectMode",
+      activeTabId: "assistant",
       onTabReorder,
     });
 

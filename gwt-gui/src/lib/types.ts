@@ -59,51 +59,6 @@ export interface TerminalAnsiProbe {
   has_true_color: boolean;
 }
 
-export interface ProjectModeMessage {
-  role: "user" | "assistant" | "system" | "tool";
-  kind?: "message" | "thought" | "action" | "observation" | "error";
-  content: string;
-  timestamp: number;
-}
-
-export interface ProjectModeState {
-  messages: ProjectModeMessage[];
-  ai_ready: boolean;
-  ai_error?: string | null;
-  last_error?: string | null;
-  is_waiting: boolean;
-  session_name?: string | null;
-  project_mode_session_id?: string | null;
-  lead_status?: string | null;
-  llm_call_count: number;
-  estimated_tokens: number;
-  active_spec_issue_number?: number | null;
-  active_spec_issue_url?: string | null;
-  active_spec_issue_etag?: string | null;
-}
-
-export interface AgentSidebarSubAgent {
-  id: string;
-  name: string;
-  toolId: string;
-  status: "running" | "completed" | "failed" | (string & {});
-  model?: string | null;
-  branch: string;
-  worktreeRelPath: string;
-  worktreeAbsPath?: string | null;
-}
-
-export interface AgentSidebarTask {
-  id: string;
-  title: string;
-  status: "running" | "pending" | "failed" | "completed" | (string & {});
-  subAgents: AgentSidebarSubAgent[];
-}
-
-export interface AgentSidebarView {
-  issueNumber?: number | null;
-  tasks: AgentSidebarTask[];
-}
 
 export interface SendKeysRequest {
   paneId: string;
@@ -250,12 +205,12 @@ export interface Tab {
     | "agent"
     | "settings"
     | "versionHistory"
-    | "projectMode"
     | "terminal"
     | "issueSpec"
     | "issues"
     | "prs"
-    | "projectIndex";
+    | "projectIndex"
+    | "assistant";
   paneId?: string;
   cwd?: string;
   issueNumber?: number;
@@ -699,73 +654,6 @@ export interface PrStatusResponse {
   repoKey?: string | null;
 }
 
-// === Project Mode 3-Layer Type Definitions ===
-
-export interface ProjectModeWorkspaceState {
-  sessionId: string;
-  status: "active" | "paused" | "completed" | "failed";
-  lead: LeadState;
-  issues: ProjectIssue[];
-  developerAgentType: "claude" | "codex" | "gemini";
-}
-
-export interface LeadState {
-  messages: LeadMessage[];
-  status: "idle" | "thinking" | "waiting_approval" | "orchestrating" | "error";
-  llmCallCount: number;
-  estimatedTokens: number;
-}
-
-export interface LeadMessage {
-  role: "user" | "assistant" | "system";
-  kind: "message" | "thought" | "action" | "observation" | "error" | "progress";
-  content: string;
-  timestamp: number;
-}
-
-export interface ProjectIssue {
-  id: string;
-  githubIssueNumber: number;
-  githubIssueUrl: string;
-  title: string;
-  status: "pending" | "planned" | "in_progress" | "ci_fail" | "completed" | "failed";
-  coordinator?: CoordinatorState;
-  tasks: ProjectTask[];
-}
-
-export type DashboardIssue = ProjectIssue & {
-  expanded: boolean;
-  taskCompletedCount: number;
-  taskTotalCount: number;
-};
-
-export interface CoordinatorState {
-  paneId: string;
-  status: "starting" | "running" | "completed" | "crashed" | "restarting";
-}
-
-export interface ProjectTask {
-  id: string;
-  name: string;
-  status: "pending" | "ready" | "running" | "completed" | "failed" | "cancelled";
-  developers: DeveloperState[];
-  testStatus?: "not_run" | "running" | "passed" | "failed";
-  pullRequest?: { number: number; url: string; ciStatus?: string };
-  retryCount: number;
-}
-
-export type DashboardTask = ProjectTask & {
-  developerCount: number;
-};
-
-export interface DeveloperState {
-  id: string;
-  agentType: "claude" | "codex" | "gemini";
-  paneId: string;
-  status: "starting" | "running" | "completed" | "error";
-  worktree: { branchName: string; path: string };
-}
-
 // PR List types (gwt-spec issue)
 
 export interface PrListItem {
@@ -793,4 +681,39 @@ export interface FetchPrListResponse {
 export interface GitHubUserResponse {
   login: string;
   ghStatus: GhCliStatus;
+}
+
+// === Assistant Mode Types ===
+
+export interface AssistantMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  kind: "message" | "thought" | "action" | "notification";
+  content: string;
+  timestamp: number;
+}
+
+export interface PaneDashboard {
+  pane_id: string;
+  agent_name: string;
+  status: string;
+}
+
+export interface GitDashboard {
+  branch: string;
+  uncommitted_count: number;
+  unpushed_count: number;
+}
+
+export interface DashboardData {
+  panes: PaneDashboard[];
+  git: GitDashboard;
+}
+
+export interface AssistantState {
+  messages: AssistantMessage[];
+  ai_ready: boolean;
+  is_thinking: boolean;
+  session_id?: string | null;
+  llm_call_count: number;
+  estimated_tokens: number;
 }
