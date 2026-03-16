@@ -48,7 +48,7 @@ test("opens project from recent projects list", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
   const log = await getInvokeLog(page);
   expect(log).toContain("open_project");
@@ -163,7 +163,7 @@ test("close project returns to OpenProject screen", async ({ page }) => {
   await openRecentProject(page);
 
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   // Trigger close-project menu action
@@ -210,13 +210,13 @@ test("displays gwt title and subtitle on open project screen", async ({
   ).toBeVisible();
 });
 
-test("project mode prompt is visible after opening project", async ({
+test("assistant prompt is visible after opening project", async ({
   page,
 }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 });
 
@@ -313,6 +313,6 @@ test("disables buttons while opening project", async ({ page }) => {
   await recentItem.click();
   // We just verify the project eventually opens
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 });

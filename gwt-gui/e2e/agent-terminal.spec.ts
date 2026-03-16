@@ -190,7 +190,7 @@ test("new terminal opens from menu action", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -203,7 +203,7 @@ test("multiple terminal tabs can be opened", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -303,7 +303,7 @@ test("terminal stream error shows error message", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -356,7 +356,7 @@ test("error terminal closes on Enter key", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -519,11 +519,11 @@ test("Launch Agent dialog close button dismisses dialog", async ({
   await expect(dialog).toBeHidden();
 });
 
-test("tab switch between terminal and project mode", async ({ page }) => {
+test("tab switch between terminal and assistant mode", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -534,12 +534,12 @@ test("tab switch between terminal and project mode", async ({ page }) => {
   // Should now have a terminal tab
   await expect(page.locator(".tab .tab-dot.terminal")).toBeVisible();
 
-  // Click project mode tab to switch back
-  const projectModeTab = page.locator(".tab", { hasText: "Project Mode" });
-  if (await projectModeTab.isVisible()) {
-    await projectModeTab.click();
+  // Click Assistant tab to switch back
+  const assistantTab = page.locator(".tab", { hasText: "Assistant" });
+  if (await assistantTab.isVisible()) {
+    await assistantTab.click();
     await expect(
-      page.getByPlaceholder("Type a task and press Enter..."),
+      page.getByPlaceholder("Type a message..."),
     ).toBeVisible();
   }
 });

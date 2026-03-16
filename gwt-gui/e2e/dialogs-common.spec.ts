@@ -21,7 +21,7 @@ test("Bug Report dialog opens from menu action", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -36,7 +36,7 @@ test("Bug Report dialog has title input", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -49,7 +49,7 @@ test("Bug Report dialog has steps field", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -62,7 +62,7 @@ test("Feature Request dialog opens from menu action", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -77,7 +77,7 @@ test("Feature Request dialog has description field", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -92,7 +92,7 @@ test("Bug Report dialog covers most of viewport height", async ({
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -118,7 +118,7 @@ test("Bug Report form text has readable font size", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -147,7 +147,7 @@ test("About dialog opens from menu action", async ({ page }) => {
   await setMockCommandResponses(page, standardBranchResponses());
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -163,7 +163,7 @@ test("switching between Bug Report and Feature Request tabs", async ({
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -186,7 +186,7 @@ test("Feature Request dialog form has readable font sizes", async ({
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);

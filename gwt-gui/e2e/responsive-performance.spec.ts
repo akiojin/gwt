@@ -26,7 +26,7 @@ test("app renders correctly at small viewport", async ({ page }) => {
   await openRecentProject(page);
 
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 });
 
@@ -36,7 +36,7 @@ test("app renders correctly at large viewport", async ({ page }) => {
   await openRecentProject(page);
 
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 });
 
@@ -73,7 +73,7 @@ test("tab switching performance with two terminals", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -212,12 +212,12 @@ test("viewport resize does not break layout", async ({ page }) => {
   // Resize to a smaller viewport
   await page.setViewportSize({ width: 640, height: 480 });
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   // Resize back to normal
   await page.setViewportSize({ width: 1280, height: 720 });
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 });

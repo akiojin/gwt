@@ -3,20 +3,18 @@ import type { Page } from "@playwright/test";
 const DEFAULT_PROJECT_PATH = "/tmp/gwt-playwright";
 const DEFAULT_LAST_OPENED_AT = "2026-02-13T00:00:00.000Z";
 
-type ProjectModeState = {
+type AssistantState = {
   messages: Array<{
     role: "user" | "assistant" | "system" | "tool";
-    kind?: "message" | "thought" | "action" | "observation" | "error";
+    kind?: "text" | "tool_use" | "message" | "thought" | "action" | "observation" | "error";
     content: string;
     timestamp: number;
   }>;
-  ai_ready: boolean;
-  ai_error: string | null;
-  last_error: string | null;
-  is_waiting: boolean;
-  session_name: string;
-  llm_call_count: number;
-  estimated_tokens: number;
+  aiReady: boolean;
+  isThinking: boolean;
+  sessionId: string | null;
+  llmCallCount: number;
+  estimatedTokens: number;
 };
 
 type TauriMockCommandResponse = unknown;
@@ -84,21 +82,19 @@ export async function installTauriMock(
       let lastSpawnedPaneId: string | null = null;
       let restoreLeaderAcquired = false;
 
-      let projectModeState: ProjectModeState = {
+      let assistantState: AssistantState = {
         messages: [],
-        ai_ready: true,
-        ai_error: null,
-        last_error: null,
-        is_waiting: false,
-        session_name: "Project Mode",
-        llm_call_count: 0,
-        estimated_tokens: 0,
+        aiReady: true,
+        isThinking: false,
+        sessionId: null,
+        llmCallCount: 0,
+        estimatedTokens: 0,
       };
 
-      function cloneProjectModeState(): ProjectModeState {
+      function cloneAssistantState(): AssistantState {
         return {
-          ...projectModeState,
-          messages: projectModeState.messages.map((msg) => ({ ...msg })),
+          ...assistantState,
+          messages: assistantState.messages.map((msg) => ({ ...msg })),
         };
       }
 
@@ -423,38 +419,58 @@ export async function installTauriMock(
 
             return null;
           }
-          case "get_project_mode_state_cmd":
-            return cloneProjectModeState();
-          case "send_project_mode_message_cmd": {
+          case "assistant_get_state":
+            return cloneAssistantState();
+          case "assistant_start":
+            assistantState = {
+              ...assistantState,
+              sessionId: assistantState.sessionId ?? "mock-assistant-session",
+            };
+            return null;
+          case "assistant_send_message": {
             const input =
               typeof args.input === "string" ? args.input.trim() : "";
-            if (!input) return cloneProjectModeState();
+            if (!input) return cloneAssistantState();
+            if (!assistantState.sessionId) {
+              assistantState = {
+                ...assistantState,
+                sessionId: "mock-assistant-session",
+              };
+            }
             const now = Date.now();
             const nextMessages = [
-              ...projectModeState.messages,
+              ...assistantState.messages,
               {
                 role: "user" as const,
-                kind: "message" as const,
+                kind: "text" as const,
                 content: input,
                 timestamp: now,
               },
               {
                 role: "assistant" as const,
-                kind: "message" as const,
+                kind: "text" as const,
                 content: `Echo: ${input}`,
                 timestamp: now + 1,
               },
             ];
-            projectModeState = {
-              ...projectModeState,
+            assistantState = {
+              ...assistantState,
               messages: nextMessages,
-              llm_call_count: projectModeState.llm_call_count + 1,
-              estimated_tokens:
-                projectModeState.estimated_tokens + Math.max(1, input.length),
-              last_error: null,
+              llmCallCount: assistantState.llmCallCount + 1,
+              estimatedTokens:
+                assistantState.estimatedTokens + Math.max(1, input.length),
             };
-            return cloneProjectModeState();
+            return cloneAssistantState();
           }
+          case "assistant_get_dashboard":
+            return {
+              panes: [],
+              git: {
+                branch: "main",
+                uncommittedCount: 0,
+                unpushedCount: 0,
+              },
+            };
         }
 
         if (cmd === "plugin:event|listen") {

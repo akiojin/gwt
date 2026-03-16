@@ -46,7 +46,7 @@ test("StatusBar shows terminal count when terminals open", async ({
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);

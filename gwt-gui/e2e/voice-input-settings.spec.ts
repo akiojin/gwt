@@ -100,7 +100,7 @@ async function openProjectAndSelectBranch(
   await dismissSkillRegistrationScopeDialogIfPresent(page);
   await page.locator("button.recent-item").first().click();
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   const branchButton = page

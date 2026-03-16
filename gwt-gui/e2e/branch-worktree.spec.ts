@@ -355,7 +355,7 @@ test("empty branch list shows properly when no branches returned", async ({
 
   // Should still show the sidebar
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 });
 

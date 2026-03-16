@@ -34,7 +34,7 @@ test("measures terminal tab-switch latency (p95 budget)", async ({ page }) => {
   ).toBeVisible();
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await page.evaluate(() => {

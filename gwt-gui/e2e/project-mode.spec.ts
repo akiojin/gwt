@@ -16,15 +16,15 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("Project Mode panel shows prompt input", async ({ page }) => {
+test("Assistant panel shows prompt input", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 });
 
-test("Project Mode shows Send button", async ({ page }) => {
+test("Assistant mode shows Send button", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
@@ -34,12 +34,12 @@ test("sending a message displays user message", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
 
-  const prompt = page.getByPlaceholder("Type a task and press Enter...");
-  await prompt.fill("hello project mode");
+  const prompt = page.getByPlaceholder("Type a message...");
+  await prompt.fill("hello assistant mode");
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(
-    page.getByText("hello project mode", { exact: true }),
+    page.getByText("hello assistant mode", { exact: true }),
   ).toBeVisible();
 });
 
@@ -47,31 +47,31 @@ test("sending a message displays echo response", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
 
-  const prompt = page.getByPlaceholder("Type a task and press Enter...");
+  const prompt = page.getByPlaceholder("Type a message...");
   await prompt.fill("test echo");
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.getByText("Echo: test echo")).toBeVisible();
 });
 
-test("send invokes send_project_mode_message_cmd", async ({ page }) => {
+test("send invokes assistant_send_message", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
 
-  const prompt = page.getByPlaceholder("Type a task and press Enter...");
+  const prompt = page.getByPlaceholder("Type a message...");
   await prompt.fill("invoke check");
   await prompt.press("Enter");
 
   await expect(page.getByText("Echo: invoke check")).toBeVisible();
   const log = await getInvokeLog(page);
-  expect(log).toContain("send_project_mode_message_cmd");
+  expect(log).toContain("assistant_send_message");
 });
 
 test("input clears after sending", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
 
-  const prompt = page.getByPlaceholder("Type a task and press Enter...");
+  const prompt = page.getByPlaceholder("Type a message...");
   await prompt.fill("clear test");
   await page.getByRole("button", { name: "Send" }).click();
 
@@ -83,7 +83,7 @@ test("multiple messages accumulate in chat", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
 
-  const prompt = page.getByPlaceholder("Type a task and press Enter...");
+  const prompt = page.getByPlaceholder("Type a message...");
 
   await prompt.fill("message one");
   await page.getByRole("button", { name: "Send" }).click();
@@ -112,30 +112,30 @@ test("pressing Enter sends message", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
 
-  const prompt = page.getByPlaceholder("Type a task and press Enter...");
+  const prompt = page.getByPlaceholder("Type a message...");
   await prompt.fill("enter test");
   await prompt.press("Enter");
 
   await expect(page.getByText("Echo: enter test")).toBeVisible();
 });
 
-test("Project Mode state is retrieved on mount", async ({ page }) => {
+test("Assistant state is retrieved on mount", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
 
   await expect
     .poll(async () => {
       const log = await getInvokeLog(page);
-      return log.includes("get_project_mode_state_cmd");
+      return log.includes("assistant_get_state");
     })
     .toBe(true);
 });
 
-test("project mode tab is saved to localStorage", async ({ page }) => {
+test("assistant tab is saved to localStorage", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await expect
@@ -152,7 +152,7 @@ test("project mode tab is saved to localStorage", async ({ page }) => {
           };
           return (
             parsed.byProjectPath?.["/tmp/gwt-playwright"]?.activeTabId ===
-            "projectMode"
+            "assistant"
           );
         } catch {
           return false;
@@ -162,18 +162,17 @@ test("project mode tab is saved to localStorage", async ({ page }) => {
     .toBe(true);
 });
 
-test("Project Mode shows session name in header", async ({ page }) => {
+test("Assistant tab stays active after opening a project", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
-  // The session name "Project Mode" appears in the agent header
-  await expect(page.locator(".agent-title")).toContainText("Project Mode");
+  await expect(page.locator(".tab.active .tab-label")).toHaveText("Assistant");
 });
 
 test("chat area scrolls on new messages", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
 
-  const prompt = page.getByPlaceholder("Type a task and press Enter...");
+  const prompt = page.getByPlaceholder("Type a message...");
 
   // Send several messages to fill chat
   for (let i = 0; i < 5; i++) {

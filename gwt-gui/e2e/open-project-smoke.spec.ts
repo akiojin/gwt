@@ -139,7 +139,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("launches and completes open-project -> project mode send smoke flow", async ({
+test("launches and completes open-project -> assistant mode send smoke flow", async ({
   page,
 }) => {
   await page.goto("/");
@@ -149,7 +149,7 @@ test("launches and completes open-project -> project mode send smoke flow", asyn
   ).toBeVisible();
   await openRecentProject(page);
 
-  const prompt = page.getByPlaceholder("Type a task and press Enter...");
+  const prompt = page.getByPlaceholder("Type a message...");
   await expect(prompt).toBeVisible();
 
   const message = "smoke message";
@@ -168,7 +168,7 @@ test("launches and completes open-project -> project mode send smoke flow", asyn
   });
 
   expect(invokeCommands).toContain("open_project");
-  expect(invokeCommands).toContain("send_project_mode_message_cmd");
+  expect(invokeCommands).toContain("assistant_send_message");
 });
 
 test("opens report dialogs from menu actions and keeps form text readable", async ({
@@ -181,7 +181,7 @@ test("opens report dialogs from menu actions and keeps form text readable", asyn
   ).toBeVisible();
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await waitForMenuActionListener(page);
@@ -447,7 +447,7 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
   ).toBeVisible();
   await openRecentProject(page);
   await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
+    page.getByPlaceholder("Type a message..."),
   ).toBeVisible();
 
   await expect
@@ -461,7 +461,7 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
           };
           return (
             parsed.byProjectPath?.["/tmp/gwt-playwright"]?.activeTabId ===
-            "projectMode"
+            "assistant"
           );
         } catch {
           return false;
