@@ -1454,7 +1454,7 @@
               <option value="anthropic">Anthropic (default)</option>
               <option value="glm">GLM (z.ai)</option>
             </select>
-            <span class="field-hint">Saved in ~/.gwt/agents.toml</span>
+            <span class="field-hint">Saved in ~/.gwt/config.toml</span>
             {#if agentConfigError}
               <span class="field-hint warn">{agentConfigError}</span>
             {/if}
