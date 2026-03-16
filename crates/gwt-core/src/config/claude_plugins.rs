@@ -496,17 +496,6 @@ pub fn force_setup_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
     Ok(())
 }
 
-/// Remove the `gwt-plugins` entry from `known_marketplaces.json`.
-///
-/// Silent no-op when the file is missing, unreadable, or the key is absent.
-#[cfg(test)]
-fn unregister_gwt_marketplace() -> Result<(), GwtError> {
-    let Some(path) = get_known_marketplaces_path() else {
-        return Ok(());
-    };
-    unregister_gwt_marketplace_at(&path)
-}
-
 /// Remove the `gwt-plugins` entry from a specific `known_marketplaces.json`.
 #[cfg(test)]
 fn unregister_gwt_marketplace_at(path: &Path) -> Result<(), GwtError> {

@@ -2383,6 +2383,7 @@ mod tests {
                 api_key: "".to_string(),
                 model: "gpt-4o-mini".to_string(),
                 language: "en".to_string(),
+                summary_enabled: true,
             });
         }
         config.save().unwrap();
@@ -2408,8 +2409,7 @@ mod tests {
         assert!(out.error.is_none());
     }
 
-    // session_summary_returns_disabled_when_summary_disabled was removed:
-    // summary_enabled field was removed; session summary is always enabled.
+    // session summary follows AISettings::summary_enabled.
 
     #[test]
     fn session_summary_returns_generating_when_cache_miss_and_session_file_present() {
@@ -2424,6 +2424,7 @@ mod tests {
                 api_key: "".to_string(),
                 model: "gpt-4o-mini".to_string(),
                 language: "en".to_string(),
+                summary_enabled: true,
             });
         }
         config.save().unwrap();
@@ -2470,6 +2471,7 @@ mod tests {
                 api_key: "".to_string(),
                 model: "gpt-4o-mini".to_string(),
                 language: "en".to_string(),
+                summary_enabled: true,
             });
         }
         config.save().unwrap();

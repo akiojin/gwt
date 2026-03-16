@@ -1381,6 +1381,7 @@ mod tests {
                 String::new()
             },
             language: "en".to_string(),
+            summary_enabled: true,
         }
     }
 
