@@ -716,4 +716,6 @@ export interface AssistantState {
   sessionId?: string | null;
   llmCallCount: number;
   estimatedTokens: number;
+  startupStatus: "idle" | "analyzing" | "ready" | "failed" | (string & {});
+  startupSummaryReady: boolean;
 }
