@@ -14,6 +14,6 @@ pub mod port;
 pub use command::{compose_available, daemon_running, docker_available, try_start_daemon};
 pub use container::{ContainerInfo, ContainerStatus};
 pub use detector::{detect_docker_files, DockerFileType};
-pub use devcontainer::DevContainerConfig;
+pub use devcontainer::{normalize_docker_compose_path, DevContainerConfig};
 pub use manager::DockerManager;
 pub use port::PortAllocator;

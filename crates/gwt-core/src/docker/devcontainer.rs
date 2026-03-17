@@ -10,6 +10,25 @@ use tracing::debug;
 
 use crate::{GwtError, Result};
 
+/// Normalize a file path to a string suitable for `docker compose -f` arguments.
+///
+/// On Windows, `Path::to_string_lossy()` can produce forward slashes when the
+/// path originates from JSON (e.g. devcontainer.json), which causes Docker to
+/// fail with OS error 193 ("%1 is not valid Win32 application").  This helper
+/// ensures backslash separators on Windows so that Docker receives a valid
+/// native path.  On non-Windows platforms this is a simple `to_string_lossy`.
+pub fn normalize_docker_compose_path(path: &Path) -> String {
+    let s = path.to_string_lossy().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        s.replace('/', "\\")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        s
+    }
+}
+
 /// devcontainer.json configuration
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -181,7 +200,7 @@ impl DevContainerConfig {
             for file in files.to_vec() {
                 let compose_path = devcontainer_dir.join(&file);
                 args.push("-f".to_string());
-                args.push(compose_path.to_string_lossy().to_string());
+                args.push(normalize_docker_compose_path(&compose_path));
             }
         }
 
@@ -440,5 +459,18 @@ mod tests {
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], "-f");
         assert!(args[1].ends_with("docker-compose.yml"));
+    }
+
+    #[test]
+    fn normalize_docker_compose_path_preserves_native_separators() {
+        use std::path::Path;
+        // On any platform, a simple path should round-trip without forward slashes
+        // on Windows (where `/` would break Docker), and be unchanged on Unix.
+        let p = Path::new("some").join("dir").join("docker-compose.yml");
+        let result = normalize_docker_compose_path(&p);
+        assert!(result.ends_with("docker-compose.yml"));
+        // The result must not contain forward slashes on Windows.
+        #[cfg(target_os = "windows")]
+        assert!(!result.contains('/'));
     }
 }
