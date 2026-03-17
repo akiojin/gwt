@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::state::AppState;
 use crate::tool_helpers::{
-    execute_shared_tool, get_optional_u64_any, get_required_string_any, normalize_args,
-    shared_tool_definitions,
+    execute_shared_tool_with_mode, get_optional_u64_any, get_required_string_any, normalize_args,
+    shared_tool_definitions_for_mode, ToolAccessMode,
 };
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 use gwt_core::process::command as process_command;
@@ -25,13 +25,17 @@ pub const TOOL_GIT_STATUS: &str = "git_status";
 pub const TOOL_RUN_COMMAND: &str = "run_command";
 
 pub fn assistant_tool_definitions() -> Vec<ToolDefinition> {
-    let mut tools = assistant_specific_tool_definitions();
-    tools.extend(shared_tool_definitions());
+    assistant_tool_definitions_for_mode(ToolAccessMode::Full)
+}
+
+pub fn assistant_tool_definitions_for_mode(access_mode: ToolAccessMode) -> Vec<ToolDefinition> {
+    let mut tools = assistant_specific_tool_definitions(access_mode);
+    tools.extend(shared_tool_definitions_for_mode(access_mode));
     tools
 }
 
-fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+fn assistant_specific_tool_definitions(access_mode: ToolAccessMode) -> Vec<ToolDefinition> {
+    let mut tools = vec![
         ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
@@ -113,7 +117,10 @@ fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
-        ToolDefinition {
+    ];
+
+    if access_mode.allows_write() {
+        tools.push(ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
                 name: TOOL_RUN_COMMAND.to_string(),
@@ -126,8 +133,10 @@ fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
                     "required": ["command"]
                 }),
             },
-        },
-    ]
+        });
+    }
+
+    tools
 }
 
 /// Execute a single assistant tool call and return the result as a string.
@@ -137,10 +146,28 @@ pub fn execute_assistant_tool(
     _window_label: &str,
     project_path: &str,
 ) -> Result<String, String> {
+    execute_assistant_tool_with_mode(
+        call,
+        state,
+        _window_label,
+        project_path,
+        ToolAccessMode::Full,
+    )
+}
+
+pub fn execute_assistant_tool_with_mode(
+    call: &ToolCall,
+    state: &AppState,
+    _window_label: &str,
+    project_path: &str,
+    access_mode: ToolAccessMode,
+) -> Result<String, String> {
     let args = normalize_args(&call.arguments)?;
 
     // Try shared tools first
-    if let Some(result) = execute_shared_tool(call, &args, state, project_path) {
+    if let Some(result) =
+        execute_shared_tool_with_mode(call, &args, state, project_path, access_mode)
+    {
         return result;
     }
 
@@ -202,6 +229,12 @@ pub fn execute_assistant_tool(
         TOOL_GIT_DIFF => run_command_in_dir(project_path, "git", &["diff"]),
         TOOL_GIT_STATUS => run_command_in_dir(project_path, "git", &["status", "--short"]),
         TOOL_RUN_COMMAND => {
+            if !access_mode.allows_write() {
+                return Err(format!(
+                    "Tool {} is not available in read-only mode",
+                    call.name
+                ));
+            }
             let command = get_required_string_any(&args, &["command"])?;
             run_shell_command(project_path, command)
         }
@@ -291,6 +324,79 @@ fn run_shell_command(dir: &str, shell_command: &str) -> Result<String, String> {
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => return Err(format!("Failed to wait for command: {}", e)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool_helpers::{TOOL_SEND_KEYS_TO_PANE, TOOL_UPSERT_SPEC_ISSUE};
+    use serde_json::json;
+
+    #[test]
+    fn assistant_tool_definitions_read_only_excludes_mutating_tools() {
+        let names: Vec<String> = assistant_tool_definitions_for_mode(ToolAccessMode::ReadOnly)
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect();
+
+        assert!(names.contains(&TOOL_READ_FILE.to_string()));
+        assert!(names.contains(&TOOL_GREP_FILE.to_string()));
+        assert!(names.contains(&TOOL_LIST_DIRECTORY.to_string()));
+        assert!(names.contains(&TOOL_GIT_LOG.to_string()));
+        assert!(names.contains(&TOOL_GIT_DIFF.to_string()));
+        assert!(names.contains(&TOOL_GIT_STATUS.to_string()));
+        assert!(!names.contains(&TOOL_RUN_COMMAND.to_string()));
+        assert!(!names.contains(&TOOL_SEND_KEYS_TO_PANE.to_string()));
+        assert!(!names.contains(&TOOL_UPSERT_SPEC_ISSUE.to_string()));
+    }
+
+    #[test]
+    fn execute_assistant_tool_read_only_rejects_run_command() {
+        let state = AppState::new();
+        let call = ToolCall {
+            name: TOOL_RUN_COMMAND.to_string(),
+            arguments: json!({ "command": "pwd" }),
+            call_id: None,
+        };
+
+        let err =
+            execute_assistant_tool_with_mode(&call, &state, "main", ".", ToolAccessMode::ReadOnly)
+                .expect_err("run_command should be blocked");
+
+        assert!(err.contains("read-only mode"));
+    }
+
+    #[test]
+    fn execute_assistant_tool_read_only_rejects_mutating_shared_tools() {
+        let state = AppState::new();
+
+        for call in [
+            ToolCall {
+                name: TOOL_SEND_KEYS_TO_PANE.to_string(),
+                arguments: json!({ "pane_id": "pane-1", "text": "hello" }),
+                call_id: None,
+            },
+            ToolCall {
+                name: TOOL_UPSERT_SPEC_ISSUE.to_string(),
+                arguments: json!({
+                    "title": "spec title",
+                    "sections": { "spec": "body" }
+                }),
+                call_id: None,
+            },
+        ] {
+            let err = execute_assistant_tool_with_mode(
+                &call,
+                &state,
+                "main",
+                ".",
+                ToolAccessMode::ReadOnly,
+            )
+            .expect_err("mutating shared tool should be blocked");
+
+            assert!(err.contains("read-only mode"));
         }
     }
 }

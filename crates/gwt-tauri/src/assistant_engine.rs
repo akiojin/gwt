@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use crate::assistant_monitor::MonitorEvent;
 use crate::assistant_tools;
 use crate::state::AppState;
+use crate::tool_helpers::ToolAccessMode;
 
 const MAX_TOOL_LOOP_ITERATIONS: usize = 10;
 const ASSISTANT_MAX_TOKENS: u32 = 4096;
@@ -92,12 +93,11 @@ impl AssistantEngine {
     }
 
     pub fn run_initial_analysis(&mut self, state: &AppState) -> Result<AssistantResponse, String> {
-        self.enqueue_initial_analysis_prompt();
-        self.run_llm_loop(state)
-    }
-
-    pub(crate) fn enqueue_initial_analysis_prompt(&mut self) {
-        self.push_hidden_system_message(STARTUP_ANALYSIS_PROMPT);
+        self.run_llm_loop_with_mode(
+            state,
+            ToolAccessMode::ReadOnly,
+            Some(STARTUP_ANALYSIS_PROMPT),
+        )
     }
 
     pub(crate) fn push_visible_assistant_message(&mut self, content: impl Into<String>) {
@@ -121,6 +121,34 @@ impl AssistantEngine {
             tool_calls: None,
             tool_call_id: None,
         });
+    }
+
+    fn build_request_messages(
+        &self,
+        transient_system_prompt: Option<&str>,
+    ) -> Vec<ChatCompletionsToolMessage> {
+        let Some(prompt) = transient_system_prompt else {
+            return self.conversation.clone();
+        };
+        let Some((system_prompt, remaining)) = self.conversation.split_first() else {
+            return vec![ChatCompletionsToolMessage {
+                role: "system".to_string(),
+                content: Some(prompt.to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            }];
+        };
+
+        let mut messages = Vec::with_capacity(self.conversation.len() + 1);
+        messages.push(system_prompt.clone());
+        messages.push(ChatCompletionsToolMessage {
+            role: "system".to_string(),
+            content: Some(prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        messages.extend_from_slice(remaining);
+        messages
     }
 
     /// Handle a batch of monitor events: summarize changes, optionally call LLM.
@@ -199,7 +227,16 @@ impl AssistantEngine {
     /// Run the LLM tool-use loop: call LLM, execute tool calls, repeat until
     /// the LLM returns a text response (no tool calls) or max iterations reached.
     fn run_llm_loop(&mut self, state: &AppState) -> Result<AssistantResponse, String> {
-        let tools = assistant_tools::assistant_tool_definitions();
+        self.run_llm_loop_with_mode(state, ToolAccessMode::Full, None)
+    }
+
+    fn run_llm_loop_with_mode(
+        &mut self,
+        state: &AppState,
+        access_mode: ToolAccessMode,
+        transient_system_prompt: Option<&str>,
+    ) -> Result<AssistantResponse, String> {
+        let tools = assistant_tools::assistant_tool_definitions_for_mode(access_mode);
         let mut actions_taken = Vec::new();
 
         // Load AI settings once before the loop to avoid repeated config reads.
@@ -209,7 +246,7 @@ impl AssistantEngine {
         self.prune_conversation();
 
         for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
-            let messages = self.conversation.clone();
+            let messages = self.build_request_messages(transient_system_prompt);
             let tools_clone = tools.clone();
             let settings = ai_settings.clone();
 
@@ -280,11 +317,12 @@ impl AssistantEngine {
             // Execute each tool call and add tool results
             let project_path = self.project_path.to_string_lossy().to_string();
             for tc in &response.tool_calls {
-                let tool_result = assistant_tools::execute_assistant_tool(
+                let tool_result = assistant_tools::execute_assistant_tool_with_mode(
                     tc,
                     state,
                     &self.window_label,
                     &project_path,
+                    access_mode,
                 );
 
                 let result_text = match &tool_result {
@@ -382,19 +420,33 @@ mod tests {
     }
 
     #[test]
-    fn test_enqueue_initial_analysis_prompt_adds_hidden_system_message() {
-        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
-        engine.enqueue_initial_analysis_prompt();
+    fn test_initial_analysis_prompt_is_transient() {
+        let engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        let request_messages = engine.build_request_messages(Some(STARTUP_ANALYSIS_PROMPT));
 
+        assert_eq!(engine.conversation.len(), 1);
+        assert_eq!(request_messages.len(), 2);
+        assert_eq!(request_messages[1].role, "system");
+        assert!(request_messages[1]
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("project was just opened"));
+    }
+
+    #[test]
+    fn test_build_request_messages_inserts_transient_prompt_after_base_system_message() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        engine.conversation.push(make_msg("user", "hello"));
+
+        let request_messages = engine.build_request_messages(Some("transient"));
+
+        assert_eq!(request_messages.len(), 3);
+        assert_eq!(request_messages[0].role, "system");
+        assert_eq!(request_messages[1].role, "system");
+        assert_eq!(request_messages[1].content.as_deref(), Some("transient"));
+        assert_eq!(request_messages[2].role, "user");
         assert_eq!(engine.conversation.len(), 2);
-        assert_eq!(engine.conversation[1].role, "system");
-        assert!(
-            engine.conversation[1]
-                .content
-                .as_deref()
-                .unwrap_or_default()
-                .contains("project was just opened")
-        );
     }
 
     #[test]
