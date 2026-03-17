@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::state::AppState;
 use crate::tool_helpers::{
-    execute_shared_tool, get_optional_string_any, get_optional_u64_any, get_required_string_any,
-    normalize_args, shared_tool_definitions,
+    execute_shared_tool_with_mode, get_optional_string_any, get_optional_u64_any,
+    get_required_string_any, normalize_args, shared_tool_definitions_for_mode, ToolAccessMode,
 };
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 use gwt_core::process::command as process_command;
@@ -34,14 +34,22 @@ pub enum AssistantToolMode {
 }
 
 pub fn assistant_tool_definitions(mode: AssistantToolMode) -> Vec<ToolDefinition> {
-    let mut tools = assistant_specific_tool_definitions();
-    tools.extend(shared_tool_definitions());
+    let access_mode = shared_tool_access_mode(mode);
+    let mut tools = assistant_specific_tool_definitions(access_mode);
+    tools.extend(shared_tool_definitions_for_mode(access_mode));
     tools.retain(|tool| assistant_tool_allowed(&tool.function.name, mode));
     tools
 }
 
-fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+fn shared_tool_access_mode(mode: AssistantToolMode) -> ToolAccessMode {
+    match mode {
+        AssistantToolMode::FullAccess => ToolAccessMode::Full,
+        AssistantToolMode::ReadOnly => ToolAccessMode::ReadOnly,
+    }
+}
+
+fn assistant_specific_tool_definitions(access_mode: ToolAccessMode) -> Vec<ToolDefinition> {
+    let mut tools = vec![
         ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
@@ -126,14 +134,12 @@ fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
-                name: TOOL_RUN_COMMAND.to_string(),
-                description: "Run a shell command with a 30-second timeout.".to_string(),
+                name: TOOL_LIST_PANES.to_string(),
+                description: "List panes for the current project.".to_string(),
                 parameters: json!({
                     "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "Shell command to execute" }
-                    },
-                    "required": ["command"]
+                    "properties": {},
+                    "required": []
                 }),
             },
         },
@@ -181,7 +187,26 @@ fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
-    ]
+    ];
+
+    if access_mode.allows_write() {
+        tools.push(ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_RUN_COMMAND.to_string(),
+                description: "Run a shell command with a 30-second timeout.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Shell command to execute" }
+                    },
+                    "required": ["command"]
+                }),
+            },
+        });
+    }
+
+    tools
 }
 
 pub fn assistant_tool_allowed(name: &str, mode: AssistantToolMode) -> bool {
@@ -205,6 +230,7 @@ pub fn execute_assistant_tool(
     mode: AssistantToolMode,
 ) -> Result<String, String> {
     let args = normalize_args(&call.arguments)?;
+    let access_mode = shared_tool_access_mode(mode);
 
     if !assistant_tool_allowed(call.name.as_str(), mode) {
         return Err(format!(
@@ -214,7 +240,9 @@ pub fn execute_assistant_tool(
     }
 
     // Try shared tools first
-    if let Some(result) = execute_shared_tool(call, &args, state, project_path) {
+    if let Some(result) =
+        execute_shared_tool_with_mode(call, &args, state, project_path, access_mode)
+    {
         return result;
     }
 
@@ -276,6 +304,12 @@ pub fn execute_assistant_tool(
         TOOL_GIT_DIFF => run_command_in_dir(project_path, "git", &["diff"]),
         TOOL_GIT_STATUS => run_command_in_dir(project_path, "git", &["status", "--short"]),
         TOOL_RUN_COMMAND => {
+            if !access_mode.allows_write() {
+                return Err(format!(
+                    "Tool is not available in {:?} mode: {}",
+                    mode, call.name
+                ));
+            }
             let command = get_required_string_any(&args, &["command"])?;
             run_shell_command(project_path, command)
         }
