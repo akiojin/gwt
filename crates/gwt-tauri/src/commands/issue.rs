@@ -19,11 +19,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::Manager;
+use tauri::{Manager, State};
 
 const ISSUE_LIST_CACHE_TTL_MS: i64 = 120_000;
 const ISSUE_LIST_CACHE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const ISSUE_LIST_INFLIGHT_WAIT_MS: u64 = 5_000;
+const GH_STATUS_OS_ENV_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueCategory {
@@ -582,19 +583,38 @@ pub async fn fetch_branch_linked_issue(
 }
 
 /// Check gh CLI availability and authentication (FR-011)
-#[tauri::command]
-pub fn check_gh_cli_status(_project_path: String) -> Result<GhCliStatus, StructuredError> {
-    let available = is_gh_cli_available();
-    let authenticated = if available {
-        is_gh_cli_authenticated()
-    } else {
-        false
-    };
+fn resolve_gh_cli_status<FAvailable, FAuthenticated>(
+    state: Option<&AppState>,
+    is_available: FAvailable,
+    is_authenticated: FAuthenticated,
+) -> GhCliStatus
+where
+    FAvailable: FnOnce() -> bool,
+    FAuthenticated: FnOnce() -> bool,
+{
+    if let Some(state) = state {
+        let _ = state.wait_os_env_ready(GH_STATUS_OS_ENV_WAIT_TIMEOUT);
+    }
 
-    Ok(GhCliStatus {
+    let available = is_available();
+    let authenticated = if available { is_authenticated() } else { false };
+
+    GhCliStatus {
         available,
         authenticated,
-    })
+    }
+}
+
+#[tauri::command]
+pub fn check_gh_cli_status(
+    state: State<AppState>,
+    _project_path: String,
+) -> Result<GhCliStatus, StructuredError> {
+    Ok(resolve_gh_cli_status(
+        Some(state.inner()),
+        is_gh_cli_available,
+        is_gh_cli_authenticated,
+    ))
 }
 
 /// Find an existing branch for a given issue (FR-012)
@@ -899,6 +919,57 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"available\":false"));
         assert!(json.contains("\"authenticated\":false"));
+    }
+
+    #[test]
+    fn test_resolve_gh_cli_status_waits_for_os_env_ready() {
+        let state = AppState::new();
+        assert!(state.begin_os_env_capture());
+
+        let ready_during_probe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let status = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                state.set_os_env_snapshot(
+                    std::collections::HashMap::new(),
+                    gwt_core::config::os_env::EnvSource::ProcessEnv,
+                );
+            });
+
+            let ready_during_probe_for_thread = ready_during_probe.clone();
+            resolve_gh_cli_status(
+                Some(&state),
+                || {
+                    ready_during_probe_for_thread
+                        .store(state.is_os_env_ready(), std::sync::atomic::Ordering::SeqCst);
+                    true
+                },
+                || true,
+            )
+        });
+
+        assert!(ready_during_probe.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(status.available);
+        assert!(status.authenticated);
+    }
+
+    #[test]
+    fn test_resolve_gh_cli_status_skips_auth_probe_when_unavailable() {
+        let auth_checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let auth_checked_for_probe = auth_checked.clone();
+
+        let status = resolve_gh_cli_status(
+            None,
+            || false,
+            || {
+                auth_checked_for_probe.store(true, std::sync::atomic::Ordering::SeqCst);
+                true
+            },
+        );
+
+        assert!(!status.available);
+        assert!(!status.authenticated);
+        assert!(!auth_checked.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     // ==========================================================
