@@ -188,10 +188,9 @@ pub async fn assistant_get_dashboard(
     };
 
     let panes = {
-        let repo_path = crate::commands::project::resolve_repo_path_for_project_root(
-            Path::new(&project_path),
-        )
-        .map_err(|e| format!("Failed to resolve repository path: {}", e))?;
+        let repo_path =
+            crate::commands::project::resolve_repo_path_for_project_root(Path::new(&project_path))
+                .map_err(|e| format!("Failed to resolve repository path: {}", e))?;
         let mgr = state
             .pane_manager
             .lock()

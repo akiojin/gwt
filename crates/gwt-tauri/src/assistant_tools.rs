@@ -187,14 +187,12 @@ fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
 pub fn assistant_tool_allowed(name: &str, mode: AssistantToolMode) -> bool {
     match mode {
         AssistantToolMode::FullAccess => true,
-        AssistantToolMode::ReadOnly => {
-            !matches!(
-                name,
-                TOOL_RUN_COMMAND
-                    | crate::tool_helpers::TOOL_SEND_KEYS_TO_PANE
-                    | crate::tool_helpers::TOOL_UPSERT_SPEC_ISSUE
-            )
-        }
+        AssistantToolMode::ReadOnly => !matches!(
+            name,
+            TOOL_RUN_COMMAND
+                | crate::tool_helpers::TOOL_SEND_KEYS_TO_PANE
+                | crate::tool_helpers::TOOL_UPSERT_SPEC_ISSUE
+        ),
     }
 }
 
@@ -411,8 +409,9 @@ fn list_project_issues(project_path: &str, args: &serde_json::Value) -> Result<S
             .map_err(|e| format!("Failed to resolve repository path: {e}"))?;
     let state = get_optional_string_any(args, &["state"]).unwrap_or("open");
     let limit = get_optional_u64_any(args, &["limit"]).unwrap_or(5).min(20) as u32;
-    let result = gwt_core::git::fetch_issues_with_options(&repo_path, 1, limit, state, false, "all")
-        .map_err(|e| format!("Failed to list issues: {e}"))?;
+    let result =
+        gwt_core::git::fetch_issues_with_options(&repo_path, 1, limit, state, false, "all")
+            .map_err(|e| format!("Failed to list issues: {e}"))?;
 
     let issues = result
         .issues
@@ -493,13 +492,8 @@ mod tests {
         };
 
         let state = AppState::new();
-        let result = execute_assistant_tool(
-            &call,
-            &state,
-            "main",
-            ".",
-            AssistantToolMode::ReadOnly,
-        );
+        let result =
+            execute_assistant_tool(&call, &state, "main", ".", AssistantToolMode::ReadOnly);
         assert!(result.is_err());
     }
 }
