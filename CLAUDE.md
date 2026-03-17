@@ -187,6 +187,7 @@
 ## リリースワークフロー
 
 - feature/\* ブランチは develop への PR を作成し、オーナー承認後にマージする。develop で次回リリース候補を蓄積する。
+- **main への PR は develop からのみ許可。** それ以外のブランチ（feature/\*、release-\* 等）から main への直接 PR は禁止。CI（`pr-source-check.yml`）でも拒否される。
 - `/release` コマンドで Release PR を作成:
   - Conventional Commits を解析してバージョン自動判定（feat→minor, fix→patch, !→major）
   - git-cliff で CHANGELOG.md を更新
