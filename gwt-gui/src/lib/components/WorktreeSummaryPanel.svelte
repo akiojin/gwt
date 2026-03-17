@@ -58,6 +58,7 @@
     onNewTerminal,
     onOpenDocsEditor,
     onOpenCiLog,
+    onDisplayNameChanged,
     agentTabBranches = [],
     activeAgentTabBranch = null,
     preferredLanguage = "auto",
@@ -72,6 +73,7 @@
     onNewTerminal?: () => void;
     onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
     onOpenCiLog?: (runId: number) => void;
+    onDisplayNameChanged?: () => void;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
     preferredLanguage?: SettingsData["app_language"];
@@ -117,6 +119,10 @@
   let quickLaunchingKey: string | null = $state(null);
   let docsActionBusy: boolean = $state(false);
   let docsActionError: string | null = $state(null);
+
+  let editingDisplayName = $state(false);
+  let displayNameValue = $state("");
+  let displayNameSaving = $state(false);
 
   type SummaryTab =
     | "summary"
@@ -698,6 +704,8 @@
   $effect(() => {
     void selectedBranch;
     void projectPath;
+    editingDisplayName = false;
+    displayNameValue = "";
     loadQuickStart();
   });
 
@@ -1222,13 +1230,90 @@
     }
     return invokeFn;
   }
+
+  function startEditDisplayName() {
+    if (!selectedBranch) return;
+    displayNameValue = selectedBranch.display_name ?? "";
+    editingDisplayName = true;
+  }
+
+  function cancelEditDisplayName() {
+    editingDisplayName = false;
+    displayNameValue = "";
+  }
+
+  async function saveDisplayName() {
+    if (!selectedBranch || displayNameSaving) return;
+    const trimmed = displayNameValue.trim();
+    // If unchanged, just cancel
+    const current = selectedBranch.display_name ?? "";
+    if (trimmed === current) {
+      cancelEditDisplayName();
+      return;
+    }
+    displayNameSaving = true;
+    try {
+      await tauriInvoke("set_branch_display_name", {
+        projectPath: projectPath,
+        branch: selectedBranch.name,
+        displayName: trimmed || null,
+      });
+      editingDisplayName = false;
+      displayNameValue = "";
+      onDisplayNameChanged?.();
+    } catch (err) {
+      toastBus.emit({ message: toErrorMessage(err) });
+    } finally {
+      displayNameSaving = false;
+    }
+  }
+
+  function handleDisplayNameKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      saveDisplayName();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelEditDisplayName();
+    }
+  }
 </script>
 
 <div class="worktree-summary-panel">
   {#if selectedBranch}
     <div class="branch-detail">
       <div class="branch-header">
-        <h2>{selectedBranch.name}</h2>
+        {#if editingDisplayName}
+          <div class="display-name-edit">
+            <input
+              class="display-name-input"
+              type="text"
+              bind:value={displayNameValue}
+              onkeydown={handleDisplayNameKeydown}
+              onblur={() => saveDisplayName()}
+              disabled={displayNameSaving}
+              placeholder={selectedBranch.name}
+              autofocus
+            />
+          </div>
+        {:else}
+          <h2 class="branch-name-heading">
+            <span class="branch-display-name">{selectedBranch.display_name ?? selectedBranch.name}</span>
+            <button
+              class="edit-display-name-btn"
+              title="Edit display name"
+              onclick={() => startEditDisplayName()}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                <path d="m15 5 4 4" />
+              </svg>
+            </button>
+          </h2>
+          {#if selectedBranch.display_name && selectedBranch.display_name !== selectedBranch.name}
+            <span class="branch-real-name">{selectedBranch.name}</span>
+          {/if}
+        {/if}
         <div class="branch-header-actions">
           <button
             class="header-quick-btn"
@@ -1685,6 +1770,69 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .branch-name-heading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .branch-display-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .edit-display-name-btn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    padding: 2px;
+    cursor: pointer;
+    color: var(--text-muted);
+    opacity: 0.5;
+    transition: opacity 0.15s;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .edit-display-name-btn:hover {
+    opacity: 1;
+  }
+
+  .branch-real-name {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-basis: 100%;
+    margin-top: -8px;
+  }
+
+  .display-name-edit {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .display-name-input {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 0;
+    font-size: var(--ui-font-lg);
+    font-weight: 700;
+    color: var(--text-primary);
+    font-family: monospace;
+    background: var(--bg-surface);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 2px 6px;
+    outline: none;
+  }
+
+  .display-name-input:disabled {
+    opacity: 0.6;
   }
 
   .launch-btn {

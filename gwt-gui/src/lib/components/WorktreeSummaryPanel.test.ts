@@ -199,7 +199,7 @@ describe("WorktreeSummaryPanel", () => {
             payload?.branch === "feature/markdown-ui"
         )
       ).toBe(true);
-      expect(rendered.container.querySelector("h2")?.textContent).toBe("feature/markdown-ui");
+      expect(rendered.container.querySelector("h2 .branch-display-name")?.textContent).toBe("feature/markdown-ui");
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
@@ -1264,7 +1264,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     await waitFor(() => {
-      expect(rendered.container.querySelector("h2")?.textContent).toBe("feature/markdown-ui");
+      expect(rendered.container.querySelector("h2 .branch-display-name")?.textContent).toBe("feature/markdown-ui");
     });
   });
 
@@ -1712,7 +1712,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     await waitFor(() => {
-      expect(rendered.container.querySelector("h2")?.textContent).toBe(
+      expect(rendered.container.querySelector("h2 .branch-display-name")?.textContent).toBe(
         "origin/feature/markdown-ui"
       );
     });
