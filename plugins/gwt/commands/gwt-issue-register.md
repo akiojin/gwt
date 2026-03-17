@@ -21,7 +21,7 @@ Use this command as the main entrypoint for new work registration.
 
 1. Load `skills/gwt-issue-register/SKILL.md` and follow the workflow.
 2. Normalize the request and classify the work type.
-3. Run `gwt-project-index` Issue search first with at least 2 semantic queries.
+3. Run `gwt-issue-search` first with at least 2 semantic queries.
 4. If a clear existing Issue or `gwt-spec` already owns the request, stop new creation and switch to the existing workflow.
 5. If the request needs new specification work, switch to `gwt-spec-register`.
 6. Otherwise create a plain GitHub Issue with the standard section structure.

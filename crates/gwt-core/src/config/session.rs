@@ -67,6 +67,9 @@ pub struct Session {
     /// Last activity timestamp (gwt-spec issue FR-100b)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// User-set display name for this worktree (gwt-spec issue FR-04)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 impl Session {
@@ -92,6 +95,7 @@ impl Session {
             updated_at: now,
             status: AgentStatus::Unknown,
             last_activity_at: None,
+            display_name: None,
         }
     }
 
