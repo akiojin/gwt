@@ -20,6 +20,7 @@ use tracing::error;
 #[derive(Debug, Clone, Serialize)]
 pub struct BranchInfo {
     pub name: String,
+    pub display_name: Option<String>,
     pub commit: String,
     pub is_current: bool,
     pub is_agent_running: bool,
@@ -39,6 +40,7 @@ impl From<Branch> for BranchInfo {
         let divergence_status = b.divergence_status().to_string();
         BranchInfo {
             name: b.name,
+            display_name: None,
             commit: b.commit,
             is_current: b.is_current,
             is_agent_running: false,
@@ -55,9 +57,19 @@ impl From<Branch> for BranchInfo {
     }
 }
 
-/// Build a map of branch name → AgentStatus from session files.
+/// Per-branch metadata extracted from session files.
+#[derive(Debug, Clone)]
+struct SessionBranchMeta {
+    agent_status: AgentStatus,
+    display_name: Option<String>,
+}
+
+/// Build a map of branch name → SessionBranchMeta from session files.
 /// For agents without Hook support, infers status from pane output.
-fn build_agent_status_map(repo_path: &Path, state: &AppState) -> HashMap<String, AgentStatus> {
+fn build_session_branch_meta_map(
+    repo_path: &Path,
+    state: &AppState,
+) -> HashMap<String, SessionBranchMeta> {
     let manager = match WorktreeManager::new(repo_path) {
         Ok(m) => m,
         Err(_) => return HashMap::new(),
@@ -76,17 +88,24 @@ fn build_agent_status_map(repo_path: &Path, state: &AppState) -> HashMap<String,
             if let Some(mut session) = Session::load_for_worktree(&wt.path) {
                 session.check_idle_timeout();
 
-                if agent_has_hook_support(session.agent.as_deref()) {
+                let agent_status = if agent_has_hook_support(session.agent.as_deref()) {
                     // Claude Code: trust session file status
-                    map.insert(branch_name.clone(), session.status);
+                    session.status
                 } else if let Some(pane_id) = pane_map.get(branch_name) {
                     // Non-hook agent with running pane: infer from output
-                    let status = infer_status_from_pane(state, pane_id);
-                    map.insert(branch_name.clone(), status);
+                    infer_status_from_pane(state, pane_id)
                 } else {
                     // No running pane: use session status as-is
-                    map.insert(branch_name.clone(), session.status);
-                }
+                    session.status
+                };
+
+                map.insert(
+                    branch_name.clone(),
+                    SessionBranchMeta {
+                        agent_status,
+                        display_name: session.display_name,
+                    },
+                );
             }
         }
     }
@@ -254,6 +273,34 @@ struct WorktreeBranchListing {
     branch_names: Vec<String>,
 }
 
+/// Apply session branch meta (agent_status + display_name) to a BranchInfo.
+/// `branch_key` is the lookup key in the meta map (may differ from info.name for remote branches).
+fn apply_session_meta(
+    info: &mut BranchInfo,
+    branch_key: &str,
+    meta_map: &HashMap<String, SessionBranchMeta>,
+    summary_cache: &Option<&gwt_core::ai::SessionSummaryCache>,
+) {
+    if let Some(meta) = meta_map.get(branch_key) {
+        info.agent_status = agent_status_to_string(meta.agent_status);
+        // display_name priority: session.display_name → task_overview
+        if meta.display_name.is_some() {
+            info.display_name = meta.display_name.clone();
+        }
+    }
+    if info.display_name.is_none() {
+        if let Some(cache) = summary_cache {
+            if let Some(summary) = cache.get(branch_key) {
+                if let Some(overview) = &summary.task_overview {
+                    if !overview.is_empty() {
+                        info.display_name = Some(overview.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn list_worktree_branches_impl(
     project_path: &str,
     state: &AppState,
@@ -263,7 +310,10 @@ fn list_worktree_branches_impl(
         .map_err(|e| StructuredError::internal(&e, "list_worktree_branches"))?;
     let last_tool = build_last_tool_usage_map(&repo_path);
     let running_branches = running_agent_branches(state, &repo_path);
-    let agent_statuses = build_agent_status_map(&repo_path, state);
+    let meta_map = build_session_branch_meta_map(&repo_path, state);
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let summary_cache_guard = state.session_summary_cache.lock().ok();
+    let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
 
     let manager = WorktreeManager::new(&repo_path)
         .map_err(|e| StructuredError::from_gwt_error(&e, "list_worktree_branches"))?;
@@ -296,9 +346,7 @@ fn list_worktree_branches_impl(
     for info in &mut infos {
         info.last_tool_usage = last_tool.get(&info.name).cloned();
         info.is_agent_running = running_branches.contains(&info.name);
-        if let Some(status) = agent_statuses.get(&info.name) {
-            info.agent_status = agent_status_to_string(*status);
-        }
+        apply_session_meta(info, &info.name.clone(), &meta_map, &summary_cache);
     }
 
     Ok(WorktreeBranchListing {
@@ -316,7 +364,10 @@ fn list_remote_branches_impl(
         .map_err(|e| StructuredError::internal(&e, "list_remote_branches"))?;
     let last_tool = build_last_tool_usage_map(&repo_path);
     let running_branches = running_agent_branches(state, &repo_path);
-    let agent_statuses = build_agent_status_map(&repo_path, state);
+    let meta_map = build_session_branch_meta_map(&repo_path, state);
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let summary_cache_guard = state.session_summary_cache.lock().ok();
+    let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
     let remotes = Remote::list(&repo_path).unwrap_or_default();
 
     let branches = if is_bare_repository(&repo_path) {
@@ -329,12 +380,10 @@ fn list_remote_branches_impl(
 
     let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
     for info in &mut infos {
-        let normalized = strip_known_remote_prefix(&info.name, &remotes);
-        info.last_tool_usage = last_tool.get(normalized).cloned();
-        info.is_agent_running = running_branches.contains(normalized);
-        if let Some(status) = agent_statuses.get(normalized) {
-            info.agent_status = agent_status_to_string(*status);
-        }
+        let normalized = strip_known_remote_prefix(&info.name, &remotes).to_string();
+        info.last_tool_usage = last_tool.get(&normalized).cloned();
+        info.is_agent_running = running_branches.contains(&normalized);
+        apply_session_meta(info, &normalized, &meta_map, &summary_cache);
     }
 
     Ok(infos)
@@ -352,7 +401,10 @@ pub fn list_branches(
             .map_err(|e| StructuredError::internal(&e, "list_branches"))?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
-        let agent_statuses = build_agent_status_map(&repo_path, &state);
+        let meta_map = build_session_branch_meta_map(&repo_path, &state);
+        let repo_key = repo_path.to_string_lossy().to_string();
+        let summary_cache_guard = state.session_summary_cache.lock().ok();
+        let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
 
         let branches = Branch::list(&repo_path)
             .map_err(|e| StructuredError::from_gwt_error(&e, "list_branches"))?;
@@ -360,9 +412,7 @@ pub fn list_branches(
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
-            if let Some(status) = agent_statuses.get(&info.name) {
-                info.agent_status = agent_status_to_string(*status);
-            }
+            apply_session_meta(info, &info.name.clone(), &meta_map, &summary_cache);
         }
         Ok(infos)
     })
@@ -441,14 +491,16 @@ pub fn get_current_branch(
             .map_err(|e| StructuredError::from_gwt_error(&e, "get_current_branch"))?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
-        let agent_statuses = build_agent_status_map(&repo_path, &state);
+        let meta_map = build_session_branch_meta_map(&repo_path, &state);
+        let repo_key = repo_path.to_string_lossy().to_string();
+        let summary_cache_guard = state.session_summary_cache.lock().ok();
+        let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
         Ok(branch.map(|b| {
             let mut info = BranchInfo::from(b);
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
-            if let Some(status) = agent_statuses.get(&info.name) {
-                info.agent_status = agent_status_to_string(*status);
-            }
+            let name_key = info.name.clone();
+            apply_session_meta(&mut info, &name_key, &meta_map, &summary_cache);
             info
         }))
     })
@@ -591,5 +643,71 @@ mod tests {
 
         let out = list_remote_branches_impl(&project_path, &state).expect("listing should work");
         assert!(out.is_empty());
+    }
+
+    // --- display_name tests ---
+
+    #[test]
+    fn test_branch_info_default_display_name_none() {
+        let branch = gwt_core::git::Branch {
+            name: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            is_current: false,
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+        let info = BranchInfo::from(branch);
+        assert_eq!(info.display_name, None);
+    }
+
+    #[test]
+    fn test_branch_info_serializes_display_name() {
+        let branch = gwt_core::git::Branch {
+            name: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            is_current: false,
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+        let mut info = BranchInfo::from(branch);
+        info.display_name = Some("My feature".to_string());
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            json.contains(r#""display_name":"My feature""#),
+            "JSON should contain display_name with value: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_branch_info_serializes_null_display_name() {
+        let branch = gwt_core::git::Branch {
+            name: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            is_current: false,
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+        let info = BranchInfo::from(branch);
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            json.contains(r#""display_name":null"#),
+            "JSON should contain display_name:null: {}",
+            json
+        );
     }
 }

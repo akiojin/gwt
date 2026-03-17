@@ -127,7 +127,8 @@ describe("IssueSpecPanel", () => {
       "Data Model", "Quickstart", "Contracts", "Checklists",
     ]);
 
-    const todoElements = rendered.getAllByText("_TODO_");
+    // _TODO_ is rendered as <em>TODO</em> by MarkdownRenderer
+    const todoElements = rendered.getAllByText("TODO");
     expect(todoElements.length).toBeGreaterThanOrEqual(9);
   });
 
@@ -247,7 +248,7 @@ describe("IssueSpecPanel", () => {
       expect(rendered.getByText("Plan content")).toBeTruthy();
     });
 
-    // No _TODO_ when sections are filled
-    expect(rendered.queryByText("_TODO_")).toBeNull();
+    // No TODO fallback when sections are filled
+    expect(rendered.queryByText("TODO")).toBeNull();
   });
 });

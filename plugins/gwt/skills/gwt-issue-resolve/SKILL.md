@@ -43,7 +43,7 @@ If the issue is not a spec issue:
 
 ## Mandatory preflight for spec-needed issues
 
-When the Issue needs SPEC handling, use `gwt-project-index` first.
+When the Issue needs SPEC handling, use `gwt-issue-search` first.
 
 Required behavior:
 
@@ -155,7 +155,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py
    - If any actionable item has Low confidence, ask only the minimum question needed to unblock.
 
 7. **Spec-needed path.**
-   - Use `gwt-project-index` Issue search before creating or updating any SPEC.
+   - Use `gwt-issue-search` before creating or updating any SPEC.
    - Search with at least 2 semantic queries derived from the Issue.
    - If a canonical existing SPEC is found, update that destination and hand off to `gwt-spec-ops`.
    - If no suitable SPEC exists, switch to `gwt-spec-register` to create the new `gwt-spec` Issue.

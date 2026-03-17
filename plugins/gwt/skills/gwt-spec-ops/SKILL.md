@@ -16,7 +16,7 @@ GitHub Issues are the single source of truth for specs. Manage every spec as an 
 ## Mandatory preflight: search existing spec first
 
 Before you create a new spec issue or decide where to integrate a change, use
-`gwt-project-index` Issue search first.
+`gwt-issue-search` first.
 
 Required behavior:
 
@@ -33,7 +33,7 @@ Typical cases where this preflight is mandatory:
 - "Project Index の統合仕様を整理して"
 - "関連仕様を探してから仕様を書いて"
 
-If `gwt-project-index` is unavailable or the Issue index is missing, say so and fall back to the
+If `gwt-issue-search` is unavailable or the Issue index is missing, say so and fall back to the
 shortest explicit recovery action. Do not silently skip the search.
 
 ## Conventions
@@ -206,7 +206,7 @@ gh issue list --label gwt-spec --state all --json number,title
 
 Before `Specify` or `Plan`, determine whether an existing spec already owns the scope.
 
-1. Use `gwt-project-index` Issue search (`index-issues` + `search-issues`)
+1. Use `gwt-issue-search` (`index-issues` + `search-issues`)
 2. Search with at least 2 semantic queries derived from the request
 3. Rank candidates in this order:
    - canonical integrated spec

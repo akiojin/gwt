@@ -15,7 +15,7 @@ Use this skill to create a new `gwt-spec` Issue only after confirming that no ex
 
 ## Mandatory preflight: search existing spec first
 
-Before creating a new spec issue, use `gwt-project-index` Issue search first.
+Before creating a new spec issue, use `gwt-issue-search` first.
 
 Required behavior:
 
@@ -87,7 +87,7 @@ Artifact files are managed in issue comments with `checklist:<name>` entries.
    - If unauthenticated, stop and ask the user to log in.
 
 2. **Search for an existing canonical SPEC.**
-   - Use `gwt-project-index` Issue search with at least 2 queries.
+   - Use `gwt-issue-search` with at least 2 queries.
    - If a canonical SPEC exists, stop registration and hand off to `gwt-spec-ops`.
 
 3. **Create the new `gwt-spec` Issue.**

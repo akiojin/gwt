@@ -29,7 +29,7 @@ For new work registration with no existing Issue yet, use `gwt-issue-register` i
    - direct fix
    - existing SPEC
    - new SPEC
-5. For SPEC-needed paths, use `gwt-project-index` Issue search before choosing the destination.
+5. For SPEC-needed paths, use `gwt-issue-search` before choosing the destination.
 6. If no canonical SPEC exists, switch to `gwt-spec-register` to create it.
 7. Continue toward implementation or SPEC execution instead of stopping at triage.
 

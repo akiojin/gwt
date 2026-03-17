@@ -1,6 +1,30 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.12.0] - 2026-03-17
+
+### Bug Fixes
+
+- **release:** Reference-only issue warningsを追加
+- **ci:** Restrict main PR source to develop
+- Wait for shell env before checking gh cli (#1672)
+- **assistant:** Run initial analysis on start (#1673)
+- **assistant:** Auto-start project analysis (#1674)
+- Harden startup analysis and improve overlay visibility (#1675)
+
+### Features
+
+- **ui:** Worktree表示名の改善 - display_name フォールバックチェーン
+- **ui:** Spec Issue詳細画面のマークダウンレンダリング対応
+
+### Refactor
+
+- **skills:** Gwt-project-indexからIssue検索を分離してgwt-issue-searchを新設
+
+### Testing
+
+- **ui:** Display_name機能のテスト追加
+
 ## [8.11.0] - 2026-03-17
 
 ### Features

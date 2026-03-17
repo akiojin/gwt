@@ -14,6 +14,7 @@ export interface StructuredError {
 
 export interface BranchInfo {
   name: string;
+  display_name?: string | null;
   commit: string;
   is_current: boolean;
   is_agent_running: boolean;
@@ -716,4 +717,6 @@ export interface AssistantState {
   sessionId?: string | null;
   llmCallCount: number;
   estimatedTokens: number;
+  startupStatus: "idle" | "analyzing" | "ready" | "failed" | (string & {});
+  startupSummaryReady: boolean;
 }

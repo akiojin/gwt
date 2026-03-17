@@ -17,7 +17,7 @@ feature request, enhancement idea, documentation task, or rough note.
 
 ## Mandatory preflight: search existing issues first
 
-Before creating any new Issue or SPEC, use `gwt-project-index` Issue search first.
+Before creating any new Issue or SPEC, use `gwt-issue-search` first.
 
 Required behavior:
 
@@ -118,7 +118,7 @@ Use `CLEAN` only when the duplicate search found no credible owner.
    - Classify the request type.
 
 3. **Search for an existing destination.**
-   - Use `gwt-project-index` Issue search with at least 2 semantic queries.
+   - Use `gwt-issue-search` with at least 2 semantic queries.
    - Prefer open Issues and active canonical `gwt-spec` Issues.
 
 4. **Stop on duplicates or existing owners.**

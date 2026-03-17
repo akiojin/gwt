@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::state::AppState;
 use crate::tool_helpers::{
-    execute_shared_tool, get_optional_u64_any, get_required_string_any, normalize_args,
-    shared_tool_definitions,
+    execute_shared_tool_with_mode, get_optional_string_any, get_optional_u64_any,
+    get_required_string_any, normalize_args, shared_tool_definitions_for_mode, ToolAccessMode,
 };
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 use gwt_core::process::command as process_command;
@@ -23,15 +23,33 @@ pub const TOOL_GIT_LOG: &str = "git_log";
 pub const TOOL_GIT_DIFF: &str = "git_diff";
 pub const TOOL_GIT_STATUS: &str = "git_status";
 pub const TOOL_RUN_COMMAND: &str = "run_command";
+pub const TOOL_LIST_PANES: &str = "list_panes";
+pub const TOOL_LIST_ISSUES: &str = "list_issues";
+pub const TOOL_LIST_PULL_REQUESTS: &str = "list_pull_requests";
 
-pub fn assistant_tool_definitions() -> Vec<ToolDefinition> {
-    let mut tools = assistant_specific_tool_definitions();
-    tools.extend(shared_tool_definitions());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantToolMode {
+    FullAccess,
+    ReadOnly,
+}
+
+pub fn assistant_tool_definitions(mode: AssistantToolMode) -> Vec<ToolDefinition> {
+    let access_mode = shared_tool_access_mode(mode);
+    let mut tools = assistant_specific_tool_definitions(access_mode);
+    tools.extend(shared_tool_definitions_for_mode(access_mode));
+    tools.retain(|tool| assistant_tool_allowed(&tool.function.name, mode));
     tools
 }
 
-fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+fn shared_tool_access_mode(mode: AssistantToolMode) -> ToolAccessMode {
+    match mode {
+        AssistantToolMode::FullAccess => ToolAccessMode::Full,
+        AssistantToolMode::ReadOnly => ToolAccessMode::ReadOnly,
+    }
+}
+
+fn assistant_specific_tool_definitions(access_mode: ToolAccessMode) -> Vec<ToolDefinition> {
+    let mut tools = vec![
         ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
@@ -116,6 +134,65 @@ fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
+                name: TOOL_LIST_PANES.to_string(),
+                description: "List panes for the current project.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_LIST_PANES.to_string(),
+                description: "List panes for the current project.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_LIST_ISSUES.to_string(),
+                description: "List GitHub issues for the current project in read-only mode."
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "state": { "type": "string", "description": "Issue state (open, closed, all)" },
+                        "limit": { "type": "integer", "description": "Maximum number of issues to return", "minimum": 1, "maximum": 20 }
+                    },
+                    "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_LIST_PULL_REQUESTS.to_string(),
+                description: "List GitHub pull requests for the current project in read-only mode."
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "state": { "type": "string", "description": "PR state (open, closed, merged, all)" },
+                        "limit": { "type": "integer", "description": "Maximum number of PRs to return", "minimum": 1, "maximum": 20 }
+                    },
+                    "required": []
+                }),
+            },
+        },
+    ];
+
+    if access_mode.allows_write() {
+        tools.push(ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
                 name: TOOL_RUN_COMMAND.to_string(),
                 description: "Run a shell command with a 30-second timeout.".to_string(),
                 parameters: json!({
@@ -126,8 +203,22 @@ fn assistant_specific_tool_definitions() -> Vec<ToolDefinition> {
                     "required": ["command"]
                 }),
             },
-        },
-    ]
+        });
+    }
+
+    tools
+}
+
+pub fn assistant_tool_allowed(name: &str, mode: AssistantToolMode) -> bool {
+    match mode {
+        AssistantToolMode::FullAccess => true,
+        AssistantToolMode::ReadOnly => !matches!(
+            name,
+            TOOL_RUN_COMMAND
+                | crate::tool_helpers::TOOL_SEND_KEYS_TO_PANE
+                | crate::tool_helpers::TOOL_UPSERT_SPEC_ISSUE
+        ),
+    }
 }
 
 /// Execute a single assistant tool call and return the result as a string.
@@ -136,11 +227,22 @@ pub fn execute_assistant_tool(
     state: &AppState,
     _window_label: &str,
     project_path: &str,
+    mode: AssistantToolMode,
 ) -> Result<String, String> {
     let args = normalize_args(&call.arguments)?;
+    let access_mode = shared_tool_access_mode(mode);
+
+    if !assistant_tool_allowed(call.name.as_str(), mode) {
+        return Err(format!(
+            "Tool is not available in {:?} mode: {}",
+            mode, call.name
+        ));
+    }
 
     // Try shared tools first
-    if let Some(result) = execute_shared_tool(call, &args, state, project_path) {
+    if let Some(result) =
+        execute_shared_tool_with_mode(call, &args, state, project_path, access_mode)
+    {
         return result;
     }
 
@@ -202,9 +304,18 @@ pub fn execute_assistant_tool(
         TOOL_GIT_DIFF => run_command_in_dir(project_path, "git", &["diff"]),
         TOOL_GIT_STATUS => run_command_in_dir(project_path, "git", &["status", "--short"]),
         TOOL_RUN_COMMAND => {
+            if !access_mode.allows_write() {
+                return Err(format!(
+                    "Tool is not available in {:?} mode: {}",
+                    mode, call.name
+                ));
+            }
             let command = get_required_string_any(&args, &["command"])?;
             run_shell_command(project_path, command)
         }
+        TOOL_LIST_PANES => list_project_panes(state, project_path),
+        TOOL_LIST_ISSUES => list_project_issues(project_path, &args),
+        TOOL_LIST_PULL_REQUESTS => list_project_pull_requests(project_path, &args),
         _ => Err(format!("Unknown tool: {}", call.name)),
     }
 }
@@ -292,5 +403,131 @@ fn run_shell_command(dir: &str, shell_command: &str) -> Result<String, String> {
             }
             Err(e) => return Err(format!("Failed to wait for command: {}", e)),
         }
+    }
+}
+
+fn list_project_panes(state: &AppState, project_path: &str) -> Result<String, String> {
+    let repo_path =
+        crate::commands::project::resolve_repo_path_for_project_root(Path::new(project_path))
+            .map_err(|e| format!("Failed to resolve repository path: {e}"))?;
+
+    let manager = state
+        .pane_manager
+        .lock()
+        .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+    let panes = manager
+        .panes()
+        .iter()
+        .filter(|pane| pane.project_root() == repo_path.as_path())
+        .map(|pane| {
+            json!({
+                "paneId": pane.pane_id(),
+                "agentName": pane.agent_name(),
+                "branchName": pane.branch_name(),
+                "status": format!("{:?}", pane.status()),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_string(&json!({ "panes": panes }))
+        .map_err(|e| format!("Failed to serialize panes: {e}"))
+}
+
+fn list_project_issues(project_path: &str, args: &serde_json::Value) -> Result<String, String> {
+    if !gwt_core::git::is_gh_cli_available() || !gwt_core::git::is_gh_cli_authenticated() {
+        return Ok(json!({ "ghAvailable": false, "issues": [] }).to_string());
+    }
+
+    let repo_path =
+        crate::commands::project::resolve_repo_path_for_project_root(Path::new(project_path))
+            .map_err(|e| format!("Failed to resolve repository path: {e}"))?;
+    let state = get_optional_string_any(args, &["state"]).unwrap_or("open");
+    let limit = get_optional_u64_any(args, &["limit"]).unwrap_or(5).min(20) as u32;
+    let result =
+        gwt_core::git::fetch_issues_with_options(&repo_path, 1, limit, state, false, "all")
+            .map_err(|e| format!("Failed to list issues: {e}"))?;
+
+    let issues = result
+        .issues
+        .into_iter()
+        .map(|issue| {
+            json!({
+                "number": issue.number,
+                "title": issue.title,
+                "state": issue.state,
+                "updatedAt": issue.updated_at,
+                "url": issue.html_url,
+                "labels": issue.labels.into_iter().map(|label| label.name).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_string(&json!({
+        "ghAvailable": true,
+        "hasNextPage": result.has_next_page,
+        "issues": issues,
+    }))
+    .map_err(|e| format!("Failed to serialize issues: {e}"))
+}
+
+fn list_project_pull_requests(
+    project_path: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    if !gwt_core::git::is_gh_cli_available() || !gwt_core::git::is_gh_cli_authenticated() {
+        return Ok(json!({ "ghAvailable": false, "items": [] }).to_string());
+    }
+
+    let repo_path =
+        crate::commands::project::resolve_repo_path_for_project_root(Path::new(project_path))
+            .map_err(|e| format!("Failed to resolve repository path: {e}"))?;
+    let state = get_optional_string_any(args, &["state"]).unwrap_or("open");
+    let limit = get_optional_u64_any(args, &["limit"]).unwrap_or(5).min(20) as u32;
+    let items = gwt_core::git::gh_cli::fetch_pr_list(&repo_path, state, limit)
+        .map_err(|e| format!("Failed to list pull requests: {e}"))?;
+
+    serde_json::to_string(&json!({
+        "ghAvailable": true,
+        "items": items,
+    }))
+    .map_err(|e| format!("Failed to serialize pull requests: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use gwt_core::ai::ToolCall;
+
+    #[test]
+    fn read_only_mode_excludes_mutating_tools() {
+        let names: Vec<String> = assistant_tool_definitions(AssistantToolMode::ReadOnly)
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect();
+
+        assert!(!names.contains(&TOOL_RUN_COMMAND.to_string()));
+        assert!(!names.contains(&crate::tool_helpers::TOOL_SEND_KEYS_TO_PANE.to_string()));
+        assert!(!names.contains(&crate::tool_helpers::TOOL_UPSERT_SPEC_ISSUE.to_string()));
+        assert!(names.contains(&TOOL_LIST_PANES.to_string()));
+        assert!(names.contains(&TOOL_LIST_ISSUES.to_string()));
+        assert!(names.contains(&TOOL_LIST_PULL_REQUESTS.to_string()));
+    }
+
+    #[test]
+    fn read_only_mode_rejects_mutating_shared_tools() {
+        let call = ToolCall {
+            name: crate::tool_helpers::TOOL_SEND_KEYS_TO_PANE.to_string(),
+            arguments: json!({
+                "pane_id": "pane-1",
+                "text": "hello",
+            }),
+            call_id: None,
+        };
+
+        let state = AppState::new();
+        let result =
+            execute_assistant_tool(&call, &state, "main", ".", AssistantToolMode::ReadOnly);
+        assert!(result.is_err());
     }
 }

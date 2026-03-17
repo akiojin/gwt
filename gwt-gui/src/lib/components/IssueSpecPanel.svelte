@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import MarkdownRenderer from "./MarkdownRenderer.svelte";
 
   type SpecIssueSectionsData = {
     spec: string;
@@ -94,39 +95,39 @@
 
       <article class="section">
         <h3>Spec</h3>
-        <pre>{sectionText(detail.sections.spec)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.spec)} />
       </article>
       <article class="section">
         <h3>Plan</h3>
-        <pre>{sectionText(detail.sections.plan)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.plan)} />
       </article>
       <article class="section">
         <h3>Tasks</h3>
-        <pre>{sectionText(detail.sections.tasks)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.tasks)} />
       </article>
       <article class="section">
         <h3>TDD</h3>
-        <pre>{sectionText(detail.sections.tdd)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.tdd)} />
       </article>
       <article class="section">
         <h3>Research</h3>
-        <pre>{sectionText(detail.sections.research)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.research)} />
       </article>
       <article class="section">
         <h3>Data Model</h3>
-        <pre>{sectionText(detail.sections.dataModel)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.dataModel)} />
       </article>
       <article class="section">
         <h3>Quickstart</h3>
-        <pre>{sectionText(detail.sections.quickstart)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.quickstart)} />
       </article>
       <article class="section">
         <h3>Contracts</h3>
-        <pre>{sectionText(detail.sections.contracts)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.contracts)} />
       </article>
       <article class="section">
         <h3>Checklists</h3>
-        <pre>{sectionText(detail.sections.checklists)}</pre>
+        <MarkdownRenderer text={sectionText(detail.sections.checklists)} />
       </article>
     </div>
   {:else}
@@ -204,12 +205,4 @@
     color: var(--text-primary);
   }
 
-  .section pre {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: var(--ui-font-sm);
-    color: var(--text-primary);
-  }
 </style>

@@ -1012,7 +1012,7 @@
       aria-label="Paste"
       onclick={handlePasteImageClick}
     >
-      <ClipboardPaste size={16} />
+      <ClipboardPaste size={24} />
     </button>
     <button
       class:active={voiceInputListening}
@@ -1025,7 +1025,7 @@
       aria-label="Voice"
       onclick={handleVoiceButtonClick}
     >
-      <Mic size={16} />
+      <Mic size={24} />
     </button>
   </div>
 </div>
@@ -1049,7 +1049,7 @@
     bottom: 12px;
     z-index: 2;
     display: flex;
-    gap: 8px;
+    gap: 10px;
     pointer-events: none;
   }
 
@@ -1058,13 +1058,13 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 32px;
-    min-height: 32px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, white 18%);
-    background: color-mix(in srgb, var(--bg-secondary) 88%, black 12%);
-    color: var(--text-muted);
+    min-width: 48px;
+    min-height: 48px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 70%, white 30%);
+    background: color-mix(in srgb, var(--bg-secondary) 92%, black 8%);
+    color: var(--text-secondary);
     border-radius: 999px;
-    padding: 7px;
+    padding: 11px;
     font-size: var(--ui-font-xs);
     line-height: 1;
     cursor: pointer;

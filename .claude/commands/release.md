@@ -256,44 +256,15 @@ ALL_REFS=$(printf '%s\n%s\n' "$SQUASH_REFS" "$MERGE_PRS" | awk 'NF' | sort -nu)
 
 #### 9.2 各番号を分類し、Closing Issue を収集
 
-各番号について GitHub API で PR か Issue かを判定し、それぞれ適切に処理する：
+各番号について GitHub API で PR か Issue かを判定し、それぞれ適切に処理する。  
+**必ず** 以下のヘルパースクリプトを使って収集結果を JSON で取得すること：
 
 ```bash
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-ISSUE_NUMBERS=""
+ISSUE_REF_JSON=$(python3 scripts/release_issue_refs.py --range "$RANGE" --format json)
 
-for NUM in $ALL_REFS; do
-  IS_PR=$(gh api "repos/$REPO/issues/$NUM" --jq '.pull_request // empty' 2>/dev/null || true)
-
-  if [ -n "$IS_PR" ]; then
-    # PR の場合: PR body から Closing Issue 番号を抽出
-    PR_BODY=$(gh pr view "$NUM" --json body --jq '.body' 2>/dev/null || true)
-    if [ -n "$PR_BODY" ]; then
-      # 既存: キーワード付き参照を収集（PR body 全体）
-      FOUND=$(printf '%s\n' "$PR_BODY" \
-        | grep -Eio '(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#[0-9]+' \
-        | grep -Eo '#[0-9]+' \
-        | tr -d '#' || true)
-
-      # 追加: "Closing Issues" セクション内の #N を収集（キーワード不要）
-      SECTION_FOUND=$(printf '%s\n' "$PR_BODY" \
-        | sed -n '/^## Closing Issues/,/^## /p' \
-        | grep -Eo '#[0-9]+' \
-        | tr -d '#' || true)
-
-      # 結合・重複排除
-      FOUND=$(printf '%s\n%s\n' "$FOUND" "$SECTION_FOUND" | awk 'NF' | sort -nu)
-      if [ -n "$FOUND" ]; then
-        ISSUE_NUMBERS="${ISSUE_NUMBERS}\n${FOUND}"
-      fi
-    fi
-  else
-    # Issue の場合: その番号自体を Closing Issue として追加
-    ISSUE_NUMBERS="${ISSUE_NUMBERS}\n${NUM}"
-  fi
-done
-
-ISSUE_NUMBERS=$(printf '%b\n' "$ISSUE_NUMBERS" | awk 'NF' | sort -nu)
+ISSUE_NUMBERS=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.auto_close_issues[]?')
+REFERENCE_ONLY_ISSUES=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.reference_only_issues[]?')
+ISSUE_WARNINGS=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.warnings[]?')
 ```
 
 `ISSUE_NUMBERS` が空でなければ、PR 本文の `## Closing Issues` セクションに **1行ずつ** 以下を追加：
@@ -302,6 +273,17 @@ ISSUE_NUMBERS=$(printf '%b\n' "$ISSUE_NUMBERS" | awk 'NF' | sort -nu)
 Closes #123
 Closes #456
 ```
+
+#### 9.3 warning の扱い
+
+`REFERENCE_ONLY_ISSUES` または `ISSUE_WARNINGS` がある場合、それらは **自動クローズ対象ではない**。  
+この場合、ステップ5の承認時とステップ10の PR 本文生成時に必ず可視化すること。
+
+- `REFERENCE_ONLY_ISSUES`: `## Related Issues / Links` に残す
+- `ISSUE_WARNINGS`: ユーザー承認時にそのまま表示する
+- `ISSUE_NUMBERS` が空でも `REFERENCE_ONLY_ISSUES` がある場合:
+  - 「関連Issueは見つかったが、自動クローズ対象は 0 件」と明示する
+  - 対象 Issue を本当に閉じたいなら `Closing Issues` 側へ移す必要があると説明する
 
 ### 10. PR作成/更新
 
@@ -345,8 +327,10 @@ PR bodyには以下を含めてください：
 - `## Changes` - 主な変更点をリスト形式で
 - `## Version` - バージョン番号
 - `## Closing Issues` - main マージ時にクローズしたい Issue を `Closes #<番号>` の生テキストで列挙（`ISSUE_NUMBERS` が空の場合は `None` と記載）
+- `## Related Issues / Links` - `REFERENCE_ONLY_ISSUES` を `#<番号>` で列挙（空の場合は `None`）
 
 **重要**: `Closes #<番号>` はコードブロックに入れず、通常の本文として記載すること。
+**重要**: `#<番号>` を `## Related Issues / Links` にだけ書いても auto-close されない。
 
 ### 11. Closing Issue へのコメント追記
 
