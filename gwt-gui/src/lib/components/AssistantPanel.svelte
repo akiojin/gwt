@@ -73,10 +73,19 @@
     }
   }
 
+  function isImeEnterKeydown(event: KeyboardEvent): boolean {
+    const legacyKeyCode = event.keyCode || event.which;
+    return event.isComposing || isComposing || legacyKeyCode === 229;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey && !isComposing) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      if (isImeEnterKeydown(e)) {
+        return;
+      }
+
       e.preventDefault();
-      sendMessage();
+      void sendMessage();
     }
   }
 
