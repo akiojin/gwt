@@ -233,6 +233,21 @@ describe("PrStatusSection", () => {
     expect(badge?.textContent).toContain("Blocked");
   });
 
+  it("renders checking when mergeStateStatus is BLOCKED but required checks are still queued", async () => {
+    const pr = makePrDetail({
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "BLOCKED",
+      checkSuites: [
+        { workflowName: "CI", runId: 3, status: "queued", conclusion: null, isRequired: true },
+      ],
+    });
+    const { container } = await renderSection({ prDetail: pr });
+    const badge = container.querySelector(".mergeable-badge");
+    expect(badge?.classList.contains("checking")).toBe(true);
+    expect(badge?.textContent).toContain("Checking merge status...");
+    expect(badge?.textContent).not.toContain("Blocked");
+  });
+
   it("renders reviews with correct state icons", async () => {
     const reviews: ReviewInfo[] = [
       { reviewer: "alice", state: "APPROVED" },

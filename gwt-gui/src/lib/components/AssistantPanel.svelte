@@ -2,13 +2,17 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
-  import type { AssistantState, DashboardData } from "../types";
+  import type { AssistantMessage, AssistantState, DashboardData } from "../types";
   import AssistantDashboard from "./AssistantDashboard.svelte";
 
   let assistantState: AssistantState | null = $state(null);
   let dashboard: DashboardData | null = $state(null);
   let inputText: string = $state("");
   let isComposing: boolean = $state(false);
+  let messageInputRef: HTMLTextAreaElement | undefined = $state();
+  let sentInputHistory: string[] = $state([]);
+  let historyIndex: number | null = $state(null);
+  let draftBeforeHistory: string | null = $state(null);
   let messagesEndRef: HTMLDivElement | undefined = $state();
 
   function scrollToBottom() {
@@ -57,6 +61,7 @@
     if (isComposing) return;
     const text = inputText.trim();
     if (!text) return;
+    let previousState: AssistantState | null = null;
 
     try {
       const readyState = await initializeAssistant();
@@ -64,19 +69,130 @@
         return;
       }
 
+      previousState = assistantState ?? readyState;
+      const optimisticState: AssistantState = {
+        ...previousState,
+        isThinking: true,
+        messages: [
+          ...previousState.messages,
+          createOptimisticUserMessage(text),
+        ],
+      };
+
       inputText = "";
+      assistantState = optimisticState;
       assistantState = await invoke<AssistantState>("assistant_send_message", {
         input: text,
       });
+      sentInputHistory = [...sentInputHistory, text];
+      historyIndex = null;
+      draftBeforeHistory = null;
     } catch (err) {
+      if (previousState) {
+        assistantState = previousState;
+      }
+      inputText = text;
+      historyIndex = null;
+      draftBeforeHistory = null;
       console.error("Failed to send assistant message:", err);
     }
   }
 
+  function createOptimisticUserMessage(content: string): AssistantMessage {
+    return {
+      role: "user",
+      kind: "text",
+      content,
+      timestamp: Date.now(),
+    };
+  }
+
+  function isImeEnterKeydown(event: KeyboardEvent): boolean {
+    const legacyKeyCode = event.keyCode || event.which;
+    return event.isComposing || isComposing || legacyKeyCode === 229;
+  }
+
+  function scheduleCaretToEnd() {
+    requestAnimationFrame(() => {
+      if (!messageInputRef) return;
+      const end = messageInputRef.value.length;
+      messageInputRef.setSelectionRange(end, end);
+    });
+  }
+
+  function isCaretOnFirstLine(value: string, position: number): boolean {
+    return !value.slice(0, position).includes("\n");
+  }
+
+  function isCaretOnLastLine(value: string, position: number): boolean {
+    return !value.slice(position).includes("\n");
+  }
+
+  function handleHistoryKeydown(event: KeyboardEvent): boolean {
+    if (isComposing || event.isComposing || !messageInputRef) {
+      return false;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+      return false;
+    }
+
+    const { selectionStart, selectionEnd, value } = messageInputRef;
+    if (selectionStart === null || selectionEnd === null || selectionStart !== selectionEnd) {
+      return false;
+    }
+
+    if (event.key === "ArrowUp") {
+      if (!sentInputHistory.length || !isCaretOnFirstLine(value, selectionStart)) {
+        return false;
+      }
+
+      event.preventDefault();
+      if (historyIndex === null) {
+        draftBeforeHistory = inputText;
+        historyIndex = sentInputHistory.length - 1;
+      } else if (historyIndex > 0) {
+        historyIndex -= 1;
+      }
+
+      inputText = sentInputHistory[historyIndex ?? sentInputHistory.length - 1];
+      scheduleCaretToEnd();
+      return true;
+    }
+
+    if (event.key === "ArrowDown") {
+      if (historyIndex === null || !isCaretOnLastLine(value, selectionStart)) {
+        return false;
+      }
+
+      event.preventDefault();
+      const nextIndex = historyIndex + 1;
+      if (nextIndex >= sentInputHistory.length) {
+        historyIndex = null;
+        inputText = draftBeforeHistory ?? "";
+        draftBeforeHistory = null;
+      } else {
+        historyIndex = nextIndex;
+        inputText = sentInputHistory[nextIndex];
+      }
+      scheduleCaretToEnd();
+      return true;
+    }
+
+    return false;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey && !isComposing) {
+    if (handleHistoryKeydown(e)) {
+      return;
+    }
+
+    if (e.key === "Enter" && !e.shiftKey) {
+      if (isImeEnterKeydown(e)) {
+        return;
+      }
+
       e.preventDefault();
-      sendMessage();
+      void sendMessage();
     }
   }
 
@@ -160,6 +276,7 @@
       {/if}
       <div class="input-row">
         <textarea
+          bind:this={messageInputRef}
           class="message-input"
           placeholder="Type a message..."
           bind:value={inputText}
@@ -246,6 +363,11 @@
 
   .message.tool-use .message-content {
     font-weight: 600;
+  }
+
+  .message-content {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .action-icon {

@@ -1744,6 +1744,58 @@ mod tests {
     }
 
     #[test]
+    fn project_scoped_registration_recovers_from_legacy_global_profiles_schema() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvGuard::new(home.path());
+        let project = tempfile::tempdir().unwrap();
+        init_test_git_dir(project.path());
+
+        let global_dir = home.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            r#"
+[agent.skill_registration]
+enabled = true
+
+[profiles]
+version = 1
+active = "default"
+
+[profiles.profiles.default]
+name = "default"
+disabled_env = []
+description = ""
+
+[profiles.profiles.default.env]
+OPENAI_API_KEY = "legacy-key"
+"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load_global().unwrap();
+        let status = repair_skill_registration_with_settings_at_project_root(
+            &settings,
+            Some(project.path()),
+        );
+
+        assert_eq!(status.overall, "ok");
+        assert!(project
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-issue-resolve")
+            .join("SKILL.md")
+            .exists());
+        assert!(project
+            .path()
+            .join(".claude")
+            .join("settings.local.json")
+            .exists());
+    }
+
+    #[test]
     fn registration_rewrites_project_root_references_for_all_agents() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
