@@ -128,7 +128,12 @@ pub async fn assistant_start(
 
     state.clear_assistant_session_for_window(&window_label);
 
-    let engine = AssistantEngine::new(PathBuf::from(&project_path), window_label.clone());
+    let mut engine = AssistantEngine::new(PathBuf::from(&project_path), window_label.clone());
+    if let Err(err) = engine.run_initial_analysis(&state) {
+        engine.push_visible_assistant_message(format!(
+            "Assistant started, but the initial analysis failed: {err}"
+        ));
+    }
 
     let mut engine_guard = state
         .assistant_engine
@@ -314,4 +319,22 @@ fn check_ai_configured() -> bool {
         .ok()
         .map(|profiles| profiles.resolve_active_ai_settings().resolved.is_some())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_build_messages_from_conversation_hides_system_messages() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        engine.push_hidden_system_message_for_test("hidden startup prompt");
+        engine.push_visible_assistant_message("visible guidance");
+
+        let messages = build_messages_from_conversation(&engine);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content, "visible guidance");
+    }
 }
