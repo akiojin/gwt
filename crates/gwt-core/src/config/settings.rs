@@ -67,6 +67,8 @@ struct ProfilesSectionToml {
     active: Option<String>,
     #[serde(flatten)]
     profiles: std::collections::HashMap<String, Profile>,
+    #[serde(default, rename = "profiles", skip_serializing)]
+    legacy_profiles: std::collections::HashMap<String, Profile>,
 }
 
 impl From<ProfilesConfig> for ProfilesSectionToml {
@@ -75,16 +77,21 @@ impl From<ProfilesConfig> for ProfilesSectionToml {
             version: value.version,
             active: value.active,
             profiles: value.profiles,
+            legacy_profiles: std::collections::HashMap::new(),
         }
     }
 }
 
 impl From<ProfilesSectionToml> for ProfilesConfig {
     fn from(value: ProfilesSectionToml) -> Self {
+        let mut profiles = value.profiles;
+        for (name, profile) in value.legacy_profiles {
+            profiles.entry(name).or_insert(profile);
+        }
         Self {
             version: value.version,
             active: value.active,
-            profiles: value.profiles,
+            profiles,
         }
     }
 }
