@@ -721,6 +721,12 @@ fn has_non_required_check_failure(check_suites: &[WorkflowRunInfo]) -> bool {
     })
 }
 
+fn has_pending_required_check(check_suites: &[WorkflowRunInfo]) -> bool {
+    check_suites.iter().any(|run| {
+        run.is_required == Some(true) && (run.status != "completed" || run.conclusion.is_none())
+    })
+}
+
 fn compute_non_required_checks_warning(check_suites: &[WorkflowRunInfo]) -> bool {
     has_non_required_check_failure(check_suites) && !has_required_check_failure(check_suites)
 }
@@ -758,10 +764,13 @@ fn compute_merge_ui_state(
     if retrying {
         return "checking";
     }
-    if merge_state_status == Some("BLOCKED")
-        || has_required_check_failure(check_suites)
-        || has_changes_requested(reviews)
-    {
+    if has_required_check_failure(check_suites) || has_changes_requested(reviews) {
+        return "blocked";
+    }
+    if merge_state_status == Some("BLOCKED") && has_pending_required_check(check_suites) {
+        return "checking";
+    }
+    if merge_state_status == Some("BLOCKED") {
         return "blocked";
     }
     if is_unknown_merge_fields(mergeable, merge_state_status) {
@@ -1855,6 +1864,36 @@ mod tests {
         let state =
             compute_merge_ui_state("OPEN", "MERGEABLE", Some("CLEAN"), false, &checks, &reviews);
         assert_eq!(state, "blocked");
+    }
+
+    #[test]
+    fn test_compute_merge_ui_state_checking_for_pending_required_check_when_blocked() {
+        let checks = vec![WorkflowRunInfo {
+            workflow_name: "Required CI".to_string(),
+            run_id: 101,
+            status: "queued".to_string(),
+            conclusion: None,
+            is_required: Some(true),
+        }];
+
+        let state =
+            compute_merge_ui_state("OPEN", "MERGEABLE", Some("BLOCKED"), false, &checks, &[]);
+        assert_eq!(state, "checking");
+    }
+
+    #[test]
+    fn test_compute_merge_ui_state_checking_for_in_progress_required_check_when_blocked() {
+        let checks = vec![WorkflowRunInfo {
+            workflow_name: "Required CI".to_string(),
+            run_id: 102,
+            status: "in_progress".to_string(),
+            conclusion: None,
+            is_required: Some(true),
+        }];
+
+        let state =
+            compute_merge_ui_state("OPEN", "MERGEABLE", Some("BLOCKED"), false, &checks, &[]);
+        assert_eq!(state, "checking");
     }
 
     #[test]
