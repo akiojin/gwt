@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.11.0] - 2026-03-17
+
+### Features
+
+- **skills:** Add issue register workflow (#1667)
+
 ## [8.10.0] - 2026-03-17
 
 ### Bug Fixes
