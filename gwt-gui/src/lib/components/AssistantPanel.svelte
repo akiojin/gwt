@@ -2,7 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
-  import type { AssistantState, DashboardData } from "../types";
+  import type { AssistantMessage, AssistantState, DashboardData } from "../types";
   import AssistantDashboard from "./AssistantDashboard.svelte";
 
   let assistantState: AssistantState | null = $state(null);
@@ -57,6 +57,7 @@
     if (isComposing) return;
     const text = inputText.trim();
     if (!text) return;
+    let previousState: AssistantState | null = null;
 
     try {
       const readyState = await initializeAssistant();
@@ -64,13 +65,37 @@
         return;
       }
 
+      previousState = assistantState ?? readyState;
+      const optimisticState: AssistantState = {
+        ...previousState,
+        isThinking: true,
+        messages: [
+          ...previousState.messages,
+          createOptimisticUserMessage(text),
+        ],
+      };
+
       inputText = "";
+      assistantState = optimisticState;
       assistantState = await invoke<AssistantState>("assistant_send_message", {
         input: text,
       });
     } catch (err) {
+      if (previousState) {
+        assistantState = previousState;
+      }
+      inputText = text;
       console.error("Failed to send assistant message:", err);
     }
+  }
+
+  function createOptimisticUserMessage(content: string): AssistantMessage {
+    return {
+      role: "user",
+      kind: "text",
+      content,
+      timestamp: Date.now(),
+    };
   }
 
   function isImeEnterKeydown(event: KeyboardEvent): boolean {
@@ -255,6 +280,11 @@
 
   .message.tool-use .message-content {
     font-weight: 600;
+  }
+
+  .message-content {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .action-icon {
