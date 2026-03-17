@@ -94,6 +94,14 @@
     );
   }
 
+  function hasPendingRequiredCheck(checks: WorkflowRunInfo[]): boolean {
+    return checks.some(
+      (check) =>
+        check.isRequired === true &&
+        (check.status !== "completed" || check.conclusion == null),
+    );
+  }
+
   function hasChangesRequested(pr: PrStatusInfo): boolean {
     return pr.reviews.some((review) => review.state === "CHANGES_REQUESTED");
   }
@@ -118,13 +126,13 @@
     if (retryingNow) return "checking";
     const explicit = asMergeUiState(pr.mergeUiState ?? null);
     if (explicit) return explicit;
-    if (
-      pr.mergeStateStatus === "BLOCKED" ||
-      hasRequiredCheckFailure(pr.checkSuites) ||
-      hasChangesRequested(pr)
-    ) {
+    if (hasRequiredCheckFailure(pr.checkSuites) || hasChangesRequested(pr)) {
       return "blocked";
     }
+    if (pr.mergeStateStatus === "BLOCKED" && hasPendingRequiredCheck(pr.checkSuites)) {
+      return "checking";
+    }
+    if (pr.mergeStateStatus === "BLOCKED") return "blocked";
     if (pr.mergeable === "UNKNOWN" || pr.mergeStateStatus === "UNKNOWN") {
       return "checking";
     }
