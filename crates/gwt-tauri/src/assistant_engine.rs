@@ -88,16 +88,32 @@ impl AssistantEngine {
             tool_call_id: None,
         });
 
-        self.run_llm_loop(state)
+        Self::run_llm_loop_for_conversation(
+            &mut self.conversation,
+            &self.project_path,
+            &self.window_label,
+            &mut self.llm_call_count,
+            &mut self.estimated_tokens,
+            state,
+        )
     }
 
     pub fn run_initial_analysis(&mut self, state: &AppState) -> Result<AssistantResponse, String> {
-        self.enqueue_initial_analysis_prompt();
-        self.run_llm_loop(state)
-    }
+        let mut startup_conversation = self.build_initial_analysis_conversation();
+        let response = Self::run_llm_loop_for_conversation(
+            &mut startup_conversation,
+            &self.project_path,
+            &self.window_label,
+            &mut self.llm_call_count,
+            &mut self.estimated_tokens,
+            state,
+        )?;
 
-    pub(crate) fn enqueue_initial_analysis_prompt(&mut self) {
-        self.push_hidden_system_message(STARTUP_ANALYSIS_PROMPT);
+        if !response.text.is_empty() {
+            self.push_visible_assistant_message(response.text.clone());
+        }
+
+        Ok(response)
     }
 
     pub(crate) fn push_visible_assistant_message(&mut self, content: impl Into<String>) {
@@ -111,11 +127,27 @@ impl AssistantEngine {
 
     #[cfg(test)]
     pub(crate) fn push_hidden_system_message_for_test(&mut self, content: impl Into<String>) {
-        self.push_hidden_system_message(content);
+        Self::push_hidden_system_message_to(&mut self.conversation, content);
     }
 
-    fn push_hidden_system_message(&mut self, content: impl Into<String>) {
-        self.conversation.push(ChatCompletionsToolMessage {
+    #[cfg(test)]
+    pub(crate) fn build_initial_analysis_conversation_for_test(
+        &self,
+    ) -> Vec<ChatCompletionsToolMessage> {
+        self.build_initial_analysis_conversation()
+    }
+
+    fn build_initial_analysis_conversation(&self) -> Vec<ChatCompletionsToolMessage> {
+        let mut conversation = self.conversation.clone();
+        Self::push_hidden_system_message_to(&mut conversation, STARTUP_ANALYSIS_PROMPT);
+        conversation
+    }
+
+    fn push_hidden_system_message_to(
+        conversation: &mut Vec<ChatCompletionsToolMessage>,
+        content: impl Into<String>,
+    ) {
+        conversation.push(ChatCompletionsToolMessage {
             role: "system".to_string(),
             content: Some(content.into()),
             tool_calls: None,
@@ -160,45 +192,57 @@ impl AssistantEngine {
             tool_call_id: None,
         });
 
-        let response = self.run_llm_loop(state)?;
+        let response = Self::run_llm_loop_for_conversation(
+            &mut self.conversation,
+            &self.project_path,
+            &self.window_label,
+            &mut self.llm_call_count,
+            &mut self.estimated_tokens,
+            state,
+        )?;
         Ok(Some(response))
     }
 
     /// Prune conversation to stay within the sliding window limit.
     /// Keeps the system prompt (index 0) and the most recent messages.
     /// Ensures the cut point does not orphan tool result messages.
-    fn prune_conversation(&mut self) {
-        if self.conversation.len() <= MAX_CONVERSATION_MESSAGES {
+    fn prune_conversation_buffer(conversation: &mut Vec<ChatCompletionsToolMessage>) {
+        if conversation.len() <= MAX_CONVERSATION_MESSAGES {
             return;
         }
 
         // Always keep message[0] (system prompt).
         // Keep the last (MAX_CONVERSATION_MESSAGES - 1) messages from the tail.
         let keep_tail = MAX_CONVERSATION_MESSAGES - 1;
-        let mut cut = self.conversation.len() - keep_tail;
+        let mut cut = conversation.len() - keep_tail;
 
         // Ensure cut point doesn't orphan a "tool" role message (tool result without
         // the preceding assistant tool_calls message). Walk forward from the cut point
         // to find the first message that is NOT a "tool" role.
-        while cut < self.conversation.len() && self.conversation[cut].role == "tool" {
+        while cut < conversation.len() && conversation[cut].role == "tool" {
             cut += 1;
         }
 
-        if cut >= self.conversation.len() {
+        if cut >= conversation.len() {
             // Edge case: all remaining messages are tool results — keep everything
             return;
         }
 
         // Build pruned conversation: system prompt + messages from cut onward
-        let mut pruned = Vec::with_capacity(1 + self.conversation.len() - cut);
-        pruned.push(self.conversation[0].clone());
-        pruned.extend_from_slice(&self.conversation[cut..]);
-        self.conversation = pruned;
+        let mut pruned = Vec::with_capacity(1 + conversation.len() - cut);
+        pruned.push(conversation[0].clone());
+        pruned.extend_from_slice(&conversation[cut..]);
+        *conversation = pruned;
     }
 
-    /// Run the LLM tool-use loop: call LLM, execute tool calls, repeat until
-    /// the LLM returns a text response (no tool calls) or max iterations reached.
-    fn run_llm_loop(&mut self, state: &AppState) -> Result<AssistantResponse, String> {
+    fn run_llm_loop_for_conversation(
+        conversation: &mut Vec<ChatCompletionsToolMessage>,
+        project_path: &std::path::Path,
+        window_label: &str,
+        llm_call_count: &mut u64,
+        estimated_tokens: &mut u64,
+        state: &AppState,
+    ) -> Result<AssistantResponse, String> {
         let tools = assistant_tools::assistant_tool_definitions();
         let mut actions_taken = Vec::new();
 
@@ -206,10 +250,10 @@ impl AssistantEngine {
         let ai_settings = resolve_ai_settings()?;
 
         // Prune conversation before sending to LLM to avoid context window overflow.
-        self.prune_conversation();
+        Self::prune_conversation_buffer(conversation);
 
         for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
-            let messages = self.conversation.clone();
+            let messages = conversation.clone();
             let tools_clone = tools.clone();
             let settings = ai_settings.clone();
 
@@ -231,14 +275,14 @@ impl AssistantEngine {
             .join()
             .map_err(|_| "LLM call panicked".to_string())??;
 
-            self.llm_call_count += 1;
+            *llm_call_count += 1;
             if let Some(tokens) = response.usage_tokens {
-                self.estimated_tokens += tokens;
+                *estimated_tokens += tokens;
             }
 
             if response.tool_calls.is_empty() {
                 // No tool calls — this is the final text response
-                self.conversation.push(ChatCompletionsToolMessage {
+                conversation.push(ChatCompletionsToolMessage {
                     role: "assistant".to_string(),
                     content: Some(response.text.clone()),
                     tool_calls: None,
@@ -266,7 +310,7 @@ impl AssistantEngine {
                 .collect();
 
             // Add the assistant message with tool_calls
-            self.conversation.push(ChatCompletionsToolMessage {
+            conversation.push(ChatCompletionsToolMessage {
                 role: "assistant".to_string(),
                 content: if response.text.is_empty() {
                     None
@@ -278,14 +322,10 @@ impl AssistantEngine {
             });
 
             // Execute each tool call and add tool results
-            let project_path = self.project_path.to_string_lossy().to_string();
+            let project_path = project_path.to_string_lossy().to_string();
             for tc in &response.tool_calls {
-                let tool_result = assistant_tools::execute_assistant_tool(
-                    tc,
-                    state,
-                    &self.window_label,
-                    &project_path,
-                );
+                let tool_result =
+                    assistant_tools::execute_assistant_tool(tc, state, window_label, &project_path);
 
                 let result_text = match &tool_result {
                     Ok(text) => {
@@ -299,7 +339,7 @@ impl AssistantEngine {
                 };
 
                 let call_id = tc.call_id.clone().unwrap_or_default();
-                self.conversation.push(ChatCompletionsToolMessage {
+                conversation.push(ChatCompletionsToolMessage {
                     role: "tool".to_string(),
                     content: Some(truncate_tool_result(&result_text)),
                     tool_calls: None,
@@ -383,18 +423,17 @@ mod tests {
 
     #[test]
     fn test_enqueue_initial_analysis_prompt_adds_hidden_system_message() {
-        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
-        engine.enqueue_initial_analysis_prompt();
+        let engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        let startup_conversation = engine.build_initial_analysis_conversation_for_test();
 
-        assert_eq!(engine.conversation.len(), 2);
-        assert_eq!(engine.conversation[1].role, "system");
-        assert!(
-            engine.conversation[1]
-                .content
-                .as_deref()
-                .unwrap_or_default()
-                .contains("project was just opened")
-        );
+        assert_eq!(engine.conversation.len(), 1);
+        assert_eq!(startup_conversation.len(), 2);
+        assert_eq!(startup_conversation[1].role, "system");
+        assert!(startup_conversation[1]
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("project was just opened"));
     }
 
     #[test]
@@ -426,7 +465,7 @@ mod tests {
                 .push(make_msg("user", &format!("msg {}", i)));
         }
         assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
-        engine.prune_conversation();
+        AssistantEngine::prune_conversation_buffer(&mut engine.conversation);
         // Should not change
         assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
     }
@@ -441,7 +480,7 @@ mod tests {
                 .push(make_msg("user", &format!("msg {}", i)));
         }
         assert_eq!(engine.conversation.len(), 61);
-        engine.prune_conversation();
+        AssistantEngine::prune_conversation_buffer(&mut engine.conversation);
         // Should be MAX_CONVERSATION_MESSAGES
         assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
         // First message is always system
@@ -490,7 +529,7 @@ mod tests {
                 .push(make_msg("user", &format!("late {}", i)));
         }
         assert_eq!(engine.conversation.len(), 54);
-        engine.prune_conversation();
+        AssistantEngine::prune_conversation_buffer(&mut engine.conversation);
         // First should be system
         assert_eq!(engine.conversation[0].role, "system");
         // No orphaned tool messages at the start of the kept window
