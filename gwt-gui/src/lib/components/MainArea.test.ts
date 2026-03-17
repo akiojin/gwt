@@ -6,6 +6,7 @@ import {
   render,
   waitFor,
 } from "@testing-library/svelte";
+import MainArea from "./MainArea.svelte";
 import type { Tab } from "../types";
 
 async function renderMainArea(props: {
@@ -19,7 +20,6 @@ async function renderMainArea(props: {
     position: "before" | "after",
   ) => void;
 }) {
-  const { default: MainArea } = await import("./MainArea.svelte");
   return render(MainArea, {
     props: {
       projectPath: "/tmp/project",
