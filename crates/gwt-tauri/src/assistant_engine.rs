@@ -17,6 +17,9 @@ const MAX_TOOL_LOOP_ITERATIONS: usize = 10;
 const ASSISTANT_MAX_TOKENS: u32 = 4096;
 const ASSISTANT_TEMPERATURE: f32 = 0.3;
 const MAX_CONVERSATION_MESSAGES: usize = 50;
+const STARTUP_ANALYSIS_PROMPT: &str = r#"A project was just opened in gwt.
+Analyze the current repository state, summarize what is happening now, and recommend the first actionable next steps for the user.
+Keep the answer concise and immediately useful."#;
 
 const SYSTEM_PROMPT: &str = r#"あなたは gwt (Git Worktree Manager) のアシスタントです。
 プロアクティブな参謀として、ユーザーの開発作業を支援します。
@@ -86,6 +89,38 @@ impl AssistantEngine {
         });
 
         self.run_llm_loop(state)
+    }
+
+    pub fn run_initial_analysis(&mut self, state: &AppState) -> Result<AssistantResponse, String> {
+        self.enqueue_initial_analysis_prompt();
+        self.run_llm_loop(state)
+    }
+
+    pub(crate) fn enqueue_initial_analysis_prompt(&mut self) {
+        self.push_hidden_system_message(STARTUP_ANALYSIS_PROMPT);
+    }
+
+    pub(crate) fn push_visible_assistant_message(&mut self, content: impl Into<String>) {
+        self.conversation.push(ChatCompletionsToolMessage {
+            role: "assistant".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_hidden_system_message_for_test(&mut self, content: impl Into<String>) {
+        self.push_hidden_system_message(content);
+    }
+
+    fn push_hidden_system_message(&mut self, content: impl Into<String>) {
+        self.conversation.push(ChatCompletionsToolMessage {
+            role: "system".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
     }
 
     /// Handle a batch of monitor events: summarize changes, optionally call LLM.
@@ -344,6 +379,32 @@ mod tests {
         // Conversation should have system message
         assert_eq!(engine.conversation.len(), 1);
         assert_eq!(engine.conversation[0].role, "system");
+    }
+
+    #[test]
+    fn test_enqueue_initial_analysis_prompt_adds_hidden_system_message() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        engine.enqueue_initial_analysis_prompt();
+
+        assert_eq!(engine.conversation.len(), 2);
+        assert_eq!(engine.conversation[1].role, "system");
+        assert!(
+            engine.conversation[1]
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .contains("project was just opened")
+        );
+    }
+
+    #[test]
+    fn test_push_visible_assistant_message_appends_assistant_role() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        engine.push_visible_assistant_message("hello");
+
+        assert_eq!(engine.conversation.len(), 2);
+        assert_eq!(engine.conversation[1].role, "assistant");
+        assert_eq!(engine.conversation[1].content.as_deref(), Some("hello"));
     }
 
     fn make_msg(role: &str, content: &str) -> ChatCompletionsToolMessage {
