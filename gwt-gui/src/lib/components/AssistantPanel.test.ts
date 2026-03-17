@@ -46,6 +46,29 @@ async function renderAssistantPanel() {
   return render(AssistantPanel);
 }
 
+async function waitForTextarea(rendered: Awaited<ReturnType<typeof renderAssistantPanel>>) {
+  const textarea = rendered.getByPlaceholderText("Type a message...") as HTMLTextAreaElement;
+  await waitFor(() => {
+    expect(textarea.disabled).toBe(false);
+  });
+  return textarea;
+}
+
+async function sendWithEnter(textarea: HTMLTextAreaElement, value: string) {
+  const baseline = getAssistantSendCalls().length;
+  await fireEvent.input(textarea, { target: { value } });
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  await fireEvent.keyDown(textarea, {
+    key: "Enter",
+    code: "Enter",
+    keyCode: 13,
+    which: 13,
+  });
+  await waitFor(() => {
+    expect(getAssistantSendCalls()).toHaveLength(baseline + 1);
+  });
+}
+
 function getAssistantSendCalls() {
   return invokeMock.mock.calls.filter(([command]) => command === "assistant_send_message");
 }
@@ -315,5 +338,85 @@ describe("AssistantPanel", () => {
     });
     expect(rendered.container.querySelector(".message.user")).toBeNull();
     expect(rendered.queryByText("Thinking...")).toBeNull();
+  });
+
+  it("navigates sent user input history with ArrowUp and ArrowDown, then restores the draft", async () => {
+    const rendered = await renderAssistantPanel();
+    const textarea = await waitForTextarea(rendered);
+
+    await sendWithEnter(textarea, "first");
+    await sendWithEnter(textarea, "second");
+
+    await fireEvent.input(textarea, { target: { value: "draft" } });
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+    await fireEvent.keyDown(textarea, { key: "ArrowUp", code: "ArrowUp" });
+    await waitFor(() => {
+      expect(textarea.value).toBe("second");
+    });
+
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    await fireEvent.keyDown(textarea, { key: "ArrowUp", code: "ArrowUp" });
+    await waitFor(() => {
+      expect(textarea.value).toBe("first");
+    });
+
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    await fireEvent.keyDown(textarea, { key: "ArrowDown", code: "ArrowDown" });
+    await waitFor(() => {
+      expect(textarea.value).toBe("second");
+    });
+
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    await fireEvent.keyDown(textarea, { key: "ArrowDown", code: "ArrowDown" });
+    await waitFor(() => {
+      expect(textarea.value).toBe("draft");
+    });
+  });
+
+  it("does not navigate history with ArrowUp when the caret is not on the first line", async () => {
+    const rendered = await renderAssistantPanel();
+    const textarea = await waitForTextarea(rendered);
+
+    await sendWithEnter(textarea, "previous");
+    await fireEvent.input(textarea, { target: { value: "line 1\nline 2" } });
+
+    const secondLineOffset = textarea.value.indexOf("\n") + 1;
+    textarea.setSelectionRange(secondLineOffset, secondLineOffset);
+    await fireEvent.keyDown(textarea, { key: "ArrowUp", code: "ArrowUp" });
+
+    expect(textarea.value).toBe("line 1\nline 2");
+  });
+
+  it("does not leave multiline history with ArrowDown before the caret reaches the last line", async () => {
+    const rendered = await renderAssistantPanel();
+    const textarea = await waitForTextarea(rendered);
+
+    await sendWithEnter(textarea, "older\nentry");
+    await fireEvent.input(textarea, { target: { value: "draft" } });
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+    await fireEvent.keyDown(textarea, { key: "ArrowUp", code: "ArrowUp" });
+    await waitFor(() => {
+      expect(textarea.value).toBe("older\nentry");
+    });
+
+    textarea.setSelectionRange(2, 2);
+    await fireEvent.keyDown(textarea, { key: "ArrowDown", code: "ArrowDown" });
+
+    expect(textarea.value).toBe("older\nentry");
+  });
+
+  it("does not navigate history when the input text is selected", async () => {
+    const rendered = await renderAssistantPanel();
+    const textarea = await waitForTextarea(rendered);
+
+    await sendWithEnter(textarea, "previous");
+    await fireEvent.input(textarea, { target: { value: "draft" } });
+    textarea.setSelectionRange(0, textarea.value.length);
+
+    await fireEvent.keyDown(textarea, { key: "ArrowUp", code: "ArrowUp" });
+
+    expect(textarea.value).toBe("draft");
   });
 });
