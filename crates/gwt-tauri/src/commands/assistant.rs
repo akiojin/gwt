@@ -133,15 +133,7 @@ pub async fn assistant_start(
     let mut engine = AssistantEngine::new(PathBuf::from(&project_path), window_label.clone());
     engine.handle_startup(&state)?;
 
-    let response = build_assistant_state_response(&engine, Some(window_label.clone()));
-
-    let mut engine_guard = state
-        .assistant_engine
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    engine_guard.insert(window_label, engine);
-
-    Ok(response)
+    finalize_started_engine(&state, &window_label, &project_path, engine)
 }
 
 #[tauri::command]
@@ -241,6 +233,43 @@ fn build_empty_assistant_state_response() -> AssistantStateResponse {
     }
 }
 
+fn finalize_started_engine(
+    state: &AppState,
+    window_label: &str,
+    project_path: &str,
+    engine: AssistantEngine,
+) -> Result<AssistantStateResponse, String> {
+    let current_project_path = state.project_for_window(window_label);
+    let mut engine_guard = state
+        .assistant_engine
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    if current_project_path.as_deref() != Some(project_path) {
+        return Ok(engine_guard
+            .get(window_label)
+            .map(|current| build_assistant_state_response(current, Some(window_label.to_string())))
+            .unwrap_or_else(build_empty_assistant_state_response));
+    }
+
+    if let Some(existing) = engine_guard.get(window_label) {
+        return Ok(build_assistant_state_response(
+            existing,
+            Some(window_label.to_string()),
+        ));
+    }
+
+    engine_guard.insert(window_label.to_string(), engine);
+    let inserted = engine_guard
+        .get(window_label)
+        .ok_or_else(|| "Assistant session disappeared after startup.".to_string())?;
+
+    Ok(build_assistant_state_response(
+        inserted,
+        Some(window_label.to_string()),
+    ))
+}
+
 fn build_git_dashboard(state: &AppState, window_label: &str) -> Result<GitDashboard, String> {
     let Some(project_path) = state.project_for_window(window_label) else {
         return Ok(GitDashboard {
@@ -334,4 +363,52 @@ fn check_ai_configured() -> bool {
         .ok()
         .map(|profiles| profiles.resolve_active_ai_settings().resolved.is_some())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finalize_started_engine_skips_stale_project_startup() {
+        let state = AppState::new();
+        state
+            .claim_project_for_window_with_identity(
+                "main",
+                "/tmp/current".to_string(),
+                "/tmp/current-id".to_string(),
+            )
+            .unwrap();
+
+        let stale_engine = AssistantEngine::new(PathBuf::from("/tmp/stale"), "main".to_string());
+        let response = finalize_started_engine(&state, "main", "/tmp/stale", stale_engine).unwrap();
+
+        assert!(state.assistant_engine.lock().unwrap().is_empty());
+        assert_eq!(response.session_id, None);
+    }
+
+    #[test]
+    fn finalize_started_engine_keeps_existing_session() {
+        let state = AppState::new();
+        state
+            .claim_project_for_window_with_identity(
+                "main",
+                "/tmp/current".to_string(),
+                "/tmp/current-id".to_string(),
+            )
+            .unwrap();
+
+        state.assistant_engine.lock().unwrap().insert(
+            "main".to_string(),
+            AssistantEngine::new(PathBuf::from("/tmp/current"), "main".to_string()),
+        );
+
+        let stale_engine = AssistantEngine::new(PathBuf::from("/tmp/stale"), "main".to_string());
+        let response = finalize_started_engine(&state, "main", "/tmp/stale", stale_engine).unwrap();
+
+        let stored = state.assistant_engine.lock().unwrap();
+        let current = stored.get("main").unwrap();
+        assert_eq!(current.project_path(), Path::new("/tmp/current"));
+        assert_eq!(response.session_id.as_deref(), Some("main"));
+    }
 }

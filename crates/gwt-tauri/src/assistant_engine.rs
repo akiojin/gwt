@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! Assistant Mode engine — LLM conversation loop with tool calling.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gwt_core::ai::{
     ChatCompletionsToolCallFunction, ChatCompletionsToolCallRef, ChatCompletionsToolMessage,
@@ -123,6 +123,10 @@ impl AssistantEngine {
         &self.conversation
     }
 
+    pub fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
     pub fn startup_status(&self) -> AssistantStartupStatus {
         self.startup_status
     }
@@ -136,6 +140,7 @@ impl AssistantEngine {
             return Ok(());
         }
 
+        let base_len = self.conversation.len();
         self.startup_status = AssistantStartupStatus::Analyzing;
         self.startup_summary_ready = false;
         self.conversation.push(ChatCompletionsToolMessage {
@@ -147,22 +152,33 @@ impl AssistantEngine {
 
         match self.run_llm_loop(state, AssistantToolMode::ReadOnly) {
             Ok(_) => {
+                let summary = self
+                    .conversation
+                    .last()
+                    .and_then(|message| message.content.clone())
+                    .unwrap_or_default();
+                self.finish_startup_transcript(base_len, &summary);
                 self.startup_status = AssistantStartupStatus::Ready;
                 self.startup_summary_ready = true;
                 Ok(())
             }
             Err(err) => {
+                self.finish_startup_transcript(base_len, &format!("自律起動に失敗しました: {err}"));
                 self.startup_status = AssistantStartupStatus::Failed;
                 self.startup_summary_ready = false;
-                self.conversation.push(ChatCompletionsToolMessage {
-                    role: "assistant".to_string(),
-                    content: Some(format!("自律起動に失敗しました: {err}")),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
                 Ok(())
             }
         }
+    }
+
+    fn finish_startup_transcript(&mut self, base_len: usize, summary: &str) {
+        self.conversation.truncate(base_len);
+        self.conversation.push(ChatCompletionsToolMessage {
+            role: "assistant".to_string(),
+            content: Some(summary.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
     }
 
     /// Handle a user message: add to conversation, run LLM loop, return response.
@@ -441,9 +457,55 @@ mod tests {
         assert_eq!(engine.estimated_tokens, 0);
         assert_eq!(engine.startup_status(), AssistantStartupStatus::Idle);
         assert!(!engine.startup_summary_ready());
+        assert_eq!(engine.project_path(), Path::new("/repo"));
         // Conversation should have system message
         assert_eq!(engine.conversation.len(), 1);
         assert_eq!(engine.conversation[0].role, "system");
+    }
+
+    #[test]
+    fn test_finish_startup_transcript_removes_startup_prompt_and_tool_messages() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        let base_len = engine.conversation.len();
+
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "system".to_string(),
+            content: Some(STARTUP_REPORT_PROMPT.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![]),
+            tool_call_id: None,
+        });
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "tool".to_string(),
+            content: Some("tool-result".to_string()),
+            tool_calls: None,
+            tool_call_id: Some("call-1".to_string()),
+        });
+
+        engine.finish_startup_transcript(base_len, "startup summary");
+
+        assert_eq!(engine.conversation.len(), base_len + 1);
+        assert_eq!(engine.conversation[0].role, "system");
+        assert_eq!(
+            engine
+                .conversation
+                .last()
+                .and_then(|message| message.content.as_deref()),
+            Some("startup summary")
+        );
+        assert!(!engine
+            .conversation
+            .iter()
+            .any(|message| message.content.as_deref() == Some(STARTUP_REPORT_PROMPT)));
+        assert!(!engine
+            .conversation
+            .iter()
+            .any(|message| message.role == "tool"));
     }
 
     fn make_msg(role: &str, content: &str) -> ChatCompletionsToolMessage {
