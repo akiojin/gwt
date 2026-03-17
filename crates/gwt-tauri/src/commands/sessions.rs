@@ -13,9 +13,9 @@ use gwt_core::config::{ProfilesConfig, ResolvedAISettings, Session, ToolSessionE
 use gwt_core::git::{
     fetch_issues_with_options, get_spec_issue_detail, Branch, FetchIssuesResult, SpecIssueDetail,
 };
-use gwt_core::worktree::WorktreeManager;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
+use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
