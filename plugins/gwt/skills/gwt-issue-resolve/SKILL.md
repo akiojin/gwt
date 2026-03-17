@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-resolve
-description: Resolve a GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing gwt-spec issue, or promoted to a new spec issue, and continue toward resolution.
+description: Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing gwt-spec issue, or promoted to a new spec issue, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration.
 metadata:
   short-description: Resolve GitHub Issues through direct fixes or spec workflows
 ---
@@ -8,6 +8,8 @@ metadata:
 # GitHub Issue Resolve
 
 Use this skill as the main entrypoint when the user brings a GitHub Issue and wants it progressed, not merely classified.
+
+- If the user wants to register new work and no Issue exists yet, use `gwt-issue-register` first.
 
 The skill must decide the execution path:
 

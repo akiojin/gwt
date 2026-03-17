@@ -1,12 +1,12 @@
 ---
-description: Create a new Issue-first SPEC (`gwt-spec`) when no existing canonical SPEC fits, then hand off to gwt-spec-ops.
+description: Create a new Issue-first SPEC (`gwt-spec`) when no existing canonical SPEC fits, typically after gwt-issue-register determines a new SPEC is required, then hand off to gwt-spec-ops.
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
 # GWT SPEC Register Command
 
-Use this command as a supplementary entrypoint when the user explicitly wants to register a new SPEC, or when a plain Issue needs a new SPEC after preflight search.
+Use this command as a supplementary entrypoint when the user explicitly wants to register a new SPEC, or when `gwt-issue-register` / `gwt-issue-resolve` determine that a new SPEC is required after preflight search.
 
 ## Usage
 

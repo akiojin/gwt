@@ -1,8 +1,9 @@
 ---
 description: >-
-  Resolve a GitHub Issue end-to-end. Analyze the issue, decide whether it
-  should be fixed directly, integrated into an existing gwt-spec issue, or
-  promoted to a new spec issue, and continue toward resolution.
+  Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide
+  whether it should be fixed directly, integrated into an existing gwt-spec
+  issue, or promoted to a new spec issue, and continue toward resolution. Use
+  gwt-issue-register for brand-new work registration.
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
@@ -10,6 +11,8 @@ allowed-tools: Read, Glob, Grep, Bash
 # GitHub Issue Resolve Command
 
 Use this command as the main entrypoint for GitHub Issues. It should not stop at classification. It should decide the execution path and move the work forward.
+
+For new work registration with no existing Issue yet, use `gwt-issue-register` instead.
 
 ## Usage
 
