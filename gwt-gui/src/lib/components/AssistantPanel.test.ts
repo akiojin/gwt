@@ -11,6 +11,7 @@ import type { AssistantState } from "../types";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
+const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -41,9 +42,11 @@ const dashboardFixture = {
 let initialAssistantState: AssistantState;
 let sendMessageImpl: (args?: { input?: string }) => Promise<AssistantState>;
 
-async function renderAssistantPanel() {
+async function renderAssistantPanel(
+  props: { isActive?: boolean; projectPath?: string | null } = {},
+) {
   const { default: AssistantPanel } = await import("./AssistantPanel.svelte");
-  return render(AssistantPanel);
+  return render(AssistantPanel, { props });
 }
 
 async function waitForTextarea(rendered: Awaited<ReturnType<typeof renderAssistantPanel>>) {
@@ -80,8 +83,16 @@ describe("AssistantPanel", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     listenMock.mockReset();
+    eventHandlers.clear();
 
-    listenMock.mockResolvedValue(() => {});
+    listenMock.mockImplementation(async (eventName: string, handler: unknown) => {
+      if (typeof eventName === "string" && typeof handler === "function") {
+        eventHandlers.set(eventName, handler as (event: { payload: unknown }) => void);
+      }
+      return () => {
+        eventHandlers.delete(eventName);
+      };
+    });
     initialAssistantState = structuredClone(assistantStateFixture);
     sendMessageImpl = async (args?: { input?: string }) => ({
       ...structuredClone(assistantStateFixture),
@@ -418,5 +429,57 @@ describe("AssistantPanel", () => {
     await fireEvent.keyDown(textarea, { key: "ArrowUp", code: "ArrowUp" });
 
     expect(textarea.value).toBe("draft");
+  });
+
+  it("reloads the dashboard when the Assistant tab becomes active again", async () => {
+    const rendered = await renderAssistantPanel({
+      isActive: true,
+      projectPath: "/tmp/project",
+    });
+
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "assistant_get_dashboard"),
+      ).toHaveLength(1);
+    });
+
+    await rendered.rerender({ isActive: false, projectPath: "/tmp/project" });
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "assistant_get_dashboard"),
+    ).toHaveLength(1);
+
+    await rendered.rerender({ isActive: true, projectPath: "/tmp/project" });
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "assistant_get_dashboard"),
+      ).toHaveLength(2);
+    });
+  });
+
+  it("reloads the dashboard when launch and close events arrive", async () => {
+    await renderAssistantPanel({
+      isActive: false,
+      projectPath: "/tmp/project",
+    });
+
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "assistant_get_dashboard"),
+      ).toHaveLength(1);
+    });
+
+    eventHandlers.get("launch-finished")?.({ payload: { paneId: "pane-1" } });
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "assistant_get_dashboard"),
+      ).toHaveLength(2);
+    });
+
+    eventHandlers.get("terminal-closed")?.({ payload: { pane_id: "pane-1" } });
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "assistant_get_dashboard"),
+      ).toHaveLength(3);
+    });
   });
 });

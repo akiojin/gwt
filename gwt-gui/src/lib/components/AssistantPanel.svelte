@@ -5,6 +5,12 @@
   import type { AssistantMessage, AssistantState, DashboardData } from "../types";
   import AssistantDashboard from "./AssistantDashboard.svelte";
 
+  interface Props {
+    isActive?: boolean;
+    projectPath?: string | null;
+  }
+
+  let { isActive = true, projectPath = null }: Props = $props();
   let assistantState: AssistantState | null = $state(null);
   let dashboard: DashboardData | null = $state(null);
   let inputText: string = $state("");
@@ -14,6 +20,9 @@
   let historyIndex: number | null = $state(null);
   let draftBeforeHistory: string | null = $state(null);
   let messagesEndRef: HTMLDivElement | undefined = $state();
+  let hasMounted = false;
+  let previousProjectPath: string | null = null;
+  let previousIsActive = false;
 
   function scrollToBottom() {
     messagesEndRef?.scrollIntoView({ behavior: "smooth" });
@@ -197,11 +206,17 @@
   }
 
   onMount(() => {
+    previousProjectPath = projectPath;
+    previousIsActive = isActive;
+    hasMounted = true;
+
     void initializeAssistant();
     void loadDashboard();
 
     let unlistenState: Promise<() => void> | undefined;
     let unlistenDashboard: Promise<() => void> | undefined;
+    let unlistenLaunchFinished: Promise<() => void> | undefined;
+    let unlistenTerminalClosed: Promise<() => void> | undefined;
 
     try {
       unlistenState = listen<AssistantState>(
@@ -217,6 +232,14 @@
           dashboard = event.payload;
         },
       );
+
+      unlistenLaunchFinished = listen("launch-finished", () => {
+        void loadDashboard();
+      });
+
+      unlistenTerminalClosed = listen("terminal-closed", () => {
+        void loadDashboard();
+      });
     } catch {
       // Event listener setup failed (e.g. test environment)
     }
@@ -224,7 +247,37 @@
     return () => {
       unlistenState?.then((fn) => fn()).catch(() => {});
       unlistenDashboard?.then((fn) => fn()).catch(() => {});
+      unlistenLaunchFinished?.then((fn) => fn()).catch(() => {});
+      unlistenTerminalClosed?.then((fn) => fn()).catch(() => {});
     };
+  });
+
+  $effect(() => {
+    if (!hasMounted) {
+      return;
+    }
+
+    const nextProjectPath = projectPath;
+    const nextIsActive = isActive;
+    const projectChanged = nextProjectPath !== previousProjectPath;
+    const becameActive = nextIsActive && !previousIsActive;
+
+    if (projectChanged) {
+      assistantState = null;
+      dashboard = null;
+      inputText = "";
+      isComposing = false;
+      sentInputHistory = [];
+      historyIndex = null;
+      draftBeforeHistory = null;
+      void initializeAssistant();
+      void loadDashboard();
+    } else if (becameActive) {
+      void loadDashboard();
+    }
+
+    previousProjectPath = nextProjectPath;
+    previousIsActive = nextIsActive;
   });
 
   $effect(() => {

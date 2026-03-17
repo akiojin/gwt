@@ -480,7 +480,10 @@
             {:else if tab.type === "projectIndex"}
               <ProjectIndexPanel {projectPath} />
             {:else if tab.type === "assistant"}
-              <AssistantPanel />
+              <AssistantPanel
+                isActive={activeTabId === tab.id}
+                {projectPath}
+              />
             {:else}
               <div class="placeholder">
                 <h2>Select a tab</h2>
