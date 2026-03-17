@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.9.0] - 2026-03-17
+
+### Bug Fixes
+
+- **config:** Load legacy nested profiles tables (#1657) by @akiojin
+
+### Features
+
+- **assistant:** Replace Project Mode with Assistant Mode (#1639)
+- **gui:** Lucide-svelte導入、Paste/VoiceオーバーレイをLucideアイコンに置換
+
 ## [8.8.1] - 2026-03-16
 
 ### Bug Fixes
