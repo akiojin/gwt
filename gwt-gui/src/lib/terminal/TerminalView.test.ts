@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, waitFor, cleanup } from "@testing-library/svelte";
+import TerminalView from "./TerminalView.svelte";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -192,7 +193,6 @@ function installFontSetStub() {
 }
 
 async function renderTerminalView(props: any) {
-  const { default: TerminalView } = await import("./TerminalView.svelte");
   return render(TerminalView, { props });
 }
 
