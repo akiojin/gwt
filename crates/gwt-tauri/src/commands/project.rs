@@ -753,6 +753,7 @@ pub fn start_migration_job(
 /// Quit the app (used by forced migration refusal).
 #[tauri::command]
 pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), StructuredError> {
+    crate::app::cleanup_pty_processes(&state);
     state.request_quit();
     app_handle.exit(0);
     Ok(())
