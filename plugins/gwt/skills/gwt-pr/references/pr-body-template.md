@@ -33,13 +33,15 @@ Rules:
 <!-- GUIDE: Issues to auto-close when this change is released to main.
      Use "Closes #N" syntax (one per line). Write "None" if no issues to close.
      Note: develop PRs do NOT auto-close issues directly;
-     the release workflow re-collects these into the Release PR. -->
+     the release workflow re-collects these into the Release PR.
+     If an issue should close on release, it must appear here even if it is also listed below. -->
 
 - Closes #{issue number}
 
 ## Related Issues / Links
 
-<!-- GUIDE: Reference-only links (NOT auto-closed). Use #number or URL. Write "None" if none. -->
+<!-- GUIDE: Reference-only links (NOT auto-closed). Use #number or URL. Write "None" if none.
+     Any #number listed only here is treated as reference-only and will not auto-close. -->
 
 - {#issue or URL or "None"}
 

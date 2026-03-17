@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-register
-description: Create a new GitHub Issue-first SPEC (`gwt-spec`) using the standard section skeleton when no existing canonical SPEC fits. Use when a plain Issue requires a new SPEC or the user explicitly asks to register a new SPEC.
+description: Create a new GitHub Issue-first SPEC (`gwt-spec`) using the standard section skeleton when no existing canonical SPEC fits. Use when `gwt-issue-register` determines a new SPEC is needed or the user explicitly asks to register a new SPEC.
 ---
 
 # gwt SPEC Register
@@ -9,8 +9,9 @@ Use this skill to create a new `gwt-spec` Issue only after confirming that no ex
 
 `gwt-spec-register` is a registration step, not an execution step.
 
+- If the user wants to register new work and it is still unclear whether it should become a plain Issue or a SPEC, use `gwt-issue-register` first.
 - If an existing `gwt-spec` Issue already fits, use `gwt-spec-ops` instead.
-- If the user starts from a plain Issue and the correct path is still unclear, use `gwt-issue-resolve` first.
+- If the user starts from an existing plain Issue and the correct path is still unclear, use `gwt-issue-resolve` first.
 
 ## Mandatory preflight: search existing spec first
 

@@ -12,19 +12,20 @@ Create or update GitHub Pull Requests with the gh CLI using a detailed body temp
 ## Decision rules (must follow)
 
 1. **Do not create or switch branches.** Always use the current branch as the PR head.
-2. **Check local working tree state before push/PR operations.**
+2. **Only `develop` may target `main`.** If the base is `main` and the head branch is anything other than `develop`, **refuse to create the PR** and instruct the user to merge into `develop` first, then create a release PR from `develop`.
+3. **Check local working tree state before push/PR operations.**
    - `git status --porcelain`
    - If output is non-empty (tracked or untracked changes), pause and ask the user what to do.
    - Present 3 options: continue as-is, abort, or manual cleanup then rerun.
    - **Do not** run `git stash`, `git commit`, or `git clean` automatically unless explicitly requested.
-3. **Check for an existing PR for the current head branch.**
+4. **Check for an existing PR for the current head branch.**
    - `gh pr list --head <head> --state all --json number,state,mergedAt,updatedAt,url,title,mergeCommit`
-4. **If no PR exists** → create a new PR.
-5. **If any PR exists and is NOT merged** (`mergedAt` is null) → push only and finish (do **not** create a new PR).
+5. **If no PR exists** → create a new PR.
+6. **If any PR exists and is NOT merged** (`mergedAt` is null) → push only and finish (do **not** create a new PR).
    - This applies to OPEN or CLOSED (unmerged) PRs.
    - Only update title/body/labels if the user explicitly requests changes.
-6. **If all PRs for the head are merged** → check for post-merge commits (see below).
-7. **If multiple PRs exist for the head** → use the most recently updated PR for reporting, but the create vs push decision is based on `mergedAt`.
+7. **If all PRs for the head are merged** → check for post-merge commits (see below).
+8. **If multiple PRs exist for the head** → use the most recently updated PR for reporting, but the create vs push decision is based on `mergedAt`.
 
 ## Post-merge commit check (critical)
 
@@ -86,6 +87,7 @@ When all PRs for the head branch are merged, you **must** check whether there ar
 6. Add a reason comment to every unchecked checklist item (for example: `- [ ] Docs updated — N/A: no user-facing change`).
 7. Related Issues must be written as `#123` or as a URL. If nothing applies, explicitly write "None".
 8. Closing Issues セクションは `Closes #N` または `None` のみ許可。`- #N`（キーワードなし）は不可。
+9. `Related Issues / Links` に `#N` があり、その Issue をリリースで閉じたい場合は、同じ番号を `Closing Issues` にも `Closes #N` で必ず記載する。`Related Issues / Links` のみでは auto-close されない。
 
 ## Issue/PR Comment Formatting (must follow)
 

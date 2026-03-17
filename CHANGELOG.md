@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.11.0] - 2026-03-17
+
+### Features
+
+- **skills:** Add issue register workflow (#1667)
+
+## [8.10.0] - 2026-03-17
+
+### Bug Fixes
+
+- **config:** Recover legacy profile schema for skill registration (#1658)
+- **tauri:** Preserve compose service workdir for docker launches (#1663)
+- **gui:** Clarify pending PR checks status (#1664)
+
+### Features
+
+- **gui:** Improve assistant panel composer ux (#1665)
+
 ## [8.9.0] - 2026-03-17
 
 ### Bug Fixes

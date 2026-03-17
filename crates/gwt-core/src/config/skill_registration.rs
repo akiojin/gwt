@@ -28,6 +28,7 @@ struct ManagedAsset {
 
 #[cfg(test)]
 const MANAGED_SKILL_NAMES: &[&str] = &[
+    "gwt-issue-register",
     "gwt-issue-resolve",
     "gwt-spec-register",
     "gwt-fix-pr",
@@ -40,6 +41,15 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
 ];
 
 const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
+    ManagedAsset {
+        relative_path: "skills/gwt-issue-register/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-issue-register/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
     ManagedAsset {
         relative_path: "skills/gwt-issue-resolve/SKILL.md",
         body: include_str!(concat!(
@@ -190,6 +200,15 @@ const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
 ];
 
 const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
+    ManagedAsset {
+        relative_path: "commands/gwt-issue-register.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-issue-register.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
     ManagedAsset {
         relative_path: "commands/gwt-issue-resolve.md",
         body: include_str!(concat!(
@@ -1510,6 +1529,10 @@ mod tests {
             MANAGED_SKILL_NAMES.contains(&"gwt-spec-to-issue-migration"),
             "managed skills must include gwt-spec-to-issue-migration"
         );
+        assert!(
+            MANAGED_SKILL_NAMES.contains(&"gwt-issue-register"),
+            "managed skills must include gwt-issue-register"
+        );
     }
 
     #[test]
@@ -1948,6 +1971,19 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
 
+        let issue_register_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-issue-register")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(issue_register_skill.contains("Search existing Issues and `gwt-spec` Issues first"));
+        assert!(issue_register_skill.contains("gwt-project-index"));
+        assert!(issue_register_skill.contains("gwt-spec-register"));
+        assert!(issue_register_skill.contains("gwt-issue-resolve"));
+
         let project_index_skill = std::fs::read_to_string(
             temp.path()
                 .join(".codex")
@@ -1993,6 +2029,17 @@ OPENAI_API_KEY = "legacy-key"
         assert!(spec_register_skill.contains("Create a new GitHub Issue-first SPEC"));
         assert!(spec_register_skill.contains("gwt-project-index"));
 
+        let issue_register_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-issue-register.md"),
+        )
+        .unwrap();
+        assert!(issue_register_command.contains("main entrypoint for new work registration"));
+        assert!(issue_register_command.contains("gwt-project-index"));
+        assert!(issue_register_command.contains("gwt-spec-register"));
+
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
                 .join(".claude")
@@ -2002,6 +2049,7 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(issue_resolve_command.contains("direct fix"));
         assert!(issue_resolve_command.contains("existing SPEC"));
+        assert!(issue_resolve_command.contains("gwt-issue-register"));
 
         let spec_register_command = std::fs::read_to_string(
             temp.path()
@@ -2012,6 +2060,7 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(spec_register_command.contains("Create a new Issue-first SPEC"));
         assert!(spec_register_command.contains("gwt-project-index"));
+        assert!(spec_register_command.contains("gwt-issue-register"));
 
         assert!(!temp
             .path()
