@@ -10,6 +10,7 @@ use super::profile::{Profile, ProfilesConfig};
 use super::recent_projects::RecentProjectsConfig;
 use super::tools::ToolsConfig;
 use crate::error::{GwtError, Result};
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -60,13 +61,80 @@ pub struct Settings {
 }
 
 /// TOML DTO for the `[profiles]` section inside `config.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(default)]
 struct ProfilesSectionToml {
     version: u8,
     active: Option<String>,
     #[serde(flatten)]
     profiles: std::collections::HashMap<String, Profile>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct ProfilesSectionTomlRaw {
+    version: u8,
+    active: Option<String>,
+    #[serde(flatten)]
+    entries: toml::value::Table,
+}
+
+impl<'de> Deserialize<'de> for ProfilesSectionToml {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = ProfilesSectionTomlRaw::deserialize(deserializer)?;
+        let mut profiles = std::collections::HashMap::new();
+
+        for (key, value) in raw.entries {
+            if key == "profiles" {
+                let legacy_profiles = value.as_table().ok_or_else(|| {
+                    de::Error::custom(
+                        "profiles.profiles must be a table when loading legacy config",
+                    )
+                })?;
+
+                for (legacy_key, legacy_value) in legacy_profiles {
+                    insert_profile_entry::<D::Error>(
+                        &mut profiles,
+                        legacy_key.to_string(),
+                        legacy_value.clone(),
+                    )?;
+                }
+                continue;
+            }
+
+            insert_profile_entry::<D::Error>(&mut profiles, key, value)?;
+        }
+
+        Ok(Self {
+            version: raw.version,
+            active: raw.active,
+            profiles,
+        })
+    }
+}
+
+fn insert_profile_entry<E>(
+    profiles: &mut std::collections::HashMap<String, Profile>,
+    key: String,
+    value: toml::Value,
+) -> std::result::Result<(), E>
+where
+    E: de::Error,
+{
+    if profiles.contains_key(&key) {
+        return Err(E::custom(format!(
+            "duplicate profile entry found while loading config.toml: {key}"
+        )));
+    }
+
+    let profile = value
+        .try_into()
+        .map_err(|err| E::custom(format!("invalid profile entry `{key}`: {err}")))?;
+    profiles.insert(key, profile);
+    Ok(())
 }
 
 impl From<ProfilesConfig> for ProfilesSectionToml {
@@ -978,6 +1046,55 @@ model = "Qwen/Qwen3-ASR-1.7B"
             Some(value) => std::env::set_var("GWT_AGENT", value),
             None => std::env::remove_var("GWT_AGENT"),
         }
+    }
+
+    #[test]
+    fn test_load_global_accepts_legacy_nested_profiles_schema() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        let config_path = global_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[profiles]
+version = 1
+active = "default"
+
+[profiles.profiles.default]
+name = "default"
+disabled_env = []
+description = ""
+
+[profiles.profiles.default.env]
+OPENAI_API_KEY = "legacy-key"
+
+[agent.skill_registration]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let loaded = Settings::load_global().unwrap();
+        assert_eq!(loaded.profiles.active.as_deref(), Some("default"));
+        assert_eq!(
+            loaded
+                .profiles
+                .profiles
+                .get("default")
+                .and_then(|profile| profile.env.get("OPENAI_API_KEY"))
+                .map(String::as_str),
+            Some("legacy-key")
+        );
+        assert!(!loaded.profiles.profiles.contains_key("profiles"));
+
+        loaded.save_global().unwrap();
+        let rewritten = std::fs::read_to_string(config_path).unwrap();
+        assert!(rewritten.contains("[profiles.default]"));
+        assert!(!rewritten.contains("[profiles.profiles.default]"));
     }
 
     #[test]
