@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, waitFor, cleanup } from "@testing-library/svelte";
 import TerminalView from "./TerminalView.svelte";
+import terminalViewSource from "./TerminalView.svelte?raw";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -1737,6 +1738,44 @@ describe("TerminalView", () => {
 
     expect(getByRole("button", { name: "Paste" })).toBeTruthy();
     expect(getByRole("button", { name: "Voice" })).toBeTruthy();
+  });
+
+  it("renders overlay actions with the visibility sizing contract", async () => {
+    const { container, getByRole } = await renderTerminalView({
+      paneId: "pane-actions-visual-contract",
+      active: true,
+      voiceInputEnabled: true,
+      voiceInputSupported: true,
+      voiceInputAvailable: true,
+    });
+
+    const actions = container.querySelector(".terminal-actions");
+    const pasteButton = getByRole("button", { name: "Paste" }) as HTMLButtonElement;
+    const voiceButton = getByRole("button", { name: "Voice" }) as HTMLButtonElement;
+    const pasteIcon = pasteButton.querySelector("svg");
+    const voiceIcon = voiceButton.querySelector("svg");
+
+    expect(actions).toBeTruthy();
+    expect(pasteIcon?.getAttribute("width")).toBe("24");
+    expect(pasteIcon?.getAttribute("height")).toBe("24");
+    expect(voiceIcon?.getAttribute("width")).toBe("24");
+    expect(voiceIcon?.getAttribute("height")).toBe("24");
+
+    expect(terminalViewSource).toMatch(/\.terminal-actions\s*\{[\s\S]*gap:\s*10px;/);
+    expect(terminalViewSource).toMatch(/\.terminal-actions\s*\{[\s\S]*pointer-events:\s*none;/);
+    expect(terminalViewSource).toMatch(/\.terminal-action-btn\s*\{[\s\S]*min-width:\s*48px;/);
+    expect(terminalViewSource).toMatch(/\.terminal-action-btn\s*\{[\s\S]*min-height:\s*48px;/);
+    expect(terminalViewSource).toMatch(/\.terminal-action-btn\s*\{[\s\S]*padding:\s*11px;/);
+    expect(terminalViewSource).toMatch(/\.terminal-action-btn\s*\{[\s\S]*pointer-events:\s*auto;/);
+    expect(terminalViewSource).toMatch(
+      /\.terminal-action-btn\s*\{[\s\S]*color:\s*var\(--text-secondary\);/,
+    );
+    expect(terminalViewSource).toMatch(
+      /terminal-action-btn[\s\S]*color-mix\(in srgb,\s*var\(--bg-secondary\)\s*92%,\s*black\s*8%\)/,
+    );
+    expect(terminalViewSource).toMatch(
+      /terminal-action-btn[\s\S]*color-mix\(in srgb,\s*var\(--border-color\)\s*70%,\s*white\s*30%\)/,
+    );
   });
 
   it("pastes a staged image reference for agent terminals", async () => {
