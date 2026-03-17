@@ -863,12 +863,12 @@ fn pane_runtime_context(state: &AppState, pane_id: &str) -> Option<PaneRuntimeCo
 
 const DOCKER_WORKDIR: &str = "/workspace";
 
-fn docker_compose_exec_workdir(workspace_folder: Option<&str>, working_dir: &Path) -> String {
+fn docker_compose_exec_workdir(workspace_folder: Option<&str>, _working_dir: &Path) -> String {
     workspace_folder
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| docker_mount_target_path(&working_dir.to_string_lossy()))
+        .unwrap_or_default()
 }
 
 fn build_docker_compose_up_args(
@@ -3561,10 +3561,10 @@ services:
     }
 
     #[test]
-    fn docker_compose_exec_workdir_falls_back_to_mount_target_without_workspace_folder() {
+    fn docker_compose_exec_workdir_preserves_service_default_without_workspace_folder() {
         assert_eq!(
             docker_compose_exec_workdir(None, Path::new("D:/Repository/GE/GrimoireEngine.git")),
-            "/Repository/GE/GrimoireEngine.git"
+            ""
         );
     }
 
