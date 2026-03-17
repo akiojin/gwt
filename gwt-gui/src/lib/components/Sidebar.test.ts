@@ -2820,4 +2820,121 @@ describe("Sidebar", () => {
     });
     expect(document.body.style.cursor).not.toBe("row-resize");
   });
+
+  it("search filter matches display_name", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "list_worktree_branches") {
+          return [
+            {
+              ...branchFixture,
+              name: "feature/auth-impl",
+              display_name: "Add auth feature",
+            },
+            {
+              ...branchFixture,
+              name: "feature/other-work",
+            },
+          ];
+        }
+        if (command === "list_worktrees") return [];
+        return [];
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText("Add auth feature");
+
+      const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      // Search by display_name which does NOT match the branch name
+      await fireEvent.input(searchInput, { target: { value: "auth feature" } });
+
+      await vi.advanceTimersByTimeAsync(150);
+      await waitFor(() => {
+        // Branch with matching display_name should still be visible
+        expect(rendered.queryByText("Add auth feature")).toBeTruthy();
+        // Branch without matching name or display_name should be hidden
+        expect(rendered.queryByText("feature/other-work")).toBeNull();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("search filter matches branch name when display_name exists", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "list_worktree_branches") {
+          return [
+            {
+              ...branchFixture,
+              name: "feature/auth-impl",
+              display_name: "Add auth feature",
+            },
+            {
+              ...branchFixture,
+              name: "feature/other-work",
+            },
+          ];
+        }
+        if (command === "list_worktrees") return [];
+        return [];
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText("Add auth feature");
+
+      const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      // Search by branch name, not display_name
+      await fireEvent.input(searchInput, { target: { value: "auth-impl" } });
+
+      await vi.advanceTimersByTimeAsync(150);
+      await waitFor(() => {
+        // Branch should be visible because branch name matches
+        expect(rendered.queryByText("Add auth feature")).toBeTruthy();
+        // Other branch should be hidden
+        expect(rendered.queryByText("feature/other-work")).toBeNull();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sidebar shows display_name instead of branch name with tooltip", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [
+          {
+            ...branchFixture,
+            name: "feature/auth-impl",
+            display_name: "Add auth feature",
+          },
+        ];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const branchNameSpan = rendered.container.querySelector("button.branch-item .branch-name");
+      // Should show display_name text
+      expect(branchNameSpan?.textContent?.trim()).toBe("Add auth feature");
+      // Should have title attribute with raw branch name for tooltip
+      expect(branchNameSpan?.getAttribute("title")).toBe("feature/auth-impl");
+    });
+  });
 });

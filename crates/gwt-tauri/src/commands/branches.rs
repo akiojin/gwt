@@ -652,4 +652,70 @@ mod tests {
         let out = list_remote_branches_impl(&project_path, &state).expect("listing should work");
         assert!(out.is_empty());
     }
+
+    // --- display_name tests ---
+
+    #[test]
+    fn test_branch_info_default_display_name_none() {
+        let branch = gwt_core::git::Branch {
+            name: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            is_current: false,
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+        let info = BranchInfo::from(branch);
+        assert_eq!(info.display_name, None);
+    }
+
+    #[test]
+    fn test_branch_info_serializes_display_name() {
+        let branch = gwt_core::git::Branch {
+            name: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            is_current: false,
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+        let mut info = BranchInfo::from(branch);
+        info.display_name = Some("My feature".to_string());
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            json.contains(r#""display_name":"My feature""#),
+            "JSON should contain display_name with value: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_branch_info_serializes_null_display_name() {
+        let branch = gwt_core::git::Branch {
+            name: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            is_current: false,
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+        let info = BranchInfo::from(branch);
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            json.contains(r#""display_name":null"#),
+            "JSON should contain display_name:null: {}",
+            json
+        );
+    }
 }
