@@ -234,6 +234,24 @@ describe("AssistantPanel", () => {
     expect(getAssistantSendCalls()).toHaveLength(0);
   });
 
+  it("disables the composer while the assistant is thinking", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      isThinking: true,
+      sessionId: "session-main",
+    };
+
+    const rendered = await renderAssistantPanel();
+    const textarea = rendered.getByPlaceholderText("Type a message...") as HTMLTextAreaElement;
+    const button = rendered.getByText("Send") as HTMLButtonElement;
+
+    await waitFor(() => {
+      expect(textarea.disabled).toBe(true);
+      expect(button.disabled).toBe(true);
+      expect(rendered.getByText("Thinking...")).toBeTruthy();
+    });
+  });
+
   it("preserves line breaks in rendered message content", async () => {
     initialAssistantState = {
       ...structuredClone(assistantStateFixture),

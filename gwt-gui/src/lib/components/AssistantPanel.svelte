@@ -58,7 +58,7 @@
   }
 
   async function sendMessage() {
-    if (isComposing) return;
+    if (isComposing || assistantState?.isThinking) return;
     const text = inputText.trim();
     if (!text) return;
     let previousState: AssistantState | null = null;
@@ -283,7 +283,11 @@
           onkeydown={handleKeydown}
           oncompositionstart={() => (isComposing = true)}
           oncompositionend={() => (isComposing = false)}
-          disabled={!assistantState?.aiReady || !assistantState?.sessionId}
+          disabled={
+            !assistantState?.aiReady ||
+            !assistantState?.sessionId ||
+            assistantState?.isThinking
+          }
           rows={1}
         ></textarea>
         <button
@@ -293,6 +297,7 @@
           disabled={
             !assistantState?.aiReady ||
             !assistantState?.sessionId ||
+            assistantState?.isThinking ||
             !inputText.trim()
           }
         >

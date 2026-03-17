@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use tauri::{Emitter, Manager};
 
 use crate::assistant_engine::AssistantEngine;
 use crate::state::AppState;
@@ -63,10 +64,21 @@ pub async fn assistant_get_state(
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
 
-    match engine_guard.get(&window_label) {
-        Some(engine) => Ok(build_assistant_state_response(engine, Some(window_label))),
-        None => Ok(build_empty_assistant_state_response()),
+    if let Some(engine) = engine_guard.get(&window_label) {
+        return Ok(build_assistant_state_response(engine, Some(window_label)));
     }
+
+    drop(engine_guard);
+
+    let startup_guard = state
+        .assistant_startup_inflight
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    if startup_guard.contains(&window_label) {
+        return Ok(build_startup_inflight_state_response(window_label));
+    }
+
+    Ok(build_empty_assistant_state_response())
 }
 
 #[tauri::command]
@@ -127,19 +139,39 @@ pub async fn assistant_start(
         .ok_or_else(|| "No project opened. Open a project first.".to_string())?;
 
     state.clear_assistant_session_for_window(&window_label);
-
-    let mut engine = AssistantEngine::new(PathBuf::from(&project_path), window_label.clone());
-    if let Err(err) = engine.run_initial_analysis(&state) {
-        engine.push_visible_assistant_message(format!(
-            "Assistant started, but the initial analysis failed: {err}"
-        ));
-    }
-
-    let mut engine_guard = state
-        .assistant_engine
+    state
+        .assistant_startup_inflight
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    engine_guard.insert(window_label, engine);
+        .map_err(|e| format!("Lock error: {}", e))?
+        .insert(window_label.clone());
+
+    let app_handle = window.app_handle().clone();
+    let window_label_for_task = window_label.clone();
+    let project_path_for_task = project_path.clone();
+    tokio::spawn(async move {
+        let state = app_handle.state::<AppState>();
+        let mut engine = AssistantEngine::new(
+            PathBuf::from(&project_path_for_task),
+            window_label_for_task.clone(),
+        );
+        if let Err(err) = engine.run_initial_analysis(&state) {
+            engine.push_visible_assistant_message(format!(
+                "Assistant started, but the initial analysis failed: {err}"
+            ));
+        }
+
+        let response = build_assistant_state_response(&engine, Some(window_label_for_task.clone()));
+
+        if let Ok(mut startup_guard) = state.assistant_startup_inflight.lock() {
+            startup_guard.remove(&window_label_for_task);
+        }
+        if let Ok(mut engine_guard) = state.assistant_engine.lock() {
+            engine_guard.insert(window_label_for_task.clone(), engine);
+        }
+        if let Some(window) = app_handle.get_webview_window(&window_label_for_task) {
+            let _ = window.emit("assistant-state-updated", &response);
+        }
+    });
 
     Ok(())
 }
@@ -221,6 +253,17 @@ fn build_empty_assistant_state_response() -> AssistantStateResponse {
         ai_ready: check_ai_configured(),
         is_thinking: false,
         session_id: None,
+        llm_call_count: 0,
+        estimated_tokens: 0,
+    }
+}
+
+fn build_startup_inflight_state_response(session_id: String) -> AssistantStateResponse {
+    AssistantStateResponse {
+        messages: Vec::new(),
+        ai_ready: check_ai_configured(),
+        is_thinking: true,
+        session_id: Some(session_id),
         llm_call_count: 0,
         estimated_tokens: 0,
     }
@@ -336,5 +379,14 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "assistant");
         assert_eq!(messages[0].content, "visible guidance");
+    }
+
+    #[test]
+    fn assistant_startup_inflight_state_exposes_session_id_and_thinking() {
+        let response = build_startup_inflight_state_response("main".to_string());
+
+        assert_eq!(response.session_id.as_deref(), Some("main"));
+        assert!(response.is_thinking);
+        assert!(response.messages.is_empty());
     }
 }
