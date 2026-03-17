@@ -313,9 +313,7 @@ fn list_worktree_branches_impl(
     let meta_map = build_session_branch_meta_map(&repo_path, state);
     let repo_key = repo_path.to_string_lossy().to_string();
     let summary_cache_guard = state.session_summary_cache.lock().ok();
-    let summary_cache = summary_cache_guard
-        .as_ref()
-        .and_then(|g| g.get(&repo_key));
+    let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
 
     let manager = WorktreeManager::new(&repo_path)
         .map_err(|e| StructuredError::from_gwt_error(&e, "list_worktree_branches"))?;
@@ -369,9 +367,7 @@ fn list_remote_branches_impl(
     let meta_map = build_session_branch_meta_map(&repo_path, state);
     let repo_key = repo_path.to_string_lossy().to_string();
     let summary_cache_guard = state.session_summary_cache.lock().ok();
-    let summary_cache = summary_cache_guard
-        .as_ref()
-        .and_then(|g| g.get(&repo_key));
+    let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
     let remotes = Remote::list(&repo_path).unwrap_or_default();
 
     let branches = if is_bare_repository(&repo_path) {
@@ -408,9 +404,7 @@ pub fn list_branches(
         let meta_map = build_session_branch_meta_map(&repo_path, &state);
         let repo_key = repo_path.to_string_lossy().to_string();
         let summary_cache_guard = state.session_summary_cache.lock().ok();
-        let summary_cache = summary_cache_guard
-            .as_ref()
-            .and_then(|g| g.get(&repo_key));
+        let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
 
         let branches = Branch::list(&repo_path)
             .map_err(|e| StructuredError::from_gwt_error(&e, "list_branches"))?;
@@ -500,9 +494,7 @@ pub fn get_current_branch(
         let meta_map = build_session_branch_meta_map(&repo_path, &state);
         let repo_key = repo_path.to_string_lossy().to_string();
         let summary_cache_guard = state.session_summary_cache.lock().ok();
-        let summary_cache = summary_cache_guard
-            .as_ref()
-            .and_then(|g| g.get(&repo_key));
+        let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
         Ok(branch.map(|b| {
             let mut info = BranchInfo::from(b);
             info.last_tool_usage = last_tool.get(&info.name).cloned();

@@ -1128,10 +1128,7 @@ updated_at = "2026-01-20T00:00:00Z"
         session.save(&session_path).unwrap();
 
         let loaded = Session::load(&session_path).unwrap();
-        assert_eq!(
-            loaded.display_name,
-            Some("Add auth feature".to_string())
-        );
+        assert_eq!(loaded.display_name, Some("Add auth feature".to_string()));
     }
 
     #[test]
