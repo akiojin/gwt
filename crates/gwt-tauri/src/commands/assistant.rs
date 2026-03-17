@@ -4,7 +4,7 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use crate::assistant_engine::AssistantEngine;
+use crate::assistant_engine::{AssistantEngine, AssistantStartupStatus};
 use crate::state::AppState;
 use gwt_core::git::{self, Branch};
 use gwt_core::worktree::WorktreeManager;
@@ -27,6 +27,8 @@ pub struct AssistantStateResponse {
     pub session_id: Option<String>,
     pub llm_call_count: u64,
     pub estimated_tokens: u64,
+    pub startup_status: String,
+    pub startup_summary_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,7 +122,7 @@ pub async fn assistant_send_message(
 pub async fn assistant_start(
     window: tauri::Window,
     state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<AssistantStateResponse, String> {
     let window_label = window.label().to_string();
     let project_path = state
         .project_for_window(&window_label)
@@ -128,7 +130,10 @@ pub async fn assistant_start(
 
     state.clear_assistant_session_for_window(&window_label);
 
-    let engine = AssistantEngine::new(PathBuf::from(&project_path), window_label.clone());
+    let mut engine = AssistantEngine::new(PathBuf::from(&project_path), window_label.clone());
+    engine.handle_startup(&state)?;
+
+    let response = build_assistant_state_response(&engine, Some(window_label.clone()));
 
     let mut engine_guard = state
         .assistant_engine
@@ -136,7 +141,7 @@ pub async fn assistant_start(
         .map_err(|e| format!("Lock error: {}", e))?;
     engine_guard.insert(window_label, engine);
 
-    Ok(())
+    Ok(response)
 }
 
 #[tauri::command]
@@ -175,13 +180,25 @@ pub async fn assistant_get_dashboard(
     state: tauri::State<'_, AppState>,
 ) -> Result<DashboardResponse, String> {
     let window_label = window.label().to_string();
+    let Some(project_path) = state.project_for_window(&window_label) else {
+        return Ok(DashboardResponse {
+            panes: Vec::new(),
+            git: build_git_dashboard(&state, &window_label)?,
+        });
+    };
+
     let panes = {
+        let repo_path = crate::commands::project::resolve_repo_path_for_project_root(
+            Path::new(&project_path),
+        )
+        .map_err(|e| format!("Failed to resolve repository path: {}", e))?;
         let mgr = state
             .pane_manager
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
         mgr.panes()
             .iter()
+            .filter(|pane| pane.project_root() == repo_path.as_path())
             .map(|pane| PaneDashboard {
                 pane_id: pane.pane_id().to_string(),
                 agent_name: pane.agent_name().to_string(),
@@ -203,10 +220,12 @@ fn build_assistant_state_response(
     AssistantStateResponse {
         messages: build_messages_from_conversation(engine),
         ai_ready: true,
-        is_thinking: false,
+        is_thinking: engine.startup_status() == AssistantStartupStatus::Analyzing,
         session_id,
         llm_call_count: engine.llm_call_count,
         estimated_tokens: engine.estimated_tokens,
+        startup_status: engine.startup_status().as_str().to_string(),
+        startup_summary_ready: engine.startup_summary_ready(),
     }
 }
 
@@ -218,6 +237,8 @@ fn build_empty_assistant_state_response() -> AssistantStateResponse {
         session_id: None,
         llm_call_count: 0,
         estimated_tokens: 0,
+        startup_status: AssistantStartupStatus::Idle.as_str().to_string(),
+        startup_summary_ready: false,
     }
 }
 

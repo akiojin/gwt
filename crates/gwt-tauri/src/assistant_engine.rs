@@ -10,13 +10,41 @@ use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::assistant_monitor::MonitorEvent;
-use crate::assistant_tools;
+use crate::assistant_tools::{self, AssistantToolMode};
 use crate::state::AppState;
 
 const MAX_TOOL_LOOP_ITERATIONS: usize = 10;
 const ASSISTANT_MAX_TOKENS: u32 = 4096;
 const ASSISTANT_TEMPERATURE: f32 = 0.3;
 const MAX_CONVERSATION_MESSAGES: usize = 50;
+const STARTUP_REPORT_PROMPT: &str = r#"これは Assistant の自律起動です。
+この応答では、開いている project 全体を read-only で調査し、最初の起動レポートを返してください。
+
+必須:
+- `git_status` と `git_log` を確認する
+- `list_panes` で現在の pane を確認する
+- `list_issues` と `list_pull_requests` で GitHub の open 状態を確認する
+- pane が存在する場合のみ、必要な pane に対して `capture_scrollback_tail` を使って状況を補足してよい
+
+禁止:
+- `run_command` を使わない
+- `send_keys_to_pane` を使わない
+- `upsert_spec_issue` を使わない
+- ファイル、Issue、PR、pane に対する変更を行わない
+
+出力形式:
+## 現在の状況
+- ...
+
+## 検出事項
+- ...
+
+## 次アクション候補
+- ...
+
+## 確認事項
+- 本当に必要な場合のみ 1 件
+"#;
 
 const SYSTEM_PROMPT: &str = r#"あなたは gwt (Git Worktree Manager) のアシスタントです。
 プロアクティブな参謀として、ユーザーの開発作業を支援します。
@@ -41,10 +69,31 @@ pub struct AssistantResponse {
     pub actions_taken: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantStartupStatus {
+    Idle,
+    Analyzing,
+    Ready,
+    Failed,
+}
+
+impl AssistantStartupStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Analyzing => "analyzing",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 pub struct AssistantEngine {
     conversation: Vec<ChatCompletionsToolMessage>,
     project_path: PathBuf,
     window_label: String,
+    startup_status: AssistantStartupStatus,
+    startup_summary_ready: bool,
     pub llm_call_count: u64,
     pub estimated_tokens: u64,
 }
@@ -62,6 +111,8 @@ impl AssistantEngine {
             conversation,
             project_path,
             window_label,
+            startup_status: AssistantStartupStatus::Idle,
+            startup_summary_ready: false,
             llm_call_count: 0,
             estimated_tokens: 0,
         }
@@ -70,6 +121,48 @@ impl AssistantEngine {
     /// Get a copy of the conversation for serialization.
     pub fn conversation(&self) -> &[ChatCompletionsToolMessage] {
         &self.conversation
+    }
+
+    pub fn startup_status(&self) -> AssistantStartupStatus {
+        self.startup_status
+    }
+
+    pub fn startup_summary_ready(&self) -> bool {
+        self.startup_summary_ready
+    }
+
+    pub fn handle_startup(&mut self, state: &AppState) -> Result<(), String> {
+        if self.startup_summary_ready {
+            return Ok(());
+        }
+
+        self.startup_status = AssistantStartupStatus::Analyzing;
+        self.startup_summary_ready = false;
+        self.conversation.push(ChatCompletionsToolMessage {
+            role: "system".to_string(),
+            content: Some(STARTUP_REPORT_PROMPT.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        match self.run_llm_loop(state, AssistantToolMode::ReadOnly) {
+            Ok(_) => {
+                self.startup_status = AssistantStartupStatus::Ready;
+                self.startup_summary_ready = true;
+                Ok(())
+            }
+            Err(err) => {
+                self.startup_status = AssistantStartupStatus::Failed;
+                self.startup_summary_ready = false;
+                self.conversation.push(ChatCompletionsToolMessage {
+                    role: "assistant".to_string(),
+                    content: Some(format!("自律起動に失敗しました: {err}")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Handle a user message: add to conversation, run LLM loop, return response.
@@ -85,7 +178,7 @@ impl AssistantEngine {
             tool_call_id: None,
         });
 
-        self.run_llm_loop(state)
+        self.run_llm_loop(state, AssistantToolMode::FullAccess)
     }
 
     /// Handle a batch of monitor events: summarize changes, optionally call LLM.
@@ -125,7 +218,7 @@ impl AssistantEngine {
             tool_call_id: None,
         });
 
-        let response = self.run_llm_loop(state)?;
+        let response = self.run_llm_loop(state, AssistantToolMode::FullAccess)?;
         Ok(Some(response))
     }
 
@@ -163,8 +256,12 @@ impl AssistantEngine {
 
     /// Run the LLM tool-use loop: call LLM, execute tool calls, repeat until
     /// the LLM returns a text response (no tool calls) or max iterations reached.
-    fn run_llm_loop(&mut self, state: &AppState) -> Result<AssistantResponse, String> {
-        let tools = assistant_tools::assistant_tool_definitions();
+    fn run_llm_loop(
+        &mut self,
+        state: &AppState,
+        tool_mode: AssistantToolMode,
+    ) -> Result<AssistantResponse, String> {
+        let tools = assistant_tools::assistant_tool_definitions(tool_mode);
         let mut actions_taken = Vec::new();
 
         // Load AI settings once before the loop to avoid repeated config reads.
@@ -250,6 +347,7 @@ impl AssistantEngine {
                     state,
                     &self.window_label,
                     &project_path,
+                    tool_mode,
                 );
 
                 let result_text = match &tool_result {
@@ -341,6 +439,8 @@ mod tests {
         let engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
         assert_eq!(engine.llm_call_count, 0);
         assert_eq!(engine.estimated_tokens, 0);
+        assert_eq!(engine.startup_status(), AssistantStartupStatus::Idle);
+        assert!(!engine.startup_summary_ready());
         // Conversation should have system message
         assert_eq!(engine.conversation.len(), 1);
         assert_eq!(engine.conversation[0].role, "system");

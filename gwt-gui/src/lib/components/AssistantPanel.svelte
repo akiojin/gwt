@@ -48,8 +48,13 @@
     }
 
     try {
-      await invoke("assistant_start");
-      const startedState = (await loadAssistantState()) ?? state;
+      assistantState = {
+        ...state,
+        isThinking: true,
+        startupStatus: "analyzing",
+        startupSummaryReady: false,
+      };
+      const startedState = await invoke<AssistantState>("assistant_start");
       assistantState = startedState;
       return startedState;
     } catch (err) {
@@ -314,7 +319,11 @@
         {#if assistantState.isThinking}
           <div class="message assistant thinking">
             <div class="spinner"></div>
-            <span>Thinking...</span>
+            <span>
+              {assistantState.startupStatus === "analyzing"
+                ? "Analyzing project..."
+                : "Thinking..."}
+            </span>
           </div>
         {/if}
       {:else}

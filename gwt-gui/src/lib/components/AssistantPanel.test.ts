@@ -28,6 +28,8 @@ const assistantStateFixture = {
   sessionId: "session-main",
   llmCallCount: 0,
   estimatedTokens: 0,
+  startupStatus: "ready",
+  startupSummaryReady: true,
 };
 
 const dashboardFixture = {
@@ -480,6 +482,63 @@ describe("AssistantPanel", () => {
       expect(
         invokeMock.mock.calls.filter(([command]) => command === "assistant_get_dashboard"),
       ).toHaveLength(3);
+    });
+  });
+
+  it("shows autonomous startup progress while assistant_start is pending", async () => {
+    let resolveStart: (() => void) | undefined;
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      sessionId: null,
+      startupStatus: "idle",
+      startupSummaryReady: false,
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: { input?: string }) => {
+      if (command === "assistant_get_state") {
+        return structuredClone(initialAssistantState);
+      }
+      if (command === "assistant_get_dashboard") {
+        return structuredClone(dashboardFixture);
+      }
+      if (command === "assistant_send_message") {
+        return sendMessageImpl(args);
+      }
+      if (command === "assistant_start") {
+        return new Promise<AssistantState>((resolve) => {
+          resolveStart = () => {
+            initialAssistantState = {
+              ...structuredClone(assistantStateFixture),
+              messages: [
+                {
+                  role: "assistant",
+                  kind: "text",
+                  content: "Current status\n- branch: main",
+                  timestamp: Date.now(),
+                },
+              ],
+            };
+            resolve(structuredClone(initialAssistantState));
+          };
+        });
+      }
+      throw new Error(`Unexpected invoke command: ${command}`);
+    });
+
+    const rendered = await renderAssistantPanel({
+      isActive: true,
+      projectPath: "/tmp/project",
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Analyzing project...")).toBeTruthy();
+    });
+
+    resolveStart?.();
+
+    await waitFor(() => {
+      const message = rendered.container.querySelector(".message.assistant .message-content");
+      expect(message?.textContent?.replace(/^\s+/, "")).toBe("Current status\n- branch: main");
     });
   });
 });
