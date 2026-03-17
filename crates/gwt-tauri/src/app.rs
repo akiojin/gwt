@@ -665,12 +665,6 @@ pub fn build_app(
             crate::commands::terminal::probe_terminal_ansi,
             crate::commands::terminal::capture_scrollback_tail,
             crate::commands::terminal::terminal_ready,
-            crate::commands::project_mode::get_project_mode_state_cmd,
-            crate::commands::project_mode::send_project_mode_message,
-            crate::commands::project_mode::send_project_mode_message_cmd,
-            crate::commands::project_mode::restore_project_mode_session_cmd,
-            crate::commands::project_mode::list_project_mode_sessions_cmd,
-            crate::commands::project_mode::stop_project_mode_session_cmd,
             crate::commands::skills::get_skill_registration_status_cmd,
             crate::commands::skills::repair_skill_registration_cmd,
             crate::commands::settings::get_settings,
@@ -762,6 +756,11 @@ pub fn build_app(
             crate::commands::project_index::get_index_status_cmd,
             crate::commands::project_index::index_github_issues_cmd,
             crate::commands::project_index::search_github_issues_cmd,
+            crate::commands::assistant::assistant_get_state,
+            crate::commands::assistant::assistant_send_message,
+            crate::commands::assistant::assistant_start,
+            crate::commands::assistant::assistant_stop,
+            crate::commands::assistant::assistant_get_dashboard,
         ])
 }
 

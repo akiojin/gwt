@@ -32,6 +32,9 @@ importers:
       dompurify:
         specifier: ^3.3.3
         version: 3.3.3
+      lucide-svelte:
+        specifier: ^0.577.0
+        version: 0.577.0(svelte@5.53.12)
       marked:
         specifier: ^17.0.4
         version: 17.0.4
@@ -887,6 +890,11 @@ packages:
   lru-cache@11.2.7:
     resolution: {integrity: sha512-aY/R+aEsRelme17KGQa/1ZSIpLpNYYrhcrepKTZgE+W3WM16YMCaPwOHLHsmopZHELU0Ojin1lPVxKR0MihncA==}
     engines: {node: 20 || >=22}
+
+  lucide-svelte@0.577.0:
+    resolution: {integrity: sha512-0i88o57KsaHWnc80J57fY99CWzlZsSdtH5kKjLUJa7z8dum/9/AbINNLzJ7NiRFUdOgMnfAmJt8jFbW2zeC5qQ==}
+    peerDependencies:
+      svelte: ^3 || ^4 || ^5.0.0-next.42
 
   lz-string@1.5.0:
     resolution: {integrity: sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ==}
@@ -1858,6 +1866,10 @@ snapshots:
   locate-character@3.0.0: {}
 
   lru-cache@11.2.7: {}
+
+  lucide-svelte@0.577.0(svelte@5.53.12):
+    dependencies:
+      svelte: 5.53.12
 
   lz-string@1.5.0: {}
 

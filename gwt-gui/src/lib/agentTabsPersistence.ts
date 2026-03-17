@@ -25,7 +25,7 @@ export type StoredTerminalTab = {
 };
 
 export type StoredStaticTab = {
-  type: "projectMode" | "settings" | "versionHistory" | "issues";
+  type: "assistant" | "settings" | "versionHistory" | "issues";
   id: string;
   label: string;
 };
@@ -159,23 +159,23 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
   }
 
   if (
-    type === "projectMode" ||
+    type === "assistant" ||
     type === "settings" ||
     type === "versionHistory" ||
     type === "issues"
   ) {
-    const canonicalType = type === "projectMode" ? "projectMode" : type;
+    const canonicalType = type === "assistant" ? "assistant" : type;
     const fallbackId =
-      canonicalType === "projectMode"
-        ? "projectMode"
+      canonicalType === "assistant"
+        ? "assistant"
         : canonicalType === "settings"
           ? "settings"
           : canonicalType === "issues"
             ? "issues"
             : "versionHistory";
     const fallbackLabel =
-      canonicalType === "projectMode"
-        ? "Project Mode"
+      canonicalType === "assistant"
+        ? "Assistant"
         : canonicalType === "settings"
           ? "Settings"
           : canonicalType === "issues"
@@ -183,13 +183,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
             : "Version History";
     const idRaw = normalizeString(obj.id);
     const id =
-      canonicalType === "projectMode"
-        ? "projectMode"
+      canonicalType === "assistant"
+        ? "assistant"
         : idRaw || fallbackId;
     const labelRaw = typeof obj.label === "string" ? obj.label.trim() : "";
     const label =
-      canonicalType === "projectMode" && (type === "projectMode" || !labelRaw)
-        ? "Project Mode"
+      canonicalType === "assistant" && (type === "assistant" || !labelRaw)
+        ? "Assistant"
         : labelRaw || fallbackLabel;
     return { type: canonicalType, id, label };
   }
@@ -456,17 +456,17 @@ export function buildRestoredProjectTabs(
     restoredTabs.push({ id: tab.id, label: tab.label, type: tab.type });
   }
 
-  if (!restoredTabs.some((tab) => tab.id === "projectMode")) {
+  if (!restoredTabs.some((tab) => tab.id === "assistant")) {
     restoredTabs.unshift({
-      id: "projectMode",
-      label: "Project Mode",
-      type: "projectMode",
+      id: "assistant",
+      label: "Assistant",
+      type: "assistant",
     });
   }
 
   const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
   const normalizedActiveTabId =
-    stored.activeTabId === "projectMode" ? "projectMode" : stored.activeTabId;
+    stored.activeTabId === "assistant" ? "assistant" : stored.activeTabId;
   const activeTabId =
     normalizedActiveTabId && restoredIds.has(normalizedActiveTabId)
       ? normalizedActiveTabId

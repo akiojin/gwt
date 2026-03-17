@@ -31,7 +31,7 @@
 
   type FilterType = "Local" | "Remote" | "All";
   type BranchSortMode = "name" | "updated";
-  type SidebarMode = "branch" | "projectMode";
+  type SidebarMode = "branch";
   type FilterCacheEntry = {
     branches: BranchInfo[];
     remoteBranchNames: Set<string>;
@@ -1230,16 +1230,6 @@
       <span class="mode-icon">B</span>
       <span class="mode-label">Branch</span>
     </button>
-    <button
-      class="mode-btn"
-      class:active={mode === "projectMode"}
-      aria-pressed={mode === "projectMode"}
-      title="Project Mode"
-      onclick={() => handleModeChange("projectMode")}
-    >
-      <span class="mode-icon">P</span>
-      <span class="mode-label">Project Mode</span>
-    </button>
   </div>
   {#if mode === "branch"}
     <div class="filter-bar">
@@ -1397,9 +1387,9 @@
     </div>
   {:else}
     <div class="project-mode-sidebar">
-      <div class="project-mode-sidebar-title">Project Mode</div>
+      <div class="project-mode-sidebar-title">Assistant</div>
       <div class="project-mode-sidebar-body">
-        Open the <code>Project Mode</code> tab in the main area and send your first instruction.
+        Open the <code>Assistant</code> tab in the main area and send your first instruction.
       </div>
     </div>
   {/if}

@@ -151,6 +151,44 @@ struct ChatCompletionsRequest<'a> {
 }
 
 #[derive(Debug, Serialize)]
+struct ChatCompletionsWithToolsRequest {
+    model: String,
+    messages: Vec<ChatCompletionsToolMessage>,
+    tools: Vec<ToolDefinition>,
+    tool_choice: String,
+    max_tokens: u32,
+    temperature: f32,
+}
+
+/// A chat message that supports both plain text content and tool result content.
+/// Uses `Value` for content to allow `null` (for assistant messages with only tool_calls).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionsToolMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatCompletionsToolCallRef>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+/// A tool call reference for the assistant message in chat completions format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionsToolCallRef {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: ChatCompletionsToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionsToolCallFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ChatCompletionsReasoning<'a> {
     effort: &'a str,
 }
@@ -176,6 +214,23 @@ struct ChatCompletionsChoice {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionsOutputMessage {
     content: Option<Value>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ChatCompletionsRawToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionsRawToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    #[allow(dead_code)]
+    call_type: Option<String>,
+    function: ChatCompletionsRawFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionsRawFunction {
+    name: String,
+    arguments: String,
 }
 
 /// OpenAI-compatible API client (blocking)
@@ -240,23 +295,7 @@ impl AIClient {
         let mut retries = 0usize;
 
         loop {
-            let mut headers = HeaderMap::new();
-            if !self.api_key.trim().is_empty() {
-                if is_azure_endpoint(&url) {
-                    headers.insert(
-                        "api-key",
-                        HeaderValue::from_str(self.api_key.trim())
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                } else {
-                    let value = format!("Bearer {}", self.api_key.trim());
-                    headers.insert(
-                        AUTHORIZATION,
-                        HeaderValue::from_str(&value)
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                }
-            }
+            let headers = self.build_auth_headers(&url)?;
 
             let response = self
                 .client
@@ -363,23 +402,7 @@ impl AIClient {
         let mut retries = 0usize;
 
         loop {
-            let mut headers = HeaderMap::new();
-            if !self.api_key.trim().is_empty() {
-                if is_azure_endpoint(&url) {
-                    headers.insert(
-                        "api-key",
-                        HeaderValue::from_str(self.api_key.trim())
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                } else {
-                    let value = format!("Bearer {}", self.api_key.trim());
-                    headers.insert(
-                        AUTHORIZATION,
-                        HeaderValue::from_str(&value)
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                }
-            }
+            let headers = self.build_auth_headers(&url)?;
 
             let response = self
                 .client
@@ -440,6 +463,114 @@ impl AIClient {
         }
     }
 
+    /// ChatCompletions API with tool calling support.
+    /// Uses `/v1/chat/completions` with `tools` and `tool_choice: "auto"`.
+    pub fn create_chat_completion_with_tools(
+        &self,
+        messages: Vec<ChatCompletionsToolMessage>,
+        tools: Vec<ToolDefinition>,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> Result<AIResponse, AIError> {
+        let url = build_chat_completions_url(&self.endpoint)?;
+        if messages.is_empty() {
+            return Err(AIError::ConfigError("No input messages".to_string()));
+        }
+        let request_body = ChatCompletionsWithToolsRequest {
+            model: self.model.clone(),
+            messages,
+            tools,
+            tool_choice: "auto".to_string(),
+            max_tokens,
+            temperature,
+        };
+
+        let mut retries = 0usize;
+
+        loop {
+            let headers = self.build_auth_headers(&url)?;
+
+            let response = self
+                .client
+                .post(url.clone())
+                .headers(headers)
+                .json(&request_body)
+                .send();
+
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let resp_headers = resp.headers().clone();
+                    let body = resp.text().unwrap_or_default();
+                    if status == StatusCode::OK {
+                        let (text, tool_calls, usage) = parse_chat_completion_with_tools(&body)?;
+                        if let Some(tokens) = usage {
+                            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
+                        }
+                        return Ok(AIResponse {
+                            text,
+                            tool_calls,
+                            usage_tokens: usage,
+                        });
+                    }
+                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                        return Err(AIError::Unauthorized);
+                    }
+                    let error = if status == StatusCode::TOO_MANY_REQUESTS {
+                        let retry_after = parse_retry_after(&body, &resp_headers);
+                        AIError::RateLimited { retry_after }
+                    } else if status.is_server_error() {
+                        let message = extract_error_message(&body)
+                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+                        AIError::ServerError(message)
+                    } else {
+                        let message = extract_error_message(&body)
+                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+                        return Err(AIError::ServerError(message));
+                    };
+
+                    if !is_retryable(&error) || retries >= MAX_RETRIES {
+                        return Err(error);
+                    }
+
+                    let delay = backoff_delay(retries);
+                    retries += 1;
+                    std::thread::sleep(delay);
+                }
+                Err(e) => {
+                    if retries >= MAX_RETRIES {
+                        return Err(AIError::NetworkError(e.to_string()));
+                    }
+                    let delay = backoff_delay(retries);
+                    retries += 1;
+                    std::thread::sleep(delay);
+                }
+            }
+        }
+    }
+
+    /// Build authentication headers for the given URL.
+    fn build_auth_headers(&self, url: &Url) -> Result<HeaderMap, AIError> {
+        let mut headers = HeaderMap::new();
+        if !self.api_key.trim().is_empty() {
+            if is_azure_endpoint(url) {
+                headers.insert(
+                    "api-key",
+                    HeaderValue::from_str(self.api_key.trim())
+                        .map_err(|e| AIError::ConfigError(e.to_string()))?,
+                );
+            } else {
+                let value = format!("Bearer {}", self.api_key.trim());
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&value)
+                        .map_err(|e| AIError::ConfigError(e.to_string()))?,
+                );
+            }
+        }
+        Ok(headers)
+    }
+
     fn create_chat_completion(&self, messages: &[ChatMessage]) -> Result<String, AIError> {
         let url = build_chat_completions_url(&self.endpoint)?;
         let body_messages = build_chat_completions_messages(messages);
@@ -460,23 +591,7 @@ impl AIClient {
             let request_body =
                 build_chat_completions_request(&body_messages, &self.model, reasoning);
 
-            let mut headers = HeaderMap::new();
-            if !self.api_key.trim().is_empty() {
-                if is_azure_endpoint(&url) {
-                    headers.insert(
-                        "api-key",
-                        HeaderValue::from_str(self.api_key.trim())
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                } else {
-                    let value = format!("Bearer {}", self.api_key.trim());
-                    headers.insert(
-                        AUTHORIZATION,
-                        HeaderValue::from_str(&value)
-                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                    );
-                }
-            }
+            let headers = self.build_auth_headers(&url)?;
 
             let response = self
                 .client
@@ -820,6 +935,49 @@ fn parse_chat_completion_with_usage(body: &str) -> Result<(String, Option<u64>),
 
     let usage_tokens = parsed.usage.map(|u| u.total_tokens);
     Ok((text, usage_tokens))
+}
+
+fn parse_chat_completion_with_tools(
+    body: &str,
+) -> Result<(String, Vec<ToolCall>, Option<u64>), AIError> {
+    let parsed: ChatCompletionsResponse = serde_json::from_str(body)
+        .map_err(|e| AIError::ParseError(format!("Invalid chat completion response: {}", e)))?;
+
+    let choice =
+        parsed.choices.into_iter().next().ok_or_else(|| {
+            AIError::ParseError("No choices in chat completion response".to_string())
+        })?;
+
+    let text = choice
+        .message
+        .content
+        .and_then(extract_chat_completion_text)
+        .unwrap_or_default();
+
+    let tool_calls = match choice.message.tool_calls {
+        Some(raw_calls) => raw_calls
+            .into_iter()
+            .map(|raw| {
+                let arguments: Value =
+                    serde_json::from_str(&raw.function.arguments).unwrap_or(Value::Null);
+                ToolCall {
+                    name: raw.function.name,
+                    arguments,
+                    call_id: Some(raw.id),
+                }
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    if text.is_empty() && tool_calls.is_empty() {
+        return Err(AIError::ParseError(
+            "No content or tool calls in chat completion response".to_string(),
+        ));
+    }
+
+    let usage_tokens = parsed.usage.map(|u| u.total_tokens);
+    Ok((text, tool_calls, usage_tokens))
 }
 
 fn extract_chat_completion_text(content: Value) -> Option<String> {
