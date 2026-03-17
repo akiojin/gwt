@@ -461,6 +461,43 @@ model = "gpt-5"
     }
 
     #[test]
+    fn load_accepts_legacy_nested_profiles_table() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let config_path = Settings::global_config_path().unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"
+[profiles]
+version = 1
+active = "default"
+
+[profiles.profiles.default]
+name = "default"
+disabled_env = []
+description = ""
+
+[profiles.profiles.default.ai]
+endpoint = "https://api.example.com/v1"
+api_key = "sk-legacy"
+model = "gpt-5"
+"#,
+        )
+        .unwrap();
+
+        let loaded = ProfilesConfig::load().unwrap();
+        assert_eq!(loaded.active.as_deref(), Some("default"));
+        assert!(loaded.profiles.contains_key("default"));
+        assert!(!loaded.profiles.contains_key("profiles"));
+        let default = loaded.profiles.get("default").unwrap();
+        assert_eq!(default.name, "default");
+        assert_eq!(default.ai.as_ref().unwrap().api_key, "sk-legacy");
+    }
+
+    #[test]
     fn test_ai_settings_resolved_defaults() {
         // AISettings::default() uses #[derive(Default)], so all fields are empty
         // The serde default functions (default_endpoint, default_model) are only used during deserialization
