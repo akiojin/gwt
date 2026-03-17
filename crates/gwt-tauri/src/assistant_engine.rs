@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! Assistant Mode engine — LLM conversation loop with tool calling.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gwt_core::ai::{
     ChatCompletionsToolCallFunction, ChatCompletionsToolCallRef, ChatCompletionsToolMessage,
@@ -10,17 +10,41 @@ use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::assistant_monitor::MonitorEvent;
-use crate::assistant_tools;
+use crate::assistant_tools::{self, AssistantToolMode};
 use crate::state::AppState;
-use crate::tool_helpers::ToolAccessMode;
 
 const MAX_TOOL_LOOP_ITERATIONS: usize = 10;
 const ASSISTANT_MAX_TOKENS: u32 = 4096;
 const ASSISTANT_TEMPERATURE: f32 = 0.3;
 const MAX_CONVERSATION_MESSAGES: usize = 50;
-const STARTUP_ANALYSIS_PROMPT: &str = r#"A project was just opened in gwt.
-Analyze the current repository state, summarize what is happening now, and recommend the first actionable next steps for the user.
-Keep the answer concise and immediately useful."#;
+const STARTUP_REPORT_PROMPT: &str = r#"これは Assistant の自律起動です。
+この応答では、開いている project 全体を read-only で調査し、最初の起動レポートを返してください。
+
+必須:
+- `git_status` と `git_log` を確認する
+- `list_panes` で現在の pane を確認する
+- `list_issues` と `list_pull_requests` で GitHub の open 状態を確認する
+- pane が存在する場合のみ、必要な pane に対して `capture_scrollback_tail` を使って状況を補足してよい
+
+禁止:
+- `run_command` を使わない
+- `send_keys_to_pane` を使わない
+- `upsert_spec_issue` を使わない
+- ファイル、Issue、PR、pane に対する変更を行わない
+
+出力形式:
+## 現在の状況
+- ...
+
+## 検出事項
+- ...
+
+## 次アクション候補
+- ...
+
+## 確認事項
+- 本当に必要な場合のみ 1 件
+"#;
 
 const SYSTEM_PROMPT: &str = r#"あなたは gwt (Git Worktree Manager) のアシスタントです。
 プロアクティブな参謀として、ユーザーの開発作業を支援します。
@@ -45,10 +69,31 @@ pub struct AssistantResponse {
     pub actions_taken: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantStartupStatus {
+    Idle,
+    Analyzing,
+    Ready,
+    Failed,
+}
+
+impl AssistantStartupStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Analyzing => "analyzing",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 pub struct AssistantEngine {
     conversation: Vec<ChatCompletionsToolMessage>,
     project_path: PathBuf,
     window_label: String,
+    startup_status: AssistantStartupStatus,
+    startup_summary_ready: bool,
     pub llm_call_count: u64,
     pub estimated_tokens: u64,
 }
@@ -66,6 +111,8 @@ impl AssistantEngine {
             conversation,
             project_path,
             window_label,
+            startup_status: AssistantStartupStatus::Idle,
+            startup_summary_ready: false,
             llm_call_count: 0,
             estimated_tokens: 0,
         }
@@ -74,6 +121,64 @@ impl AssistantEngine {
     /// Get a copy of the conversation for serialization.
     pub fn conversation(&self) -> &[ChatCompletionsToolMessage] {
         &self.conversation
+    }
+
+    pub fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
+    pub fn startup_status(&self) -> AssistantStartupStatus {
+        self.startup_status
+    }
+
+    pub fn startup_summary_ready(&self) -> bool {
+        self.startup_summary_ready
+    }
+
+    pub fn handle_startup(&mut self, state: &AppState) -> Result<(), String> {
+        if self.startup_summary_ready {
+            return Ok(());
+        }
+
+        let base_len = self.conversation.len();
+        self.startup_status = AssistantStartupStatus::Analyzing;
+        self.startup_summary_ready = false;
+        self.conversation.push(ChatCompletionsToolMessage {
+            role: "system".to_string(),
+            content: Some(STARTUP_REPORT_PROMPT.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        match self.run_llm_loop(state, AssistantToolMode::ReadOnly) {
+            Ok(_) => {
+                let summary = self
+                    .conversation
+                    .last()
+                    .and_then(|message| message.content.clone())
+                    .unwrap_or_default();
+                self.finish_startup_transcript(base_len, &summary);
+                self.startup_status = AssistantStartupStatus::Ready;
+                self.startup_summary_ready = true;
+                Ok(())
+            }
+            Err(err) => {
+                self.finish_startup_transcript(base_len, &format!("自律起動に失敗しました: {err}"));
+                self.startup_status = AssistantStartupStatus::Failed;
+                self.startup_summary_ready = false;
+                Ok(())
+            }
+        }
+    }
+
+    fn finish_startup_transcript(&mut self, base_len: usize, summary: &str) {
+        self.conversation.truncate(base_len);
+        self.conversation.push(ChatCompletionsToolMessage {
+            role: "assistant".to_string(),
+            content: Some(summary.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
     }
 
     /// Handle a user message: add to conversation, run LLM loop, return response.
@@ -89,73 +194,7 @@ impl AssistantEngine {
             tool_call_id: None,
         });
 
-        Self::run_llm_loop_for_conversation(
-            &mut self.conversation,
-            &self.project_path,
-            &self.window_label,
-            &mut self.llm_call_count,
-            &mut self.estimated_tokens,
-            state,
-            ToolAccessMode::Full,
-        )
-    }
-
-    pub(crate) fn push_visible_assistant_message(&mut self, content: impl Into<String>) {
-        self.conversation.push(ChatCompletionsToolMessage {
-            role: "assistant".to_string(),
-            content: Some(content.into()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn push_hidden_system_message_for_test(&mut self, content: impl Into<String>) {
-        Self::push_hidden_system_message_to(&mut self.conversation, content);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn build_initial_analysis_conversation_for_test(
-        &self,
-    ) -> Vec<ChatCompletionsToolMessage> {
-        self.build_initial_analysis_conversation()
-    }
-
-    pub fn run_initial_analysis(&mut self, state: &AppState) -> Result<AssistantResponse, String> {
-        let mut startup_conversation = self.build_initial_analysis_conversation();
-        let response = Self::run_llm_loop_for_conversation(
-            &mut startup_conversation,
-            &self.project_path,
-            &self.window_label,
-            &mut self.llm_call_count,
-            &mut self.estimated_tokens,
-            state,
-            ToolAccessMode::ReadOnly,
-        )?;
-
-        if !response.text.is_empty() {
-            self.push_visible_assistant_message(response.text.clone());
-        }
-
-        Ok(response)
-    }
-
-    fn build_initial_analysis_conversation(&self) -> Vec<ChatCompletionsToolMessage> {
-        let mut conversation = self.conversation.clone();
-        Self::push_hidden_system_message_to(&mut conversation, STARTUP_ANALYSIS_PROMPT);
-        conversation
-    }
-
-    fn push_hidden_system_message_to(
-        conversation: &mut Vec<ChatCompletionsToolMessage>,
-        content: impl Into<String>,
-    ) {
-        conversation.push(ChatCompletionsToolMessage {
-            role: "system".to_string(),
-            content: Some(content.into()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        self.run_llm_loop(state, AssistantToolMode::FullAccess)
     }
 
     /// Handle a batch of monitor events: summarize changes, optionally call LLM.
@@ -195,70 +234,60 @@ impl AssistantEngine {
             tool_call_id: None,
         });
 
-        let response = Self::run_llm_loop_for_conversation(
-            &mut self.conversation,
-            &self.project_path,
-            &self.window_label,
-            &mut self.llm_call_count,
-            &mut self.estimated_tokens,
-            state,
-            ToolAccessMode::Full,
-        )?;
+        let response = self.run_llm_loop(state, AssistantToolMode::FullAccess)?;
         Ok(Some(response))
     }
 
     /// Prune conversation to stay within the sliding window limit.
     /// Keeps the system prompt (index 0) and the most recent messages.
     /// Ensures the cut point does not orphan tool result messages.
-    fn prune_conversation_buffer(conversation: &mut Vec<ChatCompletionsToolMessage>) {
-        if conversation.len() <= MAX_CONVERSATION_MESSAGES {
+    fn prune_conversation(&mut self) {
+        if self.conversation.len() <= MAX_CONVERSATION_MESSAGES {
             return;
         }
 
         // Always keep message[0] (system prompt).
         // Keep the last (MAX_CONVERSATION_MESSAGES - 1) messages from the tail.
         let keep_tail = MAX_CONVERSATION_MESSAGES - 1;
-        let mut cut = conversation.len() - keep_tail;
+        let mut cut = self.conversation.len() - keep_tail;
 
         // Ensure cut point doesn't orphan a "tool" role message (tool result without
         // the preceding assistant tool_calls message). Walk forward from the cut point
         // to find the first message that is NOT a "tool" role.
-        while cut < conversation.len() && conversation[cut].role == "tool" {
+        while cut < self.conversation.len() && self.conversation[cut].role == "tool" {
             cut += 1;
         }
 
-        if cut >= conversation.len() {
+        if cut >= self.conversation.len() {
             // Edge case: all remaining messages are tool results — keep everything
             return;
         }
 
         // Build pruned conversation: system prompt + messages from cut onward
-        let mut pruned = Vec::with_capacity(1 + conversation.len() - cut);
-        pruned.push(conversation[0].clone());
-        pruned.extend_from_slice(&conversation[cut..]);
-        *conversation = pruned;
+        let mut pruned = Vec::with_capacity(1 + self.conversation.len() - cut);
+        pruned.push(self.conversation[0].clone());
+        pruned.extend_from_slice(&self.conversation[cut..]);
+        self.conversation = pruned;
     }
 
-    fn run_llm_loop_for_conversation(
-        conversation: &mut Vec<ChatCompletionsToolMessage>,
-        project_path: &std::path::Path,
-        window_label: &str,
-        llm_call_count: &mut u64,
-        estimated_tokens: &mut u64,
+    /// Run the LLM tool-use loop: call LLM, execute tool calls, repeat until
+    /// the LLM returns a text response (no tool calls) or max iterations reached.
+    fn run_llm_loop(
+        &mut self,
         state: &AppState,
-        access_mode: ToolAccessMode,
+        tool_mode: AssistantToolMode,
     ) -> Result<AssistantResponse, String> {
-        let tools = assistant_tools::assistant_tool_definitions_for_mode(access_mode);
+        let tools = assistant_tools::assistant_tool_definitions(tool_mode);
         let mut actions_taken = Vec::new();
 
         // Load AI settings once before the loop to avoid repeated config reads.
         let ai_settings = resolve_ai_settings()?;
 
         // Prune conversation before sending to LLM to avoid context window overflow.
-        Self::prune_conversation_buffer(conversation);
+        self.prune_conversation();
 
         for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
-            let messages = conversation.clone();
+            let messages = self.conversation.clone();
             let tools_clone = tools.clone();
             let settings = ai_settings.clone();
 
@@ -280,14 +309,14 @@ impl AssistantEngine {
             .join()
             .map_err(|_| "LLM call panicked".to_string())??;
 
-            *llm_call_count += 1;
+            self.llm_call_count += 1;
             if let Some(tokens) = response.usage_tokens {
-                *estimated_tokens += tokens;
+                self.estimated_tokens += tokens;
             }
 
             if response.tool_calls.is_empty() {
                 // No tool calls — this is the final text response
-                conversation.push(ChatCompletionsToolMessage {
+                self.conversation.push(ChatCompletionsToolMessage {
                     role: "assistant".to_string(),
                     content: Some(response.text.clone()),
                     tool_calls: None,
@@ -315,7 +344,7 @@ impl AssistantEngine {
                 .collect();
 
             // Add the assistant message with tool_calls
-            conversation.push(ChatCompletionsToolMessage {
+            self.conversation.push(ChatCompletionsToolMessage {
                 role: "assistant".to_string(),
                 content: if response.text.is_empty() {
                     None
@@ -327,14 +356,14 @@ impl AssistantEngine {
             });
 
             // Execute each tool call and add tool results
-            let project_path = project_path.to_string_lossy().to_string();
+            let project_path = self.project_path.to_string_lossy().to_string();
             for tc in &response.tool_calls {
-                let tool_result = assistant_tools::execute_assistant_tool_with_mode(
+                let tool_result = assistant_tools::execute_assistant_tool(
                     tc,
                     state,
-                    window_label,
+                    &self.window_label,
                     &project_path,
-                    access_mode,
+                    tool_mode,
                 );
 
                 let result_text = match &tool_result {
@@ -349,7 +378,7 @@ impl AssistantEngine {
                 };
 
                 let call_id = tc.call_id.clone().unwrap_or_default();
-                conversation.push(ChatCompletionsToolMessage {
+                self.conversation.push(ChatCompletionsToolMessage {
                     role: "tool".to_string(),
                     content: Some(truncate_tool_result(&result_text)),
                     tool_calls: None,
@@ -426,34 +455,57 @@ mod tests {
         let engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
         assert_eq!(engine.llm_call_count, 0);
         assert_eq!(engine.estimated_tokens, 0);
+        assert_eq!(engine.startup_status(), AssistantStartupStatus::Idle);
+        assert!(!engine.startup_summary_ready());
+        assert_eq!(engine.project_path(), Path::new("/repo"));
         // Conversation should have system message
         assert_eq!(engine.conversation.len(), 1);
         assert_eq!(engine.conversation[0].role, "system");
     }
 
     #[test]
-    fn test_enqueue_initial_analysis_prompt_adds_hidden_system_message() {
-        let engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
-        let startup_conversation = engine.build_initial_analysis_conversation_for_test();
-
-        assert_eq!(engine.conversation.len(), 1);
-        assert_eq!(startup_conversation.len(), 2);
-        assert_eq!(startup_conversation[1].role, "system");
-        assert!(startup_conversation[1]
-            .content
-            .as_deref()
-            .unwrap_or_default()
-            .contains("project was just opened"));
-    }
-
-    #[test]
-    fn test_push_visible_assistant_message_appends_assistant_role() {
+    fn test_finish_startup_transcript_removes_startup_prompt_and_tool_messages() {
         let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
-        engine.push_visible_assistant_message("hello");
+        let base_len = engine.conversation.len();
 
-        assert_eq!(engine.conversation.len(), 2);
-        assert_eq!(engine.conversation[1].role, "assistant");
-        assert_eq!(engine.conversation[1].content.as_deref(), Some("hello"));
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "system".to_string(),
+            content: Some(STARTUP_REPORT_PROMPT.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![]),
+            tool_call_id: None,
+        });
+        engine.conversation.push(ChatCompletionsToolMessage {
+            role: "tool".to_string(),
+            content: Some("tool-result".to_string()),
+            tool_calls: None,
+            tool_call_id: Some("call-1".to_string()),
+        });
+
+        engine.finish_startup_transcript(base_len, "startup summary");
+
+        assert_eq!(engine.conversation.len(), base_len + 1);
+        assert_eq!(engine.conversation[0].role, "system");
+        assert_eq!(
+            engine
+                .conversation
+                .last()
+                .and_then(|message| message.content.as_deref()),
+            Some("startup summary")
+        );
+        assert!(!engine
+            .conversation
+            .iter()
+            .any(|message| message.content.as_deref() == Some(STARTUP_REPORT_PROMPT)));
+        assert!(!engine
+            .conversation
+            .iter()
+            .any(|message| message.role == "tool"));
     }
 
     fn make_msg(role: &str, content: &str) -> ChatCompletionsToolMessage {
@@ -475,7 +527,7 @@ mod tests {
                 .push(make_msg("user", &format!("msg {}", i)));
         }
         assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
-        AssistantEngine::prune_conversation_buffer(&mut engine.conversation);
+        engine.prune_conversation();
         // Should not change
         assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
     }
@@ -490,7 +542,7 @@ mod tests {
                 .push(make_msg("user", &format!("msg {}", i)));
         }
         assert_eq!(engine.conversation.len(), 61);
-        AssistantEngine::prune_conversation_buffer(&mut engine.conversation);
+        engine.prune_conversation();
         // Should be MAX_CONVERSATION_MESSAGES
         assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
         // First message is always system
@@ -539,7 +591,7 @@ mod tests {
                 .push(make_msg("user", &format!("late {}", i)));
         }
         assert_eq!(engine.conversation.len(), 54);
-        AssistantEngine::prune_conversation_buffer(&mut engine.conversation);
+        engine.prune_conversation();
         // First should be system
         assert_eq!(engine.conversation[0].role, "system");
         // No orphaned tool messages at the start of the kept window
