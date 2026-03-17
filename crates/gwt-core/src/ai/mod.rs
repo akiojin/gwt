@@ -13,7 +13,8 @@ pub use branch_suggest::{
     parse_branch_suggestion, suggest_branch_name, BRANCH_SUGGEST_SYSTEM_PROMPT,
 };
 pub use client::{
-    format_error_for_display, AIClient, AIError, AIResponse, ChatMessage, ModelInfo, ToolCall,
+    format_error_for_display, AIClient, AIError, AIResponse, ChatCompletionsToolCallFunction,
+    ChatCompletionsToolCallRef, ChatCompletionsToolMessage, ChatMessage, ModelInfo, ToolCall,
     ToolDefinition, ToolFunction,
 };
 pub use issue_classify::{

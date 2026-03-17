@@ -10,7 +10,7 @@ import {
 describe("windowMenuSync", () => {
   it("buildWindowMenuVisibleTabs includes only agent/terminal tabs", () => {
     const tabs: Tab[] = [
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       {
         id: "agent-pane-1",
         label: "feature/one",

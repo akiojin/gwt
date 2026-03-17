@@ -143,8 +143,8 @@ describe("agentTabsPersistence", () => {
         version: 2,
         byProjectPath: {
           "/a": {
-            tabs: [{ type: "projectMode", id: "projectMode", label: "Project Mode" }],
-            activeTabId: "projectMode",
+            tabs: [{ type: "assistant", id: "assistant", label: "Assistant" }],
+            activeTabId: "assistant",
           },
         },
       }),
@@ -169,8 +169,8 @@ describe("agentTabsPersistence", () => {
       version: 2,
       byProjectPath: {
         "/a": {
-          tabs: [{ type: "projectMode", id: "projectMode", label: "Project Mode" }],
-          activeTabId: "projectMode",
+          tabs: [{ type: "assistant", id: "assistant", label: "Assistant" }],
+          activeTabId: "assistant",
         },
         "/b": {
           tabs: [
@@ -188,7 +188,7 @@ describe("agentTabsPersistence", () => {
       "/repo",
       {
         tabs: [
-          { type: "projectMode", id: "projectMode", label: "Project Mode" },
+          { type: "assistant", id: "assistant", label: "Assistant" },
           { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
           { type: "agent", paneId: "old", label: "old-agent" },
         ],
@@ -209,7 +209,7 @@ describe("agentTabsPersistence", () => {
     const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded).toEqual({
       tabs: [
-        { type: "projectMode", id: "projectMode", label: "Project Mode" },
+        { type: "assistant", id: "assistant", label: "Assistant" },
         { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
         { type: "agent", paneId: "new", label: "new-agent" },
       ],
@@ -221,7 +221,7 @@ describe("agentTabsPersistence", () => {
     const restored = buildRestoredProjectTabs(
       {
         tabs: [
-          { type: "projectMode", id: "projectMode", label: "Project Mode" },
+          { type: "assistant", id: "assistant", label: "Assistant" },
           { type: "settings", id: "settings", label: "Settings" },
           { type: "agent", paneId: "p1", label: "one" },
           {
@@ -237,7 +237,7 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "agent-p1",
@@ -275,7 +275,7 @@ describe("agentTabsPersistence", () => {
     expect(restored.terminalTabsToRespawn).toEqual([]);
     expect(restored.activeTerminalPaneIdToRespawn).toBeNull();
     expect(restored.tabs).toEqual([
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       {
         id: "settings",
         label: "Settings",
@@ -308,7 +308,7 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       { id: "agent-p1", label: "one", type: "agent", paneId: "p1" },
     ]);
     expect(restored.terminalTabsToRespawn).toEqual([]);
@@ -333,7 +333,7 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "projectMode", label: "Project Mode", type: "projectMode" },
+      { id: "assistant", label: "Assistant", type: "assistant" },
       {
         id: "agent-a-live",
         label: "feature-a",
@@ -609,7 +609,7 @@ describe("agentTabsPersistence", () => {
     expect(loadStoredProjectTabs("/repo", store)).toBeNull();
   });
 
-  it("parseStoredProjectTab handles projectMode tab type correctly", () => {
+  it("parseStoredProjectTab handles assistant tab type correctly", () => {
     store.setItem(
       PROJECT_TABS_STORAGE_KEY,
       JSON.stringify({
@@ -617,7 +617,7 @@ describe("agentTabsPersistence", () => {
         byProjectPath: {
           "/repo": {
             tabs: [
-              { type: "projectMode", id: "custom-id", label: "Custom" },
+              { type: "assistant", id: "custom-id", label: "Custom" },
               { type: "issues", id: "", label: "" },
             ],
             activeTabId: null,
@@ -627,7 +627,7 @@ describe("agentTabsPersistence", () => {
     );
     const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded!.tabs).toEqual([
-      { type: "projectMode", id: "projectMode", label: "Project Mode" },
+      { type: "assistant", id: "assistant", label: "Assistant" },
       { type: "issues", id: "issues", label: "Issues" },
     ]);
   });
@@ -691,17 +691,17 @@ describe("agentTabsPersistence", () => {
     expect(loaded!.tabs).toEqual([]);
   });
 
-  it("buildRestoredProjectTabs preserves projectMode activeTabId normalization", () => {
+  it("buildRestoredProjectTabs preserves assistant activeTabId normalization", () => {
     const restored = buildRestoredProjectTabs(
       {
         tabs: [
-          { type: "projectMode", id: "projectMode", label: "Project Mode" },
+          { type: "assistant", id: "assistant", label: "Assistant" },
         ],
-        activeTabId: "projectMode",
+        activeTabId: "assistant",
       },
       [],
     );
-    expect(restored.activeTabId).toBe("projectMode");
+    expect(restored.activeTabId).toBe("assistant");
   });
 
   it("buildRestoredProjectTabs deduplicates tabs by key", () => {

@@ -14,6 +14,7 @@
   import { registerTerminalInputTarget } from "../voice/inputTargetRegistry";
   import { openExternalUrl } from "../openExternalUrl";
   import { toastBus } from "../toastBus";
+  import { ClipboardPaste, Mic } from "lucide-svelte";
 
   let {
     paneId,
@@ -1008,9 +1009,10 @@
       class="terminal-action-btn"
       type="button"
       title={pasteButtonTitle()}
+      aria-label="Paste"
       onclick={handlePasteImageClick}
     >
-      Paste
+      <ClipboardPaste size={16} />
     </button>
     <button
       class:active={voiceInputListening}
@@ -1020,9 +1022,10 @@
       disabled={voiceButtonDisabled()}
       type="button"
       title={voiceButtonTitle()}
+      aria-label="Voice"
       onclick={handleVoiceButtonClick}
     >
-      Voice
+      <Mic size={16} />
     </button>
   </div>
 </div>
@@ -1052,12 +1055,16 @@
 
   .terminal-action-btn {
     pointer-events: auto;
-    min-width: 58px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    min-height: 32px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, white 18%);
     background: color-mix(in srgb, var(--bg-secondary) 88%, black 12%);
     color: var(--text-muted);
     border-radius: 999px;
-    padding: 5px 10px;
+    padding: 7px;
     font-size: var(--ui-font-xs);
     line-height: 1;
     cursor: pointer;

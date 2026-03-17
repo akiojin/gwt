@@ -2,13 +2,13 @@
   import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
-  import ProjectModePanel from "./ProjectModePanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import PrListPanel from "./PrListPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
   import ProjectIndexPanel from "./ProjectIndexPanel.svelte";
+  import AssistantPanel from "./AssistantPanel.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
     return (
@@ -107,7 +107,7 @@
     (activeTab?.type === "agent" || activeTab?.type === "terminal") &&
       activeTerminalTabId === null,
   );
-  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "projectMode";
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "assistant";
   let draggingTabId: string | null = $state(null);
   let terminalPendingTabId: string | null = $state(null);
   let visibleTerminalTabId: string | null = $state(null);
@@ -459,8 +459,6 @@
               <SettingsPanel onClose={() => onTabClose(tab.id)} />
             {:else if tab.type === "versionHistory"}
               <VersionHistoryPanel {projectPath} />
-            {:else if tab.type === "projectMode"}
-              <ProjectModePanel />
             {:else if tab.type === "issueSpec"}
               <IssueSpecPanel
                 projectPath={projectPath}
@@ -481,6 +479,8 @@
               />
             {:else if tab.type === "projectIndex"}
               <ProjectIndexPanel {projectPath} />
+            {:else if tab.type === "assistant"}
+              <AssistantPanel />
             {:else}
               <div class="placeholder">
                 <h2>Select a tab</h2>
