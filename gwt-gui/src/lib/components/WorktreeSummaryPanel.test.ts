@@ -3044,6 +3044,89 @@ describe("WorktreeSummaryPanel", () => {
     expect(openExternalUrlMock).not.toHaveBeenCalled();
   });
 
+  it("shows display_name in header when set", async () => {
+    const branchWithDisplayName: BranchInfo = {
+      ...branchFixture,
+      display_name: "My custom name",
+    };
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchWithDisplayName,
+    });
+
+    await waitFor(() => {
+      expect(
+        rendered.container.querySelector("h2 .branch-display-name")?.textContent
+      ).toBe("My custom name");
+    });
+  });
+
+  it("shows branch name when no display_name", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(
+        rendered.container.querySelector("h2 .branch-display-name")?.textContent
+      ).toBe("feature/markdown-ui");
+    });
+  });
+
+  it("shows edit display name button", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      const editBtn = rendered.container.querySelector(".edit-display-name-btn");
+      expect(editBtn).toBeTruthy();
+    });
+  });
+
+  it("clicking edit shows display name input", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".edit-display-name-btn")).toBeTruthy();
+    });
+
+    const editBtn = rendered.container.querySelector(".edit-display-name-btn") as HTMLElement;
+    await fireEvent.click(editBtn);
+
+    await waitFor(() => {
+      const input = rendered.container.querySelector(".display-name-input");
+      expect(input).toBeTruthy();
+    });
+  });
+
+  it("shows real branch name subtitle when display_name differs", async () => {
+    const branchWithDisplayName: BranchInfo = {
+      ...branchFixture,
+      display_name: "Custom display name",
+    };
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchWithDisplayName,
+    });
+
+    await waitFor(() => {
+      expect(
+        rendered.container.querySelector("h2 .branch-display-name")?.textContent
+      ).toBe("Custom display name");
+      const realName = rendered.container.querySelector(".branch-real-name");
+      expect(realName).toBeTruthy();
+      expect(realName?.textContent).toBe("feature/markdown-ui");
+    });
+  });
+
   it("getInvoke throws when __TAURI_INTERNALS__ is absent and tauriInvoke module invoke is null", async () => {
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const savedInternals = (globalThis as any).__TAURI_INTERNALS__;
@@ -3116,4 +3199,5 @@ describe("WorktreeSummaryPanel", () => {
       });
     }
   });
+
 });

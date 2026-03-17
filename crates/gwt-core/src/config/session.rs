@@ -1108,4 +1108,83 @@ updated_at = "2026-01-20T00:00:00Z"
         let status = infer_agent_status("Enter password:\nPrompt: ", true);
         assert_eq!(status, AgentStatus::WaitingInput);
     }
+
+    // --- display_name tests ---
+
+    #[test]
+    fn test_session_new_has_no_display_name() {
+        let session = Session::new("/repo/.worktrees/feature", "feature/test");
+        assert_eq!(session.display_name, None);
+    }
+
+    #[test]
+    fn test_session_save_load_with_display_name() {
+        let temp = TempDir::new().unwrap();
+        let session_path = temp.path().join("session.toml");
+
+        let mut session = Session::new("/repo/.worktrees/feature", "feature/auth");
+        session.display_name = Some("Add auth feature".to_string());
+
+        session.save(&session_path).unwrap();
+
+        let loaded = Session::load(&session_path).unwrap();
+        assert_eq!(
+            loaded.display_name,
+            Some("Add auth feature".to_string())
+        );
+    }
+
+    #[test]
+    fn test_session_save_load_without_display_name() {
+        let temp = TempDir::new().unwrap();
+        let session_path = temp.path().join("session.toml");
+
+        let session = Session::new("/repo/.worktrees/feature", "feature/test");
+        assert_eq!(session.display_name, None);
+
+        session.save(&session_path).unwrap();
+
+        let loaded = Session::load(&session_path).unwrap();
+        assert_eq!(loaded.display_name, None);
+
+        // Verify skip_serializing_if works: TOML should not contain "display_name"
+        let content = std::fs::read_to_string(&session_path).unwrap();
+        assert!(
+            !content.contains("display_name"),
+            "TOML should not contain display_name when None (skip_serializing_if)"
+        );
+    }
+
+    #[test]
+    fn test_session_load_old_format_without_display_name() {
+        // Backward compatibility: old TOML without display_name field
+        let toml_content = r#"
+id = "old-session-id"
+worktree_path = "/repo/.worktrees/feature"
+branch = "feature/old"
+created_at = "2026-01-20T00:00:00Z"
+updated_at = "2026-01-20T00:00:00Z"
+"#;
+
+        let session: Session = toml::from_str(toml_content).unwrap();
+        assert_eq!(session.display_name, None);
+        assert_eq!(session.branch, "feature/old");
+    }
+
+    #[test]
+    fn test_session_display_name_roundtrip_empty_after_clear() {
+        let temp = TempDir::new().unwrap();
+        let session_path = temp.path().join("session.toml");
+
+        let mut session = Session::new("/repo/.worktrees/feature", "feature/test");
+        session.display_name = Some("test".to_string());
+
+        // Clear the display_name
+        session.display_name = None;
+
+        session.save(&session_path).unwrap();
+
+        let loaded = Session::load(&session_path).unwrap();
+        assert_eq!(loaded.display_name, None);
+    }
 }
