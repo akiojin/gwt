@@ -1,6 +1,6 @@
 ---
 name: gwt-pr-fix
-description: Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Create fix plans and implement after user approval. Reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Notify reviewers after fixes.
+description: Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Autonomously fix high-confidence blockers, reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Ask the user only for ambiguous conflicts or design decisions.
 metadata:
   short-description: Fix failing GitHub PRs comprehensively
 ---
@@ -18,9 +18,7 @@ Use gh to inspect PRs for:
 - Change Requests from reviewers
 - Unresolved review threads
 
-Then propose a fix plan, implement after explicit approval, **reply to every reviewer comment** (with action taken or reason for not addressing), resolve all threads, and notify reviewers.
-
-- Depends on the `plan` skill for drafting and approving the fix plan.
+Then inspect, fix, **reply to every reviewer comment** (with action taken or reason for not addressing), resolve all threads, and notify reviewers.
 
 Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), then run `gh auth status` with escalated permissions (include workflow/repo scopes) so `gh` commands succeed.
 
@@ -203,11 +201,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" -
    **Each CHANGE-REQUEST and each UNRESOLVED-THREAD is a separate B-item.** Do not combine multiple threads or requests into one item.
 
 5. **Decide execution path.**
-   - If ALL blocking items have `Auto-fix: Yes` → display Diagnosis Report, skip plan, proceed directly to step 6.
-   - If ANY blocking item has `Auto-fix: No` → create a plan referencing B-item IDs (e.g., "Fix B1: ...", "Fix B3: ...") and request user approval for `Auto-fix: No` items before proceeding.
+   - If ALL blocking items have `Auto-fix: Yes` → display Diagnosis Report and proceed directly to step 6.
+   - If ANY blocking item has `Auto-fix: No` → create a concise plan referencing B-item IDs and ask the user only about those ambiguous items before proceeding.
 
 6. **Implement fixes.**
-   - Apply the approved fixes, summarize diffs/tests.
+   - Apply the fixes, summarize diffs/tests.
    - After applying fixes, commit changes and push to the PR branch.
    - Verify push succeeded before proceeding to step 7.
    - **After implementing fixes, proceed to step 7 to reply and resolve ALL threads.**

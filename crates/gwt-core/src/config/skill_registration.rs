@@ -35,6 +35,7 @@ pub fn generate_managed_skills_block() -> String {
         "gwt-spec-tasks",
         "gwt-spec-analyze",
         "gwt-spec-ops",
+        "gwt-spec-implement",
     ];
     const PR_SKILLS: &[&str] = &["gwt-pr", "gwt-pr-check", "gwt-pr-fix"];
     // Everything else goes to Utilities.
@@ -93,14 +94,12 @@ pub fn generate_managed_skills_block() -> String {
     block.push_str("### Recommended Workflow\n\n");
     block.push_str("See each skill's SKILL.md for detailed instructions:\n\n");
     block.push_str("1. **Register work** → `gwt-issue-register`\n");
-    block.push_str("2. **Create SPEC container** → `gwt-spec-register`\n");
-    block.push_str("3. **Clarify spec** → `gwt-spec-clarify`\n");
-    block.push_str("4. **Plan artifacts** → `gwt-spec-plan`\n");
-    block.push_str("5. **Generate tasks** → `gwt-spec-tasks`\n");
-    block.push_str("6. **Analyze readiness** → `gwt-spec-analyze`\n");
-    block.push_str("7. **Execute / maintain SPEC** → `gwt-spec-ops`\n");
-    block.push_str("8. **Open PR** → `gwt-pr`\n");
-    block.push_str("9. **Fix CI / reviews** → `gwt-pr-fix`\n");
+    block.push_str("2. **Resolve an existing issue** → `gwt-issue-resolve`\n");
+    block.push_str("3. **Create or select SPEC** → `gwt-spec-register` / `gwt-spec-ops`\n");
+    block.push_str("4. **Clarify / plan / tasks / analyze** → `gwt-spec-ops`\n");
+    block.push_str("5. **Implement SPEC tasks** → `gwt-spec-implement`\n");
+    block.push_str("6. **Open PR** → `gwt-pr`\n");
+    block.push_str("7. **Fix CI / reviews** → `gwt-pr-fix`\n");
     block.push_str(MANAGED_SKILLS_BLOCK_END);
     block.push('\n');
 
@@ -184,8 +183,9 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-spec-plan",
     "gwt-spec-tasks",
     "gwt-spec-analyze",
-    "gwt-pr-fix",
     "gwt-spec-ops",
+    "gwt-spec-implement",
+    "gwt-pr-fix",
     "gwt-pr",
     "gwt-pr-check",
     "gwt-project-index",
@@ -301,6 +301,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         )),
         executable: false,
         rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-implement/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-implement/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
     },
     ManagedAsset {
         relative_path: "skills/gwt-pr/SKILL.md",
@@ -476,6 +485,15 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/gwt/commands/gwt-spec-analyze.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-implement.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-implement.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -2352,6 +2370,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(spec_register_skill.contains("Issue-first SPEC container"));
         assert!(spec_register_skill.contains("gwt-issue-search"));
         assert!(spec_register_skill.contains("GWT_SPEC_ARTIFACT:doc:spec.md"));
+        assert!(spec_register_skill.contains("gwt-spec-ops"));
 
         let spec_clarify_skill = std::fs::read_to_string(
             temp.path()
@@ -2362,7 +2381,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(spec_clarify_skill.contains("[NEEDS CLARIFICATION"));
-        assert!(spec_clarify_skill.contains("gwt-spec-plan"));
+        assert!(spec_clarify_skill.contains("gwt-spec-ops"));
 
         let spec_plan_skill = std::fs::read_to_string(
             temp.path()
@@ -2374,6 +2393,7 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(spec_plan_skill.contains("memory/constitution.md"));
         assert!(spec_plan_skill.contains("Constitution Check"));
+        assert!(spec_plan_skill.contains("gwt-spec-tasks"));
 
         let spec_tasks_skill = std::fs::read_to_string(
             temp.path()
@@ -2385,6 +2405,7 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(spec_tasks_skill.contains("[P]"));
         assert!(spec_tasks_skill.contains("user story"));
+        assert!(spec_tasks_skill.contains("gwt-spec-analyze"));
 
         let spec_analyze_skill = std::fs::read_to_string(
             temp.path()
@@ -2394,8 +2415,21 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_analyze_skill.contains("Status: CLEAR | BLOCKED"));
+        assert!(spec_analyze_skill.contains("Status: CLEAR | AUTO-FIXABLE | NEEDS-DECISION"));
         assert!(spec_analyze_skill.contains("Constitution"));
+        assert!(spec_analyze_skill.contains("gwt-spec-implement"));
+
+        let spec_implement_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-implement")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_implement_skill.contains("implementation owner"));
+        assert!(spec_implement_skill.contains("gwt-pr"));
+        assert!(spec_implement_skill.contains("gwt-pr-fix"));
 
         let issue_register_command = std::fs::read_to_string(
             temp.path()
@@ -2407,6 +2441,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(issue_register_command.contains("main entrypoint for new work registration"));
         assert!(issue_register_command.contains("gwt-issue-search"));
         assert!(issue_register_command.contains("gwt-spec-register"));
+        assert!(issue_register_command.contains("gwt-spec-ops"));
 
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
@@ -2418,6 +2453,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(issue_resolve_command.contains("direct fix"));
         assert!(issue_resolve_command.contains("existing SPEC"));
         assert!(issue_resolve_command.contains("gwt-issue-register"));
+        assert!(issue_resolve_command.contains("gwt-spec-ops"));
 
         let spec_register_command = std::fs::read_to_string(
             temp.path()
@@ -2429,6 +2465,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(spec_register_command.contains("seed `doc:spec.md`"));
         assert!(spec_register_command.contains("gwt-issue-search"));
         assert!(spec_register_command.contains("gwt-issue-register"));
+        assert!(spec_register_command.contains("gwt-spec-ops"));
 
         let spec_clarify_command = std::fs::read_to_string(
             temp.path()
@@ -2438,7 +2475,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(spec_clarify_command.contains("NEEDS CLARIFICATION"));
-        assert!(spec_clarify_command.contains("gwt-spec-plan"));
+        assert!(spec_clarify_command.contains("gwt-spec-ops"));
 
         let spec_plan_command = std::fs::read_to_string(
             temp.path()
@@ -2449,6 +2486,7 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(spec_plan_command.contains("memory/constitution.md"));
         assert!(spec_plan_command.contains("gwt-spec-tasks"));
+        assert!(spec_plan_command.contains("gwt-spec-ops"));
 
         let spec_tasks_command = std::fs::read_to_string(
             temp.path()
@@ -2458,6 +2496,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(spec_tasks_command.contains("gwt-spec-analyze"));
+        assert!(spec_tasks_command.contains("gwt-spec-ops"));
 
         let spec_analyze_command = std::fs::read_to_string(
             temp.path()
@@ -2466,8 +2505,18 @@ OPENAI_API_KEY = "legacy-key"
                 .join("gwt-spec-analyze.md"),
         )
         .unwrap();
-        assert!(spec_analyze_command.contains("final gate"));
+        assert!(spec_analyze_command.contains("AUTO-FIXABLE"));
         assert!(spec_analyze_command.contains("gwt-spec-ops"));
+
+        let spec_implement_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-implement.md"),
+        )
+        .unwrap();
+        assert!(spec_implement_command.contains("execution-ready"));
+        assert!(spec_implement_command.contains("gwt-pr"));
 
         assert!(!temp
             .path()

@@ -1,5 +1,5 @@
 ---
-description: Create a new Issue-first SPEC container when no existing canonical SPEC fits, seed `spec.md`, then hand off to gwt-spec-clarify.
+description: Create a new Issue-first SPEC container when no existing canonical SPEC fits, seed `spec.md`, then continue into SPEC orchestration unless register-only was requested.
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
@@ -18,9 +18,9 @@ Use this command as a supplementary entrypoint when the user explicitly wants to
 
 1. Load `skills/gwt-spec-register/SKILL.md` and follow the workflow.
 2. Use `gwt-issue-search` before creating a new SPEC.
-3. If an existing canonical SPEC fits, stop creation and switch to `gwt-spec-ops`.
+3. If an existing canonical SPEC fits, continue with `gwt-spec-ops` instead of creating a duplicate.
 4. Otherwise create a new `gwt-spec` Issue with the artifact-index body and seed `doc:spec.md`.
-5. Hand the created issue number off to `gwt-spec-clarify`.
+5. Return the created issue number to `gwt-spec-ops` unless the user explicitly asked to stop after registration.
 
 ## Examples
 

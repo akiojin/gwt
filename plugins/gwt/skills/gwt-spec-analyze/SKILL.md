@@ -1,15 +1,15 @@
 ---
 name: gwt-spec-analyze
-description: Analyze a `gwt-spec` artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation.
+description: Analyze a `gwt-spec` artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers.
 ---
 
 # gwt SPEC Analyze
 
 Use this skill as the final gate before implementation starts.
 
-- `gwt-spec-analyze` is check-only.
+- `gwt-spec-analyze` is still non-implementation work.
 - Do not implement code here.
-- If artifacts are missing, point to the exact preceding skill that must run next.
+- If artifacts are missing, distinguish between gaps that `gwt-spec-ops` can repair automatically and gaps that truly require user input.
 
 ## Required artifact set
 
@@ -50,23 +50,23 @@ Optional but validated when present:
 ```text
 ## Analysis Report: #<number>
 
-Status: CLEAR | BLOCKED
+Status: CLEAR | AUTO-FIXABLE | NEEDS-DECISION
 
 Blocking items:
 - A1. <artifact gap>
 - A2. <traceability gap>
 
 Next:
-- `gwt-spec-clarify`
-- `gwt-spec-plan`
-- `gwt-spec-tasks`
 - `gwt-spec-ops`
+- `gwt-spec-implement`
+- ask user for decision
 ```
 
 ## Decision rule
 
-- `CLEAR`: implementation may proceed through `gwt-spec-ops`
-- `BLOCKED`: the report must point to the exact artifact or gate that failed
+- `CLEAR`: implementation may proceed through `gwt-spec-implement`
+- `AUTO-FIXABLE`: `gwt-spec-ops` should repair the artifact set and rerun analysis
+- `NEEDS-DECISION`: the report must point to the exact user decision or unresolved ambiguity
 
 ## Operations
 

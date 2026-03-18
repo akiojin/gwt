@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-ops
-description: GitHub Issue-first SPEC orchestration. Use an existing or newly created `gwt-spec` issue to coordinate `spec.md`, `plan.md`, `tasks.md`, analysis gates, and implementation readiness.
+description: GitHub Issue-first SPEC orchestration. Use an existing or newly created `gwt-spec` issue to stabilize `spec.md`, `plan.md`, `tasks.md`, analysis gates, and then continue into implementation without stopping at normal handoff boundaries.
 ---
 
 # gwt Issue SPEC Ops
@@ -13,13 +13,14 @@ GitHub Issues are the single source of truth for specs. Manage every spec as an 
 - If the user explicitly needs to create a brand-new SPEC and no canonical SPEC exists yet, use `gwt-spec-register`.
 - If the user already has a `gwt-spec` issue number, or the target SPEC destination is already known, continue with this skill.
 
-`gwt-spec-ops` is the coordinator, not the first writer of every artifact.
+`gwt-spec-ops` is the workflow owner. It may call focused subskills, but it should keep driving the work.
 
-- Missing `spec.md` -> `gwt-spec-register`
-- Unresolved clarification -> `gwt-spec-clarify`
-- Missing plan artifacts -> `gwt-spec-plan`
-- Missing tasks -> `gwt-spec-tasks`
-- Missing consistency gate -> `gwt-spec-analyze`
+- Missing `spec.md` -> seed it through `gwt-spec-register` and continue
+- Unresolved clarification -> run `gwt-spec-clarify`, then continue
+- Missing plan artifacts -> run `gwt-spec-plan`, then continue
+- Missing tasks -> run `gwt-spec-tasks`, then continue
+- Missing consistency gate -> run `gwt-spec-analyze`, then continue
+- Ready artifact set -> run `gwt-spec-implement`
 
 ## Mandatory preflight: search existing spec first
 
@@ -188,18 +189,19 @@ Execution-oriented spec maintenance procedure:
 
 When `doc:spec.md` still contains ambiguous points:
 
-1. Hand off to `gwt-spec-clarify`.
-2. Focus questions on:
+1. Run `gwt-spec-clarify` as a focused substep.
+2. Resolve everything that can be inferred safely before asking.
+3. Focus questions only on:
    - unclear scope boundaries
    - acceptance criteria that cannot be tested
    - concrete thresholds for non-functional requirements
    - dependencies on other features
-3. Replace `[NEEDS CLARIFICATION: ...]` markers with the resolved answers.
-4. Reflect both the questions and the answers back into `doc:spec.md`.
+4. Replace `[NEEDS CLARIFICATION: ...]` markers with the resolved answers.
+5. Reflect both the questions and the answers back into `doc:spec.md`.
 
 ### 3. Plan (write the planning artifacts)
 
-Hand off to `gwt-spec-plan` to write `doc:plan.md` and supporting artifacts:
+Run `gwt-spec-plan` to write `doc:plan.md` and supporting artifacts:
 
 1. `doc:plan.md`
 2. `doc:research.md`
@@ -218,13 +220,26 @@ Hand off to `gwt-spec-plan` to write `doc:plan.md` and supporting artifacts:
 
 ### 4. Generate tasks
 
-Hand off to `gwt-spec-tasks` to produce `doc:tasks.md`.
+Run `gwt-spec-tasks` to produce `doc:tasks.md`.
 
 ### 5. Run analysis gate
 
-Hand off to `gwt-spec-analyze` before implementation starts.
+Run `gwt-spec-analyze` before implementation starts.
 
-Implementation may proceed only when analysis returns `CLEAR`.
+Analysis handling rules:
+
+- `CLEAR`: continue directly into `gwt-spec-implement`
+- `AUTO-FIXABLE`: repair the artifact set through clarify/plan/tasks as needed, then rerun analysis
+- `NEEDS-DECISION`: stop and ask the user only for the missing decision
+
+### 6. Implement the SPEC
+
+When the artifact set is ready:
+
+1. Run `gwt-spec-implement`.
+2. Keep issue progress comments current.
+3. Use `gwt-pr` and `gwt-pr-fix` to keep PR work moving without waiting for extra permission on routine branch-sync or CI fixes.
+4. Return to artifact maintenance only when execution uncovers a real spec bug or newly required clarification.
 
 ### 8. Quality checklists
 
@@ -282,3 +297,12 @@ Use the Phase field to track lifecycle state:
 - Repository must have `gwt-spec` label created.
 - Agent CWD must be inside the target repository (enforced by gwt worktree hooks).
 - `$GWT_PROJECT_ROOT` environment variable is available for explicit repo resolution.
+
+## Stop Conditions
+
+Only stop the workflow for one of these reasons:
+
+- `gh auth status` or required repo access is unavailable
+- an existing-owner search is ambiguous and would risk duplicate work
+- a product or scope decision remains and the correct answer is not inferable
+- a merge conflict or reviewer request cannot be resolved with high confidence

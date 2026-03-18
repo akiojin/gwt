@@ -18,6 +18,6 @@ Use this command as the final gate before implementation.
 
 1. Load `skills/gwt-spec-analyze/SKILL.md` and follow the workflow.
 2. Check `spec.md`, `plan.md`, `tasks.md`, and `memory/constitution.md`.
-3. Report missing traceability, unresolved clarifications, or constitution gaps.
-4. If clear, return control to `gwt-spec-ops`.
-5. If blocked, point to the exact preceding skill that must run next.
+3. Report missing traceability, unresolved clarifications, or constitution gaps, and classify them as `CLEAR`, `AUTO-FIXABLE`, or `NEEDS-DECISION`.
+4. If the result is `CLEAR` or `AUTO-FIXABLE`, return control to `gwt-spec-ops`.
+5. If the result is `NEEDS-DECISION`, point to the exact missing decision.

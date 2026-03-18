@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-tasks
-description: Generate `tasks.md` for an existing `gwt-spec` from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. Use after `gwt-spec-plan`.
+description: Generate `tasks.md` for an existing `gwt-spec` from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. Use directly or through `gwt-spec-ops`.
 ---
 
 # gwt SPEC Tasks
@@ -10,6 +10,7 @@ Use this skill to turn the approved spec and plan artifacts into executable work
 - If `plan.md` is missing, use `gwt-spec-plan` first.
 - If clarification blockers remain in `spec.md`, use `gwt-spec-clarify` first.
 - Do not invent scope that is not traceable to `spec.md` or `plan.md`.
+- When traceability gaps are mechanical and obvious, repair `tasks.md` instead of stopping the workflow.
 
 ## Required inputs
 
@@ -56,7 +57,8 @@ Each task must include:
    - Every user story must have implementation and verification tasks.
    - Every declared contract/data-model change must have at least one task.
 
-6. **Write `tasks.md` and hand off to `gwt-spec-analyze`.**
+6. **Write `tasks.md` and continue into analysis.**
+   - Return the artifact to `gwt-spec-ops`, or proceed directly to `gwt-spec-analyze` when the flow is already active.
 
 ## Exit criteria
 

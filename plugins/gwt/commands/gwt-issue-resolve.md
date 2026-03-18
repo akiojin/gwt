@@ -30,8 +30,8 @@ For new work registration with no existing Issue yet, use `gwt-issue-register` i
    - existing SPEC
    - new SPEC
 5. For SPEC-needed paths, use `gwt-issue-search` before choosing the destination.
-6. If no canonical SPEC exists, switch to `gwt-spec-register` to create the container and initial `spec.md`.
-7. Continue through `gwt-spec-clarify`, `gwt-spec-plan`, `gwt-spec-tasks`, and `gwt-spec-analyze` before implementation.
+6. If no canonical SPEC exists, create the container and initial `spec.md` through `gwt-spec-register`.
+7. Continue through `gwt-spec-ops`, which owns clarify/plan/tasks/analyze and then implementation.
 
 ## Proactive Trigger Examples
 

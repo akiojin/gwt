@@ -1,16 +1,16 @@
 ---
 name: gwt-spec-clarify
-description: Clarify an existing `gwt-spec` by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. Use after `gwt-spec-register` and before `gwt-spec-plan`.
+description: Clarify an existing `gwt-spec` by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. Use directly or through `gwt-spec-ops`.
 ---
 
 # gwt SPEC Clarify
 
 Use this skill to turn a draft `spec.md` artifact into a planning-ready specification.
 
-`gwt-spec-clarify` is a clarification step, not an implementation step.
+`gwt-spec-clarify` is a focused clarification step inside the wider SPEC workflow.
 
 - If the target SPEC does not exist yet, use `gwt-spec-register` first.
-- If no important clarification remains, hand off to `gwt-spec-plan`.
+- If no important clarification remains, return a planning-ready result to `gwt-spec-ops`.
 - Do not generate `plan.md` or `tasks.md` here.
 
 ## Artifact contract
@@ -41,16 +41,17 @@ Unknown decisions must be written as `[NEEDS CLARIFICATION: question]`.
    - If the destination is unknown, use `gwt-issue-search` first.
 
 2. **Read the current `spec.md` artifact.**
-   - If it does not exist, stop and hand off to `gwt-spec-register`.
+   - If it does not exist, seed it through `gwt-spec-register`, then continue.
 
 3. **Find clarification gaps.**
    - Prioritize `[NEEDS CLARIFICATION]` markers.
    - Also look for missing user stories, weak acceptance scenarios, vague requirements, and
      unstated edge cases.
 
-4. **Ask only high-impact questions.**
+4. **Resolve what is knowable before asking.**
+   - Fill obvious gaps from the source Issue, existing comments, current implementation, and surrounding artifacts.
+   - Ask only high-impact questions that change scope, behavior, or testability.
    - Ask at most 5 questions, ordered by implementation impact.
-   - Focus on scope boundaries, behavioral choices, acceptance criteria, and error handling.
 
 5. **Update the `spec.md` artifact.**
    - Replace resolved markers with concrete decisions.
@@ -58,8 +59,9 @@ Unknown decisions must be written as `[NEEDS CLARIFICATION: question]`.
    - Tighten user stories and acceptance scenarios while preserving existing intent.
 
 6. **Decide the next step.**
-   - If critical clarification remains, stop with a blocker summary.
-   - If the spec is planning-ready, hand off to `gwt-spec-plan`.
+   - If a real product or scope decision remains, stop with a blocker summary.
+   - If the remaining gaps are implementation-local and can be decided safely, resolve them here.
+   - If the spec is planning-ready, return control to `gwt-spec-ops` or proceed to `gwt-spec-plan`.
 
 ## Planning-ready exit criteria
 
@@ -77,7 +79,7 @@ The spec may move to planning only when all of the following are true:
 
 Resolved: <N>
 Remaining blockers: <M>
-Next: `gwt-spec-plan` | ask follow-up clarification
+Next: `gwt-spec-ops` -> `gwt-spec-plan` | ask follow-up clarification
 ```
 
 ## Operations

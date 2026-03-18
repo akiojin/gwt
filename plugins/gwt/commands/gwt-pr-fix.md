@@ -2,7 +2,8 @@
 description: >-
   Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements,
   reviewer comments, change requests, and unresolved review threads.
-  Create fix plans and implement after user approval.
+  Autonomously fix high-confidence blockers and ask the user only for ambiguous
+  conflicts or design decisions.
   Use when: (1) user explicitly asks to fix CI/PR issues,
   (2) after creating or pushing to a PR and CI checks fail or reviews are requested,
   (3) user says 'CIを直して/fix ci/fix pr/マージできない'.
@@ -28,7 +29,7 @@ Use this command to diagnose and fix CI failures for a PR.
 2. Run the inspection script to gather CI results.
 3. If the PR is behind the base branch, merge `origin/<base>` into the current branch and push when the merge is clean.
 4. If that merge conflicts and the correct resolution is not obvious, ask the user before continuing.
-5. Propose fixes and apply them after user approval when required.
+5. Apply high-confidence fixes immediately; ask the user only when a blocker is ambiguous.
 
 ## Proactive Trigger Examples
 

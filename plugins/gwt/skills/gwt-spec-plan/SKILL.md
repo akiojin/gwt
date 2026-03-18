@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-plan
-description: Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use after `gwt-spec-clarify`.
+description: Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`.
 ---
 
 # gwt SPEC Plan
@@ -10,6 +10,7 @@ Use this skill to translate a clarified `spec.md` into implementation-ready plan
 - If `spec.md` still has critical clarification gaps, use `gwt-spec-clarify` first.
 - If the target SPEC does not exist, use `gwt-spec-register` first.
 - If planning artifacts already exist but are stale, update them instead of recreating them blindly.
+- Prefer repairing obviously incomplete planning artifacts over stopping the workflow.
 
 ## Required inputs
 
@@ -41,7 +42,7 @@ Create or update these artifacts as issue comments:
 
 1. **Read the source artifacts.**
    - Load `spec.md` and `memory/constitution.md`.
-   - Refuse to continue if `spec.md` is missing or not clarification-ready.
+   - Refuse to continue only when `spec.md` is missing or a user decision still blocks planning.
 
 2. **Establish technical context.**
    - Identify affected files, modules, services, and external constraints.
@@ -61,7 +62,8 @@ Create or update these artifacts as issue comments:
    - Describe phases in implementation order.
    - Keep it technical and decision-complete.
 
-6. **Hand off to `gwt-spec-tasks`.**
+6. **Continue into task generation.**
+   - Return the updated planning artifacts to `gwt-spec-ops`, or proceed directly to `gwt-spec-tasks` when the workflow is already in motion.
    - Tasks are generated from the clarified spec and plan artifacts, not from guesswork.
 
 ## Exit criteria

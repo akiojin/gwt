@@ -1,8 +1,8 @@
 ---
 description: >-
   Register new GitHub work from a request. Search existing issues and specs
-  first, stop on duplicates, then either create a plain issue or switch to
-  gwt-spec-register for a new spec.
+  first, reuse a clear owner when possible, then either create a plain issue or
+  continue into the SPEC workflow.
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
@@ -22,8 +22,8 @@ Use this command as the main entrypoint for new work registration.
 1. Load `skills/gwt-issue-register/SKILL.md` and follow the workflow.
 2. Normalize the request and classify the work type.
 3. Run `gwt-issue-search` first with at least 2 semantic queries.
-4. If a clear existing Issue or `gwt-spec` already owns the request, stop new creation and switch to the existing workflow.
-5. If the request needs new specification work, switch to `gwt-spec-register`, then continue through `gwt-spec-clarify`, `gwt-spec-plan`, `gwt-spec-tasks`, and `gwt-spec-analyze`.
+4. If a clear existing Issue or `gwt-spec` already owns the request, continue with that workflow instead of creating a duplicate.
+5. If the request needs new specification work, create the SPEC through `gwt-spec-register`, then continue through `gwt-spec-ops`.
 6. Otherwise create a plain GitHub Issue with the standard section structure.
 
 ## Proactive Trigger Examples

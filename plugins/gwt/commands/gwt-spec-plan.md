@@ -20,4 +20,4 @@ Use this command after `spec.md` is clarification-ready.
 2. Read `memory/constitution.md` and the target `spec.md` artifact.
 3. Generate or update `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contract:*` artifacts.
 4. Record constitution findings in `plan.md`.
-5. Hand off to `gwt-spec-tasks`.
+5. Return control to `gwt-spec-ops` or continue into `gwt-spec-tasks`.

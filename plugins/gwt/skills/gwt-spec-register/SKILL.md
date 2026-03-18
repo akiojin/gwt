@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-register
-description: Create a new GitHub Issue-first SPEC container when no existing canonical SPEC fits. Seed the Issue body as an artifact index plus a `spec.md` comment, then hand off to `gwt-spec-clarify`.
+description: Create a new GitHub Issue-first SPEC container when no existing canonical SPEC fits. Seed the Issue body as an artifact index plus a `spec.md` comment, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior.
 ---
 
 # gwt SPEC Register
@@ -8,7 +8,7 @@ description: Create a new GitHub Issue-first SPEC container when no existing can
 Use this skill to create a new `gwt-spec` Issue container only after confirming that no
 existing canonical SPEC should own the scope.
 
-`gwt-spec-register` is a registration step, not an execution step.
+`gwt-spec-register` owns creation, then normally returns control to `gwt-spec-ops`.
 
 - If the user wants to register new work and it is still unclear whether it should become a plain Issue or a SPEC, use `gwt-issue-register` first.
 - If an existing `gwt-spec` Issue already fits, use `gwt-spec-ops` instead.
@@ -55,7 +55,7 @@ New SPEC Issues must use this compact index structure:
 
 - Phase: Specify
 - Clarification: Required
-- Planning: Blocked until `gwt-spec-clarify`
+- Planning: Pending `gwt-spec-ops`
 
 ## Links
 
@@ -113,7 +113,7 @@ doc:spec.md
 
 2. **Search for an existing canonical SPEC.**
    - Use `gwt-issue-search` with at least 2 queries.
-   - If a canonical SPEC exists, stop registration and hand off to `gwt-spec-ops`.
+   - If a canonical SPEC exists, switch to `gwt-spec-ops` and continue there.
 
 3. **Create the new `gwt-spec` Issue.**
    - Use the built-in spec issue creation path when available.
@@ -125,9 +125,9 @@ doc:spec.md
    - Use `[NEEDS CLARIFICATION: ...]` instead of guessing.
    - Do not create `plan.md` or `tasks.md` here.
 
-5. **Hand off to `gwt-spec-clarify`.**
-   - Pass the created issue number and source context into `gwt-spec-clarify`.
-   - `gwt-spec-register` should not own clarification, planning, or execution.
+5. **Continue through `gwt-spec-ops` unless register-only was explicitly requested.**
+   - Pass the created issue number and source context into `gwt-spec-ops`.
+   - `gwt-spec-register` should not stop at the first handoff boundary when the user's request is to keep moving.
 
 ## Operations (gh CLI fallback)
 
@@ -163,7 +163,7 @@ gh issue create --label gwt-spec --title "feat: ..." --body "$(cat <<'EOF'
 
 - Phase: Specify
 - Clarification: Required
-- Planning: Blocked until `gwt-spec-clarify`
+- Planning: Pending `gwt-spec-ops`
 
 ## Links
 

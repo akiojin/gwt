@@ -151,16 +151,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py
 6. **Direct-fix path.**
    - Search the codebase for relevant files and definitions.
    - Produce the Issue Analysis Report.
-   - If all actionable items have High confidence, propose the concrete fix and continue after approval.
+   - If all actionable items have High confidence, implement the fix immediately and keep the Issue moving.
    - If any actionable item has Low confidence, ask only the minimum question needed to unblock.
 
 7. **Spec-needed path.**
    - Use `gwt-issue-search` before creating or updating any SPEC.
    - Search with at least 2 semantic queries derived from the Issue.
-   - If a canonical existing SPEC is found, update that destination and hand off to `gwt-spec-ops`.
-   - If no suitable SPEC exists, switch to `gwt-spec-register` to create the new `gwt-spec` Issue container and seed `spec.md`.
-   - After the target SPEC exists, run `gwt-spec-clarify`, `gwt-spec-plan`,
-     `gwt-spec-tasks`, and `gwt-spec-analyze` before implementation starts.
+   - If a canonical existing SPEC is found, update that destination and continue with `gwt-spec-ops`.
+   - If no suitable SPEC exists, create the new `gwt-spec` Issue container through `gwt-spec-register`.
+   - After the target SPEC exists, continue with `gwt-spec-ops`, which owns clarify/plan/tasks/analyze and then implementation.
 
 8. **Produce Issue Analysis Report for non-SPEC issues before execution.**
 
@@ -249,8 +248,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py
    - Include the chosen execution path and immediate next action.
 
 10. **Execution handoff or implementation.**
-    - Direct-fix path: apply the approved fix, summarize diffs and tests, then update the issue and PR linkage.
-    - SPEC path: pass the resolved SPEC issue number and context into `gwt-spec-ops`.
+    - Direct-fix path: apply the fix, summarize diffs and tests, then update the issue and PR linkage.
+    - SPEC path: pass the resolved SPEC issue number and context into `gwt-spec-ops`, then let that workflow continue end-to-end.
 
 ## Bundled Resources
 

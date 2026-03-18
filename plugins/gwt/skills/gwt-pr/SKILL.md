@@ -168,9 +168,10 @@ Next
    - Read the template from the gwt-pr skill path (not the current project path):
      - `PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"`
    - Read `${PR_BODY_TEMPLATE}` and fill all required placeholders.
+   - Derive missing sections from the diff, linked Issues/SPECs, and executed tests before asking the user.
    - **If a conditional section does not apply, remove the entire section.**
    - **Remove any `<!-- GUIDE: ... -->` comments from the final output.**
-   - **If any required section still contains TODO, do not create the PR and ask the user for the missing information.**
+   - **If any required section still contains TODO after inference, ask only for the irreducible missing information.**
 
 10. **Create or update the PR**
     - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`

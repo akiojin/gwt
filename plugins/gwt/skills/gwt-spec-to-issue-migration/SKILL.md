@@ -28,11 +28,11 @@ This skill uses:
 ## Standard Workflow
 
 1. Inspect source specs directory (auto-detection or explicit `--specs-dir`)
-2. Run dry-run and review planned migration count and deletion targets
-3. Run actual migration
+2. Run dry-run automatically and review planned migration count and deletion targets
+3. If the user explicitly asked to migrate or convert, continue into actual migration after the dry-run
 4. Verify migrated issues exist (`gwt-spec` label)
-5. Confirm legacy local spec files were removed on success
-6. If needed, run issue-body to artifact-first conversion for existing `gwt-spec` Issues
+5. Confirm legacy local spec files or body-canonical bundles were retired on success
+6. Ask the user only when migration intent is unclear or the requested scope does not obviously include the detected destructive changes
 
 ## Commands
 
@@ -89,6 +89,7 @@ gh issue list --label gwt-spec --state all --limit 200
 - Writes per-spec result to `migration-report.json`
 - Shows planned deletions during `--dry-run`
 - Deletes migrated local spec directories, detected legacy workflow leftovers, and `migration-report.json` after a fully successful cleanup
+- Treats an explicit "migrate/convert" request as approval to execute after the dry-run summary, without an extra confirmation loop
 
 ## Notes
 
