@@ -30,6 +30,7 @@ struct ManagedAsset {
 const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-issue-register",
     "gwt-issue-resolve",
+    "gwt-issue-search",
     "gwt-spec-register",
     "gwt-fix-pr",
     "gwt-spec-ops",
@@ -141,6 +142,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: false,
     },
     ManagedAsset {
+        relative_path: "skills/gwt-issue-search/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-issue-search/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
         relative_path: "skills/gwt-project-index/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -250,6 +260,15 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/gwt/commands/gwt-pr.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-issue-search.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-issue-search.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -1980,7 +1999,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(issue_register_skill.contains("Search existing Issues and `gwt-spec` Issues first"));
-        assert!(issue_register_skill.contains("gwt-project-index"));
+        assert!(issue_register_skill.contains("gwt-issue-search"));
         assert!(issue_register_skill.contains("gwt-spec-register"));
         assert!(issue_register_skill.contains("gwt-issue-resolve"));
 
@@ -1992,9 +2011,21 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(project_index_skill.contains("Issues search first"));
-        assert!(project_index_skill.contains("spec integration"));
-        assert!(project_index_skill.contains("search-issues"));
+        assert!(project_index_skill.contains("project source files"));
+        assert!(project_index_skill.contains("File search command"));
+        assert!(!project_index_skill.contains("Issues search first"));
+
+        let issue_search_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-issue-search")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(issue_search_skill.contains("Issues search first"));
+        assert!(issue_search_skill.contains("spec integration"));
+        assert!(issue_search_skill.contains("search-issues"));
 
         let issue_spec_skill = std::fs::read_to_string(
             temp.path()
@@ -2005,7 +2036,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(issue_spec_skill.contains("search existing spec first"));
-        assert!(issue_spec_skill.contains("gwt-project-index"));
+        assert!(issue_spec_skill.contains("gwt-issue-search"));
 
         let issue_resolve_skill = std::fs::read_to_string(
             temp.path()
@@ -2016,7 +2047,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(issue_resolve_skill.contains("Direct fix path"));
-        assert!(issue_resolve_skill.contains("gwt-project-index"));
+        assert!(issue_resolve_skill.contains("gwt-issue-search"));
 
         let spec_register_skill = std::fs::read_to_string(
             temp.path()
@@ -2027,7 +2058,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(spec_register_skill.contains("Create a new GitHub Issue-first SPEC"));
-        assert!(spec_register_skill.contains("gwt-project-index"));
+        assert!(spec_register_skill.contains("gwt-issue-search"));
 
         let issue_register_command = std::fs::read_to_string(
             temp.path()
@@ -2037,7 +2068,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(issue_register_command.contains("main entrypoint for new work registration"));
-        assert!(issue_register_command.contains("gwt-project-index"));
+        assert!(issue_register_command.contains("gwt-issue-search"));
         assert!(issue_register_command.contains("gwt-spec-register"));
 
         let issue_resolve_command = std::fs::read_to_string(
@@ -2059,7 +2090,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(spec_register_command.contains("Create a new Issue-first SPEC"));
-        assert!(spec_register_command.contains("gwt-project-index"));
+        assert!(spec_register_command.contains("gwt-issue-search"));
         assert!(spec_register_command.contains("gwt-issue-register"));
 
         assert!(!temp

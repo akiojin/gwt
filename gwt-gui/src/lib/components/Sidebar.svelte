@@ -481,6 +481,10 @@
   let contextMenu: { x: number; y: number; branch: BranchInfo } | null =
     $state(null);
 
+  // Inline rename state
+  let renamingBranch: string | null = $state(null);
+  let renameValue: string = $state("");
+
   let resizing = false;
   let resizePointerId: number | null = null;
   let resizeStartX = 0;
@@ -496,7 +500,8 @@
 
     const normalizedQuery = searchQuery.toLowerCase();
     return sortedBranches.filter((b) =>
-      b.name.toLowerCase().includes(normalizedQuery)
+      b.name.toLowerCase().includes(normalizedQuery) ||
+      (b.display_name && b.display_name.toLowerCase().includes(normalizedQuery))
     );
   });
   let selectedBranchIndex = $derived.by(() => {
@@ -1213,6 +1218,43 @@
     onCleanupRequest?.(branchName);
   }
 
+  function handleRenameBranch() {
+    if (!contextMenu) return;
+    const branch = contextMenu.branch;
+    contextMenu = null;
+    renamingBranch = branch.name;
+    renameValue = branch.display_name ?? branch.name;
+  }
+
+  async function commitRename() {
+    if (!renamingBranch) return;
+    const branchName = renamingBranch;
+    const newName = renameValue.trim();
+    renamingBranch = null;
+    renameValue = "";
+
+    // If the user entered the branch name itself, treat as clearing display_name
+    const displayName = newName === branchName ? "" : newName;
+
+    try {
+      const invoke = await getInvoke();
+      await invoke("set_branch_display_name", {
+        projectPath: projectPath,
+        branch: branchName,
+        displayName: displayName,
+      });
+      // Refresh branch list
+      fetchBranches(fetchToken, true);
+    } catch (err) {
+      console.error("Failed to set display name:", err);
+    }
+  }
+
+  function cancelRename() {
+    renamingBranch = null;
+    renameValue = "";
+  }
+
 </script>
 
 <aside
@@ -1330,7 +1372,22 @@
                   title={getSafetyTitle(branch)}
                 ></span>
               {/if}
-              <span class="branch-name">{branch.name}</span>
+              {#if renamingBranch === branch.name}
+                <input
+                  class="branch-rename-input"
+                  type="text"
+                  bind:value={renameValue}
+                  autofocus
+                  onblur={commitRename}
+                  onkeydown={(e) => {
+                    if (e.key === "Enter") commitRename();
+                    if (e.key === "Escape") cancelRename();
+                  }}
+                  onclick={(e) => e.stopPropagation()}
+                />
+              {:else}
+                <span class="branch-name" title={branch.display_name ? branch.name : undefined}>{branch.display_name ?? branch.name}</span>
+              {/if}
               {#if branch.last_tool_usage}
                 <span class="tool-usage {toolUsageClass(branch.last_tool_usage)}">
                   {branch.last_tool_usage}
@@ -1382,6 +1439,7 @@
           onNewTerminal={onNewTerminal}
           onOpenDocsEditor={onOpenDocsEditor}
           {onOpenCiLog}
+          onDisplayNameChanged={() => fetchBranches(fetchToken, true)}
         />
       </div>
     </div>
@@ -1412,6 +1470,9 @@
       style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       onclick={(e) => e.stopPropagation()}
     >
+      <button class="context-menu-item" onclick={handleRenameBranch}>
+        Rename
+      </button>
       <button
         class="context-menu-item"
         class:disabled={!canLaunchBranch(contextMenu.branch)}
@@ -1807,6 +1868,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
+    min-width: 0;
+  }
+
+  .branch-rename-input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--accent-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: inherit;
+    font-family: inherit;
+    padding: 0 2px;
+    outline: none;
+    border-radius: 2px;
   }
 
   /* Agent indicator: fixed-width slot for all branch rows (gwt-spec issue FR-800) */

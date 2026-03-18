@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, Manager};
 
-use crate::assistant_engine::AssistantEngine;
+use crate::assistant_engine::{AssistantEngine, AssistantStartupStatus};
 use crate::state::AppState;
 use gwt_core::git::{self, Branch};
 use gwt_core::process::command as process_command;
@@ -29,6 +29,8 @@ pub struct AssistantStateResponse {
     pub session_id: Option<String>,
     pub llm_call_count: u64,
     pub estimated_tokens: u64,
+    pub startup_status: String,
+    pub startup_summary_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,7 +151,7 @@ pub async fn assistant_send_message(
 pub async fn assistant_start(
     window: tauri::Window,
     state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<AssistantStateResponse, String> {
     let window_label = window.label().to_string();
     let project_path = state
         .project_for_window(&window_label)
@@ -182,10 +184,15 @@ pub async fn assistant_start(
         {
             Ok(fingerprint) => fingerprint,
             Err(err) => {
-                engine.push_visible_assistant_message(format!(
+                engine.apply_startup_failure_message(format!(
                     "Assistant started, but repository inspection failed: {err}"
                 ));
-                finish_startup_session(&app_handle, &window_label_for_task, engine);
+                finish_startup_session(
+                    &app_handle,
+                    &window_label_for_task,
+                    &project_path_for_task,
+                    engine,
+                );
                 return;
             }
         };
@@ -203,8 +210,13 @@ pub async fn assistant_start(
                     &window_label_for_task,
                     "Using cached startup analysis...".to_string(),
                 );
-                engine.push_visible_assistant_message(cache.summary);
-                finish_startup_session(&app_handle, &window_label_for_task, engine);
+                engine.apply_cached_startup_summary(cache.summary);
+                finish_startup_session(
+                    &app_handle,
+                    &window_label_for_task,
+                    &project_path_for_task,
+                    engine,
+                );
                 return;
             }
         }
@@ -214,27 +226,43 @@ pub async fn assistant_start(
             &window_label_for_task,
             "Running startup analysis...".to_string(),
         );
-        match engine.run_initial_analysis(&state) {
-            Ok(response) => {
-                if !response.text.is_empty() {
-                    let cache = StartupAnalysisCacheEntry {
-                        fingerprint,
-                        summary: response.text,
-                    };
-                    let _ = save_startup_analysis_cache(&cache_path, &cache);
+        match engine.handle_startup(&state) {
+            Ok(()) => {
+                if engine.startup_summary_ready() {
+                    if let Some(summary) = engine
+                        .conversation()
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                        .and_then(|message| message.content.clone())
+                    {
+                        let cache = StartupAnalysisCacheEntry {
+                            fingerprint,
+                            summary,
+                        };
+                        let _ = save_startup_analysis_cache(&cache_path, &cache);
+                    }
                 }
             }
             Err(err) => {
-                engine.push_visible_assistant_message(format!(
+                engine.apply_startup_failure_message(format!(
                     "Assistant started, but the initial analysis failed: {err}"
                 ));
             }
         }
 
-        finish_startup_session(&app_handle, &window_label_for_task, engine);
+        finish_startup_session(
+            &app_handle,
+            &window_label_for_task,
+            &project_path_for_task,
+            engine,
+        );
     });
 
-    Ok(())
+    Ok(build_startup_inflight_state_response(
+        window_label,
+        "Inspecting repository state...".to_string(),
+    ))
 }
 
 #[tauri::command]
@@ -273,13 +301,24 @@ pub async fn assistant_get_dashboard(
     state: tauri::State<'_, AppState>,
 ) -> Result<DashboardResponse, String> {
     let window_label = window.label().to_string();
+    let Some(project_path) = state.project_for_window(&window_label) else {
+        return Ok(DashboardResponse {
+            panes: Vec::new(),
+            git: build_git_dashboard(&state, &window_label)?,
+        });
+    };
+
     let panes = {
+        let repo_path =
+            crate::commands::project::resolve_repo_path_for_project_root(Path::new(&project_path))
+                .map_err(|e| format!("Failed to resolve repository path: {}", e))?;
         let mgr = state
             .pane_manager
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
         mgr.panes()
             .iter()
+            .filter(|pane| pane.project_root() == repo_path.as_path())
             .map(|pane| PaneDashboard {
                 pane_id: pane.pane_id().to_string(),
                 agent_name: pane.agent_name().to_string(),
@@ -301,10 +340,12 @@ fn build_assistant_state_response(
     AssistantStateResponse {
         messages: build_messages_from_conversation(engine),
         ai_ready: true,
-        is_thinking: false,
+        is_thinking: engine.startup_status() == AssistantStartupStatus::Analyzing,
         session_id,
         llm_call_count: engine.llm_call_count,
         estimated_tokens: engine.estimated_tokens,
+        startup_status: engine.startup_status().as_str().to_string(),
+        startup_summary_ready: engine.startup_summary_ready(),
     }
 }
 
@@ -316,6 +357,8 @@ fn build_empty_assistant_state_response() -> AssistantStateResponse {
         session_id: None,
         llm_call_count: 0,
         estimated_tokens: 0,
+        startup_status: AssistantStartupStatus::Idle.as_str().to_string(),
+        startup_summary_ready: false,
     }
 }
 
@@ -335,6 +378,8 @@ fn build_startup_inflight_state_response(
         session_id: Some(session_id),
         llm_call_count: 0,
         estimated_tokens: 0,
+        startup_status: AssistantStartupStatus::Analyzing.as_str().to_string(),
+        startup_summary_ready: false,
     }
 }
 
@@ -371,20 +416,56 @@ fn emit_startup_status(
 fn finish_startup_session(
     app_handle: &tauri::AppHandle,
     window_label: &str,
+    project_path: &str,
     engine: AssistantEngine,
 ) {
     let state = app_handle.state::<AppState>();
-    let response = build_assistant_state_response(&engine, Some(window_label.to_string()));
-
     if let Ok(mut startup_guard) = state.assistant_startup_inflight.lock() {
         startup_guard.remove(window_label);
     }
-    if let Ok(mut engine_guard) = state.assistant_engine.lock() {
-        engine_guard.insert(window_label.to_string(), engine);
+
+    if let Ok(response) = finalize_started_engine(&state, window_label, project_path, engine) {
+        if let Some(window) = app_handle.get_webview_window(window_label) {
+            let _ = window.emit("assistant-state-updated", &response);
+        }
     }
-    if let Some(window) = app_handle.get_webview_window(window_label) {
-        let _ = window.emit("assistant-state-updated", &response);
+}
+
+fn finalize_started_engine(
+    state: &AppState,
+    window_label: &str,
+    project_path: &str,
+    engine: AssistantEngine,
+) -> Result<AssistantStateResponse, String> {
+    let current_project_path = state.project_for_window(window_label);
+    let mut engine_guard = state
+        .assistant_engine
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    if current_project_path.as_deref() != Some(project_path) {
+        return Ok(engine_guard
+            .get(window_label)
+            .map(|current| build_assistant_state_response(current, Some(window_label.to_string())))
+            .unwrap_or_else(build_empty_assistant_state_response));
     }
+
+    if let Some(existing) = engine_guard.get(window_label) {
+        return Ok(build_assistant_state_response(
+            existing,
+            Some(window_label.to_string()),
+        ));
+    }
+
+    engine_guard.insert(window_label.to_string(), engine);
+    let inserted = engine_guard
+        .get(window_label)
+        .ok_or_else(|| "Assistant session disappeared after startup.".to_string())?;
+
+    Ok(build_assistant_state_response(
+        inserted,
+        Some(window_label.to_string()),
+    ))
 }
 
 fn startup_analysis_cache_path(project_path: &str) -> PathBuf {
@@ -607,5 +688,48 @@ mod tests {
         let loaded = load_startup_analysis_cache(&path).unwrap();
 
         assert_eq!(loaded, entry);
+    }
+
+    #[test]
+    fn finalize_started_engine_skips_stale_project_startup() {
+        let state = AppState::new();
+        state
+            .claim_project_for_window_with_identity(
+                "main",
+                "/tmp/current".to_string(),
+                "/tmp/current-id".to_string(),
+            )
+            .unwrap();
+
+        let stale_engine = AssistantEngine::new(PathBuf::from("/tmp/stale"), "main".to_string());
+        let response = finalize_started_engine(&state, "main", "/tmp/stale", stale_engine).unwrap();
+
+        assert!(state.assistant_engine.lock().unwrap().is_empty());
+        assert_eq!(response.session_id, None);
+    }
+
+    #[test]
+    fn finalize_started_engine_keeps_existing_session() {
+        let state = AppState::new();
+        state
+            .claim_project_for_window_with_identity(
+                "main",
+                "/tmp/current".to_string(),
+                "/tmp/current-id".to_string(),
+            )
+            .unwrap();
+
+        state.assistant_engine.lock().unwrap().insert(
+            "main".to_string(),
+            AssistantEngine::new(PathBuf::from("/tmp/current"), "main".to_string()),
+        );
+
+        let stale_engine = AssistantEngine::new(PathBuf::from("/tmp/stale"), "main".to_string());
+        let response = finalize_started_engine(&state, "main", "/tmp/stale", stale_engine).unwrap();
+
+        let stored = state.assistant_engine.lock().unwrap();
+        let current = stored.get("main").unwrap();
+        assert_eq!(current.project_path(), Path::new("/tmp/current"));
+        assert_eq!(response.session_id.as_deref(), Some("main"));
     }
 }

@@ -9,12 +9,13 @@ use gwt_core::ai::{
     OpenCodeSessionParser, ScrollbackCacheEntry, ScrollbackRollingContext, ScrollbackSummaryBuild,
     SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
 };
-use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
+use gwt_core::config::{ProfilesConfig, ResolvedAISettings, Session, ToolSessionEntry};
 use gwt_core::git::{
     fetch_issues_with_options, get_spec_issue_detail, Branch, FetchIssuesResult, SpecIssueDetail,
 };
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
+use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -2079,6 +2080,56 @@ pub fn rebuild_all_branch_session_summaries(
         );
         release_session_summary_rebuild_inflight(&state, &repo_key_for_task);
     });
+
+    Ok(())
+}
+
+/// Set or clear a user-defined display name for a worktree branch.
+///
+/// Passing an empty or whitespace-only string clears the display name
+/// (falling back to automatic resolution: issue title → AI summary → branch name).
+#[tauri::command]
+pub fn set_branch_display_name(
+    project_path: String,
+    branch: String,
+    display_name: String,
+) -> Result<(), StructuredError> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "set_branch_display_name"))?;
+
+    let manager = WorktreeManager::new(&repo_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "set_branch_display_name"))?;
+    let worktrees = manager
+        .list_basic()
+        .map_err(|e| StructuredError::from_gwt_error(&e, "set_branch_display_name"))?;
+
+    let worktree_path = worktrees
+        .iter()
+        .find(|wt| wt.branch.as_deref() == Some(&branch))
+        .map(|wt| wt.path.clone())
+        .ok_or_else(|| {
+            StructuredError::internal(
+                &format!("Worktree not found for branch: {branch}"),
+                "set_branch_display_name",
+            )
+        })?;
+
+    let session_path = Session::session_path(&worktree_path);
+    let mut session = Session::load_for_worktree(&worktree_path)
+        .unwrap_or_else(|| Session::new(&worktree_path, &branch));
+
+    let trimmed = display_name.trim();
+    session.display_name = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    session.updated_at = chrono::Utc::now();
+
+    session
+        .save(&session_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "set_branch_display_name"))?;
 
     Ok(())
 }

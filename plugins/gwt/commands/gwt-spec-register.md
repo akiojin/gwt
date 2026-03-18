@@ -17,7 +17,7 @@ Use this command as a supplementary entrypoint when the user explicitly wants to
 ## Steps
 
 1. Load `skills/gwt-spec-register/SKILL.md` and follow the workflow.
-2. Use `gwt-project-index` Issue search before creating a new SPEC.
+2. Use `gwt-issue-search` before creating a new SPEC.
 3. If an existing canonical SPEC fits, stop creation and switch to `gwt-spec-ops`.
 4. Otherwise create a new `gwt-spec` Issue with the standard section skeleton.
 5. Hand the created issue number off to `gwt-spec-ops`.

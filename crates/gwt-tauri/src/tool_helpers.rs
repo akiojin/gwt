@@ -14,6 +14,18 @@ use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 
 // ── Tool name constants (shared tools) ──────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAccessMode {
+    Full,
+    ReadOnly,
+}
+
+impl ToolAccessMode {
+    pub fn allows_write(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 pub const TOOL_SEND_KEYS_TO_PANE: &str = "send_keys_to_pane";
 pub const TOOL_CAPTURE_SCROLLBACK_TAIL: &str = "capture_scrollback_tail";
 pub const TOOL_GET_SPEC_ISSUE: &str = "get_spec_issue";
@@ -185,8 +197,14 @@ pub fn merge_sections_data(
 /// Returns tool definitions shared between Assistant Mode and Project Mode:
 /// `send_keys_to_pane`, `capture_scrollback_tail`, `get_spec_issue`, `upsert_spec_issue`.
 pub fn shared_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
+    shared_tool_definitions_for_mode(ToolAccessMode::Full)
+}
+
+pub fn shared_tool_definitions_for_mode(access_mode: ToolAccessMode) -> Vec<ToolDefinition> {
+    let mut tools = Vec::new();
+
+    if is_shared_tool_allowed(TOOL_SEND_KEYS_TO_PANE, access_mode) {
+        tools.push(ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
                 name: TOOL_SEND_KEYS_TO_PANE.to_string(),
@@ -200,8 +218,11 @@ pub fn shared_tool_definitions() -> Vec<ToolDefinition> {
                     "required": ["pane_id", "text"]
                 }),
             },
-        },
-        ToolDefinition {
+        });
+    }
+
+    if is_shared_tool_allowed(TOOL_CAPTURE_SCROLLBACK_TAIL, access_mode) {
+        tools.push(ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
                 name: TOOL_CAPTURE_SCROLLBACK_TAIL.to_string(),
@@ -215,8 +236,11 @@ pub fn shared_tool_definitions() -> Vec<ToolDefinition> {
                     "required": ["pane_id"]
                 }),
             },
-        },
-        ToolDefinition {
+        });
+    }
+
+    if is_shared_tool_allowed(TOOL_GET_SPEC_ISSUE, access_mode) {
+        tools.push(ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
                 name: TOOL_GET_SPEC_ISSUE.to_string(),
@@ -229,8 +253,11 @@ pub fn shared_tool_definitions() -> Vec<ToolDefinition> {
                     "required": ["issue_number"]
                 }),
             },
-        },
-        ToolDefinition {
+        });
+    }
+
+    if is_shared_tool_allowed(TOOL_UPSERT_SPEC_ISSUE, access_mode) {
+        tools.push(ToolDefinition {
             tool_type: "function".to_string(),
             function: ToolFunction {
                 name: TOOL_UPSERT_SPEC_ISSUE.to_string(),
@@ -260,8 +287,18 @@ pub fn shared_tool_definitions() -> Vec<ToolDefinition> {
                     "required": ["title", "sections"]
                 }),
             },
-        },
-    ]
+        });
+    }
+
+    tools
+}
+
+pub fn is_shared_tool_allowed(tool_name: &str, access_mode: ToolAccessMode) -> bool {
+    match tool_name {
+        TOOL_CAPTURE_SCROLLBACK_TAIL | TOOL_GET_SPEC_ISSUE => true,
+        TOOL_SEND_KEYS_TO_PANE | TOOL_UPSERT_SPEC_ISSUE => access_mode.allows_write(),
+        _ => false,
+    }
 }
 
 /// Execute a shared tool call. Returns `Some(result)` if the tool name matches a shared tool,
@@ -272,7 +309,25 @@ pub fn execute_shared_tool(
     state: &AppState,
     project_path: &str,
 ) -> Option<Result<String, String>> {
+    execute_shared_tool_with_mode(call, args, state, project_path, ToolAccessMode::Full)
+}
+
+pub fn execute_shared_tool_with_mode(
+    call: &ToolCall,
+    args: &Value,
+    state: &AppState,
+    project_path: &str,
+    access_mode: ToolAccessMode,
+) -> Option<Result<String, String>> {
     match call.name.as_str() {
+        TOOL_SEND_KEYS_TO_PANE if !access_mode.allows_write() => Some(Err(format!(
+            "Tool {} is not available in read-only mode",
+            call.name
+        ))),
+        TOOL_UPSERT_SPEC_ISSUE if !access_mode.allows_write() => Some(Err(format!(
+            "Tool {} is not available in read-only mode",
+            call.name
+        ))),
         TOOL_SEND_KEYS_TO_PANE => {
             let result = (|| {
                 let pane_id = get_required_string_any(args, &["pane_id", "paneId"])?;
@@ -406,5 +461,39 @@ mod tests {
     #[test]
     fn shared_tool_definitions_count() {
         assert_eq!(shared_tool_definitions().len(), 4);
+    }
+
+    #[test]
+    fn shared_tool_definitions_read_only_excludes_mutating_tools() {
+        let names: Vec<String> = shared_tool_definitions_for_mode(ToolAccessMode::ReadOnly)
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect();
+
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&TOOL_CAPTURE_SCROLLBACK_TAIL.to_string()));
+        assert!(names.contains(&TOOL_GET_SPEC_ISSUE.to_string()));
+        assert!(!names.contains(&TOOL_SEND_KEYS_TO_PANE.to_string()));
+        assert!(!names.contains(&TOOL_UPSERT_SPEC_ISSUE.to_string()));
+    }
+
+    #[test]
+    fn shared_tool_access_mode_marks_mutating_tools_as_disallowed_in_read_only() {
+        assert!(is_shared_tool_allowed(
+            TOOL_CAPTURE_SCROLLBACK_TAIL,
+            ToolAccessMode::ReadOnly
+        ));
+        assert!(is_shared_tool_allowed(
+            TOOL_GET_SPEC_ISSUE,
+            ToolAccessMode::ReadOnly
+        ));
+        assert!(!is_shared_tool_allowed(
+            TOOL_SEND_KEYS_TO_PANE,
+            ToolAccessMode::ReadOnly
+        ));
+        assert!(!is_shared_tool_allowed(
+            TOOL_UPSERT_SPEC_ISSUE,
+            ToolAccessMode::ReadOnly
+        ));
     }
 }

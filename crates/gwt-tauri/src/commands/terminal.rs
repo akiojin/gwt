@@ -7,8 +7,9 @@ use gwt_core::ai::SessionParser;
 use gwt_core::config::stats::Stats;
 use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
-    compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
-    DevContainerConfig, DockerFileType, DockerManager, PortAllocator,
+    compose_available, daemon_running, detect_docker_files, docker_available,
+    normalize_docker_compose_path, try_start_daemon, DevContainerConfig, DockerFileType,
+    DockerManager, PortAllocator,
 };
 use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
 use gwt_core::terminal::pane::PaneStatus;
@@ -4499,8 +4500,10 @@ pub(crate) fn launch_agent_for_project_root(
                         DockerFileType::Compose(compose_path.clone()),
                     );
 
-                    let mut compose_args =
-                        vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
+                    let mut compose_args = vec![
+                        "-f".to_string(),
+                        normalize_docker_compose_path(&compose_path),
+                    ];
                     let compose_paths = compose_file_paths_from_args(&compose_args);
 
                     let mut env = manager.collect_passthrough_env();
@@ -4520,7 +4523,7 @@ pub(crate) fn launch_agent_for_project_root(
                         &mounts,
                     )? {
                         compose_args.push("-f".to_string());
-                        compose_args.push(override_path.to_string_lossy().to_string());
+                        compose_args.push(normalize_docker_compose_path(&override_path));
                     }
 
                     docker_compose_up(
@@ -4614,7 +4617,7 @@ pub(crate) fn launch_agent_for_project_root(
                             &mounts,
                         )? {
                             compose_args.push("-f".to_string());
-                            compose_args.push(override_path.to_string_lossy().to_string());
+                            compose_args.push(normalize_docker_compose_path(&override_path));
                         }
 
                         docker_compose_up(

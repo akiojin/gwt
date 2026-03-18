@@ -336,6 +336,14 @@ impl PaneManager {
     }
 }
 
+impl Drop for PaneManager {
+    fn drop(&mut self) {
+        for pane in &mut self.panes {
+            let _ = pane.kill();
+        }
+    }
+}
+
 impl Default for PaneManager {
     fn default() -> Self {
         Self::new()
