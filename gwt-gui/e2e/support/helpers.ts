@@ -111,8 +111,6 @@ export const settingsFixture = {
   voice_input: {
     enabled: false,
     engine: "qwen3-asr",
-    hotkey: "Mod+Shift+M",
-    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
     quality: "balanced",
     model: "Qwen/Qwen3-ASR-1.7B",
@@ -230,17 +228,14 @@ export async function waitForInvokeCommand(
 ): Promise<void> {
   await expect
     .poll(async () => {
-      return page.evaluate(
-        (targetCmd) => {
-          const globalWindow = window as unknown as {
-            __GWT_TAURI_INVOKE_LOG__?: Array<{ cmd: string }>;
-          };
-          return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
-            (entry) => entry.cmd === targetCmd,
-          );
-        },
-        cmd,
-      );
+      return page.evaluate((targetCmd) => {
+        const globalWindow = window as unknown as {
+          __GWT_TAURI_INVOKE_LOG__?: Array<{ cmd: string }>;
+        };
+        return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
+          (entry) => entry.cmd === targetCmd,
+        );
+      }, cmd);
     })
     .toBe(true);
 }
@@ -251,22 +246,19 @@ export async function waitForEventListener(
 ): Promise<void> {
   await expect
     .poll(async () => {
-      return page.evaluate(
-        (targetEvent) => {
-          const globalWindow = window as unknown as {
-            __GWT_TAURI_INVOKE_LOG__?: Array<{
-              cmd: string;
-              args?: { event?: string };
-            }>;
-          };
-          return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
-            (entry) =>
-              entry.cmd === "plugin:event|listen" &&
-              entry.args?.event === targetEvent,
-          );
-        },
-        eventName,
-      );
+      return page.evaluate((targetEvent) => {
+        const globalWindow = window as unknown as {
+          __GWT_TAURI_INVOKE_LOG__?: Array<{
+            cmd: string;
+            args?: { event?: string };
+          }>;
+        };
+        return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
+          (entry) =>
+            entry.cmd === "plugin:event|listen" &&
+            entry.args?.event === targetEvent,
+        );
+      }, eventName);
     })
     .toBe(true);
 }
@@ -294,18 +286,12 @@ export async function openSettings(
   page: Page,
   commandResponses: Record<string, unknown>,
 ): Promise<void> {
-  await openProjectAndSelectBranch(
-    page,
-    branchFeature.name,
-    commandResponses,
-  );
+  await openProjectAndSelectBranch(page, branchFeature.name, commandResponses);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "open-settings" });
 
-  await expect(
-    page.getByRole("heading", { name: "Settings" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
 }
 
 /** Standard command responses for branch-list scenarios */
@@ -337,18 +323,15 @@ export function standardSettingsResponses(
 }
 
 export function getInvokeArgs(page: Page, cmd: string) {
-  return page.evaluate(
-    (targetCmd) => {
-      const globalWindow = window as unknown as {
-        __GWT_TAURI_INVOKE_LOG__?: Array<{
-          cmd: string;
-          args?: Record<string, unknown>;
-        }>;
-      };
-      const log = globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? [];
-      const entry = [...log].reverse().find((item) => item.cmd === targetCmd);
-      return entry?.args ?? null;
-    },
-    cmd,
-  );
+  return page.evaluate((targetCmd) => {
+    const globalWindow = window as unknown as {
+      __GWT_TAURI_INVOKE_LOG__?: Array<{
+        cmd: string;
+        args?: Record<string, unknown>;
+      }>;
+    };
+    const log = globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? [];
+    const entry = [...log].reverse().find((item) => item.cmd === targetCmd);
+    return entry?.args ?? null;
+  }, cmd);
 }

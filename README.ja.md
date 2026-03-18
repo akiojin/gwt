@@ -160,6 +160,8 @@ scripts/voice-eval.sh
 - 手動導入不要: `qwen_asr` パッケージ
 - 初回利用時に gwt が `~/.gwt/runtime/voice-venv` を自動作成し、必要依存を自動インストール
 - その後、選択品質に対応する Qwen モデルを Hugging Face キャッシュへ必要時に取得
+- PTT キーは固定で、macOS は `Cmd+Shift+Space`、Windows/Linux は `Ctrl+Shift+Space`
+- ターミナルオーバーレイでは Voice ボタンを押している間だけ音声を取り込みます
 
 ### 任意（高度設定）
 

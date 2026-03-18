@@ -266,7 +266,10 @@ export async function installTauriMock(
             // Keep StatusBar reactive graph stable in web-preview E2E.
             return [];
           case "get_voice_capability":
-            return { available: false, reason: "GPU acceleration is not available" };
+            return {
+              available: false,
+              reason: "GPU acceleration is not available",
+            };
           case "get_settings":
             return {
               ui_font_size: 13,
@@ -279,9 +282,10 @@ export async function installTauriMock(
               agent_skill_registration_enabled: true,
               voice_input: {
                 enabled: false,
-                hotkey: "Mod+Shift+M",
+                engine: "qwen3-asr",
                 language: "auto",
-                model: "base",
+                quality: "balanced",
+                model: "Qwen/Qwen3-ASR-1.7B",
               },
             };
           case "rebuild_all_branch_session_summaries":
@@ -313,20 +317,23 @@ export async function installTauriMock(
           case "get_current_window_label":
             return "main";
           case "try_acquire_window_restore_leader": {
-            const label = typeof args.label === "string" ? args.label.trim() : "";
+            const label =
+              typeof args.label === "string" ? args.label.trim() : "";
             if (label !== "main" || restoreLeaderAcquired) return false;
             restoreLeaderAcquired = true;
             return true;
           }
           case "release_window_restore_leader": {
-            const label = typeof args.label === "string" ? args.label.trim() : "";
+            const label =
+              typeof args.label === "string" ? args.label.trim() : "";
             if (label === "main") {
               restoreLeaderAcquired = false;
             }
             return null;
           }
           case "open_gwt_window": {
-            const label = typeof args.label === "string" ? args.label.trim() : "";
+            const label =
+              typeof args.label === "string" ? args.label.trim() : "";
             return label || "main";
           }
           case "probe_path":
