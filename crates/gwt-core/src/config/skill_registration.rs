@@ -32,7 +32,7 @@ pub fn generate_managed_skills_block() -> String {
         "gwt-spec-register",
         "gwt-spec-ops",
     ];
-    const PR_SKILLS: &[&str] = &["gwt-pr", "gwt-pr-check", "gwt-fix-pr"];
+    const PR_SKILLS: &[&str] = &["gwt-pr", "gwt-pr-check", "gwt-pr-fix"];
     // Everything else goes to Utilities.
 
     fn table_rows(names: &[&str]) -> String {
@@ -92,7 +92,7 @@ pub fn generate_managed_skills_block() -> String {
     block.push_str("2. **Create SPEC** → `gwt-spec-register` → `gwt-spec-ops`\n");
     block.push_str("3. **Implement** → TDD (test first) → code\n");
     block.push_str("4. **Open PR** → `gwt-pr`\n");
-    block.push_str("5. **Fix CI / reviews** → `gwt-fix-pr`\n");
+    block.push_str("5. **Fix CI / reviews** → `gwt-pr-fix`\n");
     block.push_str(MANAGED_SKILLS_BLOCK_END);
     block.push('\n');
 
@@ -172,7 +172,7 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-issue-resolve",
     "gwt-issue-search",
     "gwt-spec-register",
-    "gwt-fix-pr",
+    "gwt-pr-fix",
     "gwt-spec-ops",
     "gwt-pr",
     "gwt-pr-check",
@@ -219,19 +219,19 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/SKILL.md",
+        relative_path: "skills/gwt-pr-fix/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-pr-fix/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/scripts/inspect_pr_checks.py",
+        relative_path: "skills/gwt-pr-fix/scripts/inspect_pr_checks.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/scripts/inspect_pr_checks.py"
+            "/../../plugins/gwt/skills/gwt-pr-fix/scripts/inspect_pr_checks.py"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -378,10 +378,10 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-fix-pr.md",
+        relative_path: "commands/gwt-pr-fix.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-fix-pr.md"
+            "/../../plugins/gwt/commands/gwt-pr-fix.md"
         )),
         executable: false,
         rewrite_for_project: true,

@@ -19,12 +19,12 @@ Use this command to diagnose and fix CI failures for a PR.
 ## Usage
 
 ```
-/gwt:gwt-fix-pr [pr-number|pr-url|optional context]
+/gwt:gwt-pr-fix [pr-number|pr-url|optional context]
 ```
 
 ## Steps
 
-1. Load `skills/gwt-fix-pr/SKILL.md` and follow the workflow.
+1. Load `skills/gwt-pr-fix/SKILL.md` and follow the workflow.
 2. Run the inspection script to gather CI results.
 3. Propose fixes and apply them after user approval.
 
@@ -35,28 +35,28 @@ Context: LLM just created a PR using gwt-pr, and CI checks may fail
 user: "PRを作成して"
 assistant: (gwt-pr でPR作成完了後) "PR #123 を作成しました。CI チェックの状態を確認します。"
 <commentary>
-PR作成直後、自動的に gwt-fix-pr で検査する。
+PR作成直後、自動的に gwt-pr-fix で検査する。
 </commentary>
 </example>
 
 <example>
 Context: User pushed commits and mentions the PR isn't passing
 user: "pushしたけどCIが通らない"
-assistant: "gwt-fix-pr で PR の状態を診断します。"
+assistant: "gwt-pr-fix で PR の状態を診断します。"
 </example>
 
 <example>
 Context: User mentions PR can't be merged
 user: "PRがマージできない"
-assistant: "gwt-fix-pr で blocking items を診断します。"
+assistant: "gwt-pr-fix で blocking items を診断します。"
 </example>
 
 ## Examples
 
 ```
-/gwt:gwt-fix-pr 123
+/gwt:gwt-pr-fix 123
 ```
 
 ```
-/gwt:gwt-fix-pr https://github.com/org/repo/pull/123
+/gwt:gwt-pr-fix https://github.com/org/repo/pull/123
 ```

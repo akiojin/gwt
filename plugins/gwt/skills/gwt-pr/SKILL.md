@@ -177,9 +177,9 @@ Next
     - `gh pr view <number> --json url -q .url`
 
 12. **Post-PR CI/merge check (automatic).**
-    - After PR creation or push, load `skills/gwt-fix-pr/SKILL.md` and follow its workflow to inspect CI status, merge state, and review feedback.
+    - After PR creation or push, load `skills/gwt-pr-fix/SKILL.md` and follow its workflow to inspect CI status, merge state, and review feedback.
     - If all CI checks are still pending, poll (30s interval) until complete.
-    - If conflicts, review issues, or CI failures are detected, proceed with the gwt-fix-pr workflow to diagnose and fix.
+    - If conflicts, review issues, or CI failures are detected, proceed with the gwt-pr-fix workflow to diagnose and fix.
 
 ## Command snippets (bash)
 
