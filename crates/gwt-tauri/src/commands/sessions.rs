@@ -1963,6 +1963,23 @@ pub fn get_branch_session_summary(
     Ok(result)
 }
 
+pub(crate) fn get_branch_session_summary_for_assistant(
+    project_path: &str,
+    branch: &str,
+    state: &AppState,
+) -> Option<SessionSummaryResult> {
+    let (immediate, maybe_job) =
+        get_branch_session_summary_immediate(project_path, branch, false, state).ok()?;
+
+    let result = match maybe_job {
+        Some(SummaryJob::Session(job)) => generate_and_cache_session_summary(&job, state),
+        Some(SummaryJob::Scrollback(job)) => generate_and_cache_scrollback_summary(&job, state),
+        None => immediate,
+    };
+
+    Some(result)
+}
+
 #[tauri::command]
 pub fn rebuild_all_branch_session_summaries(
     project_path: String,

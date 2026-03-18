@@ -204,6 +204,7 @@ export interface GitHubIssueSearchResult {
 export interface Tab {
   id: string;
   label: string;
+  branchName?: string;
   agentId?: AgentId;
   type:
     | "summary"
@@ -736,4 +737,24 @@ export interface AssistantState {
   estimatedTokens: number;
   startupStatus: "idle" | "analyzing" | "ready" | "failed" | (string & {});
   startupSummaryReady: boolean;
+  startupFailureKind?:
+    | "resource_guard"
+    | "ai_not_configured"
+    | "llm_error"
+    | "unknown"
+    | (string & {})
+    | null;
+  startupFailureDetail?: string | null;
+  startupRecoveryHints: string[];
+  workingGoal?: string | null;
+  goalConfidence?: "high" | "medium" | "low" | (string & {}) | null;
+  currentStatus?:
+    | "analyzing"
+    | "awaiting_goal_confirmation"
+    | "monitoring"
+    | "blocked"
+    | (string & {})
+    | null;
+  blockers: string[];
+  recommendedNextActions: string[];
 }

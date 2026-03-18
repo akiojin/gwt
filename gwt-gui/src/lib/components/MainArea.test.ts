@@ -101,7 +101,12 @@ function setupTerminalMocks(): () => void {
 
 function getTabByLabel(container: HTMLElement, label: string): HTMLElement {
   const tab = Array.from(container.querySelectorAll<HTMLElement>(".tab-bar .tab")).find(
-    (el) => el.querySelector(".tab-label")?.textContent?.trim() === label,
+    (el) => {
+      const tabLabel = el.querySelector(".tab-label");
+      const effectiveLabel =
+        tabLabel?.getAttribute("aria-label") ?? tabLabel?.textContent?.trim() ?? "";
+      return effectiveLabel === label;
+    },
   );
   if (!tab) {
     throw new Error(`Tab not found: ${label}`);
@@ -137,6 +142,30 @@ describe("MainArea", () => {
     const assistantTab = rendered.container.querySelector(".tab-bar .tab");
     expect(assistantTab).toBeTruthy();
     expect(assistantTab?.querySelector(".tab-close")).toBeNull();
+  });
+
+  it("renders agent tab labels with always-scrolling markup only for agent tabs", async () => {
+    const tabs: Tab[] = [
+      { id: "assistant", label: "Assistant", type: "assistant" },
+      {
+        id: "agent-1",
+        label: "#1644 Worktree管理",
+        type: "agent",
+        paneId: "pane-1",
+        branchName: "feature/issue-1644",
+      },
+      { id: "settings", label: "Settings", type: "settings" },
+    ];
+    const restoreTerminalMocks = setupTerminalMocks();
+    try {
+      const rendered = await renderMainArea({ tabs, activeTabId: "assistant" });
+      const agentTab = rendered.container.querySelector('[data-tab-id="agent-1"]');
+      const staticTab = rendered.container.querySelector('[data-tab-id="settings"]');
+      expect(agentTab?.querySelector(".tab-label-scroll .tab-label-track")).toBeTruthy();
+      expect(staticTab?.querySelector(".tab-label-scroll")).toBeNull();
+    } finally {
+      restoreTerminalMocks();
+    }
   });
 
   it("shows close button for non-pinned tabs and emits close callback", async () => {

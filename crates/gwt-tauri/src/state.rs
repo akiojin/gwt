@@ -84,6 +84,16 @@ pub struct WindowMigrationState {
     pub source_root: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantContext {
+    pub working_goal: Option<String>,
+    pub goal_confidence: Option<String>,
+    pub current_status: Option<String>,
+    pub blockers: Vec<String>,
+    pub recommended_next_actions: Vec<String>,
+}
+
 const WINDOW_SESSION_RESTORE_LEAD_TTL_MS: u64 = 15_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +163,10 @@ pub struct AppState {
     pub session_store: SessionStore,
     /// Assistant Mode engine per window label.
     pub assistant_engine: Mutex<HashMap<String, crate::assistant_engine::AssistantEngine>>,
+    /// Assistant PM context per window label.
+    pub assistant_context: Mutex<HashMap<String, AssistantContext>>,
+    /// Assistant session generation per window label to invalidate stale startup tasks.
+    pub assistant_session_generation: Mutex<HashMap<String, u64>>,
     /// Assistant sessions currently running startup analysis, keyed by window label
     /// with a human-readable progress status.
     pub assistant_startup_inflight: Mutex<HashMap<String, String>>,
@@ -201,6 +215,8 @@ impl AppState {
             last_focused_window_label: Mutex::new(None),
             session_store: SessionStore::new(),
             assistant_engine: Mutex::new(HashMap::new()),
+            assistant_context: Mutex::new(HashMap::new()),
+            assistant_session_generation: Mutex::new(HashMap::new()),
             assistant_startup_inflight: Mutex::new(HashMap::new()),
             assistant_monitor_handle: Mutex::new(HashMap::new()),
         }
@@ -337,15 +353,57 @@ impl AppState {
     }
 
     pub fn clear_assistant_session_for_window(&self, window_label: &str) {
+        self.invalidate_assistant_session_for_window(window_label);
         if let Ok(mut map) = self.assistant_engine.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.assistant_context.lock() {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.assistant_startup_inflight.lock() {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.assistant_monitor_handle.lock() {
-            map.remove(window_label);
+            if let Some(handle) = map.remove(window_label) {
+                tokio::spawn(async move {
+                    handle.stop().await;
+                });
+            }
         }
+    }
+
+    pub fn begin_assistant_session_for_window(&self, window_label: &str) -> u64 {
+        let Ok(mut map) = self.assistant_session_generation.lock() else {
+            return 0;
+        };
+        let next = map
+            .get(window_label)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        map.insert(window_label.to_string(), next);
+        next
+    }
+
+    pub fn invalidate_assistant_session_for_window(&self, window_label: &str) {
+        let Ok(mut map) = self.assistant_session_generation.lock() else {
+            return;
+        };
+        let next = map
+            .get(window_label)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        map.insert(window_label.to_string(), next);
+    }
+
+    pub fn is_current_assistant_session(&self, window_label: &str, generation: u64) -> bool {
+        self.assistant_session_generation
+            .lock()
+            .ok()
+            .and_then(|map| map.get(window_label).copied())
+            .map(|current| current == generation)
+            .unwrap_or(false)
     }
 
     fn now_millis() -> u64 {
@@ -838,6 +896,21 @@ mod tests {
         state.clear_project_for_window("main");
 
         assert!(!state.assistant_engine.lock().unwrap().contains_key("main"));
+    }
+
+    #[test]
+    fn assistant_session_generation_invalidates_stale_startup() {
+        let state = AppState::new();
+
+        let first = state.begin_assistant_session_for_window("main");
+        assert!(state.is_current_assistant_session("main", first));
+
+        state.clear_assistant_session_for_window("main");
+        assert!(!state.is_current_assistant_session("main", first));
+
+        let second = state.begin_assistant_session_for_window("main");
+        assert!(second > first);
+        assert!(state.is_current_assistant_session("main", second));
     }
 
     #[test]

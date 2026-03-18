@@ -1268,6 +1268,48 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
+  it("shows latest agent badge in the branch header when last_tool_usage exists", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: { ...branchFixture, last_tool_usage: "codex" },
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Latest agent: Codex")).toBeTruthy();
+    });
+
+    const badge = rendered.getByText("Latest agent: Codex");
+    expect(badge.classList.contains("branch-tool-badge")).toBe(true);
+    expect(badge.classList.contains("codex")).toBe(true);
+  });
+
+  it("renders header action buttons with hover titles", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [olderQuickStartEntry, quickStartDockerEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch: vi.fn().mockResolvedValue(undefined),
+      onNewTerminal: vi.fn(),
+      onLaunchAgent: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByTitle("Continue")).toBeTruthy();
+      expect(rendered.getByTitle("New")).toBeTruthy();
+      expect(rendered.getByTitle("Check/Fix Docs + Edit")).toBeTruthy();
+      expect(rendered.getByTitle("New Terminal")).toBeTruthy();
+      expect(rendered.getByTitle("Launch Agent")).toBeTruthy();
+    });
+  });
+
   it("renders New Terminal button and fires onNewTerminal callback", async () => {
     const onNewTerminal = vi.fn();
     const rendered = await renderPanel({
@@ -2088,10 +2130,10 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     await waitFor(() => {
-      expect(rendered.getByText("Launch Agent...")).toBeTruthy();
+      expect(rendered.getByRole("button", { name: "Launch Agent" })).toBeTruthy();
     });
 
-    await fireEvent.click(rendered.getByText("Launch Agent..."));
+    await fireEvent.click(rendered.getByRole("button", { name: "Launch Agent" }));
     expect(onLaunchAgent).toHaveBeenCalledTimes(1);
   });
 

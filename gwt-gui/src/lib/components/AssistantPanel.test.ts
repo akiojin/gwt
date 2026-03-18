@@ -30,6 +30,11 @@ const assistantStateFixture = {
   estimatedTokens: 0,
   startupStatus: "ready",
   startupSummaryReady: true,
+  startupFailureKind: null,
+  startupFailureDetail: null,
+  startupRecoveryHints: [],
+  blockers: [],
+  recommendedNextActions: [],
 };
 
 const dashboardFixture = {
@@ -45,7 +50,11 @@ let initialAssistantState: AssistantState;
 let sendMessageImpl: (args?: { input?: string }) => Promise<AssistantState>;
 
 async function renderAssistantPanel(
-  props: { isActive?: boolean; projectPath?: string | null } = {},
+  props: {
+    isActive?: boolean;
+    projectPath?: string | null;
+    onOpenSettings?: () => void;
+  } = {},
 ) {
   const { default: AssistantPanel } = await import("./AssistantPanel.svelte");
   return render(AssistantPanel, { props });
@@ -271,6 +280,62 @@ describe("AssistantPanel", () => {
       expect(button.disabled).toBe(true);
       expect(rendered.getByText("Checking startup analysis cache...")).toBeTruthy();
       expect(rendered.getByText("Thinking...")).toBeTruthy();
+    });
+  });
+
+  it("shows the current goal and recommended next actions in the dashboard strip", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      workingGoal: "#1636 Assistant Mode",
+      goalConfidence: "high",
+      currentStatus: "monitoring",
+      recommendedNextActions: [
+        "ブランチ `feature/issue-1636` で agent を起動して作業を再開する",
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByTestId("assistant-goal-strip")).toBeTruthy();
+      expect(rendered.getByText("#1636 Assistant Mode")).toBeTruthy();
+      expect(rendered.getByText("Monitoring")).toBeTruthy();
+      expect(
+        rendered.getByText("ブランチ `feature/issue-1636` で agent を起動して作業を再開する")
+      ).toBeTruthy();
+    });
+  });
+
+  it("renders goal confirmation state with blockers", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      currentStatus: "awaiting_goal_confirmation",
+      blockers: [
+        "README / CLAUDE.md / 現在の branch から、着手中のゴールを一意に特定できません。",
+      ],
+      recommendedNextActions: [
+        "現在のゴールを一文で確認し、必要なら issue または README に明記する",
+      ],
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "## Assistant PM Update\n現在の作業ゴールを一文で確認してください。",
+          timestamp: 1,
+        },
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Needs Goal")).toBeTruthy();
+      expect(
+        rendered.getByText(
+          "README / CLAUDE.md / 現在の branch から、着手中のゴールを一意に特定できません。"
+        )
+      ).toBeTruthy();
+      expect(rendered.getByText("現在の作業ゴールを一文で確認してください。")).toBeTruthy();
     });
   });
 
@@ -532,6 +597,153 @@ describe("AssistantPanel", () => {
       expect(
         invokeMock.mock.calls.filter(([command]) => command === "assistant_get_dashboard"),
       ).toHaveLength(3);
+    });
+  });
+
+  it("shows a startup recovery panel for failed autonomous startup", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      sessionId: "session-main",
+      startupStatus: "failed",
+      startupFailureKind: "resource_guard",
+      startupFailureDetail:
+        'Failed to load model "qwen/qwen3.5-35b-a3b" due to insufficient system resources.',
+      startupRecoveryHints: [
+        "Choose a smaller model in Settings.",
+        "Switch to a remote inference endpoint if available.",
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByTestId("assistant-startup-recovery")).toBeTruthy();
+      expect(rendered.getByText("Selected model is too heavy for this machine")).toBeTruthy();
+      expect(rendered.getByText("Choose a smaller model in Settings.")).toBeTruthy();
+      expect(rendered.getByText("Open Settings")).toBeTruthy();
+      expect(rendered.getByText("Retry")).toBeTruthy();
+    });
+  });
+
+  it("retries assistant startup from the recovery panel", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      sessionId: "session-main",
+      startupStatus: "failed",
+      startupFailureKind: "llm_error",
+      startupFailureDetail: "LLM call failed",
+      startupRecoveryHints: ["Retry the Assistant startup."],
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: { input?: string }) => {
+      if (command === "assistant_get_state") {
+        return structuredClone(initialAssistantState);
+      }
+      if (command === "assistant_get_dashboard") {
+        return structuredClone(dashboardFixture);
+      }
+      if (command === "assistant_send_message") {
+        return sendMessageImpl(args);
+      }
+      if (command === "assistant_start") {
+        return {
+          ...structuredClone(assistantStateFixture),
+          startupStatus: "ready",
+          startupSummaryReady: true,
+          messages: [
+            {
+              role: "assistant",
+              kind: "text",
+              content: "Recovered",
+              timestamp: 1,
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected invoke command: ${command}`);
+    });
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByTestId("assistant-startup-recovery")).toBeTruthy();
+    });
+    await fireEvent.click(rendered.getByText("Retry"));
+
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "assistant_start"),
+      ).toHaveLength(1);
+      expect(rendered.getByText("Recovered")).toBeTruthy();
+    });
+  });
+
+  it("opens settings from the recovery panel", async () => {
+    const onOpenSettings = vi.fn();
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      sessionId: "session-main",
+      startupStatus: "failed",
+      startupFailureKind: "ai_not_configured",
+      startupFailureDetail: "AI is not configured.",
+      startupRecoveryHints: ["Open Settings and configure the active AI profile."],
+    };
+
+    const rendered = await renderAssistantPanel({ onOpenSettings });
+
+    await waitFor(() => {
+      expect(rendered.getByTestId("assistant-startup-recovery")).toBeTruthy();
+    });
+    await fireEvent.click(rendered.getByText("Open Settings"));
+
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("auto-retries failed startup after settings are saved while the tab is active", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      sessionId: "session-main",
+      startupStatus: "failed",
+      startupFailureKind: "resource_guard",
+      startupFailureDetail: "insufficient system resources",
+      startupRecoveryHints: ["Choose a smaller model in Settings."],
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: { input?: string }) => {
+      if (command === "assistant_get_state") {
+        return structuredClone(initialAssistantState);
+      }
+      if (command === "assistant_get_dashboard") {
+        return structuredClone(dashboardFixture);
+      }
+      if (command === "assistant_send_message") {
+        return sendMessageImpl(args);
+      }
+      if (command === "assistant_start") {
+        return {
+          ...structuredClone(assistantStateFixture),
+          startupStatus: "ready",
+          startupSummaryReady: true,
+          messages: [],
+        };
+      }
+      throw new Error(`Unexpected invoke command: ${command}`);
+    });
+
+    await renderAssistantPanel({
+      isActive: true,
+      projectPath: "/tmp/project",
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector("[data-testid='assistant-startup-recovery']")).toBeTruthy();
+    });
+    window.dispatchEvent(new CustomEvent("gwt-settings-updated"));
+
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "assistant_start"),
+      ).toHaveLength(1);
     });
   });
 

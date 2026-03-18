@@ -9,9 +9,10 @@
   interface Props {
     isActive?: boolean;
     projectPath?: string | null;
+    onOpenSettings?: () => void;
   }
 
-  let { isActive = true, projectPath = null }: Props = $props();
+  let { isActive = true, projectPath = null, onOpenSettings = () => {} }: Props = $props();
   let assistantState: AssistantState | null = $state(null);
   let dashboard: DashboardData | null = $state(null);
   let inputText: string = $state("");
@@ -27,6 +28,51 @@
 
   function scrollToBottom() {
     messagesEndRef?.scrollIntoView({ behavior: "smooth" });
+  }
+
+  function startupFailureTitle(state: AssistantState | null): string {
+    switch (state?.startupFailureKind) {
+      case "resource_guard":
+        return "Selected model is too heavy for this machine";
+      case "ai_not_configured":
+        return "AI settings are incomplete";
+      case "llm_error":
+        return "Assistant startup failed";
+      default:
+        return "Assistant could not start autonomously";
+    }
+  }
+
+  function shouldShowRecoveryPanel(state: AssistantState | null): boolean {
+    return state?.startupStatus === "failed";
+  }
+
+  async function retryAssistantStartup(): Promise<AssistantState | null> {
+    const previousState = assistantState ?? (await loadAssistantState());
+    if (!previousState?.aiReady) {
+      assistantState = previousState;
+      return previousState;
+    }
+
+    try {
+      assistantState = {
+        ...previousState,
+        isThinking: true,
+        startupStatus: "analyzing",
+        startupSummaryReady: false,
+        startupFailureKind: null,
+        startupFailureDetail: null,
+        startupRecoveryHints: [],
+      };
+      const startedState = await invoke<AssistantState>("assistant_start");
+      assistantState = startedState;
+      void loadDashboard();
+      return startedState;
+    } catch (err) {
+      assistantState = previousState;
+      console.error("Failed to retry assistant startup:", err);
+      return previousState;
+    }
   }
 
   async function loadAssistantState(): Promise<AssistantState | null> {
@@ -48,20 +94,7 @@
       return state;
     }
 
-    try {
-      assistantState = {
-        ...state,
-        isThinking: true,
-        startupStatus: "analyzing",
-        startupSummaryReady: false,
-      };
-      const startedState = await invoke<AssistantState>("assistant_start");
-      assistantState = startedState;
-      return startedState;
-    } catch (err) {
-      console.error("Failed to start assistant session:", err);
-      return state;
-    }
+    return retryAssistantStartup();
   }
 
   async function loadDashboard() {
@@ -223,6 +256,16 @@
     let unlistenDashboard: Promise<() => void> | undefined;
     let unlistenLaunchFinished: Promise<() => void> | undefined;
     let unlistenTerminalClosed: Promise<() => void> | undefined;
+    const onSettingsUpdated = () => {
+      if (
+        assistantState?.startupStatus === "failed" &&
+        isActive &&
+        !!projectPath &&
+        !assistantState.isThinking
+      ) {
+        void retryAssistantStartup();
+      }
+    };
 
     try {
       unlistenState = listen<AssistantState>(
@@ -250,11 +293,14 @@
       // Event listener setup failed (e.g. test environment)
     }
 
+    window.addEventListener("gwt-settings-updated", onSettingsUpdated);
+
     return () => {
       unlistenState?.then((fn) => fn()).catch(() => {});
       unlistenDashboard?.then((fn) => fn()).catch(() => {});
       unlistenLaunchFinished?.then((fn) => fn()).catch(() => {});
       unlistenTerminalClosed?.then((fn) => fn()).catch(() => {});
+      window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
     };
   });
 
@@ -295,11 +341,45 @@
 </script>
 
 <div class="assistant-panel">
-  <AssistantDashboard {dashboard} />
+  <AssistantDashboard {dashboard} {assistantState} />
 
   <div class="chat-area">
     <div class="messages">
       {#if assistantState}
+        {#if shouldShowRecoveryPanel(assistantState)}
+          <div class="startup-recovery" data-testid="assistant-startup-recovery">
+            <div class="startup-recovery-title">{startupFailureTitle(assistantState)}</div>
+            {#if assistantState.startupFailureDetail}
+              <div class="startup-recovery-detail">
+                {assistantState.startupFailureDetail}
+              </div>
+            {/if}
+            {#if assistantState.startupRecoveryHints.length > 0}
+              <ul class="startup-recovery-hints">
+                {#each assistantState.startupRecoveryHints as hint}
+                  <li>{hint}</li>
+                {/each}
+              </ul>
+            {/if}
+            <div class="startup-recovery-actions">
+              <button
+                class="recovery-btn"
+                type="button"
+                onclick={() => void retryAssistantStartup()}
+                disabled={assistantState.isThinking}
+              >
+                Retry
+              </button>
+              <button
+                class="recovery-btn secondary"
+                type="button"
+                onclick={onOpenSettings}
+              >
+                Open Settings
+              </button>
+            </div>
+          </div>
+        {/if}
         {#each assistantState.messages as msg}
           <div
             class="message"
@@ -353,7 +433,8 @@
           disabled={
             !assistantState?.aiReady ||
             !assistantState?.sessionId ||
-            assistantState?.isThinking
+            assistantState?.isThinking ||
+            assistantState?.startupStatus === "failed"
           }
           rows={1}
         ></textarea>
@@ -365,6 +446,7 @@
             !assistantState?.aiReady ||
             !assistantState?.sessionId ||
             assistantState?.isThinking ||
+            assistantState?.startupStatus === "failed" ||
             !inputText.trim()
           }
         >
@@ -478,6 +560,62 @@
     font-size: var(--ui-font-sm);
     text-align: center;
     padding: 24px;
+  }
+
+  .startup-recovery {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--yellow) 35%, var(--border-color));
+    background: color-mix(in srgb, var(--yellow) 10%, var(--bg-secondary));
+    color: var(--text-primary);
+  }
+
+  .startup-recovery-title {
+    font-size: var(--ui-font-sm);
+    font-weight: 600;
+  }
+
+  .startup-recovery-detail {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: var(--ui-font-sm);
+    color: var(--text-secondary);
+  }
+
+  .startup-recovery-hints {
+    margin: 0;
+    padding-left: 18px;
+    font-size: var(--ui-font-sm);
+  }
+
+  .startup-recovery-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .recovery-btn {
+    padding: 8px 12px;
+    border: none;
+    border-radius: 6px;
+    background-color: var(--accent);
+    color: var(--bg-primary);
+    font-size: var(--ui-font-sm);
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .recovery-btn.secondary {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+  }
+
+  .recovery-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .input-area {
