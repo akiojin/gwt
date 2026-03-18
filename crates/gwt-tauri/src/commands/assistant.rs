@@ -35,6 +35,9 @@ pub struct AssistantStateResponse {
     pub estimated_tokens: u64,
     pub startup_status: String,
     pub startup_summary_ready: bool,
+    pub startup_failure_kind: Option<String>,
+    pub startup_failure_detail: Option<String>,
+    pub startup_recovery_hints: Vec<String>,
     pub working_goal: Option<String>,
     pub goal_confidence: Option<String>,
     pub current_status: Option<String>,
@@ -100,6 +103,13 @@ struct TerminalSummaryInsight {
     short_summary: String,
     highlights: Vec<String>,
     source_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StartupRecoveryInfo {
+    kind: Option<String>,
+    detail: Option<String>,
+    hints: Vec<String>,
 }
 
 #[tauri::command]
@@ -438,6 +448,7 @@ fn build_assistant_state_response(
     session_id: Option<String>,
     context: &AssistantContext,
 ) -> AssistantStateResponse {
+    let recovery = derive_startup_recovery_info(engine);
     AssistantStateResponse {
         messages: build_messages_from_conversation(engine),
         ai_ready: true,
@@ -447,6 +458,9 @@ fn build_assistant_state_response(
         estimated_tokens: engine.estimated_tokens,
         startup_status: engine.startup_status().as_str().to_string(),
         startup_summary_ready: engine.startup_summary_ready(),
+        startup_failure_kind: recovery.kind,
+        startup_failure_detail: recovery.detail,
+        startup_recovery_hints: recovery.hints,
         working_goal: context.working_goal.clone(),
         goal_confidence: context.goal_confidence.clone(),
         current_status: context.current_status.clone(),
@@ -465,6 +479,9 @@ fn build_empty_assistant_state_response() -> AssistantStateResponse {
         estimated_tokens: 0,
         startup_status: AssistantStartupStatus::Idle.as_str().to_string(),
         startup_summary_ready: false,
+        startup_failure_kind: None,
+        startup_failure_detail: None,
+        startup_recovery_hints: Vec::new(),
         working_goal: None,
         goal_confidence: None,
         current_status: None,
@@ -491,6 +508,9 @@ fn build_startup_inflight_state_response(
         estimated_tokens: 0,
         startup_status: AssistantStartupStatus::Analyzing.as_str().to_string(),
         startup_summary_ready: false,
+        startup_failure_kind: None,
+        startup_failure_detail: None,
+        startup_recovery_hints: Vec::new(),
         working_goal: None,
         goal_confidence: None,
         current_status: Some("analyzing".to_string()),
@@ -601,6 +621,78 @@ fn current_assistant_context(state: &AppState, window_label: &str) -> AssistantC
         .ok()
         .and_then(|map| map.get(window_label).cloned())
         .unwrap_or_default()
+}
+
+fn derive_startup_recovery_info(engine: &AssistantEngine) -> StartupRecoveryInfo {
+    if engine.startup_status() != AssistantStartupStatus::Failed {
+        return StartupRecoveryInfo::default();
+    }
+
+    let detail = engine
+        .conversation()
+        .iter()
+        .rev()
+        .filter(|message| message.role == "assistant")
+        .find_map(|message| {
+            let content = message.content.as_deref()?;
+            let lower = content.to_ascii_lowercase();
+            (lower.contains("failed")
+                || lower.contains("error")
+                || lower.contains("guardrails")
+                || lower.contains("insufficient system resources")
+                || lower.contains("ai is not configured"))
+            .then(|| content.to_string())
+        });
+    let detail_lower = detail
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let (kind, hints) = if detail_lower.contains("ai is not configured")
+        || detail_lower.contains("please configure ai settings first")
+    {
+        (
+            Some("ai_not_configured".to_string()),
+            vec![
+                "Open Settings and configure the active AI profile.".to_string(),
+                "Save the profile and retry the Assistant startup.".to_string(),
+            ],
+        )
+    } else if detail_lower.contains("insufficient system resources")
+        || detail_lower.contains("guardrails")
+        || detail_lower.contains("requires approximately")
+    {
+        (
+            Some("resource_guard".to_string()),
+            vec![
+                "Choose a smaller model in Settings.".to_string(),
+                "Switch to a remote inference endpoint if available.".to_string(),
+                "Only relax model loading guardrails if you accept freeze risk.".to_string(),
+            ],
+        )
+    } else if detail_lower.contains("llm call failed") {
+        (
+            Some("llm_error".to_string()),
+            vec![
+                "Retry the Assistant startup.".to_string(),
+                "Open Settings and verify the active model and endpoint.".to_string(),
+            ],
+        )
+    } else {
+        (
+            Some("unknown".to_string()),
+            vec![
+                "Retry the Assistant startup.".to_string(),
+                "Open Settings and review the active AI model and endpoint.".to_string(),
+            ],
+        )
+    };
+
+    StartupRecoveryInfo {
+        kind,
+        detail,
+        hints,
+    }
 }
 
 fn store_assistant_context(state: &AppState, window_label: &str, context: AssistantContext) {
@@ -1677,5 +1769,37 @@ mod tests {
             pending_required_check_names(&checks),
             vec!["CI".to_string()]
         );
+    }
+
+    #[test]
+    fn assistant_recovery_info_detects_resource_guard_failures() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        engine.apply_startup_failure_message(
+            r#"LLM call failed: Failed to load model due to insufficient system resources. Adjust guardrails in settings."#,
+        );
+
+        let recovery = derive_startup_recovery_info(&engine);
+
+        assert_eq!(recovery.kind.as_deref(), Some("resource_guard"));
+        assert!(recovery
+            .hints
+            .iter()
+            .any(|hint| hint.contains("smaller model")));
+    }
+
+    #[test]
+    fn assistant_recovery_info_detects_ai_not_configured() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        engine.apply_startup_failure_message(
+            "AI is not configured. Please configure AI settings first.",
+        );
+
+        let recovery = derive_startup_recovery_info(&engine);
+
+        assert_eq!(recovery.kind.as_deref(), Some("ai_not_configured"));
+        assert!(recovery
+            .hints
+            .iter()
+            .any(|hint| hint.contains("Open Settings")));
     }
 }

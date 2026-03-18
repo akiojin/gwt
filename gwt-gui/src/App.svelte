@@ -2925,6 +2925,7 @@
         onWorkOnIssue={handleWorkOnIssueFromTab}
         onSwitchToWorktree={handleSwitchToWorktreeFromTab}
         onIssueCountChange={handleIssueCountChange}
+        onOpenSettings={openSettingsTab}
         voiceInputEnabled={voiceInputSettings.enabled}
         {voiceInputListening}
         {voiceInputPreparing}
