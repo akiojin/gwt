@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.14.0] - 2026-03-18
+
+### Features
+
+- **assistant:** Make assistant mode proactive (#1690)
+
+### Miscellaneous Tasks
+
+- Add managed skills catalog block to CLAUDE.md
+
 ## [8.13.1] - 2026-03-18
 
 ### Bug Fixes
