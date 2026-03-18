@@ -1,6 +1,8 @@
 export interface IssueSearchTarget {
   number: number;
   title: string;
+  labels?: string[];
+  isSpec?: boolean;
 }
 
 function normalizeIssueNumberToken(token: string): string | null {
@@ -15,18 +17,32 @@ function tokenizeIssueSearchQuery(query: string): string[] {
     .filter((token) => token.length > 0);
 }
 
-export function issueMatchesSearchQuery(issue: IssueSearchTarget, query: string): boolean {
+export function issueMatchesSearchQuery(
+  issue: IssueSearchTarget,
+  query: string,
+): boolean {
   const tokens = tokenizeIssueSearchQuery(query);
   if (tokens.length === 0) return true;
 
   const issueNumber = String(issue.number);
   const titleLower = issue.title.toLowerCase();
+  const labelSet = new Set(
+    (issue.labels ?? []).map((label) => label.toLowerCase()),
+  );
+  const isSpec = issue.isSpec === true || labelSet.has("gwt-spec");
 
   return tokens.every((token) => {
     const numberToken = normalizeIssueNumberToken(token);
     if (numberToken !== null) {
       return issueNumber.includes(numberToken);
     }
-    return titleLower.includes(token.toLowerCase());
+    const normalized = token.toLowerCase();
+    if (normalized === "spec" || normalized === "specs") {
+      return isSpec;
+    }
+    if (titleLower.includes(normalized)) {
+      return true;
+    }
+    return Array.from(labelSet).some((label) => label.includes(normalized));
   });
 }
