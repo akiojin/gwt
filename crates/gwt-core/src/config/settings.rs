@@ -373,14 +373,10 @@ impl Default for AppearanceSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VoiceInputSettings {
-    /// Enable voice input hotkey support
+    /// Enable voice input support
     pub enabled: bool,
     /// Voice backend engine (currently "qwen3-asr")
     pub engine: String,
-    /// Global hotkey string (e.g., "Mod+Shift+M")
-    pub hotkey: String,
-    /// Push-to-talk hotkey string (e.g., "Mod+Shift+Space")
-    pub ptt_hotkey: String,
     /// Recognition language ("auto" | "ja" | "en")
     pub language: String,
     /// Quality preset ("fast" | "balanced" | "accurate")
@@ -394,8 +390,6 @@ impl Default for VoiceInputSettings {
         Self {
             enabled: false,
             engine: "qwen3-asr".to_string(),
-            hotkey: "Mod+Shift+M".to_string(),
-            ptt_hotkey: "Mod+Shift+Space".to_string(),
             language: "auto".to_string(),
             quality: "balanced".to_string(),
             model: "Qwen/Qwen3-ASR-1.7B".to_string(),
@@ -755,8 +749,6 @@ mod tests {
         assert!(!settings.debug);
         assert!(!settings.voice_input.enabled);
         assert_eq!(settings.voice_input.engine, "qwen3-asr");
-        assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
-        assert_eq!(settings.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(settings.voice_input.language, "auto");
         assert_eq!(settings.voice_input.quality, "balanced");
         assert_eq!(settings.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
@@ -904,8 +896,6 @@ default_base_branch = "new-global"
         assert_eq!(settings.appearance.terminal_font_size, 13);
         assert!(!settings.voice_input.enabled);
         assert_eq!(settings.voice_input.engine, "qwen3-asr");
-        assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
-        assert_eq!(settings.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(settings.voice_input.language, "auto");
         assert_eq!(settings.voice_input.quality, "balanced");
         assert_eq!(settings.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
@@ -1036,8 +1026,6 @@ model = "Qwen/Qwen3-ASR-1.7B"
         assert_eq!(loaded.appearance.terminal_font_size, 19);
         assert!(loaded.voice_input.enabled);
         assert_eq!(loaded.voice_input.engine, "qwen3-asr");
-        assert_eq!(loaded.voice_input.hotkey, "Mod+Shift+V");
-        assert_eq!(loaded.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(loaded.voice_input.language, "ja");
         assert_eq!(loaded.voice_input.quality, "accurate");
         assert_eq!(loaded.voice_input.model, "Qwen/Qwen3-ASR-1.7B");

@@ -77,9 +77,10 @@ const settingsFixture = {
   app_language: "auto",
   voice_input: {
     enabled: false,
-    hotkey: "Mod+Shift+M",
+    engine: "qwen3-asr",
     language: "auto",
-    model: "base",
+    quality: "balanced",
+    model: "Qwen/Qwen3-ASR-1.7B",
   },
   default_shell: null,
 };
@@ -104,9 +105,11 @@ async function setMockCommandResponses(
   commandResponses: Record<string, unknown>,
 ) {
   await page.evaluate((responses) => {
-    (window as unknown as {
-      __GWT_MOCK_COMMAND_RESPONSES__?: Record<string, unknown>;
-    }).__GWT_MOCK_COMMAND_RESPONSES__ = responses;
+    (
+      window as unknown as {
+        __GWT_MOCK_COMMAND_RESPONSES__?: Record<string, unknown>;
+      }
+    ).__GWT_MOCK_COMMAND_RESPONSES__ = responses;
   }, commandResponses);
 }
 
@@ -136,7 +139,9 @@ async function openProjectAndSelectBranch(
   await expect(branchButton).toBeVisible();
   await branchButton.click();
 
-  await expect(page.locator(".branch-detail h2")).toContainText(branchFeature.name);
+  await expect(page.locator(".branch-detail h2")).toContainText(
+    branchFeature.name,
+  );
 }
 
 async function waitForInvokeCommand(page: Page, cmd: string) {
@@ -220,7 +225,9 @@ test("launches with selected Windows shell from Launch Agent form", async ({
   });
 
   await page.getByRole("button", { name: "Launch Agent..." }).click();
-  await expect(page.getByRole("dialog", { name: "Launch Agent" })).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Launch Agent" }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "Advanced" }).click();
   await page.getByLabel("Shell").selectOption("wsl");
@@ -236,7 +243,9 @@ test("launches with selected Windows shell from Launch Agent form", async ({
       }>;
     };
     const log = globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? [];
-    const entry = [...log].reverse().find((item) => item.cmd === "start_launch_job");
+    const entry = [...log]
+      .reverse()
+      .find((item) => item.cmd === "start_launch_job");
     return entry?.args?.request ?? null;
   });
 
@@ -267,7 +276,9 @@ test("disables shell selection in Docker mode and does not send terminalShell", 
   });
 
   await page.getByRole("button", { name: "Launch Agent..." }).click();
-  await expect(page.getByRole("dialog", { name: "Launch Agent" })).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Launch Agent" }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "Advanced" }).click();
   await expect(page.getByLabel("Shell")).toBeDisabled();
@@ -284,7 +295,9 @@ test("disables shell selection in Docker mode and does not send terminalShell", 
       }>;
     };
     const log = globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? [];
-    const entry = [...log].reverse().find((item) => item.cmd === "start_launch_job");
+    const entry = [...log]
+      .reverse()
+      .find((item) => item.cmd === "start_launch_job");
     return entry?.args?.request ?? null;
   });
 
@@ -292,7 +305,9 @@ test("disables shell selection in Docker mode and does not send terminalShell", 
   expect(request?.terminalShell).toBeUndefined();
 });
 
-test("saves Settings Terminal default shell via Terminal tab", async ({ page }) => {
+test("saves Settings Terminal default shell via Terminal tab", async ({
+  page,
+}) => {
   await openProjectAndSelectBranch(page, {
     list_worktree_branches: [branchMain, branchDevelop, branchFeature],
     list_remote_branches: [],
@@ -316,7 +331,9 @@ test("saves Settings Terminal default shell via Terminal tab", async ({ page }) 
   await page.getByRole("button", { name: "Terminal", exact: true }).click();
 
   await expect(page.getByLabel("Default Shell")).toBeVisible();
-  await expect(page.getByLabel("Default Shell")).toContainText("PowerShell (7.4.1)");
+  await expect(page.getByLabel("Default Shell")).toContainText(
+    "PowerShell (7.4.1)",
+  );
 
   await page.getByLabel("Default Shell").selectOption("wsl");
   await page.getByRole("button", { name: "Save" }).click();
@@ -331,7 +348,9 @@ test("saves Settings Terminal default shell via Terminal tab", async ({ page }) 
       }>;
     };
     const log = globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? [];
-    const entry = [...log].reverse().find((item) => item.cmd === "save_settings");
+    const entry = [...log]
+      .reverse()
+      .find((item) => item.cmd === "save_settings");
     return entry?.args?.settings ?? null;
   });
 
@@ -352,7 +371,9 @@ test("saves UI and terminal font families from General and Terminal tabs", async
   });
 
   await openSettingsFromMenu(page);
-  await expect(page.getByRole("button", { name: "General", exact: true })).toHaveClass(/active/);
+  await expect(
+    page.getByRole("button", { name: "General", exact: true }),
+  ).toHaveClass(/active/);
 
   await page.getByLabel("UI font family").selectOption(UI_FONT_FAMILY_INTER);
   await page.getByRole("button", { name: "Terminal", exact: true }).click();
@@ -376,16 +397,22 @@ test("saves UI and terminal font families from General and Terminal tabs", async
       }>;
     };
     const log = globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? [];
-    const entry = [...log].reverse().find((item) => item.cmd === "save_settings");
+    const entry = [...log]
+      .reverse()
+      .find((item) => item.cmd === "save_settings");
     return entry?.args?.settings ?? null;
   });
 
   expect(savedSettings).not.toBeNull();
   expect(savedSettings?.ui_font_family).toBe(UI_FONT_FAMILY_INTER);
-  expect(savedSettings?.terminal_font_family).toBe(TERMINAL_FONT_FAMILY_CASCADIA);
+  expect(savedSettings?.terminal_font_family).toBe(
+    TERMINAL_FONT_FAMILY_CASCADIA,
+  );
 });
 
-test("restores font family preview on Close without saving", async ({ page }) => {
+test("restores font family preview on Close without saving", async ({
+  page,
+}) => {
   await openProjectAndSelectBranch(page, {
     list_worktree_branches: [branchMain, branchDevelop, branchFeature],
     list_remote_branches: [],
@@ -403,7 +430,9 @@ test("restores font family preview on Close without saving", async ({ page }) =>
     .getByLabel("Terminal font family")
     .selectOption(TERMINAL_FONT_FAMILY_CASCADIA);
 
-  await page.locator(".settings-footer .btn-cancel", { hasText: "Close" }).click();
+  await page
+    .locator(".settings-footer .btn-cancel", { hasText: "Close" })
+    .click();
   await expect(page.getByRole("heading", { name: "Settings" })).toBeHidden();
 
   const preview = await readFontFamilyPreview(page);

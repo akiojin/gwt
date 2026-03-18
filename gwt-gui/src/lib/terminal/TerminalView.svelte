@@ -47,6 +47,7 @@
   let fitAddon: FitAddon | undefined = $state(undefined);
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
+  let activeVoicePointerId: number | null = null;
   let activationSerial = 0;
   let lastNotifiedRows: number | null = null;
   let lastNotifiedCols: number | null = null;
@@ -312,7 +313,9 @@
 
   function getInitialTerminalFontSize(): number {
     const stored = (window as any).__gwtTerminalFontSize;
-    return typeof stored === "number" && stored >= 8 && stored <= 24 ? stored : 13;
+    return typeof stored === "number" && stored >= 8 && stored <= 24
+      ? stored
+      : 13;
   }
 
   function getInitialTerminalFontFamily(): string {
@@ -407,9 +410,13 @@
     if (absDeltaY === 0 && absDeltaX === 0) return 0;
 
     const fontSize =
-      typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
+      typeof terminal?.options.fontSize === "number"
+        ? terminal.options.fontSize
+        : 13;
     const lineHeight =
-      typeof terminal?.options.lineHeight === "number" ? terminal.options.lineHeight : 1;
+      typeof terminal?.options.lineHeight === "number"
+        ? terminal.options.lineHeight
+        : 1;
     const lineStep = fontSize * lineHeight;
 
     const axis = pickWheelAxis(event);
@@ -464,12 +471,7 @@
   }
 
   function voiceButtonDisabled(): boolean {
-    return (
-      voiceInputPreparing ||
-      !voiceInputSupported ||
-      !voiceInputAvailable ||
-      !voiceInputEnabled
-    );
+    return voiceInputPreparing || !voiceInputSupported || !voiceInputEnabled;
   }
 
   function voiceButtonTitle(): string {
@@ -489,9 +491,12 @@
       return "Voice input is preparing.";
     }
     if (voiceInputListening) {
-      return "Stop voice input";
+      return "Release to stop voice input";
     }
-    return "Start voice input";
+    if (!voiceInputAvailable) {
+      return voiceInputAvailabilityReason ?? "Voice input is unavailable.";
+    }
+    return "Hold to talk";
   }
 
   function pasteButtonTitle(): string {
@@ -520,7 +525,8 @@
       }
 
       const imageType =
-        imageItem.types.find((type) => type.startsWith("image/")) ?? "image/png";
+        imageItem.types.find((type) => type.startsWith("image/")) ??
+        "image/png";
       const blob = await imageItem.getType(imageType);
       if (blob.size > MAX_CLIPBOARD_IMAGE_BYTES) {
         toastBus.emit({
@@ -558,9 +564,45 @@
     }
   }
 
-  function handleVoiceButtonClick() {
-    if (voiceInputPreparing || voiceButtonDisabled()) return;
-    window.dispatchEvent(new CustomEvent("gwt-voice-toggle"));
+  function handleVoiceButtonPointerDown(event: PointerEvent) {
+    if (voiceButtonDisabled()) return;
+    const button = event.currentTarget as HTMLButtonElement | null;
+    if (!button) return;
+
+    event.preventDefault();
+    activeVoicePointerId = event.pointerId;
+    try {
+      button.setPointerCapture(event.pointerId);
+    } catch {
+      // Ignore capture failures in non-interactive test environments.
+    }
+    window.dispatchEvent(new CustomEvent("gwt-voice-ptt-start"));
+    requestTerminalFocus(true);
+  }
+
+  function stopVoiceButtonPtt(event: PointerEvent) {
+    if (activeVoicePointerId === null) return;
+    if (event.pointerId !== activeVoicePointerId) return;
+
+    const button = event.currentTarget as HTMLButtonElement | null;
+    event.preventDefault();
+    activeVoicePointerId = null;
+    if (button?.hasPointerCapture?.(event.pointerId)) {
+      try {
+        button.releasePointerCapture(event.pointerId);
+      } catch {
+        // Ignore release failures in non-interactive test environments.
+      }
+    }
+    window.dispatchEvent(new CustomEvent("gwt-voice-ptt-stop"));
+    requestTerminalFocus(true);
+  }
+
+  function handleVoiceButtonLostPointerCapture(event: PointerEvent) {
+    if (activeVoicePointerId === null) return;
+    if (event.pointerId !== activeVoicePointerId) return;
+    activeVoicePointerId = null;
+    window.dispatchEvent(new CustomEvent("gwt-voice-ptt-stop"));
     requestTerminalFocus(true);
   }
 
@@ -568,7 +610,10 @@
     const rootEl = containerEl;
     if (!rootEl) return;
     let cancelled = false;
-    const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
+    const unregisterVoiceInputTarget = registerTerminalInputTarget(
+      paneId,
+      rootEl,
+    );
     const wheelScrollState: WheelScrollState = {
       axis: null,
       remainder: 0,
@@ -652,8 +697,13 @@
       scheduleFitAfterBufferFlush({ rootEl });
     };
 
-    rootEl.addEventListener("pointerdown", handleRootPointerDown, { capture: true });
-    rootEl.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    rootEl.addEventListener("pointerdown", handleRootPointerDown, {
+      capture: true,
+    });
+    rootEl.addEventListener("wheel", handleWheel, {
+      passive: false,
+      capture: true,
+    });
     window.addEventListener("focus", handleWindowFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
@@ -745,7 +795,10 @@
         void pasteFromClipboard();
       }
     };
-    window.addEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
+    window.addEventListener(
+      "gwt-terminal-edit-action",
+      handleTerminalEditAction,
+    );
 
     // Handle user input -> send to PTY backend
     term.onData((data: string) => {
@@ -831,7 +884,8 @@
       viewportObserver.observe(viewportEl);
     }
 
-    const fontSet = typeof document !== "undefined" ? document.fonts : undefined;
+    const fontSet =
+      typeof document !== "undefined" ? document.fonts : undefined;
     const handleFontMetricsChanged = () => {
       scheduleFitAndNotify({ force: true, rootEl });
     };
@@ -840,7 +894,10 @@
         ? (() => {
             fontSet.addEventListener("loadingdone", handleFontMetricsChanged);
             return () =>
-              fontSet.removeEventListener("loadingdone", handleFontMetricsChanged);
+              fontSet.removeEventListener(
+                "loadingdone",
+                handleFontMetricsChanged,
+              );
           })()
         : null;
     if (fontSet?.ready) {
@@ -889,9 +946,18 @@
       rootEl.removeEventListener("wheel", handleWheel, true);
       window.removeEventListener("focus", handleWindowFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
-      window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
-      window.removeEventListener("gwt-terminal-font-family", handleFontFamilyChange);
+      window.removeEventListener(
+        "gwt-terminal-edit-action",
+        handleTerminalEditAction,
+      );
+      window.removeEventListener(
+        "gwt-terminal-font-size",
+        handleFontSizeChange,
+      );
+      window.removeEventListener(
+        "gwt-terminal-font-family",
+        handleFontFamilyChange,
+      );
       unlistenTauriFocus?.();
       removeFontListener?.();
       delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
@@ -919,7 +985,7 @@
               term.write(bytes);
             }
           }
-        }
+        },
       );
       return unlistenFn;
     } catch (err) {
@@ -1023,7 +1089,10 @@
       type="button"
       title={voiceButtonTitle()}
       aria-label="Voice"
-      onclick={handleVoiceButtonClick}
+      onpointerdown={handleVoiceButtonPointerDown}
+      onpointerup={stopVoiceButtonPtt}
+      onpointercancel={stopVoiceButtonPtt}
+      onlostpointercapture={handleVoiceButtonLostPointerCapture}
     >
       <Mic size={24} />
     </button>
@@ -1079,7 +1148,11 @@
 
   .terminal-action-btn:hover:not(:disabled) {
     color: var(--text-primary);
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-color) 55%);
+    border-color: color-mix(
+      in srgb,
+      var(--accent) 45%,
+      var(--border-color) 55%
+    );
     transform: translateY(-1px);
   }
 
@@ -1090,7 +1163,11 @@
 
   .terminal-action-btn.busy {
     color: var(--yellow);
-    border-color: color-mix(in srgb, var(--yellow) 55%, var(--border-color) 45%);
+    border-color: color-mix(
+      in srgb,
+      var(--yellow) 55%,
+      var(--border-color) 45%
+    );
   }
 
   .terminal-action-btn.disabled,

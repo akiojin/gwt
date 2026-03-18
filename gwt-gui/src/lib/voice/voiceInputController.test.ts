@@ -19,8 +19,6 @@ describe("VoiceInputController", () => {
     settings = {
       enabled: true,
       engine: "qwen3-asr",
-      hotkey: "Mod+Shift+M",
-      ptt_hotkey: "Mod+Shift+Space",
       language: "auto",
       quality: "balanced",
       model: "base",
@@ -174,7 +172,7 @@ describe("VoiceInputController", () => {
         key: " ",
         metaKey: true,
         shiftKey: false,
-      })
+      }),
     );
 
     await vi.waitFor(() => {
@@ -222,7 +220,10 @@ describe("VoiceInputController", () => {
     await vi.waitFor(() => {
       expect(input.value).toBe("unchanged");
     });
-    expect(invokeMock).not.toHaveBeenCalledWith("send_keys_to_pane", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "send_keys_to_pane",
+      expect.anything(),
+    );
 
     input.remove();
     controller.dispose();
@@ -257,7 +258,11 @@ describe("VoiceInputController", () => {
       }
       if (command === "ensure_voice_runtime") {
         runtimeReady = true;
-        return { ready: true, installed: true, pythonPath: "/tmp/voice-venv/bin/python3" };
+        return {
+          ready: true,
+          installed: true,
+          pythonPath: "/tmp/voice-venv/bin/python3",
+        };
       }
       if (command === "prepare_voice_model") {
         return { ready: true };
@@ -397,7 +402,9 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      const errorState = states.find((s) => s.error?.includes("transcription failed"));
+      const errorState = states.find((s) =>
+        s.error?.includes("transcription failed"),
+      );
       expect(errorState).toBeTruthy();
     });
 
@@ -428,7 +435,7 @@ describe("VoiceInputController", () => {
 
     await vi.waitFor(() => {
       const errorState = states.find((s) =>
-        s.error?.includes("No active input target")
+        s.error?.includes("No active input target"),
       );
       expect(errorState).toBeTruthy();
     });
@@ -478,8 +485,16 @@ describe("VoiceInputController", () => {
 
     controller.dispose();
 
-    expect(removeListenerSpy).toHaveBeenCalledWith("keydown", expect.any(Function), true);
-    expect(removeListenerSpy).toHaveBeenCalledWith("keyup", expect.any(Function), true);
+    expect(removeListenerSpy).toHaveBeenCalledWith(
+      "keydown",
+      expect.any(Function),
+      true,
+    );
+    expect(removeListenerSpy).toHaveBeenCalledWith(
+      "keyup",
+      expect.any(Function),
+      true,
+    );
 
     removeListenerSpy.mockRestore();
   });
@@ -657,7 +672,9 @@ describe("VoiceInputController", () => {
     await (controller as any).startListening("toggle");
 
     await vi.waitFor(() => {
-      const errorState = states.find((s) => s.error?.includes("Microphone denied"));
+      const errorState = states.find((s) =>
+        s.error?.includes("Microphone denied"),
+      );
       expect(errorState).toBeTruthy();
     });
 
@@ -691,7 +708,10 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(true);
 
     // Should NOT have called transcribe
-    expect(invokeMock).not.toHaveBeenCalledWith("transcribe_voice_audio", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "transcribe_voice_audio",
+      expect.anything(),
+    );
     // Value unchanged
     expect(input.value).toBe("original");
 
@@ -712,7 +732,10 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     // No crash, no error
-    expect(invokeMock).not.toHaveBeenCalledWith("transcribe_voice_audio", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "transcribe_voice_audio",
+      expect.anything(),
+    );
 
     controller.dispose();
   });
@@ -888,7 +911,9 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      const errState = states.find((s) => s.error?.includes("Failed to send transcript"));
+      const errState = states.find((s) =>
+        s.error?.includes("Failed to send transcript"),
+      );
       expect(errState).toBeTruthy();
     });
 
@@ -896,7 +921,7 @@ describe("VoiceInputController", () => {
     controller.dispose();
   });
 
-  it("handles keydown for toggle hotkey - starts and stops", async () => {
+  it("handles fixed PTT keydown", async () => {
     const controller = new VoiceInputController({
       getSettings: () => settings,
       getFallbackTerminalPaneId: () => null,
@@ -907,20 +932,20 @@ describe("VoiceInputController", () => {
     (controller as any).startListening = startMock;
     (controller as any).stopListening = stopMock;
 
-    // Simulate toggle hotkey keydown (Mod+Shift+M on Mac = Meta+Shift+M)
+    // Fixed PTT key is Mod+Shift+Space.
     const isMac = navigator.userAgent.includes("Mac");
     document.dispatchEvent(
       new KeyboardEvent("keydown", {
-        key: "m",
+        key: " ",
         metaKey: isMac,
         ctrlKey: !isMac,
         shiftKey: true,
         bubbles: true,
-      })
+      }),
     );
 
     await vi.waitFor(() => {
-      expect(startMock).toHaveBeenCalledWith("toggle");
+      expect(startMock).toHaveBeenCalledWith("ptt");
     });
 
     controller.dispose();
@@ -940,12 +965,12 @@ describe("VoiceInputController", () => {
     const isMac = navigator.userAgent.includes("Mac");
     document.dispatchEvent(
       new KeyboardEvent("keydown", {
-        key: "m",
+        key: " ",
         metaKey: isMac,
         ctrlKey: !isMac,
         shiftKey: true,
         bubbles: true,
-      })
+      }),
     );
 
     // Should NOT have been called
@@ -972,7 +997,7 @@ describe("VoiceInputController", () => {
         shiftKey: true,
         repeat: true,
         bubbles: true,
-      })
+      }),
     );
 
     expect(startMock).not.toHaveBeenCalled();
@@ -993,7 +1018,7 @@ describe("VoiceInputController", () => {
       new KeyboardEvent("keyup", {
         key: " ",
         bubbles: true,
-      })
+      }),
     );
 
     expect(stopMock).not.toHaveBeenCalled();
@@ -1135,16 +1160,28 @@ describe("VoiceInputController", () => {
 
     (controller as any).processorNode = {
       onaudioprocess: () => {},
-      disconnect: () => { throw new Error("disconnect fail"); },
+      disconnect: () => {
+        throw new Error("disconnect fail");
+      },
     };
     (controller as any).sourceNode = {
-      disconnect: () => { throw new Error("source disconnect fail"); },
+      disconnect: () => {
+        throw new Error("source disconnect fail");
+      },
     };
     (controller as any).mediaStream = {
-      getTracks: () => [{ stop: () => { throw new Error("stop fail"); } }],
+      getTracks: () => [
+        {
+          stop: () => {
+            throw new Error("stop fail");
+          },
+        },
+      ],
     };
     (controller as any).audioContext = {
-      close: async () => { throw new Error("close fail"); },
+      close: async () => {
+        throw new Error("close fail");
+      },
     };
     (controller as any).chunks = [new Float32Array([0.5])];
     (controller as any).capturedSampleCount = 1;
@@ -1173,7 +1210,7 @@ describe("VoiceInputController", () => {
     });
 
     await expect((controller as any).beginCapture()).rejects.toThrow(
-      "Microphone capture API is unavailable"
+      "Microphone capture API is unavailable",
     );
 
     Object.defineProperty(navigator, "mediaDevices", {
@@ -1208,7 +1245,7 @@ describe("VoiceInputController", () => {
     delete (window as any).webkitAudioContext;
 
     await expect((controller as any).beginCapture()).rejects.toThrow(
-      "AudioContext is unavailable"
+      "AudioContext is unavailable",
     );
 
     // Stream tracks should be stopped
@@ -1263,12 +1300,16 @@ describe("VoiceInputController", () => {
     });
 
     const origAudioContext = (window as any).AudioContext;
-    (window as any).AudioContext = function() { return mockAudioContext; };
+    (window as any).AudioContext = function () {
+      return mockAudioContext;
+    };
 
     await (controller as any).beginCapture();
 
     expect(mockSource.connect).toHaveBeenCalledWith(mockProcessor);
-    expect(mockProcessor.connect).toHaveBeenCalledWith(mockAudioContext.destination);
+    expect(mockProcessor.connect).toHaveBeenCalledWith(
+      mockAudioContext.destination,
+    );
     expect((controller as any).mediaStream).toBe(mockStream);
     expect((controller as any).sampleRate).toBe(16_000);
 
@@ -1339,7 +1380,9 @@ describe("VoiceInputController", () => {
       configurable: true,
     });
     const origAudioContext = (window as any).AudioContext;
-    (window as any).AudioContext = function() { return mockAudioContext; };
+    (window as any).AudioContext = function () {
+      return mockAudioContext;
+    };
 
     await (controller as any).beginCapture();
     const handler = mockProcessor.onaudioprocess;
@@ -1390,13 +1433,17 @@ describe("VoiceInputController", () => {
       configurable: true,
     });
     const origAudioContext = (window as any).AudioContext;
-    (window as any).AudioContext = function() { return mockAudioContext; };
+    (window as any).AudioContext = function () {
+      return mockAudioContext;
+    };
 
     await (controller as any).beginCapture();
     const handler = mockProcessor.onaudioprocess;
 
     // Set captured = max so remaining is 0
-    (controller as any).capturedSampleCount = (controller as any).maxCaptureSamples;
+    (controller as any).capturedSampleCount = (
+      controller as any
+    ).maxCaptureSamples;
 
     const inputData = new Float32Array([0.1]);
     handler({
@@ -1431,7 +1478,7 @@ describe("VoiceInputController", () => {
         ctrlKey: !isMac,
         shiftKey: true,
         bubbles: true,
-      })
+      }),
     );
 
     await vi.waitFor(() => {
@@ -1442,29 +1489,24 @@ describe("VoiceInputController", () => {
     controller.dispose();
   });
 
-  it("toggle keydown stops listening when already in toggle mode", async () => {
+  it("button push-to-talk starts and stops capture", async () => {
     const controller = new VoiceInputController({
       getSettings: () => settings,
       getFallbackTerminalPaneId: () => null,
     });
 
+    const startMock = vi.fn(async () => {});
     const stopMock = vi.fn(async () => {});
+    (controller as any).startListening = startMock;
     (controller as any).stopListening = stopMock;
     (controller as any).state.listening = true;
-    (controller as any).activeMode = "toggle";
+    (controller as any).activeMode = "ptt";
 
-    const isMac = navigator.userAgent.includes("Mac");
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "m",
-        metaKey: isMac,
-        ctrlKey: !isMac,
-        shiftKey: true,
-        bubbles: true,
-      })
-    );
+    controller.pressPushToTalk();
+    controller.releasePushToTalk();
 
     await vi.waitFor(() => {
+      expect(startMock).toHaveBeenCalledWith("ptt");
       expect(stopMock).toHaveBeenCalledWith(false);
     });
 
@@ -1488,7 +1530,7 @@ describe("VoiceInputController", () => {
       new KeyboardEvent("keyup", {
         key: "m",
         bubbles: true,
-      })
+      }),
     );
 
     // stopListening should NOT be called since key doesn't match ptt trigger
@@ -1549,7 +1591,10 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     // Should not call transcribe
-    expect(invokeMock).not.toHaveBeenCalledWith("transcribe_voice_audio", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "transcribe_voice_audio",
+      expect.anything(),
+    );
 
     controller.dispose();
   });
@@ -1571,7 +1616,10 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     // Should not call transcribe
-    expect(invokeMock).not.toHaveBeenCalledWith("transcribe_voice_audio", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "transcribe_voice_audio",
+      expect.anything(),
+    );
 
     controller.dispose();
   });
@@ -1602,9 +1650,12 @@ describe("VoiceInputController", () => {
     // Input should be unchanged because it's disabled
     // Transcript should go to fallback terminal
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
-        paneId: "pane-fb",
-      }));
+      expect(invokeMock).toHaveBeenCalledWith(
+        "send_keys_to_pane",
+        expect.objectContaining({
+          paneId: "pane-fb",
+        }),
+      );
     });
     expect(input.value).toBe("original");
 
@@ -1636,9 +1687,12 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
-        paneId: "pane-fb2",
-      }));
+      expect(invokeMock).toHaveBeenCalledWith(
+        "send_keys_to_pane",
+        expect.objectContaining({
+          paneId: "pane-fb2",
+        }),
+      );
     });
     expect(input.value).toBe("locked");
 
@@ -1669,9 +1723,12 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
-        paneId: "pane-ta",
-      }));
+      expect(invokeMock).toHaveBeenCalledWith(
+        "send_keys_to_pane",
+        expect.objectContaining({
+          paneId: "pane-ta",
+        }),
+      );
     });
     expect(textarea.value).toBe("original");
 
@@ -1701,9 +1758,12 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
-        paneId: "pane-non-input",
-      }));
+      expect(invokeMock).toHaveBeenCalledWith(
+        "send_keys_to_pane",
+        expect.objectContaining({
+          paneId: "pane-non-input",
+        }),
+      );
     });
 
     button.remove();
@@ -1732,9 +1792,12 @@ describe("VoiceInputController", () => {
     await (controller as any).stopListening(false);
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
-        paneId: "pane-check",
-      }));
+      expect(invokeMock).toHaveBeenCalledWith(
+        "send_keys_to_pane",
+        expect.objectContaining({
+          paneId: "pane-check",
+        }),
+      );
     });
 
     input.remove();
@@ -1761,16 +1824,27 @@ describe("VoiceInputController", () => {
 
     // jsdom does not support isContentEditable or document.execCommand,
     // and focus() on a div may not set activeElement. Patch these limitations.
-    const origActiveElementDesc = Object.getOwnPropertyDescriptor(Document.prototype, "activeElement")
-      ?? Object.getOwnPropertyDescriptor(document, "activeElement");
+    const origActiveElementDesc =
+      Object.getOwnPropertyDescriptor(Document.prototype, "activeElement") ??
+      Object.getOwnPropertyDescriptor(document, "activeElement");
 
-    Object.defineProperty(editable, "isContentEditable", { get: () => true, configurable: true });
+    Object.defineProperty(editable, "isContentEditable", {
+      get: () => true,
+      configurable: true,
+    });
     editable.focus();
     // Ensure activeElement points to the editable div
-    Object.defineProperty(document, "activeElement", { get: () => editable, configurable: true });
+    Object.defineProperty(document, "activeElement", {
+      get: () => editable,
+      configurable: true,
+    });
 
     const origExecCommand = document.execCommand;
-    document.execCommand = ((commandId: string, _showUI?: boolean, value?: string): boolean => {
+    document.execCommand = ((
+      commandId: string,
+      _showUI?: boolean,
+      value?: string,
+    ): boolean => {
       if (commandId === "insertText" && value) {
         editable.textContent = (editable.textContent ?? "") + value;
         return true;
@@ -1814,12 +1888,19 @@ describe("VoiceInputController", () => {
     editable.tabIndex = 0;
     document.body.appendChild(editable);
 
-    const origActiveElementDesc = Object.getOwnPropertyDescriptor(Document.prototype, "activeElement")
-      ?? Object.getOwnPropertyDescriptor(document, "activeElement");
+    const origActiveElementDesc =
+      Object.getOwnPropertyDescriptor(Document.prototype, "activeElement") ??
+      Object.getOwnPropertyDescriptor(document, "activeElement");
 
-    Object.defineProperty(editable, "isContentEditable", { get: () => true, configurable: true });
+    Object.defineProperty(editable, "isContentEditable", {
+      get: () => true,
+      configurable: true,
+    });
     editable.focus();
-    Object.defineProperty(document, "activeElement", { get: () => editable, configurable: true });
+    Object.defineProperty(document, "activeElement", {
+      get: () => editable,
+      configurable: true,
+    });
 
     // execCommand returns false to trigger fallback path
     const origExecCommand = document.execCommand;
@@ -1866,9 +1947,12 @@ describe("VoiceInputController", () => {
 
     // Should fall through to terminal
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
-        paneId: "pane-no-edit",
-      }));
+      expect(invokeMock).toHaveBeenCalledWith(
+        "send_keys_to_pane",
+        expect.objectContaining({
+          paneId: "pane-no-edit",
+        }),
+      );
     });
 
     div.remove();
@@ -2013,7 +2097,7 @@ describe("VoiceInputController", () => {
         ctrlKey: !isMac,
         shiftKey: true,
         bubbles: true,
-      })
+      }),
     );
 
     // Should NOT have called startListening because pttPressed was already true
@@ -2038,7 +2122,7 @@ describe("VoiceInputController", () => {
       new KeyboardEvent("keyup", {
         key: " ",
         bubbles: true,
-      })
+      }),
     );
 
     await vi.waitFor(() => {
@@ -2066,7 +2150,7 @@ describe("VoiceInputController", () => {
       new KeyboardEvent("keyup", {
         key: " ",
         bubbles: true,
-      })
+      }),
     );
 
     await vi.waitFor(() => {
@@ -2085,18 +2169,21 @@ describe("VoiceInputController", () => {
 
     // Wait for initial capability check
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("get_voice_capability", expect.anything());
+      expect(invokeMock).toHaveBeenCalledWith(
+        "get_voice_capability",
+        expect.anything(),
+      );
     });
 
     const callCountBefore = invokeMock.mock.calls.filter(
-      (c: any[]) => c[0] === "get_voice_capability"
+      (c: any[]) => c[0] === "get_voice_capability",
     ).length;
 
     controller.updateSettings();
 
     await vi.waitFor(() => {
       const callCountAfter = invokeMock.mock.calls.filter(
-        (c: any[]) => c[0] === "get_voice_capability"
+        (c: any[]) => c[0] === "get_voice_capability",
       ).length;
       expect(callCountAfter).toBeGreaterThan(callCountBefore);
     });
@@ -2126,7 +2213,7 @@ describe("VoiceInputController", () => {
 
     await vi.waitFor(() => {
       const errorState = states.find((s) =>
-        s.error?.includes("GPU acceleration and runtime support")
+        s.error?.includes("GPU acceleration and runtime support"),
       );
       expect(errorState).toBeTruthy();
     });
@@ -2214,9 +2301,7 @@ describe("VoiceInputController", () => {
     controller.dispose();
   });
 
-  it("uses fallback hotkey when settings.hotkey is empty", async () => {
-    settings.hotkey = "";
-
+  it("uses the fixed PTT key regardless of settings shape", async () => {
     const controller = new VoiceInputController({
       getSettings: () => settings,
       getFallbackTerminalPaneId: () => null,
@@ -2225,37 +2310,6 @@ describe("VoiceInputController", () => {
     const startMock = vi.fn(async () => {});
     (controller as any).startListening = startMock;
 
-    // Default toggle hotkey is Mod+Shift+M
-    const isMac = navigator.userAgent.includes("Mac");
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "m",
-        metaKey: isMac,
-        ctrlKey: !isMac,
-        shiftKey: true,
-        bubbles: true,
-      })
-    );
-
-    await vi.waitFor(() => {
-      expect(startMock).toHaveBeenCalledWith("toggle");
-    });
-
-    controller.dispose();
-  });
-
-  it("uses fallback ptt_hotkey when settings.ptt_hotkey is empty", async () => {
-    settings.ptt_hotkey = "";
-
-    const controller = new VoiceInputController({
-      getSettings: () => settings,
-      getFallbackTerminalPaneId: () => null,
-    });
-
-    const startMock = vi.fn(async () => {});
-    (controller as any).startListening = startMock;
-
-    // Default PTT hotkey is Mod+Shift+Space
     const isMac = navigator.userAgent.includes("Mac");
     document.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -2264,7 +2318,7 @@ describe("VoiceInputController", () => {
         ctrlKey: !isMac,
         shiftKey: true,
         bubbles: true,
-      })
+      }),
     );
 
     await vi.waitFor(() => {
@@ -2299,10 +2353,11 @@ describe("VoiceInputController", () => {
 
     await vi.waitFor(() => {
       const transcribeCall = invokeMock.mock.calls.find(
-        (c: any[]) => c[0] === "transcribe_voice_audio"
+        (c: any[]) => c[0] === "transcribe_voice_audio",
       );
       expect(transcribeCall).toBeTruthy();
-      if (!transcribeCall) throw new Error("transcribe_voice_audio call not found");
+      if (!transcribeCall)
+        throw new Error("transcribe_voice_audio call not found");
       expect(transcribeCall[1].input.language).toBe("ja");
     });
 
@@ -2335,10 +2390,11 @@ describe("VoiceInputController", () => {
 
     await vi.waitFor(() => {
       const transcribeCall = invokeMock.mock.calls.find(
-        (c: any[]) => c[0] === "transcribe_voice_audio"
+        (c: any[]) => c[0] === "transcribe_voice_audio",
       );
       expect(transcribeCall).toBeTruthy();
-      if (!transcribeCall) throw new Error("transcribe_voice_audio call not found");
+      if (!transcribeCall)
+        throw new Error("transcribe_voice_audio call not found");
       expect(transcribeCall[1].input.language).toBe("en");
     });
 
@@ -2361,9 +2417,12 @@ describe("VoiceInputController", () => {
     await (controller as any).insertTranscript("voice transcript");
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
-        paneId: "pane-ta-ro",
-      }));
+      expect(invokeMock).toHaveBeenCalledWith(
+        "send_keys_to_pane",
+        expect.objectContaining({
+          paneId: "pane-ta-ro",
+        }),
+      );
     });
     expect(textarea.value).toBe("locked");
 
@@ -2380,12 +2439,19 @@ describe("VoiceInputController", () => {
     const editable = document.createElement("div");
     editable.contentEditable = "true";
     document.body.appendChild(editable);
-    Object.defineProperty(editable, "isContentEditable", { get: () => true, configurable: true });
+    Object.defineProperty(editable, "isContentEditable", {
+      get: () => true,
+      configurable: true,
+    });
 
-    const origActiveElementDesc = Object.getOwnPropertyDescriptor(Document.prototype, "activeElement")
-      ?? Object.getOwnPropertyDescriptor(document, "activeElement");
+    const origActiveElementDesc =
+      Object.getOwnPropertyDescriptor(Document.prototype, "activeElement") ??
+      Object.getOwnPropertyDescriptor(document, "activeElement");
 
-    Object.defineProperty(document, "activeElement", { get: () => editable, configurable: true });
+    Object.defineProperty(document, "activeElement", {
+      get: () => editable,
+      configurable: true,
+    });
 
     const origGetSelection = window.getSelection;
     window.getSelection = () => null;
@@ -2394,9 +2460,12 @@ describe("VoiceInputController", () => {
 
     // Should fall through to terminal
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("send_keys_to_pane", expect.objectContaining({
-        paneId: "pane-sel-null",
-      }));
+      expect(invokeMock).toHaveBeenCalledWith(
+        "send_keys_to_pane",
+        expect.objectContaining({
+          paneId: "pane-sel-null",
+        }),
+      );
     });
 
     window.getSelection = origGetSelection;
@@ -2419,32 +2488,49 @@ describe("VoiceInputController", () => {
     editable.contentEditable = "true";
     editable.textContent = "existing";
     document.body.appendChild(editable);
-    Object.defineProperty(editable, "isContentEditable", { get: () => true, configurable: true });
+    Object.defineProperty(editable, "isContentEditable", {
+      get: () => true,
+      configurable: true,
+    });
 
-    const origActiveElementDesc = Object.getOwnPropertyDescriptor(Document.prototype, "activeElement")
-      ?? Object.getOwnPropertyDescriptor(document, "activeElement");
-    Object.defineProperty(document, "activeElement", { get: () => editable, configurable: true });
+    const origActiveElementDesc =
+      Object.getOwnPropertyDescriptor(Document.prototype, "activeElement") ??
+      Object.getOwnPropertyDescriptor(document, "activeElement");
+    Object.defineProperty(document, "activeElement", {
+      get: () => editable,
+      configurable: true,
+    });
 
     // Mock getSelection to return a selection with rangeCount=0, then add range
     const mockRange = document.createRange();
     const addedRanges: Range[] = [];
     const origGetSelection = window.getSelection;
     let rangeCount = 0;
-    window.getSelection = () => ({
-      rangeCount: rangeCount,
-      removeAllRanges: () => { rangeCount = 0; },
-      addRange: (r: Range) => { addedRanges.push(r); rangeCount = 1; },
-      getRangeAt: () => {
-        // Return a real range for the execCommand fallback path
-        const r = document.createRange();
-        r.selectNodeContents(editable);
-        r.collapse(false);
-        return r;
-      },
-    } as any);
+    window.getSelection = () =>
+      ({
+        rangeCount: rangeCount,
+        removeAllRanges: () => {
+          rangeCount = 0;
+        },
+        addRange: (r: Range) => {
+          addedRanges.push(r);
+          rangeCount = 1;
+        },
+        getRangeAt: () => {
+          // Return a real range for the execCommand fallback path
+          const r = document.createRange();
+          r.selectNodeContents(editable);
+          r.collapse(false);
+          return r;
+        },
+      }) as any;
 
     const origExecCommand = document.execCommand;
-    document.execCommand = ((commandId: string, _showUI?: boolean, value?: string): boolean => {
+    document.execCommand = ((
+      commandId: string,
+      _showUI?: boolean,
+      value?: string,
+    ): boolean => {
       if (commandId === "insertText" && value) {
         editable.textContent = (editable.textContent ?? "") + value;
         return true;
@@ -2496,7 +2582,9 @@ describe("VoiceInputController", () => {
       configurable: true,
     });
     const origAudioContext = (window as any).AudioContext;
-    (window as any).AudioContext = function() { return mockAudioContext; };
+    (window as any).AudioContext = function () {
+      return mockAudioContext;
+    };
 
     await (controller as any).beginCapture();
     const handler = mockProcessor.onaudioprocess;
@@ -2541,10 +2629,7 @@ describe("VoiceInputController", () => {
     __setVoiceGpuDetectorForTests(() => true);
   });
 
-  it("parseHotkey handles Ctrl+Control and Cmd+Command modifiers", async () => {
-    // Set hotkey with explicit ctrl modifier
-    settings.hotkey = "Ctrl+Shift+K";
-
+  it("ignores non-fixed keyboard shortcuts", async () => {
     const controller = new VoiceInputController({
       getSettings: () => settings,
       getFallbackTerminalPaneId: () => null,
@@ -2553,74 +2638,16 @@ describe("VoiceInputController", () => {
     const startMock = vi.fn(async () => {});
     (controller as any).startListening = startMock;
 
-    // Dispatch with ctrlKey for non-Mod hotkey
     document.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "k",
         ctrlKey: true,
         shiftKey: true,
         bubbles: true,
-      })
+      }),
     );
 
-    await vi.waitFor(() => {
-      expect(startMock).toHaveBeenCalledWith("toggle");
-    });
-
-    controller.dispose();
-  });
-
-  it("parseHotkey handles Alt+Option modifier", async () => {
-    settings.hotkey = "Alt+K";
-
-    const controller = new VoiceInputController({
-      getSettings: () => settings,
-      getFallbackTerminalPaneId: () => null,
-    });
-
-    const startMock = vi.fn(async () => {});
-    (controller as any).startListening = startMock;
-
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "k",
-        altKey: true,
-        bubbles: true,
-      })
-    );
-
-    await vi.waitFor(() => {
-      expect(startMock).toHaveBeenCalledWith("toggle");
-    });
-
-    controller.dispose();
-  });
-
-  it("normalizeKeyName handles Escape key event", async () => {
-    // Use "Esc" as the key in a hotkey config to test normalizeKeyName
-    settings.hotkey = "Mod+Esc";
-
-    const controller = new VoiceInputController({
-      getSettings: () => settings,
-      getFallbackTerminalPaneId: () => null,
-    });
-
-    const startMock = vi.fn(async () => {});
-    (controller as any).startListening = startMock;
-
-    const isMac = navigator.userAgent.includes("Mac");
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Escape",
-        metaKey: isMac,
-        ctrlKey: !isMac,
-        bubbles: true,
-      })
-    );
-
-    await vi.waitFor(() => {
-      expect(startMock).toHaveBeenCalledWith("toggle");
-    });
+    expect(startMock).not.toHaveBeenCalled();
 
     controller.dispose();
   });
@@ -2676,10 +2703,11 @@ describe("VoiceInputController", () => {
 
     await vi.waitFor(() => {
       const transcribeCall = invokeMock.mock.calls.find(
-        (c: any[]) => c[0] === "transcribe_voice_audio"
+        (c: any[]) => c[0] === "transcribe_voice_audio",
       );
       expect(transcribeCall).toBeTruthy();
-      if (!transcribeCall) throw new Error("transcribe_voice_audio call not found");
+      if (!transcribeCall)
+        throw new Error("transcribe_voice_audio call not found");
       expect(transcribeCall[1].input.quality).toBe("high");
     });
 

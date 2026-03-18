@@ -1,6 +1,10 @@
 import type { AgentId } from "./agentUtils";
 
-export type AgentStatusValue = "unknown" | "running" | "waiting_input" | "stopped";
+export type AgentStatusValue =
+  | "unknown"
+  | "running"
+  | "waiting_input"
+  | "stopped";
 
 export interface StructuredError {
   severity: "info" | "warning" | "error" | "critical";
@@ -59,7 +63,6 @@ export interface TerminalAnsiProbe {
   has_256_color: boolean;
   has_true_color: boolean;
 }
-
 
 export interface SendKeysRequest {
   paneId: string;
@@ -134,8 +137,6 @@ export interface SettingsData {
 export interface VoiceInputSettings {
   enabled: boolean;
   engine: "qwen3-asr" | (string & {});
-  hotkey: string;
-  ptt_hotkey: string;
   language: "auto" | "ja" | "en" | (string & {});
   quality: "fast" | "balanced" | "accurate" | (string & {});
   model: string;
@@ -511,8 +512,12 @@ export interface IssueBranchMatch {
   branchName: string;
 }
 
-export const ISSUE_BRANCH_LOOKUP_UNKNOWN = "__gwt_issue_branch_lookup_unknown__";
-export type IssueBranchLookupState = string | null | typeof ISSUE_BRANCH_LOOKUP_UNKNOWN;
+export const ISSUE_BRANCH_LOOKUP_UNKNOWN =
+  "__gwt_issue_branch_lookup_unknown__";
+export type IssueBranchLookupState =
+  | string
+  | null
+  | typeof ISSUE_BRANCH_LOOKUP_UNKNOWN;
 
 export interface RollbackResult {
   localDeleted: boolean;
@@ -573,7 +578,16 @@ export interface PrStatusInfo {
   changedFilesCount: number;
   additions: number;
   deletions: number;
-  mergeStateStatus?: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
+  mergeStateStatus?:
+    | "BEHIND"
+    | "BLOCKED"
+    | "CLEAN"
+    | "DIRTY"
+    | "DRAFT"
+    | "HAS_HOOKS"
+    | "UNKNOWN"
+    | "UNSTABLE"
+    | null;
   /** UI-oriented merge state synthesized by backend. */
   mergeUiState?: MergeUiState;
   /** True when only non-required checks are failing. */

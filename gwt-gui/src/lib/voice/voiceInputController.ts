@@ -1,10 +1,11 @@
-import { getFocusedTerminalPaneId, getInputFieldTarget } from "./inputTargetRegistry";
+import {
+  getFocusedTerminalPaneId,
+  getInputFieldTarget,
+} from "./inputTargetRegistry";
 
 export interface VoiceControllerSettings {
   enabled: boolean;
   engine: string;
-  hotkey: string;
-  ptt_hotkey: string;
   language: string;
   quality: string;
   model: string;
@@ -26,16 +27,8 @@ export interface VoiceInputControllerOptions {
   onStateChange?: (state: VoiceControllerState) => void;
 }
 
-type HotkeyDefinition = {
-  useMod: boolean;
-  ctrl: boolean;
-  meta: boolean;
-  shift: boolean;
-  alt: boolean;
-  key: string;
-};
-
 type CaptureMode = "toggle" | "ptt";
+type PttSource = "keyboard" | "button";
 
 type VoiceCapabilityResponse = {
   available: boolean;
@@ -59,50 +52,7 @@ type VoiceTranscriptionResponse = {
 
 type TauriInvokeFn = <T>(command: string, payload?: unknown) => Promise<T>;
 
-const DEFAULT_TOGGLE_HOTKEY = "Mod+Shift+M";
-const DEFAULT_PTT_HOTKEY = "Mod+Shift+Space";
 const MAX_CAPTURE_DURATION_SECONDS = 30;
-
-function parseHotkey(rawHotkey: string): HotkeyDefinition {
-  const tokens = rawHotkey
-    .split("+")
-    .map((t) => t.trim().toLowerCase())
-    .filter((t) => t.length > 0);
-
-  const modifiers = new Set(tokens);
-  const keyToken = tokens.find(
-    (t) =>
-      t !== "mod" &&
-      t !== "ctrl" &&
-      t !== "control" &&
-      t !== "meta" &&
-      t !== "cmd" &&
-      t !== "command" &&
-      t !== "shift" &&
-      t !== "alt" &&
-      t !== "option"
-  );
-
-  return {
-    useMod: modifiers.has("mod"),
-    ctrl: modifiers.has("ctrl") || modifiers.has("control"),
-    meta: modifiers.has("meta") || modifiers.has("cmd") || modifiers.has("command"),
-    shift: modifiers.has("shift"),
-    alt: modifiers.has("alt") || modifiers.has("option"),
-    key: normalizeKeyName(keyToken ?? "m"),
-  };
-}
-
-function normalizeHotkey(
-  rawHotkey: string | undefined | null,
-  fallback: string
-): HotkeyDefinition {
-  const value = (rawHotkey ?? "").trim();
-  if (!value) {
-    return parseHotkey(fallback);
-  }
-  return parseHotkey(value);
-}
 
 function normalizeKey(value: string): string {
   if (value.length === 1) return value.toLowerCase();
@@ -116,25 +66,18 @@ function normalizeKeyName(value: string): string {
   return key;
 }
 
-function eventMatchesHotkey(event: KeyboardEvent, hotkey: HotkeyDefinition): boolean {
-  const expectedCtrl = hotkey.useMod
-    ? !navigator.userAgent.includes("Mac")
-    : hotkey.ctrl;
-  const expectedMeta = hotkey.useMod
-    ? navigator.userAgent.includes("Mac")
-    : hotkey.meta;
-
+function eventMatchesFixedPttHotkey(event: KeyboardEvent): boolean {
+  const isMac = navigator.userAgent.includes("Mac");
   return (
-    normalizeKeyName(event.key) === hotkey.key &&
-    event.ctrlKey === expectedCtrl &&
-    event.metaKey === expectedMeta &&
-    event.shiftKey === hotkey.shift &&
-    event.altKey === hotkey.alt
+    normalizeKeyName(event.key) === " " &&
+    event.shiftKey &&
+    !event.altKey &&
+    (isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey)
   );
 }
 
-function eventMatchesHotkeyTrigger(event: KeyboardEvent, hotkey: HotkeyDefinition): boolean {
-  return normalizeKeyName(event.key) === hotkey.key;
+function eventMatchesFixedPttTrigger(event: KeyboardEvent): boolean {
+  return normalizeKeyName(event.key) === " ";
 }
 
 function languageForQwen(value: string): string {
@@ -178,7 +121,10 @@ function detectGpuAvailability(): boolean {
   }
 }
 
-async function defaultInvokeTauri<T>(command: string, payload?: unknown): Promise<T> {
+async function defaultInvokeTauri<T>(
+  command: string,
+  payload?: unknown,
+): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(command, payload as Record<string, unknown> | undefined);
 }
@@ -190,7 +136,9 @@ export function __setVoiceInvokeForTests(invoker: TauriInvokeFn | null) {
   invokeTauri = invoker ?? defaultInvokeTauri;
 }
 
-export function __setVoiceGpuDetectorForTests(detector: (() => boolean) | null) {
+export function __setVoiceGpuDetectorForTests(
+  detector: (() => boolean) | null,
+) {
   gpuAvailabilityDetector = detector ?? detectGpuAvailability;
 }
 
@@ -208,11 +156,14 @@ function isTextInputElement(element: HTMLInputElement): boolean {
 }
 
 function dispatchTextInputEvent(target: HTMLElement) {
-  target.dispatchEvent(new Event("input", { bubbles: true, cancelable: false }));
+  target.dispatchEvent(
+    new Event("input", { bubbles: true, cancelable: false }),
+  );
 }
 
 function insertIntoInput(element: HTMLInputElement, text: string): boolean {
-  if (element.disabled || element.readOnly || !isTextInputElement(element)) return false;
+  if (element.disabled || element.readOnly || !isTextInputElement(element))
+    return false;
 
   const original = element.value;
   const start = element.selectionStart ?? original.length;
@@ -230,7 +181,10 @@ function insertIntoInput(element: HTMLInputElement, text: string): boolean {
   return true;
 }
 
-function insertIntoTextarea(element: HTMLTextAreaElement, text: string): boolean {
+function insertIntoTextarea(
+  element: HTMLTextAreaElement,
+  text: string,
+): boolean {
   if (element.disabled || element.readOnly) return false;
 
   const original = element.value;
@@ -306,7 +260,7 @@ export class VoiceInputController {
 
   private startInFlight = false;
   private runtimeBootstrapSucceeded = false;
-  private pttPressed = false;
+  private activePttSources = new Set<PttSource>();
   private activeMode: CaptureMode | null = null;
 
   private mediaStream: MediaStream | null = null;
@@ -319,6 +273,18 @@ export class VoiceInputController {
   private maxCaptureSamples = 0;
   private captureTruncated = false;
 
+  private get pttPressed(): boolean {
+    return this.activePttSources.has("keyboard");
+  }
+
+  private set pttPressed(value: boolean) {
+    if (value) {
+      this.activePttSources.add("keyboard");
+    } else {
+      this.activePttSources.delete("keyboard");
+    }
+  }
+
   constructor(options: VoiceInputControllerOptions) {
     this.options = options;
     document.addEventListener("keydown", this.handleKeydown, true);
@@ -329,6 +295,7 @@ export class VoiceInputController {
   updateSettings() {
     const settings = this.options.getSettings();
     if (!settings.enabled && this.state.listening) {
+      this.activePttSources.clear();
       void this.stopListening(false);
     }
     void this.refreshCapability();
@@ -337,7 +304,7 @@ export class VoiceInputController {
   dispose() {
     document.removeEventListener("keydown", this.handleKeydown, true);
     document.removeEventListener("keyup", this.handleKeyup, true);
-    this.pttPressed = false;
+    this.activePttSources.clear();
     void this.stopListening(true);
   }
 
@@ -361,7 +328,7 @@ export class VoiceInputController {
         {
           gpuAvailable,
           quality,
-        }
+        },
       );
 
       this.state.supported = true;
@@ -376,7 +343,8 @@ export class VoiceInputController {
       this.state.supported = false;
       this.state.available = false;
       this.state.modelReady = false;
-      this.state.availabilityReason = "Voice runtime is unavailable in this environment.";
+      this.state.availabilityReason =
+        "Voice runtime is unavailable in this environment.";
       this.emitState();
     }
   }
@@ -387,50 +355,44 @@ export class VoiceInputController {
     const settings = this.options.getSettings();
     if (!settings.enabled) return;
 
-    const toggleHotkey = normalizeHotkey(settings.hotkey, DEFAULT_TOGGLE_HOTKEY);
-    const pttHotkey = normalizeHotkey(settings.ptt_hotkey, DEFAULT_PTT_HOTKEY);
-
-    if (eventMatchesHotkey(event, toggleHotkey)) {
+    if (eventMatchesFixedPttHotkey(event)) {
       event.preventDefault();
       event.stopPropagation();
-      if (this.state.listening && this.activeMode === "toggle") {
-        void this.stopListening(false);
-      } else {
-        void this.startListening("toggle");
-      }
-      return;
-    }
-
-    if (!this.pttPressed && eventMatchesHotkey(event, pttHotkey)) {
-      event.preventDefault();
-      event.stopPropagation();
-      this.pttPressed = true;
-      void this.startListening("ptt");
+      this.beginPushToTalk("keyboard");
     }
   };
 
   private handleKeyup = (event: KeyboardEvent) => {
-    if (!this.pttPressed) return;
-
-    const settings = this.options.getSettings();
-    const pttHotkey = normalizeHotkey(settings.ptt_hotkey, DEFAULT_PTT_HOTKEY);
-    if (!eventMatchesHotkeyTrigger(event, pttHotkey)) return;
+    if (!this.activePttSources.has("keyboard")) return;
+    if (!eventMatchesFixedPttTrigger(event)) return;
 
     event.preventDefault();
     event.stopPropagation();
-    this.pttPressed = false;
-
-    if (this.state.listening && this.activeMode === "ptt") {
-      void this.stopListening(false);
-    }
+    this.endPushToTalk("keyboard");
   };
 
-  /** Toggle voice listening on/off. Used by UI mic buttons. */
-  toggleListening() {
-    if (this.state.listening && this.activeMode === "toggle") {
+  pressPushToTalk() {
+    this.beginPushToTalk("button");
+  }
+
+  releasePushToTalk() {
+    this.endPushToTalk("button");
+  }
+
+  private beginPushToTalk(source: PttSource) {
+    const settings = this.options.getSettings();
+    if (!settings.enabled || this.activePttSources.has(source)) return;
+    this.activePttSources.add(source);
+    if (this.activePttSources.size === 1) {
+      void this.startListening("ptt");
+    }
+  }
+
+  private endPushToTalk(source: PttSource) {
+    if (!this.activePttSources.delete(source)) return;
+    if (this.activePttSources.size > 0) return;
+    if (this.state.listening && this.activeMode === "ptt") {
       void this.stopListening(false);
-    } else {
-      void this.startListening("toggle");
     }
   }
 
@@ -450,7 +412,7 @@ export class VoiceInputController {
       if (!this.state.available) {
         this.setError(
           this.state.availabilityReason ||
-            "Voice input is unavailable because GPU acceleration and runtime support are required."
+            "Voice input is unavailable because GPU acceleration and runtime support are required.",
         );
         return;
       }
@@ -464,7 +426,7 @@ export class VoiceInputController {
           {
             gpuAvailable: gpuAvailabilityDetector(),
             quality: settings.quality,
-          }
+          },
         );
         this.state.modelReady = !!prep.ready;
       }
@@ -501,7 +463,7 @@ export class VoiceInputController {
 
     try {
       const setupResult = await invokeTauri<VoiceRuntimeSetupResponse>(
-        "ensure_voice_runtime"
+        "ensure_voice_runtime",
       );
       if (setupResult.ready) {
         this.runtimeBootstrapSucceeded = true;
@@ -543,14 +505,14 @@ export class VoiceInputController {
             quality: settings.quality,
             gpuAvailable: gpuAvailabilityDetector(),
           },
-        }
+        },
       );
 
       const transcript = (result?.transcript ?? "").trim();
       if (!transcript) {
         if (capture.truncated) {
           this.setError(
-            `Voice capture reached the ${MAX_CAPTURE_DURATION_SECONDS}s limit with no transcribed text.`
+            `Voice capture reached the ${MAX_CAPTURE_DURATION_SECONDS}s limit with no transcribed text.`,
           );
         }
         return;
@@ -560,7 +522,7 @@ export class VoiceInputController {
         this.setError(
           capture.truncated
             ? `Voice capture was limited to ${MAX_CAPTURE_DURATION_SECONDS}s.`
-            : null
+            : null,
         );
       }
     } catch (err) {
@@ -589,7 +551,8 @@ export class VoiceInputController {
       video: false,
     });
 
-    const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext) as
+    const AudioCtx = (window.AudioContext ||
+      (window as any).webkitAudioContext) as
       | (new () => AudioContext)
       | undefined;
     if (!AudioCtx) {
@@ -604,7 +567,7 @@ export class VoiceInputController {
     this.sampleRate = audioContext.sampleRate;
     this.maxCaptureSamples = Math.max(
       1,
-      Math.round(this.sampleRate * MAX_CAPTURE_DURATION_SECONDS)
+      Math.round(this.sampleRate * MAX_CAPTURE_DURATION_SECONDS),
     );
 
     processor.onaudioprocess = (event) => {
@@ -622,7 +585,10 @@ export class VoiceInputController {
       }
       this.chunks.push(new Float32Array(input.subarray(0, length)));
       this.capturedSampleCount += length;
-      if (length < input.length || this.capturedSampleCount >= this.maxCaptureSamples) {
+      if (
+        length < input.length ||
+        this.capturedSampleCount >= this.maxCaptureSamples
+      ) {
         this.captureTruncated = true;
       }
     };
@@ -636,7 +602,11 @@ export class VoiceInputController {
     this.processorNode = processor;
   }
 
-  private async endCapture(): Promise<{ samples: number[]; sampleRate: number; truncated: boolean } | null> {
+  private async endCapture(): Promise<{
+    samples: number[];
+    sampleRate: number;
+    truncated: boolean;
+  } | null> {
     const processor = this.processorNode;
     const source = this.sourceNode;
     const audioContext = this.audioContext;
@@ -690,7 +660,10 @@ export class VoiceInputController {
       return null;
     }
 
-    const totalLength = this.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const totalLength = this.chunks.reduce(
+      (sum, chunk) => sum + chunk.length,
+      0,
+    );
     const merged = new Float32Array(totalLength);
     let offset = 0;
     for (const chunk of this.chunks) {
