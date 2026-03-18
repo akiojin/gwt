@@ -239,6 +239,14 @@ describe("AssistantPanel", () => {
       ...structuredClone(assistantStateFixture),
       isThinking: true,
       sessionId: "session-main",
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "Checking startup analysis cache...",
+          timestamp: 1,
+        },
+      ],
     };
 
     const rendered = await renderAssistantPanel();
@@ -248,6 +256,7 @@ describe("AssistantPanel", () => {
     await waitFor(() => {
       expect(textarea.disabled).toBe(true);
       expect(button.disabled).toBe(true);
+      expect(rendered.getByText("Checking startup analysis cache...")).toBeTruthy();
       expect(rendered.getByText("Thinking...")).toBeTruthy();
     });
   });

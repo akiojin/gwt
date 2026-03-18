@@ -153,8 +153,9 @@ pub struct AppState {
     pub session_store: SessionStore,
     /// Assistant Mode engine per window label.
     pub assistant_engine: Mutex<HashMap<String, crate::assistant_engine::AssistantEngine>>,
-    /// Assistant sessions currently running startup analysis.
-    pub assistant_startup_inflight: Mutex<HashSet<String>>,
+    /// Assistant sessions currently running startup analysis, keyed by window label
+    /// with a human-readable progress status.
+    pub assistant_startup_inflight: Mutex<HashMap<String, String>>,
     /// Assistant Mode monitor handle per window label.
     pub assistant_monitor_handle:
         Mutex<HashMap<String, crate::assistant_monitor::AssistantMonitorHandle>>,
@@ -200,7 +201,7 @@ impl AppState {
             last_focused_window_label: Mutex::new(None),
             session_store: SessionStore::new(),
             assistant_engine: Mutex::new(HashMap::new()),
-            assistant_startup_inflight: Mutex::new(HashSet::new()),
+            assistant_startup_inflight: Mutex::new(HashMap::new()),
             assistant_monitor_handle: Mutex::new(HashMap::new()),
         }
     }
@@ -339,8 +340,8 @@ impl AppState {
         if let Ok(mut map) = self.assistant_engine.lock() {
             map.remove(window_label);
         }
-        if let Ok(mut set) = self.assistant_startup_inflight.lock() {
-            set.remove(window_label);
+        if let Ok(mut map) = self.assistant_startup_inflight.lock() {
+            map.remove(window_label);
         }
         if let Ok(mut map) = self.assistant_monitor_handle.lock() {
             map.remove(window_label);

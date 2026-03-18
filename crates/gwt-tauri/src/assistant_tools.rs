@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::state::AppState;
 use crate::tool_helpers::{
     execute_shared_tool, get_optional_u64_any, get_required_string_any, normalize_args,
-    shared_tool_definitions,
+    shared_tool_definitions, TOOL_SEND_KEYS_TO_PANE, TOOL_UPSERT_SPEC_ISSUE,
 };
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 use gwt_core::process::command as process_command;
@@ -27,6 +27,17 @@ pub const TOOL_RUN_COMMAND: &str = "run_command";
 pub fn assistant_tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = assistant_specific_tool_definitions();
     tools.extend(shared_tool_definitions());
+    tools
+}
+
+pub fn assistant_startup_tool_definitions() -> Vec<ToolDefinition> {
+    let mut tools = assistant_specific_tool_definitions()
+        .into_iter()
+        .filter(|tool| tool.function.name != TOOL_RUN_COMMAND)
+        .collect::<Vec<_>>();
+    tools.extend(shared_tool_definitions().into_iter().filter(|tool| {
+        tool.function.name != TOOL_SEND_KEYS_TO_PANE && tool.function.name != TOOL_UPSERT_SPEC_ISSUE
+    }));
     tools
 }
 
@@ -292,5 +303,25 @@ fn run_shell_command(dir: &str, shell_command: &str) -> Result<String, String> {
             }
             Err(e) => return Err(format!("Failed to wait for command: {}", e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_names(tools: Vec<ToolDefinition>) -> Vec<String> {
+        tools.into_iter().map(|tool| tool.function.name).collect()
+    }
+
+    #[test]
+    fn assistant_startup_tool_definitions_exclude_mutating_tools() {
+        let names = tool_names(assistant_startup_tool_definitions());
+
+        assert!(!names.contains(&TOOL_RUN_COMMAND.to_string()));
+        assert!(!names.contains(&TOOL_SEND_KEYS_TO_PANE.to_string()));
+        assert!(!names.contains(&TOOL_UPSERT_SPEC_ISSUE.to_string()));
+        assert!(names.contains(&TOOL_READ_FILE.to_string()));
+        assert!(names.contains(&TOOL_GIT_STATUS.to_string()));
     }
 }

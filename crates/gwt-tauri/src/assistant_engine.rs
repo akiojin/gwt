@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use gwt_core::ai::{
     ChatCompletionsToolCallFunction, ChatCompletionsToolCallRef, ChatCompletionsToolMessage,
+    ToolDefinition,
 };
 use serde::Serialize;
 use tracing::{info, warn};
@@ -94,6 +95,7 @@ impl AssistantEngine {
             &self.window_label,
             &mut self.llm_call_count,
             &mut self.estimated_tokens,
+            assistant_tools::assistant_tool_definitions(),
             state,
         )
     }
@@ -106,6 +108,7 @@ impl AssistantEngine {
             &self.window_label,
             &mut self.llm_call_count,
             &mut self.estimated_tokens,
+            assistant_tools::assistant_startup_tool_definitions(),
             state,
         )?;
 
@@ -198,6 +201,7 @@ impl AssistantEngine {
             &self.window_label,
             &mut self.llm_call_count,
             &mut self.estimated_tokens,
+            assistant_tools::assistant_tool_definitions(),
             state,
         )?;
         Ok(Some(response))
@@ -241,9 +245,9 @@ impl AssistantEngine {
         window_label: &str,
         llm_call_count: &mut u64,
         estimated_tokens: &mut u64,
+        tools: Vec<ToolDefinition>,
         state: &AppState,
     ) -> Result<AssistantResponse, String> {
-        let tools = assistant_tools::assistant_tool_definitions();
         let mut actions_taken = Vec::new();
 
         // Load AI settings once before the loop to avoid repeated config reads.
