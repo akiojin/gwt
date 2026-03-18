@@ -12,7 +12,8 @@ vi.mock("../openExternalUrl", () => ({
 }));
 
 async function renderProjectIndexPanel(projectPath = "/tmp/project") {
-  const { default: ProjectIndexPanel } = await import("./ProjectIndexPanel.svelte");
+  const { default: ProjectIndexPanel } =
+    await import("./ProjectIndexPanel.svelte");
   return render(ProjectIndexPanel, {
     props: {
       projectPath,
@@ -55,6 +56,22 @@ describe("ProjectIndexPanel", () => {
     cleanup();
   });
 
+  it("is files-only and no longer exposes issue search controls", async () => {
+    const rendered = await renderProjectIndexPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("12911 files indexed")).toBeTruthy();
+    });
+
+    expect(rendered.queryByRole("button", { name: "Issues" })).toBeNull();
+    expect(
+      rendered.queryByRole("button", { name: /Update Index/i }),
+    ).toBeNull();
+    expect(
+      rendered.queryByPlaceholderText("Search GitHub Issues..."),
+    ).toBeNull();
+  });
+
   it("does not show no-results message before a files search is executed", async () => {
     const rendered = await renderProjectIndexPanel();
 
@@ -62,7 +79,9 @@ describe("ProjectIndexPanel", () => {
       expect(rendered.getByText("12911 files indexed")).toBeTruthy();
     });
 
-    const input = rendered.getByPlaceholderText("Search project files...") as HTMLInputElement;
+    const input = rendered.getByPlaceholderText(
+      "Search project files...",
+    ) as HTMLInputElement;
     await fireEvent.input(input, { target: { value: "Git" } });
 
     expect(rendered.queryByText("No results found")).toBeNull();
@@ -79,7 +98,9 @@ describe("ProjectIndexPanel", () => {
       expect(rendered.getByText("12911 files indexed")).toBeTruthy();
     });
 
-    const input = rendered.getByPlaceholderText("Search project files...") as HTMLInputElement;
+    const input = rendered.getByPlaceholderText(
+      "Search project files...",
+    ) as HTMLInputElement;
     await fireEvent.input(input, { target: { value: "Git" } });
     await fireEvent.click(rendered.getByRole("button", { name: "Search" }));
 
@@ -103,7 +124,9 @@ describe("ProjectIndexPanel", () => {
       expect(rendered.getByText("12911 files indexed")).toBeTruthy();
     });
 
-    const input = rendered.getByPlaceholderText("Search project files...") as HTMLInputElement;
+    const input = rendered.getByPlaceholderText(
+      "Search project files...",
+    ) as HTMLInputElement;
     await fireEvent.input(input, { target: { value: "Git" } });
     await fireEvent.click(rendered.getByRole("button", { name: "Search" }));
 
@@ -144,11 +167,15 @@ describe("ProjectIndexPanel", () => {
     const rendered = await renderProjectIndexPanel();
 
     await waitFor(() => {
-      expect(rendered.getByText("Project Index requires Python 3.11+")).toBeTruthy();
+      expect(
+        rendered.getByText("Project Index requires Python 3.11+"),
+      ).toBeTruthy();
     });
 
     expect(
-      rendered.getByText(/Install Python 3\.11 or later, then reopen Project Index\./),
+      rendered.getByText(
+        /Install Python 3\.11 or later, then reopen Project Index\./,
+      ),
     ).toBeTruthy();
     expect(rendered.queryByText(/Failed to load index status:/)).toBeNull();
   });
@@ -185,15 +212,21 @@ describe("ProjectIndexPanel", () => {
 
     const rendered = await renderProjectIndexPanel();
 
-    const input = rendered.getByPlaceholderText("Search project files...") as HTMLInputElement;
+    const input = rendered.getByPlaceholderText(
+      "Search project files...",
+    ) as HTMLInputElement;
     await fireEvent.input(input, { target: { value: "Git" } });
     await fireEvent.click(rendered.getByRole("button", { name: "Search" }));
 
     await waitFor(() => {
-      expect(rendered.getByText("Project Index requires Python 3.11+")).toBeTruthy();
+      expect(
+        rendered.getByText("Project Index requires Python 3.11+"),
+      ).toBeTruthy();
     });
 
-    expect(rendered.queryByText(/Search project index task failed:/)).toBeNull();
+    expect(
+      rendered.queryByText(/Search project index task failed:/),
+    ).toBeNull();
     expect(rendered.queryByText("No results found")).toBeNull();
   });
 });
