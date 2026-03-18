@@ -4298,6 +4298,28 @@ pub(crate) fn launch_agent_for_project_root(
                     return Err("Cancelled".to_string());
                 }
                 state.set_skill_registration_status(status);
+
+                // Inject managed skills block into instruction docs based on settings
+                if let Some(ref prefs) = settings.agent.skill_registration {
+                    if prefs.inject_claude_md {
+                        let claude_md_path = working_dir.join("CLAUDE.md");
+                        let _ = crate::commands::clause_docs::ensure_managed_skills_block(
+                            &claude_md_path,
+                        );
+                    }
+                    if prefs.inject_agents_md {
+                        let agents_md_path = working_dir.join("AGENTS.md");
+                        let _ = crate::commands::clause_docs::ensure_managed_skills_block(
+                            &agents_md_path,
+                        );
+                    }
+                    if prefs.inject_gemini_md {
+                        let gemini_md_path = working_dir.join("GEMINI.md");
+                        let _ = crate::commands::clause_docs::ensure_managed_skills_block(
+                            &gemini_md_path,
+                        );
+                    }
+                }
             }
             Err(error) => {
                 tracing::warn!(
