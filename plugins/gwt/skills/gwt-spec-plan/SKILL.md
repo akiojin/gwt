@@ -72,3 +72,35 @@ Planning is complete only when:
 - Phases reflect a coherent build order
 - Supporting artifacts cover real decision points
 - The next implementer can generate tasks without inventing architecture
+
+## Operations
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --upsert \
+  --artifact "doc:plan.md" \
+  --body-file /tmp/plan.md
+
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --upsert \
+  --artifact "doc:research.md" \
+  --body-file /tmp/research.md
+
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --upsert \
+  --artifact "doc:data-model.md" \
+  --body-file /tmp/data-model.md
+
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --upsert \
+  --artifact "doc:quickstart.md" \
+  --body-file /tmp/quickstart.md
+```

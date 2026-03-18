@@ -79,3 +79,26 @@ Resolved: <N>
 Remaining blockers: <M>
 Next: `gwt-spec-plan` | ask follow-up clarification
 ```
+
+## Operations
+
+### Read current `spec.md`
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --get \
+  --artifact "doc:spec.md"
+```
+
+### Update `spec.md`
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --upsert \
+  --artifact "doc:spec.md" \
+  --body-file /tmp/spec.md
+```

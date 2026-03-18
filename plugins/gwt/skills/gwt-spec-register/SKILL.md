@@ -131,6 +131,17 @@ doc:spec.md
 
 ## Operations (gh CLI fallback)
 
+Artifact comments should be created with the shared helper:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --upsert \
+  --artifact "doc:spec.md" \
+  --body-file /tmp/spec.md
+```
+
 ### Create new spec issue
 
 ```bash
@@ -172,9 +183,8 @@ gh issue edit {number} --body "$(updated body with <!-- GWT_SPEC_ID:#{number} --
 ### Create initial `spec.md` artifact comment
 
 ```bash
-gh issue comment {number} --body "$(cat <<'EOF'
+cat <<'EOF' >/tmp/spec.md
 <!-- GWT_SPEC_ARTIFACT:doc:spec.md -->
-doc:spec.md
 
 # Feature Specification: ...
 
@@ -208,5 +218,11 @@ doc:spec.md
 
 - SC-001 ...
 EOF
-)"
+
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "{number}" \
+  --upsert \
+  --artifact "doc:spec.md" \
+  --body-file /tmp/spec.md
 ```

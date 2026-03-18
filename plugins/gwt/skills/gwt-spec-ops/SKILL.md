@@ -105,6 +105,15 @@ contract:openapi.yaml
 (content)
 ```
 
+Use the shared helper to list, read, and upsert artifact comments:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --list
+```
+
 ## Operations (gh CLI)
 
 ### Read spec issue
@@ -122,13 +131,12 @@ gh issue edit {number} --body "$(updated body)"
 ### Add artifact comment
 
 ```bash
-gh issue comment {number} --body "$(cat <<'EOF'
-<!-- GWT_SPEC_ARTIFACT:doc:tasks.md -->
-doc:tasks.md
-
-(content)
-EOF
-)"
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "{number}" \
+  --upsert \
+  --artifact "doc:tasks.md" \
+  --body-file /tmp/tasks.md
 ```
 
 ### Sync to project

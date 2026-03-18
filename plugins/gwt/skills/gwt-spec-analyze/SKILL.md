@@ -67,3 +67,12 @@ Next:
 
 - `CLEAR`: implementation may proceed through `gwt-spec-ops`
 - `BLOCKED`: the report must point to the exact artifact or gate that failed
+
+## Operations
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --list
+```

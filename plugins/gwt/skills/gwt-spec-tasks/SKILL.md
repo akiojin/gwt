@@ -66,3 +66,14 @@ Each task must include:
 - no task is vague
 - test tasks are present where acceptance scenarios require proof
 - parallel markers are defensible
+
+## Operations
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --upsert \
+  --artifact "doc:tasks.md" \
+  --body-file /tmp/tasks.md
+```

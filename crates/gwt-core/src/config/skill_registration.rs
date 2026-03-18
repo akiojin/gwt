@@ -294,6 +294,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
+        relative_path: "skills/gwt-spec-ops/scripts/spec_artifact.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-ops/scripts/spec_artifact.py"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
         relative_path: "skills/gwt-pr/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -375,6 +384,16 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: false,
     },
 ];
+
+const PROJECT_ROOT_ASSETS: &[ManagedAsset] = &[ManagedAsset {
+    relative_path: "memory/constitution.md",
+    body: include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../memory/constitution.md"
+    )),
+    executable: false,
+    rewrite_for_project: false,
+}];
 
 const LEGACY_MANAGED_GWT_HOOK_COMMANDS: &[&str] = &[
     "gwt hook UserPromptSubmit",
@@ -590,6 +609,7 @@ const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.claude/commands/gwt-*.md",
     "/.claude/hooks/scripts/gwt-*.mjs",
     "/.claude/settings.local.json",
+    "/memory/constitution.md",
 ];
 const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".gwt/",
@@ -606,6 +626,8 @@ const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.claude/hooks/scripts/gwt-*.sh",
     ".claude/settings.json",
     "/.claude/settings.json",
+    "memory/constitution.md",
+    "/memory/constitution.md",
 ];
 
 /// Agent types that support skill registration.
@@ -692,7 +714,7 @@ impl Default for SkillRegistrationStatus {
 }
 
 fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
-    match agent {
+    let mut items = match agent {
         SkillAgentType::Claude => all_claude_assets()
             .map(|asset| format!(".claude/{}", asset.relative_path))
             .chain(std::iter::once(
@@ -701,7 +723,13 @@ fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
             .collect(),
         SkillAgentType::Codex => project_asset_missing_items(".codex"),
         SkillAgentType::Gemini => project_asset_missing_items(".gemini"),
-    }
+    };
+    items.extend(
+        PROJECT_ROOT_ASSETS
+            .iter()
+            .map(|asset| asset.relative_path.to_string()),
+    );
+    items
 }
 
 fn project_asset_missing_items(agent_root_name: &str) -> Vec<String> {
@@ -752,7 +780,8 @@ fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
 
 #[cfg(test)]
 fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
-    write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")
+    write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")?;
+    write_managed_assets(root, PROJECT_ROOT_ASSETS.iter(), ".")
 }
 
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
@@ -1455,6 +1484,8 @@ pub fn register_agent_skills_with_settings_at_project_root(
         });
     };
 
+    write_managed_assets(project_root, PROJECT_ROOT_ASSETS.iter(), ".")?;
+
     match agent {
         SkillAgentType::Claude => register_claude_assets_at(project_root),
         SkillAgentType::Codex | SkillAgentType::Gemini => {
@@ -1475,6 +1506,7 @@ pub fn register_all_skills_with_settings_at_project_root(
 ) -> Result<(), GwtError> {
     if let Some(project_root) = project_root {
         ensure_project_local_exclude_rules(project_root)?;
+        write_managed_assets(project_root, PROJECT_ROOT_ASSETS.iter(), ".")?;
     }
 
     let mut failures = Vec::new();
@@ -1544,6 +1576,12 @@ fn status_for(
             ));
         }
     }
+    for asset in PROJECT_ROOT_ASSETS {
+        let asset_path = project_root.join(asset.relative_path);
+        if !asset_path.exists() {
+            missing.push(asset.relative_path.to_string());
+        }
+    }
 
     let registered = missing.is_empty();
     SkillAgentRegistrationStatus {
@@ -1592,6 +1630,14 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         let asset_path = claude_root.join(asset.relative_path);
         if !asset_path.exists() {
             missing_items.push(format!(".claude/{}", asset.relative_path));
+        }
+    }
+    if let Some(project_root) = project_root {
+        for asset in PROJECT_ROOT_ASSETS {
+            let asset_path = project_root.join(asset.relative_path);
+            if !asset_path.exists() {
+                missing_items.push(asset.relative_path.to_string());
+            }
         }
     }
 
@@ -1764,6 +1810,14 @@ mod tests {
             .join("scripts")
             .join("check_pr_status.py")
             .exists());
+        assert!(tmp
+            .path()
+            .join("skills")
+            .join("gwt-spec-ops")
+            .join("scripts")
+            .join("spec_artifact.py")
+            .exists());
+        assert!(tmp.path().join("memory").join("constitution.md").exists());
     }
 
     #[test]
@@ -1959,6 +2013,15 @@ mod tests {
             .join("scripts")
             .join("check_pr_status.py")
             .exists());
+        assert!(temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-spec-ops")
+            .join("scripts")
+            .join("spec_artifact.py")
+            .exists());
+        assert!(temp.path().join("memory").join("constitution.md").exists());
         assert!(temp
             .path()
             .join(".gemini")
@@ -2540,6 +2603,7 @@ OPENAI_API_KEY = "legacy-key"
             .join("scripts")
             .join("gwt-forward-hook.mjs")
             .exists());
+        assert!(temp.path().join("memory").join("constitution.md").exists());
 
         let settings_content =
             std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
