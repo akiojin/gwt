@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::assistant_engine::{AssistantEngine, AssistantStartupStatus};
 use crate::assistant_monitor::{self, MonitorEvent, MonitorSnapshot, PaneSnapshot};
 use crate::commands::sessions::get_branch_session_summary_for_assistant;
-use crate::state::{AppState, AssistantContext};
+use crate::state::{AppState, AssistantActiveRunKind, AssistantContext, AssistantRuntimeState};
 use gwt_core::git::{self, get_spec_issue_detail, graphql, Branch, PrCache, WorkflowRunInfo};
 use gwt_core::process::command as process_command;
 use gwt_core::terminal::pane::PaneStatus;
@@ -43,6 +43,14 @@ pub struct AssistantStateResponse {
     pub current_status: Option<String>,
     pub blockers: Vec<String>,
     pub recommended_next_actions: Vec<String>,
+    pub queued_message_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AssistantDeliveryMode {
+    Interrupt,
+    Queue,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,10 +132,14 @@ pub async fn assistant_get_state(
 
     if let Some(engine) = engine_guard.get(&window_label) {
         let context = current_assistant_context(&state, &window_label);
+        let runtime = state.assistant_runtime_snapshot(&window_label);
+        let startup_status_message = current_startup_status_message(&state, &window_label);
         return Ok(build_assistant_state_response(
             engine,
             Some(window_label),
             &context,
+            &runtime,
+            startup_status_message.as_deref(),
         ));
     }
 
@@ -152,50 +164,66 @@ pub async fn assistant_send_message(
     window: tauri::Window,
     state: tauri::State<'_, AppState>,
     input: String,
+    delivery_mode: Option<AssistantDeliveryMode>,
 ) -> Result<AssistantStateResponse, String> {
     let window_label = window.label().to_string();
     let input = input.trim().to_string();
     if input.is_empty() {
         return Err("Message cannot be empty".to_string());
     }
+    let delivery_mode = delivery_mode.unwrap_or(AssistantDeliveryMode::Interrupt);
+    let project_path = state
+        .project_for_window(&window_label)
+        .ok_or_else(|| "No project opened. Open a project first.".to_string())?;
 
-    let mut engine = {
-        let mut engine_guard = state
+    let runtime_before = state.assistant_runtime_snapshot(&window_label);
+    if runtime_before.active_kind.is_some() && delivery_mode == AssistantDeliveryMode::Queue {
+        state.enqueue_assistant_input(&window_label, input);
+        let engine = state
             .assistant_engine
             .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-
-        engine_guard
-            .remove(&window_label)
-            .ok_or_else(|| "Assistant not started. Call assistant_start first.".to_string())?
-    };
-
-    let state_ref: &AppState = &state;
-    let result = engine.handle_user_message(&input, state_ref);
-
-    {
-        let mut engine_guard = state
-            .assistant_engine
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        engine_guard.insert(window_label.clone(), engine);
+            .map_err(|e| format!("Lock error: {}", e))?
+            .get(&window_label)
+            .cloned()
+            .unwrap_or_else(|| {
+                AssistantEngine::new(PathBuf::from(&project_path), window_label.clone())
+            });
+        let context = current_assistant_context(&state, &window_label);
+        let runtime = state.assistant_runtime_snapshot(&window_label);
+        let startup_status_message = current_startup_status_message(&state, &window_label);
+        return Ok(build_assistant_state_response(
+            &engine,
+            Some(window_label),
+            &context,
+            &runtime,
+            startup_status_message.as_deref(),
+        ));
     }
 
-    result?;
+    clear_startup_status(&state, &window_label);
+    let base_engine = ensure_assistant_engine_snapshot(&state, &window_label, &project_path)?;
+    let generation = state.begin_assistant_session_for_window(&window_label);
+    state.set_assistant_active_run(&window_label, generation, AssistantActiveRunKind::User);
 
-    let engine_guard = state
-        .assistant_engine
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    let engine = engine_guard
-        .get(&window_label)
-        .ok_or_else(|| "Assistant session disappeared after send.".to_string())?;
+    let app_handle = window.app_handle().clone();
+    spawn_assistant_user_run(
+        &app_handle,
+        &window_label,
+        &project_path,
+        generation,
+        input.clone(),
+        base_engine.clone(),
+        false,
+    );
 
     let context = current_assistant_context(&state, &window_label);
-    Ok(build_assistant_state_response(
-        engine,
-        Some(window_label),
+    let runtime = state.assistant_runtime_snapshot(&window_label);
+    Ok(build_pending_user_send_state_response(
+        &base_engine,
+        &window_label,
         &context,
+        &runtime,
+        &input,
     ))
 }
 
@@ -211,6 +239,21 @@ pub async fn assistant_start(
 
     state.clear_assistant_session_for_window(&window_label);
     let session_generation = state.begin_assistant_session_for_window(&window_label);
+    state.set_assistant_active_run(
+        &window_label,
+        session_generation,
+        AssistantActiveRunKind::Startup,
+    );
+    {
+        let mut engine_guard = state
+            .assistant_engine
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        engine_guard.insert(
+            window_label.clone(),
+            AssistantEngine::new(PathBuf::from(&project_path), window_label.clone()),
+        );
+    }
     set_startup_status(
         &state,
         &window_label,
@@ -232,10 +275,17 @@ pub async fn assistant_start(
             session_generation,
             "Inspecting repository state...".to_string(),
         );
-        let mut engine = AssistantEngine::new(
-            PathBuf::from(&project_path_for_task),
-            window_label_for_task.clone(),
-        );
+        let mut engine = state
+            .assistant_engine
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&window_label_for_task).cloned())
+            .unwrap_or_else(|| {
+                AssistantEngine::new(
+                    PathBuf::from(&project_path_for_task),
+                    window_label_for_task.clone(),
+                )
+            });
 
         let fingerprint = match resolve_startup_analysis_fingerprint(&state, &window_label_for_task)
         {
@@ -344,8 +394,10 @@ pub async fn assistant_start(
             session_generation,
             "Running startup analysis...".to_string(),
         );
-        match engine.handle_startup(&state) {
-            Ok(()) => {
+        match engine.handle_startup_with_cancel(&state, || {
+            !state.is_current_assistant_session(&window_label_for_task, session_generation)
+        }) {
+            Ok(true) => {
                 if engine.startup_summary_ready() {
                     if let Some(summary) = engine
                         .conversation()
@@ -365,6 +417,14 @@ pub async fn assistant_start(
                     engine
                         .push_visible_assistant_message(format_assistant_context_message(&context));
                 }
+            }
+            Ok(false) => {
+                state.clear_assistant_active_run_if_generation(
+                    &window_label_for_task,
+                    session_generation,
+                );
+                clear_startup_status(&state, &window_label_for_task);
+                return;
             }
             Err(err) => {
                 engine.apply_startup_failure_message(format!(
@@ -450,16 +510,34 @@ fn build_assistant_state_response(
     engine: &AssistantEngine,
     session_id: Option<String>,
     context: &AssistantContext,
+    runtime: &AssistantRuntimeState,
+    startup_status_message: Option<&str>,
 ) -> AssistantStateResponse {
     let recovery = derive_startup_recovery_info(engine);
+    let mut messages = build_messages_from_conversation(engine);
+    if matches!(runtime.active_kind, Some(AssistantActiveRunKind::Startup)) {
+        if let Some(status_message) = startup_status_message {
+            messages.push(AssistantMessage {
+                role: "assistant".to_string(),
+                kind: "text".to_string(),
+                content: status_message.to_string(),
+                timestamp: chrono::Utc::now().timestamp(),
+            });
+        }
+    }
     AssistantStateResponse {
-        messages: build_messages_from_conversation(engine),
+        messages,
         ai_ready: true,
-        is_thinking: engine.startup_status() == AssistantStartupStatus::Analyzing,
+        is_thinking: runtime.active_kind.is_some()
+            || engine.startup_status() == AssistantStartupStatus::Analyzing,
         session_id,
         llm_call_count: engine.llm_call_count,
         estimated_tokens: engine.estimated_tokens,
-        startup_status: engine.startup_status().as_str().to_string(),
+        startup_status: if matches!(runtime.active_kind, Some(AssistantActiveRunKind::Startup)) {
+            AssistantStartupStatus::Analyzing.as_str().to_string()
+        } else {
+            engine.startup_status().as_str().to_string()
+        },
         startup_summary_ready: engine.startup_summary_ready(),
         startup_failure_kind: recovery.kind,
         startup_failure_detail: recovery.detail,
@@ -469,6 +547,7 @@ fn build_assistant_state_response(
         current_status: context.current_status.clone(),
         blockers: context.blockers.clone(),
         recommended_next_actions: context.recommended_next_actions.clone(),
+        queued_message_count: runtime.queued_inputs.len(),
     }
 }
 
@@ -490,6 +569,7 @@ fn build_empty_assistant_state_response() -> AssistantStateResponse {
         current_status: None,
         blockers: Vec::new(),
         recommended_next_actions: Vec::new(),
+        queued_message_count: 0,
     }
 }
 
@@ -519,7 +599,32 @@ fn build_startup_inflight_state_response(
         current_status: Some("analyzing".to_string()),
         blockers: Vec::new(),
         recommended_next_actions: Vec::new(),
+        queued_message_count: 0,
     }
+}
+
+fn build_pending_user_send_state_response(
+    engine: &AssistantEngine,
+    session_id: &str,
+    context: &AssistantContext,
+    runtime: &AssistantRuntimeState,
+    input: &str,
+) -> AssistantStateResponse {
+    let mut response = build_assistant_state_response(
+        engine,
+        Some(session_id.to_string()),
+        context,
+        runtime,
+        None,
+    );
+    response.is_thinking = true;
+    response.messages.push(AssistantMessage {
+        role: "user".to_string(),
+        kind: "text".to_string(),
+        content: input.to_string(),
+        timestamp: chrono::Utc::now().timestamp(),
+    });
+    response
 }
 
 fn set_startup_status(
@@ -558,6 +663,14 @@ fn clear_startup_status(state: &AppState, window_label: &str) {
     }
 }
 
+fn current_startup_status_message(state: &AppState, window_label: &str) -> Option<String> {
+    state
+        .assistant_startup_inflight
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(window_label).cloned())
+}
+
 fn emit_startup_status_if_current(
     app_handle: &tauri::AppHandle,
     window_label: &str,
@@ -581,6 +694,7 @@ fn finish_startup_session(
 ) {
     let state = app_handle.state::<AppState>();
     clear_startup_status(&state, window_label);
+    state.clear_assistant_active_run_if_generation(window_label, session_generation);
     if !state.is_current_assistant_session(window_label, session_generation) {
         return;
     }
@@ -601,6 +715,7 @@ fn finalize_started_engine(
 ) -> Result<AssistantStateResponse, String> {
     let current_project_path = state.project_for_window(window_label);
     let context = current_assistant_context(state, window_label);
+    let runtime = state.assistant_runtime_snapshot(window_label);
     let mut engine_guard = state
         .assistant_engine
         .lock()
@@ -610,17 +725,15 @@ fn finalize_started_engine(
         return Ok(engine_guard
             .get(window_label)
             .map(|current| {
-                build_assistant_state_response(current, Some(window_label.to_string()), &context)
+                build_assistant_state_response(
+                    current,
+                    Some(window_label.to_string()),
+                    &context,
+                    &runtime,
+                    None,
+                )
             })
             .unwrap_or_else(build_empty_assistant_state_response));
-    }
-
-    if let Some(existing) = engine_guard.get(window_label) {
-        return Ok(build_assistant_state_response(
-            existing,
-            Some(window_label.to_string()),
-            &context,
-        ));
     }
 
     engine_guard.insert(window_label.to_string(), engine);
@@ -632,7 +745,142 @@ fn finalize_started_engine(
         inserted,
         Some(window_label.to_string()),
         &context,
+        &runtime,
+        None,
     ))
+}
+
+fn ensure_assistant_engine_snapshot(
+    state: &AppState,
+    window_label: &str,
+    project_path: &str,
+) -> Result<AssistantEngine, String> {
+    let mut engine_guard = state
+        .assistant_engine
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    if let Some(engine) = engine_guard.get(window_label) {
+        return Ok(engine.clone());
+    }
+
+    let engine = AssistantEngine::new(PathBuf::from(project_path), window_label.to_string());
+    engine_guard.insert(window_label.to_string(), engine.clone());
+    Ok(engine)
+}
+
+fn ensure_assistant_monitor_started(
+    app_handle: &tauri::AppHandle,
+    window_label: &str,
+    project_path: &str,
+) {
+    let state = app_handle.state::<AppState>();
+    let already_running = state
+        .assistant_monitor_handle
+        .lock()
+        .ok()
+        .is_some_and(|handles| handles.contains_key(window_label));
+    if !already_running {
+        start_assistant_monitor(app_handle, window_label, project_path);
+    }
+}
+
+fn spawn_assistant_user_run(
+    app_handle: &tauri::AppHandle,
+    window_label: &str,
+    project_path: &str,
+    generation: u64,
+    input: String,
+    base_engine: AssistantEngine,
+    emit_initial_state: bool,
+) {
+    let app_handle = app_handle.clone();
+    let window_label = window_label.to_string();
+    let project_path = project_path.to_string();
+
+    tokio::spawn(async move {
+        let state = app_handle.state::<AppState>();
+        if !state.is_current_assistant_session(&window_label, generation) {
+            return;
+        }
+
+        if emit_initial_state {
+            let context = current_assistant_context(&state, &window_label);
+            let runtime = state.assistant_runtime_snapshot(&window_label);
+            let response = build_pending_user_send_state_response(
+                &base_engine,
+                &window_label,
+                &context,
+                &runtime,
+                &input,
+            );
+            if let Some(window) = app_handle.get_webview_window(&window_label) {
+                let _ = window.emit("assistant-state-updated", &response);
+            }
+        }
+
+        let mut engine = base_engine;
+        let run_result = engine.handle_user_message_with_cancel(&input, &state, || {
+            !state.is_current_assistant_session(&window_label, generation)
+        });
+
+        let should_commit = state.is_current_assistant_session(&window_label, generation);
+        if !should_commit {
+            return;
+        }
+
+        match run_result {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(err) => {
+                engine.push_visible_assistant_message(format!("Assistant request failed: {err}"));
+            }
+        }
+
+        if let Ok(mut engine_guard) = state.assistant_engine.lock() {
+            engine_guard.insert(window_label.clone(), engine.clone());
+        }
+        state.clear_assistant_active_run_if_generation(&window_label, generation);
+
+        ensure_assistant_monitor_started(&app_handle, &window_label, &project_path);
+
+        let context = current_assistant_context(&state, &window_label);
+        let runtime = state.assistant_runtime_snapshot(&window_label);
+        let response = build_assistant_state_response(
+            &engine,
+            Some(window_label.clone()),
+            &context,
+            &runtime,
+            None,
+        );
+
+        if let Some(window) = app_handle.get_webview_window(&window_label) {
+            let _ = window.emit("assistant-state-updated", &response);
+        }
+        emit_dashboard_update(&app_handle, &window_label);
+
+        if let Some(next_input) = state.dequeue_assistant_input(&window_label) {
+            let next_generation = state.begin_assistant_session_for_window(&window_label);
+            state.set_assistant_active_run(
+                &window_label,
+                next_generation,
+                AssistantActiveRunKind::User,
+            );
+            let next_engine =
+                match ensure_assistant_engine_snapshot(&state, &window_label, &project_path) {
+                    Ok(engine) => engine,
+                    Err(_) => return,
+                };
+            spawn_assistant_user_run(
+                &app_handle,
+                &window_label,
+                &project_path,
+                next_generation,
+                next_input,
+                next_engine,
+                true,
+            );
+        }
+    });
 }
 
 fn current_assistant_context(state: &AppState, window_label: &str) -> AssistantContext {
@@ -826,8 +1074,14 @@ async fn handle_assistant_monitor_event(
     };
 
     engine.push_visible_assistant_message(format_assistant_context_message(&next_context));
-    let response =
-        build_assistant_state_response(&engine, Some(window_label.to_string()), &next_context);
+    let runtime = state.assistant_runtime_snapshot(window_label);
+    let response = build_assistant_state_response(
+        &engine,
+        Some(window_label.to_string()),
+        &next_context,
+        &runtime,
+        None,
+    );
 
     if let Ok(mut engine_guard) = state.assistant_engine.lock() {
         engine_guard.insert(window_label.to_string(), engine);
