@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-ops
-description: GitHub Issue-first SPEC execution. Use an existing or newly created `gwt-spec` issue to stabilize the spec bundle, maintain plan/tasks/TDD artifacts, and drive implementation progress.
+description: GitHub Issue-first SPEC orchestration. Use an existing or newly created `gwt-spec` issue to stabilize `spec.md`, `plan.md`, `tasks.md`, analysis gates, and then continue into implementation without stopping at normal handoff boundaries.
 ---
 
 # gwt Issue SPEC Ops
@@ -12,6 +12,15 @@ GitHub Issues are the single source of truth for specs. Manage every spec as an 
 - If the user starts from a plain Issue, use `gwt-issue-resolve` first.
 - If the user explicitly needs to create a brand-new SPEC and no canonical SPEC exists yet, use `gwt-spec-register`.
 - If the user already has a `gwt-spec` issue number, or the target SPEC destination is already known, continue with this skill.
+
+`gwt-spec-ops` is the workflow owner. It may call focused subskills, but it should keep driving the work.
+
+- Missing `spec.md` -> seed it through `gwt-spec-register` and continue
+- Unresolved clarification -> run `gwt-spec-clarify`, then continue
+- Missing plan artifacts -> run `gwt-spec-plan`, then continue
+- Missing tasks -> run `gwt-spec-tasks`, then continue
+- Missing consistency gate -> run `gwt-spec-analyze`, then continue
+- Ready artifact set -> run `gwt-spec-implement`
 
 ## Mandatory preflight: search existing spec first
 
@@ -46,121 +55,67 @@ SPEC ID = the **issue number**. Do not use legacy UUID-style spec identifiers.
 
 An issue with the `gwt-spec` label is a spec issue.
 
-### Issue body sections
+### Issue body contract
 
-The issue body must follow this section structure:
+The issue body acts as an artifact index, not as the full spec itself:
 
 ```markdown
 <!-- GWT_SPEC_ID:#{number} -->
 
-## Spec
+## Artifact Index
 
-(background, user scenarios, requirements, success criteria)
+- `doc:spec.md`
+- `doc:plan.md`
+- `doc:tasks.md`
+- `doc:research.md`
+- `doc:data-model.md`
+- `doc:quickstart.md`
+- `contract:*`
+- `checklist:*`
 
-## Plan
+## Status
 
-(implementation plan)
+- Phase: ...
+- Clarification: ...
+- Analysis: ...
 
-## Tasks
+## Links
 
-(task list)
-
-## TDD
-
-(test design)
-
-## Research
-
-(research notes)
-
-## Data Model
-
-(data model)
-
-## Quickstart
-
-(minimum setup or usage steps)
-
-## Contracts
-
-Artifact files are managed in issue comments with `contract:<name>` entries.
-
-## Checklists
-
-Artifact files are managed in issue comments with `checklist:<name>` entries.
-
-## Acceptance Checklist
-
-- [ ] (acceptance checklist item)
+- Parent: ...
+- Related: ...
+- PRs: ...
 ```
 
 ### Artifact comments
 
-Manage contracts and checklists as issue comments. Add a marker on the first line:
+Manage spec artifacts as issue comments. Add a marker on the first line:
 
 ```markdown
-<!-- GWT_SPEC_ARTIFACT:contract:openapi.md -->
-contract:openapi.md
+<!-- GWT_SPEC_ARTIFACT:doc:plan.md -->
+doc:plan.md
 
 (content)
 ```
 
+Contracts and checklists continue to use:
+
+```markdown
+<!-- GWT_SPEC_ARTIFACT:contract:openapi.yaml -->
+contract:openapi.yaml
+
+(content)
+```
+
+Use the shared helper to list, read, and upsert artifact comments:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "<number>" \
+  --list
+```
+
 ## Operations (gh CLI)
-
-### Create new spec issue
-
-```bash
-gh issue create --label gwt-spec --title "feat: ..." --body "$(cat <<'EOF'
-<!-- GWT_SPEC_ID:#NEW -->
-
-## Spec
-
-_TODO_
-
-## Plan
-
-_TODO_
-
-## Tasks
-
-_TODO_
-
-## TDD
-
-_TODO_
-
-## Research
-
-_TODO_
-
-## Data Model
-
-_TODO_
-
-## Quickstart
-
-_TODO_
-
-## Contracts
-
-Artifact files are managed in issue comments with `contract:<name>` entries.
-
-## Checklists
-
-Artifact files are managed in issue comments with `checklist:<name>` entries.
-
-## Acceptance Checklist
-
-- [ ] Add acceptance checklist
-EOF
-)"
-```
-
-After creation, update the `GWT_SPEC_ID` marker with the issue number:
-
-```bash
-gh issue edit {number} --body "$(updated body with <!-- GWT_SPEC_ID:#{number} -->)"
-```
 
 ### Read spec issue
 
@@ -177,13 +132,12 @@ gh issue edit {number} --body "$(updated body)"
 ### Add artifact comment
 
 ```bash
-gh issue comment {number} --body "$(cat <<'EOF'
-<!-- GWT_SPEC_ARTIFACT:contract:openapi.md -->
-contract:openapi.md
-
-(content)
-EOF
-)"
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "{number}" \
+  --upsert \
+  --artifact "doc:tasks.md" \
+  --body-file /tmp/tasks.md
 ```
 
 ### Sync to project
@@ -219,7 +173,7 @@ Before `Specify` or `Plan`, determine whether an existing spec already owns the 
 
 Execution-oriented spec maintenance procedure:
 
-1. Update the `## Spec` section only as much as needed to unblock planning and implementation.
+1. Update `doc:spec.md` only as much as needed to unblock planning and implementation.
 2. **Required elements**:
    - **Background**: why this feature or fix is needed
    - **User scenarios**: concrete flows and expected outcomes, with priority P0/P1/P2
@@ -227,78 +181,65 @@ Execution-oriented spec maintenance procedure:
    - **Non-functional requirements**: numbered as `NFR-001` (performance, security, and so on)
    - **Success criteria**: numbered as `SC-001`, with measurable completion conditions
 3. Fill missing details from the source Issue, existing comments, or current implementation context before asking the user.
-4. Mark unresolved blockers with `[Needs Clarification]` only when they truly block execution.
+4. Mark unresolved blockers with `[NEEDS CLARIFICATION: ...]` only when they truly block execution.
 5. Explicitly document edge cases and error handling that affect implementation or testing.
 6. When integrating new work into an existing SPEC, explain the integration choice and reference the related issue numbers.
 
 ### 2. Clarify blocking ambiguity
 
-When `## Spec` still contains ambiguous points:
+When `doc:spec.md` still contains ambiguous points:
 
-1. Ask at most **5 questions**, ordered by impact.
-2. Focus questions on:
+1. Run `gwt-spec-clarify` as a focused substep.
+2. Resolve everything that can be inferred safely before asking.
+3. Focus questions only on:
    - unclear scope boundaries
    - acceptance criteria that cannot be tested
    - concrete thresholds for non-functional requirements
    - dependencies on other features
-3. Replace `[Needs Clarification]` markers with the resolved answers.
-4. Reflect both the questions and the answers back into the Spec section.
+4. Replace `[NEEDS CLARIFICATION: ...]` markers with the resolved answers.
+5. Reflect both the questions and the answers back into `doc:spec.md`.
 
-### 3. Plan (write the implementation plan)
+### 3. Plan (write the planning artifacts)
 
-Write the implementation plan in the `## Plan` section:
+Run `gwt-spec-plan` to write `doc:plan.md` and supporting artifacts:
 
-1. **Technical context**: list the affected files and modules
-2. **Implementation approach**: describe the selected architecture and why it was chosen
-3. **Phasing**: break the work into staged implementation steps
+1. `doc:plan.md`
+2. `doc:research.md`
+3. `doc:data-model.md`
+4. `doc:quickstart.md`
+5. `contract:*`
 
-Generate supporting sections as needed:
+`doc:plan.md` must include:
 
-- `## Research`: research results such as library selection or API findings
-- `## Data Model`: schema and type design
-- `## Quickstart`: minimum steps required to run or validate the feature
-- `## Contracts`: API contracts managed as artifact comments
+- Summary
+- Technical Context
+- Constitution Check
+- Project Structure
+- Complexity Tracking
+- Phased Implementation
 
-### 4. Tasks (generate the task list)
+### 4. Generate tasks
 
-Write the task list in `## Tasks`:
+Run `gwt-spec-tasks` to produce `doc:tasks.md`.
 
-1. **Phase structure**: Setup -> Foundation -> User Stories -> Finalization
-2. **Task format**: `- [ ] T001 [Phase] [US1] description`
-   - `T001`: sequential ID
-   - `[Phase]`: `[S]`etup, `[F]`oundation, `[U]`ser story, `[FIN]`alization
-   - `[USn]`: related user scenario number
-3. **Dependencies**: document task dependencies explicitly, including `blocked-by` relationships
-4. **Completion**: change the checkbox to `[x]` when done
+### 5. Run analysis gate
 
-### 5. Analyze (check consistency)
+Run `gwt-spec-analyze` before implementation starts.
 
-Validate coverage across Spec -> Plan -> Tasks:
+Analysis handling rules:
 
-1. Confirm that every FR and NFR is covered by Tasks
-2. Confirm that every user scenario is mapped to tasks
-3. Confirm that there are no circular dependencies
-4. Confirm that the work remains testable
-5. Propose corrections if you find any gaps or inconsistencies
+- `CLEAR`: continue directly into `gwt-spec-implement`
+- `AUTO-FIXABLE`: repair the artifact set through clarify/plan/tasks as needed, then rerun analysis
+- `NEEDS-DECISION`: stop and ask the user only for the missing decision
 
-### 6. Implement (execute tasks)
+### 6. Implement the SPEC
 
-Task execution procedure:
+When the artifact set is ready:
 
-1. Select the highest-priority unchecked task from `## Tasks`
-2. **TDD**: write tests first -> confirm RED -> implement -> confirm GREEN
-3. Run independent tasks in parallel when practical
-4. Update completed task checkboxes to `[x]`
-5. Update the issue body to reflect progress
-6. When execution started from a plain Issue, keep the originating Issue linked from the SPEC and reflect status back to the original Issue or PR thread
-
-### 7. Tasks to child issues
-
-When a large task must be split into child issues:
-
-1. Create child issues in dependency order
-2. Add links from the parent issue to the child issues in `## Tasks`
-3. Add the `gwt-spec` label to child issues that also carry spec content
+1. Run `gwt-spec-implement`.
+2. Keep issue progress comments current.
+3. Use `gwt-pr` and `gwt-pr-fix` to keep PR work moving without waiting for extra permission on routine branch-sync or CI fixes.
+4. Return to artifact maintenance only when execution uncovers a real spec bug or newly required clarification.
 
 ### 8. Quality checklists
 
@@ -356,3 +297,12 @@ Use the Phase field to track lifecycle state:
 - Repository must have `gwt-spec` label created.
 - Agent CWD must be inside the target repository (enforced by gwt worktree hooks).
 - `$GWT_PROJECT_ROOT` environment variable is available for explicit repo resolution.
+
+## Stop Conditions
+
+Only stop the workflow for one of these reasons:
+
+- `gh auth status` or required repo access is unavailable
+- an existing-owner search is ambiguous and would risk duplicate work
+- a product or scope decision remains and the correct answer is not inferable
+- a merge conflict or reviewer request cannot be resolved with high confidence

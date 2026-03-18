@@ -97,6 +97,12 @@
     type DocsEditorShellId,
   } from "./lib/docsEditor";
   import { applyMenuPasteText } from "./lib/terminal/menuPaste";
+  import {
+    findAgentTabByBranchName,
+    normalizeBranchName,
+    resolveWorktreeTabLabel,
+    syncAgentTabLabels,
+  } from "./lib/worktreeTabLabels";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -1412,16 +1418,32 @@
             : agentId;
   }
 
-  function normalizeBranchName(name: string): string {
-    const trimmed = name.trim();
-    return trimmed.startsWith("origin/")
-      ? trimmed.slice("origin/".length)
-      : trimmed;
+  function worktreeTabLabel(branch: string): string {
+    const branches =
+      selectedBranch &&
+      normalizeBranchName(selectedBranch.name) === normalizeBranchName(branch)
+        ? [selectedBranch]
+        : [];
+    return resolveWorktreeTabLabel(branch, branches);
   }
 
-  function worktreeTabLabel(branch: string): string {
-    const b = branch.trim();
-    return b ? normalizeBranchName(b) : "Worktree";
+  async function refreshAgentTabLabelsForProject(targetProjectPath: string) {
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const branches = await invoke<BranchInfo[]>("list_worktree_branches", {
+        projectPath: targetProjectPath,
+      });
+      if (projectPath !== targetProjectPath) return;
+      tabs = syncAgentTabLabels(tabs, branches);
+    } catch (err) {
+      console.error("Failed to refresh agent tab labels:", err);
+    }
+  }
+
+  function handleBranchDisplayNameChanged() {
+    sidebarRefreshKey++;
+    if (!projectPath) return;
+    void refreshAgentTabLabelsForProject(projectPath);
   }
 
   function parseE1004BranchName(errorMessage: string): string | null {
@@ -1749,6 +1771,7 @@
       label,
       type: "agent",
       paneId,
+      ...(requestedBranch ? { branchName: requestedBranch } : {}),
     };
 
     if (requestedAgentId) {
@@ -1772,9 +1795,10 @@
           if (!terminal) return;
 
           const updates: Partial<Tab> = {};
-          if (needsBranchResolution) {
-            const resolvedBranch = terminal.branch_name?.trim() ?? "";
-            if (resolvedBranch) {
+          const resolvedBranch = terminal.branch_name?.trim() ?? "";
+          if (resolvedBranch) {
+            updates.branchName = resolvedBranch;
+            if (needsBranchResolution) {
               updates.label = worktreeTabLabel(resolvedBranch);
             }
           }
@@ -1789,6 +1813,9 @@
           tabs = tabs.map((t) =>
             t.id === newTab.id ? { ...t, ...updates } : t,
           );
+          if (projectPath) {
+            await refreshAgentTabLabelsForProject(projectPath);
+          }
         } catch {
           // Ignore: fallback color is used when terminal metadata is unavailable.
         }
@@ -1944,11 +1971,7 @@
 
   function handleSwitchToWorktreeFromTab(branchName: string) {
     // Find the matching agent tab and switch to it
-    const agentTab = tabs.find(
-      (t) =>
-        t.type === "agent" &&
-        normalizeBranchName(t.label) === normalizeBranchName(branchName),
-    );
+    const agentTab = findAgentTabByBranchName(tabs, branchName);
     if (agentTab) {
       activeTabId = agentTab.id;
       return;
@@ -2574,6 +2597,7 @@
       ...respawnedTerminalResult.tabs,
     ]);
     tabs = mergedTabs;
+    await refreshAgentTabLabelsForProject(targetProjectPath);
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     if (allowOverrideActive) {
@@ -2629,6 +2653,7 @@
           type: "agent",
           paneId: tab.paneId,
           label: tab.label,
+          ...(tab.branchName ? { branchName: tab.branchName } : {}),
           ...(tab.agentId ? { agentId: tab.agentId } : {}),
         });
         continue;
@@ -2910,6 +2935,7 @@
           onNewTerminal={handleNewTerminal}
           onOpenDocsEditor={handleOpenDocsEditor}
           onOpenCiLog={handleOpenCiLog}
+          onDisplayNameChanged={handleBranchDisplayNameChanged}
         />
       {/if}
       <MainArea

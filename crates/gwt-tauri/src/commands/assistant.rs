@@ -111,7 +111,6 @@ struct StartupRecoveryInfo {
     detail: Option<String>,
     hints: Vec<String>,
 }
-
 #[tauri::command]
 pub async fn assistant_get_state(
     window: tauri::Window,
@@ -716,7 +715,6 @@ fn derive_startup_recovery_info(engine: &AssistantEngine) -> StartupRecoveryInfo
         hints,
     }
 }
-
 fn store_assistant_context(state: &AppState, window_label: &str, context: AssistantContext) {
     if let Ok(mut map) = state.assistant_context.lock() {
         map.insert(window_label.to_string(), context);
@@ -1803,7 +1801,6 @@ mod tests {
             vec!["CI".to_string()]
         );
     }
-
     #[test]
     fn assistant_recovery_info_detects_resource_guard_failures() {
         let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());

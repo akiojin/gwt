@@ -60,6 +60,7 @@
     onOpenDocsEditor,
     onResize,
     onOpenCiLog,
+    onDisplayNameChanged,
     widthPx = 260,
     minWidthPx = 220,
     maxWidthPx = 520,
@@ -84,6 +85,7 @@
     onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
     onResize?: (nextWidthPx: number) => void;
     onOpenCiLog?: (runId: number) => void;
+    onDisplayNameChanged?: () => void;
     widthPx?: number;
     minWidthPx?: number;
     maxWidthPx?: number;
@@ -107,6 +109,9 @@
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
   const FILTER_BACKGROUND_REFRESH_TTL_MS = 10_000;
   const SEARCH_FILTER_DEBOUNCE_MS = 120;
+  const SELECTED_BRANCH_SCROLL_GAP_PX = 24;
+  const SELECTED_BRANCH_SCROLL_PX_PER_SECOND = 36;
+  const SELECTED_BRANCH_SCROLL_MIN_DURATION_MS = 5_000;
 
   // PR Polling — inline to avoid .svelte.ts import issues in tests
   const PR_POLL_INTERVAL_MS = 30_000;
@@ -415,6 +420,161 @@
     );
   }
 
+  function resetSelectedBranchAutoScroll() {
+    selectedBranchAutoScrollEnabled = false;
+    selectedBranchAutoScrollDistancePx = 0;
+    selectedBranchAutoScrollDurationMs = SELECTED_BRANCH_SCROLL_MIN_DURATION_MS;
+  }
+
+  function cancelSelectedBranchAutoScrollMeasure() {
+    if (selectedBranchMeasureTimer === null) return;
+    clearTimeout(selectedBranchMeasureTimer);
+    selectedBranchMeasureTimer = null;
+  }
+
+  function disconnectSelectedBranchResizeObserver() {
+    if (selectedBranchResizeObserver === null) return;
+    selectedBranchResizeObserver.disconnect();
+    selectedBranchResizeObserver = null;
+  }
+
+  function applySelectedBranchAutoScrollMeasure() {
+    if (
+      selectedBranch === null ||
+      selectedBranchNameViewportEl === null ||
+      selectedBranchNameLabelEl === null
+    ) {
+      resetSelectedBranchAutoScroll();
+      return;
+    }
+
+    const viewportWidth = Math.ceil(selectedBranchNameViewportEl.clientWidth);
+    const labelWidth = Math.ceil(selectedBranchNameLabelEl.scrollWidth);
+    if (
+      !Number.isFinite(viewportWidth) ||
+      !Number.isFinite(labelWidth) ||
+      viewportWidth <= 0 ||
+      labelWidth <= 0
+    ) {
+      resetSelectedBranchAutoScroll();
+      return;
+    }
+
+    if (labelWidth <= viewportWidth + 1) {
+      resetSelectedBranchAutoScroll();
+      return;
+    }
+
+    const distancePx = Math.max(
+      0,
+      labelWidth - viewportWidth + SELECTED_BRANCH_SCROLL_GAP_PX
+    );
+    const durationMs = Math.max(
+      SELECTED_BRANCH_SCROLL_MIN_DURATION_MS,
+      Math.round((distancePx / SELECTED_BRANCH_SCROLL_PX_PER_SECOND) * 1000)
+    );
+    selectedBranchAutoScrollDistancePx = distancePx;
+    selectedBranchAutoScrollDurationMs = durationMs;
+    selectedBranchAutoScrollEnabled = true;
+  }
+
+  function queueSelectedBranchAutoScrollMeasure() {
+    cancelSelectedBranchAutoScrollMeasure();
+    selectedBranchMeasureTimer = setTimeout(() => {
+      selectedBranchMeasureTimer = null;
+      applySelectedBranchAutoScrollMeasure();
+    }, 0);
+  }
+
+  function observeSelectedBranchAutoScrollTargets() {
+    disconnectSelectedBranchResizeObserver();
+    if (
+      typeof ResizeObserver === "undefined" ||
+      selectedBranchNameViewportEl === null ||
+      selectedBranchNameLabelEl === null
+    ) {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      queueSelectedBranchAutoScrollMeasure();
+    });
+    observer.observe(selectedBranchNameViewportEl);
+    observer.observe(selectedBranchNameLabelEl);
+    selectedBranchResizeObserver = observer;
+  }
+
+  function selectedBranchViewportAction(
+    node: HTMLSpanElement,
+    branchName: string | null
+  ) {
+    function sync(nextBranchName: string | null) {
+      if (nextBranchName !== null) {
+        selectedBranchNameViewportEl = node;
+        queueSelectedBranchAutoScrollMeasure();
+        return;
+      }
+      if (selectedBranchNameViewportEl === node) {
+        selectedBranchNameViewportEl = null;
+      }
+    }
+
+    sync(branchName);
+
+    return {
+      update(nextBranchName: string | null) {
+        sync(nextBranchName);
+      },
+      destroy() {
+        if (selectedBranchNameViewportEl === node) {
+          selectedBranchNameViewportEl = null;
+        }
+      },
+    };
+  }
+
+  function selectedBranchLabelAction(
+    node: HTMLSpanElement,
+    branchName: string | null
+  ) {
+    function sync(nextBranchName: string | null) {
+      if (nextBranchName !== null) {
+        selectedBranchNameLabelEl = node;
+        queueSelectedBranchAutoScrollMeasure();
+        return;
+      }
+      if (selectedBranchNameLabelEl === node) {
+        selectedBranchNameLabelEl = null;
+      }
+    }
+
+    sync(branchName);
+
+    return {
+      update(nextBranchName: string | null) {
+        sync(nextBranchName);
+      },
+      destroy() {
+        if (selectedBranchNameLabelEl === node) {
+          selectedBranchNameLabelEl = null;
+        }
+      },
+    };
+  }
+
+  function isSelectedBranchAutoScrollActive(branch: BranchInfo): boolean {
+    return isSelectedBranch(branch) && selectedBranchAutoScrollEnabled;
+  }
+
+  function selectedBranchAutoScrollStyle(branch: BranchInfo): string | undefined {
+    if (!isSelectedBranchAutoScrollActive(branch)) return undefined;
+    return [
+      `--branch-scroll-distance: ${selectedBranchAutoScrollDistancePx}px`,
+      `--branch-scroll-duration: ${selectedBranchAutoScrollDurationMs}ms`,
+      `--branch-scroll-gap: ${SELECTED_BRANCH_SCROLL_GAP_PX}px`,
+    ].join("; ");
+  }
+
   function loadSummaryHeight(): number {
     if (typeof window === "undefined")
       return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
@@ -503,6 +663,15 @@
   let resizeStartWidth = 0;
   let previousBodyCursor = "";
   let previousBodyUserSelect = "";
+  let selectedBranchNameViewportEl: HTMLSpanElement | null = $state(null);
+  let selectedBranchNameLabelEl: HTMLSpanElement | null = $state(null);
+  let selectedBranchAutoScrollEnabled = $state(false);
+  let selectedBranchAutoScrollDistancePx = $state(0);
+  let selectedBranchAutoScrollDurationMs = $state(
+    SELECTED_BRANCH_SCROLL_MIN_DURATION_MS
+  );
+  let selectedBranchMeasureTimer: ReturnType<typeof setTimeout> | null = null;
+  let selectedBranchResizeObserver: ResizeObserver | null = null;
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
@@ -537,6 +706,34 @@
   $effect(() => {
     if (!branchSummaryStackEl) return;
     setSummaryHeight(summaryHeightPx, false);
+  });
+
+  $effect(() => {
+    const selectedBranchName = selectedBranch?.name ?? "";
+    const selectedBranchDisplayName =
+      selectedBranch?.display_name ?? selectedBranch?.name ?? "";
+    void clampedWidthPx;
+    void selectedBranchName;
+    void selectedBranchDisplayName;
+
+    if (
+      selectedBranchName === "" ||
+      selectedBranchNameViewportEl === null ||
+      selectedBranchNameLabelEl === null
+    ) {
+      disconnectSelectedBranchResizeObserver();
+      cancelSelectedBranchAutoScrollMeasure();
+      resetSelectedBranchAutoScroll();
+      return;
+    }
+
+    observeSelectedBranchAutoScrollTargets();
+    queueSelectedBranchAutoScrollMeasure();
+
+    return () => {
+      disconnectSelectedBranchResizeObserver();
+      cancelSelectedBranchAutoScrollMeasure();
+    };
   });
 
   $effect(() => {
@@ -1285,6 +1482,7 @@
       });
       // Refresh branch list
       fetchBranches(fetchToken, true);
+      onDisplayNameChanged?.();
     } catch (err) {
       console.error("Failed to set display name:", err);
     }
@@ -1440,10 +1638,22 @@
               {:else}
                 <span
                   class="branch-name"
-                  class:scroll-active={isSelectedBranch(branch)}
+                  class:auto-scroll={isSelectedBranchAutoScrollActive(branch)}
                   title={branch.display_name ? branch.name : undefined}
-                  >{branch.display_name ?? branch.name}</span
+                  style={selectedBranchAutoScrollStyle(branch)}
+                  use:selectedBranchViewportAction={isSelectedBranch(branch)
+                    ? branch.name
+                    : null}
                 >
+                  <span
+                    class="branch-name-label"
+                    use:selectedBranchLabelAction={isSelectedBranch(branch)
+                      ? branch.name
+                      : null}
+                  >
+                    {branch.display_name ?? branch.name}
+                  </span>
+                </span>
               {/if}
               {#if branch.last_tool_usage}
                 <span
@@ -1497,7 +1707,10 @@
           {onNewTerminal}
           {onOpenDocsEditor}
           {onOpenCiLog}
-          onDisplayNameChanged={() => fetchBranches(fetchToken, true)}
+          onDisplayNameChanged={() => {
+            fetchBranches(fetchToken, true);
+            onDisplayNameChanged?.();
+          }}
         />
       </div>
     </div>
@@ -1924,22 +2137,43 @@
     font-size: var(--ui-font-base);
     white-space: nowrap;
     overflow: hidden;
-    text-overflow: ellipsis;
     flex: 1;
     min-width: 0;
   }
 
-  .branch-name.scroll-active {
-    overflow-x: auto;
-    overflow-y: hidden;
-    text-overflow: clip;
-    scrollbar-width: thin;
-    scrollbar-gutter: stable both-edges;
-    overscroll-behavior-inline: contain;
+  .branch-name-label {
+    display: block;
+    min-width: 0;
+    white-space: inherit;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  .branch-name.scroll-active::-webkit-scrollbar {
-    height: 4px;
+  .branch-name.auto-scroll {
+    text-overflow: clip;
+  }
+
+  .branch-name.auto-scroll .branch-name-label {
+    display: inline-block;
+    min-width: max-content;
+    overflow: visible;
+    text-overflow: clip;
+    padding-inline-end: var(--branch-scroll-gap, 24px);
+    will-change: transform;
+    animation: branch-name-marquee var(--branch-scroll-duration, 5000ms)
+      linear infinite;
+  }
+
+  @keyframes branch-name-marquee {
+    0%,
+    14% {
+      transform: translateX(0);
+    }
+
+    86%,
+    100% {
+      transform: translateX(calc(var(--branch-scroll-distance, 0px) * -1));
+    }
   }
 
   .branch-rename-input {
