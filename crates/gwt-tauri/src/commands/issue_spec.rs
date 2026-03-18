@@ -94,6 +94,7 @@ impl From<SpecIssueSections> for SpecIssueSectionsData {
 impl From<SpecIssueArtifactComment> for SpecIssueArtifactCommentData {
     fn from(value: SpecIssueArtifactComment) -> Self {
         let kind = match value.kind {
+            SpecIssueArtifactKind::Doc => "doc".to_string(),
             SpecIssueArtifactKind::Contract => "contract".to_string(),
             SpecIssueArtifactKind::Checklist => "checklist".to_string(),
         };
@@ -338,6 +339,7 @@ fn parse_phase(value: &str) -> Result<SpecProjectPhase, String> {
 
 fn parse_artifact_kind(value: &str) -> Result<SpecIssueArtifactKind, String> {
     match value.trim().to_ascii_lowercase().as_str() {
+        "doc" => Ok(SpecIssueArtifactKind::Doc),
         "contract" => Ok(SpecIssueArtifactKind::Contract),
         "checklist" => Ok(SpecIssueArtifactKind::Checklist),
         _ => Err(format!("Invalid artifact kind: {}", value.trim())),
@@ -362,6 +364,10 @@ mod tests {
 
     #[test]
     fn parse_artifact_kind_accepts_known_values() {
+        assert!(matches!(
+            parse_artifact_kind("doc").unwrap(),
+            SpecIssueArtifactKind::Doc
+        ));
         assert!(matches!(
             parse_artifact_kind("contract").unwrap(),
             SpecIssueArtifactKind::Contract

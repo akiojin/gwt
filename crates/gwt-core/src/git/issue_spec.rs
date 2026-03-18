@@ -1,7 +1,8 @@
 //! Issue-first spec operations for GitHub Issues.
 //!
-//! These helpers keep Spec/Plan/Tasks and related artifacts in a single
-//! GitHub Issue body as the canonical spec bundle.
+//! `doc:*`/`contract:*`/`checklist:*` artifact comments are preferred as the
+//! canonical source of truth, with Issue body sections retained as a fallback
+//! for legacy specs.
 
 use super::gh_cli::run_gh_output_with_repair;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,14 @@ const SECTION_CONTRACTS: &str = "Contracts";
 const SECTION_CHECKLISTS: &str = "Checklists";
 const SECTION_CHECKLIST_LEGACY: &str = "Checklist";
 const SECTION_ACCEPTANCE_CHECKLIST: &str = "Acceptance Checklist";
+const DOC_SPEC: &str = "spec.md";
+const DOC_PLAN: &str = "plan.md";
+const DOC_TASKS: &str = "tasks.md";
+const DOC_TDD: &str = "tdd.md";
+const DOC_RESEARCH: &str = "research.md";
+const DOC_DATA_MODEL: &str = "data-model.md";
+const DOC_QUICKSTART: &str = "quickstart.md";
+const CHECKLIST_TDD: &str = "tdd.md";
 
 const ARTIFACT_MARKER_PREFIX: &str = "<!-- GWT_SPEC_ARTIFACT:";
 const ARTIFACT_MARKER_SUFFIX: &str = " -->";
@@ -50,6 +59,7 @@ pub struct SpecIssueChecklist {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SpecIssueArtifactKind {
+    Doc,
     Contract,
     Checklist,
 }
@@ -57,6 +67,7 @@ pub enum SpecIssueArtifactKind {
 impl SpecIssueArtifactKind {
     fn token(self) -> &'static str {
         match self {
+            Self::Doc => "doc",
             Self::Contract => "contract",
             Self::Checklist => "checklist",
         }
@@ -64,6 +75,7 @@ impl SpecIssueArtifactKind {
 
     fn from_token(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "doc" => Some(Self::Doc),
             "contract" => Some(Self::Contract),
             "checklist" => Some(Self::Checklist),
             _ => None,
@@ -197,13 +209,13 @@ pub fn get_spec_issue_detail(
     repo_path: &Path,
     issue_number: u64,
 ) -> Result<SpecIssueDetail, String> {
-    let issue_number = issue_number.to_string();
+    let issue_number_str = issue_number.to_string();
     let output = run_gh_output_with_repair(
         repo_path,
         [
             "issue",
             "view",
-            issue_number.as_str(),
+            issue_number_str.as_str(),
             "--json",
             "number,title,body,updatedAt,labels,url",
         ],
@@ -215,7 +227,14 @@ pub fn get_spec_issue_detail(
         return Err(format!("gh issue view failed: {}", stderr.trim()));
     }
 
-    parse_issue_detail_json(&String::from_utf8_lossy(&output.stdout))
+    let mut detail = parse_issue_detail_json(&String::from_utf8_lossy(&output.stdout))?;
+    let (_, comments) = fetch_issue_node_and_comments(repo_path, issue_number)?;
+    let artifacts = comments
+        .into_iter()
+        .filter_map(|comment| parse_artifact_comment(issue_number, comment))
+        .collect::<Vec<_>>();
+    detail.sections = resolve_sections_from_artifacts_and_body(&detail.body, &artifacts);
+    Ok(detail)
 }
 
 pub fn list_spec_issue_artifact_comments(
@@ -1048,6 +1067,79 @@ fn parse_sections_from_body(body: &str) -> SpecIssueSections {
     }
 }
 
+fn resolve_sections_from_artifacts_and_body(
+    body: &str,
+    artifacts: &[SpecIssueArtifactComment],
+) -> SpecIssueSections {
+    let mut sections = parse_sections_from_body(body);
+    let mut contract_blocks = Vec::new();
+    let mut checklist_blocks = Vec::new();
+
+    let mut sorted_artifacts = artifacts.to_vec();
+    sorted_artifacts.sort_by(|a, b| {
+        a.kind
+            .token()
+            .cmp(b.kind.token())
+            .then_with(|| a.artifact_name.cmp(&b.artifact_name))
+    });
+
+    for artifact in sorted_artifacts {
+        match artifact.kind {
+            SpecIssueArtifactKind::Doc => match artifact.artifact_name.as_str() {
+                DOC_SPEC => sections.spec = artifact.content,
+                DOC_PLAN => sections.plan = artifact.content,
+                DOC_TASKS => sections.tasks = artifact.content,
+                DOC_TDD => sections.tdd = artifact.content,
+                DOC_RESEARCH => sections.research = artifact.content,
+                DOC_DATA_MODEL => sections.data_model = artifact.content,
+                DOC_QUICKSTART => sections.quickstart = artifact.content,
+                _ => {}
+            },
+            SpecIssueArtifactKind::Contract => {
+                contract_blocks.push(render_named_artifact_block(
+                    artifact.kind,
+                    &artifact.artifact_name,
+                    &artifact.content,
+                ));
+            }
+            SpecIssueArtifactKind::Checklist => {
+                if artifact.artifact_name.eq_ignore_ascii_case(CHECKLIST_TDD) {
+                    sections.tdd = artifact.content;
+                } else {
+                    checklist_blocks.push(render_named_artifact_block(
+                        artifact.kind,
+                        &artifact.artifact_name,
+                        &artifact.content,
+                    ));
+                }
+            }
+        }
+    }
+
+    if !contract_blocks.is_empty() {
+        sections.contracts = contract_blocks.join("\n\n");
+    }
+    if !checklist_blocks.is_empty() {
+        sections.checklists = checklist_blocks.join("\n\n");
+    }
+
+    sections
+}
+
+fn render_named_artifact_block(
+    kind: SpecIssueArtifactKind,
+    artifact_name: &str,
+    content: &str,
+) -> String {
+    let trimmed_name = artifact_name.trim();
+    let trimmed_content = content.trim();
+    if trimmed_content.is_empty() {
+        format!("### {}:{trimmed_name}", kind.token())
+    } else {
+        format!("### {}:{trimmed_name}\n\n{trimmed_content}", kind.token())
+    }
+}
+
 fn split_markdown_sections(body: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let mut current: Option<String> = None;
@@ -1429,6 +1521,88 @@ mod tests {
         assert_eq!(parsed.kind, SpecIssueArtifactKind::Checklist);
         assert_eq!(parsed.artifact_name, "requirements.md");
         assert_eq!(parsed.content, "- [ ] item");
+    }
+
+    #[test]
+    fn parse_artifact_comment_doc_prefix() {
+        let body = "doc:spec.md\n\n# Spec";
+        let parsed = parse_artifact_header_and_content(body).expect("parse doc");
+        assert_eq!(parsed.kind, SpecIssueArtifactKind::Doc);
+        assert_eq!(parsed.artifact_name, "spec.md");
+        assert_eq!(parsed.content, "# Spec");
+    }
+
+    #[test]
+    fn resolve_sections_prefers_doc_artifacts_over_body_sections() {
+        let body = "## Spec\n\nlegacy spec\n\n## Plan\n\nlegacy plan\n\n## Tasks\n\nlegacy tasks\n";
+        let artifacts = vec![
+            SpecIssueArtifactComment {
+                comment_id: "1".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Doc,
+                artifact_name: "spec.md".to_string(),
+                content: "artifact spec".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag1".to_string(),
+                url: None,
+            },
+            SpecIssueArtifactComment {
+                comment_id: "2".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Doc,
+                artifact_name: "plan.md".to_string(),
+                content: "artifact plan".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag2".to_string(),
+                url: None,
+            },
+            SpecIssueArtifactComment {
+                comment_id: "3".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Checklist,
+                artifact_name: "tdd.md".to_string(),
+                content: "artifact tdd".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag3".to_string(),
+                url: None,
+            },
+            SpecIssueArtifactComment {
+                comment_id: "4".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Contract,
+                artifact_name: "openapi.yaml".to_string(),
+                content: "openapi: 3.1.0".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag4".to_string(),
+                url: None,
+            },
+            SpecIssueArtifactComment {
+                comment_id: "5".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Checklist,
+                artifact_name: "acceptance.md".to_string(),
+                content: "- [ ] acceptance".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag5".to_string(),
+                url: None,
+            },
+        ];
+
+        let sections = resolve_sections_from_artifacts_and_body(body, &artifacts);
+        assert_eq!(sections.spec, "artifact spec");
+        assert_eq!(sections.plan, "artifact plan");
+        assert_eq!(sections.tasks, "legacy tasks");
+        assert_eq!(sections.tdd, "artifact tdd");
+        assert!(sections.contracts.contains("contract:openapi.yaml"));
+        assert!(sections.checklists.contains("checklist:acceptance.md"));
+    }
+
+    #[test]
+    fn resolve_sections_falls_back_to_body_when_doc_artifacts_are_missing() {
+        let body = "## Spec\n\nlegacy spec\n\n## Data Model\n\nlegacy model\n";
+        let sections = resolve_sections_from_artifacts_and_body(body, &[]);
+        assert_eq!(sections.spec, "legacy spec");
+        assert_eq!(sections.data_model, "legacy model");
     }
 
     #[test]
