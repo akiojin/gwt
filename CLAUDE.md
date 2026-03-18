@@ -224,3 +224,46 @@
 │   └── package.json
 └── package.json        # Tauri開発用スクリプト
 ```
+
+<!-- BEGIN gwt managed skills -->
+## Available Skills & Commands (gwt)
+
+Skills are located in `.claude/skills/<name>/SKILL.md`.
+Commands can be invoked as `/gwt:<command-name>`.
+
+### Issue & SPEC Management
+
+| Skill | Command | Description |
+|-------|---------|-------------|
+| gwt-issue-register | `/gwt:gwt-issue-register` | Register new GitHub work items from a request. Search existing Issues and `gwt-spec` Issues first, stop on duplicates, then either create a plain GitHub Issue or hand off to `gwt-spec-register` for a new SPEC. Use as the main entrypoint for new Issue/SPEC registration requests. |
+| gwt-issue-resolve | `/gwt:gwt-issue-resolve` | Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing gwt-spec issue, or promoted to a new spec issue, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration. |
+| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub gwt-spec Issues using vector embeddings. Use before creating or updating any spec issue. |
+| gwt-spec-register | `/gwt:gwt-spec-register` | Create a new GitHub Issue-first SPEC (`gwt-spec`) using the standard section skeleton when no existing canonical SPEC fits. Use when `gwt-issue-register` determines a new SPEC is needed or the user explicitly asks to register a new SPEC. |
+| gwt-spec-ops | — | GitHub Issue-first SPEC execution. Use an existing or newly created `gwt-spec` issue to stabilize the spec bundle, maintain plan/tasks/TDD artifacts, and drive implementation progress. |
+
+### PR Management
+
+| Skill | Command | Description |
+|-------|---------|-------------|
+| gwt-pr | `/gwt:gwt-pr` | Create or update GitHub Pull Requests with the gh CLI, including deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches). |
+| gwt-pr-check | `/gwt:gwt-pr-check` | Check GitHub PR status with the gh CLI, including unmerged PR detection and post-merge new-commit detection for the current branch. |
+| gwt-fix-pr | `/gwt:gwt-fix-pr` | Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Create fix plans and implement after user approval. Reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Notify reviewers after fixes. |
+
+### Utilities
+
+| Skill | Command | Description |
+|-------|---------|-------------|
+| gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
+| gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
+| gwt-spec-to-issue-migration | — | Migrate existing local SPEC directories (specs/SPEC-*) to GitHub Issue-first specs (gwt-spec label) using the bundled migration script. Use when asked to replace local spec.md/plan.md/tasks.md based workflow with GitHub Issue based management. |
+
+### Recommended Workflow
+
+See each skill's SKILL.md for detailed instructions:
+
+1. **Register work** → `gwt-issue-register`
+2. **Create SPEC** → `gwt-spec-register` → `gwt-spec-ops`
+3. **Implement** → TDD (test first) → code
+4. **Open PR** → `gwt-pr`
+5. **Fix CI / reviews** → `gwt-fix-pr`
+<!-- END gwt managed skills -->
