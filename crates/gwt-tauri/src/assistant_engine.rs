@@ -171,6 +171,41 @@ impl AssistantEngine {
         }
     }
 
+    pub fn push_visible_assistant_message(&mut self, content: impl Into<String>) {
+        self.conversation.push(ChatCompletionsToolMessage {
+            role: "assistant".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    #[cfg(test)]
+    pub fn push_hidden_system_message_for_test(&mut self, content: impl Into<String>) {
+        self.conversation.push(ChatCompletionsToolMessage {
+            role: "system".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    pub fn apply_cached_startup_summary(&mut self, summary: impl Into<String>) {
+        let summary = summary.into();
+        let base_len = self.conversation.len();
+        self.finish_startup_transcript(base_len, &summary);
+        self.startup_status = AssistantStartupStatus::Ready;
+        self.startup_summary_ready = true;
+    }
+
+    pub fn apply_startup_failure_message(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        let base_len = self.conversation.len();
+        self.finish_startup_transcript(base_len, &message);
+        self.startup_status = AssistantStartupStatus::Failed;
+        self.startup_summary_ready = false;
+    }
+
     fn finish_startup_transcript(&mut self, base_len: usize, summary: &str) {
         self.conversation.truncate(base_len);
         self.conversation.push(ChatCompletionsToolMessage {
@@ -506,6 +541,23 @@ mod tests {
             .conversation
             .iter()
             .any(|message| message.role == "tool"));
+    }
+
+    #[test]
+    fn test_apply_cached_startup_summary_marks_engine_ready() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+
+        engine.apply_cached_startup_summary("cached");
+
+        assert_eq!(engine.startup_status(), AssistantStartupStatus::Ready);
+        assert!(engine.startup_summary_ready());
+        assert_eq!(
+            engine
+                .conversation
+                .last()
+                .and_then(|message| message.content.as_deref()),
+            Some("cached")
+        );
     }
 
     fn make_msg(role: &str, content: &str) -> ChatCompletionsToolMessage {

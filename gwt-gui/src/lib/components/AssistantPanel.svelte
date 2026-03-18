@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import type { AssistantMessage, AssistantState, DashboardData } from "../types";
   import AssistantDashboard from "./AssistantDashboard.svelte";
+  import MarkdownRenderer from "./MarkdownRenderer.svelte";
 
   interface Props {
     isActive?: boolean;
@@ -72,7 +73,7 @@
   }
 
   async function sendMessage() {
-    if (isComposing) return;
+    if (isComposing || assistantState?.isThinking) return;
     const text = inputText.trim();
     if (!text) return;
     let previousState: AssistantState | null = null;
@@ -307,12 +308,16 @@
             class:system={msg.role === "system" || msg.role === "tool"}
             class:tool-use={msg.kind === "tool_use"}
           >
-            <div class="message-content">
-              {#if msg.kind === "tool_use"}
-                <span class="action-icon">&#9654;</span>
-              {/if}
-              {msg.content}
-            </div>
+            {#if msg.role === "assistant" && msg.kind === "text"}
+              <MarkdownRenderer text={msg.content} className="assistant-message-markdown" />
+            {:else}
+              <div class="message-content">
+                {#if msg.kind === "tool_use"}
+                  <span class="action-icon">&#9654;</span>
+                {/if}
+                {msg.content}
+              </div>
+            {/if}
           </div>
         {/each}
 
@@ -345,7 +350,11 @@
           onkeydown={handleKeydown}
           oncompositionstart={() => (isComposing = true)}
           oncompositionend={() => (isComposing = false)}
-          disabled={!assistantState?.aiReady || !assistantState?.sessionId}
+          disabled={
+            !assistantState?.aiReady ||
+            !assistantState?.sessionId ||
+            assistantState?.isThinking
+          }
           rows={1}
         ></textarea>
         <button
@@ -355,6 +364,7 @@
           disabled={
             !assistantState?.aiReady ||
             !assistantState?.sessionId ||
+            assistantState?.isThinking ||
             !inputText.trim()
           }
         >
@@ -430,6 +440,10 @@
   .message-content {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+
+  .message.assistant :global(.assistant-message-markdown) {
+    color: var(--text-primary);
   }
 
   .action-icon {
