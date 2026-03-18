@@ -35,6 +35,9 @@ pub struct AssistantStateResponse {
     pub estimated_tokens: u64,
     pub startup_status: String,
     pub startup_summary_ready: bool,
+    pub startup_failure_kind: Option<String>,
+    pub startup_failure_detail: Option<String>,
+    pub startup_recovery_hints: Vec<String>,
     pub working_goal: Option<String>,
     pub goal_confidence: Option<String>,
     pub current_status: Option<String>,
@@ -100,6 +103,13 @@ struct TerminalSummaryInsight {
     short_summary: String,
     highlights: Vec<String>,
     source_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StartupRecoveryInfo {
+    kind: Option<String>,
+    detail: Option<String>,
+    hints: Vec<String>,
 }
 
 #[tauri::command]
@@ -201,6 +211,7 @@ pub async fn assistant_start(
         .ok_or_else(|| "No project opened. Open a project first.".to_string())?;
 
     state.clear_assistant_session_for_window(&window_label);
+    let session_generation = state.begin_assistant_session_for_window(&window_label);
     set_startup_status(
         &state,
         &window_label,
@@ -213,9 +224,13 @@ pub async fn assistant_start(
     let project_path_for_task = project_path.clone();
     tokio::spawn(async move {
         let state = app_handle.state::<AppState>();
-        let _ = emit_startup_status(
+        if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
+            return;
+        }
+        let _ = emit_startup_status_if_current(
             &app_handle,
             &window_label_for_task,
+            session_generation,
             "Inspecting repository state...".to_string(),
         );
         let mut engine = AssistantEngine::new(
@@ -234,11 +249,15 @@ pub async fn assistant_start(
                     &app_handle,
                     &window_label_for_task,
                     &project_path_for_task,
+                    session_generation,
                     engine,
                 );
                 return;
             }
         };
+        if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
+            return;
+        }
 
         let context_path = assistant_context_cache_path(&project_path_for_task);
         let context = match resolve_assistant_context(&state, &window_label_for_task) {
@@ -265,11 +284,15 @@ pub async fn assistant_start(
                     &app_handle,
                     &window_label_for_task,
                     &project_path_for_task,
+                    session_generation,
                     engine,
                 );
                 return;
             }
         };
+        if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
+            return;
+        }
 
         if context.current_status.as_deref() == Some("awaiting_goal_confirmation") {
             engine.push_visible_assistant_message(format_assistant_context_message(&context));
@@ -277,22 +300,25 @@ pub async fn assistant_start(
                 &app_handle,
                 &window_label_for_task,
                 &project_path_for_task,
+                session_generation,
                 engine,
             );
             return;
         }
 
         let cache_path = startup_analysis_cache_path(&project_path_for_task);
-        let _ = emit_startup_status(
+        let _ = emit_startup_status_if_current(
             &app_handle,
             &window_label_for_task,
+            session_generation,
             "Checking startup analysis cache...".to_string(),
         );
         if let Some(cache) = load_startup_analysis_cache(&cache_path) {
             if cache.fingerprint == fingerprint {
-                let _ = emit_startup_status(
+                let _ = emit_startup_status_if_current(
                     &app_handle,
                     &window_label_for_task,
+                    session_generation,
                     "Using cached startup analysis...".to_string(),
                 );
                 engine.apply_cached_startup_summary(cache.summary);
@@ -303,15 +329,20 @@ pub async fn assistant_start(
                     &app_handle,
                     &window_label_for_task,
                     &project_path_for_task,
+                    session_generation,
                     engine,
                 );
                 return;
             }
         }
+        if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
+            return;
+        }
 
-        let _ = emit_startup_status(
+        let _ = emit_startup_status_if_current(
             &app_handle,
             &window_label_for_task,
+            session_generation,
             "Running startup analysis...".to_string(),
         );
         match engine.handle_startup(&state) {
@@ -348,6 +379,7 @@ pub async fn assistant_start(
             &app_handle,
             &window_label_for_task,
             &project_path_for_task,
+            session_generation,
             engine,
         );
     });
@@ -366,26 +398,6 @@ pub async fn assistant_stop(
     let window_label = window.label().to_string();
     state.clear_assistant_session_for_window(&window_label);
 
-    {
-        let mut engine_guard = state
-            .assistant_engine
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        engine_guard.remove(&window_label);
-    }
-
-    {
-        let mut monitor_guard = state
-            .assistant_monitor_handle
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        if let Some(handle) = monitor_guard.remove(&window_label) {
-            tokio::spawn(async move {
-                handle.stop().await;
-            });
-        }
-    }
-
     Ok(())
 }
 
@@ -401,12 +413,15 @@ fn build_dashboard_response(
     state: &AppState,
     window_label: &str,
 ) -> Result<DashboardResponse, String> {
-    let project_path = state.project_for_window(window_label);
-    let repo_path = project_path
-        .as_deref()
-        .map(Path::new)
-        .map(crate::commands::project::resolve_repo_path_for_project_root)
-        .transpose()?;
+    let Some(project_path) = state.project_for_window(window_label) else {
+        return Ok(DashboardResponse {
+            panes: Vec::new(),
+            git: build_git_dashboard(state, window_label)?,
+        });
+    };
+    let repo_path = project_path.as_str();
+    let repo_path =
+        crate::commands::project::resolve_repo_path_for_project_root(Path::new(repo_path))?;
     let panes = {
         let mut mgr = state
             .pane_manager
@@ -414,12 +429,7 @@ fn build_dashboard_response(
             .map_err(|e| format!("Lock error: {}", e))?;
         mgr.panes_mut()
             .iter_mut()
-            .filter(|pane| {
-                repo_path
-                    .as_ref()
-                    .map(|repo_path| pane.project_root() == repo_path)
-                    .unwrap_or(true)
-            })
+            .filter(|pane| pane.project_root() == repo_path)
             .map(|pane| {
                 let _ = pane.check_status();
                 PaneDashboard {
@@ -442,6 +452,7 @@ fn build_assistant_state_response(
     session_id: Option<String>,
     context: &AssistantContext,
 ) -> AssistantStateResponse {
+    let recovery = derive_startup_recovery_info(engine);
     AssistantStateResponse {
         messages: build_messages_from_conversation(engine),
         ai_ready: true,
@@ -451,6 +462,9 @@ fn build_assistant_state_response(
         estimated_tokens: engine.estimated_tokens,
         startup_status: engine.startup_status().as_str().to_string(),
         startup_summary_ready: engine.startup_summary_ready(),
+        startup_failure_kind: recovery.kind,
+        startup_failure_detail: recovery.detail,
+        startup_recovery_hints: recovery.hints,
         working_goal: context.working_goal.clone(),
         goal_confidence: context.goal_confidence.clone(),
         current_status: context.current_status.clone(),
@@ -469,6 +483,9 @@ fn build_empty_assistant_state_response() -> AssistantStateResponse {
         estimated_tokens: 0,
         startup_status: AssistantStartupStatus::Idle.as_str().to_string(),
         startup_summary_ready: false,
+        startup_failure_kind: None,
+        startup_failure_detail: None,
+        startup_recovery_hints: Vec::new(),
         working_goal: None,
         goal_confidence: None,
         current_status: None,
@@ -495,6 +512,9 @@ fn build_startup_inflight_state_response(
         estimated_tokens: 0,
         startup_status: AssistantStartupStatus::Analyzing.as_str().to_string(),
         startup_summary_ready: false,
+        startup_failure_kind: None,
+        startup_failure_detail: None,
+        startup_recovery_hints: Vec::new(),
         working_goal: None,
         goal_confidence: None,
         current_status: Some("analyzing".to_string()),
@@ -533,15 +553,37 @@ fn emit_startup_status(
     Ok(())
 }
 
+fn clear_startup_status(state: &AppState, window_label: &str) {
+    if let Ok(mut guard) = state.assistant_startup_inflight.lock() {
+        guard.remove(window_label);
+    }
+}
+
+fn emit_startup_status_if_current(
+    app_handle: &tauri::AppHandle,
+    window_label: &str,
+    session_generation: u64,
+    status_message: String,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    if !state.is_current_assistant_session(window_label, session_generation) {
+        clear_startup_status(&state, window_label);
+        return Ok(());
+    }
+    emit_startup_status(app_handle, window_label, status_message)
+}
+
 fn finish_startup_session(
     app_handle: &tauri::AppHandle,
     window_label: &str,
     project_path: &str,
+    session_generation: u64,
     engine: AssistantEngine,
 ) {
     let state = app_handle.state::<AppState>();
-    if let Ok(mut startup_guard) = state.assistant_startup_inflight.lock() {
-        startup_guard.remove(window_label);
+    clear_startup_status(&state, window_label);
+    if !state.is_current_assistant_session(window_label, session_generation) {
+        return;
     }
 
     if let Ok(response) = finalize_started_engine(&state, window_label, project_path, engine) {
@@ -601,6 +643,78 @@ fn current_assistant_context(state: &AppState, window_label: &str) -> AssistantC
         .ok()
         .and_then(|map| map.get(window_label).cloned())
         .unwrap_or_default()
+}
+
+fn derive_startup_recovery_info(engine: &AssistantEngine) -> StartupRecoveryInfo {
+    if engine.startup_status() != AssistantStartupStatus::Failed {
+        return StartupRecoveryInfo::default();
+    }
+
+    let detail = engine
+        .conversation()
+        .iter()
+        .rev()
+        .filter(|message| message.role == "assistant")
+        .find_map(|message| {
+            let content = message.content.as_deref()?;
+            let lower = content.to_ascii_lowercase();
+            (lower.contains("failed")
+                || lower.contains("error")
+                || lower.contains("guardrails")
+                || lower.contains("insufficient system resources")
+                || lower.contains("ai is not configured"))
+            .then(|| content.to_string())
+        });
+    let detail_lower = detail
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let (kind, hints) = if detail_lower.contains("ai is not configured")
+        || detail_lower.contains("please configure ai settings first")
+    {
+        (
+            Some("ai_not_configured".to_string()),
+            vec![
+                "Open Settings and configure the active AI profile.".to_string(),
+                "Save the profile and retry the Assistant startup.".to_string(),
+            ],
+        )
+    } else if detail_lower.contains("insufficient system resources")
+        || detail_lower.contains("guardrails")
+        || detail_lower.contains("requires approximately")
+    {
+        (
+            Some("resource_guard".to_string()),
+            vec![
+                "Choose a smaller model in Settings.".to_string(),
+                "Switch to a remote inference endpoint if available.".to_string(),
+                "Only relax model loading guardrails if you accept freeze risk.".to_string(),
+            ],
+        )
+    } else if detail_lower.contains("llm call failed") {
+        (
+            Some("llm_error".to_string()),
+            vec![
+                "Retry the Assistant startup.".to_string(),
+                "Open Settings and verify the active model and endpoint.".to_string(),
+            ],
+        )
+    } else {
+        (
+            Some("unknown".to_string()),
+            vec![
+                "Retry the Assistant startup.".to_string(),
+                "Open Settings and review the active AI model and endpoint.".to_string(),
+            ],
+        )
+    };
+
+    StartupRecoveryInfo {
+        kind,
+        detail,
+        hints,
+    }
 }
 
 fn store_assistant_context(state: &AppState, window_label: &str, context: AssistantContext) {
@@ -1522,6 +1636,17 @@ mod tests {
     }
 
     #[test]
+    fn clear_startup_status_removes_inflight_entry() {
+        let state = AppState::new();
+        set_startup_status(&state, "main", "Running startup analysis...".to_string()).unwrap();
+
+        clear_startup_status(&state, "main");
+
+        let guard = state.assistant_startup_inflight.lock().unwrap();
+        assert!(!guard.contains_key("main"));
+    }
+
+    #[test]
     fn finalize_started_engine_skips_stale_project_startup() {
         let state = AppState::new();
         state
@@ -1677,5 +1802,37 @@ mod tests {
             pending_required_check_names(&checks),
             vec!["CI".to_string()]
         );
+    }
+
+    #[test]
+    fn assistant_recovery_info_detects_resource_guard_failures() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        engine.apply_startup_failure_message(
+            r#"LLM call failed: Failed to load model due to insufficient system resources. Adjust guardrails in settings."#,
+        );
+
+        let recovery = derive_startup_recovery_info(&engine);
+
+        assert_eq!(recovery.kind.as_deref(), Some("resource_guard"));
+        assert!(recovery
+            .hints
+            .iter()
+            .any(|hint| hint.contains("smaller model")));
+    }
+
+    #[test]
+    fn assistant_recovery_info_detects_ai_not_configured() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        engine.apply_startup_failure_message(
+            "AI is not configured. Please configure AI settings first.",
+        );
+
+        let recovery = derive_startup_recovery_info(&engine);
+
+        assert_eq!(recovery.kind.as_deref(), Some("ai_not_configured"));
+        assert!(recovery
+            .hints
+            .iter()
+            .any(|hint| hint.contains("Open Settings")));
     }
 }

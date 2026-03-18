@@ -737,6 +737,15 @@ export interface AssistantState {
   estimatedTokens: number;
   startupStatus: "idle" | "analyzing" | "ready" | "failed" | (string & {});
   startupSummaryReady: boolean;
+  startupFailureKind?:
+    | "resource_guard"
+    | "ai_not_configured"
+    | "llm_error"
+    | "unknown"
+    | (string & {})
+    | null;
+  startupFailureDetail?: string | null;
+  startupRecoveryHints: string[];
   workingGoal?: string | null;
   goalConfidence?: "high" | "medium" | "low" | (string & {}) | null;
   currentStatus?:
