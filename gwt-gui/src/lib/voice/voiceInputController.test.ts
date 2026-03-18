@@ -144,6 +144,7 @@ describe("VoiceInputController", () => {
     document.body.appendChild(textarea);
     textarea.focus();
 
+    (controller as any).pttPressed = true;
     await (controller as any).startListening("ptt");
     await (controller as any).stopListening(false);
 
@@ -1508,6 +1509,45 @@ describe("VoiceInputController", () => {
     await vi.waitFor(() => {
       expect(startMock).toHaveBeenCalledWith("ptt");
       expect(stopMock).toHaveBeenCalledWith(false);
+    });
+
+    controller.dispose();
+  });
+
+  it("cancels in-flight push-to-talk start when the button is released early", async () => {
+    const controller = new VoiceInputController({
+      getSettings: () => settings,
+      getFallbackTerminalPaneId: () => null,
+    });
+
+    let resolveCapture: any = null;
+    const beginCaptureMock = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCapture = resolve;
+        }),
+    );
+    (controller as any).beginCapture = beginCaptureMock;
+    const endCaptureMock = vi.fn(async () => ({
+      samples: [],
+      sampleRate: 16_000,
+      truncated: false,
+    }));
+    (controller as any).endCapture = endCaptureMock;
+
+    controller.pressPushToTalk();
+    await vi.waitFor(() => {
+      expect(beginCaptureMock).toHaveBeenCalled();
+    });
+    controller.releasePushToTalk();
+    if (resolveCapture) {
+      resolveCapture();
+    }
+
+    await vi.waitFor(() => {
+      expect(endCaptureMock).toHaveBeenCalled();
+      expect((controller as any).state.listening).toBe(false);
+      expect((controller as any).activeMode).toBeNull();
     });
 
     controller.dispose();

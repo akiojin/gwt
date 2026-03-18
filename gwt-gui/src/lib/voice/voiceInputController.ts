@@ -396,6 +396,12 @@ export class VoiceInputController {
     }
   }
 
+  private shouldAbortListeningStart(mode: CaptureMode): boolean {
+    const settings = this.options.getSettings();
+    if (!settings.enabled) return true;
+    return mode === "ptt" && this.activePttSources.size === 0;
+  }
+
   private async startListening(mode: CaptureMode) {
     if (this.startInFlight || this.state.listening) return;
 
@@ -406,9 +412,13 @@ export class VoiceInputController {
 
     try {
       await this.refreshCapability();
+      if (this.shouldAbortListeningStart(mode)) return;
+
       if (!this.state.available && gpuAvailabilityDetector()) {
         await this.ensureRuntimeIfNeeded();
       }
+      if (this.shouldAbortListeningStart(mode)) return;
+
       if (!this.state.available) {
         this.setError(
           this.state.availabilityReason ||
@@ -430,8 +440,14 @@ export class VoiceInputController {
         );
         this.state.modelReady = !!prep.ready;
       }
+      if (this.shouldAbortListeningStart(mode)) return;
 
       await this.beginCapture();
+      if (this.shouldAbortListeningStart(mode)) {
+        await this.endCapture();
+        return;
+      }
+
       this.activeMode = mode;
       this.state.listening = true;
       this.setError(null);
