@@ -90,6 +90,7 @@ gh issue list --label gwt-spec --state all --limit 200
 - Shows planned deletions during `--dry-run`
 - Deletes migrated local spec directories, detected legacy workflow leftovers, and `migration-report.json` after a fully successful cleanup
 - Treats an explicit "migrate/convert" request as approval to execute after the dry-run summary, without an extra confirmation loop
+- Uses REST-safe body-file writes and retry/backoff for GitHub issue create/edit/comment operations where available
 
 ## Notes
 

@@ -16,6 +16,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -940,11 +941,36 @@ def resolve_thread(thread_id: str, repo_root: Path) -> bool:
 
 def add_pr_comment(pr_value: str, body: str, repo_root: Path) -> bool:
     """Add a comment to the PR."""
-    result = run_gh_command(
-        ["pr", "comment", pr_value, "-b", body],
-        cwd=repo_root,
-    )
-    return result.returncode == 0
+    result = run_gh_command(["pr", "comment", pr_value, "-b", body], cwd=repo_root)
+    if result.returncode == 0:
+        return True
+
+    message = (result.stderr or result.stdout or "").lower()
+    if "submitted too quickly" not in message and "secondary rate limit" not in message:
+        return False
+
+    repo_slug = fetch_repo_slug(repo_root)
+    if not repo_slug:
+        return False
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tmp:
+        json.dump({"body": body}, tmp, ensure_ascii=False)
+        tmp_path = Path(tmp.name)
+    try:
+        fallback = run_gh_command(
+            [
+                "api",
+                f"repos/{repo_slug}/issues/{pr_value}/comments",
+                "--method",
+                "POST",
+                "--input",
+                str(tmp_path),
+            ],
+            cwd=repo_root,
+        )
+        return fallback.returncode == 0
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 # =============================================================================

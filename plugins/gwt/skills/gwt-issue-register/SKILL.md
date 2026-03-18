@@ -164,3 +164,9 @@ Links, examples, or constraints
 EOF
 )"
 ```
+
+If `gh issue create` is rate-limited (`was submitted too quickly` / secondary rate limit), resolve the repo slug with `gh repo view --json nameWithOwner -q .nameWithOwner` and fall back to:
+
+```bash
+gh api "repos/<owner>/<repo>/issues" --method POST --input /tmp/issue-create.json
+```
