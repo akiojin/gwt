@@ -86,6 +86,7 @@ impl AssistantStartupStatus {
     }
 }
 
+#[derive(Clone)]
 pub struct AssistantEngine {
     conversation: Vec<ConversationItem>,
     project_path: PathBuf,
@@ -132,8 +133,19 @@ impl AssistantEngine {
     }
 
     pub fn handle_startup(&mut self, state: &AppState) -> Result<(), String> {
+        self.handle_startup_with_cancel(state, || false).map(|_| ())
+    }
+
+    pub fn handle_startup_with_cancel<F>(
+        &mut self,
+        state: &AppState,
+        should_cancel: F,
+    ) -> Result<bool, String>
+    where
+        F: Fn() -> bool,
+    {
         if self.startup_summary_ready {
-            return Ok(());
+            return Ok(true);
         }
 
         let base_len = self.conversation.len();
@@ -143,9 +155,8 @@ impl AssistantEngine {
             role: "system".to_string(),
             content: STARTUP_REPORT_PROMPT.to_string(),
         });
-
-        match self.run_llm_loop(state, AssistantToolMode::ReadOnly) {
-            Ok(_) => {
+        match self.run_llm_loop(state, AssistantToolMode::ReadOnly, &should_cancel) {
+            Ok(Some(_)) => {
                 let summary = match self.conversation.last() {
                     Some(ConversationItem::Message { content, .. }) => content.clone(),
                     _ => String::new(),
@@ -153,13 +164,19 @@ impl AssistantEngine {
                 self.finish_startup_transcript(base_len, &summary);
                 self.startup_status = AssistantStartupStatus::Ready;
                 self.startup_summary_ready = true;
-                Ok(())
+                Ok(true)
+            }
+            Ok(None) => {
+                self.conversation.truncate(base_len);
+                self.startup_status = AssistantStartupStatus::Idle;
+                self.startup_summary_ready = false;
+                Ok(false)
             }
             Err(err) => {
                 self.finish_startup_transcript(base_len, &format!("自律起動に失敗しました: {err}"));
                 self.startup_status = AssistantStartupStatus::Failed;
                 self.startup_summary_ready = false;
-                Ok(())
+                Ok(true)
             }
         }
     }
@@ -209,12 +226,29 @@ impl AssistantEngine {
         input: &str,
         state: &AppState,
     ) -> Result<AssistantResponse, String> {
+        self.handle_user_message_with_cancel(input, state, || false)?
+            .ok_or_else(|| "Assistant run cancelled".to_string())
+    }
+
+    pub fn handle_user_message_with_cancel<F>(
+        &mut self,
+        input: &str,
+        state: &AppState,
+        should_cancel: F,
+    ) -> Result<Option<AssistantResponse>, String>
+    where
+        F: Fn() -> bool,
+    {
+        if should_cancel() {
+            return Ok(None);
+        }
+
         self.conversation.push(ConversationItem::Message {
             role: "user".to_string(),
             content: input.to_string(),
         });
 
-        self.run_llm_loop(state, AssistantToolMode::FullAccess)
+        self.run_llm_loop(state, AssistantToolMode::FullAccess, &should_cancel)
     }
 
     /// Handle a batch of monitor events: summarize changes, optionally call LLM.
@@ -252,7 +286,9 @@ impl AssistantEngine {
             ),
         });
 
-        let response = self.run_llm_loop(state, AssistantToolMode::FullAccess)?;
+        let response = self
+            .run_llm_loop(state, AssistantToolMode::FullAccess, &|| false)?
+            .ok_or_else(|| "Assistant monitor run cancelled".to_string())?;
         Ok(Some(response))
     }
 
@@ -299,7 +335,12 @@ impl AssistantEngine {
         &mut self,
         state: &AppState,
         tool_mode: AssistantToolMode,
-    ) -> Result<AssistantResponse, String> {
+        should_cancel: &impl Fn() -> bool,
+    ) -> Result<Option<AssistantResponse>, String> {
+        if should_cancel() {
+            return Ok(None);
+        }
+
         let tools = assistant_tools::assistant_tool_definitions(tool_mode);
         let mut actions_taken = Vec::new();
 
@@ -310,6 +351,10 @@ impl AssistantEngine {
         self.prune_conversation();
 
         for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
+            if should_cancel() {
+                return Ok(None);
+            }
+
             let messages = self.conversation.clone();
             let tools_clone = tools.clone();
             let settings = ai_settings.clone();
@@ -346,17 +391,24 @@ impl AssistantEngine {
                 self.estimated_tokens += tokens;
             }
 
+            if should_cancel() {
+                return Ok(None);
+            }
+
             if response.tool_calls.is_empty() {
                 // No tool calls — this is the final text response
+                if should_cancel() {
+                    return Ok(None);
+                }
                 self.conversation.push(ConversationItem::Message {
                     role: "assistant".to_string(),
                     content: response.text.clone(),
                 });
 
-                return Ok(AssistantResponse {
+                return Ok(Some(AssistantResponse {
                     text: response.text,
                     actions_taken,
-                });
+                }));
             }
 
             // Add each tool call as a separate FunctionCall item
@@ -371,6 +423,10 @@ impl AssistantEngine {
             // Execute each tool call and add tool results
             let project_path = self.project_path.to_string_lossy().to_string();
             for tc in &response.tool_calls {
+                if should_cancel() {
+                    return Ok(None);
+                }
+
                 let tool_result = assistant_tools::execute_assistant_tool(
                     tc,
                     state,
@@ -406,10 +462,10 @@ impl AssistantEngine {
         }
 
         warn!("Assistant tool loop reached max iterations");
-        Ok(AssistantResponse {
+        Ok(Some(AssistantResponse {
             text: "Maximum tool call iterations reached. Please try again with a more specific request.".to_string(),
             actions_taken,
-        })
+        }))
     }
 }
 
@@ -630,5 +686,22 @@ mod tests {
         ));
         // Should have been pruned
         assert!(engine.conversation.len() <= MAX_CONVERSATION_MESSAGES);
+    }
+
+    #[test]
+    fn handle_user_message_with_cancel_returns_none_before_mutating_conversation() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        let state = crate::state::AppState::new();
+
+        let result = engine
+            .handle_user_message_with_cancel("hello", &state, || true)
+            .expect("cancelled run should not error");
+
+        assert!(result.is_none());
+        assert_eq!(engine.conversation.len(), 1);
+        assert!(matches!(
+            &engine.conversation[0],
+            ConversationItem::Message { role, .. } if role == "system"
+        ));
     }
 }

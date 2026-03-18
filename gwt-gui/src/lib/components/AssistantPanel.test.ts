@@ -35,6 +35,7 @@ const assistantStateFixture = {
   startupRecoveryHints: [],
   blockers: [],
   recommendedNextActions: [],
+  queuedMessageCount: 0,
 };
 
 const dashboardFixture = {
@@ -48,6 +49,7 @@ const dashboardFixture = {
 
 let initialAssistantState: AssistantState;
 let sendMessageImpl: (args?: { input?: string }) => Promise<AssistantState>;
+let committedMessages: AssistantState["messages"];
 
 async function renderAssistantPanel(
   props: {
@@ -105,16 +107,21 @@ describe("AssistantPanel", () => {
       };
     });
     initialAssistantState = structuredClone(assistantStateFixture);
+    committedMessages = structuredClone(initialAssistantState.messages);
     sendMessageImpl = async (args?: { input?: string }) => ({
       ...structuredClone(assistantStateFixture),
-      messages: [
-        {
-          role: "user",
-          kind: "text",
-          content: args?.input ?? "",
-          timestamp: Date.now(),
-        },
-      ],
+      messages: (() => {
+        committedMessages = [
+          ...committedMessages,
+          {
+            role: "user",
+            kind: "text",
+            content: args?.input ?? "",
+            timestamp: Date.now(),
+          },
+        ];
+        return structuredClone(committedMessages);
+      })(),
     });
 
     invokeMock.mockImplementation(async (command: string, args?: { input?: string }) => {
@@ -232,7 +239,7 @@ describe("AssistantPanel", () => {
 
     expect(getAssistantSendCalls()[0]).toEqual([
       "assistant_send_message",
-      { input: "hello" },
+      { input: "hello", deliveryMode: "interrupt" },
     ]);
   });
 
@@ -256,7 +263,7 @@ describe("AssistantPanel", () => {
     expect(getAssistantSendCalls()).toHaveLength(0);
   });
 
-  it("disables the composer while the assistant is thinking", async () => {
+  it("keeps the composer available while the assistant is thinking", async () => {
     initialAssistantState = {
       ...structuredClone(assistantStateFixture),
       isThinking: true,
@@ -276,11 +283,112 @@ describe("AssistantPanel", () => {
     const button = rendered.getByText("Send") as HTMLButtonElement;
 
     await waitFor(() => {
-      expect(textarea.disabled).toBe(true);
+      expect(textarea.disabled).toBe(false);
       expect(button.disabled).toBe(true);
       expect(rendered.getByText("Checking startup analysis cache...")).toBeTruthy();
       expect(rendered.getByText("Thinking...")).toBeTruthy();
     });
+  });
+
+  it("interrupt-sends on Enter even while the assistant is thinking", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      isThinking: true,
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "Thinking…",
+          timestamp: 1,
+        },
+      ],
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: { input?: string; deliveryMode?: string }) => {
+      if (command === "assistant_get_state") {
+        return structuredClone(initialAssistantState);
+      }
+      if (command === "assistant_get_dashboard") {
+        return structuredClone(dashboardFixture);
+      }
+      if (command === "assistant_send_message") {
+        return {
+          ...structuredClone(initialAssistantState),
+          queuedMessageCount: 0,
+        };
+      }
+      throw new Error(`Unexpected invoke command: ${command}`);
+    });
+
+    const rendered = await renderAssistantPanel();
+    const textarea = await waitForTextarea(rendered);
+
+    await fireEvent.input(textarea, { target: { value: "interrupt now" } });
+    await fireEvent.keyDown(textarea, {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+    });
+
+    await waitFor(() => {
+      expect(getAssistantSendCalls()).toHaveLength(1);
+    });
+    expect(getAssistantSendCalls()[0]).toEqual([
+      "assistant_send_message",
+      { input: "interrupt now", deliveryMode: "interrupt" },
+    ]);
+  });
+
+  it("queues a message on Tab while the assistant is thinking", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      isThinking: true,
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "Thinking…",
+          timestamp: 1,
+        },
+      ],
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: { input?: string; deliveryMode?: string }) => {
+      if (command === "assistant_get_state") {
+        return structuredClone(initialAssistantState);
+      }
+      if (command === "assistant_get_dashboard") {
+        return structuredClone(dashboardFixture);
+      }
+      if (command === "assistant_send_message") {
+        return {
+          ...structuredClone(initialAssistantState),
+          queuedMessageCount: 1,
+        };
+      }
+      throw new Error(`Unexpected invoke command: ${command}`);
+    });
+
+    const rendered = await renderAssistantPanel();
+    const textarea = await waitForTextarea(rendered);
+
+    await fireEvent.input(textarea, { target: { value: "send later" } });
+    await fireEvent.keyDown(textarea, {
+      key: "Tab",
+      code: "Tab",
+      keyCode: 9,
+      which: 9,
+    });
+
+    await waitFor(() => {
+      expect(getAssistantSendCalls()).toHaveLength(1);
+      expect(rendered.getByTestId("assistant-queued-send-indicator").textContent).toContain("1");
+    });
+    expect(getAssistantSendCalls()[0]).toEqual([
+      "assistant_send_message",
+      { input: "send later", deliveryMode: "queue" },
+    ]);
   });
 
   it("shows the current goal and recommended next actions in the dashboard strip", async () => {
@@ -388,12 +496,19 @@ describe("AssistantPanel", () => {
     });
   });
 
-  it("shows the user message immediately while assistant_send_message is pending", async () => {
-    let resolveSend: ((state: AssistantState) => void) | undefined;
-    sendMessageImpl = () =>
-      new Promise<AssistantState>((resolve) => {
-        resolveSend = resolve;
-      });
+  it("shows the user message immediately while assistant_send_message returns a pending-thinking state", async () => {
+    sendMessageImpl = async (args?: { input?: string }) => ({
+      ...structuredClone(assistantStateFixture),
+      isThinking: true,
+      messages: [
+        {
+          role: "user",
+          kind: "text",
+          content: args?.input ?? "",
+          timestamp: 1,
+        },
+      ],
+    });
 
     const rendered = await renderAssistantPanel();
     const textarea = rendered.getByPlaceholderText("Type a message...") as HTMLTextAreaElement;
@@ -416,28 +531,6 @@ describe("AssistantPanel", () => {
     });
     expect(rendered.getByText("Thinking...")).toBeTruthy();
     expect(textarea.value).toBe("");
-
-    resolveSend?.({
-      ...structuredClone(assistantStateFixture),
-      messages: [
-        {
-          role: "user",
-          kind: "text",
-          content: "first line\nsecond line",
-          timestamp: 1,
-        },
-        {
-          role: "assistant",
-          kind: "text",
-          content: "done",
-          timestamp: 2,
-        },
-      ],
-    });
-
-    await waitFor(() => {
-      expect(rendered.getByText("done")).toBeTruthy();
-    });
   });
 
   it("rolls back the optimistic message and restores the input on send failure", async () => {
