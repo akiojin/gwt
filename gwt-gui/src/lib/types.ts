@@ -123,6 +123,9 @@ export interface SettingsData {
   agent_auto_install_deps: boolean;
   agent_github_project_id?: string | null;
   agent_skill_registration_enabled?: boolean | null;
+  agent_inject_claude_md?: boolean | null;
+  agent_inject_agents_md?: boolean | null;
+  agent_inject_gemini_md?: boolean | null;
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;

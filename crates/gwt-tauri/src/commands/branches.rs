@@ -1051,7 +1051,6 @@ mod tests {
         );
         assert!(!issue_names.contains_key("develop"));
     }
-
     #[test]
     fn test_build_issue_display_name_map_uses_cached_issue_titles_only() {
         let temp = TempDir::new().unwrap();
