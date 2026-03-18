@@ -58,6 +58,14 @@ fn resolve_existing_worktree_path(
     Ok(None)
 }
 
+/// Return the path of the main (first) worktree, used as a fallback for
+/// Docker file detection when a branch has no local worktree.
+fn resolve_main_worktree_path(repo_path: &Path) -> Option<PathBuf> {
+    let manager = WorktreeManager::new(repo_path).ok()?;
+    let worktrees = manager.list_basic().ok()?;
+    worktrees.into_iter().next().map(|wt| wt.path)
+}
+
 #[derive(Debug, Clone)]
 struct ComposeProbeTarget {
     docker_file_type: DockerFileType,
@@ -439,7 +447,15 @@ pub fn detect_docker_context(
     let remotes = Remote::list(&repo_path).unwrap_or_default();
     let normalized_branch = strip_known_remote_prefix(branch_ref, &remotes);
 
-    let (file_type, compose_services, compose_probe) = match worktree_path.as_ref() {
+    // For remote-only branches (no local worktree), fall back to the main
+    // worktree for Docker file detection.  Docker configuration files
+    // (Dockerfile, compose.yml, .devcontainer/) typically live at the repo
+    // root and apply to all branches.
+    let detection_path: Option<PathBuf> = worktree_path
+        .clone()
+        .or_else(|| resolve_main_worktree_path(&repo_path));
+
+    let (file_type, compose_services, compose_probe) = match detection_path.as_ref() {
         Some(wt) => match detect_docker_files(wt) {
             Some(DockerFileType::Compose(compose_path)) => {
                 let compose_args =
@@ -505,9 +521,9 @@ pub fn detect_docker_context(
     let process_env: HashMap<String, String> = std::env::vars().collect();
     let detection_env = merge_profile_env_for_detection(&process_env);
 
-    // Detect container / image status when daemon is running and worktree exists.
+    // Detect container / image status when daemon is running and a detection path exists.
     let (container_status, images_exist) = if daemon_ok && compose_ok {
-        if let (Some(wt), Some(probe)) = (worktree_path.as_ref(), compose_probe.as_ref()) {
+        if let (Some(wt), Some(probe)) = (detection_path.as_ref(), compose_probe.as_ref()) {
             if normalized_branch.is_empty() {
                 (None, None)
             } else {

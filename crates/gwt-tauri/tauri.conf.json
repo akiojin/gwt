@@ -1,6 +1,6 @@
 {
   "productName": "gwt",
-  "version": "8.12.0",
+  "version": "8.13.0",
   "identifier": "com.akiojin.gwt",
   "build": {
     "frontendDist": "../../gwt-gui/dist",
@@ -14,7 +14,10 @@
       "icons/icon.png",
       "icons/icon.ico",
       "icons/icon.icns"
-    ]
+    ],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    }
   },
   "app": {
     "windows": [
@@ -29,7 +32,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' mediastream:"
     },
     "macOSPrivateApi": true
   }

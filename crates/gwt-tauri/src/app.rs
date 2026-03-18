@@ -152,6 +152,24 @@ fn end_exit_confirm(state: &AppState) {
     state.exit_confirm_inflight.store(false, Ordering::SeqCst);
 }
 
+/// Kill all PTY child processes managed by the PaneManager.
+///
+/// Must be called before `app_handle.exit()` to prevent orphan processes on
+/// Windows (and as a safety net on other platforms).
+pub fn cleanup_pty_processes(state: &AppState) {
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Err(err) = manager.kill_all() {
+            warn!(
+                category = "cleanup",
+                error = %err,
+                "Failed to kill some PTY child processes during shutdown"
+            );
+        } else {
+            info!(category = "cleanup", "All PTY child processes terminated");
+        }
+    }
+}
+
 fn menu_action_from_id(id: &str) -> Option<&'static str> {
     match id {
         crate::menu::MENU_ID_FILE_OPEN_PROJECT => Some("open-project"),
@@ -319,6 +337,7 @@ pub fn build_app(
                         "tray-quit" => {
                             let state = app.state::<AppState>();
                             if !has_running_agents(&state) {
+                                cleanup_pty_processes(&state);
                                 state.request_quit();
                                 app.exit(0);
                                 return;
@@ -340,6 +359,7 @@ pub fn build_app(
                                     let state = app_handle.state::<AppState>();
                                     end_exit_confirm(&state);
                                     if ok {
+                                        cleanup_pty_processes(&state);
                                         state.request_quit();
                                         app_handle.exit(0);
                                     }
@@ -616,6 +636,7 @@ pub fn build_app(
                             event = "AllWindowsClosed",
                             "All windows closed; exiting app"
                         );
+                        cleanup_pty_processes(&state);
                         state.request_quit();
                         app_handle.exit(0);
                     } else {
@@ -968,6 +989,7 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
                 if state.is_quit_confirm_active(QUIT_CONFIRM_TIMEOUT) {
                     // 2nd press within timeout → quit
                     state.cancel_quit_confirm();
+                    cleanup_pty_processes(&state);
                     state.request_quit();
                     app_handle.exit(0);
                     return;

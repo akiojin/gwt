@@ -30,7 +30,8 @@
     | "general"
     | "profiles"
     | "terminal"
-    | "voiceInput";
+    | "voiceInput"
+    | "agent";
   let activeSettingsTab: SettingsTabId = $state("general");
 
   let showCreateProfileDialog: boolean = $state(false);
@@ -744,6 +745,11 @@
           class:active={activeSettingsTab === "voiceInput"}
           onclick={() => (activeSettingsTab = "voiceInput")}
         >Voice Input</button>
+        <button
+          class="settings-tab-btn"
+          class:active={activeSettingsTab === "agent"}
+          onclick={() => (activeSettingsTab = "agent")}
+        >Agent</button>
       </div>
 
       <div class="settings-tab-content">
@@ -1385,6 +1391,141 @@
                 </div>
               {/if}
             {/if}
+          </div>
+
+        <!-- ═══ Agent ═══ -->
+        {:else if activeSettingsTab === "agent"}
+          <div class="section-content">
+            <div class="settings-section">
+              <h3 class="settings-section-title">Skill Registration</h3>
+              <div class="settings-section-body">
+                <div class="field">
+                  <div class="ai-toggle">
+                    <input
+                      id="agent-skill-registration"
+                      type="checkbox"
+                      checked={settings.agent_skill_registration_enabled ?? false}
+                      onchange={(e) => {
+                        const current = settings as SettingsData;
+                        settings = { ...current, agent_skill_registration_enabled: (e.target as HTMLInputElement).checked };
+                      }}
+                    />
+                    <label for="agent-skill-registration">Enable skill registration</label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h3 class="settings-section-title">Docs Injection</h3>
+              <div class="settings-section-body">
+                <div class="field">
+                  <div class="ai-toggle">
+                    <input
+                      id="agent-inject-claude-md"
+                      type="checkbox"
+                      checked={settings.agent_inject_claude_md ?? true}
+                      onchange={(e) => {
+                        const current = settings as SettingsData;
+                        settings = { ...current, agent_inject_claude_md: (e.target as HTMLInputElement).checked };
+                      }}
+                    />
+                    <label for="agent-inject-claude-md">CLAUDE.md</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <div class="ai-toggle">
+                    <input
+                      id="agent-inject-agents-md"
+                      type="checkbox"
+                      checked={settings.agent_inject_agents_md ?? false}
+                      onchange={(e) => {
+                        const current = settings as SettingsData;
+                        settings = { ...current, agent_inject_agents_md: (e.target as HTMLInputElement).checked };
+                      }}
+                    />
+                    <label for="agent-inject-agents-md">AGENTS.md</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <div class="ai-toggle">
+                    <input
+                      id="agent-inject-gemini-md"
+                      type="checkbox"
+                      checked={settings.agent_inject_gemini_md ?? false}
+                      onchange={(e) => {
+                        const current = settings as SettingsData;
+                        settings = { ...current, agent_inject_gemini_md: (e.target as HTMLInputElement).checked };
+                      }}
+                    />
+                    <label for="agent-inject-gemini-md">GEMINI.md</label>
+                  </div>
+                </div>
+                <span class="field-hint">
+                  Inject skills catalog on each agent launch.
+                </span>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h3 class="settings-section-title">Agent Paths</h3>
+              <div class="settings-section-body">
+                <div class="field">
+                  <label for="agent-claude-path">Claude Code</label>
+                  <input
+                    id="agent-claude-path"
+                    type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                    value={settings.agent_claude_path ?? ""}
+                    oninput={(e) => {
+                      const current = settings as SettingsData;
+                      const v = (e.target as HTMLInputElement).value;
+                      settings = { ...current, agent_claude_path: v || null };
+                    }}
+                    placeholder="claude"
+                  />
+                </div>
+                <div class="field">
+                  <label for="agent-codex-path">Codex CLI</label>
+                  <input
+                    id="agent-codex-path"
+                    type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                    value={settings.agent_codex_path ?? ""}
+                    oninput={(e) => {
+                      const current = settings as SettingsData;
+                      const v = (e.target as HTMLInputElement).value;
+                      settings = { ...current, agent_codex_path: v || null };
+                    }}
+                    placeholder="codex"
+                  />
+                </div>
+                <div class="field">
+                  <label for="agent-gemini-path">Gemini CLI</label>
+                  <input
+                    id="agent-gemini-path"
+                    type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                    value={settings.agent_gemini_path ?? ""}
+                    oninput={(e) => {
+                      const current = settings as SettingsData;
+                      const v = (e.target as HTMLInputElement).value;
+                      settings = { ...current, agent_gemini_path: v || null };
+                    }}
+                    placeholder="gemini"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         {/if}
       </div>

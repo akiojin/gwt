@@ -239,7 +239,34 @@ fn process_is_alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    // Windows API constants
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259; // STATUS_PENDING
+
+    extern "system" {
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        fn GetExitCodeProcess(process: *mut c_void, exit_code: *mut u32) -> i32;
+        fn CloseHandle(object: *mut c_void) -> i32;
+    }
+
+    // SAFETY: calling well-known Windows API with valid arguments.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut exit_code);
+        CloseHandle(handle);
+        ok != 0 && exit_code == STILL_ACTIVE
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_is_alive(_pid: u32) -> bool {
     false
 }

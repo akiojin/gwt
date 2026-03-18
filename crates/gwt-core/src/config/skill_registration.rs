@@ -16,6 +16,146 @@ use tracing::{info, warn};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+// Auto-generated skill catalog from build.rs (parses plugins/gwt/skills/*/SKILL.md).
+include!(concat!(env!("OUT_DIR"), "/skill_catalog_generated.rs"));
+
+const MANAGED_SKILLS_BLOCK_BEGIN: &str = "<!-- BEGIN gwt managed skills -->";
+const MANAGED_SKILLS_BLOCK_END: &str = "<!-- END gwt managed skills -->";
+
+/// Generate the managed skills markdown block from the compiled skill catalog.
+pub fn generate_managed_skills_block() -> String {
+    // Category assignments (hardcoded since SKILL.md has no category field).
+    const ISSUE_SPEC_SKILLS: &[&str] = &[
+        "gwt-issue-register",
+        "gwt-issue-resolve",
+        "gwt-issue-search",
+        "gwt-spec-register",
+        "gwt-spec-ops",
+    ];
+    const PR_SKILLS: &[&str] = &["gwt-pr", "gwt-pr-check", "gwt-fix-pr"];
+    // Everything else goes to Utilities.
+
+    fn table_rows(names: &[&str]) -> String {
+        let mut rows = String::new();
+        for &name in names {
+            let entry = SKILL_CATALOG.iter().find(|e| e.name == name);
+            let (command, desc) = match entry {
+                Some(e) => {
+                    let cmd = if e.has_command {
+                        format!("`/gwt:{}`", e.name)
+                    } else {
+                        "\u{2014}".to_string() // em-dash
+                    };
+                    (cmd, e.description)
+                }
+                None => continue,
+            };
+            rows.push_str(&format!("| {} | {} | {} |\n", name, command, desc));
+        }
+        rows
+    }
+
+    let utility_names: Vec<&str> = SKILL_CATALOG
+        .iter()
+        .map(|e| e.name)
+        .filter(|n| !ISSUE_SPEC_SKILLS.contains(n) && !PR_SKILLS.contains(n))
+        .collect();
+
+    let mut block = String::new();
+    block.push_str(MANAGED_SKILLS_BLOCK_BEGIN);
+    block.push('\n');
+    block.push_str("## Available Skills & Commands (gwt)\n\n");
+    block.push_str("Skills are located in `.claude/skills/<name>/SKILL.md`.\n");
+    block.push_str("Commands can be invoked as `/gwt:<command-name>`.\n\n");
+
+    block.push_str("### Issue & SPEC Management\n\n");
+    block.push_str("| Skill | Command | Description |\n");
+    block.push_str("|-------|---------|-------------|\n");
+    block.push_str(&table_rows(ISSUE_SPEC_SKILLS));
+    block.push('\n');
+
+    block.push_str("### PR Management\n\n");
+    block.push_str("| Skill | Command | Description |\n");
+    block.push_str("|-------|---------|-------------|\n");
+    block.push_str(&table_rows(PR_SKILLS));
+    block.push('\n');
+
+    block.push_str("### Utilities\n\n");
+    block.push_str("| Skill | Command | Description |\n");
+    block.push_str("|-------|---------|-------------|\n");
+    block.push_str(&table_rows(&utility_names));
+    block.push('\n');
+
+    block.push_str("### Recommended Workflow\n\n");
+    block.push_str("See each skill's SKILL.md for detailed instructions:\n\n");
+    block.push_str("1. **Register work** → `gwt-issue-register`\n");
+    block.push_str("2. **Create SPEC** → `gwt-spec-register` → `gwt-spec-ops`\n");
+    block.push_str("3. **Implement** → TDD (test first) → code\n");
+    block.push_str("4. **Open PR** → `gwt-pr`\n");
+    block.push_str("5. **Fix CI / reviews** → `gwt-fix-pr`\n");
+    block.push_str(MANAGED_SKILLS_BLOCK_END);
+    block.push('\n');
+
+    block
+}
+
+/// Inject or replace the managed skills block in markdown content.
+///
+/// - If `<!-- BEGIN gwt managed skills -->` / `<!-- END gwt managed skills -->` markers
+///   exist, replaces the block between them.
+/// - If no markers exist, appends the block at the end (with blank-line separator).
+/// - Returns an error for malformed marker pairs (e.g., BEGIN without END).
+pub fn inject_managed_skills_block(content: &str) -> Result<String, String> {
+    let has_begin = content.contains(MANAGED_SKILLS_BLOCK_BEGIN);
+    let has_end = content.contains(MANAGED_SKILLS_BLOCK_END);
+
+    if has_begin && !has_end {
+        return Err(format!(
+            "Malformed managed skills block: found BEGIN marker but missing END marker ('{}')",
+            MANAGED_SKILLS_BLOCK_END
+        ));
+    }
+    if !has_begin && has_end {
+        return Err(format!(
+            "Malformed managed skills block: found END marker but missing BEGIN marker ('{}')",
+            MANAGED_SKILLS_BLOCK_BEGIN
+        ));
+    }
+
+    let managed_block = generate_managed_skills_block();
+
+    if has_begin && has_end {
+        // Replace existing block
+        let begin_idx = content.find(MANAGED_SKILLS_BLOCK_BEGIN).unwrap();
+        let end_idx = content.find(MANAGED_SKILLS_BLOCK_END).unwrap();
+        let after_end = end_idx + MANAGED_SKILLS_BLOCK_END.len();
+        // Skip trailing newline after END marker if present
+        let after_end = if content[after_end..].starts_with('\n') {
+            after_end + 1
+        } else {
+            after_end
+        };
+
+        let mut result = String::new();
+        result.push_str(&content[..begin_idx]);
+        result.push_str(&managed_block);
+        result.push_str(&content[after_end..]);
+        Ok(result)
+    } else {
+        // Append to end
+        let trimmed = content.trim_end();
+        if trimmed.is_empty() {
+            Ok(managed_block)
+        } else {
+            let mut result = String::new();
+            result.push_str(trimmed);
+            result.push_str("\n\n");
+            result.push_str(&managed_block);
+            Ok(result)
+        }
+    }
+}
+
 /// Managed file asset definition for project-local agent assets.
 #[derive(Debug, Clone, Copy)]
 struct ManagedAsset {
@@ -1602,8 +1742,10 @@ mod tests {
     fn status_for_reports_scope_not_configured_when_explicitly_disabled() {
         let tmp = tempfile::tempdir().unwrap();
         let mut settings = Settings::default();
-        settings.agent.skill_registration =
-            Some(crate::config::SkillRegistrationPreferences { enabled: false });
+        settings.agent.skill_registration = Some(crate::config::SkillRegistrationPreferences {
+            enabled: false,
+            ..Default::default()
+        });
         let status = get_skill_registration_status_with_settings_at_project_root(
             &settings,
             Some(tmp.path()),
@@ -1653,8 +1795,10 @@ mod tests {
     fn register_with_settings_respects_explicit_disable() {
         let temp = tempfile::tempdir().unwrap();
         let mut settings = Settings::default();
-        settings.agent.skill_registration =
-            Some(crate::config::SkillRegistrationPreferences { enabled: false });
+        settings.agent.skill_registration = Some(crate::config::SkillRegistrationPreferences {
+            enabled: false,
+            ..Default::default()
+        });
         let result = register_agent_skills_with_settings_at_project_root(
             SkillAgentType::Codex,
             &settings,
@@ -2433,6 +2577,171 @@ another-pattern
         let exclude = std::fs::read_to_string(exclude_path).unwrap();
         assert!(exclude.contains(PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER));
         assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.mjs"));
+    }
+
+    // ── Skill catalog / managed block injection tests ──────────────
+
+    #[test]
+    fn generate_managed_skills_block_contains_all_skills() {
+        let block = generate_managed_skills_block();
+
+        // Every cataloged skill name must appear
+        for entry in SKILL_CATALOG {
+            assert!(
+                block.contains(entry.name),
+                "managed block should contain skill: {}",
+                entry.name
+            );
+        }
+
+        // Skills with commands should show `/gwt:<name>`
+        for entry in SKILL_CATALOG.iter().filter(|e| e.has_command) {
+            let command_ref = format!("/gwt:{}", entry.name);
+            assert!(
+                block.contains(&command_ref),
+                "managed block should contain command ref: {command_ref}"
+            );
+        }
+
+        // Skills without commands should show em-dash
+        for entry in SKILL_CATALOG.iter().filter(|e| !e.has_command) {
+            // Verify they do NOT have a `/gwt:` command reference
+            let command_ref = format!("/gwt:{}", entry.name);
+            assert!(
+                !block.contains(&command_ref),
+                "managed block should NOT contain command ref for no-command skill: {command_ref}"
+            );
+        }
+    }
+
+    #[test]
+    fn inject_managed_skills_block_appends_to_content_without_block() {
+        let existing = "# My CLAUDE.md\n\nSome existing content.\n";
+        let result = inject_managed_skills_block(existing).unwrap();
+
+        // Existing content must be preserved
+        assert!(result.contains("# My CLAUDE.md"));
+        assert!(result.contains("Some existing content."));
+
+        // Managed block must be appended
+        assert!(result.contains(MANAGED_SKILLS_BLOCK_BEGIN));
+        assert!(result.contains(MANAGED_SKILLS_BLOCK_END));
+
+        // Empty line separator between existing and managed block
+        let begin_pos = result.find(MANAGED_SKILLS_BLOCK_BEGIN).unwrap();
+        let before_begin = &result[..begin_pos];
+        assert!(
+            before_begin.ends_with("\n\n"),
+            "managed block should be separated by an empty line"
+        );
+    }
+
+    #[test]
+    fn inject_managed_skills_block_replaces_existing_block() {
+        let old_block = format!(
+            "# Heading\n\nBefore.\n\n{}\nOld content\n{}\n\nAfter.\n",
+            MANAGED_SKILLS_BLOCK_BEGIN, MANAGED_SKILLS_BLOCK_END
+        );
+        let result = inject_managed_skills_block(&old_block).unwrap();
+
+        assert!(result.contains("# Heading"));
+        assert!(result.contains("Before."));
+        assert!(result.contains("After."));
+        assert!(!result.contains("Old content"));
+        assert!(result.contains(MANAGED_SKILLS_BLOCK_BEGIN));
+        assert!(result.contains(MANAGED_SKILLS_BLOCK_END));
+    }
+
+    #[test]
+    fn inject_managed_skills_block_is_idempotent() {
+        let existing = "# My CLAUDE.md\n";
+        let first = inject_managed_skills_block(existing).unwrap();
+        let second = inject_managed_skills_block(&first).unwrap();
+
+        assert_eq!(first, second, "inject must be idempotent");
+    }
+
+    #[test]
+    fn inject_managed_skills_block_rejects_unterminated_begin() {
+        let content = format!(
+            "# Heading\n\n{}\nSome content\n",
+            MANAGED_SKILLS_BLOCK_BEGIN
+        );
+        let result = inject_managed_skills_block(&content);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("END"),
+            "error should mention missing END marker: {err}"
+        );
+    }
+
+    #[test]
+    fn inject_managed_skills_block_rejects_orphan_end() {
+        let content = format!("# Heading\n\n{}\n", MANAGED_SKILLS_BLOCK_END);
+        let result = inject_managed_skills_block(&content);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("BEGIN"),
+            "error should mention missing BEGIN marker: {err}"
+        );
+    }
+
+    #[test]
+    fn inject_managed_skills_block_handles_empty_content() {
+        let result = inject_managed_skills_block("").unwrap();
+
+        assert!(result.contains(MANAGED_SKILLS_BLOCK_BEGIN));
+        assert!(result.contains(MANAGED_SKILLS_BLOCK_END));
+        // Should be only the managed block (no leading separator for empty content)
+        assert!(result.starts_with(MANAGED_SKILLS_BLOCK_BEGIN));
+    }
+
+    #[test]
+    fn skill_catalog_matches_project_skill_assets() {
+        // Every name in SKILL_CATALOG must correspond to a PROJECT_SKILL_ASSETS entry
+        for entry in SKILL_CATALOG {
+            let expected_relative = format!("skills/{}/SKILL.md", entry.name);
+            let found = PROJECT_SKILL_ASSETS
+                .iter()
+                .any(|asset| asset.relative_path == expected_relative);
+            assert!(
+                found,
+                "SKILL_CATALOG entry '{}' has no matching PROJECT_SKILL_ASSETS entry (expected relative_path='{}')",
+                entry.name,
+                expected_relative
+            );
+        }
+
+        // Every unique skill name in PROJECT_SKILL_ASSETS (SKILL.md only) must appear in SKILL_CATALOG
+        for asset in PROJECT_SKILL_ASSETS {
+            if !asset.relative_path.ends_with("/SKILL.md") {
+                continue;
+            }
+            let skill_name = asset
+                .relative_path
+                .strip_prefix("skills/")
+                .and_then(|s| s.strip_suffix("/SKILL.md"))
+                .unwrap();
+            let found = SKILL_CATALOG.iter().any(|entry| entry.name == skill_name);
+            assert!(
+                found,
+                "PROJECT_SKILL_ASSETS skill '{}' has no matching SKILL_CATALOG entry",
+                skill_name
+            );
+        }
+    }
+
+    #[test]
+    fn skill_registration_preferences_inject_defaults() {
+        let prefs = crate::config::SkillRegistrationPreferences::default();
+        assert!(prefs.enabled);
+        assert!(prefs.inject_claude_md);
+        assert!(!prefs.inject_agents_md);
+        assert!(!prefs.inject_gemini_md);
     }
 
     #[test]

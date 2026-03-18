@@ -7,8 +7,9 @@ use gwt_core::ai::SessionParser;
 use gwt_core::config::stats::Stats;
 use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
-    compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
-    DevContainerConfig, DockerFileType, DockerManager, PortAllocator,
+    compose_available, daemon_running, detect_docker_files, docker_available,
+    normalize_docker_compose_path, try_start_daemon, DevContainerConfig, DockerFileType,
+    DockerManager, PortAllocator,
 };
 use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
 use gwt_core::terminal::pane::PaneStatus;
@@ -4297,6 +4298,28 @@ pub(crate) fn launch_agent_for_project_root(
                     return Err("Cancelled".to_string());
                 }
                 state.set_skill_registration_status(status);
+
+                // Inject managed skills block into instruction docs based on settings
+                if let Some(ref prefs) = settings.agent.skill_registration {
+                    if prefs.inject_claude_md {
+                        let claude_md_path = working_dir.join("CLAUDE.md");
+                        let _ = crate::commands::clause_docs::ensure_managed_skills_block(
+                            &claude_md_path,
+                        );
+                    }
+                    if prefs.inject_agents_md {
+                        let agents_md_path = working_dir.join("AGENTS.md");
+                        let _ = crate::commands::clause_docs::ensure_managed_skills_block(
+                            &agents_md_path,
+                        );
+                    }
+                    if prefs.inject_gemini_md {
+                        let gemini_md_path = working_dir.join("GEMINI.md");
+                        let _ = crate::commands::clause_docs::ensure_managed_skills_block(
+                            &gemini_md_path,
+                        );
+                    }
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -4499,8 +4522,10 @@ pub(crate) fn launch_agent_for_project_root(
                         DockerFileType::Compose(compose_path.clone()),
                     );
 
-                    let mut compose_args =
-                        vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
+                    let mut compose_args = vec![
+                        "-f".to_string(),
+                        normalize_docker_compose_path(&compose_path),
+                    ];
                     let compose_paths = compose_file_paths_from_args(&compose_args);
 
                     let mut env = manager.collect_passthrough_env();
@@ -4520,7 +4545,7 @@ pub(crate) fn launch_agent_for_project_root(
                         &mounts,
                     )? {
                         compose_args.push("-f".to_string());
-                        compose_args.push(override_path.to_string_lossy().to_string());
+                        compose_args.push(normalize_docker_compose_path(&override_path));
                     }
 
                     docker_compose_up(
@@ -4614,7 +4639,7 @@ pub(crate) fn launch_agent_for_project_root(
                             &mounts,
                         )? {
                             compose_args.push("-f".to_string());
-                            compose_args.push(override_path.to_string_lossy().to_string());
+                            compose_args.push(normalize_docker_compose_path(&override_path));
                         }
 
                         docker_compose_up(

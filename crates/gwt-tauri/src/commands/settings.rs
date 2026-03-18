@@ -81,6 +81,15 @@ pub struct SettingsData {
     /// `Some(true)` = enabled, `Some(false)` = explicitly disabled, `None` = use default.
     #[serde(default)]
     pub agent_skill_registration_enabled: Option<bool>,
+    /// Inject managed skills block into CLAUDE.md.
+    #[serde(default)]
+    pub agent_inject_claude_md: Option<bool>,
+    /// Inject managed skills block into AGENTS.md.
+    #[serde(default)]
+    pub agent_inject_agents_md: Option<bool>,
+    /// Inject managed skills block into GEMINI.md.
+    #[serde(default)]
+    pub agent_inject_gemini_md: Option<bool>,
     pub docker_force_host: bool,
     pub ui_font_size: u32,
     pub terminal_font_size: u32,
@@ -142,6 +151,27 @@ impl From<&Settings> for SettingsData {
                     .map(|prefs| prefs.enabled)
                     .unwrap_or(true),
             ),
+            agent_inject_claude_md: Some(
+                s.agent
+                    .skill_registration
+                    .as_ref()
+                    .map(|prefs| prefs.inject_claude_md)
+                    .unwrap_or(true),
+            ),
+            agent_inject_agents_md: Some(
+                s.agent
+                    .skill_registration
+                    .as_ref()
+                    .map(|prefs| prefs.inject_agents_md)
+                    .unwrap_or(false),
+            ),
+            agent_inject_gemini_md: Some(
+                s.agent
+                    .skill_registration
+                    .as_ref()
+                    .map(|prefs| prefs.inject_gemini_md)
+                    .unwrap_or(false),
+            ),
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
@@ -184,10 +214,12 @@ impl SettingsData {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
-        s.agent.skill_registration = match self.agent_skill_registration_enabled {
-            Some(false) => Some(SkillRegistrationPreferences { enabled: false }),
-            _ => Some(SkillRegistrationPreferences::default()),
-        };
+        s.agent.skill_registration = Some(SkillRegistrationPreferences {
+            enabled: self.agent_skill_registration_enabled.unwrap_or(true),
+            inject_claude_md: self.agent_inject_claude_md.unwrap_or(true),
+            inject_agents_md: self.agent_inject_agents_md.unwrap_or(false),
+            inject_gemini_md: self.agent_inject_gemini_md.unwrap_or(false),
+        });
 
         s.docker.force_host = self.docker_force_host;
         s.appearance.ui_font_size = self.ui_font_size;
@@ -434,7 +466,10 @@ mod tests {
         let back = disabled.to_settings().unwrap();
         assert_eq!(
             back.agent.skill_registration,
-            Some(SkillRegistrationPreferences { enabled: false })
+            Some(SkillRegistrationPreferences {
+                enabled: false,
+                ..Default::default()
+            })
         );
     }
 
@@ -478,6 +513,28 @@ mod tests {
         data.voice_input.ptt_hotkey = "Mod+Shift+Space".to_string();
         let normalized = data.to_settings().unwrap();
         assert_eq!(normalized.voice_input.hotkey, "Space");
+    }
+
+    #[test]
+    fn settings_data_inject_round_trip() {
+        let mut core = Settings::default();
+        core.agent.skill_registration = Some(SkillRegistrationPreferences {
+            enabled: true,
+            inject_claude_md: true,
+            inject_agents_md: true,
+            inject_gemini_md: false,
+        });
+
+        let data = SettingsData::from(&core);
+        assert_eq!(data.agent_inject_claude_md, Some(true));
+        assert_eq!(data.agent_inject_agents_md, Some(true));
+        assert_eq!(data.agent_inject_gemini_md, Some(false));
+
+        let back = data.to_settings().unwrap();
+        let prefs = back.agent.skill_registration.unwrap();
+        assert!(prefs.inject_claude_md);
+        assert!(prefs.inject_agents_md);
+        assert!(!prefs.inject_gemini_md);
     }
 
     #[test]
