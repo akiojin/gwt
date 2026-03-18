@@ -1,15 +1,18 @@
 ---
 name: gwt-spec-to-issue-migration
-description: "Migrate existing local SPEC directories (specs/SPEC-*) to GitHub Issue-first specs (gwt-spec label) using the bundled migration script. Use when asked to replace local spec.md/plan.md/tasks.md based workflow with GitHub Issue based management."
+description: "Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script."
 ---
 
 # gwt Spec to Issue Migration
 
 ## Overview
 
-Use this skill only for repositories that still carry legacy local spec trees from a pre-Issue-first workflow.
+Use this skill for legacy spec migrations:
 
-Migrate local `specs/SPEC-*` directories to GitHub Issues (`gwt-spec` label), then remove the legacy local source of truth.
+- local `specs/SPEC-*` directories from a pre-Issue-first workflow
+- existing `gwt-spec` Issues that still keep the canonical bundle in the Issue body
+
+Migrate legacy sources to artifact-first `gwt-spec` Issues, then remove or retire the old source of truth.
 
 This skill uses:
 - `${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs`
@@ -29,6 +32,7 @@ This skill uses:
 3. Run actual migration
 4. Verify migrated issues exist (`gwt-spec` label)
 5. Confirm legacy local spec files were removed on success
+6. If needed, run issue-body to artifact-first conversion for existing `gwt-spec` Issues
 
 ## Commands
 
@@ -50,6 +54,18 @@ node "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-s
 node "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
 ```
 
+### Dry-run existing body-canonical issue migration
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs" --dry-run --convert-existing-issues
+```
+
+### Execute existing body-canonical issue migration
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs" --convert-existing-issues
+```
+
 ### Verify report
 
 ```bash
@@ -68,7 +84,8 @@ gh issue list --label gwt-spec --state all --limit 200
 
 - Auto-detects local `specs/` under `$GWT_PROJECT_ROOT` or the current repository
 - If no `SPEC-*` directory exists, exits successfully with empty report (`[]`)
-- Migrates sections from `spec.md`, `plan.md`, `tasks.md` and related artifacts
+- Migrates local sections from `spec.md`, `plan.md`, `tasks.md` and related artifacts
+- Can rewrite body-canonical `gwt-spec` Issues into artifact-first format
 - Writes per-spec result to `migration-report.json`
 - Shows planned deletions during `--dry-run`
 - Deletes migrated local spec directories, detected legacy workflow leftovers, and `migration-report.json` after a fully successful cleanup
@@ -77,5 +94,6 @@ gh issue list --label gwt-spec --state all --limit 200
 
 - For safety, always run `--dry-run` first.
 - Artifact files in `contracts/` and `checklists/` are migrated as issue comments.
+- `doc:*` artifacts are created for `spec.md`, `plan.md`, `tasks.md`, `research.md`, `data-model.md`, and `quickstart.md`.
 - After migration, ongoing spec updates should use Issue-first operations (`gwt-spec-ops`).
 - This skill is for external legacy import only; gwt's normal spec workflow should never recreate repository-local spec bundles.
