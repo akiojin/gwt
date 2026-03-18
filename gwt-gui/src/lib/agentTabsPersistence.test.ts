@@ -104,6 +104,40 @@ describe("agentTabsPersistence", () => {
     });
   });
 
+  it("loadStoredProjectTabs preserves agent branchName in v2 format", () => {
+    store.setItem(
+      PROJECT_TABS_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/repo": {
+            tabs: [
+              {
+                type: "agent",
+                paneId: "p1",
+                label: "#1644 Worktree管理",
+                branchName: "feature/issue-1644",
+              },
+            ],
+            activeTabId: "agent-p1",
+          },
+        },
+      }),
+    );
+
+    expect(loadStoredProjectTabs("/repo", store)).toEqual({
+      tabs: [
+        {
+          type: "agent",
+          paneId: "p1",
+          label: "#1644 Worktree管理",
+          branchName: "feature/issue-1644",
+        },
+      ],
+      activeTabId: "agent-p1",
+    });
+  });
+
   it("loadStoredProjectTabs falls back to legacy v1 state with terminal support", () => {
     store.setItem(
       PROJECT_AGENT_TABS_STORAGE_KEY,
@@ -129,10 +163,37 @@ describe("agentTabsPersistence", () => {
     const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded).toEqual({
       tabs: [
-        { type: "agent", paneId: "p1", label: "one" },
+        { type: "agent", paneId: "p1", label: "one", branchName: "one" },
         { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp/term" },
       ],
       activeTabId: "terminal-t1",
+    });
+  });
+
+  it("loadStoredProjectTabs derives agent branchName from legacy label", () => {
+    store.setItem(
+      PROJECT_AGENT_TABS_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        byProjectPath: {
+          "/repo": {
+            tabs: [{ paneId: "p1", label: "feature/issue-1644" }],
+            activePaneId: "p1",
+          },
+        },
+      }),
+    );
+
+    expect(loadStoredProjectTabs("/repo", store)).toEqual({
+      tabs: [
+        {
+          type: "agent",
+          paneId: "p1",
+          label: "feature/issue-1644",
+          branchName: "feature/issue-1644",
+        },
+      ],
+      activeTabId: "agent-p1",
     });
   });
 
@@ -217,6 +278,35 @@ describe("agentTabsPersistence", () => {
     });
   });
 
+  it("persistStoredProjectAgentTabs preserves agent branchName", () => {
+    persistStoredProjectAgentTabs(
+      "/repo",
+      {
+        tabs: [
+          {
+            paneId: "new",
+            label: "#1644 Worktree管理",
+            branchName: "feature/issue-1644",
+          },
+        ],
+        activePaneId: "new",
+      },
+      store,
+    );
+
+    expect(loadStoredProjectTabs("/repo", store)).toEqual({
+      tabs: [
+        {
+          type: "agent",
+          paneId: "new",
+          label: "#1644 Worktree管理",
+          branchName: "feature/issue-1644",
+        },
+      ],
+      activeTabId: "agent-new",
+    });
+  });
+
   it("buildRestoredProjectTabs restores in stored order and filters missing panes", () => {
     const restored = buildRestoredProjectTabs(
       {
@@ -244,6 +334,7 @@ describe("agentTabsPersistence", () => {
         label: "one",
         type: "agent",
         paneId: "p1",
+        branchName: "feature/x",
         agentId: "codex",
       },
       {
@@ -286,6 +377,7 @@ describe("agentTabsPersistence", () => {
         label: "one",
         type: "agent",
         paneId: "p1",
+        branchName: "feature/x",
         agentId: "codex",
       },
       {
@@ -293,6 +385,7 @@ describe("agentTabsPersistence", () => {
         label: "two",
         type: "agent",
         paneId: "p2",
+        branchName: "feature/x",
         agentId: "codex",
       },
     ]);
@@ -309,7 +402,13 @@ describe("agentTabsPersistence", () => {
 
     expect(restored.tabs).toEqual([
       { id: "assistant", label: "Assistant", type: "assistant" },
-      { id: "agent-p1", label: "one", type: "agent", paneId: "p1" },
+      {
+        id: "agent-p1",
+        label: "one",
+        type: "agent",
+        paneId: "p1",
+        branchName: "feature/x",
+      },
     ]);
     expect(restored.terminalTabsToRespawn).toEqual([]);
     expect(restored.activeTerminalPaneIdToRespawn).toBeNull();
@@ -339,6 +438,7 @@ describe("agentTabsPersistence", () => {
         label: "feature-a",
         type: "agent",
         paneId: "a-live",
+        branchName: "feature/x",
         agentId: "codex",
       },
     ]);
