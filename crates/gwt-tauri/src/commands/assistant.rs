@@ -227,9 +227,10 @@ pub async fn assistant_start(
         if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
             return;
         }
-        let _ = emit_startup_status(
+        let _ = emit_startup_status_if_current(
             &app_handle,
             &window_label_for_task,
+            session_generation,
             "Inspecting repository state...".to_string(),
         );
         let mut engine = AssistantEngine::new(
@@ -306,16 +307,18 @@ pub async fn assistant_start(
         }
 
         let cache_path = startup_analysis_cache_path(&project_path_for_task);
-        let _ = emit_startup_status(
+        let _ = emit_startup_status_if_current(
             &app_handle,
             &window_label_for_task,
+            session_generation,
             "Checking startup analysis cache...".to_string(),
         );
         if let Some(cache) = load_startup_analysis_cache(&cache_path) {
             if cache.fingerprint == fingerprint {
-                let _ = emit_startup_status(
+                let _ = emit_startup_status_if_current(
                     &app_handle,
                     &window_label_for_task,
+                    session_generation,
                     "Using cached startup analysis...".to_string(),
                 );
                 engine.apply_cached_startup_summary(cache.summary);
@@ -336,9 +339,10 @@ pub async fn assistant_start(
             return;
         }
 
-        let _ = emit_startup_status(
+        let _ = emit_startup_status_if_current(
             &app_handle,
             &window_label_for_task,
+            session_generation,
             "Running startup analysis...".to_string(),
         );
         match engine.handle_startup(&state) {
@@ -549,6 +553,26 @@ fn emit_startup_status(
     Ok(())
 }
 
+fn clear_startup_status(state: &AppState, window_label: &str) {
+    if let Ok(mut guard) = state.assistant_startup_inflight.lock() {
+        guard.remove(window_label);
+    }
+}
+
+fn emit_startup_status_if_current(
+    app_handle: &tauri::AppHandle,
+    window_label: &str,
+    session_generation: u64,
+    status_message: String,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    if !state.is_current_assistant_session(window_label, session_generation) {
+        clear_startup_status(&state, window_label);
+        return Ok(());
+    }
+    emit_startup_status(app_handle, window_label, status_message)
+}
+
 fn finish_startup_session(
     app_handle: &tauri::AppHandle,
     window_label: &str,
@@ -557,11 +581,9 @@ fn finish_startup_session(
     engine: AssistantEngine,
 ) {
     let state = app_handle.state::<AppState>();
+    clear_startup_status(&state, window_label);
     if !state.is_current_assistant_session(window_label, session_generation) {
         return;
-    }
-    if let Ok(mut startup_guard) = state.assistant_startup_inflight.lock() {
-        startup_guard.remove(window_label);
     }
 
     if let Ok(response) = finalize_started_engine(&state, window_label, project_path, engine) {
@@ -1611,6 +1633,17 @@ mod tests {
         let loaded = load_startup_analysis_cache(&path).unwrap();
 
         assert_eq!(loaded, entry);
+    }
+
+    #[test]
+    fn clear_startup_status_removes_inflight_entry() {
+        let state = AppState::new();
+        set_startup_status(&state, "main", "Running startup analysis...".to_string()).unwrap();
+
+        clear_startup_status(&state, "main");
+
+        let guard = state.assistant_startup_inflight.lock().unwrap();
+        assert!(!guard.contains_key("main"));
     }
 
     #[test]
