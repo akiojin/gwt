@@ -117,6 +117,15 @@ const noSessionSummaryFixture = {
   bulletPoints: [],
 };
 
+function measureBranchLabelWidth(element: HTMLElement): number {
+  const explicitWidth = element.dataset.testWidth ?? element.dataset.testScrollWidth;
+  if (explicitWidth) {
+    return Number(explicitWidth);
+  }
+  const text = element.textContent?.trim() ?? "";
+  return text.length * 8;
+}
+
 const makeLocalStorageMock = () => {
   const store = new Map<string, string>();
   return {
@@ -151,6 +160,32 @@ describe("Sidebar", () => {
     Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
       value: { invoke: invokeMock },
       configurable: true,
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+      configurable: true,
+      get() {
+        const element = this as HTMLElement;
+        if (element.classList.contains("branch-name")) {
+          return Number(element.dataset.testWidth ?? 160);
+        }
+        if (element.classList.contains("branch-name-label")) {
+          return measureBranchLabelWidth(element);
+        }
+        return 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+      configurable: true,
+      get() {
+        const element = this as HTMLElement;
+        if (element.classList.contains("branch-name-label")) {
+          return measureBranchLabelWidth(element);
+        }
+        if (element.classList.contains("branch-name")) {
+          return Number(element.dataset.testScrollWidth ?? element.dataset.testWidth ?? 160);
+        }
+        return 0;
+      },
     });
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);
@@ -2965,7 +3000,7 @@ describe("Sidebar", () => {
     });
   });
 
-  it("adds horizontal-scroll class only to the selected branch name", async () => {
+  it("enables auto-scroll only for the selected overflowing branch label", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") {
         return [
@@ -3005,8 +3040,41 @@ describe("Sidebar", () => {
         'button[data-branch-name="feature/other-work"] .branch-name'
       );
 
-      expect(selectedName?.classList.contains("scroll-active")).toBe(true);
-      expect(unselectedName?.classList.contains("scroll-active")).toBe(false);
+      expect(selectedName?.classList.contains("auto-scroll")).toBe(true);
+      expect(unselectedName?.classList.contains("auto-scroll")).toBe(false);
+    });
+  });
+
+  it("does not enable auto-scroll for a selected short branch label", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [
+          {
+            ...branchFixture,
+            name: "feature/auth-impl",
+            display_name: "Short label",
+          },
+        ];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      selectedBranch: {
+        ...branchFixture,
+        name: "feature/auth-impl",
+        display_name: "Short label",
+      },
+    });
+
+    await waitFor(() => {
+      const selectedName = rendered.container.querySelector(
+        'button[data-branch-name="feature/auth-impl"] .branch-name'
+      );
+      expect(selectedName?.classList.contains("auto-scroll")).toBe(false);
     });
   });
 });
