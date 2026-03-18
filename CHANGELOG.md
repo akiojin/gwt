@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.13.1] - 2026-03-18
+
+### Bug Fixes
+
+- Stabilize voice input controls and branch loading (#1688)
+
 ## [8.13.0] - 2026-03-18
 
 ### Bug Fixes
