@@ -12,7 +12,7 @@
 //   --label LABEL   Additional label to apply (can be repeated; gwt-spec is always applied)
 //   --convert-existing-issues  Rewrite body-canonical gwt-spec issues to artifact-first format
 
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync, rmdirSync } from "node:fs";
 import path from "node:path";
 
@@ -22,6 +22,9 @@ let CONVERT_EXISTING_ISSUES = false;
 const REPORT_FILE = "migration-report.json";
 const RATE_LIMIT_BATCH = 10;
 const RATE_LIMIT_SLEEP = 3;
+const COMMENT_POST_SLEEP = 1;
+const GH_RETRY_ATTEMPTS = 5;
+const GH_RETRY_SLEEP_SECONDS = [5, 15, 30, 60];
 const EXEC_MAX_BUFFER = 20 * 1024 * 1024;
 const EXTRA_LABELS = [];
 let REPO_ROOT = "";
@@ -145,6 +148,49 @@ function sleep(seconds) {
   execSync(`node -e "setTimeout(()=>{},${seconds * 1000})"`, { stdio: "ignore" });
 }
 
+function makeTempFilePath(prefix, ext = ".md") {
+  return path.join(
+    REPO_ROOT || process.cwd(),
+    `.tmp-${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}${ext}`
+  );
+}
+
+function withTempBodyFile(prefix, body, fn) {
+  const filePath = makeTempFilePath(prefix);
+  writeFileSync(filePath, body);
+  try {
+    return fn(filePath);
+  } finally {
+    rmSync(filePath, { force: true });
+  }
+}
+
+function gh(args, options = {}) {
+  return execFileSync("gh", args, {
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "ignore"],
+    maxBuffer: EXEC_MAX_BUFFER,
+    ...options,
+  });
+}
+
+function runWithRetry(label, fn) {
+  let lastError;
+  for (let attempt = 1; attempt <= GH_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return fn();
+    } catch (error) {
+      lastError = error;
+      const sleepSeconds =
+        GH_RETRY_SLEEP_SECONDS[Math.min(attempt - 1, GH_RETRY_SLEEP_SECONDS.length - 1)];
+      if (attempt === GH_RETRY_ATTEMPTS) break;
+      console.error(`  Warning: ${label} failed (attempt ${attempt}/${GH_RETRY_ATTEMPTS}); retrying in ${sleepSeconds}s`);
+      sleep(sleepSeconds);
+    }
+  }
+  throw lastError;
+}
+
 // Resolve specs directory
 if (!SPECS_DIR) {
   REPO_ROOT = resolveRepoRoot();
@@ -258,9 +304,14 @@ function createArtifactComments(dir, issueNumber) {
     } else {
       const commentBody = `<!-- GWT_SPEC_ARTIFACT:${kind}:${name} -->\n${kind}:${name}\n\n${content.trim()}\n`;
       try {
-        execSync(`gh issue comment ${issueNumber} --body ${JSON.stringify(commentBody)}`, {
-          stdio: ["pipe", "ignore", "ignore"],
-        });
+        runWithRetry(`create ${kind}:${name} on issue #${issueNumber}`, () =>
+          withTempBodyFile(`issue-comment-${issueNumber}-${kind}-${name}`, commentBody, (bodyFile) => {
+            gh(["issue", "comment", String(issueNumber), "--body-file", bodyFile], {
+              stdio: ["pipe", "ignore", "ignore"],
+            });
+            sleep(COMMENT_POST_SLEEP);
+          })
+        );
       } catch {
         console.error(`  Warning: Failed to create ${kind} artifact: ${name}`);
         hadError = true;
@@ -285,9 +336,14 @@ function createArtifactComments(dir, issueNumber) {
       } else {
         const commentBody = `<!-- GWT_SPEC_ARTIFACT:${kind}:${name} -->\n${kind}:${name}\n\n${content}`;
         try {
-          execSync(`gh issue comment ${issueNumber} --body ${JSON.stringify(commentBody)}`, {
-            stdio: ["pipe", "ignore", "ignore"],
-          });
+          runWithRetry(`create ${kind}:${name} on issue #${issueNumber}`, () =>
+            withTempBodyFile(`issue-comment-${issueNumber}-${kind}-${name}`, commentBody, (bodyFile) => {
+              gh(["issue", "comment", String(issueNumber), "--body-file", bodyFile], {
+                stdio: ["pipe", "ignore", "ignore"],
+              });
+              sleep(COMMENT_POST_SLEEP);
+            })
+          );
         } catch {
           console.error(`  Warning: Failed to create ${kind} artifact: ${name}`);
           hadError = true;
@@ -322,11 +378,7 @@ function migrateExistingBodyCanonicalIssues() {
   let issues = [];
   try {
     issues = JSON.parse(
-      execSync("gh issue list --label gwt-spec --state all --limit 200 --json number,title,body", {
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "ignore"],
-        maxBuffer: EXEC_MAX_BUFFER,
-      })
+      gh(["issue", "list", "--label", "gwt-spec", "--state", "all", "--limit", "200", "--json", "number,title,body"])
     );
   } catch {
     console.error("  Failed to list existing gwt-spec issues");
@@ -343,6 +395,7 @@ function migrateExistingBodyCanonicalIssues() {
   let failedCount = 0;
 
   for (const issue of candidates) {
+    console.log(`  Migrating issue #${issue.number}...`);
     const sections = parseIssueSections(issue.body || "");
     const artifacts = [
       ["doc", "spec.md", sections["Spec"] || ""],
@@ -363,9 +416,18 @@ function migrateExistingBodyCanonicalIssues() {
     let ok = true;
     for (const [kind, name, content] of artifacts) {
       try {
-        execSync(`gh issue comment ${issue.number} --body ${JSON.stringify(buildArtifactCommentBody(kind, name, content))}`, {
-          stdio: ["pipe", "ignore", "ignore"],
-        });
+        runWithRetry(`create ${kind}:${name} on issue #${issue.number}`, () =>
+          withTempBodyFile(
+            `issue-comment-${issue.number}-${kind}-${name}`,
+            buildArtifactCommentBody(kind, name, content),
+            (bodyFile) => {
+              gh(["issue", "comment", String(issue.number), "--body-file", bodyFile], {
+                stdio: ["pipe", "ignore", "ignore"],
+              });
+              sleep(COMMENT_POST_SLEEP);
+            }
+          )
+        );
       } catch {
         console.error(`  Warning: failed to add ${kind}:${name} to issue #${issue.number}`);
         ok = false;
@@ -373,9 +435,13 @@ function migrateExistingBodyCanonicalIssues() {
     }
 
     try {
-      execSync(`gh issue edit ${issue.number} --body ${JSON.stringify(buildIssueBody(`#${issue.number}`))}`, {
-        stdio: ["pipe", "ignore", "ignore"],
-      });
+      runWithRetry(`rewrite body for issue #${issue.number}`, () =>
+        withTempBodyFile(`issue-edit-${issue.number}`, buildIssueBody(`#${issue.number}`), (bodyFile) => {
+          gh(["issue", "edit", String(issue.number), "--body-file", bodyFile], {
+            stdio: ["pipe", "ignore", "ignore"],
+          });
+        })
+      );
     } catch {
       console.error(`  Warning: failed to rewrite issue #${issue.number} body`);
       ok = false;
@@ -385,6 +451,11 @@ function migrateExistingBodyCanonicalIssues() {
       converted++;
     } else {
       failedCount++;
+    }
+
+    if (converted % RATE_LIMIT_BATCH === 0) {
+      console.log(`  Rate limit pause: sleeping ${RATE_LIMIT_SLEEP}s...`);
+      sleep(RATE_LIMIT_SLEEP);
     }
   }
 
@@ -421,10 +492,11 @@ for (const dir of SPEC_DIRS) {
 
   let issueUrl;
   try {
-    issueUrl = execSync(
-      `gh issue create --title ${JSON.stringify(title)} --body ${JSON.stringify(issueBody)} ${labelArgs.map((a) => JSON.stringify(a)).join(" ")}`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] }
-    ).trim();
+    issueUrl = runWithRetry(`create issue for ${specName}`, () =>
+      withTempBodyFile(`issue-create-${specName}`, issueBody, (bodyFile) => {
+        return gh(["issue", "create", "--title", title, "--body-file", bodyFile, ...labelArgs]).trim();
+      })
+    );
   } catch {
     console.error(`  Failed to create issue for ${specName}`);
     reportEntries.push({ oldSpecId: specName, issueNumber: 0, title, status: "failed" });
@@ -438,9 +510,12 @@ for (const dir of SPEC_DIRS) {
 
   const updatedBody = buildIssueBody(`#${issueNumber}`);
   try {
-    execSync(
-      `gh issue edit ${issueNumber} --body ${JSON.stringify(updatedBody)}`,
-      { stdio: ["pipe", "ignore", "ignore"] }
+    runWithRetry(`rewrite body for issue #${issueNumber}`, () =>
+      withTempBodyFile(`issue-edit-${issueNumber}`, updatedBody, (bodyFile) => {
+        gh(["issue", "edit", String(issueNumber), "--body-file", bodyFile], {
+          stdio: ["pipe", "ignore", "ignore"],
+        });
+      })
     );
   } catch {
     console.error(`  Warning: Failed to update issue body for ${specName}`);

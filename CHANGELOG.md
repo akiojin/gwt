@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.15.0] - 2026-03-18
+
+### Bug Fixes
+
+- **launch:** Refresh codex models and docker git startup env (#1696)
+- **gui:** Align worktree labels and summary actions (#1698)
+- **gui:** Automate issue branch prefix fallback (#1699)
+- **spec:** Harden issue migration retries (#1701)
+
+### Features
+
+- **git:** Unify issue and spec search in git panel (#1694)
+- Refresh codex model catalog for issue 1489 (#1695)
+- **gui:** Unify issue search and assistant recovery (#1697)
+- **spec:** Adopt artifact-first issue workflow (#1700)
+
 ## [8.14.0] - 2026-03-18
 
 ### Features

@@ -115,6 +115,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --list
 ```
 
+The helper uses REST issue-comment endpoints for create/update and should be preferred over direct `gh issue comment` calls when artifact writes are needed.
+
 ## Operations (gh CLI)
 
 ### Read spec issue
@@ -127,6 +129,12 @@ gh issue view {number} --json body,title,labels
 
 ```bash
 gh issue edit {number} --body "$(updated body)"
+```
+
+If `gh issue edit` is rate-limited, resolve the repo slug with `gh repo view --json nameWithOwner -q .nameWithOwner` and fall back to:
+
+```bash
+gh api "repos/<owner>/<repo>/issues/{number}" --method PATCH --input /tmp/issue-edit.json
 ```
 
 ### Add artifact comment
@@ -251,18 +259,15 @@ Generate quality checklists for:
 - **api**: consistency of API design
 - **testing**: completeness of the testing strategy
 
-Add checklists to the issue as artifact comments:
+Add checklists to the issue as artifact comments through the shared helper:
 
 ```bash
-gh issue comment {number} --body "$(cat <<'EOF'
-<!-- GWT_SPEC_ARTIFACT:checklist:requirements.md -->
-checklist:requirements.md
-
-- [ ] CHK001 All FR covered by tests
-- [ ] CHK002 All NFR have measurable thresholds
-...
-EOF
-)"
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --issue "{number}" \
+  --upsert \
+  --artifact "checklist:requirements.md" \
+  --body-file /tmp/requirements.md
 ```
 
 ## Integration with normal issues

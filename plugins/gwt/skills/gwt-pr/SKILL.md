@@ -174,8 +174,15 @@ Next
    - **If any required section still contains TODO after inference, ask only for the irreducible missing information.**
 
 10. **Create or update the PR**
-    - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-    - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
+    - Primary path:
+      - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
+      - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
+    - If `gh pr create` or `gh pr edit` fails with a secondary rate limit or `was submitted too quickly`, do not stop.
+    - Resolve the repo slug first: `gh repo view --json nameWithOwner -q .nameWithOwner`
+    - REST fallback:
+      - Create: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
+      - Update: `gh api repos/<owner>/<repo>/pulls/<number> --method PATCH --input <json-file>`
+    - Keep the same title/body content across the primary path and REST fallback.
 
 11. **Return PR URL**
     - `gh pr view <number> --json url -q .url`
@@ -290,7 +297,12 @@ case "$action" in
     cp "$PR_BODY_TEMPLATE" /tmp/pr-body.md
 
     git push -u origin "$head"
-    gh pr create -B "$base" -H "$head" --title "..." --body-file /tmp/pr-body.md
+    gh pr create -B "$base" -H "$head" --title "..." --body-file /tmp/pr-body.md || {
+      repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+      jq -n --arg title "..." --arg head "$head" --arg base "$base" --rawfile body /tmp/pr-body.md \
+        '{title:$title, head:$head, base:$base, body:$body}' >/tmp/pr-create.json
+      gh api "repos/$repo_slug/pulls" --method POST --input /tmp/pr-create.json
+    }
     ;;
   push_only)
     echo "Existing unmerged PR found - pushing changes only"

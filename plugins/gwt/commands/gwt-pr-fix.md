@@ -30,6 +30,7 @@ Use this command to diagnose and fix CI failures for a PR.
 3. If the PR is behind the base branch, merge `origin/<base>` into the current branch and push when the merge is clean.
 4. If that merge conflicts and the correct resolution is not obvious, ask the user before continuing.
 5. Apply high-confidence fixes immediately; ask the user only when a blocker is ambiguous.
+6. If PR summary comments or PR body/title updates hit a GitHub secondary rate limit, retry through the corresponding REST endpoints.
 
 ## Proactive Trigger Examples
 

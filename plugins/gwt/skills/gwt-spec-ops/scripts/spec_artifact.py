@@ -8,12 +8,20 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 ARTIFACT_MARKER_RE = re.compile(r"^<!--\s*GWT_SPEC_ARTIFACT:([^:]+):(.+?)\s*-->\s*$")
 VALID_KINDS = {"doc", "contract", "checklist"}
+SECONDARY_RATE_LIMIT_MARKERS = (
+    "submitted too quickly",
+    "secondary rate limit",
+    "retry-after",
+)
+RETRY_SLEEP_SECONDS = (5, 15, 30, 60)
 
 
 @dataclass
@@ -48,6 +56,46 @@ def require_success(proc: subprocess.CompletedProcess[str], context: str) -> str
         stderr = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise RuntimeError(f"{context}: {stderr}")
     return proc.stdout.strip()
+
+
+def should_retry(proc: subprocess.CompletedProcess[str]) -> bool:
+    message = f"{proc.stderr}\n{proc.stdout}".lower()
+    return any(marker in message for marker in SECONDARY_RATE_LIMIT_MARKERS)
+
+
+def run_with_retry(cmd: list[str], cwd: Path, context: str) -> subprocess.CompletedProcess[str]:
+    last_proc: subprocess.CompletedProcess[str] | None = None
+    for attempt, sleep_seconds in enumerate((0, *RETRY_SLEEP_SECONDS), start=1):
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
+        proc = run(cmd, cwd)
+        last_proc = proc
+        if proc.returncode == 0 or not should_retry(proc):
+            return proc
+    assert last_proc is not None
+    return last_proc
+
+
+def run_gh_api_with_json(
+    repo_root: Path,
+    endpoint: str,
+    method: str,
+    payload: dict[str, Any],
+    context: str,
+) -> dict[str, Any]:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tmp:
+        json.dump(payload, tmp, ensure_ascii=False)
+        tmp_path = Path(tmp.name)
+    try:
+        proc = run_with_retry(
+            ["gh", "api", endpoint, "--method", method, "--input", str(tmp_path)],
+            repo_root,
+            context,
+        )
+        data = require_success(proc, context)
+        return json.loads(data or "{}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -174,28 +222,21 @@ def upsert_artifact(
     body = build_comment_body(kind, name, content)
 
     if existing:
-        proc = run(
-            [
-                "gh",
-                "api",
-                f"repos/{repo_slug}/issues/comments/{existing.comment_id}",
-                "--method",
-                "PATCH",
-                "-f",
-                f"body={body}",
-            ],
+        data = run_gh_api_with_json(
             repo_root,
+            f"repos/{repo_slug}/issues/comments/{existing.comment_id}",
+            "PATCH",
+            {"body": body},
+            "gh api patch issue comment",
         )
-        payload = require_success(proc, "gh api patch issue comment")
-        data = json.loads(payload or "{}")
     else:
-        proc = run(
-            ["gh", "issue", "comment", issue_number, "--body", body],
+        data = run_gh_api_with_json(
             repo_root,
+            f"repos/{repo_slug}/issues/{issue_number}/comments",
+            "POST",
+            {"body": body},
+            "gh api create issue comment",
         )
-        require_success(proc, "gh issue comment")
-        comments = fetch_issue_comments(repo_root, repo_slug, issue_number)
-        data = comments[-1] if comments else {}
 
     parsed = parse_artifact_comment(data)
     if not parsed:
