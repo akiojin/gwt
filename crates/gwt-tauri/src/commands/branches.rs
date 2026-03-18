@@ -739,7 +739,9 @@ pub fn get_current_branch(
         let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
         let issue_display_names = branch
             .as_ref()
-            .map(|branch| build_issue_display_name_map(&[branch.name.clone()], &repo_path))
+            .map(|branch| {
+                build_issue_display_name_map(std::slice::from_ref(&branch.name), &repo_path)
+            })
             .unwrap_or_default();
         Ok(branch.map(|b| {
             let mut info = BranchInfo::from(b);
@@ -1006,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_build_issue_display_name_map_with_formats_issue_title() {
-        let names = vec!["feature/issue-1644".to_string(), "develop".to_string()];
+        let names = ["feature/issue-1644".to_string(), "develop".to_string()];
         let issue_names = build_issue_display_name_map_with(names.iter(), |number| {
             assert_eq!(number, 1644);
             Ok((1644, "Worktree管理".to_string()))
