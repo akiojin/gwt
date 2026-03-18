@@ -1,7 +1,7 @@
 //! CLAUDE.md / AGENTS.md / GEMINI.md check/fix command
 
 use crate::commands::project::resolve_repo_path_for_project_root;
-use gwt_core::config::write_atomic;
+use gwt_core::config::{inject_managed_skills_block, write_atomic, Settings};
 use gwt_core::git::Remote;
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
@@ -148,6 +148,24 @@ fn ensure_claude_ref_file(path: &Path) -> Result<bool, String> {
     }
 }
 
+/// Inject or update the managed skills block in a markdown file.
+///
+/// Returns `true` if the file was modified, `false` if unchanged or missing.
+pub(crate) fn ensure_managed_skills_block(path: &Path) -> Result<bool, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.to_string()),
+    };
+
+    let updated = inject_managed_skills_block(&content)?;
+    if updated == content {
+        return Ok(false);
+    }
+    write_atomic(path, &updated).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 #[tauri::command]
 pub fn check_and_fix_agent_instruction_docs(
     project_path: String,
@@ -173,6 +191,20 @@ pub fn check_and_fix_agent_instruction_docs(
         updated_files.push(CLAUDE_MD.to_string());
     }
 
+    // Inject managed skills block based on settings
+    let settings = Settings::load_global().ok();
+    let skill_prefs = settings
+        .as_ref()
+        .and_then(|s| s.agent.skill_registration.as_ref());
+
+    if skill_prefs.map(|p| p.inject_claude_md).unwrap_or(true)
+        && ensure_managed_skills_block(&claude_path)
+            .map_err(|e| StructuredError::internal(&e, "check_and_fix_agent_instruction_docs"))?
+        && !updated_files.contains(&CLAUDE_MD.to_string())
+    {
+        updated_files.push(CLAUDE_MD.to_string());
+    }
+
     let agents_path = worktree_path.join(AGENTS_MD);
     if ensure_claude_ref_file(&agents_path)
         .map_err(|e| StructuredError::internal(&e, "check_and_fix_agent_instruction_docs"))?
@@ -180,9 +212,25 @@ pub fn check_and_fix_agent_instruction_docs(
         updated_files.push(AGENTS_MD.to_string());
     }
 
+    if skill_prefs.map(|p| p.inject_agents_md).unwrap_or(false)
+        && ensure_managed_skills_block(&agents_path)
+            .map_err(|e| StructuredError::internal(&e, "check_and_fix_agent_instruction_docs"))?
+        && !updated_files.contains(&AGENTS_MD.to_string())
+    {
+        updated_files.push(AGENTS_MD.to_string());
+    }
+
     let gemini_path = worktree_path.join(GEMINI_MD);
     if ensure_claude_ref_file(&gemini_path)
         .map_err(|e| StructuredError::internal(&e, "check_and_fix_agent_instruction_docs"))?
+    {
+        updated_files.push(GEMINI_MD.to_string());
+    }
+
+    if skill_prefs.map(|p| p.inject_gemini_md).unwrap_or(false)
+        && ensure_managed_skills_block(&gemini_path)
+            .map_err(|e| StructuredError::internal(&e, "check_and_fix_agent_instruction_docs"))?
+        && !updated_files.contains(&GEMINI_MD.to_string())
     {
         updated_files.push(GEMINI_MD.to_string());
     }
@@ -266,6 +314,7 @@ mod tests {
             std::fs::read_to_string(worktree_path.join(CLAUDE_MD)).expect("read CLAUDE.md");
         assert!(claude.contains("## ワークフロー設計"));
         assert!(claude.contains("## タスク管理"));
+        assert!(claude.contains("<!-- BEGIN gwt managed skills -->"));
 
         let agents =
             std::fs::read_to_string(worktree_path.join(AGENTS_MD)).expect("read AGENTS.md");
@@ -294,10 +343,13 @@ mod tests {
             check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
                 .expect("check/fix should succeed");
 
-        assert_eq!(out.updated_files, vec![AGENTS_MD]);
+        // CLAUDE.md is updated (skills block injected by default), AGENTS.md gets @CLAUDE.md ref
+        assert!(out.updated_files.contains(&CLAUDE_MD.to_string()));
+        assert!(out.updated_files.contains(&AGENTS_MD.to_string()));
 
         let claude = std::fs::read_to_string(&claude_path).expect("read CLAUDE.md");
-        assert_eq!(claude, "# custom claude\n");
+        assert!(claude.contains("# custom claude"));
+        assert!(claude.contains("<!-- BEGIN gwt managed skills -->"));
 
         let agents = std::fs::read_to_string(&agents_path).expect("read AGENTS.md");
         assert!(agents.starts_with("@CLAUDE.md\n"));
@@ -341,5 +393,119 @@ mod tests {
         assert!(out.is_err());
         let after = std::fs::read(&file_path).expect("read AGENTS.md bytes");
         assert_eq!(after, original);
+    }
+
+    #[test]
+    fn check_and_fix_creates_docs_with_skills_block() {
+        let (_temp, repo_path, worktree_path) = setup_repo_with_feature_worktree();
+        let project_path = repo_path.to_string_lossy().to_string();
+
+        let out =
+            check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
+                .expect("check/fix should succeed");
+
+        assert!(out.updated_files.contains(&CLAUDE_MD.to_string()));
+
+        let claude =
+            std::fs::read_to_string(worktree_path.join(CLAUDE_MD)).expect("read CLAUDE.md");
+        assert!(claude.contains("<!-- BEGIN gwt managed skills -->"));
+        assert!(claude.contains("<!-- END gwt managed skills -->"));
+        assert!(claude.contains("## Available Skills & Commands (gwt)"));
+    }
+
+    #[test]
+    fn check_and_fix_updates_existing_claude_md_with_skills_block() {
+        let (_temp, repo_path, worktree_path) = setup_repo_with_feature_worktree();
+        let project_path = repo_path.to_string_lossy().to_string();
+
+        let claude_path = worktree_path.join(CLAUDE_MD);
+        let original = "# My Project\n\nCustom instructions here.\n";
+        std::fs::write(&claude_path, original).expect("write CLAUDE.md");
+
+        let out =
+            check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
+                .expect("check/fix should succeed");
+
+        assert!(out.updated_files.contains(&CLAUDE_MD.to_string()));
+
+        let claude = std::fs::read_to_string(&claude_path).expect("read CLAUDE.md");
+        // Original content preserved
+        assert!(claude.contains("# My Project"));
+        assert!(claude.contains("Custom instructions here."));
+        // Skills block injected
+        assert!(claude.contains("<!-- BEGIN gwt managed skills -->"));
+    }
+
+    #[test]
+    fn check_and_fix_replaces_outdated_skills_block() {
+        let (_temp, repo_path, worktree_path) = setup_repo_with_feature_worktree();
+        let project_path = repo_path.to_string_lossy().to_string();
+
+        let claude_path = worktree_path.join(CLAUDE_MD);
+        let old_content = "# Project\n\n<!-- BEGIN gwt managed skills -->\nold content\n<!-- END gwt managed skills -->\n";
+        std::fs::write(&claude_path, old_content).expect("write CLAUDE.md");
+
+        let out =
+            check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
+                .expect("check/fix should succeed");
+
+        assert!(out.updated_files.contains(&CLAUDE_MD.to_string()));
+
+        let claude = std::fs::read_to_string(&claude_path).expect("read CLAUDE.md");
+        assert!(claude.contains("# Project"));
+        // Old content replaced with current skills block
+        assert!(!claude.contains("old content"));
+        assert!(claude.contains("## Available Skills & Commands (gwt)"));
+    }
+
+    #[test]
+    fn agents_md_not_injected_by_default() {
+        let (_temp, repo_path, worktree_path) = setup_repo_with_feature_worktree();
+        let project_path = repo_path.to_string_lossy().to_string();
+
+        let _out =
+            check_and_fix_agent_instruction_docs(project_path, "feature/docs-check".to_string())
+                .expect("check/fix should succeed");
+
+        let agents =
+            std::fs::read_to_string(worktree_path.join(AGENTS_MD)).expect("read AGENTS.md");
+        // Default: inject_agents_md = false, so no skills block
+        assert!(!agents.contains("<!-- BEGIN gwt managed skills -->"));
+    }
+
+    #[test]
+    fn ensure_managed_skills_block_returns_false_for_missing_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("NONEXISTENT.md");
+
+        let result = ensure_managed_skills_block(&path).expect("should not error");
+        assert!(!result);
+    }
+
+    #[test]
+    fn ensure_managed_skills_block_injects_into_existing_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join(CLAUDE_MD);
+        std::fs::write(&path, "# Existing\n").expect("write");
+
+        let result = ensure_managed_skills_block(&path).expect("should succeed");
+        assert!(result);
+
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert!(content.contains("# Existing"));
+        assert!(content.contains("<!-- BEGIN gwt managed skills -->"));
+    }
+
+    #[test]
+    fn ensure_managed_skills_block_is_idempotent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join(CLAUDE_MD);
+        std::fs::write(&path, "# Existing\n").expect("write");
+
+        let first = ensure_managed_skills_block(&path).expect("first call");
+        assert!(first);
+
+        let second = ensure_managed_skills_block(&path).expect("second call");
+        assert!(!second); // No change
     }
 }

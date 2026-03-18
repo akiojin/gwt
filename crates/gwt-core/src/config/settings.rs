@@ -326,11 +326,29 @@ pub struct SkillRegistrationPreferences {
     /// Whether project-local managed assets are automatically repaired and refreshed.
     #[serde(default = "default_skill_registration_enabled")]
     pub enabled: bool,
+    /// Inject managed skills block into CLAUDE.md (default: true).
+    #[serde(default = "default_inject_claude_md")]
+    pub inject_claude_md: bool,
+    /// Inject managed skills block into AGENTS.md (default: false).
+    #[serde(default)]
+    pub inject_agents_md: bool,
+    /// Inject managed skills block into GEMINI.md (default: false).
+    #[serde(default)]
+    pub inject_gemini_md: bool,
+}
+
+fn default_inject_claude_md() -> bool {
+    true
 }
 
 impl Default for SkillRegistrationPreferences {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            inject_claude_md: true,
+            inject_agents_md: false,
+            inject_gemini_md: false,
+        }
     }
 }
 

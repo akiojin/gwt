@@ -147,7 +147,7 @@ describe("SettingsPanel", () => {
       expect(invokeMock).toHaveBeenCalledWith("get_profiles");
       const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
       const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
-      expect(tabNames).toEqual(["General", "Profiles", "Terminal", "Voice Input"]);
+      expect(tabNames).toEqual(["General", "Profiles", "Terminal", "Voice Input", "Agent"]);
     });
   });
 
@@ -207,7 +207,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -263,7 +263,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -312,7 +312,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -372,7 +372,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -405,7 +405,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -430,7 +430,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -447,7 +447,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -538,7 +538,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -562,7 +562,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -605,7 +605,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -832,7 +832,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -868,7 +868,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -933,7 +933,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -981,7 +981,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1021,7 +1021,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1050,7 +1050,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1087,7 +1087,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1144,7 +1144,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1183,7 +1183,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
@@ -1236,7 +1236,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     // Terminal tab is still shown but without shell section
@@ -1304,7 +1304,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1348,7 +1348,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1400,7 +1400,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1415,7 +1415,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1476,7 +1476,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1504,7 +1504,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1539,7 +1539,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1558,7 +1558,7 @@ describe("SettingsPanel", () => {
   it("updates selected AI model and persists it in profile config", async () => {
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1600,7 +1600,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1617,7 +1617,7 @@ describe("SettingsPanel", () => {
   it("shows refresh hint when endpoint changes after models are loaded", async () => {
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1700,7 +1700,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1714,7 +1714,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1779,7 +1779,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1823,7 +1823,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -1908,7 +1908,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -1931,7 +1931,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -2053,7 +2053,7 @@ describe("SettingsPanel", () => {
 
     const rendered = await renderSettingsPanel();
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2099,7 +2099,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Voice Input");
@@ -2172,6 +2172,7 @@ describe("SettingsPanel", () => {
         "Profiles",
         "Terminal",
         "Voice Input",
+        "Agent",
       ]);
     });
 
@@ -2237,7 +2238,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2271,7 +2272,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2313,7 +2314,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2340,7 +2341,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2357,7 +2358,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2374,7 +2375,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2405,7 +2406,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2433,7 +2434,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2463,7 +2464,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2487,7 +2488,7 @@ describe("SettingsPanel", () => {
       const rendered = await renderSettingsPanel();
 
       await waitFor(() => {
-        expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+        expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
       });
 
       await switchToTab(rendered, "Profiles");
@@ -2522,7 +2523,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2548,7 +2549,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2597,7 +2598,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2624,7 +2625,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2677,7 +2678,7 @@ describe("SettingsPanel", () => {
     const first = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(first, "Profiles");
@@ -2700,7 +2701,7 @@ describe("SettingsPanel", () => {
     const reopened = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(reopened, "Profiles");
@@ -2749,7 +2750,7 @@ describe("SettingsPanel", () => {
     const first = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(first.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(first, "Profiles");
@@ -2772,7 +2773,7 @@ describe("SettingsPanel", () => {
     const reopened = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(reopened.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(reopened, "Profiles");
@@ -2827,7 +2828,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2895,7 +2896,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2954,7 +2955,7 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
     });
 
     await switchToTab(rendered, "Profiles");
@@ -2970,5 +2971,86 @@ describe("SettingsPanel", () => {
     expect(apiKeyInput.type).toBe("text");
     expect(apiKeyInput.value).toBe("sk_test_ab_cd");
     expect(apiKeyInput.value.includes("_")).toBe(true);
+  });
+
+  // --- Agent tab: Docs Injection (Phase 2) ---
+
+  it("agent_tab_renders_docs_injection_checkboxes", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
+    });
+
+    await switchToTab(rendered, "Agent");
+
+    await waitFor(() => {
+      expect(rendered.getByText("Docs Injection")).toBeTruthy();
+    });
+
+    const claudeMdCheckbox = rendered.container.querySelector("#agent-inject-claude-md") as HTMLInputElement;
+    const agentsMdCheckbox = rendered.container.querySelector("#agent-inject-agents-md") as HTMLInputElement;
+    const geminiMdCheckbox = rendered.container.querySelector("#agent-inject-gemini-md") as HTMLInputElement;
+
+    expect(claudeMdCheckbox).toBeTruthy();
+    expect(agentsMdCheckbox).toBeTruthy();
+    expect(geminiMdCheckbox).toBeTruthy();
+    expect(claudeMdCheckbox.type).toBe("checkbox");
+    expect(agentsMdCheckbox.type).toBe("checkbox");
+    expect(geminiMdCheckbox.type).toBe("checkbox");
+  });
+
+  it("agent_tab_claude_md_checked_by_default", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
+    });
+
+    await switchToTab(rendered, "Agent");
+
+    await waitFor(() => {
+      expect(rendered.getByText("Docs Injection")).toBeTruthy();
+    });
+
+    const claudeMdCheckbox = rendered.container.querySelector("#agent-inject-claude-md") as HTMLInputElement;
+    const agentsMdCheckbox = rendered.container.querySelector("#agent-inject-agents-md") as HTMLInputElement;
+    const geminiMdCheckbox = rendered.container.querySelector("#agent-inject-gemini-md") as HTMLInputElement;
+
+    expect(claudeMdCheckbox.checked).toBe(true);
+    expect(agentsMdCheckbox.checked).toBe(false);
+    expect(geminiMdCheckbox.checked).toBe(false);
+  });
+
+  it("agent_tab_saves_injection_settings", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(5);
+    });
+
+    await switchToTab(rendered, "Agent");
+
+    await waitFor(() => {
+      expect(rendered.getByText("Docs Injection")).toBeTruthy();
+    });
+
+    const claudeMdCheckbox = rendered.container.querySelector("#agent-inject-claude-md") as HTMLInputElement;
+    const agentsMdCheckbox = rendered.container.querySelector("#agent-inject-agents-md") as HTMLInputElement;
+
+    // Uncheck CLAUDE.md
+    await fireEvent.click(claudeMdCheckbox);
+    // Check AGENTS.md
+    await fireEvent.click(agentsMdCheckbox);
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const saveCall = invokeMock.mock.calls.find(([cmd]) => cmd === "save_settings");
+      expect(saveCall).toBeTruthy();
+      const savedSettings = saveCall![1].settings as SettingsData;
+      expect(savedSettings.agent_inject_claude_md).toBe(false);
+      expect(savedSettings.agent_inject_agents_md).toBe(true);
+    });
   });
 });
