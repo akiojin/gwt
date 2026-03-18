@@ -347,12 +347,19 @@ pub async fn assistant_start(
         match engine.handle_startup(&state) {
             Ok(()) => {
                 if engine.startup_summary_ready() {
-                    if let Some(summary) = engine
-                        .conversation()
-                        .iter()
-                        .rev()
-                        .find(|message| message.role == "assistant")
-                        .and_then(|message| message.content.clone())
+                    if let Some(summary) =
+                        engine
+                            .conversation()
+                            .iter()
+                            .rev()
+                            .find_map(|item| match item {
+                                gwt_core::ai::ConversationItem::Message { role, content }
+                                    if role == "assistant" =>
+                                {
+                                    Some(content.clone())
+                                }
+                                _ => None,
+                            })
                     {
                         let cache = StartupAnalysisCacheEntry {
                             fingerprint,
@@ -653,9 +660,13 @@ fn derive_startup_recovery_info(engine: &AssistantEngine) -> StartupRecoveryInfo
         .conversation()
         .iter()
         .rev()
-        .filter(|message| message.role == "assistant")
-        .find_map(|message| {
-            let content = message.content.as_deref()?;
+        .filter_map(|item| match item {
+            gwt_core::ai::ConversationItem::Message { role, content } if role == "assistant" => {
+                Some(content.as_str())
+            }
+            _ => None,
+        })
+        .find_map(|content| {
             let lower = content.to_ascii_lowercase();
             (lower.contains("failed")
                 || lower.contains("error")
@@ -1552,22 +1563,25 @@ fn build_messages_from_conversation(engine: &AssistantEngine) -> Vec<AssistantMe
     engine
         .conversation()
         .iter()
-        .filter_map(|msg| {
-            let content = msg.content.as_deref().unwrap_or("");
-            if msg.role == "system" || msg.role == "tool" {
-                return None;
+        .filter_map(|item| match item {
+            gwt_core::ai::ConversationItem::Message { role, content } => {
+                if role == "system" {
+                    return None;
+                }
+                Some(AssistantMessage {
+                    role: role.clone(),
+                    kind: "text".to_string(),
+                    content: content.clone(),
+                    timestamp: now,
+                })
             }
-            let kind = if msg.tool_calls.is_some() {
-                "tool_use".to_string()
-            } else {
-                "text".to_string()
-            };
-            Some(AssistantMessage {
-                role: msg.role.clone(),
-                kind,
-                content: content.to_string(),
+            gwt_core::ai::ConversationItem::FunctionCall { name, .. } => Some(AssistantMessage {
+                role: "assistant".to_string(),
+                kind: "tool_use".to_string(),
+                content: format!("Tool call: {}", name),
                 timestamp: now,
-            })
+            }),
+            gwt_core::ai::ConversationItem::FunctionCallOutput { .. } => None,
         })
         .collect()
 }
