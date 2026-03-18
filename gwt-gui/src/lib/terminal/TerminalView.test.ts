@@ -15,9 +15,8 @@ let customKeyEventHandler: ((event: KeyboardEvent) => boolean) | null = null;
 let terminalOutputHandler:
   | ((event: { payload: { pane_id: string; data: number[] } }) => void)
   | null = null;
-let webLinksClickHandler:
-  | ((event: MouseEvent, uri: string) => void)
-  | null = null;
+let webLinksClickHandler: ((event: MouseEvent, uri: string) => void) | null =
+  null;
 let tauriFocusHandler: (() => void) | null = null;
 let callOrder: string[] = [];
 
@@ -27,7 +26,10 @@ const resizeObserverInstances: Array<{ __trigger: () => void }> = [];
 let fontSetReadyResolve: (() => void) | null = null;
 let fontSetLoadingDoneHandler: (() => void) | null = null;
 
-function setNavigatorPlatform(platform: string, userAgentDataPlatform: string | null = null) {
+function setNavigatorPlatform(
+  platform: string,
+  userAgentDataPlatform: string | null = null,
+) {
   Object.defineProperty(navigator, "platform", {
     configurable: true,
     value: platform,
@@ -35,7 +37,9 @@ function setNavigatorPlatform(platform: string, userAgentDataPlatform: string | 
   Object.defineProperty(navigator, "userAgentData", {
     configurable: true,
     value:
-      userAgentDataPlatform === null ? null : { platform: userAgentDataPlatform },
+      userAgentDataPlatform === null
+        ? null
+        : { platform: userAgentDataPlatform },
   });
 }
 
@@ -118,9 +122,15 @@ vi.mock("@xterm/xterm", () => ({
       const self = this;
       this.buffer = {
         active: {
-          get viewportY() { return self._viewportY; },
-          get baseY() { return self._baseY; },
-          get type() { return self._bufferType; },
+          get viewportY() {
+            return self._viewportY;
+          },
+          get baseY() {
+            return self._baseY;
+          },
+          get type() {
+            return self._bufferType;
+          },
         },
       };
       terminalInstances.push(this);
@@ -135,7 +145,9 @@ function installResizeObserverStub() {
     disconnect = vi.fn();
     constructor(cb: () => void) {
       this.__callback = cb;
-      resizeObserverInstances.push(this as unknown as { __trigger: () => void });
+      resizeObserverInstances.push(
+        this as unknown as { __trigger: () => void },
+      );
     }
     __trigger() {
       this.__callback();
@@ -271,7 +283,7 @@ describe("TerminalView", () => {
       expect(terminalInstances.length).toBeGreaterThan(0);
     });
     expect(terminalInstances[0].options.fontFamily).toBe(
-      '"Cascadia Mono", "Cascadia Code", Consolas, monospace'
+      '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
     );
   });
 
@@ -304,7 +316,10 @@ describe("TerminalView", () => {
   });
 
   it("updates terminal font family from custom event", async () => {
-    await renderTerminalView({ paneId: "pane-font-family-update", active: true });
+    await renderTerminalView({
+      paneId: "pane-font-family-update",
+      active: true,
+    });
 
     await waitFor(() => {
       expect(terminalInstances.length).toBeGreaterThan(0);
@@ -319,10 +334,10 @@ describe("TerminalView", () => {
 
     await waitFor(() => {
       expect(term.options.fontFamily).toBe(
-        '"SF Mono", Menlo, Monaco, Consolas, monospace'
+        '"SF Mono", Menlo, Monaco, Consolas, monospace',
       );
       expect((window as any).__gwtTerminalFontFamily).toBe(
-        '"SF Mono", Menlo, Monaco, Consolas, monospace'
+        '"SF Mono", Menlo, Monaco, Consolas, monospace',
       );
     });
   });
@@ -348,7 +363,10 @@ describe("TerminalView", () => {
   it("re-fits when document fonts finish loading while active", async () => {
     installFontSetStub();
 
-    await renderTerminalView({ paneId: "pane-fonts-loadingdone", active: true });
+    await renderTerminalView({
+      paneId: "pane-fonts-loadingdone",
+      active: true,
+    });
 
     await waitFor(() => {
       expect(fitAddonInstances.length).toBeGreaterThan(0);
@@ -586,9 +604,7 @@ describe("TerminalView", () => {
     // The only write at this point should be the activation buffer flush
     // (empty string with callback). No real terminal data should have been
     // written because terminal_ready has not resolved yet.
-    const dataWrites = term.write.mock.calls.filter(
-      (c: any[]) => c[0] !== "",
-    );
+    const dataWrites = term.write.mock.calls.filter((c: any[]) => c[0] !== "");
     expect(dataWrites).toHaveLength(0);
 
     // Resolve terminal_ready with initial data first, then flush buffered output.
@@ -599,9 +615,7 @@ describe("TerminalView", () => {
       expect(dw).toHaveLength(2);
     });
 
-    const dataCalls = term.write.mock.calls.filter(
-      (c: any[]) => c[0] !== "",
-    );
+    const dataCalls = term.write.mock.calls.filter((c: any[]) => c[0] !== "");
     const readyChunk = dataCalls[0][0];
     expect(readyChunk).toBeInstanceOf(Uint8Array);
     expect(new TextDecoder().decode(readyChunk)).toBe("history\n");
@@ -726,7 +740,9 @@ describe("TerminalView", () => {
       expect(terminalInstances.length).toBeGreaterThan(0);
     });
 
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement | null;
     expect(rootEl).not.toBeNull();
     const term = terminalInstances[0];
     term.focus.mockClear();
@@ -803,7 +819,9 @@ describe("TerminalView", () => {
     fit.mockClear();
     term.refresh.mockClear();
 
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
     installElementSize(rootEl, { width: 800, height: 600 });
     triggerResizeObserver(0);
     await waitFor(() => {
@@ -869,7 +887,10 @@ describe("TerminalView", () => {
     term.refresh.mockClear();
     term.write.mockClear();
 
-    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "hidden",
+    );
     Object.defineProperty(document, "hidden", {
       configurable: true,
       value: false,
@@ -914,7 +935,10 @@ describe("TerminalView", () => {
     document.body.appendChild(overlay);
     input.focus();
 
-    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "hidden",
+    );
     Object.defineProperty(document, "hidden", {
       configurable: true,
       value: false,
@@ -951,7 +975,9 @@ describe("TerminalView", () => {
     const fit = fitAddonInstances[0].fit;
     fit.mockClear();
     term.refresh.mockClear();
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
     installElementSize(rootEl, { width: 800, height: 600 });
     triggerResizeObserver(0);
     await waitFor(() => {
@@ -960,7 +986,10 @@ describe("TerminalView", () => {
     fit.mockClear();
     term.refresh.mockClear();
 
-    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "hidden",
+    );
     Object.defineProperty(document, "hidden", {
       configurable: true,
       value: false,
@@ -995,7 +1024,9 @@ describe("TerminalView", () => {
 
     const term = terminalInstances[0];
     const fit = fitAddonInstances[0].fit;
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
     const size = { width: 800, height: 600 };
     installElementSize(rootEl, size);
     triggerResizeObserver(0);
@@ -1028,7 +1059,9 @@ describe("TerminalView", () => {
 
     const term = terminalInstances[0];
     const fit = fitAddonInstances[0].fit;
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
     const size = { width: 800, height: 600 };
     installElementSize(rootEl, size);
     triggerResizeObserver(0);
@@ -1040,7 +1073,10 @@ describe("TerminalView", () => {
     term.refresh.mockClear();
     size.height = 601;
 
-    const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    const hiddenDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "hidden",
+    );
     Object.defineProperty(document, "hidden", {
       configurable: true,
       value: false,
@@ -1067,7 +1103,9 @@ describe("TerminalView", () => {
       paneId: "pane-scroll-1",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
     expect(rootEl).not.toBeNull();
 
     const viewport = document.createElement("div");
@@ -1095,7 +1133,9 @@ describe("TerminalView", () => {
       paneId: "pane-alt-buf",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1120,7 +1160,9 @@ describe("TerminalView", () => {
       paneId: "pane-accum",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1147,7 +1189,9 @@ describe("TerminalView", () => {
       paneId: "pane-line-mode",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1175,7 +1219,9 @@ describe("TerminalView", () => {
       paneId: "pane-page-mode",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1207,7 +1253,9 @@ describe("TerminalView", () => {
       paneId: "pane-scroll-up",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1230,7 +1278,9 @@ describe("TerminalView", () => {
       paneId: "pane-trackpad",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1259,7 +1309,9 @@ describe("TerminalView", () => {
       paneId: "pane-axis",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1271,7 +1323,11 @@ describe("TerminalView", () => {
     const term = terminalInstances[0];
 
     // vertical: 10/15.6=0.641 → accumulated, no scroll
-    const e1 = new WheelEvent("wheel", { deltaY: 10, bubbles: true, deltaMode: 0 });
+    const e1 = new WheelEvent("wheel", {
+      deltaY: 10,
+      bubbles: true,
+      deltaMode: 0,
+    });
     rootEl.dispatchEvent(e1);
     expect(term.scrollLines).not.toHaveBeenCalled();
 
@@ -1284,7 +1340,11 @@ describe("TerminalView", () => {
 
     // back to vertical: remainder was reset, 10/15.6=0.641 again → no scroll
     term.scrollLines.mockClear();
-    const e3 = new WheelEvent("wheel", { deltaY: 10, bubbles: true, deltaMode: 0 });
+    const e3 = new WheelEvent("wheel", {
+      deltaY: 10,
+      bubbles: true,
+      deltaMode: 0,
+    });
     rootEl.dispatchEvent(e3);
     expect(term.scrollLines).not.toHaveBeenCalled();
   });
@@ -1294,7 +1354,9 @@ describe("TerminalView", () => {
       paneId: "pane-horiz",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1322,7 +1384,9 @@ describe("TerminalView", () => {
       paneId: "pane-horiz-only",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1351,7 +1415,9 @@ describe("TerminalView", () => {
       paneId: "pane-focus-wheel",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1374,7 +1440,9 @@ describe("TerminalView", () => {
       paneId: "pane-boundary",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1402,7 +1470,9 @@ describe("TerminalView", () => {
       paneId: "pane-inactive-scroll",
       active: false,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1442,7 +1512,9 @@ describe("TerminalView", () => {
       paneId: "pane-zero",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1470,7 +1542,9 @@ describe("TerminalView", () => {
       paneId: "pane-large-delta",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1493,7 +1567,9 @@ describe("TerminalView", () => {
       paneId: "pane-repeated",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
@@ -1662,7 +1738,9 @@ describe("TerminalView", () => {
     expect(preventDefaultMock).toHaveBeenCalled();
     // Should have sent SIGINT (0x03) via write_terminal
     await waitFor(() => {
-      expect(invokeMock.mock.calls.some((c) => c[0] === "write_terminal")).toBe(true);
+      expect(invokeMock.mock.calls.some((c) => c[0] === "write_terminal")).toBe(
+        true,
+      );
     });
   });
 
@@ -1750,8 +1828,12 @@ describe("TerminalView", () => {
     });
 
     const actions = container.querySelector(".terminal-actions");
-    const pasteButton = getByRole("button", { name: "Paste" }) as HTMLButtonElement;
-    const voiceButton = getByRole("button", { name: "Voice" }) as HTMLButtonElement;
+    const pasteButton = getByRole("button", {
+      name: "Paste",
+    }) as HTMLButtonElement;
+    const voiceButton = getByRole("button", {
+      name: "Voice",
+    }) as HTMLButtonElement;
     const pasteIcon = pasteButton.querySelector("svg");
     const voiceIcon = voiceButton.querySelector("svg");
 
@@ -1761,12 +1843,24 @@ describe("TerminalView", () => {
     expect(voiceIcon?.getAttribute("width")).toBe("24");
     expect(voiceIcon?.getAttribute("height")).toBe("24");
 
-    expect(terminalViewSource).toMatch(/\.terminal-actions\s*\{[\s\S]*gap:\s*10px;/);
-    expect(terminalViewSource).toMatch(/\.terminal-actions\s*\{[\s\S]*pointer-events:\s*none;/);
-    expect(terminalViewSource).toMatch(/\.terminal-action-btn\s*\{[\s\S]*min-width:\s*48px;/);
-    expect(terminalViewSource).toMatch(/\.terminal-action-btn\s*\{[\s\S]*min-height:\s*48px;/);
-    expect(terminalViewSource).toMatch(/\.terminal-action-btn\s*\{[\s\S]*padding:\s*11px;/);
-    expect(terminalViewSource).toMatch(/\.terminal-action-btn\s*\{[\s\S]*pointer-events:\s*auto;/);
+    expect(terminalViewSource).toMatch(
+      /\.terminal-actions\s*\{[\s\S]*gap:\s*10px;/,
+    );
+    expect(terminalViewSource).toMatch(
+      /\.terminal-actions\s*\{[\s\S]*pointer-events:\s*none;/,
+    );
+    expect(terminalViewSource).toMatch(
+      /\.terminal-action-btn\s*\{[\s\S]*min-width:\s*48px;/,
+    );
+    expect(terminalViewSource).toMatch(
+      /\.terminal-action-btn\s*\{[\s\S]*min-height:\s*48px;/,
+    );
+    expect(terminalViewSource).toMatch(
+      /\.terminal-action-btn\s*\{[\s\S]*padding:\s*11px;/,
+    );
+    expect(terminalViewSource).toMatch(
+      /\.terminal-action-btn\s*\{[\s\S]*pointer-events:\s*auto;/,
+    );
     expect(terminalViewSource).toMatch(
       /\.terminal-action-btn\s*\{[\s\S]*color:\s*var\(--text-secondary\);/,
     );
@@ -1817,7 +1911,9 @@ describe("TerminalView", () => {
       });
     });
 
-    const writeCall = invokeMock.mock.calls.find((call) => call[0] === "write_terminal");
+    const writeCall = invokeMock.mock.calls.find(
+      (call) => call[0] === "write_terminal",
+    );
     expect(writeCall).toBeTruthy();
     const payload = writeCall?.[1] as { data: number[] };
     const written = new TextDecoder().decode(Uint8Array.from(payload.data));
@@ -1858,7 +1954,9 @@ describe("TerminalView", () => {
       });
     });
 
-    const writeCall = invokeMock.mock.calls.find((call) => call[0] === "write_terminal");
+    const writeCall = invokeMock.mock.calls.find(
+      (call) => call[0] === "write_terminal",
+    );
     expect(writeCall).toBeTruthy();
     const payload = writeCall?.[1] as { data: number[] };
     const written = new TextDecoder().decode(Uint8Array.from(payload.data));
@@ -1899,7 +1997,9 @@ describe("TerminalView", () => {
       });
     });
 
-    const writeCall = invokeMock.mock.calls.find((call) => call[0] === "write_terminal");
+    const writeCall = invokeMock.mock.calls.find(
+      (call) => call[0] === "write_terminal",
+    );
     expect(writeCall).toBeTruthy();
     const payload = writeCall?.[1] as { data: number[] };
     const written = new TextDecoder().decode(Uint8Array.from(payload.data));
@@ -1949,7 +2049,10 @@ describe("TerminalView", () => {
         message: "Clipboard image is too large (max 10 MB).",
       });
     });
-    expect(invokeMock).not.toHaveBeenCalledWith("save_clipboard_image", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "save_clipboard_image",
+      expect.anything(),
+    );
   });
 
   it("shows a toast when writing the staged image path fails", async () => {
@@ -1990,9 +2093,11 @@ describe("TerminalView", () => {
     });
   });
 
-  it("dispatches voice toggle from the overlay button", async () => {
-    const handler = vi.fn();
-    window.addEventListener("gwt-voice-toggle", handler);
+  it("dispatches voice push-to-talk events from the overlay button", async () => {
+    const startHandler = vi.fn();
+    const stopHandler = vi.fn();
+    window.addEventListener("gwt-voice-ptt-start", startHandler);
+    window.addEventListener("gwt-voice-ptt-stop", stopHandler);
 
     const { getByRole } = await renderTerminalView({
       paneId: "pane-voice-action",
@@ -2002,15 +2107,40 @@ describe("TerminalView", () => {
       voiceInputAvailable: true,
     });
 
-    await fireEvent.click(getByRole("button", { name: "Voice" }));
+    const voiceButton = getByRole("button", { name: "Voice" });
+    await fireEvent.pointerDown(voiceButton, { pointerId: 1 });
+    await fireEvent.pointerUp(voiceButton, { pointerId: 1 });
 
-    expect(handler).toHaveBeenCalledTimes(1);
-    window.removeEventListener("gwt-voice-toggle", handler);
+    expect(startHandler).toHaveBeenCalledTimes(1);
+    expect(stopHandler).toHaveBeenCalledTimes(1);
+    window.removeEventListener("gwt-voice-ptt-start", startHandler);
+    window.removeEventListener("gwt-voice-ptt-stop", stopHandler);
   });
 
-  it("disables voice toggle while preparing", async () => {
-    const handler = vi.fn();
-    window.addEventListener("gwt-voice-toggle", handler);
+  it("keeps voice button enabled while capability is unavailable", async () => {
+    const startHandler = vi.fn();
+    window.addEventListener("gwt-voice-ptt-start", startHandler);
+
+    const { getByRole } = await renderTerminalView({
+      paneId: "pane-voice-unavailable",
+      active: true,
+      voiceInputEnabled: true,
+      voiceInputSupported: true,
+      voiceInputAvailable: false,
+    });
+
+    const voiceButton = getByRole("button", { name: "Voice" });
+    expect((voiceButton as HTMLButtonElement).disabled).toBe(false);
+
+    await fireEvent.pointerDown(voiceButton, { pointerId: 2 });
+
+    expect(startHandler).toHaveBeenCalledTimes(1);
+    window.removeEventListener("gwt-voice-ptt-start", startHandler);
+  });
+
+  it("disables voice button while preparing", async () => {
+    const startHandler = vi.fn();
+    window.addEventListener("gwt-voice-ptt-start", startHandler);
 
     const { getByRole } = await renderTerminalView({
       paneId: "pane-voice-preparing",
@@ -2024,10 +2154,10 @@ describe("TerminalView", () => {
     const voiceButton = getByRole("button", { name: "Voice" });
     expect((voiceButton as HTMLButtonElement).disabled).toBe(true);
 
-    await fireEvent.click(voiceButton);
+    await fireEvent.pointerDown(voiceButton, { pointerId: 3 });
 
-    expect(handler).not.toHaveBeenCalled();
-    window.removeEventListener("gwt-voice-toggle", handler);
+    expect(startHandler).not.toHaveBeenCalled();
+    window.removeEventListener("gwt-voice-ptt-start", startHandler);
   });
 
   it("handles paste via clipboard event on rootEl", async () => {
@@ -2040,7 +2170,9 @@ describe("TerminalView", () => {
       expect(terminalInstances.length).toBeGreaterThan(0);
     });
 
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
     expect(rootEl).not.toBeNull();
 
     const clipboardData = {
@@ -2057,7 +2189,9 @@ describe("TerminalView", () => {
 
     await waitFor(() => {
       expect(preventDefaultSpy).toHaveBeenCalled();
-      expect(invokeMock.mock.calls.some((c) => c[0] === "write_terminal")).toBe(true);
+      expect(invokeMock.mock.calls.some((c) => c[0] === "write_terminal")).toBe(
+        true,
+      );
     });
   });
 
@@ -2094,7 +2228,9 @@ describe("TerminalView", () => {
       expect(terminalInstances.length).toBeGreaterThan(0);
     });
 
-    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement;
+    const rootEl = container.querySelector(
+      ".terminal-container",
+    ) as HTMLDivElement;
     expect(rootEl).not.toBeNull();
 
     invokeMock.mockClear();

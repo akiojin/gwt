@@ -30,6 +30,8 @@ const assistantStateFixture = {
   estimatedTokens: 0,
   startupStatus: "ready",
   startupSummaryReady: true,
+  blockers: [],
+  recommendedNextActions: [],
 };
 
 const dashboardFixture = {
@@ -247,12 +249,95 @@ describe("AssistantPanel", () => {
     expect(getAssistantSendCalls()).toHaveLength(0);
   });
 
+  it("disables the composer while the assistant is thinking", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      isThinking: true,
+      sessionId: "session-main",
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "Checking startup analysis cache...",
+          timestamp: 1,
+        },
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+    const textarea = rendered.getByPlaceholderText("Type a message...") as HTMLTextAreaElement;
+    const button = rendered.getByText("Send") as HTMLButtonElement;
+
+    await waitFor(() => {
+      expect(textarea.disabled).toBe(true);
+      expect(button.disabled).toBe(true);
+      expect(rendered.getByText("Checking startup analysis cache...")).toBeTruthy();
+      expect(rendered.getByText("Thinking...")).toBeTruthy();
+    });
+  });
+
+  it("shows the current goal and recommended next actions in the dashboard strip", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      workingGoal: "#1636 Assistant Mode",
+      goalConfidence: "high",
+      currentStatus: "monitoring",
+      recommendedNextActions: [
+        "ブランチ `feature/issue-1636` で agent を起動して作業を再開する",
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByTestId("assistant-goal-strip")).toBeTruthy();
+      expect(rendered.getByText("#1636 Assistant Mode")).toBeTruthy();
+      expect(rendered.getByText("Monitoring")).toBeTruthy();
+      expect(
+        rendered.getByText("ブランチ `feature/issue-1636` で agent を起動して作業を再開する")
+      ).toBeTruthy();
+    });
+  });
+
+  it("renders goal confirmation state with blockers", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      currentStatus: "awaiting_goal_confirmation",
+      blockers: [
+        "README / CLAUDE.md / 現在の branch から、着手中のゴールを一意に特定できません。",
+      ],
+      recommendedNextActions: [
+        "現在のゴールを一文で確認し、必要なら issue または README に明記する",
+      ],
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "## Assistant PM Update\n現在の作業ゴールを一文で確認してください。",
+          timestamp: 1,
+        },
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Needs Goal")).toBeTruthy();
+      expect(
+        rendered.getByText(
+          "README / CLAUDE.md / 現在の branch から、着手中のゴールを一意に特定できません。"
+        )
+      ).toBeTruthy();
+      expect(rendered.getByText("現在の作業ゴールを一文で確認してください。")).toBeTruthy();
+    });
+  });
+
   it("preserves line breaks in rendered message content", async () => {
     initialAssistantState = {
       ...structuredClone(assistantStateFixture),
       messages: [
         {
-          role: "assistant",
+          role: "user",
           kind: "text",
           content: "line 1\nline 2",
           timestamp: 1,
@@ -271,6 +356,29 @@ describe("AssistantPanel", () => {
     expect(content.textContent?.replace(/^\s+/, "")).toBe("line 1\nline 2");
     const source = await import("./AssistantPanel.svelte?raw");
     expect(source.default).toContain("white-space: pre-wrap;");
+  });
+
+  it("renders assistant markdown output as formatted content", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "## Summary\n- item one\n- item two",
+          timestamp: 1,
+        },
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".message.assistant h2")?.textContent).toBe(
+        "Summary"
+      );
+      expect(rendered.container.querySelectorAll(".message.assistant li")).toHaveLength(2);
+    });
   });
 
   it("shows the user message immediately while assistant_send_message is pending", async () => {
@@ -537,8 +645,12 @@ describe("AssistantPanel", () => {
     resolveStart?.();
 
     await waitFor(() => {
-      const message = rendered.container.querySelector(".message.assistant .message-content");
-      expect(message?.textContent?.replace(/^\s+/, "")).toBe("Current status\n- branch: main");
+      expect(rendered.container.querySelector(".message.assistant p")?.textContent).toBe(
+        "Current status"
+      );
+      expect(rendered.container.querySelector(".message.assistant li")?.textContent).toBe(
+        "branch: main"
+      );
     });
   });
 });

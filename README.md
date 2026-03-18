@@ -164,6 +164,8 @@ Voice input uses Qwen3-ASR via a local Python runtime.
 - Not required manually: `qwen_asr` package installation.
 - On first voice use, gwt auto-creates `~/.gwt/runtime/voice-venv` and installs runtime deps there.
 - The selected Qwen model is then downloaded into Hugging Face cache on demand.
+- Push-to-talk is fixed to `Cmd+Shift+Space` on macOS and `Ctrl+Shift+Space` on Windows/Linux.
+- In the terminal overlay, hold the Voice button to capture speech.
 
 ### Optional advanced toggles
 

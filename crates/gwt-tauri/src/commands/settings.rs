@@ -42,8 +42,6 @@ fn normalize_app_language(value: Option<&str>) -> String {
 pub struct VoiceInputSettingsData {
     pub enabled: bool,
     pub engine: String,
-    pub hotkey: String,
-    pub ptt_hotkey: String,
     pub language: String,
     pub quality: String,
     pub model: String,
@@ -54,8 +52,6 @@ impl Default for VoiceInputSettingsData {
         Self {
             enabled: false,
             engine: "qwen3-asr".to_string(),
-            hotkey: "Mod+Shift+M".to_string(),
-            ptt_hotkey: "Mod+Shift+Space".to_string(),
             language: "auto".to_string(),
             quality: "balanced".to_string(),
             model: "Qwen/Qwen3-ASR-1.7B".to_string(),
@@ -81,6 +77,15 @@ pub struct SettingsData {
     /// `Some(true)` = enabled, `Some(false)` = explicitly disabled, `None` = use default.
     #[serde(default)]
     pub agent_skill_registration_enabled: Option<bool>,
+    /// Inject managed skills block into CLAUDE.md.
+    #[serde(default)]
+    pub agent_inject_claude_md: Option<bool>,
+    /// Inject managed skills block into AGENTS.md.
+    #[serde(default)]
+    pub agent_inject_agents_md: Option<bool>,
+    /// Inject managed skills block into GEMINI.md.
+    #[serde(default)]
+    pub agent_inject_gemini_md: Option<bool>,
     pub docker_force_host: bool,
     pub ui_font_size: u32,
     pub terminal_font_size: u32,
@@ -142,6 +147,27 @@ impl From<&Settings> for SettingsData {
                     .map(|prefs| prefs.enabled)
                     .unwrap_or(true),
             ),
+            agent_inject_claude_md: Some(
+                s.agent
+                    .skill_registration
+                    .as_ref()
+                    .map(|prefs| prefs.inject_claude_md)
+                    .unwrap_or(true),
+            ),
+            agent_inject_agents_md: Some(
+                s.agent
+                    .skill_registration
+                    .as_ref()
+                    .map(|prefs| prefs.inject_agents_md)
+                    .unwrap_or(false),
+            ),
+            agent_inject_gemini_md: Some(
+                s.agent
+                    .skill_registration
+                    .as_ref()
+                    .map(|prefs| prefs.inject_gemini_md)
+                    .unwrap_or(false),
+            ),
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
@@ -153,8 +179,6 @@ impl From<&Settings> for SettingsData {
             voice_input: VoiceInputSettingsData {
                 enabled: s.voice_input.enabled,
                 engine: s.voice_input.engine.clone(),
-                hotkey: s.voice_input.hotkey.clone(),
-                ptt_hotkey: s.voice_input.ptt_hotkey.clone(),
                 language: s.voice_input.language.clone(),
                 quality: s.voice_input.quality.clone(),
                 model: s.voice_input.model.clone(),
@@ -184,10 +208,12 @@ impl SettingsData {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
-        s.agent.skill_registration = match self.agent_skill_registration_enabled {
-            Some(false) => Some(SkillRegistrationPreferences { enabled: false }),
-            _ => Some(SkillRegistrationPreferences::default()),
-        };
+        s.agent.skill_registration = Some(SkillRegistrationPreferences {
+            enabled: self.agent_skill_registration_enabled.unwrap_or(true),
+            inject_claude_md: self.agent_inject_claude_md.unwrap_or(true),
+            inject_agents_md: self.agent_inject_agents_md.unwrap_or(false),
+            inject_gemini_md: self.agent_inject_gemini_md.unwrap_or(false),
+        });
 
         s.docker.force_host = self.docker_force_host;
         s.appearance.ui_font_size = self.ui_font_size;
@@ -196,8 +222,6 @@ impl SettingsData {
         let voice = normalize_voice_input(&self.voice_input)?;
         s.voice_input.enabled = self.voice_input.enabled;
         s.voice_input.engine = voice.engine;
-        s.voice_input.hotkey = voice.hotkey;
-        s.voice_input.ptt_hotkey = voice.ptt_hotkey;
         s.voice_input.language = voice.language;
         s.voice_input.quality = voice.quality;
         s.voice_input.model = voice.model;
@@ -221,8 +245,6 @@ impl SettingsData {
 #[derive(Debug, Clone)]
 struct NormalizedVoiceInput {
     engine: String,
-    hotkey: String,
-    ptt_hotkey: String,
     language: String,
     quality: String,
     model: String,
@@ -236,35 +258,11 @@ fn qwen_model_for_quality(quality: &str) -> &'static str {
     }
 }
 
-fn is_named_hotkey_key(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "space" | "escape" | "enter" | "tab" | "backspace" | "delete"
-    )
-}
-
-fn normalize_hotkey(hotkey: &str, field: &str) -> Result<String, String> {
-    let trimmed = hotkey.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{field} must not be empty"));
-    }
-    if !trimmed.contains('+') && trimmed.chars().count() != 1 && !is_named_hotkey_key(trimmed) {
-        return Err(format!("{field} must include modifiers or a single key"));
-    }
-    Ok(trimmed.to_string())
-}
-
 fn normalize_voice_input(value: &VoiceInputSettingsData) -> Result<NormalizedVoiceInput, String> {
     let engine = match value.engine.trim().to_lowercase().as_str() {
         "" | "qwen3-asr" | "qwen" | "whisper" => "qwen3-asr".to_string(),
         _ => return Err("voice_input.engine must be \"qwen3-asr\"".to_string()),
     };
-
-    let hotkey = normalize_hotkey(&value.hotkey, "voice_input.hotkey")?;
-    let ptt_hotkey = normalize_hotkey(&value.ptt_hotkey, "voice_input.ptt_hotkey")?;
-    if hotkey.eq_ignore_ascii_case(&ptt_hotkey) {
-        return Err("voice_input.hotkey and voice_input.ptt_hotkey must differ".to_string());
-    }
 
     let language = value.language.trim().to_lowercase();
     let language = match language.as_str() {
@@ -291,8 +289,6 @@ fn normalize_voice_input(value: &VoiceInputSettingsData) -> Result<NormalizedVoi
 
     Ok(NormalizedVoiceInput {
         engine,
-        hotkey,
-        ptt_hotkey,
         language,
         quality,
         model,
@@ -337,8 +333,6 @@ mod tests {
         core.app_language = "ja".to_string();
         core.voice_input.enabled = true;
         core.voice_input.engine = "qwen3-asr".to_string();
-        core.voice_input.hotkey = "Mod+Shift+V".to_string();
-        core.voice_input.ptt_hotkey = "Mod+Shift+Space".to_string();
         core.voice_input.language = "ja".to_string();
         core.voice_input.quality = "accurate".to_string();
         core.voice_input.model = "Qwen/Qwen3-ASR-1.7B".to_string();
@@ -351,8 +345,6 @@ mod tests {
         assert_eq!(data.app_language, "ja");
         assert!(data.voice_input.enabled);
         assert_eq!(data.voice_input.engine, "qwen3-asr");
-        assert_eq!(data.voice_input.hotkey, "Mod+Shift+V");
-        assert_eq!(data.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(data.voice_input.language, "ja");
         assert_eq!(data.voice_input.quality, "accurate");
         assert_eq!(data.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
@@ -364,8 +356,6 @@ mod tests {
         assert_eq!(back.app_language, "ja");
         assert!(back.voice_input.enabled);
         assert_eq!(back.voice_input.engine, "qwen3-asr");
-        assert_eq!(back.voice_input.hotkey, "Mod+Shift+V");
-        assert_eq!(back.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(back.voice_input.language, "ja");
         assert_eq!(back.voice_input.quality, "accurate");
         assert_eq!(back.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
@@ -434,7 +424,10 @@ mod tests {
         let back = disabled.to_settings().unwrap();
         assert_eq!(
             back.agent.skill_registration,
-            Some(SkillRegistrationPreferences { enabled: false })
+            Some(SkillRegistrationPreferences {
+                enabled: false,
+                ..Default::default()
+            })
         );
     }
 
@@ -462,22 +455,25 @@ mod tests {
     }
 
     #[test]
-    fn test_voice_hotkeys_must_not_conflict() {
-        let mut data = SettingsData::from(&Settings::default());
-        data.voice_input.enabled = true;
-        data.voice_input.hotkey = "Mod+Shift+M".to_string();
-        data.voice_input.ptt_hotkey = "Mod+Shift+M".to_string();
-        let err = data.to_settings().unwrap_err();
-        assert!(err.contains("must differ"));
-    }
+    fn settings_data_inject_round_trip() {
+        let mut core = Settings::default();
+        core.agent.skill_registration = Some(SkillRegistrationPreferences {
+            enabled: true,
+            inject_claude_md: true,
+            inject_agents_md: true,
+            inject_gemini_md: false,
+        });
 
-    #[test]
-    fn test_voice_hotkey_accepts_named_single_key() {
-        let mut data = SettingsData::from(&Settings::default());
-        data.voice_input.hotkey = "Space".to_string();
-        data.voice_input.ptt_hotkey = "Mod+Shift+Space".to_string();
-        let normalized = data.to_settings().unwrap();
-        assert_eq!(normalized.voice_input.hotkey, "Space");
+        let data = SettingsData::from(&core);
+        assert_eq!(data.agent_inject_claude_md, Some(true));
+        assert_eq!(data.agent_inject_agents_md, Some(true));
+        assert_eq!(data.agent_inject_gemini_md, Some(false));
+
+        let back = data.to_settings().unwrap();
+        let prefs = back.agent.skill_registration.unwrap();
+        assert!(prefs.inject_claude_md);
+        assert!(prefs.inject_agents_md);
+        assert!(!prefs.inject_gemini_md);
     }
 
     #[test]

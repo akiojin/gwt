@@ -84,6 +84,16 @@ pub struct WindowMigrationState {
     pub source_root: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantContext {
+    pub working_goal: Option<String>,
+    pub goal_confidence: Option<String>,
+    pub current_status: Option<String>,
+    pub blockers: Vec<String>,
+    pub recommended_next_actions: Vec<String>,
+}
+
 const WINDOW_SESSION_RESTORE_LEAD_TTL_MS: u64 = 15_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +163,11 @@ pub struct AppState {
     pub session_store: SessionStore,
     /// Assistant Mode engine per window label.
     pub assistant_engine: Mutex<HashMap<String, crate::assistant_engine::AssistantEngine>>,
+    /// Assistant PM context per window label.
+    pub assistant_context: Mutex<HashMap<String, AssistantContext>>,
+    /// Assistant sessions currently running startup analysis, keyed by window label
+    /// with a human-readable progress status.
+    pub assistant_startup_inflight: Mutex<HashMap<String, String>>,
     /// Assistant Mode monitor handle per window label.
     pub assistant_monitor_handle:
         Mutex<HashMap<String, crate::assistant_monitor::AssistantMonitorHandle>>,
@@ -198,6 +213,8 @@ impl AppState {
             last_focused_window_label: Mutex::new(None),
             session_store: SessionStore::new(),
             assistant_engine: Mutex::new(HashMap::new()),
+            assistant_context: Mutex::new(HashMap::new()),
+            assistant_startup_inflight: Mutex::new(HashMap::new()),
             assistant_monitor_handle: Mutex::new(HashMap::new()),
         }
     }
@@ -334,6 +351,12 @@ impl AppState {
 
     pub fn clear_assistant_session_for_window(&self, window_label: &str) {
         if let Ok(mut map) = self.assistant_engine.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.assistant_context.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.assistant_startup_inflight.lock() {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.assistant_monitor_handle.lock() {

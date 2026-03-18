@@ -31,7 +31,11 @@ describe("settingsPanelHelpers", () => {
       disabled_env: [],
       ai: null,
     };
-    const cfg: ProfilesConfig = { version: 1, active: "default", profiles: { default: profile } };
+    const cfg: ProfilesConfig = {
+      version: 1,
+      active: "default",
+      profiles: { default: profile },
+    };
     expect(getCurrentProfile(null, "default")).toBeNull();
     expect(getCurrentProfile(cfg, "")).toBeNull();
     expect(getCurrentProfile(cfg, "missing")).toBeNull();
@@ -176,8 +180,6 @@ describe("settingsPanelHelpers", () => {
     const invalid = normalizeVoiceInputSettings({
       enabled: true,
       engine: "invalid",
-      hotkey: "",
-      ptt_hotkey: "",
       language: "fr" as any,
       quality: "invalid" as any,
       model: "",
@@ -191,8 +193,6 @@ describe("settingsPanelHelpers", () => {
     const fast = normalizeVoiceInputSettings({
       enabled: false,
       engine: "qwen",
-      hotkey: "Alt+M",
-      ptt_hotkey: "Alt+Space",
       language: "ja",
       quality: "fast",
       model: "",
@@ -212,11 +212,17 @@ describe("settingsPanelHelpers", () => {
 
     expect(normalizeUiFontFamily("")).toBe(DEFAULT_UI_FONT_FAMILY);
     expect(normalizeUiFontFamily(null)).toBe(DEFAULT_UI_FONT_FAMILY);
-    expect(normalizeUiFontFamily(UI_FONT_PRESETS[1].value)).toBe(UI_FONT_PRESETS[1].value);
-    expect(normalizeUiFontFamily('"Custom UI", sans-serif')).toBe('"Custom UI", sans-serif');
+    expect(normalizeUiFontFamily(UI_FONT_PRESETS[1].value)).toBe(
+      UI_FONT_PRESETS[1].value,
+    );
+    expect(normalizeUiFontFamily('"Custom UI", sans-serif')).toBe(
+      '"Custom UI", sans-serif',
+    );
 
     expect(normalizeTerminalFontFamily("")).toBe(DEFAULT_TERMINAL_FONT_FAMILY);
-    expect(normalizeTerminalFontFamily(undefined)).toBe(DEFAULT_TERMINAL_FONT_FAMILY);
+    expect(normalizeTerminalFontFamily(undefined)).toBe(
+      DEFAULT_TERMINAL_FONT_FAMILY,
+    );
     expect(normalizeTerminalFontFamily(TERMINAL_FONT_PRESETS[1].value)).toBe(
       TERMINAL_FONT_PRESETS[1].value,
     );
