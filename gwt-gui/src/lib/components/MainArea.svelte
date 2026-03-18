@@ -39,6 +39,7 @@
     onWorkOnIssue,
     onSwitchToWorktree,
     onIssueCountChange,
+    onOpenSettings,
     voiceInputEnabled = false,
     voiceInputListening = false,
     voiceInputPreparing = false,
@@ -63,6 +64,7 @@
     onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
     onSwitchToWorktree?: (branchName: string) => void;
     onIssueCountChange?: (count: number) => void;
+    onOpenSettings?: () => void;
     voiceInputEnabled?: boolean;
     voiceInputListening?: boolean;
     voiceInputPreparing?: boolean;
@@ -483,6 +485,7 @@
               <AssistantPanel
                 isActive={activeTabId === tab.id}
                 {projectPath}
+                onOpenSettings={onOpenSettings ?? (() => {})}
               />
             {:else}
               <div class="placeholder">
