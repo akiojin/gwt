@@ -14,6 +14,7 @@ export type StoredAgentTab = {
   type: "agent";
   paneId: string;
   label: string;
+  branchName?: string;
   agentId?: Tab["agentId"];
 };
 
@@ -55,7 +56,7 @@ export type BuildRestoredProjectTabsResult = {
 
 // Backward-compatible shape consumed by legacy App.svelte restore/persist flow.
 export type StoredProjectAgentTabs = {
-  tabs: Array<{ paneId: string; label: string }>;
+  tabs: Array<{ paneId: string; label: string; branchName?: string }>;
   activePaneId: string | null;
 };
 
@@ -136,11 +137,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     const paneId = normalizeString(obj.paneId);
     if (!paneId) return null;
     const label = typeof obj.label === "string" ? obj.label : "";
+    const branchName = normalizeString(obj.branchName);
     const agentId = normalizeAgentId(obj.agentId);
     return {
       type: "agent",
       paneId,
       label,
+      ...(branchName ? { branchName } : {}),
       ...(agentId ? { agentId } : {}),
     };
   }
@@ -315,6 +318,7 @@ function loadStoredProjectTabsLegacy(
         type: "agent",
         paneId: tab.paneId,
         label: tab.label,
+        ...(tab.label ? { branchName: tab.label } : {}),
       };
     });
 
@@ -420,10 +424,15 @@ export function buildRestoredProjectTabs(
       seen.add(key);
 
       const terminal = terminalByPaneId.get(tab.paneId);
+      const branchName =
+        normalizeString(tab.branchName) ||
+        normalizeString(terminal?.branch_name) ||
+        normalizeString(tab.label);
       const agentId = inferAgentId(terminal?.agent_name) ?? tab.agentId;
       restoredTabs.push({
         id: `agent-${tab.paneId}`,
         label: tab.label,
+        ...(branchName ? { branchName } : {}),
         type: "agent",
         paneId: tab.paneId,
         ...(agentId ? { agentId } : {}),
@@ -500,7 +509,11 @@ export function loadStoredProjectAgentTabs(
 
   const tabs = stored.tabs
     .filter((tab): tab is StoredAgentTab => tab.type === "agent")
-    .map((tab) => ({ paneId: tab.paneId, label: tab.label }));
+    .map((tab) => ({
+      paneId: tab.paneId,
+      label: tab.label,
+      ...(tab.branchName ? { branchName: tab.branchName } : {}),
+    }));
 
   const activePaneId =
     stored.activeTabId && stored.activeTabId.startsWith("agent-")
@@ -523,6 +536,7 @@ export function persistStoredProjectAgentTabs(
         type: "agent" as const,
         paneId,
         label: tab.label ?? "",
+        ...(normalizeString(tab.branchName) ? { branchName: normalizeString(tab.branchName) } : {}),
       };
     })
     .filter((tab): tab is StoredAgentTab => tab !== null);
@@ -558,6 +572,7 @@ export function buildRestoredAgentTabs(
         type: "agent" as const,
         paneId: tab.paneId,
         label: tab.label,
+        ...(tab.branchName ? { branchName: tab.branchName } : {}),
       })),
       activeTabId: stored.activePaneId ? `agent-${stored.activePaneId}` : null,
     },
