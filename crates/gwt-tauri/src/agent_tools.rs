@@ -15,11 +15,11 @@
 //! - `append_spec_contract_comment` — Append a contract payload as an issue comment
 //!   using the `contract:<name>` prefix.
 //! - `upsert_spec_issue_artifact` — Create or update a spec artifact comment
-//!   (contracts/checklists) with optional `expected_etag` for concurrency control.
-//! - `list_spec_issue_artifacts` — List spec artifact comments (contracts/checklists)
+//!   (`doc`/`contract`/`checklist`) with optional `expected_etag` for concurrency control.
+//! - `list_spec_issue_artifacts` — List spec artifact comments (`doc`/`contract`/`checklist`)
 //!   for an issue, optionally filtered by kind.
 //! - `delete_spec_issue_artifact` — Delete a spec artifact comment for
-//!   contracts/checklists from an issue.
+//!   `doc`/`contract`/`checklist` from an issue.
 //! - `sync_spec_issue_project` — Sync an issue-first spec issue to GitHub Project V2
 //!   and update its phase status (draft/ready/planned/ready-for-dev/in-progress/done/blocked).
 
@@ -89,13 +89,14 @@ fn agent_specific_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".to_string(),
             function: ToolFunction {
                 name: TOOL_UPSERT_SPEC_ARTIFACT.to_string(),
-                description: "Create or update a spec artifact comment for contracts/checklists."
-                    .to_string(),
+                description:
+                    "Create or update a spec artifact comment for docs/contracts/checklists."
+                        .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "issue_number": { "type": "integer", "minimum": 1 },
-                        "kind": { "type": "string", "enum": ["contract", "checklist"] },
+                        "kind": { "type": "string", "enum": ["doc", "contract", "checklist"] },
                         "artifact_name": { "type": "string" },
                         "content": { "type": "string" },
                         "expected_etag": { "type": "string" }
@@ -108,13 +109,14 @@ fn agent_specific_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".to_string(),
             function: ToolFunction {
                 name: TOOL_LIST_SPEC_ARTIFACTS.to_string(),
-                description: "List spec artifact comments (contracts/checklists) for an issue."
-                    .to_string(),
+                description:
+                    "List spec artifact comments (docs/contracts/checklists) for an issue."
+                        .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "issue_number": { "type": "integer", "minimum": 1 },
-                        "kind": { "type": "string", "enum": ["contract", "checklist"] }
+                        "kind": { "type": "string", "enum": ["doc", "contract", "checklist"] }
                     },
                     "required": ["issue_number"]
                 }),
@@ -125,13 +127,13 @@ fn agent_specific_tool_definitions() -> Vec<ToolDefinition> {
             function: ToolFunction {
                 name: TOOL_DELETE_SPEC_ARTIFACT.to_string(),
                 description:
-                    "Delete a spec artifact comment for contracts/checklists from an issue."
+                    "Delete a spec artifact comment for docs/contracts/checklists from an issue."
                         .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "issue_number": { "type": "integer", "minimum": 1 },
-                        "kind": { "type": "string", "enum": ["contract", "checklist"] },
+                        "kind": { "type": "string", "enum": ["doc", "contract", "checklist"] },
                         "artifact_name": { "type": "string" },
                         "expected_etag": { "type": "string" }
                     },

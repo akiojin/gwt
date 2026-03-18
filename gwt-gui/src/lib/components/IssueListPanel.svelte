@@ -2,6 +2,7 @@
   import {
     ISSUE_BRANCH_LOOKUP_UNKNOWN,
     type GitHubIssueInfo,
+    type GitHubIssueSearchResult,
     type GitHubLabel,
     type GhCliStatus,
     type FetchIssuesResponse,
@@ -29,6 +30,10 @@
   type ViewMode = "list" | "detail";
   type StateFilter = "open" | "closed";
   type IssueCategory = "issues" | "specs";
+  type SearchDisplayIssue = GitHubIssueInfo & {
+    searchSource?: "browse" | "catalog" | "semantic";
+    semanticDistance?: number | null;
+  };
 
   let viewMode: ViewMode = $state("list");
   let stateFilter: StateFilter = $state("open");
@@ -43,6 +48,14 @@
   let page: number = $state(1);
   let hasNextPage: boolean = $state(false);
   let loadingMore: boolean = $state(false);
+  let searchResults: SearchDisplayIssue[] = $state([]);
+  let semanticSearchResults: GitHubIssueSearchResult[] = $state([]);
+  let searchLoading: boolean = $state(false);
+  let searchError: string | null = $state(null);
+  let semanticSearchError: string | null = $state(null);
+  let indexUpdateLoading: boolean = $state(false);
+  let indexUpdateStatus: string | null = $state(null);
+  let indexUpdateError: string | null = $state(null);
 
   let selectedIssue: GitHubIssueInfo | null = $state(null);
   let detailIssue: GitHubIssueInfo | null = $state(null);
@@ -55,6 +68,7 @@
 
   let sentinelRef: HTMLDivElement | null = $state(null);
   let listRef: HTMLDivElement | null = $state(null);
+  let searchRequestId = 0;
 
   let filteredIssues = $derived(
     (() => {
@@ -62,17 +76,82 @@
 
       const q = searchQuery.trim();
       if (q) {
-        result = result.filter((i) => issueMatchesSearchQuery(i, q));
+        result = result.filter((i) =>
+          issueMatchesSearchQuery(
+            {
+              number: i.number,
+              title: i.title,
+              labels: i.labels.map((label) => label.name),
+              isSpec: i.labels.some(
+                (label) => label.name.toLowerCase() === "gwt-spec",
+              ),
+            },
+            q,
+          ),
+        );
       }
 
       if (labelFilter) {
         result = result.filter((i) =>
-          i.labels.some((l) => l.name === labelFilter)
+          i.labels.some((l) => l.name === labelFilter),
         );
       }
 
       return result;
-    })()
+    })(),
+  );
+
+  let searchActive = $derived(searchQuery.trim().length > 0);
+
+  let displayedIssues = $derived(
+    (() => {
+      if (!searchActive) {
+        return filteredIssues.map<SearchDisplayIssue>((issue) => ({
+          ...issue,
+          searchSource: "browse",
+          semanticDistance: null,
+        }));
+      }
+
+      const merged = new Map<number, SearchDisplayIssue>();
+      for (const issue of filteredIssues) {
+        merged.set(issue.number, {
+          ...issue,
+          searchSource: "browse",
+        });
+      }
+      for (const issue of searchResults) {
+        if (!merged.has(issue.number)) {
+          merged.set(issue.number, issue);
+        }
+      }
+      for (const item of semanticSearchResults) {
+        if (merged.has(item.number)) continue;
+        merged.set(item.number, {
+          number: item.number,
+          title: item.title,
+          state: item.state === "closed" ? "closed" : "open",
+          updatedAt: "",
+          htmlUrl: item.url,
+          labels: item.labels.map((label) => ({
+            name: label,
+            color: label.toLowerCase() === "gwt-spec" ? "0075ca" : "6c7086",
+          })),
+          assignees: [],
+          commentsCount: 0,
+          searchSource: "semantic",
+          semanticDistance: item.distance,
+        });
+      }
+
+      let result = Array.from(merged.values());
+      if (labelFilter) {
+        result = result.filter((issue) =>
+          issue.labels.some((label) => label.name === labelFilter),
+        );
+      }
+      return result;
+    })(),
   );
 
   let allLabels = $derived(
@@ -89,11 +168,11 @@
         name,
         color,
       }));
-    })()
+    })(),
   );
 
   let ghCliAvailable = $derived(
-    ghCliStatus !== null && ghCliStatus.available && ghCliStatus.authenticated
+    ghCliStatus !== null && ghCliStatus.available && ghCliStatus.authenticated,
   );
 
   function toErrorMessage(err: unknown): string {
@@ -122,6 +201,7 @@
   function relativeTime(dateStr: string): string {
     try {
       const date = new Date(dateStr);
+      if (Number.isNaN(date.getTime())) return "";
       const now = new Date();
       const diffMs = now.getTime() - date.getTime();
       const diffMins = Math.floor(diffMs / 60000);
@@ -138,10 +218,17 @@
     }
   }
 
+  function formatDistance(distance: number | null | undefined): string {
+    if (distance == null) return "";
+    const clamped = Math.max(0, Math.min(1, distance));
+    return `${Math.round((1 - clamped) * 100)}%`;
+  }
+
   function inferBranchPrefix(labels: GitHubLabel[]): string {
     const names = labels.map((l) => l.name.toLowerCase());
     if (names.includes("bug")) return "bugfix/";
-    if (names.includes("enhancement") || names.includes("feature")) return "feature/";
+    if (names.includes("enhancement") || names.includes("feature"))
+      return "feature/";
     if (names.includes("hotfix")) return "hotfix/";
     return "feature/";
   }
@@ -156,7 +243,26 @@
     }
   }
 
-  async function fetchIssues(pageNum: number, append = false, forceRefresh = false) {
+  async function handleUpdateSpecIndex() {
+    indexUpdateLoading = true;
+    indexUpdateError = null;
+    indexUpdateStatus = null;
+    try {
+      const result: { issuesIndexed: number; durationMs: number } =
+        await invoke("index_github_issues_cmd", { projectRoot: projectPath });
+      indexUpdateStatus = `${result.issuesIndexed} specs indexed (${result.durationMs}ms)`;
+    } catch (err) {
+      indexUpdateError = toErrorMessage(err);
+    } finally {
+      indexUpdateLoading = false;
+    }
+  }
+
+  async function fetchIssues(
+    pageNum: number,
+    append = false,
+    forceRefresh = false,
+  ) {
     if (append && loadingMore) return;
     const requestId = ++fetchRequestId;
     const lookupGeneration = append
@@ -226,10 +332,13 @@
     issueBranchMap = baseline;
 
     try {
-      const matches = await invoke<IssueBranchMatch[]>("find_existing_issue_branches_bulk", {
-        projectPath,
-        issueNumbers,
-      });
+      const matches = await invoke<IssueBranchMatch[]>(
+        "find_existing_issue_branches_bulk",
+        {
+          projectPath,
+          issueNumbers,
+        },
+      );
       if (lookupGeneration !== branchLookupGeneration) return;
 
       const next = new Map(issueBranchMap);
@@ -254,10 +363,13 @@
     detailError = null;
 
     try {
-      const detail = await invoke<GitHubIssueInfo>("fetch_github_issue_detail", {
-        projectPath,
-        issueNumber: issue.number,
-      });
+      const detail = await invoke<GitHubIssueInfo>(
+        "fetch_github_issue_detail",
+        {
+          projectPath,
+          issueNumber: issue.number,
+        },
+      );
       detailIssue = detail;
     } catch (err) {
       detailError = toErrorMessage(err);
@@ -331,7 +443,10 @@
 
   function resolveExistingBranch(issueNumber: number): string | null {
     const branchState = issueBranchMap.get(issueNumber);
-    if (typeof branchState !== "string" || branchState === ISSUE_BRANCH_LOOKUP_UNKNOWN) {
+    if (
+      typeof branchState !== "string" ||
+      branchState === ISSUE_BRANCH_LOOKUP_UNKNOWN
+    ) {
       return null;
     }
     return branchState;
@@ -342,7 +457,9 @@
   }
 
   function checkSentinelVisibility() {
-    if (!sentinelRef || !listRef || !hasNextPage || loading || loadingMore) return;
+    if (searchActive) return;
+    if (!sentinelRef || !listRef || !hasNextPage || loading || loadingMore)
+      return;
     const containerRect = listRef.getBoundingClientRect();
     const sentinelRect = sentinelRef.getBoundingClientRect();
     if (sentinelRect.top < containerRect.bottom) {
@@ -350,19 +467,108 @@
     }
   }
 
+  async function runUnifiedSearch(query: string, requestId: number) {
+    searchLoading = true;
+    searchError = null;
+    semanticSearchError = null;
+
+    const [catalogResult, semanticResult] = await Promise.allSettled([
+      invoke<GitHubIssueInfo[]>("search_github_issue_catalog", {
+        projectPath,
+        query,
+        state: stateFilter,
+        limit: 30,
+      }),
+      invoke<GitHubIssueSearchResult[]>("search_github_issues_cmd", {
+        projectRoot: projectPath,
+        query,
+        nResults: 20,
+      }),
+    ]);
+
+    if (requestId !== searchRequestId) return;
+
+    if (
+      catalogResult.status === "fulfilled" &&
+      Array.isArray(catalogResult.value)
+    ) {
+      searchResults = catalogResult.value.map((issue) => ({
+        ...issue,
+        searchSource: "catalog",
+      }));
+      searchError = null;
+    } else {
+      searchResults = [];
+      searchError =
+        catalogResult.status === "rejected"
+          ? toErrorMessage(catalogResult.reason)
+          : null;
+    }
+
+    if (
+      semanticResult.status === "fulfilled" &&
+      Array.isArray(semanticResult.value)
+    ) {
+      semanticSearchResults = semanticResult.value;
+      semanticSearchError = null;
+    } else {
+      semanticSearchResults = [];
+      semanticSearchError =
+        semanticResult.status === "rejected"
+          ? toErrorMessage(semanticResult.reason)
+          : null;
+    }
+
+    searchLoading = false;
+  }
+
   // Setup IntersectionObserver for infinite scroll
   $effect(() => {
     if (!sentinelRef) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting && hasNextPage && !loading && !loadingMore) {
+        if (searchActive) return;
+        if (
+          entries[0]?.isIntersecting &&
+          hasNextPage &&
+          !loading &&
+          !loadingMore
+        ) {
           void fetchIssues(page + 1, true);
         }
       },
-      { root: listRef, threshold: 0.1 }
+      { root: listRef, threshold: 0.1 },
     );
     observer.observe(sentinelRef);
     return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    if (!ghCliAvailable) {
+      searchResults = [];
+      semanticSearchResults = [];
+      searchLoading = false;
+      searchError = null;
+      semanticSearchError = null;
+      return;
+    }
+
+    const query = searchQuery.trim();
+    if (!query) {
+      searchResults = [];
+      semanticSearchResults = [];
+      searchLoading = false;
+      searchError = null;
+      semanticSearchError = null;
+      return;
+    }
+
+    const requestId = ++searchRequestId;
+    const timer = window.setTimeout(() => {
+      void runUnifiedSearch(query, requestId);
+    }, 150);
+
+    return () => window.clearTimeout(timer);
   });
 
   // Initial data load
@@ -383,12 +589,15 @@
     <!-- Header -->
     <header class="ilp-header">
       <div class="ilp-header-top">
-        <h2 class="ilp-title">{categoryTab === "specs" ? "Specs" : "Issues"}</h2>
+        <h2 class="ilp-title">
+          {categoryTab === "specs" ? "Specs" : "Issues"}
+        </h2>
         <div class="ilp-header-actions">
           <div class="ilp-category-toggle">
             <button
               class="state-btn"
               class:active={categoryTab === "issues"}
+              disabled={searchActive}
               onclick={() => handleCategoryTabChange("issues")}
             >
               Issues
@@ -396,6 +605,7 @@
             <button
               class="state-btn"
               class:active={categoryTab === "specs"}
+              disabled={searchActive}
               onclick={() => handleCategoryTabChange("specs")}
             >
               Specs
@@ -417,7 +627,11 @@
               Closed
             </button>
           </div>
-          <button class="ilp-refresh-btn" onclick={handleRefresh} title="Refresh">
+          <button
+            class="ilp-refresh-btn"
+            onclick={handleRefresh}
+            title="Refresh"
+          >
             &#x21BB;
           </button>
         </div>
@@ -427,10 +641,33 @@
         <input
           type="text"
           class="ilp-search-input"
-          placeholder="Search issues..."
+          placeholder="Search issues, specs, or #1234..."
           bind:value={searchQuery}
         />
+        <button
+          class="ilp-index-btn"
+          onclick={handleUpdateSpecIndex}
+          disabled={indexUpdateLoading}
+          title="Refresh the semantic spec search index"
+        >
+          {indexUpdateLoading ? "Updating..." : "Update Spec Index"}
+        </button>
       </div>
+
+      {#if searchActive}
+        <div class="ilp-search-hint">
+          Searching across issues and specs. Semantic matches currently come
+          from the spec index.
+        </div>
+      {/if}
+
+      {#if indexUpdateStatus}
+        <div class="ilp-status">{indexUpdateStatus}</div>
+      {/if}
+
+      {#if indexUpdateError}
+        <div class="ilp-error">{indexUpdateError}</div>
+      {/if}
 
       {#if allLabels.length > 0}
         <div class="ilp-label-filters">
@@ -459,26 +696,34 @@
     <!-- Error / not available -->
     {#if !ghCliAvailable && !loading}
       <div class="ilp-error">
-        GitHub CLI (gh) is not available. Install and authenticate gh to view issues.
+        GitHub CLI (gh) is not available. Install and authenticate gh to view
+        issues.
       </div>
     {:else if error}
       <div class="ilp-error">{error}</div>
-    {:else if loading && issues.length === 0}
+    {:else if loading && issues.length === 0 && !searchActive}
       <div class="ilp-loading">Loading issues...</div>
-    {:else if filteredIssues.length === 0}
+    {:else if searchActive && searchLoading && displayedIssues.length === 0}
+      <div class="ilp-loading">Searching issues and specs...</div>
+    {:else if searchActive && searchError}
+      <div class="ilp-error">{searchError}</div>
+    {:else if displayedIssues.length === 0}
       <div class="ilp-empty">No issues found.</div>
     {:else}
       <!-- Issue List -->
       <div class="ilp-list" bind:this={listRef}>
-        {#each filteredIssues as issue (issue.number)}
+        {#if searchActive && semanticSearchError}
+          <div class="ilp-search-note">
+            Semantic spec search unavailable: {semanticSearchError}
+          </div>
+        {/if}
+
+        {#each displayedIssues as issue (issue.number)}
           {@const existingBranch = resolveExistingBranch(issue.number)}
           {@const lookupUnknown = isBranchLookupUnknown(issue.number)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="ilp-issue-row"
-            onclick={() => openDetail(issue)}
-          >
+          <div class="ilp-issue-row" onclick={() => openDetail(issue)}>
             <div class="ilp-issue-main">
               <span class="ilp-issue-number">#{issue.number}</span>
               <span class="ilp-issue-title">{issue.title}</span>
@@ -487,10 +732,7 @@
               {#if issue.labels.length > 0}
                 <span class="ilp-issue-labels">
                   {#each issue.labels as lbl (lbl.name)}
-                    <span
-                      class="ilp-issue-label"
-                      style={labelStyle(lbl.color)}
-                    >
+                    <span class="ilp-issue-label" style={labelStyle(lbl.color)}>
                       {lbl.name}
                     </span>
                   {/each}
@@ -516,18 +758,31 @@
                 </span>
               {/if}
               {#if issue.commentsCount > 0}
-                <span class="ilp-issue-comments" title="{issue.commentsCount} comments">
+                <span
+                  class="ilp-issue-comments"
+                  title="{issue.commentsCount} comments"
+                >
                   {issue.commentsCount}
                 </span>
               {/if}
-              <span class="ilp-issue-updated" title={issue.updatedAt}>
-                {relativeTime(issue.updatedAt)}
-              </span>
+              {#if issue.semanticDistance != null}
+                <span class="ilp-search-score"
+                  >{formatDistance(issue.semanticDistance)}</span
+                >
+              {/if}
+              {#if issue.updatedAt}
+                <span class="ilp-issue-updated" title={issue.updatedAt}>
+                  {relativeTime(issue.updatedAt)}
+                </span>
+              {/if}
               {#if existingBranch}
                 <button
                   class="ilp-worktree-btn"
                   title="Switch to worktree: {existingBranch}"
-                  onclick={(e) => { e.stopPropagation(); handleSwitchToWorktree(existingBranch); }}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    handleSwitchToWorktree(existingBranch);
+                  }}
                 >
                   WT
                 </button>
@@ -536,7 +791,9 @@
                   class="ilp-worktree-btn"
                   disabled
                   title="Branch lookup failed. Refresh to retry."
-                  onclick={(e) => { e.stopPropagation(); }}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                  }}
                 >
                   WT
                 </button>
@@ -546,11 +803,11 @@
         {/each}
 
         <!-- Infinite scroll sentinel -->
-        {#if hasNextPage}
+        {#if hasNextPage && !searchActive}
           <div class="ilp-sentinel" bind:this={sentinelRef}></div>
         {/if}
 
-        {#if loadingMore}
+        {#if loadingMore && !searchActive}
           <div class="ilp-loading-more">Loading more...</div>
         {/if}
       </div>
@@ -573,7 +830,10 @@
               <span class="ilp-issue-number">#{detailIssue.number}</span>
               {detailIssue.title}
             </h2>
-            <span class="ilp-detail-state" class:closed={detailIssue.state === "closed"}>
+            <span
+              class="ilp-detail-state"
+              class:closed={detailIssue.state === "closed"}
+            >
               {detailIssue.state}
             </span>
           </div>
@@ -582,10 +842,7 @@
             {#if detailIssue.labels.length > 0}
               <span class="ilp-issue-labels">
                 {#each detailIssue.labels as lbl (lbl.name)}
-                  <span
-                    class="ilp-issue-label"
-                    style={labelStyle(lbl.color)}
-                  >
+                  <span class="ilp-issue-label" style={labelStyle(lbl.color)}>
                     {lbl.name}
                   </span>
                 {/each}
@@ -625,7 +882,10 @@
             {#if resolveExistingBranch(detailIssue.number)}
               <button
                 class="ilp-action-btn ilp-action-switch"
-                onclick={() => handleSwitchToWorktree(resolveExistingBranch(detailIssue!.number)!)}
+                onclick={() =>
+                  handleSwitchToWorktree(
+                    resolveExistingBranch(detailIssue!.number)!,
+                  )}
               >
                 Switch to Worktree
               </button>
@@ -660,10 +920,7 @@
           <!-- Body -->
           <div class="ilp-detail-body">
             {#if isSpecIssue(detailIssue)}
-              <IssueSpecPanel
-                {projectPath}
-                issueNumber={detailIssue.number}
-              />
+              <IssueSpecPanel {projectPath} issueNumber={detailIssue.number} />
             {:else if detailIssue.body}
               <MarkdownRenderer text={detailIssue.body} />
             {:else}
@@ -732,7 +989,9 @@
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
-    transition: border-color 0.15s, background 0.15s;
+    transition:
+      border-color 0.15s,
+      background 0.15s;
   }
 
   .state-btn:hover {
@@ -743,6 +1002,11 @@
     border-color: var(--accent);
     background: var(--bg-surface);
     color: var(--text-primary);
+  }
+
+  .state-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
 
   .ilp-refresh-btn {
@@ -764,6 +1028,7 @@
 
   .ilp-search-row {
     display: flex;
+    gap: 8px;
   }
 
   .ilp-search-input {
@@ -782,6 +1047,36 @@
     border-color: var(--accent);
   }
 
+  .ilp-index-btn {
+    padding: 6px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: var(--ui-font-sm);
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+
+  .ilp-index-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+
+  .ilp-index-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+
+  .ilp-search-hint,
+  .ilp-status,
+  .ilp-search-note {
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
+  }
+
   .ilp-label-filters {
     display: flex;
     flex-wrap: wrap;
@@ -797,7 +1092,9 @@
     cursor: pointer;
     border: 2px solid transparent;
     font-family: inherit;
-    transition: border-color 0.15s, opacity 0.15s;
+    transition:
+      border-color 0.15s,
+      opacity 0.15s;
   }
 
   .ilp-label-chip:hover {
@@ -923,6 +1220,12 @@
   .ilp-issue-comments {
     font-size: var(--ui-font-xs, 11px);
     color: var(--text-muted);
+  }
+
+  .ilp-search-score {
+    font-size: var(--ui-font-xs, 11px);
+    color: var(--accent);
+    font-weight: 700;
   }
 
   .ilp-issue-updated {

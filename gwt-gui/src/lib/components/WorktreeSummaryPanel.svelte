@@ -1,5 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import FilePenLine from "lucide-svelte/icons/file-pen-line";
+  import LoaderCircle from "lucide-svelte/icons/loader-circle";
+  import Play from "lucide-svelte/icons/play";
+  import Plus from "lucide-svelte/icons/plus";
+  import Rocket from "lucide-svelte/icons/rocket";
+  import SquareTerminal from "lucide-svelte/icons/square-terminal";
   import { invoke as tauriInvoke } from "$lib/tauriInvoke";
   import type {
     BranchInfo,
@@ -29,7 +35,9 @@
     normalizeSummaryLanguage,
     summaryLanguageLabel,
     agentIdForToolId,
+    toolClassFromToolId,
     toolClass,
+    displayToolNameFromToolId,
     displayToolName,
     displayToolVersion,
     normalizeString,
@@ -82,15 +90,20 @@
     ghCliStatus?: GhCliStatus | null;
   } = $props();
 
-  function normalizeBranchPrPreflight(value: unknown): BranchPrPreflight | null {
+  function normalizeBranchPrPreflight(
+    value: unknown,
+  ): BranchPrPreflight | null {
     if (!value || typeof value !== "object") return null;
     const record = value as Record<string, unknown>;
-    const baseBranch = typeof record.baseBranch === "string" ? record.baseBranch : null;
+    const baseBranch =
+      typeof record.baseBranch === "string" ? record.baseBranch : null;
     const aheadBy = typeof record.aheadBy === "number" ? record.aheadBy : null;
-    const behindBy = typeof record.behindBy === "number" ? record.behindBy : null;
+    const behindBy =
+      typeof record.behindBy === "number" ? record.behindBy : null;
     const status = typeof record.status === "string" ? record.status : null;
     const blockingReason =
-      typeof record.blockingReason === "string" || record.blockingReason === null
+      typeof record.blockingReason === "string" ||
+      record.blockingReason === null
         ? record.blockingReason
         : null;
 
@@ -122,14 +135,10 @@
 
   let editingDisplayName = $state(false);
   let displayNameValue = $state("");
+  let displayNameInputEl: HTMLInputElement | null = $state(null);
   let displayNameSaving = $state(false);
 
-  type SummaryTab =
-    | "summary"
-    | "git"
-    | "issue"
-    | "pr"
-    | "docker";
+  type SummaryTab = "summary" | "git" | "issue" | "pr" | "docker";
   let activeTab: SummaryTab = $state("summary");
 
   let linkedIssueLoading: boolean = $state(false);
@@ -167,9 +176,8 @@
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
   let sessionSummaryLanguage: string | null = $state(null);
-  let sessionSummarySourceType: SessionSummaryResult["sourceType"] | null = $state(
-    null,
-  );
+  let sessionSummarySourceType: SessionSummaryResult["sourceType"] | null =
+    $state(null);
   let sessionSummaryInputMtimeMs: number | null = $state(null);
   let sessionSummaryUpdatedMs: number | null = $state(null);
   let summaryRebuildInProgress = $state(false);
@@ -244,10 +252,22 @@
   };
 
   const quickStartCache = new Map<string, CacheEntry<ToolSessionEntry[]>>();
-  const linkedIssueCache = new Map<string, CacheEntry<BranchLinkedIssueInfo | null>>();
-  const latestBranchPrCache = new Map<string, CacheEntry<BranchPrReference | null>>();
-  const branchPrPreflightCache = new Map<string, CacheEntry<BranchPrPreflight | null>>();
-  const dockerContextCache = new Map<string, CacheEntry<DockerContext | null>>();
+  const linkedIssueCache = new Map<
+    string,
+    CacheEntry<BranchLinkedIssueInfo | null>
+  >();
+  const latestBranchPrCache = new Map<
+    string,
+    CacheEntry<BranchPrReference | null>
+  >();
+  const branchPrPreflightCache = new Map<
+    string,
+    CacheEntry<BranchPrPreflight | null>
+  >();
+  const dockerContextCache = new Map<
+    string,
+    CacheEntry<DockerContext | null>
+  >();
 
   let ghCliStatusMessage = $derived.by(() => {
     if (!ghCliStatus) return null;
@@ -296,13 +316,19 @@
     return `${projectPath}::${branch}`;
   }
 
-  function isCacheFresh<T>(entry: CacheEntry<T> | undefined, ttlMs: number): entry is CacheEntry<T> {
+  function isCacheFresh<T>(
+    entry: CacheEntry<T> | undefined,
+    ttlMs: number,
+  ): entry is CacheEntry<T> {
     if (!entry) return false;
     return Date.now() - entry.fetchedAtMs < ttlMs;
   }
 
   async function waitForNextFrame(): Promise<void> {
-    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+    if (
+      typeof window === "undefined" ||
+      typeof window.requestAnimationFrame !== "function"
+    ) {
       await new Promise<void>((resolve) => {
         setTimeout(resolve, 0);
       });
@@ -341,8 +367,8 @@
         mode: dockerMode(entry),
         modeClass: dockerModeClass(entry),
         composeArgs: formatComposeArgs(entry.docker_compose_args),
-        service: (normalizeString(entry.docker_service) || null),
-        containerName: (normalizeString(entry.docker_container_name) || null),
+        service: normalizeString(entry.docker_service) || null,
+        containerName: normalizeString(entry.docker_container_name) || null,
       }))
       .sort((left, right) => right.entry.timestamp - left.entry.timestamp);
   });
@@ -353,6 +379,21 @@
       return entry.timestamp > latest.timestamp ? entry : latest;
     });
   });
+
+  let latestUsedToolId: string = $derived.by(() => {
+    const branchTool = normalizeString(selectedBranch?.last_tool_usage);
+    if (branchTool) return branchTool;
+    return normalizeString(latestQuickStartEntry?.tool_id);
+  });
+
+  let latestUsedToolLabel: string | null = $derived.by(() => {
+    const label = displayToolNameFromToolId(latestUsedToolId);
+    return label ?? null;
+  });
+
+  let latestUsedToolClass: string = $derived.by(() =>
+    toolClassFromToolId(latestUsedToolId),
+  );
 
   let quickHeaderButtonsDisabled = $derived.by(
     () =>
@@ -397,10 +438,13 @@
       if (currentBranchKey() !== key) return;
 
       const invoke = await getInvoke();
-      const entries = await invoke<ToolSessionEntry[]>("get_branch_quick_start", {
-        projectPath,
-        branch,
-      });
+      const entries = await invoke<ToolSessionEntry[]>(
+        "get_branch_quick_start",
+        {
+          projectPath,
+          branch,
+        },
+      );
       if (currentBranchKey() !== key) return;
       const nextEntries = entries ?? [];
       quickStartCache.set(key, { value: nextEntries, fetchedAtMs: Date.now() });
@@ -496,10 +540,13 @@
       if (currentBranchKey() !== key) return;
 
       const invoke = await getInvoke();
-      const result = await invoke<BranchPrReference | null>("fetch_latest_branch_pr", {
-        projectPath,
-        branch,
-      });
+      const result = await invoke<BranchPrReference | null>(
+        "fetch_latest_branch_pr",
+        {
+          projectPath,
+          branch,
+        },
+      );
       if (currentBranchKey() !== key) return;
       latestBranchPrCache.set(key, { value: result, fetchedAtMs: Date.now() });
       latestBranchPr = result;
@@ -554,7 +601,10 @@
       if (currentBranchKey() !== key) return;
       branchPrPreflight = result;
       if (result !== null) {
-        branchPrPreflightCache.set(key, { value: result, fetchedAtMs: Date.now() });
+        branchPrPreflightCache.set(key, {
+          value: result,
+          fetchedAtMs: Date.now(),
+        });
       }
     } catch (err) {
       if (currentBranchKey() !== key) return;
@@ -654,12 +704,15 @@
 
     try {
       const invoke = await getInvoke();
-      const result = await invoke<SessionSummaryResult>("get_branch_session_summary", {
-        projectPath,
-        branch,
-        cachedOnly,
-        preferredLanguage: normalizedLanguage,
-      });
+      const result = await invoke<SessionSummaryResult>(
+        "get_branch_session_summary",
+        {
+          projectPath,
+          branch,
+          cachedOnly,
+          preferredLanguage: normalizedLanguage,
+        },
+      );
 
       const currentKey = `${projectPath}::${currentBranchName()}`;
       if (currentKey !== key) return;
@@ -810,7 +863,8 @@
             if (!incomingSessionId) return;
 
             const currentSessionId = sessionSummarySessionId ?? null;
-            if (currentSessionId && incomingSessionId !== currentSessionId) return;
+            if (currentSessionId && incomingSessionId !== currentSessionId)
+              return;
 
             sessionSummaryStatus = result.status;
             sessionSummaryGenerating = !!result.generating;
@@ -824,36 +878,37 @@
             sessionSummarySourceType = result.sourceType ?? null;
             sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
             sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
-          }
+          },
         );
-        const unlistenRebuildFn = await listen<SessionSummaryRebuildProgressPayload>(
-          "session-summary-rebuild-progress",
-          (event) => {
-            const payload = event.payload;
-            if (!payload) return;
-            if (payload.projectPath !== projectPath) return;
+        const unlistenRebuildFn =
+          await listen<SessionSummaryRebuildProgressPayload>(
+            "session-summary-rebuild-progress",
+            (event) => {
+              const payload = event.payload;
+              if (!payload) return;
+              if (payload.projectPath !== projectPath) return;
 
-            summaryRebuildTotal = payload.total ?? 0;
-            summaryRebuildCompleted = payload.completed ?? 0;
-            summaryRebuildBranch = payload.branch ?? null;
-            if (payload.status === "started") {
-              summaryRebuildError = null;
-            } else if (payload.error) {
-              summaryRebuildError = payload.error;
-            }
-            summaryRebuildInProgress = payload.status !== "completed";
+              summaryRebuildTotal = payload.total ?? 0;
+              summaryRebuildCompleted = payload.completed ?? 0;
+              summaryRebuildBranch = payload.branch ?? null;
+              if (payload.status === "started") {
+                summaryRebuildError = null;
+              } else if (payload.error) {
+                summaryRebuildError = payload.error;
+              }
+              summaryRebuildInProgress = payload.status !== "completed";
 
-            if (payload.status === "completed") {
-              const branch = currentBranchName();
-              if (!branch) return;
-              const tabExists = hasAgentTabForBranch(branch);
-              loadSessionSummary({
-                silent: true,
-                cachedOnly: !tabExists,
-              });
-            }
-          }
-        );
+              if (payload.status === "completed") {
+                const branch = currentBranchName();
+                if (!branch) return;
+                const tabExists = hasAgentTabForBranch(branch);
+                loadSessionSummary({
+                  silent: true,
+                  cachedOnly: !tabExists,
+                });
+              }
+            },
+          );
         if (cancelled) {
           unlistenSummaryFn();
           unlistenRebuildFn();
@@ -1026,7 +1081,10 @@
     }
   });
 
-  async function quickLaunch(entry: ToolSessionEntry, action: "continue" | "new") {
+  async function quickLaunch(
+    entry: ToolSessionEntry,
+    action: "continue" | "new",
+  ) {
     if (!selectedBranch) return;
     if (!onQuickLaunch) return;
     if (quickLaunching) return;
@@ -1088,7 +1146,10 @@
       );
 
       const updatedCount = result.updatedFiles?.length ?? 0;
-      const suffix = updatedCount === 0 ? "No changes needed." : `Updated ${updatedCount} file(s).`;
+      const suffix =
+        updatedCount === 0
+          ? "No changes needed."
+          : `Updated ${updatedCount} file(s).`;
       toastBus.emit({ message: `Docs check complete. ${suffix}` });
 
       if (onOpenDocsEditor) {
@@ -1116,7 +1177,11 @@
   $effect(() => {
     if (!showMergeConfirm) return;
     const nextContextKey = currentPrContextKey();
-    if (activeTab !== "pr" || !nextContextKey || nextContextKey !== mergeConfirmContextKey) {
+    if (
+      activeTab !== "pr" ||
+      !nextContextKey ||
+      nextContextKey !== mergeConfirmContextKey
+    ) {
       closeMergeConfirm();
     }
   });
@@ -1222,8 +1287,9 @@
   }
 
   async function getInvoke(): Promise<TauriInvoke> {
-    const globalInvoke = (globalThis as { __TAURI_INTERNALS__?: { invoke?: TauriInvoke } })
-      .__TAURI_INTERNALS__?.invoke;
+    const globalInvoke = (
+      globalThis as { __TAURI_INTERNALS__?: { invoke?: TauriInvoke } }
+    ).__TAURI_INTERNALS__?.invoke;
     const invokeFn = globalInvoke ?? tauriInvoke;
     if (!invokeFn) {
       throw new Error("Tauri invoke API is unavailable");
@@ -1277,78 +1343,135 @@
       cancelEditDisplayName();
     }
   }
+
+  $effect(() => {
+    if (!editingDisplayName || !displayNameInputEl) return;
+    queueMicrotask(() => {
+      if (!editingDisplayName || !displayNameInputEl) return;
+      displayNameInputEl.focus();
+      displayNameInputEl.select();
+    });
+  });
 </script>
 
 <div class="worktree-summary-panel">
   {#if selectedBranch}
     <div class="branch-detail">
       <div class="branch-header">
-        {#if editingDisplayName}
-          <div class="display-name-edit">
-            <input
-              class="display-name-input"
-              type="text"
-              bind:value={displayNameValue}
-              onkeydown={handleDisplayNameKeydown}
-              onblur={() => saveDisplayName()}
-              disabled={displayNameSaving}
-              placeholder={selectedBranch.name}
-              autofocus
-            />
-          </div>
-        {:else}
-          <h2 class="branch-name-heading">
-            <span class="branch-display-name">{selectedBranch.display_name ?? selectedBranch.name}</span>
-            <button
-              class="edit-display-name-btn"
-              title="Edit display name"
-              onclick={() => startEditDisplayName()}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                <path d="m15 5 4 4" />
-              </svg>
-            </button>
-          </h2>
-          {#if selectedBranch.display_name && selectedBranch.display_name !== selectedBranch.name}
-            <span class="branch-real-name">{selectedBranch.name}</span>
+        <div class="branch-title-group">
+          {#if editingDisplayName}
+            <div class="display-name-edit">
+              <input
+                bind:this={displayNameInputEl}
+                class="display-name-input"
+                type="text"
+                bind:value={displayNameValue}
+                onkeydown={handleDisplayNameKeydown}
+                onblur={() => saveDisplayName()}
+                disabled={displayNameSaving}
+                placeholder={selectedBranch.name}
+              />
+            </div>
+          {:else}
+            <h2 class="branch-name-heading">
+              <span class="branch-display-name"
+                >{selectedBranch.display_name ?? selectedBranch.name}</span
+              >
+              <button
+                class="edit-display-name-btn"
+                title="Edit display name"
+                onclick={() => startEditDisplayName()}
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                  <path d="m15 5 4 4" />
+                </svg>
+              </button>
+            </h2>
+            {#if (selectedBranch.display_name && selectedBranch.display_name !== selectedBranch.name) || latestUsedToolLabel}
+              <div class="branch-meta-row">
+                {#if selectedBranch.display_name && selectedBranch.display_name !== selectedBranch.name}
+                  <span class="branch-real-name">{selectedBranch.name}</span>
+                {/if}
+                {#if latestUsedToolLabel}
+                  <span
+                    class={`branch-tool-badge ${latestUsedToolClass}`}
+                    title={`Latest agent: ${latestUsedToolLabel}`}
+                  >
+                    Latest agent: {latestUsedToolLabel}
+                  </span>
+                {/if}
+              </div>
+            {/if}
           {/if}
-        {/if}
+        </div>
         <div class="branch-header-actions">
           <button
-            class="header-quick-btn"
+            class="header-icon-btn"
             disabled={quickHeaderButtonsDisabled}
+            aria-label="Continue"
+            title="Continue"
             onclick={() => latestQuickStartEntry && quickLaunch(latestQuickStartEntry, "continue")}
           >
-            {quickLaunching &&
+            {#if quickLaunching &&
             latestQuickStartEntry &&
-            quickLaunchingKey === quickStartEntryKey(latestQuickStartEntry)
-              ? "Launching..."
-              : "Continue"}
+            quickLaunchingKey === quickStartEntryKey(latestQuickStartEntry)}
+              <LoaderCircle class="action-icon spin" size={16} aria-hidden="true" />
+            {:else}
+              <Play class="action-icon" size={16} aria-hidden="true" />
+            {/if}
+            <span class="sr-only">Continue</span>
           </button>
           <button
-            class="header-quick-btn ghost"
+            class="header-icon-btn ghost"
             disabled={quickHeaderButtonsDisabled}
+            aria-label="New"
+            title="New"
             onclick={() => latestQuickStartEntry && quickLaunch(latestQuickStartEntry, "new")}
           >
-            New
+            <Plus class="action-icon" size={16} aria-hidden="true" />
+            <span class="sr-only">New</span>
           </button>
           <button
-            class="header-quick-btn ghost"
+            class="header-icon-btn ghost"
             disabled={docsActionBusy}
+            aria-label={docsActionBusy ? "Checking docs" : "Check/Fix Docs + Edit"}
+            title={docsActionBusy ? "Checking docs" : "Check/Fix Docs + Edit"}
             onclick={handleCheckFixDocsAndEdit}
           >
-            {docsActionBusy ? "Checking..." : "Check/Fix Docs + Edit"}
+            {#if docsActionBusy}
+              <LoaderCircle class="action-icon spin" size={16} aria-hidden="true" />
+            {:else}
+              <FilePenLine class="action-icon" size={16} aria-hidden="true" />
+            {/if}
+            <span class="sr-only">{docsActionBusy ? "Checking docs" : "Check/Fix Docs + Edit"}</span>
           </button>
           <button
-            class="new-terminal-btn"
+            class="header-icon-btn ghost"
+            aria-label="New Terminal"
             title="New Terminal"
             onclick={() => onNewTerminal?.()}
           >
-            &gt;_
+            <SquareTerminal class="action-icon" size={16} aria-hidden="true" />
+            <span class="sr-only">New Terminal</span>
           </button>
-          <button class="launch-btn" onclick={() => onLaunchAgent?.()}>
-            Launch Agent...
+          <button
+            class="header-icon-btn accent"
+            aria-label="Launch Agent"
+            title="Launch Agent"
+            onclick={() => onLaunchAgent?.()}
+          >
+            <Rocket class="action-icon" size={16} aria-hidden="true" />
+            <span class="sr-only">Launch Agent</span>
           </button>
         </div>
       </div>
@@ -1414,7 +1537,10 @@
           <div class="quick-header">
             <span class="quick-title">Summary</span>
             {#if sessionSummaryHeaderText}
-              <span class="quick-subtitle" class:rebuild-progress={summaryRebuildInProgress}>
+              <span
+                class="quick-subtitle"
+                class:rebuild-progress={summaryRebuildInProgress}
+              >
                 {#if summaryRebuildInProgress}
                   <span class="summary-spinner" aria-hidden="true"></span>
                 {/if}
@@ -1432,12 +1558,18 @@
                     sessionSummarySessionId,
                   )}
                 </span>
-                <span class="meta-item">Language: {sessionSummaryLanguageLabel}</span>
+                <span class="meta-item"
+                  >Language: {sessionSummaryLanguageLabel}</span
+                >
                 {#if sessionSummaryInputTime}
-                  <span class="meta-item">Input updated: {sessionSummaryInputTime}</span>
+                  <span class="meta-item"
+                    >Input updated: {sessionSummaryInputTime}</span
+                  >
                 {/if}
                 {#if sessionSummaryUpdatedTime}
-                  <span class="meta-item">Summary updated: {sessionSummaryUpdatedTime}</span>
+                  <span class="meta-item"
+                    >Summary updated: {sessionSummaryUpdatedTime}</span
+                  >
                 {/if}
               </div>
             {/if}
@@ -1463,7 +1595,9 @@
               Configure AI in Settings to enable session summary.
             </div>
           {:else if sessionSummaryStatus === "disabled"}
-            <div class="session-summary-placeholder">Session summary disabled.</div>
+            <div class="session-summary-placeholder">
+              Session summary disabled.
+            </div>
           {:else if sessionSummaryStatus === "no-session"}
             <div class="session-summary-placeholder">No session.</div>
           {:else if sessionSummaryStatus === "error"}
@@ -1499,11 +1633,13 @@
           </div>
           <div class="detail-item">
             <span class="detail-label">Current</span>
-            <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
+            <span class="detail-value"
+              >{selectedBranch.is_current ? "Yes" : "No"}</span
+            >
           </div>
         </div>
         <GitSection
-          projectPath={projectPath}
+          {projectPath}
           branch={selectedBranch.name}
           collapsible={false}
           defaultCollapsed={false}
@@ -1559,8 +1695,9 @@
         </div>
       {:else if activeTab === "pr"}
         <PrStatusSection
-          prDetail={prDetail}
-          loading={latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
+          {prDetail}
+          loading={latestBranchPrLoading ||
+            (resolvedPrNumber !== null && prDetailLoading)}
           error={ghCliStatusMessage ?? latestBranchPrError ?? prDetailError}
           preflight={branchPrPreflight}
           preflightLoading={branchPrPreflightLoading}
@@ -1568,7 +1705,7 @@
           updateError={updateBranchError}
           onOpenCiLog={handleOpenCiLog}
           onUpdateBranch={handleUpdateBranch}
-          updatingBranch={updatingBranch}
+          {updatingBranch}
           onMerge={handleMerge}
           {merging}
           retrying={prRetrying}
@@ -1587,7 +1724,9 @@
             {#if dockerContextLoading}
               <span class="quick-subtitle">Detecting...</span>
             {:else if dockerContext}
-              <span class="quick-subtitle">Current: {dockerContext.file_type}</span>
+              <span class="quick-subtitle"
+                >Current: {dockerContext.file_type}</span
+              >
             {:else if dockerContextError}
               <span class="quick-subtitle">Current: error</span>
             {:else}
@@ -1596,7 +1735,9 @@
           </div>
 
           {#if dockerContextLoading}
-            <div class="session-summary-placeholder">Detecting Docker context...</div>
+            <div class="session-summary-placeholder">
+              Detecting Docker context...
+            </div>
           {:else if dockerContextError}
             <div class="quick-error">{dockerContextError}</div>
           {:else if dockerContext}
@@ -1604,10 +1745,14 @@
               <div class="quick-meta">
                 <span class="quick-pill">type: {dockerContext.file_type}</span>
                 <span class="quick-pill">
-                  docker: {dockerContext.docker_available ? "available" : "unavailable"}
+                  docker: {dockerContext.docker_available
+                    ? "available"
+                    : "unavailable"}
                 </span>
                 <span class="quick-pill">
-                  compose: {dockerContext.compose_available ? "available" : "unavailable"}
+                  compose: {dockerContext.compose_available
+                    ? "available"
+                    : "unavailable"}
                 </span>
                 <span class="quick-pill">
                   daemon: {dockerContext.daemon_running ? "running" : "stopped"}
@@ -1616,7 +1761,9 @@
                   force-host: {dockerContext.force_host ? "on" : "off"}
                 </span>
                 {#if dockerContext.worktree_path}
-                  <span class="quick-pill">worktree: {dockerContext.worktree_path}</span>
+                  <span class="quick-pill"
+                    >worktree: {dockerContext.worktree_path}</span
+                  >
                 {/if}
                 {#if dockerContext.compose_services.length > 0}
                   <span class="quick-pill">
@@ -1635,7 +1782,9 @@
               <span class="quick-subtitle">Loading...</span>
             {:else if dockerSummaryRows.length > 0}
               <span class="quick-subtitle">
-                {dockerSummaryRows.length} record{dockerSummaryRows.length === 1 ? "" : "s"}
+                {dockerSummaryRows.length} record{dockerSummaryRows.length === 1
+                  ? ""
+                  : "s"}
               </span>
             {:else}
               <span class="quick-subtitle">No Docker records</span>
@@ -1655,17 +1804,27 @@
                   <div class="docker-summary-head">
                     <div class="docker-summary-identity">
                       <div class="quick-tool {toolClass(row.entry)}">
-                        <span class="quick-tool-name">{displayToolName(row.entry)}</span>
-                        <span class="quick-tool-version">@{displayToolVersion(row.entry)}</span>
+                        <span class="quick-tool-name"
+                          >{displayToolName(row.entry)}</span
+                        >
+                        <span class="quick-tool-version"
+                          >@{displayToolVersion(row.entry)}</span
+                        >
                       </div>
                       {#if row.entry.session_id}
-                        <div class="docker-summary-session">Session {row.entry.session_id}</div>
+                        <div class="docker-summary-session">
+                          Session {row.entry.session_id}
+                        </div>
                       {/if}
                     </div>
-                    <span class="docker-summary-time">{formatTimestamp(row.entry.timestamp)}</span>
+                    <span class="docker-summary-time"
+                      >{formatTimestamp(row.entry.timestamp)}</span
+                    >
                   </div>
                   <div class="quick-meta">
-                    <span class={`quick-pill ${row.modeClass}`}>runtime: {row.mode}</span>
+                    <span class={`quick-pill ${row.modeClass}`}
+                      >runtime: {row.mode}</span
+                    >
                     {#if row.service}
                       <span class="quick-pill">service: {row.service}</span>
                     {/if}
@@ -1675,19 +1834,31 @@
                       </span>
                     {/if}
                     {#if row.entry.docker_recreate !== undefined}
-                      <span class="quick-pill">recreate: {row.entry.docker_recreate ? "on" : "off"}</span>
+                      <span class="quick-pill"
+                        >recreate: {row.entry.docker_recreate
+                          ? "on"
+                          : "off"}</span
+                      >
                     {/if}
                     {#if row.entry.docker_build !== undefined}
-                      <span class="quick-pill">build: {row.entry.docker_build ? "on" : "off"}</span>
+                      <span class="quick-pill"
+                        >build: {row.entry.docker_build ? "on" : "off"}</span
+                      >
                     {/if}
                     {#if row.entry.docker_keep !== undefined}
-                      <span class="quick-pill">keep: {row.entry.docker_keep ? "on" : "off"}</span>
+                      <span class="quick-pill"
+                        >keep: {row.entry.docker_keep ? "on" : "off"}</span
+                      >
                     {/if}
                     {#if row.containerName}
-                      <span class="quick-pill">container: {row.containerName}</span>
+                      <span class="quick-pill"
+                        >container: {row.containerName}</span
+                      >
                     {/if}
                     {#if row.composeArgs}
-                      <span class="quick-pill">compose args: {row.composeArgs}</span>
+                      <span class="quick-pill"
+                        >compose args: {row.composeArgs}</span
+                      >
                     {/if}
                   </div>
                 </div>
@@ -1748,6 +1919,14 @@
     flex-wrap: wrap;
   }
 
+  .branch-title-group {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-direction: column;
+    gap: 4px;
+  }
+
   .branch-header-actions {
     display: flex;
     align-items: center;
@@ -1783,6 +1962,14 @@
     text-overflow: ellipsis;
   }
 
+  .branch-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
   .edit-display-name-btn {
     flex-shrink: 0;
     background: none;
@@ -1807,8 +1994,46 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    flex-basis: 100%;
-    margin-top: -8px;
+    min-width: 0;
+  }
+
+  .branch-tool-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: var(--ui-font-xs);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .branch-tool-badge.claude {
+    color: var(--yellow);
+    border-color: rgba(249, 226, 175, 0.35);
+  }
+
+  .branch-tool-badge.codex {
+    color: var(--cyan);
+    border-color: rgba(148, 226, 213, 0.35);
+  }
+
+  .branch-tool-badge.gemini {
+    color: var(--magenta);
+    border-color: rgba(203, 166, 247, 0.35);
+  }
+
+  .branch-tool-badge.opencode {
+    color: var(--green);
+    border-color: rgba(166, 227, 161, 0.35);
+  }
+
+  .branch-tool-badge.copilot {
+    color: var(--accent);
+    border-color: rgba(137, 180, 250, 0.35);
   }
 
   .display-name-edit {
@@ -1835,68 +2060,69 @@
     opacity: 0.6;
   }
 
-  .launch-btn {
-    background: var(--accent);
-    color: var(--bg-primary);
-    border: none;
-    border-radius: 8px;
-    padding: 6px 10px;
-    font-size: var(--ui-font-sm);
-    font-weight: 600;
-    cursor: pointer;
-    font-family: inherit;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .launch-btn:hover {
-    background: var(--accent-hover);
-  }
-
-  .new-terminal-btn {
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 6px 10px;
-    font-size: var(--ui-font-sm);
-    font-weight: 700;
-    font-family: monospace;
-    cursor: pointer;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .new-terminal-btn:hover {
-    border-color: var(--accent);
-  }
-
-  .header-quick-btn {
-    padding: 6px 10px;
+  .header-icon-btn {
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border-radius: 8px;
     border: 1px solid var(--border-color);
     background: var(--bg-surface);
     color: var(--text-primary);
-    font-size: var(--ui-font-sm);
-    font-weight: 700;
     cursor: pointer;
+    transition: border-color 0.15s, background-color 0.15s, color 0.15s;
+    flex-shrink: 0;
     font-family: inherit;
-    transition: border-color 0.15s, background-color 0.15s;
-    white-space: nowrap;
+    flex-shrink: 0;
   }
 
-  .header-quick-btn:hover:not(:disabled) {
+  .header-icon-btn:hover:not(:disabled) {
     border-color: var(--accent);
+    color: var(--text-primary);
   }
 
-  .header-quick-btn:disabled {
+  .header-icon-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }
 
-  .header-quick-btn.ghost {
+  .header-icon-btn.ghost {
     background: transparent;
     color: var(--text-secondary);
+  }
+
+  .header-icon-btn.accent {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-primary);
+  }
+
+  .header-icon-btn.accent:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: var(--bg-primary);
+  }
+
+  .action-icon {
+    width: 16px;
+    height: 16px;
+  }
+
+  .action-icon.spin {
+    animation: summary-spin 0.8s linear infinite;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   .detail-grid {
@@ -2167,7 +2393,9 @@
     font-weight: 700;
     cursor: pointer;
     font-family: inherit;
-    transition: border-color 0.15s, background-color 0.15s;
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
   }
 
   .quick-btn:hover:not(:disabled) {
@@ -2235,14 +2463,14 @@
     white-space: nowrap;
   }
 
-	  .session-summary-markdown {
-	    border: 1px solid var(--border-color);
-	    border-radius: 10px;
-	    background: var(--bg-primary);
-	    padding: 10px 12px;
-	    overflow: hidden;
-	    margin: 0;
-	  }
+  .session-summary-markdown {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    padding: 10px 12px;
+    overflow: hidden;
+    margin: 0;
+  }
 
   .summary-tabs {
     display: flex;
@@ -2271,5 +2499,4 @@
   .summary-tab:hover:not(.active) {
     color: var(--text-secondary);
   }
-
-	</style>
+</style>

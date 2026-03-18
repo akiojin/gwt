@@ -30,9 +30,14 @@ pub fn generate_managed_skills_block() -> String {
         "gwt-issue-resolve",
         "gwt-issue-search",
         "gwt-spec-register",
+        "gwt-spec-clarify",
+        "gwt-spec-plan",
+        "gwt-spec-tasks",
+        "gwt-spec-analyze",
         "gwt-spec-ops",
+        "gwt-spec-implement",
     ];
-    const PR_SKILLS: &[&str] = &["gwt-pr", "gwt-pr-check", "gwt-fix-pr"];
+    const PR_SKILLS: &[&str] = &["gwt-pr", "gwt-pr-check", "gwt-pr-fix"];
     // Everything else goes to Utilities.
 
     fn table_rows(names: &[&str]) -> String {
@@ -89,10 +94,12 @@ pub fn generate_managed_skills_block() -> String {
     block.push_str("### Recommended Workflow\n\n");
     block.push_str("See each skill's SKILL.md for detailed instructions:\n\n");
     block.push_str("1. **Register work** → `gwt-issue-register`\n");
-    block.push_str("2. **Create SPEC** → `gwt-spec-register` → `gwt-spec-ops`\n");
-    block.push_str("3. **Implement** → TDD (test first) → code\n");
-    block.push_str("4. **Open PR** → `gwt-pr`\n");
-    block.push_str("5. **Fix CI / reviews** → `gwt-fix-pr`\n");
+    block.push_str("2. **Resolve an existing issue** → `gwt-issue-resolve`\n");
+    block.push_str("3. **Create or select SPEC** → `gwt-spec-register` / `gwt-spec-ops`\n");
+    block.push_str("4. **Clarify / plan / tasks / analyze** → `gwt-spec-ops`\n");
+    block.push_str("5. **Implement SPEC tasks** → `gwt-spec-implement`\n");
+    block.push_str("6. **Open PR** → `gwt-pr`\n");
+    block.push_str("7. **Fix CI / reviews** → `gwt-pr-fix`\n");
     block.push_str(MANAGED_SKILLS_BLOCK_END);
     block.push('\n');
 
@@ -172,8 +179,13 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-issue-resolve",
     "gwt-issue-search",
     "gwt-spec-register",
-    "gwt-fix-pr",
+    "gwt-spec-clarify",
+    "gwt-spec-plan",
+    "gwt-spec-tasks",
+    "gwt-spec-analyze",
     "gwt-spec-ops",
+    "gwt-spec-implement",
+    "gwt-pr-fix",
     "gwt-pr",
     "gwt-pr-check",
     "gwt-project-index",
@@ -219,19 +231,55 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/SKILL.md",
+        relative_path: "skills/gwt-spec-clarify/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-spec-clarify/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-fix-pr/scripts/inspect_pr_checks.py",
+        relative_path: "skills/gwt-spec-plan/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-fix-pr/scripts/inspect_pr_checks.py"
+            "/../../plugins/gwt/skills/gwt-spec-plan/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-tasks/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-tasks/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-analyze/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-analyze/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-pr-fix/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pr-fix/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-pr-fix/scripts/inspect_pr_checks.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-pr-fix/scripts/inspect_pr_checks.py"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -241,6 +289,24 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/gwt/skills/gwt-spec-ops/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-ops/scripts/spec_artifact.py",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-ops/scripts/spec_artifact.py"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-implement/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-implement/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -328,6 +394,16 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
     },
 ];
 
+const PROJECT_ROOT_ASSETS: &[ManagedAsset] = &[ManagedAsset {
+    relative_path: "memory/constitution.md",
+    body: include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../memory/constitution.md"
+    )),
+    executable: false,
+    rewrite_for_project: false,
+}];
+
 const LEGACY_MANAGED_GWT_HOOK_COMMANDS: &[&str] = &[
     "gwt hook UserPromptSubmit",
     "gwt hook PreToolUse",
@@ -378,10 +454,55 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-fix-pr.md",
+        relative_path: "commands/gwt-spec-clarify.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-fix-pr.md"
+            "/../../plugins/gwt/commands/gwt-spec-clarify.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-plan.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-plan.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-tasks.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-tasks.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-analyze.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-analyze.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-implement.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-implement.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-pr-fix.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-pr-fix.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -506,6 +627,7 @@ const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.claude/commands/gwt-*.md",
     "/.claude/hooks/scripts/gwt-*.mjs",
     "/.claude/settings.local.json",
+    "/memory/constitution.md",
 ];
 const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".gwt/",
@@ -522,6 +644,8 @@ const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.claude/hooks/scripts/gwt-*.sh",
     ".claude/settings.json",
     "/.claude/settings.json",
+    "memory/constitution.md",
+    "/memory/constitution.md",
 ];
 
 /// Agent types that support skill registration.
@@ -608,7 +732,7 @@ impl Default for SkillRegistrationStatus {
 }
 
 fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
-    match agent {
+    let mut items = match agent {
         SkillAgentType::Claude => all_claude_assets()
             .map(|asset| format!(".claude/{}", asset.relative_path))
             .chain(std::iter::once(
@@ -617,7 +741,13 @@ fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
             .collect(),
         SkillAgentType::Codex => project_asset_missing_items(".codex"),
         SkillAgentType::Gemini => project_asset_missing_items(".gemini"),
-    }
+    };
+    items.extend(
+        PROJECT_ROOT_ASSETS
+            .iter()
+            .map(|asset| asset.relative_path.to_string()),
+    );
+    items
 }
 
 fn project_asset_missing_items(agent_root_name: &str) -> Vec<String> {
@@ -668,7 +798,8 @@ fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
 
 #[cfg(test)]
 fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
-    write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")
+    write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")?;
+    write_managed_assets(root, PROJECT_ROOT_ASSETS.iter(), ".")
 }
 
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
@@ -1371,6 +1502,8 @@ pub fn register_agent_skills_with_settings_at_project_root(
         });
     };
 
+    write_managed_assets(project_root, PROJECT_ROOT_ASSETS.iter(), ".")?;
+
     match agent {
         SkillAgentType::Claude => register_claude_assets_at(project_root),
         SkillAgentType::Codex | SkillAgentType::Gemini => {
@@ -1391,6 +1524,7 @@ pub fn register_all_skills_with_settings_at_project_root(
 ) -> Result<(), GwtError> {
     if let Some(project_root) = project_root {
         ensure_project_local_exclude_rules(project_root)?;
+        write_managed_assets(project_root, PROJECT_ROOT_ASSETS.iter(), ".")?;
     }
 
     let mut failures = Vec::new();
@@ -1460,6 +1594,12 @@ fn status_for(
             ));
         }
     }
+    for asset in PROJECT_ROOT_ASSETS {
+        let asset_path = project_root.join(asset.relative_path);
+        if !asset_path.exists() {
+            missing.push(asset.relative_path.to_string());
+        }
+    }
 
     let registered = missing.is_empty();
     SkillAgentRegistrationStatus {
@@ -1508,6 +1648,14 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         let asset_path = claude_root.join(asset.relative_path);
         if !asset_path.exists() {
             missing_items.push(format!(".claude/{}", asset.relative_path));
+        }
+    }
+    if let Some(project_root) = project_root {
+        for asset in PROJECT_ROOT_ASSETS {
+            let asset_path = project_root.join(asset.relative_path);
+            if !asset_path.exists() {
+                missing_items.push(asset.relative_path.to_string());
+            }
         }
     }
 
@@ -1680,6 +1828,14 @@ mod tests {
             .join("scripts")
             .join("check_pr_status.py")
             .exists());
+        assert!(tmp
+            .path()
+            .join("skills")
+            .join("gwt-spec-ops")
+            .join("scripts")
+            .join("spec_artifact.py")
+            .exists());
+        assert!(tmp.path().join("memory").join("constitution.md").exists());
     }
 
     #[test]
@@ -1877,6 +2033,15 @@ mod tests {
             .exists());
         assert!(temp
             .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-spec-ops")
+            .join("scripts")
+            .join("spec_artifact.py")
+            .exists());
+        assert!(temp.path().join("memory").join("constitution.md").exists());
+        assert!(temp
+            .path()
             .join(".gemini")
             .join("skills")
             .join("gwt-pr-check")
@@ -2029,6 +2194,7 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(!codex_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
         assert!(codex_skill_content.contains(".codex/skills/gwt-pr/references/pr-body-template.md"));
+        assert!(codex_skill_content.contains("repos/<owner>/<repo>/pulls"));
 
         register_agent_skills_with_settings_at_project_root(
             SkillAgentType::Gemini,
@@ -2079,6 +2245,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(codex_pr_skill.contains("git merge-base --is-ancestor <merge_commit> HEAD"));
         assert!(codex_pr_skill.contains("git rev-list --count origin/<head>..HEAD"));
         assert!(codex_pr_skill.contains("MANUAL CHECK"));
+        assert!(codex_pr_skill.contains("repos/<owner>/<repo>/pulls"));
 
         let claude_pr_skill = std::fs::read_to_string(
             temp.path()
@@ -2101,7 +2268,9 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(claude_pr_command
             .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
-        assert!(claude_pr_command.contains("`MANUAL CHECK`"));
+        assert!(claude_pr_command
+            .contains("merge `origin/$base` into the current branch and push before PR creation."));
+        assert!(claude_pr_command.contains("REST pull-request endpoint"));
 
         let claude_pr_check_command = std::fs::read_to_string(
             temp.path()
@@ -2201,8 +2370,70 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_register_skill.contains("Create a new GitHub Issue-first SPEC"));
+        assert!(spec_register_skill.contains("Issue-first SPEC container"));
         assert!(spec_register_skill.contains("gwt-issue-search"));
+        assert!(spec_register_skill.contains("GWT_SPEC_ARTIFACT:doc:spec.md"));
+        assert!(spec_register_skill.contains("gwt-spec-ops"));
+        assert!(spec_register_skill.contains("repos/<owner>/<repo>/issues"));
+
+        let spec_clarify_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-clarify")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_clarify_skill.contains("[NEEDS CLARIFICATION"));
+        assert!(spec_clarify_skill.contains("gwt-spec-ops"));
+
+        let spec_plan_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-plan")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_plan_skill.contains("memory/constitution.md"));
+        assert!(spec_plan_skill.contains("Constitution Check"));
+        assert!(spec_plan_skill.contains("gwt-spec-tasks"));
+
+        let spec_tasks_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-tasks")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_tasks_skill.contains("[P]"));
+        assert!(spec_tasks_skill.contains("user story"));
+        assert!(spec_tasks_skill.contains("gwt-spec-analyze"));
+
+        let spec_analyze_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-analyze")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_analyze_skill.contains("Status: CLEAR | AUTO-FIXABLE | NEEDS-DECISION"));
+        assert!(spec_analyze_skill.contains("Constitution"));
+        assert!(spec_analyze_skill.contains("gwt-spec-implement"));
+
+        let spec_implement_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-implement")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_implement_skill.contains("implementation owner"));
+        assert!(spec_implement_skill.contains("gwt-pr"));
+        assert!(spec_implement_skill.contains("gwt-pr-fix"));
 
         let issue_register_command = std::fs::read_to_string(
             temp.path()
@@ -2214,6 +2445,8 @@ OPENAI_API_KEY = "legacy-key"
         assert!(issue_register_command.contains("main entrypoint for new work registration"));
         assert!(issue_register_command.contains("gwt-issue-search"));
         assert!(issue_register_command.contains("gwt-spec-register"));
+        assert!(issue_register_command.contains("gwt-spec-ops"));
+        assert!(issue_register_command.contains("POST /repos/<owner>/<repo>/issues"));
 
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
@@ -2225,6 +2458,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(issue_resolve_command.contains("direct fix"));
         assert!(issue_resolve_command.contains("existing SPEC"));
         assert!(issue_resolve_command.contains("gwt-issue-register"));
+        assert!(issue_resolve_command.contains("gwt-spec-ops"));
 
         let spec_register_command = std::fs::read_to_string(
             temp.path()
@@ -2233,9 +2467,61 @@ OPENAI_API_KEY = "legacy-key"
                 .join("gwt-spec-register.md"),
         )
         .unwrap();
-        assert!(spec_register_command.contains("Create a new Issue-first SPEC"));
+        assert!(spec_register_command.contains("seed `doc:spec.md`"));
         assert!(spec_register_command.contains("gwt-issue-search"));
         assert!(spec_register_command.contains("gwt-issue-register"));
+        assert!(spec_register_command.contains("gwt-spec-ops"));
+
+        let spec_clarify_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-clarify.md"),
+        )
+        .unwrap();
+        assert!(spec_clarify_command.contains("NEEDS CLARIFICATION"));
+        assert!(spec_clarify_command.contains("gwt-spec-ops"));
+
+        let spec_plan_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-plan.md"),
+        )
+        .unwrap();
+        assert!(spec_plan_command.contains("memory/constitution.md"));
+        assert!(spec_plan_command.contains("gwt-spec-tasks"));
+        assert!(spec_plan_command.contains("gwt-spec-ops"));
+
+        let spec_tasks_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-tasks.md"),
+        )
+        .unwrap();
+        assert!(spec_tasks_command.contains("gwt-spec-analyze"));
+        assert!(spec_tasks_command.contains("gwt-spec-ops"));
+
+        let spec_analyze_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-analyze.md"),
+        )
+        .unwrap();
+        assert!(spec_analyze_command.contains("AUTO-FIXABLE"));
+        assert!(spec_analyze_command.contains("gwt-spec-ops"));
+
+        let spec_implement_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-implement.md"),
+        )
+        .unwrap();
+        assert!(spec_implement_command.contains("execution-ready"));
+        assert!(spec_implement_command.contains("gwt-pr"));
 
         assert!(!temp
             .path()
@@ -2372,6 +2658,7 @@ OPENAI_API_KEY = "legacy-key"
             .join("scripts")
             .join("gwt-forward-hook.mjs")
             .exists());
+        assert!(temp.path().join("memory").join("constitution.md").exists());
 
         let settings_content =
             std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
@@ -2404,7 +2691,8 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
 
         assert!(skill_content.contains("git rev-list --left-right --count \"HEAD...origin/$base\""));
-        assert!(skill_content.contains("Branch update required before creating a PR."));
+        assert!(skill_content.contains("git merge \"origin/$base\""));
+        assert!(skill_content.contains("The update strategy is always `git merge origin/$base`; do not use rebase for this workflow."));
     }
 
     #[test]

@@ -136,9 +136,12 @@ Next
 4. **Check branch sync against base (critical)**
    - Run `git rev-list --left-right --count "HEAD...origin/$base"`.
    - Parse the result as `ahead behind`.
-   - If `behind > 0` and `ahead == 0` → stop and report `Branch update required before creating a PR.`
-   - If `behind > 0` and `ahead > 0` → stop and report `Branch has diverged from base. Sync it before creating a PR.`
-   - Continue only when `behind == 0`.
+   - If `behind == 0`, continue.
+   - If `behind > 0`, merge `origin/$base` into the current branch before PR creation.
+   - The update strategy is always `git merge origin/$base`; do not use rebase for this workflow.
+   - After merge, push the branch so the PR branch and worktree stay aligned with gwt's remote-first flow.
+   - If merge conflicts occur, inspect the affected files carefully, resolve only when the resulting behavior is coherent, and continue.
+   - If you cannot resolve the conflict with high confidence, stop and ask the user before proceeding.
 
 5. **Check existing PR for head branch**
    - Use decision rules above to pick action.
@@ -165,21 +168,29 @@ Next
    - Read the template from the gwt-pr skill path (not the current project path):
      - `PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"`
    - Read `${PR_BODY_TEMPLATE}` and fill all required placeholders.
+   - Derive missing sections from the diff, linked Issues/SPECs, and executed tests before asking the user.
    - **If a conditional section does not apply, remove the entire section.**
    - **Remove any `<!-- GUIDE: ... -->` comments from the final output.**
-   - **If any required section still contains TODO, do not create the PR and ask the user for the missing information.**
+   - **If any required section still contains TODO after inference, ask only for the irreducible missing information.**
 
 10. **Create or update the PR**
-    - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-    - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
+    - Primary path:
+      - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
+      - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
+    - If `gh pr create` or `gh pr edit` fails with a secondary rate limit or `was submitted too quickly`, do not stop.
+    - Resolve the repo slug first: `gh repo view --json nameWithOwner -q .nameWithOwner`
+    - REST fallback:
+      - Create: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
+      - Update: `gh api repos/<owner>/<repo>/pulls/<number> --method PATCH --input <json-file>`
+    - Keep the same title/body content across the primary path and REST fallback.
 
 11. **Return PR URL**
     - `gh pr view <number> --json url -q .url`
 
 12. **Post-PR CI/merge check (automatic).**
-    - After PR creation or push, load `skills/gwt-fix-pr/SKILL.md` and follow its workflow to inspect CI status, merge state, and review feedback.
+    - After PR creation or push, load `skills/gwt-pr-fix/SKILL.md` and follow its workflow to inspect CI status, merge state, and review feedback.
     - If all CI checks are still pending, poll (30s interval) until complete.
-    - If conflicts, review issues, or CI failures are detected, proceed with the gwt-fix-pr workflow to diagnose and fix.
+    - If conflicts, review issues, or CI failures are detected, proceed with the gwt-pr-fix workflow to diagnose and fix.
 
 ## Command snippets (bash)
 
@@ -214,14 +225,13 @@ divergence=$(git rev-list --left-right --count "HEAD...origin/$base" 2>/dev/null
 ahead_count=$(echo "$divergence" | awk '{print $1}')
 behind_count=$(echo "$divergence" | awk '{print $2}')
 
-if [ "${behind_count:-0}" -gt 0 ] && [ "${ahead_count:-0}" -gt 0 ]; then
-  echo "Branch has diverged from base. Sync it before creating a PR." >&2
-  exit 1
-fi
-
 if [ "${behind_count:-0}" -gt 0 ]; then
-  echo "Branch update required before creating a PR." >&2
-  exit 1
+  echo "Merging origin/$base into $head before PR creation"
+  git merge "origin/$base" || {
+    echo "Base-branch merge produced conflicts. Inspect and resolve them before continuing." >&2
+    exit 1
+  }
+  git push -u origin "$head"
 fi
 
 # Check existing PRs for the head branch
@@ -287,7 +297,12 @@ case "$action" in
     cp "$PR_BODY_TEMPLATE" /tmp/pr-body.md
 
     git push -u origin "$head"
-    gh pr create -B "$base" -H "$head" --title "..." --body-file /tmp/pr-body.md
+    gh pr create -B "$base" -H "$head" --title "..." --body-file /tmp/pr-body.md || {
+      repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+      jq -n --arg title "..." --arg head "$head" --arg base "$base" --rawfile body /tmp/pr-body.md \
+        '{title:$title, head:$head, base:$base, body:$body}' >/tmp/pr-create.json
+      gh api "repos/$repo_slug/pulls" --method POST --input /tmp/pr-create.json
+    }
     ;;
   push_only)
     echo "Existing unmerged PR found - pushing changes only"

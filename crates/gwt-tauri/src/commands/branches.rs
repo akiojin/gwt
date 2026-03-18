@@ -5,7 +5,7 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
 use gwt_core::config::{agent_has_hook_support, infer_agent_status, AgentStatus, Session};
-use gwt_core::git::{is_bare_repository, Branch, Remote};
+use gwt_core::git::{fetch_issue_detail, is_bare_repository, Branch, Remote};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
@@ -385,11 +385,11 @@ fn build_issue_display_name_map(
 ) -> HashMap<String, String> {
     let cached_titles = build_cached_issue_title_map(state, repo_path);
     build_issue_display_name_map_with(branch_names.iter(), |issue_number| {
-        cached_titles
-            .get(&issue_number)
-            .cloned()
-            .map(|title| (issue_number, title))
-            .ok_or_else(|| "cache miss".to_string())
+        if let Some(title) = cached_titles.get(&issue_number).cloned() {
+            return Ok((issue_number, title));
+        }
+        let issue = fetch_issue_detail(repo_path, issue_number)?;
+        Ok((issue.number, issue.title))
     })
 }
 
