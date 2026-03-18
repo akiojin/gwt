@@ -23,7 +23,7 @@ Use this command as the main entrypoint for new work registration.
 2. Normalize the request and classify the work type.
 3. Run `gwt-issue-search` first with at least 2 semantic queries.
 4. If a clear existing Issue or `gwt-spec` already owns the request, stop new creation and switch to the existing workflow.
-5. If the request needs new specification work, switch to `gwt-spec-register`.
+5. If the request needs new specification work, switch to `gwt-spec-register`, then continue through `gwt-spec-clarify`, `gwt-spec-plan`, `gwt-spec-tasks`, and `gwt-spec-analyze`.
 6. Otherwise create a plain GitHub Issue with the standard section structure.
 
 ## Proactive Trigger Examples

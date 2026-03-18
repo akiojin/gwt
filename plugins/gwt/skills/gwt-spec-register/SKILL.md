@@ -1,11 +1,12 @@
 ---
 name: gwt-spec-register
-description: Create a new GitHub Issue-first SPEC (`gwt-spec`) using the standard section skeleton when no existing canonical SPEC fits. Use when `gwt-issue-register` determines a new SPEC is needed or the user explicitly asks to register a new SPEC.
+description: Create a new GitHub Issue-first SPEC container when no existing canonical SPEC fits. Seed the Issue body as an artifact index plus a `spec.md` comment, then hand off to `gwt-spec-clarify`.
 ---
 
 # gwt SPEC Register
 
-Use this skill to create a new `gwt-spec` Issue only after confirming that no existing canonical SPEC should own the scope.
+Use this skill to create a new `gwt-spec` Issue container only after confirming that no
+existing canonical SPEC should own the scope.
 
 `gwt-spec-register` is a registration step, not an execution step.
 
@@ -32,52 +33,76 @@ Do not create a new SPEC when an existing canonical SPEC clearly owns the scope.
 - SPEC ID = GitHub issue number
 - Spec issues must carry the `gwt-spec` label
 
-## Required issue body structure
+## Required Issue body structure
 
-New SPEC Issues must use this section structure:
+New SPEC Issues must use this compact index structure:
 
 ```markdown
 <!-- GWT_SPEC_ID:#{number} -->
 
-## Spec
+## Artifact Index
 
-(background, user scenarios, requirements, success criteria)
+- `doc:spec.md`
+- `doc:plan.md` (planned)
+- `doc:tasks.md` (planned)
+- `doc:research.md` (planned)
+- `doc:data-model.md` (planned)
+- `doc:quickstart.md` (planned)
+- `contract:*`
+- `checklist:*`
 
-## Plan
+## Status
 
-(implementation plan)
+- Phase: Specify
+- Clarification: Required
+- Planning: Blocked until `gwt-spec-clarify`
 
-## Tasks
+## Links
 
-(task list)
+- Parent: ...
+- Related: ...
+- PRs: ...
+```
 
-## TDD
+## Required initial `spec.md` artifact
 
-(test design)
+After issue creation, create a `doc:spec.md` issue comment with this minimum structure:
 
-## Research
+```markdown
+<!-- GWT_SPEC_ARTIFACT:doc:spec.md -->
+doc:spec.md
 
-(research notes)
+# Feature Specification: <title>
 
-## Data Model
+## Background
 
-(data model)
+...
 
-## Quickstart
+## User Stories
 
-(minimum setup or usage steps)
+### User Story 1 - <title> (Priority: P1)
 
-## Contracts
+...
 
-Artifact files are managed in issue comments with `contract:<name>` entries.
+## Acceptance Scenarios
 
-## Checklists
+1. Given ...
 
-Artifact files are managed in issue comments with `checklist:<name>` entries.
+## Edge Cases
 
-## Acceptance Checklist
+- ...
 
-- [ ] (acceptance checklist item)
+## Functional Requirements
+
+- FR-001 ...
+
+## Non-Functional Requirements
+
+- NFR-001 ...
+
+## Success Criteria
+
+- SC-001 ...
 ```
 
 ## Workflow
@@ -95,14 +120,14 @@ Artifact files are managed in issue comments with `checklist:<name>` entries.
    - If the built-in path is unavailable, use the documented `gh issue create` fallback.
    - After creation, update `<!-- GWT_SPEC_ID:#NEW -->` to `<!-- GWT_SPEC_ID:#{number} -->`.
 
-4. **Seed the initial sections.**
-   - Fill `## Spec` with the minimum context from the originating Issue or request.
-   - Create stub `## Plan`, `## Tasks`, and `## TDD` sections so execution can continue without inventing a second format.
-   - Leave unresolved details explicit instead of hiding them.
+4. **Seed the initial `spec.md` artifact.**
+   - Fill the artifact with the minimum context from the originating Issue or request.
+   - Use `[NEEDS CLARIFICATION: ...]` instead of guessing.
+   - Do not create `plan.md` or `tasks.md` here.
 
-5. **Hand off to `gwt-spec-ops`.**
-   - Pass the created issue number and source context into `gwt-spec-ops`.
-   - `gwt-spec-register` should not own long-running SPEC execution.
+5. **Hand off to `gwt-spec-clarify`.**
+   - Pass the created issue number and source context into `gwt-spec-clarify`.
+   - `gwt-spec-register` should not own clarification, planning, or execution.
 
 ## Operations (gh CLI fallback)
 
@@ -112,45 +137,28 @@ Artifact files are managed in issue comments with `checklist:<name>` entries.
 gh issue create --label gwt-spec --title "feat: ..." --body "$(cat <<'EOF'
 <!-- GWT_SPEC_ID:#NEW -->
 
-## Spec
+## Artifact Index
 
-_TODO_
+- `doc:spec.md`
+- `doc:plan.md` (planned)
+- `doc:tasks.md` (planned)
+- `doc:research.md` (planned)
+- `doc:data-model.md` (planned)
+- `doc:quickstart.md` (planned)
+- `contract:*`
+- `checklist:*`
 
-## Plan
+## Status
 
-_TODO_
+- Phase: Specify
+- Clarification: Required
+- Planning: Blocked until `gwt-spec-clarify`
 
-## Tasks
+## Links
 
-_TODO_
-
-## TDD
-
-_TODO_
-
-## Research
-
-_TODO_
-
-## Data Model
-
-_TODO_
-
-## Quickstart
-
-_TODO_
-
-## Contracts
-
-Artifact files are managed in issue comments with `contract:<name>` entries.
-
-## Checklists
-
-Artifact files are managed in issue comments with `checklist:<name>` entries.
-
-## Acceptance Checklist
-
-- [ ] Add acceptance checklist
+- Parent: ...
+- Related: ...
+- PRs: ...
 EOF
 )"
 ```
@@ -159,4 +167,46 @@ EOF
 
 ```bash
 gh issue edit {number} --body "$(updated body with <!-- GWT_SPEC_ID:#{number} -->)"
+```
+
+### Create initial `spec.md` artifact comment
+
+```bash
+gh issue comment {number} --body "$(cat <<'EOF'
+<!-- GWT_SPEC_ARTIFACT:doc:spec.md -->
+doc:spec.md
+
+# Feature Specification: ...
+
+## Background
+
+...
+
+## User Stories
+
+### User Story 1 - ... (Priority: P1)
+
+...
+
+## Acceptance Scenarios
+
+1. Given ...
+
+## Edge Cases
+
+- ...
+
+## Functional Requirements
+
+- FR-001 ...
+
+## Non-Functional Requirements
+
+- NFR-001 ...
+
+## Success Criteria
+
+- SC-001 ...
+EOF
+)"
 ```

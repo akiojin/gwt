@@ -12,7 +12,9 @@ feature request, enhancement idea, documentation task, or rough note.
 
 - If the user already has an Issue number or URL, use `gwt-issue-resolve`.
 - If the target `gwt-spec` issue is already known, use `gwt-spec-ops`.
-- If this skill determines that a new SPEC is required, hand off to `gwt-spec-register`.
+- If this skill determines that a new SPEC is required, hand off to `gwt-spec-register`,
+  then continue through `gwt-spec-clarify` -> `gwt-spec-plan` -> `gwt-spec-tasks` ->
+  `gwt-spec-analyze` -> `gwt-spec-ops`.
 - Do not create both a plain Issue and a SPEC for the same request.
 
 ## Mandatory preflight: search existing issues first
@@ -129,7 +131,7 @@ Use `CLEAN` only when the duplicate search found no credible owner.
 5. **Choose plain Issue or new SPEC.**
    - Use the decision rules above.
    - Plain Issue: create directly with `gh issue create`.
-   - New SPEC: switch to `gwt-spec-register`.
+   - New SPEC: switch to `gwt-spec-register` and continue through the spec artifact flow.
 
 6. **Create the plain Issue when needed.**
    - Use the required title rule and issue body structure.

@@ -30,6 +30,10 @@ pub fn generate_managed_skills_block() -> String {
         "gwt-issue-resolve",
         "gwt-issue-search",
         "gwt-spec-register",
+        "gwt-spec-clarify",
+        "gwt-spec-plan",
+        "gwt-spec-tasks",
+        "gwt-spec-analyze",
         "gwt-spec-ops",
     ];
     const PR_SKILLS: &[&str] = &["gwt-pr", "gwt-pr-check", "gwt-pr-fix"];
@@ -89,10 +93,14 @@ pub fn generate_managed_skills_block() -> String {
     block.push_str("### Recommended Workflow\n\n");
     block.push_str("See each skill's SKILL.md for detailed instructions:\n\n");
     block.push_str("1. **Register work** → `gwt-issue-register`\n");
-    block.push_str("2. **Create SPEC** → `gwt-spec-register` → `gwt-spec-ops`\n");
-    block.push_str("3. **Implement** → TDD (test first) → code\n");
-    block.push_str("4. **Open PR** → `gwt-pr`\n");
-    block.push_str("5. **Fix CI / reviews** → `gwt-pr-fix`\n");
+    block.push_str("2. **Create SPEC container** → `gwt-spec-register`\n");
+    block.push_str("3. **Clarify spec** → `gwt-spec-clarify`\n");
+    block.push_str("4. **Plan artifacts** → `gwt-spec-plan`\n");
+    block.push_str("5. **Generate tasks** → `gwt-spec-tasks`\n");
+    block.push_str("6. **Analyze readiness** → `gwt-spec-analyze`\n");
+    block.push_str("7. **Execute / maintain SPEC** → `gwt-spec-ops`\n");
+    block.push_str("8. **Open PR** → `gwt-pr`\n");
+    block.push_str("9. **Fix CI / reviews** → `gwt-pr-fix`\n");
     block.push_str(MANAGED_SKILLS_BLOCK_END);
     block.push('\n');
 
@@ -172,6 +180,10 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-issue-resolve",
     "gwt-issue-search",
     "gwt-spec-register",
+    "gwt-spec-clarify",
+    "gwt-spec-plan",
+    "gwt-spec-tasks",
+    "gwt-spec-analyze",
     "gwt-pr-fix",
     "gwt-spec-ops",
     "gwt-pr",
@@ -214,6 +226,42 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/gwt/skills/gwt-spec-register/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-clarify/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-clarify/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-plan/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-plan/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-tasks/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-tasks/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-analyze/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-spec-analyze/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -373,6 +421,42 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/gwt/commands/gwt-spec-register.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-clarify.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-clarify.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-plan.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-plan.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-tasks.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-tasks.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "commands/gwt-spec-analyze.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/commands/gwt-spec-analyze.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -2201,8 +2285,53 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_register_skill.contains("Create a new GitHub Issue-first SPEC"));
+        assert!(spec_register_skill.contains("Issue-first SPEC container"));
         assert!(spec_register_skill.contains("gwt-issue-search"));
+        assert!(spec_register_skill.contains("GWT_SPEC_ARTIFACT:doc:spec.md"));
+
+        let spec_clarify_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-clarify")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_clarify_skill.contains("[NEEDS CLARIFICATION"));
+        assert!(spec_clarify_skill.contains("gwt-spec-plan"));
+
+        let spec_plan_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-plan")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_plan_skill.contains("memory/constitution.md"));
+        assert!(spec_plan_skill.contains("Constitution Check"));
+
+        let spec_tasks_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-tasks")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_tasks_skill.contains("[P]"));
+        assert!(spec_tasks_skill.contains("user story"));
+
+        let spec_analyze_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-spec-analyze")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(spec_analyze_skill.contains("Status: CLEAR | BLOCKED"));
+        assert!(spec_analyze_skill.contains("Constitution"));
 
         let issue_register_command = std::fs::read_to_string(
             temp.path()
@@ -2233,9 +2362,48 @@ OPENAI_API_KEY = "legacy-key"
                 .join("gwt-spec-register.md"),
         )
         .unwrap();
-        assert!(spec_register_command.contains("Create a new Issue-first SPEC"));
+        assert!(spec_register_command.contains("seed `doc:spec.md`"));
         assert!(spec_register_command.contains("gwt-issue-search"));
         assert!(spec_register_command.contains("gwt-issue-register"));
+
+        let spec_clarify_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-clarify.md"),
+        )
+        .unwrap();
+        assert!(spec_clarify_command.contains("NEEDS CLARIFICATION"));
+        assert!(spec_clarify_command.contains("gwt-spec-plan"));
+
+        let spec_plan_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-plan.md"),
+        )
+        .unwrap();
+        assert!(spec_plan_command.contains("memory/constitution.md"));
+        assert!(spec_plan_command.contains("gwt-spec-tasks"));
+
+        let spec_tasks_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-tasks.md"),
+        )
+        .unwrap();
+        assert!(spec_tasks_command.contains("gwt-spec-analyze"));
+
+        let spec_analyze_command = std::fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("gwt-spec-analyze.md"),
+        )
+        .unwrap();
+        assert!(spec_analyze_command.contains("final gate"));
+        assert!(spec_analyze_command.contains("gwt-spec-ops"));
 
         assert!(!temp
             .path()

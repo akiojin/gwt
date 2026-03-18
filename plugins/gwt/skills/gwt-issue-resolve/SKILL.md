@@ -158,8 +158,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py
    - Use `gwt-issue-search` before creating or updating any SPEC.
    - Search with at least 2 semantic queries derived from the Issue.
    - If a canonical existing SPEC is found, update that destination and hand off to `gwt-spec-ops`.
-   - If no suitable SPEC exists, switch to `gwt-spec-register` to create the new `gwt-spec` Issue.
-   - After the target SPEC exists, hand off to `gwt-spec-ops`.
+   - If no suitable SPEC exists, switch to `gwt-spec-register` to create the new `gwt-spec` Issue container and seed `spec.md`.
+   - After the target SPEC exists, run `gwt-spec-clarify`, `gwt-spec-plan`,
+     `gwt-spec-tasks`, and `gwt-spec-analyze` before implementation starts.
 
 8. **Produce Issue Analysis Report for non-SPEC issues before execution.**
 
