@@ -4,7 +4,7 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
 use gwt_core::config::{agent_has_hook_support, infer_agent_status, AgentStatus, Session};
-use gwt_core::git::{is_bare_repository, Branch, Remote};
+use gwt_core::git::{fetch_issue_detail, is_bare_repository, Branch, Remote};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
@@ -280,18 +280,89 @@ fn is_unknown_display_name(text: &str) -> bool {
     )
 }
 
-fn extract_issue_label(branch_name: &str) -> Option<String> {
+fn extract_issue_number(branch_name: &str) -> Option<u64> {
     let normalized = branch_name.trim().trim_start_matches("origin/");
     for part in normalized.split('/') {
-        let Some(rest) = part.strip_prefix("issue-") else {
+        let lower = part.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("issue-") else {
             continue;
         };
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !digits.is_empty() {
-            return Some(format!("#{digits}"));
+        if let Ok(number) = digits.parse::<u64>() {
+            return Some(number);
         }
     }
     None
+}
+
+fn extract_issue_label(branch_name: &str) -> Option<String> {
+    extract_issue_number(branch_name).map(|number| format!("#{number}"))
+}
+
+fn is_raw_branch_preserved(branch_name: &str) -> bool {
+    matches!(
+        branch_name.trim().trim_start_matches("origin/"),
+        "main" | "master" | "develop"
+    )
+}
+
+fn format_issue_display_name(number: u64, title: &str) -> Option<String> {
+    let title = title.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(format!("#{number} {title}"))
+    }
+}
+
+fn build_issue_display_name_map_with<I, F>(
+    branch_names: I,
+    fetch_issue: F,
+) -> HashMap<String, String>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+    F: Fn(u64) -> Result<(u64, String), String>,
+{
+    let mut resolved_by_issue = HashMap::<u64, Option<String>>::new();
+    let mut display_names = HashMap::<String, String>::new();
+
+    for branch_name in branch_names {
+        let branch_name = branch_name.as_ref().trim();
+        if branch_name.is_empty() || is_raw_branch_preserved(branch_name) {
+            continue;
+        }
+
+        let Some(issue_number) = extract_issue_number(branch_name) else {
+            continue;
+        };
+
+        let resolved = if let Some(existing) = resolved_by_issue.get(&issue_number) {
+            existing.clone()
+        } else {
+            let next = fetch_issue(issue_number)
+                .ok()
+                .and_then(|(number, title)| format_issue_display_name(number, &title));
+            resolved_by_issue.insert(issue_number, next.clone());
+            next
+        };
+
+        if let Some(display_name) = resolved {
+            display_names.insert(branch_name.to_string(), display_name);
+        }
+    }
+
+    display_names
+}
+
+fn build_issue_display_name_map(
+    branch_names: &[String],
+    repo_path: &Path,
+) -> HashMap<String, String> {
+    build_issue_display_name_map_with(branch_names.iter(), |issue_number| {
+        let issue = fetch_issue_detail(repo_path, issue_number)?;
+        Ok((issue.number, issue.title))
+    })
 }
 
 fn branch_topic_label(branch_name: &str) -> Option<String> {
@@ -336,11 +407,28 @@ fn first_display_line(text: &str) -> &str {
         .unwrap_or("")
 }
 
+fn looks_like_code_fragment(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("fn ")
+        || trimmed.starts_with("pub ")
+        || trimmed.starts_with("impl ")
+        || trimmed.starts_with("let ")
+        || trimmed.contains("->")
+        || trimmed.contains("&str")
+        || trimmed.contains("SummaryLanguage")
+        || trimmed.contains("::")
+        || trimmed.contains('{')
+        || trimmed.contains('}')
+}
+
 fn normalize_generated_display_name(raw: &str, branch_name: &str) -> Option<String> {
     let mut candidate = strip_inferred_prefix(first_display_line(raw))
         .trim()
         .to_string();
     if candidate.is_empty() || is_unknown_display_name(&candidate) {
+        return None;
+    }
+    if looks_like_code_fragment(&candidate) {
         return None;
     }
 
@@ -384,6 +472,20 @@ fn normalize_generated_display_name(raw: &str, branch_name: &str) -> Option<Stri
     Some(candidate)
 }
 
+fn resolve_auto_display_name(
+    branch_key: &str,
+    issue_display_names: &HashMap<String, String>,
+    task_overview: Option<&str>,
+) -> Option<String> {
+    if is_raw_branch_preserved(branch_key) {
+        return None;
+    }
+    if let Some(display_name) = issue_display_names.get(branch_key) {
+        return Some(display_name.clone());
+    }
+    task_overview.and_then(|overview| normalize_generated_display_name(overview, branch_key))
+}
+
 /// Apply session branch meta (agent_status + display_name) to a BranchInfo.
 /// `branch_key` is the lookup key in the meta map (may differ from info.name for remote branches).
 fn apply_session_meta(
@@ -391,25 +493,23 @@ fn apply_session_meta(
     branch_key: &str,
     meta_map: &HashMap<String, SessionBranchMeta>,
     summary_cache: &Option<&gwt_core::ai::SessionSummaryCache>,
+    issue_display_names: &HashMap<String, String>,
 ) {
     if let Some(meta) = meta_map.get(branch_key) {
         info.agent_status = agent_status_to_string(meta.agent_status);
-        // display_name priority: session.display_name → task_overview
+        // display_name priority: session.display_name → linked issue → task_overview
         if meta.display_name.is_some() {
             info.display_name = meta.display_name.clone();
         }
     }
     if info.display_name.is_none() {
-        if let Some(cache) = summary_cache {
-            if let Some(summary) = cache.get(branch_key) {
-                if let Some(overview) = &summary.task_overview {
-                    if let Some(display_name) =
-                        normalize_generated_display_name(overview, branch_key)
-                    {
-                        info.display_name = Some(display_name);
-                    }
-                }
-            }
+        let task_overview = summary_cache
+            .and_then(|cache| cache.get(branch_key))
+            .and_then(|summary| summary.task_overview.as_deref());
+        if let Some(display_name) =
+            resolve_auto_display_name(branch_key, issue_display_names, task_overview)
+        {
+            info.display_name = Some(display_name);
         }
     }
 }
@@ -448,6 +548,7 @@ fn list_worktree_branches_impl(
     }
 
     let branch_names = names.iter().cloned().collect::<Vec<_>>();
+    let issue_display_names = build_issue_display_name_map(&branch_names, &repo_path);
 
     let branches = Branch::list(&repo_path)
         .map_err(|e| StructuredError::from_gwt_error(&e, "list_worktree_branches"))?;
@@ -459,7 +560,13 @@ fn list_worktree_branches_impl(
     for info in &mut infos {
         info.last_tool_usage = last_tool.get(&info.name).cloned();
         info.is_agent_running = running_branches.contains(&info.name);
-        apply_session_meta(info, &info.name.clone(), &meta_map, &summary_cache);
+        apply_session_meta(
+            info,
+            &info.name.clone(),
+            &meta_map,
+            &summary_cache,
+            &issue_display_names,
+        );
     }
 
     Ok(WorktreeBranchListing {
@@ -490,13 +597,24 @@ fn list_remote_branches_impl(
         Branch::list_remote(&repo_path)
             .map_err(|e| StructuredError::from_gwt_error(&e, "list_remote_branches"))?
     };
+    let normalized_branch_names = branches
+        .iter()
+        .map(|branch| strip_known_remote_prefix(&branch.name, &remotes).to_string())
+        .collect::<Vec<_>>();
+    let issue_display_names = build_issue_display_name_map(&normalized_branch_names, &repo_path);
 
     let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
     for info in &mut infos {
         let normalized = strip_known_remote_prefix(&info.name, &remotes).to_string();
         info.last_tool_usage = last_tool.get(&normalized).cloned();
         info.is_agent_running = running_branches.contains(&normalized);
-        apply_session_meta(info, &normalized, &meta_map, &summary_cache);
+        apply_session_meta(
+            info,
+            &normalized,
+            &meta_map,
+            &summary_cache,
+            &issue_display_names,
+        );
     }
 
     Ok(infos)
@@ -521,11 +639,22 @@ pub fn list_branches(
 
         let branches = Branch::list(&repo_path)
             .map_err(|e| StructuredError::from_gwt_error(&e, "list_branches"))?;
+        let issue_branch_names = branches
+            .iter()
+            .map(|branch| branch.name.clone())
+            .collect::<Vec<_>>();
+        let issue_display_names = build_issue_display_name_map(&issue_branch_names, &repo_path);
         let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
-            apply_session_meta(info, &info.name.clone(), &meta_map, &summary_cache);
+            apply_session_meta(
+                info,
+                &info.name.clone(),
+                &meta_map,
+                &summary_cache,
+                &issue_display_names,
+            );
         }
         Ok(infos)
     })
@@ -608,12 +737,22 @@ pub fn get_current_branch(
         let repo_key = repo_path.to_string_lossy().to_string();
         let summary_cache_guard = state.session_summary_cache.lock().ok();
         let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
+        let issue_display_names = branch
+            .as_ref()
+            .map(|branch| build_issue_display_name_map(&[branch.name.clone()], &repo_path))
+            .unwrap_or_default();
         Ok(branch.map(|b| {
             let mut info = BranchInfo::from(b);
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
             let name_key = info.name.clone();
-            apply_session_meta(&mut info, &name_key, &meta_map, &summary_cache);
+            apply_session_meta(
+                &mut info,
+                &name_key,
+                &meta_map,
+                &summary_cache,
+                &issue_display_names,
+            );
             info
         }))
     })
@@ -850,6 +989,65 @@ mod tests {
     fn test_normalize_generated_display_name_returns_none_for_unknown_text() {
         assert_eq!(
             normalize_generated_display_name("Unknown", "feature/issue-1644"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_normalize_generated_display_name_rejects_code_fragment() {
+        assert_eq!(
+            normalize_generated_display_name(
+                "&str, lang: SummaryLanguage) -> Option<String>",
+                "feature/issue-1644"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_build_issue_display_name_map_with_formats_issue_title() {
+        let names = vec!["feature/issue-1644".to_string(), "develop".to_string()];
+        let issue_names = build_issue_display_name_map_with(names.iter(), |number| {
+            assert_eq!(number, 1644);
+            Ok((1644, "Worktree管理".to_string()))
+        });
+
+        assert_eq!(
+            issue_names.get("feature/issue-1644"),
+            Some(&"#1644 Worktree管理".to_string())
+        );
+        assert!(!issue_names.contains_key("develop"));
+    }
+
+    #[test]
+    fn test_resolve_auto_display_name_prefers_issue_title_over_ai_summary() {
+        let mut issue_names = HashMap::new();
+        issue_names.insert(
+            "feature/issue-1644".to_string(),
+            "#1644 Worktree管理".to_string(),
+        );
+
+        assert_eq!(
+            resolve_auto_display_name(
+                "feature/issue-1644",
+                &issue_names,
+                Some("認証フローのエラーハンドリングを改善すること")
+            ),
+            Some("#1644 Worktree管理".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_auto_display_name_keeps_develop_raw() {
+        let mut issue_names = HashMap::new();
+        issue_names.insert("develop".to_string(), "#9999 Should not use".to_string());
+
+        assert_eq!(
+            resolve_auto_display_name(
+                "develop",
+                &issue_names,
+                Some("認証フローのエラーハンドリングを改善すること")
+            ),
             None
         );
     }

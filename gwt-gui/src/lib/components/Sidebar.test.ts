@@ -2938,6 +2938,33 @@ describe("Sidebar", () => {
     });
   });
 
+  it("renders issue-backed display_name as-is", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [
+          {
+            ...branchFixture,
+            name: "feature/issue-1644",
+            display_name: "#1644 Worktree管理",
+          },
+        ];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await waitFor(() => {
+      const branchNameSpan = rendered.container.querySelector("button.branch-item .branch-name");
+      expect(branchNameSpan?.textContent?.trim()).toBe("#1644 Worktree管理");
+      expect(branchNameSpan?.getAttribute("title")).toBe("feature/issue-1644");
+    });
+  });
+
   it("adds horizontal-scroll class only to the selected branch name", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") {
