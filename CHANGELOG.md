@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.13.0] - 2026-03-18
+
+### Bug Fixes
+
+- **docker:** Normalize compose file paths for Windows (#1166, #1467)
+- Windows終了時のプロセス残留と単一インスタンスロック不具合を修正 (#1140)
+- **docker:** Fall back to main worktree for Docker detection on remote branches (#1282)
+- Enable microphone access in Tauri webview for voice input (#1614)
+- **worktree:** Prioritize issue-backed sidebar labels (#1683)
+
+### Features
+
+- CLAUDE.md/AGENTS.md/GEMINI.md にスキルカタログ管理ブロックを自動注入 (#1579)
+- **assistant:** Cache and surface startup analysis (#1685)
+
 ## [8.12.0] - 2026-03-17
 
 ### Bug Fixes
