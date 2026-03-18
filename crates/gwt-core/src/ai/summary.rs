@@ -641,27 +641,53 @@ fn is_unknown_placeholder(text: &str) -> bool {
     )
 }
 
-fn infer_purpose_from_branch(branch_name: &str, lang: SummaryLanguage) -> String {
-    let topic = branch_name
+fn issue_branch_label(branch_name: &str) -> Option<String> {
+    let normalized = branch_name.trim().trim_start_matches("origin/");
+    for part in normalized.split('/') {
+        let Some(rest) = part.strip_prefix("issue-") else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return Some(format!("#{digits}"));
+        }
+    }
+    None
+}
+
+fn humanize_branch_topic(branch_name: &str) -> Option<String> {
+    if let Some(issue) = issue_branch_label(branch_name) {
+        return Some(issue);
+    }
+
+    let normalized = branch_name.trim().trim_start_matches("origin/");
+    let topic = normalized
         .split('/')
         .next_back()
-        .unwrap_or(branch_name)
-        .replace(['-', '_'], " ");
+        .unwrap_or(normalized)
+        .trim();
+    if topic.is_empty() {
+        return None;
+    }
+
+    let humanized = topic.replace(['-', '_'], " ");
+    let normalized_spaces = humanized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized_spaces.is_empty() {
+        None
+    } else {
+        Some(normalized_spaces)
+    }
+}
+
+fn infer_purpose_from_branch(branch_name: &str, lang: SummaryLanguage) -> String {
+    let topic = humanize_branch_topic(branch_name);
     match lang {
-        SummaryLanguage::Ja => {
-            if topic.trim().is_empty() {
-                "このWorktreeで進めている成果を達成すること".to_string()
-            } else {
-                format!("{topic} に関する成果をこのWorktreeで達成すること")
-            }
-        }
-        SummaryLanguage::En => {
-            if topic.trim().is_empty() {
-                "Deliver the primary outcome for this worktree".to_string()
-            } else {
-                format!("Deliver the outcome intended by branch '{branch_name}'")
-            }
-        }
+        SummaryLanguage::Ja => topic
+            .map(|topic| format!("{topic} を進める"))
+            .unwrap_or_else(|| "このWorktreeの成果を進める".to_string()),
+        SummaryLanguage::En => topic
+            .map(|topic| format!("Advance {topic}"))
+            .unwrap_or_else(|| "Advance this worktree outcome".to_string()),
     }
 }
 
@@ -2488,7 +2514,7 @@ mod tests {
             SummaryLanguage::En,
         );
         assert_eq!(derived.source, PurposeSource::Inferred);
-        assert!(derived.text.contains("feature/project-mode"));
+        assert_eq!(derived.text, "Advance project mode");
     }
 
     #[test]
@@ -2505,8 +2531,20 @@ mod tests {
             SummaryLanguage::Ja,
         );
         assert_eq!(derived.source, PurposeSource::Inferred);
-        assert!(derived.text.contains("成果をこのWorktreeで達成すること"));
+        assert_eq!(derived.text, "project mode を進める");
         assert!(!derived.text.contains("Deliver the outcome intended"));
+    }
+
+    #[test]
+    fn test_infer_purpose_from_branch_shortens_issue_branch_label() {
+        assert_eq!(
+            infer_purpose_from_branch("feature/issue-1644", SummaryLanguage::Ja),
+            "#1644 を進める"
+        );
+        assert_eq!(
+            infer_purpose_from_branch("feature/issue-1644", SummaryLanguage::En),
+            "Advance #1644"
+        );
     }
 
     #[test]

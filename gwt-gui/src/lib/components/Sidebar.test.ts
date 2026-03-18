@@ -2937,4 +2937,49 @@ describe("Sidebar", () => {
       expect(branchNameSpan?.getAttribute("title")).toBe("feature/auth-impl");
     });
   });
+
+  it("adds horizontal-scroll class only to the selected branch name", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [
+          {
+            ...branchFixture,
+            name: "feature/auth-impl",
+            display_name: "A very long worktree label for the selected branch",
+          },
+          {
+            ...branchFixture,
+            name: "feature/other-work",
+            display_name: "Another long worktree label for the unselected branch",
+          },
+        ];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const selectedBranch = {
+      ...branchFixture,
+      name: "feature/auth-impl",
+      display_name: "A very long worktree label for the selected branch",
+    };
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      selectedBranch,
+    });
+
+    await waitFor(() => {
+      const selectedName = rendered.container.querySelector(
+        'button[data-branch-name="feature/auth-impl"] .branch-name'
+      );
+      const unselectedName = rendered.container.querySelector(
+        'button[data-branch-name="feature/other-work"] .branch-name'
+      );
+
+      expect(selectedName?.classList.contains("scroll-active")).toBe(true);
+      expect(unselectedName?.classList.contains("scroll-active")).toBe(false);
+    });
+  });
 });

@@ -273,6 +273,117 @@ struct WorktreeBranchListing {
     branch_names: Vec<String>,
 }
 
+fn is_unknown_display_name(text: &str) -> bool {
+    matches!(
+        text.trim(),
+        "" | "Unknown" | "(Unknown)" | "Not available" | "(Not available)" | "不明" | "(不明)"
+    )
+}
+
+fn extract_issue_label(branch_name: &str) -> Option<String> {
+    let normalized = branch_name.trim().trim_start_matches("origin/");
+    for part in normalized.split('/') {
+        let Some(rest) = part.strip_prefix("issue-") else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return Some(format!("#{digits}"));
+        }
+    }
+    None
+}
+
+fn branch_topic_label(branch_name: &str) -> Option<String> {
+    if let Some(issue) = extract_issue_label(branch_name) {
+        return Some(issue);
+    }
+
+    let normalized = branch_name.trim().trim_start_matches("origin/");
+    let topic = normalized
+        .split('/')
+        .next_back()
+        .unwrap_or(normalized)
+        .trim();
+    if topic.is_empty() {
+        return None;
+    }
+
+    let humanized = topic.replace(['-', '_'], " ");
+    let normalized_spaces = humanized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized_spaces.is_empty() {
+        None
+    } else {
+        Some(normalized_spaces)
+    }
+}
+
+fn strip_inferred_prefix(text: &str) -> &str {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("（推定）") {
+        return rest.trim();
+    }
+    if let Some(rest) = trimmed.strip_prefix("(Inferred)") {
+        return rest.trim();
+    }
+    trimmed
+}
+
+fn first_display_line(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+}
+
+fn normalize_generated_display_name(raw: &str, branch_name: &str) -> Option<String> {
+    let mut candidate = strip_inferred_prefix(first_display_line(raw))
+        .trim()
+        .to_string();
+    if candidate.is_empty() || is_unknown_display_name(&candidate) {
+        return None;
+    }
+
+    if candidate.starts_with("Deliver the outcome intended by branch '")
+        || candidate == "Deliver the primary outcome for this worktree"
+        || candidate == "Advance this worktree outcome"
+    {
+        return branch_topic_label(branch_name);
+    }
+
+    for suffix in [
+        " に関する成果をこのWorktreeで達成すること",
+        "に関する成果をこのWorktreeで達成すること",
+        " をこのWorktreeで達成すること",
+        "をこのWorktreeで達成すること",
+    ] {
+        if let Some(prefix) = candidate.strip_suffix(suffix) {
+            let trimmed = prefix.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+            return branch_topic_label(branch_name);
+        }
+    }
+
+    if candidate == "このWorktreeで進めている成果を達成すること" {
+        return branch_topic_label(branch_name);
+    }
+
+    if let Some(prefix) = candidate.strip_suffix("こと") {
+        let trimmed = prefix.trim();
+        if !trimmed.is_empty() {
+            candidate = trimmed.to_string();
+        }
+    }
+
+    if is_unknown_display_name(&candidate) {
+        return None;
+    }
+
+    Some(candidate)
+}
+
 /// Apply session branch meta (agent_status + display_name) to a BranchInfo.
 /// `branch_key` is the lookup key in the meta map (may differ from info.name for remote branches).
 fn apply_session_meta(
@@ -292,8 +403,10 @@ fn apply_session_meta(
         if let Some(cache) = summary_cache {
             if let Some(summary) = cache.get(branch_key) {
                 if let Some(overview) = &summary.task_overview {
-                    if !overview.is_empty() {
-                        info.display_name = Some(overview.clone());
+                    if let Some(display_name) =
+                        normalize_generated_display_name(overview, branch_key)
+                    {
+                        info.display_name = Some(display_name);
                     }
                 }
             }
@@ -708,6 +821,36 @@ mod tests {
             json.contains(r#""display_name":null"#),
             "JSON should contain display_name:null: {}",
             json
+        );
+    }
+
+    #[test]
+    fn test_normalize_generated_display_name_strips_inferred_prefix_and_suffix() {
+        assert_eq!(
+            normalize_generated_display_name(
+                "（推定）認証フローのエラーハンドリングを改善すること",
+                "feature/auth-flow"
+            ),
+            Some("認証フローのエラーハンドリングを改善する".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_generated_display_name_humanizes_branch_fallback_text() {
+        assert_eq!(
+            normalize_generated_display_name(
+                "(Inferred) Deliver the outcome intended by branch 'feature/issue-1644'",
+                "feature/issue-1644"
+            ),
+            Some("#1644".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_generated_display_name_returns_none_for_unknown_text() {
+        assert_eq!(
+            normalize_generated_display_name("Unknown", "feature/issue-1644"),
+            None
         );
     }
 }

@@ -1386,7 +1386,11 @@
                   onclick={(e) => e.stopPropagation()}
                 />
               {:else}
-                <span class="branch-name" title={branch.display_name ? branch.name : undefined}>{branch.display_name ?? branch.name}</span>
+                <span
+                  class="branch-name"
+                  class:scroll-active={isSelectedBranch(branch)}
+                  title={branch.display_name ? branch.name : undefined}
+                >{branch.display_name ?? branch.name}</span>
               {/if}
               {#if branch.last_tool_usage}
                 <span class="tool-usage {toolUsageClass(branch.last_tool_usage)}">
@@ -1863,12 +1867,26 @@
   }
 
   .branch-name {
+    display: block;
     font-size: var(--ui-font-base);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
     min-width: 0;
+  }
+
+  .branch-name.scroll-active {
+    overflow-x: auto;
+    overflow-y: hidden;
+    text-overflow: clip;
+    scrollbar-width: thin;
+    scrollbar-gutter: stable both-edges;
+    overscroll-behavior-inline: contain;
+  }
+
+  .branch-name.scroll-active::-webkit-scrollbar {
+    height: 4px;
   }
 
   .branch-rename-input {
