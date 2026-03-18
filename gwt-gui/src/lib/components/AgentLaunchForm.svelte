@@ -173,8 +173,6 @@
   let detectAgentsRequestSeq = 0;
   let refreshAiConfiguredRequestSeq = 0;
 
-  // AI prefix classification state (gwt-spec issue)
-  let prefixClassifying: boolean = $state(false);
   let classifyRequestId: number = $state(0);
   let prefixCache: Map<number, BranchPrefix> = $state(new Map());
 
@@ -724,19 +722,16 @@
     const labelPrefix = determinePrefixFromLabels(issue.labels);
     if (labelPrefix) {
       newBranchPrefix = labelPrefix;
-      prefixClassifying = false;
       return;
     }
     // 2. Cache hit
     const cached = prefixCache.get(issue.number);
     if (cached) {
       newBranchPrefix = cached;
-      prefixClassifying = false;
       return;
     }
-    // 3. AI fallback
-    newBranchPrefix = "" as BranchPrefix;
-    prefixClassifying = true;
+    // 3. AI fallback, with feature/ as the safe default when AI is unavailable or invalid.
+    newBranchPrefix = "feature/" as BranchPrefix;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<ClassifyResult>("classify_issue_branch_prefix", {
@@ -755,12 +750,8 @@
         return;
       }
       const prefix = classifyIssuePrefix(result, BRANCH_PREFIXES);
-      if (prefix) {
-        newBranchPrefix = prefix;
-        prefixCache.set(issue.number, prefix);
-        return;
-      }
-      // Invalid response, AI not configured, or error → leave unselected
+      newBranchPrefix = prefix;
+      prefixCache.set(issue.number, prefix);
     } catch {
       if (
         isStaleIssueClassifyRequest(
@@ -771,10 +762,6 @@
         )
       ) {
         return;
-      }
-    } finally {
-      if (reqId === classifyRequestId) {
-        prefixClassifying = false;
       }
     }
   }
@@ -1369,17 +1356,7 @@
               <div class="field">
                 <span class="field-label">Branch Name</span>
                 <div class="branch-name-row">
-                  <select bind:value={newBranchPrefix} disabled={prefixClassifying}>
-                    {#if newBranchPrefix === ""}
-                      <option value="" disabled>Select...</option>
-                    {/if}
-                    {#each BRANCH_PREFIXES as p (p)}
-                      <option value={p}>{p}</option>
-                    {/each}
-                  </select>
-                  {#if prefixClassifying}
-                    <span class="prefix-classifying-spinner" title="Classifying...">&#x21BB;</span>
-                  {/if}
+                  <span class="branch-prefix-value">{newBranchPrefix}</span>
                   <input
                     type="text"
                     value={issueBranchSuffix}
@@ -1854,7 +1831,7 @@
               ? !existingBranch.trim()
               : !baseBranch.trim() ||
                 (newBranchTab === "fromIssue"
-                  ? !canLaunchFromIssue(selectedIssue) || newBranchPrefix === ""
+                  ? !canLaunchFromIssue(selectedIssue)
                   : branchNamingMode === "ai-suggest"
                     ? !aiDescription.trim()
                     : newBranchPrefix === "" || !newBranchFullName.trim()))
@@ -2062,21 +2039,22 @@
     flex: 0 0 auto;
   }
 
+  .branch-prefix-value {
+    width: 120px;
+    flex: 0 0 auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    background: var(--bg-elevated);
+    color: var(--text);
+    font-family: var(--font-mono);
+    line-height: 1.2;
+    box-sizing: border-box;
+  }
+
   .branch-name-row input {
     flex: 1;
     min-width: 0;
-  }
-
-  .prefix-classifying-spinner {
-    flex: 0 0 auto;
-    font-size: var(--ui-font-lg);
-    color: var(--text-muted);
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
   }
 
   .check-row {
