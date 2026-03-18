@@ -43,7 +43,10 @@
   type FetchSnapshotResult =
     | { ok: true; snapshot: FilterCacheEntry }
     | { ok: false; errorMessage: string };
-  type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  type TauriInvoke = <T>(
+    command: string,
+    args?: Record<string, unknown>,
+  ) => Promise<T>;
   type TauriEventListen = SidebarEventListen;
 
   let {
@@ -96,7 +99,8 @@
     ghCliStatus?: GhCliStatus | null;
   } = $props();
 
-  const SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY = "gwt.sidebar.worktreeSummaryHeight";
+  const SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY =
+    "gwt.sidebar.worktreeSummaryHeight";
   const DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX = 360;
   const MIN_WORKTREE_SUMMARY_HEIGHT_PX = 160;
   const MIN_BRANCH_LIST_HEIGHT_PX = 120;
@@ -248,7 +252,8 @@
         start();
         if (prPollingBootstrappedPath !== path) return;
         if (isTextEntryFocused()) return;
-        if (Date.now() - lastRefreshAt < PR_POLL_VISIBILITY_REFRESH_MIN_GAP_MS) return;
+        if (Date.now() - lastRefreshAt < PR_POLL_VISIBILITY_REFRESH_MIN_GAP_MS)
+          return;
         clearTimer();
         void refresh(false);
       }
@@ -280,7 +285,11 @@
           const { repoKey, branch: eventBranch, status } = event.payload;
           if (!pollingRepoKey || repoKey !== pollingRepoKey) return;
           if (status.retrying) return;
-          const next = applyPrStatusUpdate(pollingStatuses, eventBranch, status);
+          const next = applyPrStatusUpdate(
+            pollingStatuses,
+            eventBranch,
+            status,
+          );
           if (next) pollingStatuses = next;
         });
         if (cancelled) {
@@ -310,7 +319,6 @@
     if (pollingGhCliStatus) return pollingGhCliStatus;
     return ghCliStatus;
   });
-
 
   // Derived selected PR status/number for WorktreeSummaryPanel
   let selectedPrStatus = $derived.by(() => {
@@ -408,9 +416,12 @@
   }
 
   function loadSummaryHeight(): number {
-    if (typeof window === "undefined") return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
+    if (typeof window === "undefined")
+      return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
     try {
-      const raw = window.localStorage.getItem(SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY);
+      const raw = window.localStorage.getItem(
+        SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY,
+      );
       if (!raw) return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
       const parsed = Number(raw);
       if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -427,7 +438,7 @@
     try {
       window.localStorage.setItem(
         SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY,
-        String(Math.max(MIN_WORKTREE_SUMMARY_HEIGHT_PX, Math.round(heightPx)))
+        String(Math.max(MIN_WORKTREE_SUMMARY_HEIGHT_PX, Math.round(heightPx))),
       );
     } catch {
       // Ignore localStorage failures.
@@ -438,7 +449,7 @@
     const stackHeight = branchSummaryStackEl?.clientHeight ?? 0;
     const minSummaryHeight = Math.max(
       MIN_WORKTREE_SUMMARY_HEIGHT_PX,
-      Math.round(nextHeightPx)
+      Math.round(nextHeightPx),
     );
 
     if (!Number.isFinite(stackHeight) || stackHeight <= 0) {
@@ -447,7 +458,7 @@
 
     const availableSummaryHeight = Math.max(
       0,
-      stackHeight - MIN_BRANCH_LIST_HEIGHT_PX - SUMMARY_RESIZE_HANDLE_HEIGHT_PX
+      stackHeight - MIN_BRANCH_LIST_HEIGHT_PX - SUMMARY_RESIZE_HANDLE_HEIGHT_PX,
     );
 
     if (availableSummaryHeight < MIN_WORKTREE_SUMMARY_HEIGHT_PX) {
@@ -484,6 +495,7 @@
   // Inline rename state
   let renamingBranch: string | null = $state(null);
   let renameValue: string = $state("");
+  let renameInputEl: HTMLInputElement | null = $state(null);
 
   let resizing = false;
   let resizePointerId: number | null = null;
@@ -499,14 +511,18 @@
     if (!searchQuery) return sortedBranches;
 
     const normalizedQuery = searchQuery.toLowerCase();
-    return sortedBranches.filter((b) =>
-      b.name.toLowerCase().includes(normalizedQuery) ||
-      (b.display_name && b.display_name.toLowerCase().includes(normalizedQuery))
+    return sortedBranches.filter(
+      (b) =>
+        b.name.toLowerCase().includes(normalizedQuery) ||
+        (b.display_name &&
+          b.display_name.toLowerCase().includes(normalizedQuery)),
     );
   });
   let selectedBranchIndex = $derived.by(() => {
     if (selectedBranch === null || filteredBranches.length === 0) return -1;
-    return filteredBranches.findIndex((branch) => branch.name === selectedBranch!.name);
+    return filteredBranches.findIndex(
+      (branch) => branch.name === selectedBranch!.name,
+    );
   });
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
 
@@ -542,7 +558,8 @@
     if (key === lastFetchKey) return;
 
     const isInitialRun = lastForceKey === "";
-    const projectChanged = lastProjectPath !== "" && projectPath !== lastProjectPath;
+    const projectChanged =
+      lastProjectPath !== "" && projectPath !== lastProjectPath;
     const forceRefreshTriggered = !isInitialRun && forceKey !== lastForceKey;
 
     lastFetchKey = key;
@@ -592,7 +609,7 @@
               next.delete(branch);
               deletingBranches = next;
             }
-          }
+          },
         );
         if (cancelled) {
           unlistenFn();
@@ -697,7 +714,6 @@
     };
   });
 
-
   function fetchBranches(token: number, forceRefresh = false) {
     const filter = activeFilter;
     const path = projectPath;
@@ -708,7 +724,9 @@
       applyCacheEntry(cached);
       const ttlElapsed = Date.now() - cached.fetchedAtMs;
       const shouldRefresh =
-        forceRefresh || cached.dirty || ttlElapsed >= FILTER_BACKGROUND_REFRESH_TTL_MS;
+        forceRefresh ||
+        cached.dirty ||
+        ttlElapsed >= FILTER_BACKGROUND_REFRESH_TTL_MS;
       if (!shouldRefresh) return;
       void refreshFilterSnapshot(filter, path, cacheKey, token, true, true);
       return;
@@ -746,7 +764,7 @@
         cacheKey,
         token,
         true,
-        filter === activeFilter
+        filter === activeFilter,
       );
     }
   }
@@ -757,7 +775,7 @@
     cacheKey: string,
     token: number,
     background: boolean,
-    applyToActiveView: boolean
+    applyToActiveView: boolean,
   ) {
     const hadFallbackCache = !!(filterCache.get(filter)?.cacheKey === cacheKey);
     const result = await loadFilterSnapshot(filter, path, cacheKey);
@@ -798,7 +816,7 @@
   function loadFilterSnapshot(
     filter: FilterType,
     path: string,
-    cacheKey: string
+    cacheKey: string,
   ): Promise<FetchSnapshotResult> {
     const inflightKey = `${filter}::${cacheKey}`;
     const inflight = inflightFetches.get(inflightKey);
@@ -814,16 +832,18 @@
   async function fetchFilterSnapshot(
     filter: FilterType,
     path: string,
-    cacheKey: string
+    cacheKey: string,
   ): Promise<FetchSnapshotResult> {
     try {
       const invoke = await getInvoke();
 
       if (filter === "Local") {
-        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path });
-        const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }).catch(
-          () => [] as WorktreeInfo[]
-        );
+        const next = await invoke<BranchInfo[]>("list_worktree_branches", {
+          projectPath: path,
+        });
+        const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
+          projectPath: path,
+        }).catch(() => [] as WorktreeInfo[]);
         return {
           ok: true,
           snapshot: {
@@ -838,12 +858,16 @@
       }
 
       if (filter === "Remote") {
-        const next = await invoke<BranchInfo[]>("list_remote_branches", { projectPath: path });
+        const next = await invoke<BranchInfo[]>("list_remote_branches", {
+          projectPath: path,
+        });
         return {
           ok: true,
           snapshot: {
             branches: next,
-            remoteBranchNames: new Set(next.map((branch) => branch.name.trim())),
+            remoteBranchNames: new Set(
+              next.map((branch) => branch.name.trim()),
+            ),
             worktreeMap: new Map(),
             cacheKey,
             fetchedAtMs: Date.now(),
@@ -869,15 +893,17 @@
         }
       }
 
-      const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }).catch(
-        () => [] as WorktreeInfo[]
-      );
+      const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
+        projectPath: path,
+      }).catch(() => [] as WorktreeInfo[]);
 
       return {
         ok: true,
         snapshot: {
           branches: merged,
-          remoteBranchNames: new Set(remote.map((branch) => branch.name.trim())),
+          remoteBranchNames: new Set(
+            remote.map((branch) => branch.name.trim()),
+          ),
           worktreeMap: buildWorktreeMap(worktrees),
           cacheKey,
           fetchedAtMs: Date.now(),
@@ -896,7 +922,9 @@
     return buildFilterCacheKeyHelper(filter, path, refreshKey, localRefreshKey);
   }
 
-  function buildWorktreeMap(worktrees: WorktreeInfo[]): Map<string, WorktreeInfo> {
+  function buildWorktreeMap(
+    worktrees: WorktreeInfo[],
+  ): Map<string, WorktreeInfo> {
     return buildWorktreeMapHelper(worktrees);
   }
 
@@ -941,7 +969,10 @@
     if (!tauriEventListenPromise) {
       tauriEventListenPromise = import("@tauri-apps/api/event").then((mod) =>
         resolveEventListen(
-          mod as { listen?: TauriEventListen; default?: { listen?: TauriEventListen } },
+          mod as {
+            listen?: TauriEventListen;
+            default?: { listen?: TauriEventListen };
+          },
         ),
       );
     }
@@ -1055,13 +1086,21 @@
 
   function handleSummaryResizePointerMove(event: PointerEvent) {
     if (!summaryResizing) return;
-    if (summaryResizePointerId !== null && event.pointerId !== summaryResizePointerId) return;
+    if (
+      summaryResizePointerId !== null &&
+      event.pointerId !== summaryResizePointerId
+    )
+      return;
     const delta = event.clientY - summaryResizeStartY;
     setSummaryHeight(summaryResizeStartHeight - delta);
   }
 
   function handleSummaryResizePointerUp(event: PointerEvent) {
-    if (summaryResizePointerId !== null && event.pointerId !== summaryResizePointerId) return;
+    if (
+      summaryResizePointerId !== null &&
+      event.pointerId !== summaryResizePointerId
+    )
+      return;
     stopSummaryResize();
   }
 
@@ -1096,7 +1135,7 @@
   function focusBranchButtonByIndex(index: number) {
     queueMicrotask(() => {
       const button = branchListEl?.querySelector<HTMLButtonElement>(
-        `[data-branch-index="${index}"]`
+        `[data-branch-index="${index}"]`,
       );
       if (!button) return;
       button.focus();
@@ -1108,7 +1147,8 @@
 
   function isAgentBranchActive(branch: BranchInfo): boolean {
     if (activeFilter === "Remote") return false;
-    if (activeFilter === "All" && remoteBranchNames.has(branch.name)) return false;
+    if (activeFilter === "All" && remoteBranchNames.has(branch.name))
+      return false;
     return agentTabBranchSet.has(normalizeTabBranch(branch.name));
   }
 
@@ -1122,7 +1162,7 @@
     if (filteredBranches.length === 0) return;
 
     const focusedBranchIndex = Array.from(
-      branchListEl?.querySelectorAll<HTMLButtonElement>(".branch-item") ?? []
+      branchListEl?.querySelectorAll<HTMLButtonElement>(".branch-item") ?? [],
     ).findIndex((el) => el === document.activeElement);
     const currentIndex =
       selectedBranchIndex >= 0
@@ -1255,6 +1295,14 @@
     renameValue = "";
   }
 
+  $effect(() => {
+    if (!renamingBranch || !renameInputEl) return;
+    queueMicrotask(() => {
+      if (!renamingBranch || !renameInputEl) return;
+      renameInputEl.focus();
+      renameInputEl.select();
+    });
+  });
 </script>
 
 <aside
@@ -1353,7 +1401,11 @@
                 class:agent-active={isAgentBranchActive(branch)}
                 class:agent-running={isAgentRunning(branch)}
                 aria-hidden="true"
-                title={isAgentBranchActive(branch) ? (isAgentRunning(branch) ? "Agent is running" : "Agent tab is open") : ""}
+                title={isAgentBranchActive(branch)
+                  ? isAgentRunning(branch)
+                    ? "Agent is running"
+                    : "Agent tab is open"
+                  : ""}
               >
                 {#if isAgentRunning(branch)}
                   <span class="agent-pulse-dot"></span>
@@ -1374,10 +1426,10 @@
               {/if}
               {#if renamingBranch === branch.name}
                 <input
+                  bind:this={renameInputEl}
                   class="branch-rename-input"
                   type="text"
                   bind:value={renameValue}
-                  autofocus
                   onblur={commitRename}
                   onkeydown={(e) => {
                     if (e.key === "Enter") commitRename();
@@ -1390,10 +1442,13 @@
                   class="branch-name"
                   class:scroll-active={isSelectedBranch(branch)}
                   title={branch.display_name ? branch.name : undefined}
-                >{branch.display_name ?? branch.name}</span>
+                  >{branch.display_name ?? branch.name}</span
+                >
               {/if}
               {#if branch.last_tool_usage}
-                <span class="tool-usage {toolUsageClass(branch.last_tool_usage)}">
+                <span
+                  class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
+                >
                   {branch.last_tool_usage}
                 </span>
               {/if}
@@ -1407,7 +1462,9 @@
               {#if activePrStatuses[branch.name]}
                 {@const prSt = activePrStatuses[branch.name]!}
                 <span
-                  class="pr-badge {prBadgeClass(prSt)}{prSt.retrying ? ' pulse' : ''}"
+                  class="pr-badge {prBadgeClass(prSt)}{prSt.retrying
+                    ? ' pulse'
+                    : ''}"
                   title="PR #{prSt.number}"
                 >
                   #{prSt.number}
@@ -1425,10 +1482,7 @@
         onpointerdown={handleSummaryResizePointerDown}
         onkeydown={handleSummaryResizeKeydown}
       ></button>
-      <div
-        class="worktree-summary-wrap"
-        style="height: {summaryHeightPx}px;"
-      >
+      <div class="worktree-summary-wrap" style="height: {summaryHeightPx}px;">
         <WorktreeSummaryPanel
           {projectPath}
           {selectedBranch}
@@ -1438,10 +1492,10 @@
           prNumber={selectedPrNumber}
           {selectedPrStatus}
           ghCliStatus={effectiveGhCliStatus}
-          onLaunchAgent={onLaunchAgent}
-          onQuickLaunch={onQuickLaunch}
-          onNewTerminal={onNewTerminal}
-          onOpenDocsEditor={onOpenDocsEditor}
+          {onLaunchAgent}
+          {onQuickLaunch}
+          {onNewTerminal}
+          {onOpenDocsEditor}
           {onOpenCiLog}
           onDisplayNameChanged={() => fetchBranches(fetchToken, true)}
         />
@@ -1501,7 +1555,6 @@
     </div>
   {/if}
 {/if}
-
 
 <style>
   .sidebar {
@@ -1931,8 +1984,13 @@
   }
 
   @keyframes agent-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.2; }
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.2;
+    }
   }
 
   /* Reduced-motion fallback: show "@" instead of animated dot */
@@ -2083,8 +2141,13 @@
   }
 
   @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.4;
+    }
   }
 
   .pulse {

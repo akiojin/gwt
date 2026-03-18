@@ -736,6 +736,7 @@ pub fn build_app(
             crate::commands::recent_projects::get_recent_projects,
             crate::commands::issue::fetch_github_issues,
             crate::commands::issue::fetch_github_issue_detail,
+            crate::commands::issue::search_github_issue_catalog,
             crate::commands::issue::fetch_branch_linked_issue,
             crate::commands::issue::check_gh_cli_status,
             crate::commands::issue::find_existing_issue_branch,

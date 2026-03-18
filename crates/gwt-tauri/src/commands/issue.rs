@@ -9,6 +9,7 @@ use gwt_core::config::ProfilesConfig;
 use gwt_core::git::{
     create_linked_branch, fetch_issue_detail, fetch_issues_with_options, find_branch_for_issue,
     find_branches_for_issues, get_spec_issue_detail, is_gh_cli_authenticated, is_gh_cli_available,
+    search_issues_with_query,
 };
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
@@ -507,6 +508,33 @@ pub async fn fetch_github_issue_detail(
         StructuredError::internal(
             &format!("Task join failed: {e}"),
             "fetch_github_issue_detail",
+        )
+    })?
+}
+
+/// Search GitHub issues/specs across the repository with a free-text query.
+#[tauri::command]
+pub async fn search_github_issue_catalog(
+    project_path: String,
+    query: String,
+    state: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<IssueInfo>, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "search_github_issue_catalog"))?;
+        let state = state.unwrap_or_else(|| "open".to_string());
+        let limit = limit.unwrap_or(30);
+        let issues = search_issues_with_query(&repo_path, &query, limit, &state, false, "all")
+            .map_err(|e| StructuredError::internal(e.as_str(), "search_github_issue_catalog"))?;
+        Ok(issues.into_iter().map(issue_to_info).collect())
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "search_github_issue_catalog",
         )
     })?
 }

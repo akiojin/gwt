@@ -197,6 +197,90 @@ pub fn fetch_open_issues(
     fetch_issues_with_options(repo_path, page, per_page, state, true, "all")
 }
 
+/// Search issues using a free-text query.
+///
+/// Returns full issue rows suitable for the GitHub Issue/SPEC search UI. Numeric tokens such as
+/// `#1684` or `1684` are resolved as exact issue matches and placed first.
+pub fn search_issues_with_query(
+    repo_path: &Path,
+    query: &str,
+    per_page: u32,
+    state: &str,
+    include_body: bool,
+    category: &str,
+) -> Result<Vec<GitHubIssue>, String> {
+    if per_page == 0 {
+        return Err("per_page must be greater than 0".to_string());
+    }
+
+    let trimmed_query = query.trim();
+    if trimmed_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repo_slug = resolve_repo_slug(repo_path);
+    let category = parse_issue_category(category);
+    let state_value = if state == "closed" { "closed" } else { "open" };
+    let json_fields = if include_body {
+        "number,title,updatedAt,labels,body,state,url,assignees,comments,milestone"
+    } else {
+        "number,title,updatedAt,labels,state,url,assignees,comments,milestone"
+    };
+    let search_query = build_issue_search_query(trimmed_query, category);
+    let limit = per_page.to_string();
+
+    let mut args = vec![
+        "issue".to_string(),
+        "list".to_string(),
+        "--state".to_string(),
+        state_value.to_string(),
+        "--json".to_string(),
+        json_fields.to_string(),
+        "--limit".to_string(),
+        limit,
+        "--search".to_string(),
+        search_query,
+    ];
+
+    if let Some(slug) = repo_slug.as_deref() {
+        args.push("--repo".to_string());
+        args.push(slug.to_string());
+    }
+
+    let output = run_gh_output_with_repair(repo_path, &args)
+        .map_err(|e| format!("Failed to execute gh CLI: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue list failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let searched = parse_gh_issues_json(&stdout)?;
+
+    let mut seen_numbers = HashSet::new();
+    let mut combined = Vec::new();
+    for issue_number in extract_query_issue_numbers(trimmed_query) {
+        if !seen_numbers.insert(issue_number) {
+            continue;
+        }
+        let Ok(issue) = fetch_issue_detail(repo_path, issue_number) else {
+            continue;
+        };
+        if !issue_matches_state(&issue, state_value) || !issue_matches_category(&issue, category) {
+            continue;
+        }
+        combined.push(issue);
+    }
+
+    for issue in searched {
+        if seen_numbers.insert(issue.number) {
+            combined.push(issue);
+        }
+    }
+
+    Ok(combined)
+}
+
 /// Fetch issues with category/body options.
 ///
 /// `category` can be `"all"`, `"issues"` (exclude `gwt-spec`), or `"specs"` (only `gwt-spec`).
@@ -332,6 +416,16 @@ fn issue_search_api_endpoint(
 
     let q = query_parts.join("+");
     format!("search/issues?q={q}&per_page={per_page}&page={page}")
+}
+
+fn build_issue_search_query(query: &str, category: IssueCategory) -> String {
+    let mut combined = query.trim().to_string();
+    match category {
+        IssueCategory::Specs => combined.push_str(&format!(" label:{SPEC_LABEL}")),
+        IssueCategory::Issues => combined.push_str(&format!(" -label:{SPEC_LABEL}")),
+        IssueCategory::All => {}
+    }
+    combined
 }
 
 /// Parse a GitHub REST Search API response into `FetchIssuesResult`.
@@ -804,6 +898,35 @@ fn parse_issue_search_tokens(query: &str) -> Vec<IssueSearchToken> {
             IssueSearchToken::Title(token.to_lowercase())
         })
         .collect()
+}
+
+fn extract_query_issue_numbers(query: &str) -> Vec<u64> {
+    parse_issue_search_tokens(query)
+        .into_iter()
+        .filter_map(|token| match token {
+            IssueSearchToken::Number(number) => number.parse::<u64>().ok(),
+            IssueSearchToken::Title(_) => None,
+        })
+        .collect()
+}
+
+fn issue_matches_state(issue: &GitHubIssue, state: &str) -> bool {
+    match state {
+        "closed" => issue.state.eq_ignore_ascii_case("closed"),
+        _ => !issue.state.eq_ignore_ascii_case("closed"),
+    }
+}
+
+fn issue_matches_category(issue: &GitHubIssue, category: IssueCategory) -> bool {
+    let is_spec = issue
+        .labels
+        .iter()
+        .any(|label| label.name.eq_ignore_ascii_case(SPEC_LABEL));
+    match category {
+        IssueCategory::All => true,
+        IssueCategory::Issues => !is_spec,
+        IssueCategory::Specs => is_spec,
+    }
 }
 
 /// Filter issues by search query.
@@ -1822,6 +1945,50 @@ mod tests {
 
         let filtered = filter_issues_by_title(&issues, "");
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_build_issue_search_query_for_all_category() {
+        assert_eq!(
+            build_issue_search_query("spec 1684", IssueCategory::All),
+            "spec 1684"
+        );
+    }
+
+    #[test]
+    fn test_build_issue_search_query_for_specs_category() {
+        assert_eq!(
+            build_issue_search_query("vector search", IssueCategory::Specs),
+            "vector search label:gwt-spec"
+        );
+    }
+
+    #[test]
+    fn test_build_issue_search_query_for_issues_category() {
+        assert_eq!(
+            build_issue_search_query("vector search", IssueCategory::Issues),
+            "vector search -label:gwt-spec"
+        );
+    }
+
+    #[test]
+    fn test_extract_query_issue_numbers_supports_spec_prefix_and_hashtag() {
+        assert_eq!(extract_query_issue_numbers("SPEC 1684 #42"), vec![1684, 42]);
+    }
+
+    #[test]
+    fn test_issue_matches_category_detects_spec_label() {
+        let spec_issue = GitHubIssue::with_labels(
+            1684,
+            "Spec".to_string(),
+            "2025-01-25T10:00:00Z".to_string(),
+            vec![GitHubLabel {
+                name: "gwt-spec".to_string(),
+                color: "0075ca".to_string(),
+            }],
+        );
+        assert!(issue_matches_category(&spec_issue, IssueCategory::Specs));
+        assert!(!issue_matches_category(&spec_issue, IssueCategory::Issues));
     }
 
     // ==========================================================
