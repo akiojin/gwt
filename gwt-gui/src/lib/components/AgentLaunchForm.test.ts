@@ -202,7 +202,7 @@ describe("AgentLaunchForm", () => {
     expect(binaryFallbackNotice).toBeTruthy();
   });
 
-  it("displays codex model options including gpt-5.4", async () => {
+  it("displays codex model options including gpt-5.4-mini", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
         return [
@@ -239,12 +239,13 @@ describe("AgentLaunchForm", () => {
     const options = Array.from(modelSelect.options).map((option) => option.value);
     expect(options).toEqual([
       "",
-      "gpt-5.3-codex",
       "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex",
       "gpt-5.3-codex-spark",
       "gpt-5.2-codex",
-      "gpt-5.1-codex-max",
       "gpt-5.2",
+      "gpt-5.1-codex-max",
       "gpt-5.1-codex-mini",
     ]);
   });
