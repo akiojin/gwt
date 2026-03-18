@@ -1,4 +1,4 @@
-//! OpenAI-compatible API client
+//! OpenAI-compatible API client (Responses API only)
 
 use crate::config::ResolvedAISettings;
 use reqwest::blocking::Client;
@@ -80,10 +80,26 @@ pub enum AIError {
     ConfigError(String),
 }
 
+/// Responses API 対応の会話アイテム
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ConversationItem {
+    /// ユーザー・アシスタント・システムメッセージ
+    Message { role: String, content: String },
+    /// LLM が返した tool 呼び出し
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    /// tool 実行結果
+    FunctionCallOutput { call_id: String, output: String },
+}
+
 #[derive(Debug, Serialize)]
 struct ResponsesRequest<'a> {
     model: &'a str,
-    input: Vec<ResponseInputItem>,
+    input: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -125,115 +141,7 @@ struct ResponseOutputContent {
     text: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct ResponseInputItem {
-    #[serde(rename = "type")]
-    item_type: String,
-    role: String,
-    content: Vec<ResponseInputContent>,
-}
-
-#[derive(Debug, Serialize)]
-struct ResponseInputContent {
-    #[serde(rename = "type")]
-    content_type: String,
-    text: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatCompletionsRequest<'a> {
-    model: &'a str,
-    messages: Vec<ChatCompletionsInputMessage<'a>>,
-    max_tokens: u32,
-    temperature: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<ChatCompletionsReasoning<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatCompletionsWithToolsRequest {
-    model: String,
-    messages: Vec<ChatCompletionsToolMessage>,
-    tools: Vec<ToolDefinition>,
-    tool_choice: String,
-    max_tokens: u32,
-    temperature: f32,
-}
-
-/// A chat message that supports both plain text content and tool result content.
-/// Uses `Value` for content to allow `null` (for assistant messages with only tool_calls).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatCompletionsToolMessage {
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ChatCompletionsToolCallRef>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
-
-/// A tool call reference for the assistant message in chat completions format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatCompletionsToolCallRef {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub call_type: String,
-    pub function: ChatCompletionsToolCallFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatCompletionsToolCallFunction {
-    pub name: String,
-    pub arguments: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatCompletionsReasoning<'a> {
-    effort: &'a str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ChatCompletionsInputMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionsResponse {
-    choices: Vec<ChatCompletionsChoice>,
-    #[serde(default)]
-    usage: Option<UsageInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionsChoice {
-    message: ChatCompletionsOutputMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionsOutputMessage {
-    content: Option<Value>,
-    #[serde(default)]
-    tool_calls: Option<Vec<ChatCompletionsRawToolCall>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionsRawToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    #[allow(dead_code)]
-    call_type: Option<String>,
-    function: ChatCompletionsRawFunction,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionsRawFunction {
-    name: String,
-    arguments: String,
-}
-
-/// OpenAI-compatible API client (blocking)
+/// OpenAI-compatible API client (blocking, Responses API only)
 pub struct AIClient {
     endpoint: String,
     api_key: String,
@@ -273,11 +181,8 @@ impl AIClient {
         self.cumulative_tokens.load(Ordering::Relaxed)
     }
 
+    /// Call Responses API with simple chat messages (for summarization, branch suggestion, etc.)
     pub fn create_response(&self, messages: Vec<ChatMessage>) -> Result<String, AIError> {
-        if should_prefer_chat_completions(&self.endpoint, &self.model) {
-            return self.create_chat_completion(&messages);
-        }
-
         let url = build_responses_url(&self.endpoint)?;
         let (instructions, input) = build_responses_input(&messages);
         if input.is_empty() {
@@ -322,34 +227,15 @@ impl AIClient {
                     let error = if status == StatusCode::TOO_MANY_REQUESTS {
                         let retry_after = parse_retry_after(&body, &resp_headers);
                         AIError::RateLimited { retry_after }
-                    } else if status.is_server_error() {
-                        let message = extract_error_message(&body)
-                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        AIError::ServerError(message)
                     } else {
                         let message = extract_error_message(&body)
                             .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        if should_fallback_to_chat_completions(status, &message) {
-                            warn!(
-                                status = status.as_u16(),
-                                reason = %message,
-                                "Responses API unavailable; falling back to chat completions"
-                            );
-                            return self.create_chat_completion(&messages);
+                        if status.is_server_error() {
+                            AIError::ServerError(message)
+                        } else {
+                            return Err(AIError::ServerError(message));
                         }
-                        return Err(AIError::ServerError(message));
                     };
-
-                    if let AIError::ServerError(message) = &error {
-                        if should_fallback_to_chat_completions(status, message) {
-                            warn!(
-                                status = status.as_u16(),
-                                reason = %message,
-                                "Responses API unavailable; falling back to chat completions"
-                            );
-                            return self.create_chat_completion(&messages);
-                        }
-                    }
 
                     if is_retryable(&error) && retries < MAX_RETRIES {
                         let delay = backoff_delay(retries);
@@ -367,26 +253,23 @@ impl AIClient {
                     return Err(error);
                 }
                 Err(err) => {
-                    if should_fallback_on_transport_error(&err) {
-                        warn!(
-                            error = %err,
-                            "Responses transport failed; falling back to chat completions"
-                        );
-                        return self.create_chat_completion(&messages);
-                    }
                     return Err(AIError::NetworkError(err.to_string()));
                 }
             }
         }
     }
 
+    /// Call Responses API with tool definitions and multi-turn conversation history.
     pub fn create_response_with_tools(
         &self,
-        messages: Vec<ChatMessage>,
+        conversation: Vec<ConversationItem>,
         tools: Vec<ToolDefinition>,
+        instructions: Option<String>,
+        max_tokens: u32,
+        temperature: f32,
     ) -> Result<AIResponse, AIError> {
         let url = build_responses_url(&self.endpoint)?;
-        let (instructions, input) = build_responses_input(&messages);
+        let input = build_conversation_input(&conversation);
         if input.is_empty() {
             return Err(AIError::ConfigError("No input messages".to_string()));
         }
@@ -395,8 +278,8 @@ impl AIClient {
             input,
             instructions,
             tools,
-            max_output_tokens: MAX_OUTPUT_TOKENS,
-            temperature: TEMPERATURE,
+            max_output_tokens: max_tokens,
+            temperature,
         };
 
         let mut retries = 0usize;
@@ -463,92 +346,6 @@ impl AIClient {
         }
     }
 
-    /// ChatCompletions API with tool calling support.
-    /// Uses `/v1/chat/completions` with `tools` and `tool_choice: "auto"`.
-    pub fn create_chat_completion_with_tools(
-        &self,
-        messages: Vec<ChatCompletionsToolMessage>,
-        tools: Vec<ToolDefinition>,
-        max_tokens: u32,
-        temperature: f32,
-    ) -> Result<AIResponse, AIError> {
-        let url = build_chat_completions_url(&self.endpoint)?;
-        if messages.is_empty() {
-            return Err(AIError::ConfigError("No input messages".to_string()));
-        }
-        let request_body = ChatCompletionsWithToolsRequest {
-            model: self.model.clone(),
-            messages,
-            tools,
-            tool_choice: "auto".to_string(),
-            max_tokens,
-            temperature,
-        };
-
-        let mut retries = 0usize;
-
-        loop {
-            let headers = self.build_auth_headers(&url)?;
-
-            let response = self
-                .client
-                .post(url.clone())
-                .headers(headers)
-                .json(&request_body)
-                .send();
-
-            match response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let resp_headers = resp.headers().clone();
-                    let body = resp.text().unwrap_or_default();
-                    if status == StatusCode::OK {
-                        let (text, tool_calls, usage) = parse_chat_completion_with_tools(&body)?;
-                        if let Some(tokens) = usage {
-                            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
-                        }
-                        return Ok(AIResponse {
-                            text,
-                            tool_calls,
-                            usage_tokens: usage,
-                        });
-                    }
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(AIError::Unauthorized);
-                    }
-                    let error = if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = parse_retry_after(&body, &resp_headers);
-                        AIError::RateLimited { retry_after }
-                    } else if status.is_server_error() {
-                        let message = extract_error_message(&body)
-                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        AIError::ServerError(message)
-                    } else {
-                        let message = extract_error_message(&body)
-                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        return Err(AIError::ServerError(message));
-                    };
-
-                    if !is_retryable(&error) || retries >= MAX_RETRIES {
-                        return Err(error);
-                    }
-
-                    let delay = backoff_delay(retries);
-                    retries += 1;
-                    std::thread::sleep(delay);
-                }
-                Err(e) => {
-                    if retries >= MAX_RETRIES {
-                        return Err(AIError::NetworkError(e.to_string()));
-                    }
-                    let delay = backoff_delay(retries);
-                    retries += 1;
-                    std::thread::sleep(delay);
-                }
-            }
-        }
-    }
-
     /// Build authentication headers for the given URL.
     fn build_auth_headers(&self, url: &Url) -> Result<HeaderMap, AIError> {
         let mut headers = HeaderMap::new();
@@ -570,86 +367,6 @@ impl AIClient {
         }
         Ok(headers)
     }
-
-    fn create_chat_completion(&self, messages: &[ChatMessage]) -> Result<String, AIError> {
-        let url = build_chat_completions_url(&self.endpoint)?;
-        let body_messages = build_chat_completions_messages(messages);
-        if body_messages.is_empty() {
-            return Err(AIError::ConfigError("No input messages".to_string()));
-        }
-
-        let mut attempts: Vec<Option<&str>> = vec![None];
-        if let Some(effort) =
-            preferred_chat_completion_reasoning_effort(&self.endpoint, &self.model)
-        {
-            attempts.insert(0, Some(effort));
-        }
-
-        let mut last_error: Option<AIError> = None;
-
-        for reasoning in attempts {
-            let request_body =
-                build_chat_completions_request(&body_messages, &self.model, reasoning);
-
-            let headers = self.build_auth_headers(&url)?;
-
-            let response = self
-                .client
-                .post(url.clone())
-                .headers(headers)
-                .json(&request_body)
-                .send();
-
-            match response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let resp_headers = resp.headers().clone();
-                    let body = resp.text().unwrap_or_default();
-                    if status == StatusCode::OK {
-                        match parse_chat_completion_with_usage(&body) {
-                            Ok((text, usage)) => {
-                                if let Some(tokens) = usage {
-                                    self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
-                                }
-                                return Ok(text);
-                            }
-                            Err(error) => {
-                                if reasoning.is_some()
-                                    && should_retry_chat_completion_without_reasoning(&error)
-                                {
-                                    last_error = Some(error);
-                                    continue;
-                                }
-                                return Err(error);
-                            }
-                        }
-                    }
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(AIError::Unauthorized);
-                    }
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = parse_retry_after(&body, &resp_headers);
-                        return Err(AIError::RateLimited { retry_after });
-                    }
-                    let message = extract_error_message(&body)
-                        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                    if reasoning.is_some()
-                        && should_retry_chat_completion_without_reasoning_message(status, &message)
-                    {
-                        last_error = Some(AIError::ServerError(message));
-                        continue;
-                    }
-                    return Err(AIError::ServerError(message));
-                }
-                Err(err) => {
-                    return Err(AIError::NetworkError(err.to_string()));
-                }
-            }
-        }
-
-        Err(last_error
-            .unwrap_or_else(|| AIError::ServerError("Chat completion request failed".to_string())))
-    }
 }
 
 fn build_responses_url(endpoint: &str) -> Result<Url, AIError> {
@@ -667,31 +384,15 @@ fn build_responses_url(endpoint: &str) -> Result<Url, AIError> {
     Ok(url)
 }
 
-fn build_chat_completions_url(endpoint: &str) -> Result<Url, AIError> {
-    let mut url = Url::parse(endpoint)
-        .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
-    let mut path = url.path().trim_end_matches('/').to_string();
-    if path.ends_with("/responses") {
-        path = path.trim_end_matches("/responses").to_string();
-    }
-    if !path.ends_with("/chat/completions") {
-        if path.is_empty() {
-            path = "/chat/completions".to_string();
-        } else {
-            path = format!("{}/chat/completions", path);
-        }
-        url.set_path(&path);
-    }
-    Ok(url)
-}
-
 fn is_azure_endpoint(url: &Url) -> bool {
     url.host_str()
         .map(|host| host.contains("openai.azure.com"))
         .unwrap_or(false)
 }
 
-fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<ResponseInputItem>) {
+/// Build Responses API input from simple ChatMessage list.
+/// System messages are extracted as instructions, others become message items.
+fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
     let mut instructions_parts = Vec::new();
     let mut items = Vec::new();
     for message in messages {
@@ -701,14 +402,11 @@ fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Respo
             }
             continue;
         }
-        items.push(ResponseInputItem {
-            item_type: "message".to_string(),
-            role: message.role.clone(),
-            content: vec![ResponseInputContent {
-                content_type: "input_text".to_string(),
-                text: message.content.clone(),
-            }],
-        });
+        items.push(serde_json::json!({
+            "type": "message",
+            "role": message.role,
+            "content": [{"type": "input_text", "text": message.content}]
+        }));
     }
     let instructions = if instructions_parts.is_empty() {
         None
@@ -718,72 +416,39 @@ fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Respo
     (instructions, items)
 }
 
-fn build_chat_completions_messages<'a>(
-    messages: &'a [ChatMessage],
-) -> Vec<ChatCompletionsInputMessage<'a>> {
-    messages
+/// Build Responses API input from ConversationItem list.
+/// System messages are skipped (they should be passed as `instructions` parameter).
+fn build_conversation_input(items: &[ConversationItem]) -> Vec<Value> {
+    items
         .iter()
-        .filter(|message| !message.content.trim().is_empty())
-        .map(|message| ChatCompletionsInputMessage {
-            role: message.role.as_str(),
-            content: message.content.as_str(),
+        .filter_map(|item| match item {
+            ConversationItem::Message { role, content } => {
+                if role == "system" {
+                    return None;
+                }
+                Some(serde_json::json!({
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": "input_text", "text": content}]
+                }))
+            }
+            ConversationItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => Some(serde_json::json!({
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments
+            })),
+            ConversationItem::FunctionCallOutput { call_id, output } => Some(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output
+            })),
         })
         .collect()
-}
-
-fn build_chat_completions_request<'a>(
-    messages: &'a [ChatCompletionsInputMessage<'a>],
-    model: &'a str,
-    reasoning_effort: Option<&'a str>,
-) -> ChatCompletionsRequest<'a> {
-    ChatCompletionsRequest {
-        model,
-        messages: messages.to_vec(),
-        max_tokens: MAX_OUTPUT_TOKENS,
-        temperature: TEMPERATURE,
-        reasoning: reasoning_effort.map(|effort| ChatCompletionsReasoning { effort }),
-    }
-}
-
-fn preferred_chat_completion_reasoning_effort(endpoint: &str, model: &str) -> Option<&'static str> {
-    if !model.contains(':') {
-        return None;
-    }
-
-    let Ok(url) = Url::parse(endpoint) else {
-        return None;
-    };
-    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    if host == "api.openai.com" {
-        return None;
-    }
-
-    Some("low")
-}
-
-fn should_retry_chat_completion_without_reasoning(error: &AIError) -> bool {
-    matches!(
-        error,
-        AIError::ParseError(message)
-            if message.contains("No message content in chat completion response")
-                || message.contains("No text content in chat completion response")
-    )
-}
-
-fn should_retry_chat_completion_without_reasoning_message(
-    status: StatusCode,
-    message: &str,
-) -> bool {
-    if !status.is_server_error() && status != StatusCode::BAD_REQUEST {
-        return false;
-    }
-
-    let lower = message.to_ascii_lowercase();
-    lower.contains("reasoning")
-        && (lower.contains("cannot unmarshal")
-            || lower.contains("invalid request")
-            || lower.contains("unsupported")
-            || lower.contains("not support"))
 }
 
 fn parse_response_with_usage(body: &str) -> Result<(String, Option<u64>), AIError> {
@@ -916,164 +581,6 @@ fn parse_tool_call(value: &Value) -> Option<ToolCall> {
         call_id,
     })
 }
-fn parse_chat_completion_with_usage(body: &str) -> Result<(String, Option<u64>), AIError> {
-    let parsed: ChatCompletionsResponse = serde_json::from_str(body)
-        .map_err(|e| AIError::ParseError(format!("Invalid chat completion response: {}", e)))?;
-
-    let choice =
-        parsed.choices.into_iter().next().ok_or_else(|| {
-            AIError::ParseError("No choices in chat completion response".to_string())
-        })?;
-
-    let content = choice.message.content.ok_or_else(|| {
-        AIError::ParseError("No message content in chat completion response".to_string())
-    })?;
-
-    let text = extract_chat_completion_text(content).ok_or_else(|| {
-        AIError::ParseError("No text content in chat completion response".to_string())
-    })?;
-
-    let usage_tokens = parsed.usage.map(|u| u.total_tokens);
-    Ok((text, usage_tokens))
-}
-
-fn parse_chat_completion_with_tools(
-    body: &str,
-) -> Result<(String, Vec<ToolCall>, Option<u64>), AIError> {
-    let parsed: ChatCompletionsResponse = serde_json::from_str(body)
-        .map_err(|e| AIError::ParseError(format!("Invalid chat completion response: {}", e)))?;
-
-    let choice =
-        parsed.choices.into_iter().next().ok_or_else(|| {
-            AIError::ParseError("No choices in chat completion response".to_string())
-        })?;
-
-    let text = choice
-        .message
-        .content
-        .and_then(extract_chat_completion_text)
-        .unwrap_or_default();
-
-    let tool_calls = match choice.message.tool_calls {
-        Some(raw_calls) => raw_calls
-            .into_iter()
-            .map(|raw| {
-                let arguments: Value =
-                    serde_json::from_str(&raw.function.arguments).unwrap_or(Value::Null);
-                ToolCall {
-                    name: raw.function.name,
-                    arguments,
-                    call_id: Some(raw.id),
-                }
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-
-    if text.is_empty() && tool_calls.is_empty() {
-        return Err(AIError::ParseError(
-            "No content or tool calls in chat completion response".to_string(),
-        ));
-    }
-
-    let usage_tokens = parsed.usage.map(|u| u.total_tokens);
-    Ok((text, tool_calls, usage_tokens))
-}
-
-fn extract_chat_completion_text(content: Value) -> Option<String> {
-    match content {
-        Value::String(text) => Some(text),
-        Value::Array(items) => {
-            let mut texts = Vec::new();
-            for item in items {
-                match item {
-                    Value::String(text) if !text.is_empty() => texts.push(text),
-                    Value::Object(map) => {
-                        if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
-                            if !text.is_empty() {
-                                texts.push(text.to_string());
-                            }
-                            continue;
-                        }
-                        if let Some(text) = map.get("content").and_then(|v| v.as_str()) {
-                            if !text.is_empty() {
-                                texts.push(text.to_string());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if texts.is_empty() {
-                None
-            } else {
-                Some(texts.join(""))
-            }
-        }
-        Value::Object(map) => map
-            .get("text")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string())
-            .or_else(|| {
-                map.get("content")
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string())
-            }),
-        _ => None,
-    }
-}
-
-fn should_fallback_to_chat_completions(status: StatusCode, message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    if status == StatusCode::NOT_IMPLEMENTED {
-        return true;
-    }
-    if status == StatusCode::METHOD_NOT_ALLOWED {
-        return true;
-    }
-    if status == StatusCode::NOT_FOUND && (m.contains("/responses") || m.contains("responses")) {
-        return true;
-    }
-    if m.contains("does not support the responses api") {
-        return true;
-    }
-    if m.contains("responses api") && m.contains("not implemented") {
-        return true;
-    }
-    if m.contains("/responses") && m.contains("not found") {
-        return true;
-    }
-    false
-}
-
-fn should_prefer_chat_completions(endpoint: &str, model: &str) -> bool {
-    if model.contains(':') {
-        return true;
-    }
-
-    let Ok(url) = Url::parse(endpoint) else {
-        return false;
-    };
-    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    host != "api.openai.com"
-}
-
-fn should_fallback_on_transport_error(err: &reqwest::Error) -> bool {
-    if err.is_timeout() || err.is_connect() {
-        return false;
-    }
-    should_fallback_on_transport_message(&err.to_string())
-}
-
-fn should_fallback_on_transport_message(message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    m.contains("empty reply from server")
-        || m.contains("incomplete message")
-        || m.contains("unexpected eof")
-        || m.contains("connection reset")
-        || m.contains("connection closed")
-        || m.contains("connection was closed")
-}
 
 /// Returns true if the error is retryable (rate limited or server error)
 fn is_retryable(error: &AIError) -> bool {
@@ -1086,7 +593,6 @@ fn is_retryable(error: &AIError) -> bool {
 
 fn is_permanent_server_error(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
-    // Some OpenAI-compatible backends return 501 for /responses. Retrying just adds long delays.
     if m.contains("http 501") {
         return true;
     }
@@ -1311,24 +817,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_build_chat_completions_url_appends_path() {
-        let url = build_chat_completions_url("https://api.openai.com/v1").unwrap();
-        assert_eq!(url.as_str(), "https://api.openai.com/v1/chat/completions");
-    }
-
-    #[test]
-    fn test_build_chat_completions_url_already_has_path() {
-        let url = build_chat_completions_url("https://api.openai.com/v1/chat/completions").unwrap();
-        assert_eq!(url.as_str(), "https://api.openai.com/v1/chat/completions");
-    }
-
-    #[test]
-    fn test_build_chat_completions_url_strips_responses_path() {
-        let url = build_chat_completions_url("https://api.openai.com/v1/responses").unwrap();
-        assert_eq!(url.as_str(), "https://api.openai.com/v1/chat/completions");
-    }
-
     // ========================================
     // Response Parsing Tests
     // ========================================
@@ -1350,7 +838,6 @@ mod tests {
 
     #[test]
     fn test_parse_models_response_ollama_format() {
-        // Ollama uses the same OpenAI-compatible format
         let body = r#"{
             "data": [
                 {"id": "llama3.2:latest", "created": 0, "owned_by": "library"},
@@ -1381,42 +868,6 @@ mod tests {
         let body = r#"{"models": []}"#;
         let result = parse_models_response(body);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_chat_completion_with_usage_string_content() {
-        let body = r#"{
-            "choices": [
-                {
-                    "message": {
-                        "content": "{\"suggestions\":[\"feature/a\",\"bugfix/b\",\"hotfix/c\"]}"
-                    }
-                }
-            ],
-            "usage": {"total_tokens": 12}
-        }"#;
-        let (text, usage) = parse_chat_completion_with_usage(body).unwrap();
-        assert!(text.contains("\"suggestions\""));
-        assert_eq!(usage, Some(12));
-    }
-
-    #[test]
-    fn test_parse_chat_completion_with_usage_array_content() {
-        let body = r#"{
-            "choices": [
-                {
-                    "message": {
-                        "content": [
-                            {"type": "text", "text": "{\"suggestions\":["},
-                            {"type": "text", "text": "\"feature/a\"]}"}
-                        ]
-                    }
-                }
-            ]
-        }"#;
-        let (text, usage) = parse_chat_completion_with_usage(body).unwrap();
-        assert_eq!(text, "{\"suggestions\":[\"feature/a\"]}");
-        assert_eq!(usage, None);
     }
 
     // ========================================
@@ -1482,7 +933,6 @@ mod tests {
 
     #[test]
     fn test_new_for_list_models_empty_api_key_allowed() {
-        // Empty API key should be allowed for local LLMs
         let result = AIClient::new_for_list_models("http://localhost:11434/v1", "");
         assert!(result.is_ok());
     }
@@ -1530,108 +980,6 @@ mod tests {
     fn test_is_not_retryable_server_error_http_501() {
         let error = AIError::ServerError("HTTP 501".to_string());
         assert!(!is_retryable(&error));
-    }
-
-    #[test]
-    fn test_should_fallback_to_chat_completions_for_not_implemented() {
-        assert!(should_fallback_to_chat_completions(
-            StatusCode::NOT_IMPLEMENTED,
-            "Not Implemented"
-        ));
-    }
-
-    #[test]
-    fn test_should_fallback_to_chat_completions_for_responses_api_error() {
-        assert!(should_fallback_to_chat_completions(
-            StatusCode::BAD_REQUEST,
-            "The backend does not support the Responses API"
-        ));
-    }
-
-    #[test]
-    fn test_should_not_fallback_to_chat_completions_for_unrelated_error() {
-        assert!(!should_fallback_to_chat_completions(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal Server Error"
-        ));
-    }
-
-    #[test]
-    fn test_should_fallback_on_transport_message_for_connection_closed() {
-        assert!(should_fallback_on_transport_message(
-            "error sending request for url: connection closed before message completed"
-        ));
-    }
-
-    #[test]
-    fn test_should_not_fallback_on_transport_message_for_timeout() {
-        assert!(!should_fallback_on_transport_message("operation timed out"));
-    }
-
-    #[test]
-    fn test_should_prefer_chat_completions_for_local_endpoint() {
-        assert!(should_prefer_chat_completions(
-            "http://localhost:11434/v1",
-            "gpt-oss:20b"
-        ));
-    }
-
-    #[test]
-    fn test_should_prefer_chat_completions_for_non_openai_host() {
-        assert!(should_prefer_chat_completions(
-            "https://openrouter.ai/api/v1",
-            "gpt-4o-mini"
-        ));
-    }
-
-    #[test]
-    fn test_should_not_prefer_chat_completions_for_official_openai() {
-        assert!(!should_prefer_chat_completions(
-            "https://api.openai.com/v1",
-            "gpt-4o-mini"
-        ));
-    }
-
-    #[test]
-    fn test_should_not_prefer_chat_completions_for_invalid_endpoint() {
-        assert!(!should_prefer_chat_completions("not-a-url", "gpt-4o-mini"));
-    }
-
-    #[test]
-    fn test_preferred_chat_completion_reasoning_effort_for_local_model() {
-        assert_eq!(
-            preferred_chat_completion_reasoning_effort(
-                "http://192.168.100.235:32768/v1",
-                "gpt-oss:20b"
-            ),
-            Some("low")
-        );
-    }
-
-    #[test]
-    fn test_preferred_chat_completion_reasoning_effort_none_for_openai() {
-        assert_eq!(
-            preferred_chat_completion_reasoning_effort("https://api.openai.com/v1", "gpt-oss:20b"),
-            None
-        );
-    }
-
-    #[test]
-    fn test_preferred_chat_completion_reasoning_effort_none_for_official_model_name() {
-        assert_eq!(
-            preferred_chat_completion_reasoning_effort("https://api.openai.com/v1", "gpt-4o-mini"),
-            None
-        );
-    }
-
-    #[test]
-    fn test_should_retry_chat_completion_without_reasoning_parse_error() {
-        assert!(should_retry_chat_completion_without_reasoning(
-            &AIError::ParseError("No message content in chat completion response".to_string())
-        ));
-        assert!(!should_retry_chat_completion_without_reasoning(
-            &AIError::ParseError("bad json".to_string())
-        ));
     }
 
     #[test]
@@ -1879,7 +1227,7 @@ mod tests {
         let (instructions, input) = build_responses_input(&messages);
         assert_eq!(instructions, Some("You are a helper.".to_string()));
         assert_eq!(input.len(), 1);
-        assert_eq!(input[0].role, "user");
+        assert_eq!(input[0]["role"], "user");
     }
 
     #[test]
@@ -1902,6 +1250,97 @@ mod tests {
     }
 
     // ========================================
+    // build_conversation_input
+    // ========================================
+
+    #[test]
+    fn test_build_conversation_input_message() {
+        let items = vec![ConversationItem::Message {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+        }];
+        let input = build_conversation_input(&items);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_build_conversation_input_skips_system() {
+        let items = vec![
+            ConversationItem::Message {
+                role: "system".to_string(),
+                content: "system prompt".to_string(),
+            },
+            ConversationItem::Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            },
+        ];
+        let input = build_conversation_input(&items);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_build_conversation_input_function_call() {
+        let items = vec![ConversationItem::FunctionCall {
+            call_id: "call_1".to_string(),
+            name: "git_status".to_string(),
+            arguments: r#"{"verbose": true}"#.to_string(),
+        }];
+        let input = build_conversation_input(&items);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert_eq!(input[0]["name"], "git_status");
+        assert_eq!(input[0]["arguments"], r#"{"verbose": true}"#);
+    }
+
+    #[test]
+    fn test_build_conversation_input_function_call_output() {
+        let items = vec![ConversationItem::FunctionCallOutput {
+            call_id: "call_1".to_string(),
+            output: "branch: main\nclean".to_string(),
+        }];
+        let input = build_conversation_input(&items);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert_eq!(input[0]["output"], "branch: main\nclean");
+    }
+
+    #[test]
+    fn test_build_conversation_input_multi_turn_tool_history() {
+        let items = vec![
+            ConversationItem::Message {
+                role: "user".to_string(),
+                content: "Check the repo status".to_string(),
+            },
+            ConversationItem::FunctionCall {
+                call_id: "call_1".to_string(),
+                name: "git_status".to_string(),
+                arguments: "{}".to_string(),
+            },
+            ConversationItem::FunctionCallOutput {
+                call_id: "call_1".to_string(),
+                output: "clean".to_string(),
+            },
+            ConversationItem::Message {
+                role: "assistant".to_string(),
+                content: "The repo is clean.".to_string(),
+            },
+        ];
+        let input = build_conversation_input(&items);
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[3]["type"], "message");
+        assert_eq!(input[3]["role"], "assistant");
+    }
+
+    // ========================================
     // extract_error_message
     // ========================================
 
@@ -1914,7 +1353,6 @@ mod tests {
 
     #[test]
     fn test_extract_error_message_returns_none_for_string_error() {
-        // extract_error_message only handles {"error":{"message":"..."}} format
         let body = r#"{"error":"Something went wrong"}"#;
         let msg = extract_error_message(body);
         assert!(msg.is_none());
@@ -1940,20 +1378,6 @@ mod tests {
     #[test]
     fn test_parse_response_with_usage_invalid_json() {
         let result = parse_response_with_usage("not json");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_chat_completion_empty_choices() {
-        let body = r#"{"choices":[]}"#;
-        let result = parse_chat_completion_with_usage(body);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_chat_completion_null_content() {
-        let body = r#"{"choices":[{"message":{"content":null}}]}"#;
-        let result = parse_chat_completion_with_usage(body);
         assert!(result.is_err());
     }
 

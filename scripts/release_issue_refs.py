@@ -146,6 +146,15 @@ def resolve_repo_slug(runner: CommandRunner) -> str:
     ).strip()
 
 
+def fetch_issue_labels(number: int, repo_slug: str, runner: CommandRunner) -> list[str]:
+    """Return label names for a GitHub issue."""
+    payload = json.loads(runner(["gh", "api", f"repos/{repo_slug}/issues/{number}"]) or "{}")
+    return [label["name"] for label in payload.get("labels", [])]
+
+
+SPEC_LABEL = "gwt-spec"
+
+
 def classify_release_ref(
     number: int,
     source: str,
@@ -195,6 +204,22 @@ def collect_release_issue_refs(
         auto_close.update(ref.auto_close_issues)
         reference_only.update(ref.reference_only_issues)
         warnings.extend(ref.warnings)
+
+    # Post-filter: move gwt-spec issues from auto-close to reference-only
+    spec_protected: list[int] = []
+    for issue_number in sorted(auto_close):
+        labels = fetch_issue_labels(issue_number, repo, runner)
+        if SPEC_LABEL in labels:
+            spec_protected.append(issue_number)
+
+    if spec_protected:
+        auto_close.difference_update(spec_protected)
+        reference_only.update(spec_protected)
+        warnings.append(
+            f"gwt-spec issues moved to reference-only: "
+            f"{format_issue_refs(spec_protected)}. "
+            "gwt-spec issues are never auto-closed by releases."
+        )
 
     reference_only.difference_update(auto_close)
     if reference_only:
