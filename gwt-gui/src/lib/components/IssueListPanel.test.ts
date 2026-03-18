@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, fireEvent, waitFor } from "@testing-library/svelte";
-import type { GitHubIssueInfo, GhCliStatus, FetchIssuesResponse } from "../types";
+import type {
+  GitHubIssueInfo,
+  GhCliStatus,
+  FetchIssuesResponse,
+} from "../types";
 
 // Mock $lib/tauriInvoke
 const mockInvoke = vi.fn();
@@ -45,7 +49,9 @@ async function renderIssueListPanel(props?: {
       projectPath: props?.projectPath ?? "/tmp/project",
       onWorkOnIssue: props?.onWorkOnIssue ?? vi.fn(),
       onSwitchToWorktree: props?.onSwitchToWorktree ?? vi.fn(),
-      ...(props?.onIssueCountChange ? { onIssueCountChange: props.onIssueCountChange } : {}),
+      ...(props?.onIssueCountChange
+        ? { onIssueCountChange: props.onIssueCountChange }
+        : {}),
     },
   });
 }
@@ -65,7 +71,9 @@ describe("IssueListPanel", () => {
         readonly root = null;
         readonly rootMargin = "0px";
         readonly thresholds: readonly number[] = [0];
-        takeRecords(): IntersectionObserverEntry[] { return []; }
+        takeRecords(): IntersectionObserverEntry[] {
+          return [];
+        }
       } as unknown as typeof globalThis.IntersectionObserver;
     }
   });
@@ -77,7 +85,11 @@ describe("IssueListPanel", () => {
 
   it("renders issue list after loading", async () => {
     const issues: GitHubIssueInfo[] = [
-      makeIssue({ number: 10, title: "First Issue", labels: [{ name: "bug", color: "d73a4a" }] }),
+      makeIssue({
+        number: 10,
+        title: "First Issue",
+        labels: [{ name: "bug", color: "d73a4a" }],
+      }),
       makeIssue({ number: 20, title: "Second Issue", commentsCount: 5 }),
     ];
 
@@ -108,24 +120,41 @@ describe("IssueListPanel", () => {
   });
 
   it("separates regular issues and specs into dedicated tabs", async () => {
-    const regular = makeIssue({ number: 10, title: "Regular Issue", labels: [{ name: "bug", color: "d73a4a" }] });
-    const spec = makeIssue({ number: 11, title: "Spec Issue", labels: [{ name: "gwt-spec", color: "0075ca" }] });
-
-    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "check_gh_cli_status") {
-        return { available: true, authenticated: true } as GhCliStatus;
-      }
-      if (cmd === "fetch_github_issues") {
-        const category = (args as { category?: string } | undefined)?.category;
-        if (category === "specs") {
-          return { issues: [spec], hasNextPage: false } as FetchIssuesResponse;
-        }
-        return { issues: [regular], hasNextPage: false } as FetchIssuesResponse;
-      }
-      if (cmd === "find_existing_issue_branches_bulk") return [];
-      if (cmd === "fetch_github_issue_detail") return regular;
-      return null;
+    const regular = makeIssue({
+      number: 10,
+      title: "Regular Issue",
+      labels: [{ name: "bug", color: "d73a4a" }],
     });
+    const spec = makeIssue({
+      number: 11,
+      title: "Spec Issue",
+      labels: [{ name: "gwt-spec", color: "0075ca" }],
+    });
+
+    mockInvoke.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_gh_cli_status") {
+          return { available: true, authenticated: true } as GhCliStatus;
+        }
+        if (cmd === "fetch_github_issues") {
+          const category = (args as { category?: string } | undefined)
+            ?.category;
+          if (category === "specs") {
+            return {
+              issues: [spec],
+              hasNextPage: false,
+            } as FetchIssuesResponse;
+          }
+          return {
+            issues: [regular],
+            hasNextPage: false,
+          } as FetchIssuesResponse;
+        }
+        if (cmd === "find_existing_issue_branches_bulk") return [];
+        if (cmd === "fetch_github_issue_detail") return regular;
+        return null;
+      },
+    );
 
     const rendered = await renderIssueListPanel();
 
@@ -144,26 +173,36 @@ describe("IssueListPanel", () => {
 
   it("ignores stale issue-tab response after switching to specs", async () => {
     const regular = makeIssue({ number: 10, title: "Regular Issue" });
-    const spec = makeIssue({ number: 11, title: "Spec Issue", labels: [{ name: "gwt-spec", color: "0075ca" }] });
+    const spec = makeIssue({
+      number: 11,
+      title: "Spec Issue",
+      labels: [{ name: "gwt-spec", color: "0075ca" }],
+    });
     let resolveIssues!: (value: FetchIssuesResponse) => void;
     const delayedIssues = new Promise<FetchIssuesResponse>((resolve) => {
       resolveIssues = resolve;
     });
 
-    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "check_gh_cli_status") {
-        return { available: true, authenticated: true } as GhCliStatus;
-      }
-      if (cmd === "fetch_github_issues") {
-        const category = (args as { category?: string } | undefined)?.category ?? "issues";
-        if (category === "specs") {
-          return { issues: [spec], hasNextPage: false } as FetchIssuesResponse;
+    mockInvoke.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_gh_cli_status") {
+          return { available: true, authenticated: true } as GhCliStatus;
         }
-        return delayedIssues;
-      }
-      if (cmd === "find_existing_issue_branches_bulk") return [];
-      return null;
-    });
+        if (cmd === "fetch_github_issues") {
+          const category =
+            (args as { category?: string } | undefined)?.category ?? "issues";
+          if (category === "specs") {
+            return {
+              issues: [spec],
+              hasNextPage: false,
+            } as FetchIssuesResponse;
+          }
+          return delayedIssues;
+        }
+        if (cmd === "find_existing_issue_branches_bulk") return [];
+        return null;
+      },
+    );
 
     const rendered = await renderIssueListPanel();
 
@@ -256,7 +295,9 @@ describe("IssueListPanel", () => {
       expect(rendered.getByText("Fix login bug")).toBeTruthy();
     });
 
-    const searchInput = rendered.container.querySelector('input[placeholder*="Search"]') as HTMLInputElement;
+    const searchInput = rendered.container.querySelector(
+      'input[placeholder*="Search"]',
+    ) as HTMLInputElement;
     expect(searchInput).toBeTruthy();
 
     await fireEvent.input(searchInput, { target: { value: "login" } });
@@ -292,7 +333,9 @@ describe("IssueListPanel", () => {
       expect(rendered.getByText("Refactor module")).toBeTruthy();
     });
 
-    const searchInput = rendered.container.querySelector('input[placeholder*="Search"]') as HTMLInputElement;
+    const searchInput = rendered.container.querySelector(
+      'input[placeholder*="Search"]',
+    ) as HTMLInputElement;
     expect(searchInput).toBeTruthy();
 
     await fireEvent.input(searchInput, { target: { value: "12" } });
@@ -320,15 +363,134 @@ describe("IssueListPanel", () => {
     });
   });
 
+  it("searches issues and specs from a single search field", async () => {
+    const browseIssue = makeIssue({ number: 7, title: "Browse Issue" });
+    const catalogIssue = makeIssue({
+      number: 1684,
+      title: "GitHub Issue/SPEC Search",
+    });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true } as GhCliStatus;
+      }
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [browseIssue],
+          hasNextPage: false,
+        } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
+      if (cmd === "search_github_issue_catalog") {
+        return [catalogIssue];
+      }
+      if (cmd === "search_github_issues_cmd") {
+        return [
+          {
+            number: 1643,
+            title: "GitHub連携（バージョン履歴含む）",
+            url: "https://github.com/test/repo/issues/1643",
+            state: "open",
+            labels: ["gwt-spec"],
+            distance: 0.08,
+          },
+        ];
+      }
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Browse Issue")).toBeTruthy();
+    });
+
+    const searchInput = rendered.container.querySelector(
+      'input[placeholder*="Search"]',
+    ) as HTMLInputElement;
+    await fireEvent.input(searchInput, { target: { value: "spec 1684" } });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "search_github_issue_catalog",
+        expect.objectContaining({
+          projectPath: "/tmp/project",
+          query: "spec 1684",
+          state: "open",
+        }),
+      );
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "search_github_issues_cmd",
+        expect.objectContaining({
+          projectRoot: "/tmp/project",
+          query: "spec 1684",
+          nResults: 20,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("GitHub Issue/SPEC Search")).toBeTruthy();
+      expect(
+        rendered.getByText("GitHub連携（バージョン履歴含む）"),
+      ).toBeTruthy();
+    });
+  });
+
+  it("updates the spec index from the Issues panel", async () => {
+    const issue = makeIssue({ number: 1, title: "Indexable Issue" });
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true } as GhCliStatus;
+      }
+      if (cmd === "fetch_github_issues") {
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      }
+      if (cmd === "find_existing_issue_branches_bulk") return [];
+      if (cmd === "index_github_issues_cmd") {
+        return { issuesIndexed: 12, durationMs: 34 };
+      }
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Indexable Issue")).toBeTruthy();
+    });
+
+    await fireEvent.click(
+      rendered.getByRole("button", { name: "Update Spec Index" }),
+    );
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("index_github_issues_cmd", {
+        projectRoot: "/tmp/project",
+      });
+      expect(rendered.getByText("12 specs indexed (34ms)")).toBeTruthy();
+    });
+  });
+
   it("filters issues by label click and clears on re-click", async () => {
     const issues: GitHubIssueInfo[] = [
-      makeIssue({ number: 1, title: "Bug report", labels: [{ name: "bug", color: "d73a4a" }] }),
-      makeIssue({ number: 2, title: "New feature", labels: [{ name: "enhancement", color: "a2eeef" }] }),
+      makeIssue({
+        number: 1,
+        title: "Bug report",
+        labels: [{ name: "bug", color: "d73a4a" }],
+      }),
+      makeIssue({
+        number: 2,
+        title: "New feature",
+        labels: [{ name: "enhancement", color: "a2eeef" }],
+      }),
     ];
 
     mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
@@ -342,7 +504,9 @@ describe("IssueListPanel", () => {
 
     // Click "bug" label chip to filter
     const labelChips = rendered.container.querySelectorAll(".ilp-label-chip");
-    const bugChip = Array.from(labelChips).find((el) => el.textContent?.trim() === "bug");
+    const bugChip = Array.from(labelChips).find(
+      (el) => el.textContent?.trim() === "bug",
+    );
     expect(bugChip).toBeTruthy();
     await fireEvent.click(bugChip!);
 
@@ -364,8 +528,10 @@ describe("IssueListPanel", () => {
     const issues = [makeIssue({ number: 1, title: "Open Issue" })];
 
     mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
@@ -396,8 +562,10 @@ describe("IssueListPanel", () => {
     const issues = [makeIssue({ number: 1, title: "Issue A" })];
 
     mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
@@ -436,8 +604,10 @@ describe("IssueListPanel", () => {
     let branchLookupCount = 0;
 
     mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") {
         branchLookupCount += 1;
         return branchLookupCount === 1
@@ -466,11 +636,17 @@ describe("IssueListPanel", () => {
   });
 
   it("navigates to detail view on issue click and back to list", async () => {
-    const issue = makeIssue({ number: 42, title: "Detail Test Issue", body: "Issue body content" });
+    const issue = makeIssue({
+      number: 42,
+      title: "Detail Test Issue",
+      body: "Issue body content",
+    });
 
     mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
@@ -509,8 +685,10 @@ describe("IssueListPanel", () => {
     ];
 
     mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issues[0];
       return null;
@@ -524,7 +702,9 @@ describe("IssueListPanel", () => {
     });
 
     // Apply search filter
-    const searchInput = rendered.container.querySelector('input[placeholder*="Search"]') as HTMLInputElement;
+    const searchInput = rendered.container.querySelector(
+      'input[placeholder*="Search"]',
+    ) as HTMLInputElement;
     await fireEvent.input(searchInput, { target: { value: "login" } });
 
     await waitFor(() => {
@@ -550,17 +730,25 @@ describe("IssueListPanel", () => {
     });
 
     // Search input should retain its value
-    const searchInputAfter = rendered.container.querySelector('input[placeholder*="Search"]') as HTMLInputElement;
+    const searchInputAfter = rendered.container.querySelector(
+      'input[placeholder*="Search"]',
+    ) as HTMLInputElement;
     expect(searchInputAfter.value).toBe("login");
   });
 
   it("calls onWorkOnIssue when 'Work on this' is clicked in detail", async () => {
-    const issue = makeIssue({ number: 7, title: "Work Issue", body: "Some body" });
+    const issue = makeIssue({
+      number: 7,
+      title: "Work Issue",
+      body: "Some body",
+    });
     const onWorkOnIssue = vi.fn();
 
     mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") return [];
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
@@ -583,23 +771,32 @@ describe("IssueListPanel", () => {
     await fireEvent.click(rendered.getByText("Work on this"));
 
     expect(onWorkOnIssue).toHaveBeenCalledTimes(1);
-    expect(onWorkOnIssue).toHaveBeenCalledWith(expect.objectContaining({ number: 7 }));
+    expect(onWorkOnIssue).toHaveBeenCalledWith(
+      expect.objectContaining({ number: 7 }),
+    );
   });
 
   it("shows 'Switch to Worktree' when branch exists for issue", async () => {
     const issue = makeIssue({ number: 5, title: "Linked Issue", body: "body" });
     const onSwitchToWorktree = vi.fn();
 
-    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branches_bulk") {
-        const nums = (args as { issueNumbers?: number[] })?.issueNumbers ?? [];
-        return nums.includes(5) ? [{ issueNumber: 5, branchName: "feature/issue-5" }] : [];
-      }
-      if (cmd === "fetch_github_issue_detail") return issue;
-      return null;
-    });
+    mockInvoke.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_gh_cli_status")
+          return { available: true, authenticated: true } as GhCliStatus;
+        if (cmd === "fetch_github_issues")
+          return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+        if (cmd === "find_existing_issue_branches_bulk") {
+          const nums =
+            (args as { issueNumbers?: number[] })?.issueNumbers ?? [];
+          return nums.includes(5)
+            ? [{ issueNumber: 5, branchName: "feature/issue-5" }]
+            : [];
+        }
+        if (cmd === "fetch_github_issue_detail") return issue;
+        return null;
+      },
+    );
 
     const rendered = await renderIssueListPanel({ onSwitchToWorktree });
 
@@ -634,8 +831,10 @@ describe("IssueListPanel", () => {
     const onIssueCountChange = vi.fn();
 
     mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") return { issues, hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "check_gh_cli_status")
+        return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues")
+        return { issues, hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") return [];
       return null;
     });
@@ -695,7 +894,10 @@ describe("IssueListPanel", () => {
       state: "closed",
       body: "Some body text",
       assignees: [
-        { login: "charlie", avatarUrl: "https://avatars.example.com/charlie.png" },
+        {
+          login: "charlie",
+          avatarUrl: "https://avatars.example.com/charlie.png",
+        },
       ],
       milestone: { title: "Sprint 5", number: 5 },
       commentsCount: 12,
@@ -724,7 +926,9 @@ describe("IssueListPanel", () => {
     await waitFor(() => {
       expect(rendered.getByText(/Back/)).toBeTruthy();
       // Wait until detail is fully loaded (not in loading state)
-      expect(rendered.container.querySelector(".ilp-detail-state")).toBeTruthy();
+      expect(
+        rendered.container.querySelector(".ilp-detail-state"),
+      ).toBeTruthy();
     });
 
     // State badge should show "closed" with the closed class
@@ -734,19 +938,23 @@ describe("IssueListPanel", () => {
 
     // Assignee avatar in detail
     const detailAvatars = rendered.container.querySelectorAll(
-      ".ilp-detail-meta .ilp-avatar"
+      ".ilp-detail-meta .ilp-avatar",
     );
     expect(detailAvatars.length).toBeGreaterThanOrEqual(1);
 
     // Milestone in detail
-    expect(rendered.container.querySelector(".ilp-detail-milestone")).toBeTruthy();
+    expect(
+      rendered.container.querySelector(".ilp-detail-milestone"),
+    ).toBeTruthy();
     expect(rendered.container.textContent).toContain("Sprint 5");
 
     // Comments in detail
     expect(rendered.container.textContent).toContain("12 comments");
 
     // Labels in detail
-    expect(rendered.container.querySelector(".ilp-detail-meta .ilp-issue-label")).toBeTruthy();
+    expect(
+      rendered.container.querySelector(".ilp-detail-meta .ilp-issue-label"),
+    ).toBeTruthy();
   });
 
   it("shows 'No description provided.' when detail issue has no body", async () => {
@@ -780,7 +988,11 @@ describe("IssueListPanel", () => {
   });
 
   it("shows detail error from fetch_github_issue_detail failure", async () => {
-    const issue = makeIssue({ number: 40, title: "Error Detail Issue", body: "body" });
+    const issue = makeIssue({
+      number: 40,
+      title: "Error Detail Issue",
+      body: "body",
+    });
 
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status")
@@ -788,7 +1000,8 @@ describe("IssueListPanel", () => {
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
       if (cmd === "find_existing_issue_branches_bulk") return [];
-      if (cmd === "fetch_github_issue_detail") throw new Error("Detail fetch failed");
+      if (cmd === "fetch_github_issue_detail")
+        throw new Error("Detail fetch failed");
       return null;
     });
 
@@ -845,7 +1058,7 @@ describe("IssueListPanel", () => {
 
     await waitFor(() => {
       expect(mockOpenExternalUrl).toHaveBeenCalledWith(
-        "https://github.com/test/repo/issues/50"
+        "https://github.com/test/repo/issues/50",
       );
     });
   });
@@ -927,8 +1140,16 @@ describe("IssueListPanel", () => {
 
   it("clears label filter with Clear button", async () => {
     const issues: GitHubIssueInfo[] = [
-      makeIssue({ number: 1, title: "Bug report", labels: [{ name: "bug", color: "d73a4a" }] }),
-      makeIssue({ number: 2, title: "New feature", labels: [{ name: "enhancement", color: "a2eeef" }] }),
+      makeIssue({
+        number: 1,
+        title: "Bug report",
+        labels: [{ name: "bug", color: "d73a4a" }],
+      }),
+      makeIssue({
+        number: 2,
+        title: "New feature",
+        labels: [{ name: "enhancement", color: "a2eeef" }],
+      }),
     ];
 
     mockInvoke.mockImplementation(async (cmd: string) => {
@@ -948,7 +1169,9 @@ describe("IssueListPanel", () => {
 
     // Click a label chip to filter
     const labelChips = rendered.container.querySelectorAll(".ilp-label-chip");
-    const bugChip = Array.from(labelChips).find((el) => el.textContent?.trim() === "bug");
+    const bugChip = Array.from(labelChips).find(
+      (el) => el.textContent?.trim() === "bug",
+    );
     await fireEvent.click(bugChip!);
 
     await waitFor(() => {
@@ -972,18 +1195,23 @@ describe("IssueListPanel", () => {
     const issue = makeIssue({ number: 5, title: "WT Click Issue" });
     const onSwitchToWorktree = vi.fn();
 
-    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "check_gh_cli_status")
-        return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues")
-        return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branches_bulk") {
-        const nums = (args as { issueNumbers?: number[] })?.issueNumbers ?? [];
-        return nums.includes(5) ? [{ issueNumber: 5, branchName: "feature/issue-5" }] : [];
-      }
-      if (cmd === "fetch_github_issue_detail") return issue;
-      return null;
-    });
+    mockInvoke.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_gh_cli_status")
+          return { available: true, authenticated: true } as GhCliStatus;
+        if (cmd === "fetch_github_issues")
+          return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+        if (cmd === "find_existing_issue_branches_bulk") {
+          const nums =
+            (args as { issueNumbers?: number[] })?.issueNumbers ?? [];
+          return nums.includes(5)
+            ? [{ issueNumber: 5, branchName: "feature/issue-5" }]
+            : [];
+        }
+        if (cmd === "fetch_github_issue_detail") return issue;
+        return null;
+      },
+    );
 
     const rendered = await renderIssueListPanel({ onSwitchToWorktree });
 
@@ -1024,7 +1252,9 @@ describe("IssueListPanel", () => {
 
     // The label should still render even with invalid color
     const labels = rendered.container.querySelectorAll(".ilp-issue-label");
-    const weirdLabel = Array.from(labels).find((el) => el.textContent?.trim() === "weird");
+    const weirdLabel = Array.from(labels).find(
+      (el) => el.textContent?.trim() === "weird",
+    );
     expect(weirdLabel).toBeTruthy();
     // With invalid hex, labelStyle returns "" so style should be empty
     expect(weirdLabel?.getAttribute("style")).toBe("");
@@ -1038,41 +1268,47 @@ describe("IssueListPanel", () => {
       labels: [{ name: "gwt-spec", color: "0075ca" }],
     });
 
-    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "check_gh_cli_status")
-        return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") {
-        const category = (args as { category?: string } | undefined)?.category;
-        if (category === "specs") {
-          return { issues: [specIssue], hasNextPage: false } as FetchIssuesResponse;
+    mockInvoke.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_gh_cli_status")
+          return { available: true, authenticated: true } as GhCliStatus;
+        if (cmd === "fetch_github_issues") {
+          const category = (args as { category?: string } | undefined)
+            ?.category;
+          if (category === "specs") {
+            return {
+              issues: [specIssue],
+              hasNextPage: false,
+            } as FetchIssuesResponse;
+          }
+          return { issues: [], hasNextPage: false } as FetchIssuesResponse;
         }
-        return { issues: [], hasNextPage: false } as FetchIssuesResponse;
-      }
-      if (cmd === "find_existing_issue_branches_bulk") return [];
-      if (cmd === "fetch_github_issue_detail") return specIssue;
-      if (cmd === "get_spec_issue_detail_cmd") {
-        return {
-          number: 70,
-          title: "Spec Issue",
-          url: "https://github.com/test/repo/issues/70",
-          updatedAt: "2026-01-01T00:00:00Z",
-          etag: "etag-70",
-          body: "body",
-          sections: {
-            spec: "s",
-            plan: "p",
-            tasks: "t",
-            tdd: "d",
-            research: "",
-            dataModel: "",
-            quickstart: "",
-            contracts: "",
-            checklists: "",
-          },
-        };
-      }
-      return null;
-    });
+        if (cmd === "find_existing_issue_branches_bulk") return [];
+        if (cmd === "fetch_github_issue_detail") return specIssue;
+        if (cmd === "get_spec_issue_detail_cmd") {
+          return {
+            number: 70,
+            title: "Spec Issue",
+            url: "https://github.com/test/repo/issues/70",
+            updatedAt: "2026-01-01T00:00:00Z",
+            etag: "etag-70",
+            body: "body",
+            sections: {
+              spec: "s",
+              plan: "p",
+              tasks: "t",
+              tdd: "d",
+              research: "",
+              dataModel: "",
+              quickstart: "",
+              contracts: "",
+              checklists: "",
+            },
+          };
+        }
+        return null;
+      },
+    );
 
     const rendered = await renderIssueListPanel();
 
@@ -1113,7 +1349,11 @@ describe("IssueListPanel", () => {
   });
 
   it("handles detail loading indicator while fetching issue detail", async () => {
-    const issue = makeIssue({ number: 80, title: "Slow Detail Issue", body: "body" });
+    const issue = makeIssue({
+      number: 80,
+      title: "Slow Detail Issue",
+      body: "body",
+    });
 
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_gh_cli_status")
@@ -1143,30 +1383,38 @@ describe("IssueListPanel", () => {
 
   it("resets loadingMore immediately after issue fetch, before branch links complete", async () => {
     const page1Issues = Array.from({ length: 30 }, (_, i) =>
-      makeIssue({ number: i + 1, title: `Issue ${i + 1}` })
+      makeIssue({ number: i + 1, title: `Issue ${i + 1}` }),
     );
     const page2Issues = Array.from({ length: 5 }, (_, i) =>
-      makeIssue({ number: i + 31, title: `Issue ${i + 31}` })
+      makeIssue({ number: i + 31, title: `Issue ${i + 31}` }),
     );
     let branchLinkResolve: (v: unknown[]) => void = () => {};
     const branchLinkPromise = new Promise<unknown[]>((resolve) => {
       branchLinkResolve = resolve;
     });
 
-    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "check_gh_cli_status")
-        return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") {
-        const p = (args as { page?: number })?.page ?? 1;
-        if (p === 1)
-          return { issues: page1Issues, hasNextPage: true } as FetchIssuesResponse;
-        return { issues: page2Issues, hasNextPage: false } as FetchIssuesResponse;
-      }
-      if (cmd === "find_existing_issue_branches_bulk") {
-        return branchLinkPromise;
-      }
-      return null;
-    });
+    mockInvoke.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_gh_cli_status")
+          return { available: true, authenticated: true } as GhCliStatus;
+        if (cmd === "fetch_github_issues") {
+          const p = (args as { page?: number })?.page ?? 1;
+          if (p === 1)
+            return {
+              issues: page1Issues,
+              hasNextPage: true,
+            } as FetchIssuesResponse;
+          return {
+            issues: page2Issues,
+            hasNextPage: false,
+          } as FetchIssuesResponse;
+        }
+        if (cmd === "find_existing_issue_branches_bulk") {
+          return branchLinkPromise;
+        }
+        return null;
+      },
+    );
 
     const rendered = await renderIssueListPanel();
 
@@ -1204,7 +1452,7 @@ describe("IssueListPanel", () => {
         queueMicrotask(() => {
           this.callback(
             [{ isIntersecting: true } as IntersectionObserverEntry],
-            this as unknown as IntersectionObserver
+            this as unknown as IntersectionObserver,
           );
         });
       }
@@ -1214,30 +1462,46 @@ describe("IssueListPanel", () => {
       readonly root = null;
       readonly rootMargin = "0px";
       readonly thresholds: readonly number[] = [0];
-      takeRecords(): IntersectionObserverEntry[] { return []; }
-    } as unknown as typeof globalThis.IntersectionObserver;
-
-    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "check_gh_cli_status")
-        return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") {
-        const p = (args as { page?: number })?.page ?? 1;
-        if (p === 1) return { issues: [page1Issue], hasNextPage: true } as FetchIssuesResponse;
-        if (p === 2) return { issues: [page2Issue], hasNextPage: false } as FetchIssuesResponse;
-        return { issues: [], hasNextPage: false } as FetchIssuesResponse;
-      }
-      if (cmd === "find_existing_issue_branches_bulk") {
-        const nums = ((args as { issueNumbers?: number[] })?.issueNumbers ?? []).slice().sort();
-        if (!page1LookupStarted && nums.length === 1 && nums[0] === 1) {
-          page1LookupStarted = true;
-          return new Promise<unknown[]>((resolve) => {
-            resolvePage1Lookup = resolve;
-          });
-        }
+      takeRecords(): IntersectionObserverEntry[] {
         return [];
       }
-      return null;
-    });
+    } as unknown as typeof globalThis.IntersectionObserver;
+
+    mockInvoke.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_gh_cli_status")
+          return { available: true, authenticated: true } as GhCliStatus;
+        if (cmd === "fetch_github_issues") {
+          const p = (args as { page?: number })?.page ?? 1;
+          if (p === 1)
+            return {
+              issues: [page1Issue],
+              hasNextPage: true,
+            } as FetchIssuesResponse;
+          if (p === 2)
+            return {
+              issues: [page2Issue],
+              hasNextPage: false,
+            } as FetchIssuesResponse;
+          return { issues: [], hasNextPage: false } as FetchIssuesResponse;
+        }
+        if (cmd === "find_existing_issue_branches_bulk") {
+          const nums = (
+            (args as { issueNumbers?: number[] })?.issueNumbers ?? []
+          )
+            .slice()
+            .sort();
+          if (!page1LookupStarted && nums.length === 1 && nums[0] === 1) {
+            page1LookupStarted = true;
+            return new Promise<unknown[]>((resolve) => {
+              resolvePage1Lookup = resolve;
+            });
+          }
+          return [];
+        }
+        return null;
+      },
+    );
 
     try {
       const rendered = await renderIssueListPanel();
@@ -1260,28 +1524,43 @@ describe("IssueListPanel", () => {
 
   it("allows category tab change while branch links are loading", async () => {
     const regularIssue = makeIssue({ number: 1, title: "Regular" });
-    const specIssue = makeIssue({ number: 2, title: "Spec", labels: [{ name: "gwt-spec", color: "0075ca" }] });
+    const specIssue = makeIssue({
+      number: 2,
+      title: "Spec",
+      labels: [{ name: "gwt-spec", color: "0075ca" }],
+    });
     let branchLinkResolve: (v: unknown[]) => void = () => {};
     let branchCallCount = 0;
 
-    mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "check_gh_cli_status")
-        return { available: true, authenticated: true } as GhCliStatus;
-      if (cmd === "fetch_github_issues") {
-        const category = (args as { category?: string })?.category ?? "issues";
-        if (category === "specs")
-          return { issues: [specIssue], hasNextPage: false } as FetchIssuesResponse;
-        return { issues: [regularIssue], hasNextPage: false } as FetchIssuesResponse;
-      }
-      if (cmd === "find_existing_issue_branches_bulk") {
-        branchCallCount++;
-        if (branchCallCount === 1) {
-          return new Promise<unknown[]>((resolve) => { branchLinkResolve = resolve; });
+    mockInvoke.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_gh_cli_status")
+          return { available: true, authenticated: true } as GhCliStatus;
+        if (cmd === "fetch_github_issues") {
+          const category =
+            (args as { category?: string })?.category ?? "issues";
+          if (category === "specs")
+            return {
+              issues: [specIssue],
+              hasNextPage: false,
+            } as FetchIssuesResponse;
+          return {
+            issues: [regularIssue],
+            hasNextPage: false,
+          } as FetchIssuesResponse;
         }
-        return [];
-      }
-      return null;
-    });
+        if (cmd === "find_existing_issue_branches_bulk") {
+          branchCallCount++;
+          if (branchCallCount === 1) {
+            return new Promise<unknown[]>((resolve) => {
+              branchLinkResolve = resolve;
+            });
+          }
+          return [];
+        }
+        return null;
+      },
+    );
 
     const rendered = await renderIssueListPanel();
 
@@ -1308,7 +1587,8 @@ describe("IssueListPanel", () => {
         return { available: true, authenticated: true } as GhCliStatus;
       if (cmd === "fetch_github_issues")
         return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
-      if (cmd === "find_existing_issue_branches_bulk") throw new Error("Branch lookup failed");
+      if (cmd === "find_existing_issue_branches_bulk")
+        throw new Error("Branch lookup failed");
       if (cmd === "fetch_github_issue_detail") return issue;
       return null;
     });
@@ -1323,7 +1603,10 @@ describe("IssueListPanel", () => {
     await waitFor(() => {
       expect(rendered.getByText(/Back/)).toBeTruthy();
       expect(rendered.queryByText("Work on this")).toBeNull();
-      expect((rendered.getByText("Switch to Worktree") as HTMLButtonElement).disabled).toBe(true);
+      expect(
+        (rendered.getByText("Switch to Worktree") as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
     });
   });
 });

@@ -1519,6 +1519,19 @@ fn yaml_single_quoted(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn translated_git_env_entries(env_vars: &HashMap<String, String>) -> Vec<(&'static str, String)> {
+    ["GIT_COMMON_DIR", "GIT_DIR"]
+        .into_iter()
+        .filter_map(|key| {
+            env_vars
+                .get(key)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| (key, value.to_string()))
+        })
+        .collect()
+}
+
 fn compose_service_container_name(container_name_prefix: &str, service: &str) -> String {
     let mut suffix = String::new();
     for c in service.trim().chars() {
@@ -1544,6 +1557,7 @@ fn render_docker_compose_override(
     services: &[String],
     container_name_prefix: &str,
     mounts: &[DockerBindMount],
+    git_env: &[(&str, String)],
 ) -> String {
     let mut content = "services:\n".to_string();
     let selected = selected_service.trim();
@@ -1570,7 +1584,18 @@ fn render_docker_compose_override(
             yaml_single_quoted(&resolved_container_name)
         ));
 
-        if service != selected || mounts.is_empty() {
+        if service != selected || (mounts.is_empty() && git_env.is_empty()) {
+            continue;
+        }
+
+        if !git_env.is_empty() {
+            content.push_str("    environment:\n");
+            for (key, value) in git_env {
+                content.push_str(&format!("      {}: {}\n", key, yaml_single_quoted(value)));
+            }
+        }
+
+        if mounts.is_empty() {
             continue;
         }
 
@@ -1597,6 +1622,7 @@ fn write_docker_compose_override(
     selected_service: &str,
     services: &[String],
     mounts: &[DockerBindMount],
+    env_vars: &HashMap<String, String>,
 ) -> Result<Option<std::path::PathBuf>, String> {
     if mounts.is_empty() && services.is_empty() {
         return Ok(None);
@@ -1609,8 +1635,14 @@ fn write_docker_compose_override(
     let filename = format!("docker-compose.gwt.override.{container_name}.yml");
     let path = gwt_dir.join(filename);
 
-    let content =
-        render_docker_compose_override(selected_service, services, container_name, mounts);
+    let git_env = translated_git_env_entries(env_vars);
+    let content = render_docker_compose_override(
+        selected_service,
+        services,
+        container_name,
+        mounts,
+        &git_env,
+    );
 
     std::fs::write(&path, content).map_err(|e| format!("Failed to write override file: {e}"))?;
     Ok(Some(path))
@@ -3622,16 +3654,62 @@ services:
     }
 
     #[test]
+    fn translated_git_env_entries_returns_only_compose_safe_git_vars() {
+        let mut env = HashMap::new();
+        env.insert(
+            "GIT_COMMON_DIR".to_string(),
+            "/Repository/GE/GrimoireEngine.git".to_string(),
+        );
+        env.insert(
+            "GIT_DIR".to_string(),
+            "/Repository/GE/GrimoireEngine.git/worktrees/feature-refactor".to_string(),
+        );
+        env.insert(
+            "HOST_GIT_WORKTREE_DIR".to_string(),
+            "D:/Repository/GE/GrimoireEngine.git/worktrees/feature-refactor".to_string(),
+        );
+
+        let git_env = translated_git_env_entries(&env);
+        assert_eq!(
+            git_env,
+            vec![
+                (
+                    "GIT_COMMON_DIR",
+                    "/Repository/GE/GrimoireEngine.git".to_string()
+                ),
+                (
+                    "GIT_DIR",
+                    "/Repository/GE/GrimoireEngine.git/worktrees/feature-refactor".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn render_docker_compose_override_uses_long_syntax_bind_mounts() {
         let mounts = vec![DockerBindMount {
             source: "D:/Repository/GE/GrimoireEngine.git".to_string(),
             target: "/Repository/GE/GrimoireEngine.git".to_string(),
         }];
+        let git_env = vec![
+            (
+                "GIT_COMMON_DIR",
+                "/Repository/GE/GrimoireEngine.git".to_string(),
+            ),
+            (
+                "GIT_DIR",
+                "/Repository/GE/GrimoireEngine.git/worktrees/develop".to_string(),
+            ),
+        ];
 
         let services = vec!["app".to_string(), "unity-mcp-server".to_string()];
-        let yaml = render_docker_compose_override("app", &services, "gwt-develop", &mounts);
+        let yaml =
+            render_docker_compose_override("app", &services, "gwt-develop", &mounts, &git_env);
         assert!(yaml.contains("container_name: 'gwt-develop-app'"));
         assert!(yaml.contains("container_name: 'gwt-develop-unity-mcp-server'"));
+        assert!(yaml.contains("environment:"));
+        assert!(yaml.contains("GIT_COMMON_DIR: '/Repository/GE/GrimoireEngine.git'"));
+        assert!(yaml.contains("GIT_DIR: '/Repository/GE/GrimoireEngine.git/worktrees/develop'"));
         assert!(yaml.contains("type: bind"));
         assert!(yaml.contains("source: 'D:/Repository/GE/GrimoireEngine.git'"));
         assert!(yaml.contains("target: '/Repository/GE/GrimoireEngine.git'"));
@@ -3641,7 +3719,8 @@ services:
     #[test]
     fn render_docker_compose_override_adds_container_names_without_mounts() {
         let services = vec!["unity-mcp-server".to_string()];
-        let yaml = render_docker_compose_override("unity-mcp-server", &services, "gwt-dev", &[]);
+        let yaml =
+            render_docker_compose_override("unity-mcp-server", &services, "gwt-dev", &[], &[]);
         assert!(yaml.contains("services:\n  unity-mcp-server:\n"));
         assert!(yaml.contains("container_name: 'gwt-dev-unity-mcp-server'"));
         assert!(!yaml.contains("volumes:"));
@@ -4543,6 +4622,7 @@ pub(crate) fn launch_agent_for_project_root(
                         &service,
                         &services,
                         &mounts,
+                        &env,
                     )? {
                         compose_args.push("-f".to_string());
                         compose_args.push(normalize_docker_compose_path(&override_path));
@@ -4637,6 +4717,7 @@ pub(crate) fn launch_agent_for_project_root(
                             &service,
                             &services,
                             &mounts,
+                            &env,
                         )? {
                             compose_args.push("-f".to_string());
                             compose_args.push(normalize_docker_compose_path(&override_path));

@@ -17,9 +17,10 @@
 
   let method: MergeMethod = $state("squash");
   let deleteBranch: boolean = $state(true);
-  let commitMsg: string = $state(prTitle);
+  let commitMsg: string = $state("");
   let merging: boolean = $state(false);
   let error: string | null = $state(null);
+  let lastSyncedPrTitle = "";
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -55,6 +56,12 @@
       onClose();
     }
   }
+
+  $effect(() => {
+    if (prTitle === lastSyncedPrTitle) return;
+    commitMsg = prTitle;
+    lastSyncedPrTitle = prTitle;
+  });
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -105,10 +112,18 @@
     </div>
 
     <div class="dialog-actions">
-      <button class="dialog-btn dialog-btn-cancel" onclick={onClose} disabled={merging}>
+      <button
+        class="dialog-btn dialog-btn-cancel"
+        onclick={onClose}
+        disabled={merging}
+      >
         Cancel
       </button>
-      <button class="dialog-btn dialog-btn-primary" onclick={handleMerge} disabled={merging}>
+      <button
+        class="dialog-btn dialog-btn-primary"
+        onclick={handleMerge}
+        disabled={merging}
+      >
         {merging ? "Merging..." : "Merge"}
       </button>
     </div>

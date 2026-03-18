@@ -111,7 +111,6 @@ struct StartupRecoveryInfo {
     detail: Option<String>,
     hints: Vec<String>,
 }
-
 #[tauri::command]
 pub async fn assistant_get_state(
     window: tauri::Window,
@@ -292,6 +291,50 @@ pub async fn assistant_start(
         if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
             return;
         }
+
+        if context.current_status.as_deref() == Some("awaiting_goal_confirmation") {
+            engine.push_visible_assistant_message(format_assistant_context_message(&context));
+            finish_startup_session(
+                &app_handle,
+                &window_label_for_task,
+                &project_path_for_task,
+                session_generation,
+                engine,
+            );
+            return;
+        }
+
+        let context_path = assistant_context_cache_path(&project_path_for_task);
+        let context = match resolve_assistant_context(&state, &window_label_for_task) {
+            Ok(context) => {
+                store_assistant_context(&state, &window_label_for_task, context.clone());
+                let _ = save_assistant_context_cache(&context_path, &context);
+                context
+            }
+            Err(err) => {
+                let context = AssistantContext {
+                    current_status: Some("blocked".to_string()),
+                    blockers: vec![format!(
+                        "起動時にプロジェクト文脈を解決できませんでした: {err}"
+                    )],
+                    recommended_next_actions: vec![
+                        "README / CLAUDE.md / issue の整合性を確認する".to_string()
+                    ],
+                    ..AssistantContext::default()
+                };
+                store_assistant_context(&state, &window_label_for_task, context.clone());
+                let _ = save_assistant_context_cache(&context_path, &context);
+                engine.push_visible_assistant_message(format_assistant_context_message(&context));
+                finish_startup_session(
+                    &app_handle,
+                    &window_label_for_task,
+                    &project_path_for_task,
+                    session_generation,
+                    engine,
+                );
+                return;
+            }
+        };
 
         if context.current_status.as_deref() == Some("awaiting_goal_confirmation") {
             engine.push_visible_assistant_message(format_assistant_context_message(&context));
@@ -694,7 +737,6 @@ fn derive_startup_recovery_info(engine: &AssistantEngine) -> StartupRecoveryInfo
         hints,
     }
 }
-
 fn store_assistant_context(state: &AppState, window_label: &str, context: AssistantContext) {
     if let Ok(mut map) = state.assistant_context.lock() {
         map.insert(window_label.to_string(), context);
@@ -1770,7 +1812,6 @@ mod tests {
             vec!["CI".to_string()]
         );
     }
-
     #[test]
     fn assistant_recovery_info_detects_resource_guard_failures() {
         let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
