@@ -201,6 +201,7 @@ pub async fn assistant_start(
         .ok_or_else(|| "No project opened. Open a project first.".to_string())?;
 
     state.clear_assistant_session_for_window(&window_label);
+    let session_generation = state.begin_assistant_session_for_window(&window_label);
     set_startup_status(
         &state,
         &window_label,
@@ -213,6 +214,9 @@ pub async fn assistant_start(
     let project_path_for_task = project_path.clone();
     tokio::spawn(async move {
         let state = app_handle.state::<AppState>();
+        if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
+            return;
+        }
         let _ = emit_startup_status(
             &app_handle,
             &window_label_for_task,
@@ -234,11 +238,15 @@ pub async fn assistant_start(
                     &app_handle,
                     &window_label_for_task,
                     &project_path_for_task,
+                    session_generation,
                     engine,
                 );
                 return;
             }
         };
+        if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
+            return;
+        }
 
         let context_path = assistant_context_cache_path(&project_path_for_task);
         let context = match resolve_assistant_context(&state, &window_label_for_task) {
@@ -265,11 +273,15 @@ pub async fn assistant_start(
                     &app_handle,
                     &window_label_for_task,
                     &project_path_for_task,
+                    session_generation,
                     engine,
                 );
                 return;
             }
         };
+        if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
+            return;
+        }
 
         if context.current_status.as_deref() == Some("awaiting_goal_confirmation") {
             engine.push_visible_assistant_message(format_assistant_context_message(&context));
@@ -277,6 +289,7 @@ pub async fn assistant_start(
                 &app_handle,
                 &window_label_for_task,
                 &project_path_for_task,
+                session_generation,
                 engine,
             );
             return;
@@ -303,10 +316,14 @@ pub async fn assistant_start(
                     &app_handle,
                     &window_label_for_task,
                     &project_path_for_task,
+                    session_generation,
                     engine,
                 );
                 return;
             }
+        }
+        if !state.is_current_assistant_session(&window_label_for_task, session_generation) {
+            return;
         }
 
         let _ = emit_startup_status(
@@ -348,6 +365,7 @@ pub async fn assistant_start(
             &app_handle,
             &window_label_for_task,
             &project_path_for_task,
+            session_generation,
             engine,
         );
     });
@@ -366,26 +384,6 @@ pub async fn assistant_stop(
     let window_label = window.label().to_string();
     state.clear_assistant_session_for_window(&window_label);
 
-    {
-        let mut engine_guard = state
-            .assistant_engine
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        engine_guard.remove(&window_label);
-    }
-
-    {
-        let mut monitor_guard = state
-            .assistant_monitor_handle
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        if let Some(handle) = monitor_guard.remove(&window_label) {
-            tokio::spawn(async move {
-                handle.stop().await;
-            });
-        }
-    }
-
     Ok(())
 }
 
@@ -401,12 +399,15 @@ fn build_dashboard_response(
     state: &AppState,
     window_label: &str,
 ) -> Result<DashboardResponse, String> {
-    let project_path = state.project_for_window(window_label);
-    let repo_path = project_path
-        .as_deref()
-        .map(Path::new)
-        .map(crate::commands::project::resolve_repo_path_for_project_root)
-        .transpose()?;
+    let Some(project_path) = state.project_for_window(window_label) else {
+        return Ok(DashboardResponse {
+            panes: Vec::new(),
+            git: build_git_dashboard(state, window_label)?,
+        });
+    };
+    let repo_path = project_path.as_str();
+    let repo_path =
+        crate::commands::project::resolve_repo_path_for_project_root(Path::new(repo_path))?;
     let panes = {
         let mut mgr = state
             .pane_manager
@@ -414,12 +415,7 @@ fn build_dashboard_response(
             .map_err(|e| format!("Lock error: {}", e))?;
         mgr.panes_mut()
             .iter_mut()
-            .filter(|pane| {
-                repo_path
-                    .as_ref()
-                    .map(|repo_path| pane.project_root() == repo_path)
-                    .unwrap_or(true)
-            })
+            .filter(|pane| pane.project_root() == repo_path)
             .map(|pane| {
                 let _ = pane.check_status();
                 PaneDashboard {
@@ -537,9 +533,13 @@ fn finish_startup_session(
     app_handle: &tauri::AppHandle,
     window_label: &str,
     project_path: &str,
+    session_generation: u64,
     engine: AssistantEngine,
 ) {
     let state = app_handle.state::<AppState>();
+    if !state.is_current_assistant_session(window_label, session_generation) {
+        return;
+    }
     if let Ok(mut startup_guard) = state.assistant_startup_inflight.lock() {
         startup_guard.remove(window_label);
     }
