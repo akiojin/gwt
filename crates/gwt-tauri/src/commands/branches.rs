@@ -1,10 +1,11 @@
 //! Branch management commands
 
+use crate::commands::issue::FetchIssuesResponse;
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
 use gwt_core::config::{agent_has_hook_support, infer_agent_status, AgentStatus, Session};
-use gwt_core::git::{fetch_issue_detail, is_bare_repository, Branch, Remote};
+use gwt_core::git::{is_bare_repository, Branch, Remote};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
@@ -355,13 +356,40 @@ where
     display_names
 }
 
+fn build_cached_issue_title_map(state: &AppState, repo_path: &Path) -> HashMap<u64, String> {
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let Ok(guard) = state.project_issue_list_cache.lock() else {
+        return HashMap::new();
+    };
+    let Some(entries) = guard.get(&repo_key) else {
+        return HashMap::new();
+    };
+
+    let mut titles = HashMap::<u64, String>::new();
+    for entry in entries.values() {
+        let Ok(response) = serde_json::from_str::<FetchIssuesResponse>(&entry.response_json) else {
+            continue;
+        };
+        for issue in response.issues {
+            titles.entry(issue.number).or_insert(issue.title);
+        }
+    }
+
+    titles
+}
+
 fn build_issue_display_name_map(
     branch_names: &[String],
     repo_path: &Path,
+    state: &AppState,
 ) -> HashMap<String, String> {
+    let cached_titles = build_cached_issue_title_map(state, repo_path);
     build_issue_display_name_map_with(branch_names.iter(), |issue_number| {
-        let issue = fetch_issue_detail(repo_path, issue_number)?;
-        Ok((issue.number, issue.title))
+        cached_titles
+            .get(&issue_number)
+            .cloned()
+            .map(|title| (issue_number, title))
+            .ok_or_else(|| "cache miss".to_string())
     })
 }
 
@@ -548,7 +576,7 @@ fn list_worktree_branches_impl(
     }
 
     let branch_names = names.iter().cloned().collect::<Vec<_>>();
-    let issue_display_names = build_issue_display_name_map(&branch_names, &repo_path);
+    let issue_display_names = build_issue_display_name_map(&branch_names, &repo_path, state);
 
     let branches = Branch::list(&repo_path)
         .map_err(|e| StructuredError::from_gwt_error(&e, "list_worktree_branches"))?;
@@ -601,7 +629,8 @@ fn list_remote_branches_impl(
         .iter()
         .map(|branch| strip_known_remote_prefix(&branch.name, &remotes).to_string())
         .collect::<Vec<_>>();
-    let issue_display_names = build_issue_display_name_map(&normalized_branch_names, &repo_path);
+    let issue_display_names =
+        build_issue_display_name_map(&normalized_branch_names, &repo_path, state);
 
     let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
     for info in &mut infos {
@@ -643,7 +672,8 @@ pub fn list_branches(
             .iter()
             .map(|branch| branch.name.clone())
             .collect::<Vec<_>>();
-        let issue_display_names = build_issue_display_name_map(&issue_branch_names, &repo_path);
+        let issue_display_names =
+            build_issue_display_name_map(&issue_branch_names, &repo_path, &state);
         let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
@@ -740,7 +770,7 @@ pub fn get_current_branch(
         let issue_display_names = branch
             .as_ref()
             .map(|branch| {
-                build_issue_display_name_map(std::slice::from_ref(&branch.name), &repo_path)
+                build_issue_display_name_map(std::slice::from_ref(&branch.name), &repo_path, &state)
             })
             .unwrap_or_default();
         Ok(branch.map(|b| {
@@ -764,6 +794,7 @@ pub fn get_current_branch(
 mod tests {
     use super::*;
     use crate::state::AppState;
+    use crate::state::IssueListCacheEntry;
     use gwt_core::config::AgentStatus;
     use gwt_core::process::command;
     use tempfile::TempDir;
@@ -1019,6 +1050,55 @@ mod tests {
             Some(&"#1644 Worktree管理".to_string())
         );
         assert!(!issue_names.contains_key("develop"));
+    }
+    #[test]
+    fn test_build_issue_display_name_map_uses_cached_issue_titles_only() {
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let state = AppState::new();
+        let repo_key = repo_path.to_string_lossy().to_string();
+        let response_json = serde_json::json!({
+            "issues": [
+                {
+                    "number": 1644,
+                    "title": "Worktree管理",
+                    "updatedAt": "2026-03-18T00:00:00Z",
+                    "labels": [],
+                    "body": null,
+                    "state": "open",
+                    "htmlUrl": "https://example.com/issues/1644",
+                    "assignees": [],
+                    "commentsCount": 0,
+                    "milestone": null
+                }
+            ],
+            "hasNextPage": false
+        })
+        .to_string();
+        state.project_issue_list_cache.lock().unwrap().insert(
+            repo_key,
+            HashMap::from([(
+                "page=1&per_page=50&state=open&category=all&include_body=false".to_string(),
+                IssueListCacheEntry {
+                    fetched_at_millis: 0,
+                    response_json,
+                },
+            )]),
+        );
+
+        let names = vec![
+            "feature/issue-1644".to_string(),
+            "feature/issue-2000".to_string(),
+        ];
+        let issue_names = build_issue_display_name_map(&names, &repo_path, &state);
+
+        assert_eq!(
+            issue_names.get("feature/issue-1644"),
+            Some(&"#1644 Worktree管理".to_string())
+        );
+        assert!(!issue_names.contains_key("feature/issue-2000"));
     }
 
     #[test]
