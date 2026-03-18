@@ -1,5 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import FilePenLine from "lucide-svelte/icons/file-pen-line";
+  import LoaderCircle from "lucide-svelte/icons/loader-circle";
+  import Play from "lucide-svelte/icons/play";
+  import Plus from "lucide-svelte/icons/plus";
+  import Rocket from "lucide-svelte/icons/rocket";
+  import SquareTerminal from "lucide-svelte/icons/square-terminal";
   import { invoke as tauriInvoke } from "$lib/tauriInvoke";
   import type {
     BranchInfo,
@@ -29,7 +35,9 @@
     normalizeSummaryLanguage,
     summaryLanguageLabel,
     agentIdForToolId,
+    toolClassFromToolId,
     toolClass,
+    displayToolNameFromToolId,
     displayToolName,
     displayToolVersion,
     normalizeString,
@@ -353,6 +361,21 @@
       return entry.timestamp > latest.timestamp ? entry : latest;
     });
   });
+
+  let latestUsedToolId: string = $derived.by(() => {
+    const branchTool = normalizeString(selectedBranch?.last_tool_usage);
+    if (branchTool) return branchTool;
+    return normalizeString(latestQuickStartEntry?.tool_id);
+  });
+
+  let latestUsedToolLabel: string | null = $derived.by(() => {
+    const label = displayToolNameFromToolId(latestUsedToolId);
+    return label ?? null;
+  });
+
+  let latestUsedToolClass: string = $derived.by(() =>
+    toolClassFromToolId(latestUsedToolId),
+  );
 
   let quickHeaderButtonsDisabled = $derived.by(
     () =>
@@ -1283,72 +1306,109 @@
   {#if selectedBranch}
     <div class="branch-detail">
       <div class="branch-header">
-        {#if editingDisplayName}
-          <div class="display-name-edit">
-            <input
-              class="display-name-input"
-              type="text"
-              bind:value={displayNameValue}
-              onkeydown={handleDisplayNameKeydown}
-              onblur={() => saveDisplayName()}
-              disabled={displayNameSaving}
-              placeholder={selectedBranch.name}
-              autofocus
-            />
-          </div>
-        {:else}
-          <h2 class="branch-name-heading">
-            <span class="branch-display-name">{selectedBranch.display_name ?? selectedBranch.name}</span>
-            <button
-              class="edit-display-name-btn"
-              title="Edit display name"
-              onclick={() => startEditDisplayName()}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                <path d="m15 5 4 4" />
-              </svg>
-            </button>
-          </h2>
-          {#if selectedBranch.display_name && selectedBranch.display_name !== selectedBranch.name}
-            <span class="branch-real-name">{selectedBranch.name}</span>
+        <div class="branch-title-group">
+          {#if editingDisplayName}
+            <div class="display-name-edit">
+              <input
+                class="display-name-input"
+                type="text"
+                bind:value={displayNameValue}
+                onkeydown={handleDisplayNameKeydown}
+                onblur={() => saveDisplayName()}
+                disabled={displayNameSaving}
+                placeholder={selectedBranch.name}
+                autofocus
+              />
+            </div>
+          {:else}
+            <h2 class="branch-name-heading">
+              <span class="branch-display-name">{selectedBranch.display_name ?? selectedBranch.name}</span>
+              <button
+                class="edit-display-name-btn"
+                title="Edit display name"
+                onclick={() => startEditDisplayName()}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                  <path d="m15 5 4 4" />
+                </svg>
+              </button>
+            </h2>
+            {#if (selectedBranch.display_name && selectedBranch.display_name !== selectedBranch.name) || latestUsedToolLabel}
+              <div class="branch-meta-row">
+                {#if selectedBranch.display_name && selectedBranch.display_name !== selectedBranch.name}
+                  <span class="branch-real-name">{selectedBranch.name}</span>
+                {/if}
+                {#if latestUsedToolLabel}
+                  <span
+                    class={`branch-tool-badge ${latestUsedToolClass}`}
+                    title={`Latest agent: ${latestUsedToolLabel}`}
+                  >
+                    Latest agent: {latestUsedToolLabel}
+                  </span>
+                {/if}
+              </div>
+            {/if}
           {/if}
-        {/if}
+        </div>
         <div class="branch-header-actions">
           <button
-            class="header-quick-btn"
+            class="header-icon-btn"
             disabled={quickHeaderButtonsDisabled}
+            aria-label="Continue"
+            title="Continue"
             onclick={() => latestQuickStartEntry && quickLaunch(latestQuickStartEntry, "continue")}
           >
-            {quickLaunching &&
+            {#if quickLaunching &&
             latestQuickStartEntry &&
-            quickLaunchingKey === quickStartEntryKey(latestQuickStartEntry)
-              ? "Launching..."
-              : "Continue"}
+            quickLaunchingKey === quickStartEntryKey(latestQuickStartEntry)}
+              <LoaderCircle class="action-icon spin" size={16} aria-hidden="true" />
+            {:else}
+              <Play class="action-icon" size={16} aria-hidden="true" />
+            {/if}
+            <span class="sr-only">Continue</span>
           </button>
           <button
-            class="header-quick-btn ghost"
+            class="header-icon-btn ghost"
             disabled={quickHeaderButtonsDisabled}
+            aria-label="New"
+            title="New"
             onclick={() => latestQuickStartEntry && quickLaunch(latestQuickStartEntry, "new")}
           >
-            New
+            <Plus class="action-icon" size={16} aria-hidden="true" />
+            <span class="sr-only">New</span>
           </button>
           <button
-            class="header-quick-btn ghost"
+            class="header-icon-btn ghost"
             disabled={docsActionBusy}
+            aria-label={docsActionBusy ? "Checking docs" : "Check/Fix Docs + Edit"}
+            title={docsActionBusy ? "Checking docs" : "Check/Fix Docs + Edit"}
             onclick={handleCheckFixDocsAndEdit}
           >
-            {docsActionBusy ? "Checking..." : "Check/Fix Docs + Edit"}
+            {#if docsActionBusy}
+              <LoaderCircle class="action-icon spin" size={16} aria-hidden="true" />
+            {:else}
+              <FilePenLine class="action-icon" size={16} aria-hidden="true" />
+            {/if}
+            <span class="sr-only">{docsActionBusy ? "Checking docs" : "Check/Fix Docs + Edit"}</span>
           </button>
           <button
-            class="new-terminal-btn"
+            class="header-icon-btn ghost"
+            aria-label="New Terminal"
             title="New Terminal"
             onclick={() => onNewTerminal?.()}
           >
-            &gt;_
+            <SquareTerminal class="action-icon" size={16} aria-hidden="true" />
+            <span class="sr-only">New Terminal</span>
           </button>
-          <button class="launch-btn" onclick={() => onLaunchAgent?.()}>
-            Launch Agent...
+          <button
+            class="header-icon-btn accent"
+            aria-label="Launch Agent"
+            title="Launch Agent"
+            onclick={() => onLaunchAgent?.()}
+          >
+            <Rocket class="action-icon" size={16} aria-hidden="true" />
+            <span class="sr-only">Launch Agent</span>
           </button>
         </div>
       </div>
@@ -1748,6 +1808,14 @@
     flex-wrap: wrap;
   }
 
+  .branch-title-group {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-direction: column;
+    gap: 4px;
+  }
+
   .branch-header-actions {
     display: flex;
     align-items: center;
@@ -1783,6 +1851,14 @@
     text-overflow: ellipsis;
   }
 
+  .branch-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
   .edit-display-name-btn {
     flex-shrink: 0;
     background: none;
@@ -1807,8 +1883,46 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    flex-basis: 100%;
-    margin-top: -8px;
+    min-width: 0;
+  }
+
+  .branch-tool-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: var(--ui-font-xs);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .branch-tool-badge.claude {
+    color: var(--yellow);
+    border-color: rgba(249, 226, 175, 0.35);
+  }
+
+  .branch-tool-badge.codex {
+    color: var(--cyan);
+    border-color: rgba(148, 226, 213, 0.35);
+  }
+
+  .branch-tool-badge.gemini {
+    color: var(--magenta);
+    border-color: rgba(203, 166, 247, 0.35);
+  }
+
+  .branch-tool-badge.opencode {
+    color: var(--green);
+    border-color: rgba(166, 227, 161, 0.35);
+  }
+
+  .branch-tool-badge.copilot {
+    color: var(--accent);
+    border-color: rgba(137, 180, 250, 0.35);
   }
 
   .display-name-edit {
@@ -1835,68 +1949,67 @@
     opacity: 0.6;
   }
 
-  .launch-btn {
-    background: var(--accent);
-    color: var(--bg-primary);
-    border: none;
-    border-radius: 8px;
-    padding: 6px 10px;
-    font-size: var(--ui-font-sm);
-    font-weight: 600;
-    cursor: pointer;
-    font-family: inherit;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .launch-btn:hover {
-    background: var(--accent-hover);
-  }
-
-  .new-terminal-btn {
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 6px 10px;
-    font-size: var(--ui-font-sm);
-    font-weight: 700;
-    font-family: monospace;
-    cursor: pointer;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .new-terminal-btn:hover {
-    border-color: var(--accent);
-  }
-
-  .header-quick-btn {
-    padding: 6px 10px;
+  .header-icon-btn {
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border-radius: 8px;
     border: 1px solid var(--border-color);
     background: var(--bg-surface);
     color: var(--text-primary);
-    font-size: var(--ui-font-sm);
-    font-weight: 700;
     cursor: pointer;
-    font-family: inherit;
-    transition: border-color 0.15s, background-color 0.15s;
-    white-space: nowrap;
+    transition: border-color 0.15s, background-color 0.15s, color 0.15s;
+    flex-shrink: 0;
   }
 
-  .header-quick-btn:hover:not(:disabled) {
+  .header-icon-btn:hover:not(:disabled) {
     border-color: var(--accent);
+    color: var(--text-primary);
   }
 
-  .header-quick-btn:disabled {
+  .header-icon-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }
 
-  .header-quick-btn.ghost {
+  .header-icon-btn.ghost {
     background: transparent;
     color: var(--text-secondary);
+  }
+
+  .header-icon-btn.accent {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-primary);
+  }
+
+  .header-icon-btn.accent:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: var(--bg-primary);
+  }
+
+  .action-icon {
+    width: 16px;
+    height: 16px;
+  }
+
+  .action-icon.spin {
+    animation: summary-spin 0.8s linear infinite;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   .detail-grid {

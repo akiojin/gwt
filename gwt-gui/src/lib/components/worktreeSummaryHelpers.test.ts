@@ -7,7 +7,9 @@ import {
   normalizeSummaryLanguage,
   summaryLanguageLabel,
   agentIdForToolId,
+  toolClassFromToolId,
   toolClass,
+  displayToolNameFromToolId,
   displayToolName,
   displayToolVersion,
   normalizeString,
@@ -83,6 +85,14 @@ describe("worktreeSummaryHelpers", () => {
     expect(agentIdForToolId("github-copilot")).toBe("copilot");
     expect(agentIdForToolId("mystery")).toBe("mystery");
 
+    expect(toolClassFromToolId("claude-code")).toBe("claude");
+    expect(toolClassFromToolId("codex-cli")).toBe("codex");
+    expect(toolClassFromToolId("gemini-cli")).toBe("gemini");
+    expect(toolClassFromToolId("opencode-cli")).toBe("opencode");
+    expect(toolClassFromToolId("github-copilot")).toBe("copilot");
+    expect(toolClassFromToolId("mystery")).toBe("");
+    expect(toolClassFromToolId(undefined)).toBe("");
+
     expect(toolClass(entry({ tool_id: "claude-code" }))).toBe("claude");
     expect(toolClass(entry({ tool_id: "codex-cli" }))).toBe("codex");
     expect(toolClass(entry({ tool_id: "gemini-cli" }))).toBe("gemini");
@@ -94,6 +104,15 @@ describe("worktreeSummaryHelpers", () => {
   });
 
   it("formats tool display name/version", () => {
+    expect(displayToolNameFromToolId("claude-code")).toBe("Claude");
+    expect(displayToolNameFromToolId("codex-cli")).toBe("Codex");
+    expect(displayToolNameFromToolId("gemini-cli")).toBe("Gemini");
+    expect(displayToolNameFromToolId("opencode-cli")).toBe("OpenCode");
+    expect(displayToolNameFromToolId("github-copilot")).toBe("GitHub Copilot");
+    expect(displayToolNameFromToolId("mystery", "Mystery Label")).toBe("Mystery Label");
+    expect(displayToolNameFromToolId("id-only", "")).toBe("id-only");
+    expect(displayToolNameFromToolId(undefined, "")).toBeUndefined();
+
     expect(displayToolName(entry({ tool_id: "claude-code" }))).toBe("Claude");
     expect(displayToolName(entry({ tool_id: "codex-cli" }))).toBe("Codex");
     expect(displayToolName(entry({ tool_id: "gemini-cli" }))).toBe("Gemini");

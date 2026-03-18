@@ -53,8 +53,8 @@ export function agentIdForToolId(toolId: string): LaunchAgentRequest["agentId"] 
   return toolId as LaunchAgentRequest["agentId"];
 }
 
-export function toolClass(entry: ToolSessionEntry): string {
-  const id = entry.tool_id?.toLowerCase() ?? "";
+export function toolClassFromToolId(toolId: string | null | undefined): string {
+  const id = toolId?.toLowerCase() ?? "";
   if (id.includes("claude")) return "claude";
   if (id.includes("codex")) return "codex";
   if (id.includes("gemini")) return "gemini";
@@ -63,14 +63,25 @@ export function toolClass(entry: ToolSessionEntry): string {
   return "";
 }
 
-export function displayToolName(entry: ToolSessionEntry): string {
-  const id = entry.tool_id?.toLowerCase() ?? "";
+export function toolClass(entry: ToolSessionEntry): string {
+  return toolClassFromToolId(entry.tool_id);
+}
+
+export function displayToolNameFromToolId(
+  toolId: string | null | undefined,
+  fallbackLabel?: string | null,
+): string | undefined {
+  const id = toolId?.toLowerCase() ?? "";
   if (id.includes("claude")) return "Claude";
   if (id.includes("codex")) return "Codex";
   if (id.includes("gemini")) return "Gemini";
   if (id.includes("opencode") || id.includes("open-code")) return "OpenCode";
   if (id.includes("copilot")) return "GitHub Copilot";
-  return entry.tool_label || entry.tool_id;
+  return fallbackLabel || toolId || undefined;
+}
+
+export function displayToolName(entry: ToolSessionEntry): string | undefined {
+  return displayToolNameFromToolId(entry.tool_id, entry.tool_label);
 }
 
 export function displayToolVersion(entry: ToolSessionEntry): string {

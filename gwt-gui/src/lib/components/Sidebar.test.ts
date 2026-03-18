@@ -1209,7 +1209,7 @@ describe("Sidebar", () => {
     });
 
     const launchButton = await rendered.findByRole("button", {
-      name: "Launch Agent...",
+      name: "Launch Agent",
     });
     await fireEvent.click(launchButton);
 
