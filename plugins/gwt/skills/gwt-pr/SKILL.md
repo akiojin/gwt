@@ -136,9 +136,12 @@ Next
 4. **Check branch sync against base (critical)**
    - Run `git rev-list --left-right --count "HEAD...origin/$base"`.
    - Parse the result as `ahead behind`.
-   - If `behind > 0` and `ahead == 0` → stop and report `Branch update required before creating a PR.`
-   - If `behind > 0` and `ahead > 0` → stop and report `Branch has diverged from base. Sync it before creating a PR.`
-   - Continue only when `behind == 0`.
+   - If `behind == 0`, continue.
+   - If `behind > 0`, merge `origin/$base` into the current branch before PR creation.
+   - The update strategy is always `git merge origin/$base`; do not use rebase for this workflow.
+   - After merge, push the branch so the PR branch and worktree stay aligned with gwt's remote-first flow.
+   - If merge conflicts occur, inspect the affected files carefully, resolve only when the resulting behavior is coherent, and continue.
+   - If you cannot resolve the conflict with high confidence, stop and ask the user before proceeding.
 
 5. **Check existing PR for head branch**
    - Use decision rules above to pick action.
@@ -214,14 +217,13 @@ divergence=$(git rev-list --left-right --count "HEAD...origin/$base" 2>/dev/null
 ahead_count=$(echo "$divergence" | awk '{print $1}')
 behind_count=$(echo "$divergence" | awk '{print $2}')
 
-if [ "${behind_count:-0}" -gt 0 ] && [ "${ahead_count:-0}" -gt 0 ]; then
-  echo "Branch has diverged from base. Sync it before creating a PR." >&2
-  exit 1
-fi
-
 if [ "${behind_count:-0}" -gt 0 ]; then
-  echo "Branch update required before creating a PR." >&2
-  exit 1
+  echo "Merging origin/$base into $head before PR creation"
+  git merge "origin/$base" || {
+    echo "Base-branch merge produced conflicts. Inspect and resolve them before continuing." >&2
+    exit 1
+  }
+  git push -u origin "$head"
 fi
 
 # Check existing PRs for the head branch

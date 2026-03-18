@@ -133,8 +133,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" -
    **Conflicts Mode (`--mode conflicts`):**
    - Check `mergeable` and `mergeStateStatus` fields.
    - If `CONFLICTING` or `DIRTY`, report conflict details.
-   - If `BEHIND`, report that the base branch advanced and an Update Branch is required.
-   - Suggest resolution steps: fetch base branch, merge/rebase, resolve conflicts.
+   - If `BEHIND`, report that the base branch advanced and a base-branch merge is required.
+   - Default resolution path is `git fetch origin <base> && git merge origin/<base>`.
+   - Do not recommend rebase for gwt PR maintenance.
 
    **Reviews Mode (`--mode reviews`):**
    - Fetch reviews with `CHANGES_REQUESTED` state.
@@ -197,7 +198,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" -
    **Auto-fix judgment:**
 
    - **Auto-fix: Yes** — CI-FAILURE code fixes, reviewer instructions that the LLM can address with high confidence
-   - **Auto-fix: No (needs confirmation)** — CONFLICT resolution (merge/rebase), low-confidence reviewer instructions, changes requiring design decisions
+   - **Auto-fix: No (needs confirmation)** — merge conflicts you cannot resolve with high confidence, low-confidence reviewer instructions, changes requiring design decisions
 
    **Each CHANGE-REQUEST and each UNRESOLVED-THREAD is a separate B-item.** Do not combine multiple threads or requests into one item.
 
@@ -250,14 +251,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" -
 
 ### BRANCH-BEHIND
 
-- Default strategy: `git fetch origin <base> && git merge origin/<base>`
+- Default strategy: `git fetch origin <base> && git merge origin/<base> && git push`
+- This is automatic when the merge is clean.
 - If merge results in conflicts, switch to CONFLICT handling below.
 
 ### CONFLICT
 
-- LLM attempts to resolve conflicts after user confirmation.
-- Present conflict summary (affected files, conflict markers) and proposed resolution to the user.
-- Execute resolution only after user approves.
+- First inspect the conflicting files and reason about the behavioral impact of each side; do not resolve by mechanically taking one side.
+- If the correct merge is clear and low-risk, resolve it, run the relevant checks, and push.
+- If the correct merge is not clear, present the conflict summary and ask the user before proceeding.
 
 ## Bundled Resources
 

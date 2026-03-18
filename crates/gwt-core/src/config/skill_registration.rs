@@ -2248,7 +2248,8 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(claude_pr_command
             .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
-        assert!(claude_pr_command.contains("`MANUAL CHECK`"));
+        assert!(claude_pr_command
+            .contains("merge `origin/$base` into the current branch and push before PR creation."));
 
         let claude_pr_check_command = std::fs::read_to_string(
             temp.path()
@@ -2636,7 +2637,8 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
 
         assert!(skill_content.contains("git rev-list --left-right --count \"HEAD...origin/$base\""));
-        assert!(skill_content.contains("Branch update required before creating a PR."));
+        assert!(skill_content.contains("git merge \"origin/$base\""));
+        assert!(skill_content.contains("The update strategy is always `git merge origin/$base`; do not use rebase for this workflow."));
     }
 
     #[test]

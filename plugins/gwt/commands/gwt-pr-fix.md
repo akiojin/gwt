@@ -26,7 +26,9 @@ Use this command to diagnose and fix CI failures for a PR.
 
 1. Load `skills/gwt-pr-fix/SKILL.md` and follow the workflow.
 2. Run the inspection script to gather CI results.
-3. Propose fixes and apply them after user approval.
+3. If the PR is behind the base branch, merge `origin/<base>` into the current branch and push when the merge is clean.
+4. If that merge conflicts and the correct resolution is not obvious, ask the user before continuing.
+5. Propose fixes and apply them after user approval when required.
 
 ## Proactive Trigger Examples
 
