@@ -228,11 +228,13 @@ describe("agentLaunchFormHelpers", () => {
   it("handles issue prefix classification and stale request checks", () => {
     const ok = { status: "ok", prefix: "feature" } as ClassifyResult;
     const invalid = { status: "ok", prefix: "invalid" } as ClassifyResult;
+    const notConfigured = { status: "ai-not-configured" } as ClassifyResult;
     const error = { status: "error", error: "x" } as ClassifyResult;
 
     expect(classifyIssuePrefix(ok, BRANCH_PREFIXES)).toBe("feature/");
-    expect(classifyIssuePrefix(invalid, BRANCH_PREFIXES)).toBe("");
-    expect(classifyIssuePrefix(error, BRANCH_PREFIXES)).toBe("");
+    expect(classifyIssuePrefix(invalid, BRANCH_PREFIXES)).toBe("feature/");
+    expect(classifyIssuePrefix(notConfigured, BRANCH_PREFIXES)).toBe("feature/");
+    expect(classifyIssuePrefix(error, BRANCH_PREFIXES)).toBe("feature/");
 
     expect(isStaleIssueClassifyRequest(1, 2, 10, 10)).toBe(true);
     expect(isStaleIssueClassifyRequest(1, 1, 11, 10)).toBe(true);
