@@ -61,10 +61,10 @@
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
   let savedUiFontFamily: string = $state(
-    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif'
+    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
   );
   let savedTerminalFontFamily: string = $state(
-    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace'
+    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace',
   );
   let apiKeyDraft: string = $state("");
   let apiKeyDraftProfileKey: string = $state("");
@@ -82,7 +82,9 @@
   let aiModelsLoadedKey: string = $state("");
   let aiModelsRequestSeq: number = 0;
 
-  let currentProfile = $derived(getCurrentProfile(profiles, selectedProfileKey));
+  let currentProfile = $derived(
+    getCurrentProfile(profiles, selectedProfileKey),
+  );
   let currentAiRequestKey = $derived.by(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
@@ -93,7 +95,9 @@
   });
   let aiModelOptions = $derived.by(() => {
     const current =
-      aiModelsLoadedKey === currentAiRequestKey ? (currentProfile?.ai?.model?.trim() ?? "") : "";
+      aiModelsLoadedKey === currentAiRequestKey
+        ? (currentProfile?.ai?.model?.trim() ?? "")
+        : "";
     const options = [...aiModels];
     if (current && !options.includes(current)) {
       options.unshift(current);
@@ -105,7 +109,9 @@
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
-  let defaultProfileSelected = $derived(isDefaultProfileKey(selectedProfileKey));
+  let defaultProfileSelected = $derived(
+    isDefaultProfileKey(selectedProfileKey),
+  );
 
   function toPlainData<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
@@ -148,7 +154,9 @@
 
   $effect(() => {
     if (!settings) return;
-    const quality = (settings.voice_input?.quality ?? "balanced").trim().toLowerCase();
+    const quality = (settings.voice_input?.quality ?? "balanced")
+      .trim()
+      .toLowerCase();
     const gpuAvailable = detectGpuAvailability();
     let cancelled = false;
 
@@ -186,7 +194,10 @@
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const nextValue = currentProfile?.ai?.api_key ?? "";
-    if (profileKey === apiKeyDraftProfileKey && nextValue === apiKeyDraftSourceValue) {
+    if (
+      profileKey === apiKeyDraftProfileKey &&
+      nextValue === apiKeyDraftSourceValue
+    ) {
       return;
     }
     apiKeyDraftProfileKey = profileKey;
@@ -254,15 +265,17 @@
     const parsedUi = Number.parseInt(computed.trim(), 10);
     savedUiFontSize = Number.isNaN(parsedUi) ? 13 : parsedUi;
     const storedTerminal = (window as any).__gwtTerminalFontSize;
-    savedTerminalFontSize = typeof storedTerminal === "number" ? storedTerminal : 13;
+    savedTerminalFontSize =
+      typeof storedTerminal === "number" ? storedTerminal : 13;
     const computedUiFamily = rootStyle.getPropertyValue("--ui-font-family");
     savedUiFontFamily = normalizeUiFontFamily(computedUiFamily);
     const storedTerminalFamily = (window as any).__gwtTerminalFontFamily;
     if (typeof storedTerminalFamily === "string") {
-      savedTerminalFontFamily = normalizeTerminalFontFamily(storedTerminalFamily);
+      savedTerminalFontFamily =
+        normalizeTerminalFontFamily(storedTerminalFamily);
     } else {
       savedTerminalFontFamily = normalizeTerminalFontFamily(
-        rootStyle.getPropertyValue("--terminal-font-family")
+        rootStyle.getPropertyValue("--terminal-font-family"),
       );
     }
   });
@@ -279,7 +292,7 @@
     endpoint: string,
     apiKey: string,
     requestKey: string,
-    force: boolean
+    force: boolean,
   ) {
     if (!force && requestKey === aiModelsLoadedKey) return;
 
@@ -297,7 +310,11 @@
       if (requestSeq !== aiModelsRequestSeq) return;
 
       const nextModels = Array.from(
-        new Set((models ?? []).map((m) => (m.id ?? "").trim()).filter((id) => id.length > 0))
+        new Set(
+          (models ?? [])
+            .map((m) => (m.id ?? "").trim())
+            .filter((id) => id.length > 0),
+        ),
       ).sort((a, b) => a.localeCompare(b));
 
       aiModels = nextModels;
@@ -339,11 +356,17 @@
         invoke<SettingsData>("get_settings"),
         invoke<ProfilesConfig>("get_profiles"),
       ]);
-      loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
-      loadedSettings.app_language = normalizeAppLanguage(loadedSettings.app_language);
-      loadedSettings.ui_font_family = normalizeUiFontFamily(loadedSettings.ui_font_family);
+      loadedSettings.voice_input = normalizeVoiceInputSettings(
+        loadedSettings.voice_input,
+      );
+      loadedSettings.app_language = normalizeAppLanguage(
+        loadedSettings.app_language,
+      );
+      loadedSettings.ui_font_family = normalizeUiFontFamily(
+        loadedSettings.ui_font_family,
+      );
       loadedSettings.terminal_font_family = normalizeTerminalFontFamily(
-        loadedSettings.terminal_font_family
+        loadedSettings.terminal_font_family,
       );
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
@@ -378,7 +401,9 @@
       const normalizedSettings = {
         ...settings,
         ui_font_family: normalizeUiFontFamily(settings.ui_font_family),
-        terminal_font_family: normalizeTerminalFontFamily(settings.terminal_font_family),
+        terminal_font_family: normalizeTerminalFontFamily(
+          settings.terminal_font_family,
+        ),
       };
       const plainSettings = toPlainData(normalizedSettings);
       settings = plainSettings;
@@ -388,7 +413,11 @@
       if (profiles) {
         const plainProfiles = toPlainData(buildProfilesConfigWithApiKeyDraft());
         const aiInPayload = plainProfiles.profiles?.[selectedProfileKey]?.ai;
-        console.debug("[gwt] save_profiles AI payload:", selectedProfileKey, aiInPayload);
+        console.debug(
+          "[gwt] save_profiles AI payload:",
+          selectedProfileKey,
+          aiInPayload,
+        );
         profiles = plainProfiles;
         await invoke("save_profiles", { config: plainProfiles });
       }
@@ -398,7 +427,7 @@
       savedTerminalFontSize = settings.terminal_font_size ?? 13;
       savedUiFontFamily = normalizeUiFontFamily(settings.ui_font_family);
       savedTerminalFontFamily = normalizeTerminalFontFamily(
-        settings.terminal_font_family
+        settings.terminal_font_family,
       );
       settings.voice_input = normalizeVoiceInputSettings(settings.voice_input);
       window.dispatchEvent(
@@ -411,7 +440,7 @@
             appLanguage: settings.app_language,
             voiceInput: settings.voice_input,
           },
-        })
+        }),
       );
     } catch (err) {
       console.error("Failed to save settings/profiles:", err);
@@ -433,7 +462,9 @@
 
   function removeBranch(branch: string) {
     if (!settings) return;
-    settings.protected_branches = settings.protected_branches.filter((b) => b !== branch);
+    settings.protected_branches = settings.protected_branches.filter(
+      (b) => b !== branch,
+    );
   }
 
   function handleBranchKeydown(e: KeyboardEvent) {
@@ -456,23 +487,33 @@
   function applyUiFontFamily(family: string | null | undefined) {
     document.documentElement.style.setProperty(
       "--ui-font-family",
-      normalizeUiFontFamily(family)
+      normalizeUiFontFamily(family),
     );
   }
 
   function applyTerminalFontSize(size: number) {
     (window as any).__gwtTerminalFontSize = size;
-    window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-size", { detail: size }),
+    );
   }
 
   function applyTerminalFontFamily(family: string | null | undefined) {
     const normalized = normalizeTerminalFontFamily(family);
-    document.documentElement.style.setProperty("--terminal-font-family", normalized);
+    document.documentElement.style.setProperty(
+      "--terminal-font-family",
+      normalized,
+    );
     (window as any).__gwtTerminalFontFamily = normalized;
-    window.dispatchEvent(new CustomEvent("gwt-terminal-font-family", { detail: normalized }));
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-family", { detail: normalized }),
+    );
   }
 
-  function adjustFontSize(field: "ui_font_size" | "terminal_font_size", delta: number) {
+  function adjustFontSize(
+    field: "ui_font_size" | "terminal_font_size",
+    delta: number,
+  ) {
     if (!settings) return;
     const current = settings[field] ?? 13;
     const next = clampFontSize(current + delta);
@@ -499,7 +540,8 @@
     const trimmed = name.trim().toLowerCase();
     if (!trimmed) return;
     if (!PROFILE_NAME_PATTERN.test(trimmed)) {
-      saveMessage = "Profile name must be lowercase letters, numbers, or hyphens.";
+      saveMessage =
+        "Profile name must be lowercase letters, numbers, or hyphens.";
       return;
     }
     if (profiles.profiles?.[trimmed]) {
@@ -533,7 +575,9 @@
     delete copy[selectedProfileKey];
     const nextKeys = Object.keys(copy).sort((a, b) => a.localeCompare(b));
     const nextActive =
-      profiles.active === selectedProfileKey ? (nextKeys[0] ?? null) : profiles.active ?? null;
+      profiles.active === selectedProfileKey
+        ? (nextKeys[0] ?? null)
+        : (profiles.active ?? null);
     profiles = { ...profiles, profiles: copy, active: nextActive };
     selectedProfileKey = nextActive ?? "";
     showDeleteProfileDialog = false;
@@ -548,7 +592,10 @@
     const nextProfile: Profile = { ...p, env: nextEnv };
     profiles = {
       ...profiles,
-      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
+      profiles: {
+        ...(profiles.profiles ?? {}),
+        [selectedProfileKey]: nextProfile,
+      },
     };
   }
 
@@ -562,7 +609,10 @@
     const nextProfile: Profile = { ...p, env: nextEnv };
     profiles = {
       ...profiles,
-      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
+      profiles: {
+        ...(profiles.profiles ?? {}),
+        [selectedProfileKey]: nextProfile,
+      },
     };
   }
 
@@ -576,7 +626,7 @@
 
   function updateAiField(
     field: "endpoint" | "api_key" | "model" | "language",
-    value: string
+    value: string,
   ) {
     if (!profiles) return;
     const p = currentProfile;
@@ -593,7 +643,10 @@
     const nextProfile: Profile = { ...p, ai: nextAi };
     profiles = {
       ...profiles,
-      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
+      profiles: {
+        ...(profiles.profiles ?? {}),
+        [selectedProfileKey]: nextProfile,
+      },
     };
   }
 
@@ -618,7 +671,10 @@
     const nextProfile: Profile = { ...p, ai: nextAi };
     const nextProfiles = {
       ...profiles,
-      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
+      profiles: {
+        ...(profiles.profiles ?? {}),
+        [selectedProfileKey]: nextProfile,
+      },
     };
     return nextProfiles;
   }
@@ -630,8 +686,13 @@
       await navigator.clipboard.writeText(key);
       apiKeyCopied = true;
       if (copyTimer !== null) clearTimeout(copyTimer);
-      copyTimer = setTimeout(() => { apiKeyCopied = false; copyTimer = null; }, 1500);
-    } catch (e) { console.warn("Failed to copy API key:", e); }
+      copyTimer = setTimeout(() => {
+        apiKeyCopied = false;
+        copyTimer = null;
+      }, 1500);
+    } catch (e) {
+      console.warn("Failed to copy API key:", e);
+    }
   }
 
   function startApiKeyPeek() {
@@ -694,7 +755,7 @@
 
   function updateVoiceInputField(
     field: keyof VoiceInputSettings,
-    value: VoiceInputSettings[keyof VoiceInputSettings]
+    value: VoiceInputSettings[keyof VoiceInputSettings],
   ) {
     if (!settings) return;
     const current = normalizeVoiceInputSettings(settings.voice_input);
@@ -709,13 +770,14 @@
     }
     settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
   }
-
 </script>
 
 <div class="settings-panel">
   <div class="settings-header">
     <h2>Settings</h2>
-    <button class="close-btn" onclick={handleClose} aria-label="Close">&times;</button>
+    <button class="close-btn" onclick={handleClose} aria-label="Close"
+      >&times;</button
+    >
   </div>
 
   {#if loadingSettings || loadingProfiles}
@@ -728,18 +790,18 @@
         <button
           class="settings-tab-btn"
           class:active={activeSettingsTab === "general"}
-          onclick={() => (activeSettingsTab = "general")}
-        >General</button>
+          onclick={() => (activeSettingsTab = "general")}>General</button
+        >
         <button
           class="settings-tab-btn"
           class:active={activeSettingsTab === "profiles"}
-          onclick={() => (activeSettingsTab = "profiles")}
-        >Profiles</button>
+          onclick={() => (activeSettingsTab = "profiles")}>Profiles</button
+        >
         <button
           class="settings-tab-btn"
           class:active={activeSettingsTab === "terminal"}
-          onclick={() => (activeSettingsTab = "terminal")}
-        >Terminal</button>
+          onclick={() => (activeSettingsTab = "terminal")}>Terminal</button
+        >
         <button
           class="settings-tab-btn"
           class:active={activeSettingsTab === "voiceInput"}
@@ -766,8 +828,8 @@
                     <button
                       class="font-size-btn"
                       onclick={() => adjustFontSize("ui_font_size", -1)}
-                      disabled={(settings.ui_font_size ?? 13) <= 8}
-                    >-</button>
+                      disabled={(settings.ui_font_size ?? 13) <= 8}>-</button
+                    >
                     <input
                       type="number"
                       min="8"
@@ -786,15 +848,17 @@
                         const current = settings as SettingsData;
                         settings = {
                           ...current,
-                          ui_font_size: clampFontSize(current.ui_font_size ?? 13),
+                          ui_font_size: clampFontSize(
+                            current.ui_font_size ?? 13,
+                          ),
                         };
                       }}
                     />
                     <button
                       class="font-size-btn"
                       onclick={() => adjustFontSize("ui_font_size", 1)}
-                      disabled={(settings.ui_font_size ?? 13) >= 24}
-                    >+</button>
+                      disabled={(settings.ui_font_size ?? 13) >= 24}>+</button
+                    >
                     <span class="font-size-unit">px</span>
                   </div>
                 </div>
@@ -808,7 +872,7 @@
                     onchange={(e) => {
                       const current = settings as SettingsData;
                       const next = normalizeUiFontFamily(
-                        (e.target as HTMLSelectElement).value
+                        (e.target as HTMLSelectElement).value,
                       );
                       settings = { ...current, ui_font_family: next };
                       applyUiFontFamily(next);
@@ -836,7 +900,7 @@
                       settings = {
                         ...current,
                         app_language: normalizeAppLanguage(
-                          (e.target as HTMLSelectElement).value
+                          (e.target as HTMLSelectElement).value,
                         ),
                       };
                     }}
@@ -862,7 +926,10 @@
                     {#each settings.protected_branches as branch}
                       <span class="branch-tag">
                         {branch}
-                        <button class="tag-remove" onclick={() => removeBranch(branch)}>
+                        <button
+                          class="tag-remove"
+                          onclick={() => removeBranch(branch)}
+                        >
                           x
                         </button>
                       </span>
@@ -908,14 +975,15 @@
             </div>
           </div>
 
-        <!-- ═══ Profiles ═══ -->
+          <!-- ═══ Profiles ═══ -->
         {:else if activeSettingsTab === "profiles"}
           <div class="section-content">
             <div class="profile-header">
               <select
                 class="select profile-select"
                 value={profiles?.active ?? ""}
-                onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value)}
+                onchange={(e) =>
+                  setActiveProfile((e.target as HTMLSelectElement).value)}
               >
                 {#if profiles}
                   {#each sortedProfileKeys(profiles) as key}
@@ -926,14 +994,18 @@
               <button
                 class="btn btn-ghost btn-danger-text"
                 onclick={() => (showDeleteProfileDialog = true)}
-                disabled={!profiles || !selectedProfileKey || defaultProfileSelected}
-                title={defaultProfileSelected ? "The default profile cannot be deleted" : "Delete profile"}
-              >Delete</button>
+                disabled={!profiles ||
+                  !selectedProfileKey ||
+                  defaultProfileSelected}
+                title={defaultProfileSelected
+                  ? "The default profile cannot be deleted"
+                  : "Delete profile"}>Delete</button
+              >
               <button
                 class="btn btn-add"
                 onclick={() => (showCreateProfileDialog = true)}
-                disabled={!profiles}
-              >+ New</button>
+                disabled={!profiles}>+ New</button
+              >
             </div>
 
             {#if profiles && selectedProfileKey && currentProfile}
@@ -944,7 +1016,7 @@
                     {#if Object.keys(currentProfile.env ?? {}).length === 0}
                       <div class="env-empty">No environment variables</div>
                     {:else}
-                      {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
+                      {#each Object.keys(currentProfile.env ?? {}).sort( (a, b) => a.localeCompare(b), ) as key (key)}
                         <div class="env-row">
                           <span class="env-key mono">{key}</span>
                           <input
@@ -955,9 +1027,16 @@
                             autocomplete="off"
                             spellcheck="false"
                             value={currentProfile.env[key]}
-                            oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
+                            oninput={(e) =>
+                              upsertEnvVar(
+                                key,
+                                (e.target as HTMLInputElement).value,
+                              )}
                           />
-                          <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
+                          <button
+                            class="btn btn-ghost"
+                            onclick={() => removeEnvVar(key)}>Remove</button
+                          >
                         </div>
                       {/each}
                     {/if}
@@ -984,7 +1063,11 @@
                       bind:value={newEnvValue}
                       placeholder="value"
                     />
-                    <button class="btn btn-add" onclick={addEnvVar} disabled={!newEnvKey.trim()}>
+                    <button
+                      class="btn btn-add"
+                      onclick={addEnvVar}
+                      disabled={!newEnvKey.trim()}
+                    >
                       Add
                     </button>
                   </div>
@@ -1012,9 +1095,16 @@
                       autocomplete="off"
                       spellcheck="false"
                       value={currentAi?.endpoint ?? ""}
-                      oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
+                      oninput={(e) =>
+                        updateAiField(
+                          "endpoint",
+                          (e.target as HTMLInputElement).value,
+                        )}
                     />
-                    <span class="field-hint">OpenAI-compatible API base URL (e.g. https://api.openai.com/v1)</span>
+                    <span class="field-hint"
+                      >OpenAI-compatible API base URL (e.g.
+                      https://api.openai.com/v1)</span
+                    >
                   </div>
 
                   <div class="field">
@@ -1047,9 +1137,17 @@
                           title="Peek API Key"
                           aria-label="Peek API Key"
                         >
-                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <path class="eye-outline" d="M2 12C4.5 8 7.5 6 12 6s7.5 2 10 6c-2.5 4-5.5 6-10 6s-7.5-2-10-6Z" />
-                            <circle class="eye-pupil" cx="12" cy="12" r="2.2"></circle>
+                          <svg
+                            viewBox="0 0 24 24"
+                            aria-hidden="true"
+                            focusable="false"
+                          >
+                            <path
+                              class="eye-outline"
+                              d="M2 12C4.5 8 7.5 6 12 6s7.5 2 10 6c-2.5 4-5.5 6-10 6s-7.5-2-10-6Z"
+                            />
+                            <circle class="eye-pupil" cx="12" cy="12" r="2.2"
+                            ></circle>
                             {#if !peekingApiKey}
                               <path class="eye-slash" d="M4 20L20 4" />
                             {/if}
@@ -1064,14 +1162,34 @@
                           title={apiKeyCopied ? "Copied!" : "Copy API Key"}
                           aria-label={apiKeyCopied ? "Copied!" : "Copy API Key"}
                         >
-                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <rect class="copy-back" x="6" y="4" width="10" height="12" rx="1.8"></rect>
-                            <rect class="copy-front" x="9" y="8" width="10" height="12" rx="1.8"></rect>
+                          <svg
+                            viewBox="0 0 24 24"
+                            aria-hidden="true"
+                            focusable="false"
+                          >
+                            <rect
+                              class="copy-back"
+                              x="6"
+                              y="4"
+                              width="10"
+                              height="12"
+                              rx="1.8"
+                            ></rect>
+                            <rect
+                              class="copy-front"
+                              x="9"
+                              y="8"
+                              width="10"
+                              height="12"
+                              rx="1.8"
+                            ></rect>
                           </svg>
                         </button>
                       </div>
                     </div>
-                    <span class="field-hint">Stored locally in ~/.gwt/config.toml</span>
+                    <span class="field-hint"
+                      >Stored locally in ~/.gwt/config.toml</span
+                    >
                   </div>
 
                   <div class="field">
@@ -1082,7 +1200,11 @@
                         class="select ai-model-select"
                         value={currentAi?.model ?? ""}
                         disabled={aiModelsLoading || !currentEndpoint}
-                        onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
+                        onchange={(e) =>
+                          updateAiField(
+                            "model",
+                            (e.target as HTMLSelectElement).value,
+                          )}
                       >
                         <option value="">Select model...</option>
                         {#each aiModelOptions as modelId (modelId)}
@@ -1103,21 +1225,19 @@
                       <span class="field-hint">
                         Current model is not listed in /v1/models.
                       </span>
-                    {:else if
-                      !aiModelsLoading &&
-                      currentEndpoint &&
-                      aiModelsLoadedKey !== currentAiRequestKey}
-                      <span class="field-hint">Click Refresh to load models from /v1/models.</span>
-                    {:else if
-                      !aiModelsLoading &&
-                      aiModels.length === 0 &&
-                      currentEndpoint &&
-                      aiModelsLoadedKey === currentAiRequestKey}
-                      <span class="field-hint">No models returned from /v1/models.</span>
+                    {:else if !aiModelsLoading && currentEndpoint && aiModelsLoadedKey !== currentAiRequestKey}
+                      <span class="field-hint"
+                        >Click Refresh to load models from /v1/models.</span
+                      >
+                    {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint && aiModelsLoadedKey === currentAiRequestKey}
+                      <span class="field-hint"
+                        >No models returned from /v1/models.</span
+                      >
                     {/if}
-                    {#if currentEndpoint && !(currentAi?.model?.trim())}
+                    {#if currentEndpoint && !currentAi?.model?.trim()}
                       <span class="field-hint field-hint-warning">
-                        Both endpoint and model are required to enable AI features.
+                        Both endpoint and model are required to enable AI
+                        features.
                       </span>
                     {/if}
                   </div>
@@ -1128,22 +1248,30 @@
                       id="ai-language"
                       class="select"
                       value={currentAi?.language ?? "en"}
-                      onchange={(e) => updateAiField("language", (e.target as HTMLSelectElement).value)}
+                      onchange={(e) =>
+                        updateAiField(
+                          "language",
+                          (e.target as HTMLSelectElement).value,
+                        )}
                     >
                       <option value="en">English</option>
                       <option value="ja">Japanese</option>
                       <option value="auto">Auto</option>
                     </select>
-                    <span class="field-hint">Language used for AI-generated responses in this profile.</span>
+                    <span class="field-hint"
+                      >Language used for AI-generated responses in this profile.</span
+                    >
                   </div>
                 </div>
               </div>
             {:else}
-              <div class="field-hint" style="padding: 16px 0;">Create a profile to configure settings.</div>
+              <div class="field-hint" style="padding: 16px 0;">
+                Create a profile to configure settings.
+              </div>
             {/if}
           </div>
 
-        <!-- ═══ Terminal ═══ -->
+          <!-- ═══ Terminal ═══ -->
         {:else if activeSettingsTab === "terminal"}
           <div class="section-content">
             <div class="settings-section">
@@ -1157,7 +1285,8 @@
                       class="font-size-btn"
                       onclick={() => adjustFontSize("terminal_font_size", -1)}
                       disabled={(settings.terminal_font_size ?? 13) <= 8}
-                    >-</button>
+                      >-</button
+                    >
                     <input
                       type="number"
                       min="8"
@@ -1176,7 +1305,9 @@
                         const current = settings as SettingsData;
                         settings = {
                           ...current,
-                          terminal_font_size: clampFontSize(current.terminal_font_size ?? 13),
+                          terminal_font_size: clampFontSize(
+                            current.terminal_font_size ?? 13,
+                          ),
                         };
                       }}
                     />
@@ -1184,7 +1315,8 @@
                       class="font-size-btn"
                       onclick={() => adjustFontSize("terminal_font_size", 1)}
                       disabled={(settings.terminal_font_size ?? 13) >= 24}
-                    >+</button>
+                      >+</button
+                    >
                     <span class="font-size-unit">px</span>
                   </div>
                 </div>
@@ -1198,7 +1330,7 @@
                     onchange={(e) => {
                       const current = settings as SettingsData;
                       const next = normalizeTerminalFontFamily(
-                        (e.target as HTMLSelectElement).value
+                        (e.target as HTMLSelectElement).value,
                       );
                       settings = { ...current, terminal_font_family: next };
                       applyTerminalFontFamily(next);
@@ -1231,7 +1363,9 @@
                       <option value="">System Default</option>
                       {#each availableShells as shell (shell.id)}
                         <option value={shell.id}>
-                          {shell.name}{shell.version ? ` (${shell.version})` : ""}
+                          {shell.name}{shell.version
+                            ? ` (${shell.version})`
+                            : ""}
                         </option>
                       {/each}
                     </select>
@@ -1244,7 +1378,7 @@
             {/if}
           </div>
 
-        <!-- ═══ Voice Input ═══ -->
+          <!-- ═══ Voice Input ═══ -->
         {:else if activeSettingsTab === "voiceInput"}
           <div class="section-content">
             <div class="field">
@@ -1257,7 +1391,7 @@
                   onchange={(e) =>
                     updateVoiceInputField(
                       "enabled",
-                      (e.target as HTMLInputElement).checked
+                      (e.target as HTMLInputElement).checked,
                     )}
                 />
                 <label for="voice-input-enabled" class="ai-enabled-label">
@@ -1268,41 +1402,13 @@
 
             {#if settings.voice_input.enabled}
               <div class="settings-section">
-                <h3 class="settings-section-title">Hotkeys</h3>
+                <h3 class="settings-section-title">Push-to-talk</h3>
                 <div class="settings-section-body">
-                  <div class="field">
-                    <label for="voice-hotkey">Toggle hotkey</label>
-                    <input
-                      id="voice-hotkey"
-                      type="text"
-                      value={settings.voice_input.hotkey}
-                      disabled={voiceCapabilityLoading}
-                      oninput={(e) =>
-                        updateVoiceInputField(
-                          "hotkey",
-                          (e.target as HTMLInputElement).value
-                        )}
-                      placeholder="Mod+Shift+M"
-                    />
-                    <span class="field-hint">Example: Mod+Shift+M</span>
-                  </div>
-
-                  <div class="field">
-                    <label for="voice-ptt-hotkey">Push-to-talk hotkey</label>
-                    <input
-                      id="voice-ptt-hotkey"
-                      type="text"
-                      value={settings.voice_input.ptt_hotkey}
-                      disabled={voiceCapabilityLoading}
-                      oninput={(e) =>
-                        updateVoiceInputField(
-                          "ptt_hotkey",
-                          (e.target as HTMLInputElement).value
-                        )}
-                      placeholder="Mod+Shift+Space"
-                    />
-                    <span class="field-hint">Press and hold to capture speech.</span>
-                  </div>
+                  <p class="field-hint">
+                    Fixed key: <code>Cmd+Shift+Space</code> on macOS and
+                    <code>Ctrl+Shift+Space</code> on Windows/Linux. Press and hold
+                    to capture speech, or hold the Voice overlay button.
+                  </p>
                 </div>
               </div>
 
@@ -1319,7 +1425,8 @@
                       onchange={(e) =>
                         updateVoiceInputField(
                           "language",
-                          (e.target as HTMLSelectElement).value as VoiceInputSettings["language"]
+                          (e.target as HTMLSelectElement)
+                            .value as VoiceInputSettings["language"],
                         )}
                     >
                       <option value="auto">Auto</option>
@@ -1338,15 +1445,19 @@
                       onchange={(e) =>
                         updateVoiceInputField(
                           "quality",
-                          (e.target as HTMLSelectElement).value as VoiceInputSettings["quality"]
+                          (e.target as HTMLSelectElement)
+                            .value as VoiceInputSettings["quality"],
                         )}
                     >
                       <option value="fast">Fast (Qwen3-ASR-0.6B)</option>
-                      <option value="balanced">Balanced (Qwen3-ASR-1.7B)</option>
-                      <option value="accurate">Accurate (Qwen3-ASR-1.7B)</option>
+                      <option value="balanced">Balanced (Qwen3-ASR-1.7B)</option
+                      >
+                      <option value="accurate">Accurate (Qwen3-ASR-1.7B)</option
+                      >
                     </select>
                     <span class="field-hint">
-                      Voice runtime and Qwen model are prepared automatically on first use.
+                      Voice runtime and Qwen model are prepared automatically on
+                      first use.
                     </span>
                   </div>
 
@@ -1359,34 +1470,51 @@
                       readonly
                       disabled
                     />
-                    <span class="field-hint">Automatically selected based on Quality setting.</span>
+                    <span class="field-hint"
+                      >Automatically selected based on Quality setting.</span
+                    >
                   </div>
                 </div>
               </div>
 
               {#if voiceCapabilityLoading}
                 <div class="field">
-                  <span class="field-hint">Checking voice runtime capability...</span>
+                  <span class="field-hint"
+                    >Checking voice runtime capability...</span
+                  >
                 </div>
               {:else if !voiceAvailable}
                 <div class="field">
-                  <span class="field-hint" style="color: var(--warning-color, #e6a700);">
-                    {voiceUnavailableReason ?? "GPU acceleration and Qwen runtime are required."}
+                  <span
+                    class="field-hint"
+                    style="color: var(--warning-color, #e6a700);"
+                  >
+                    {voiceUnavailableReason ??
+                      "GPU acceleration and Qwen runtime are required."}
                   </span>
-                  {#if voiceUnavailableReason && (voiceUnavailableReason.toLowerCase().includes("runtime") || voiceUnavailableReason.toLowerCase().includes("python") || voiceUnavailableReason.toLowerCase().includes("package"))}
+                  {#if voiceUnavailableReason && (voiceUnavailableReason
+                      .toLowerCase()
+                      .includes("runtime") || voiceUnavailableReason
+                        .toLowerCase()
+                        .includes("python") || voiceUnavailableReason
+                        .toLowerCase()
+                        .includes("package"))}
                     <button
                       class="btn btn-sm"
                       onclick={handleSetupVoiceRuntime}
                       disabled={voiceRuntimeSettingUp}
                     >
-                      {voiceRuntimeSettingUp ? "Setting up..." : "Setup Voice Runtime"}
+                      {voiceRuntimeSettingUp
+                        ? "Setting up..."
+                        : "Setup Voice Runtime"}
                     </button>
                   {/if}
                   {#if voiceSetupMessage}
                     <span class="field-hint">{voiceSetupMessage}</span>
                   {/if}
                   <span class="field-hint">
-                    Settings can still be configured and will take effect once the runtime is available.
+                    Settings can still be configured and will take effect once
+                    the runtime is available.
                   </span>
                 </div>
               {/if}
@@ -1834,8 +1962,14 @@
     max-width: none;
   }
 
-  .ai-apikey-row input { flex: 1; min-width: 0; max-width: none; }
-  .ai-apikey-row input.api-key-masked { -webkit-text-security: disc; }
+  .ai-apikey-row input {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+  }
+  .ai-apikey-row input.api-key-masked {
+    -webkit-text-security: disc;
+  }
   .ai-apikey-actions {
     display: flex;
     gap: 8px;
@@ -1881,8 +2015,12 @@
     fill: var(--text-secondary);
   }
   .btn-peek-apikey.peeking .eye-outline,
-  .btn-peek-apikey.peeking .eye-slash { stroke: var(--accent); }
-  .btn-peek-apikey.peeking .eye-pupil { fill: var(--accent); }
+  .btn-peek-apikey.peeking .eye-slash {
+    stroke: var(--accent);
+  }
+  .btn-peek-apikey.peeking .eye-pupil {
+    fill: var(--accent);
+  }
 
   /* Copy icon */
   .btn-copy-apikey .copy-front,
@@ -1894,14 +2032,22 @@
     stroke-linejoin: round;
   }
   .btn-copy-apikey.copied .copy-front,
-  .btn-copy-apikey.copied .copy-back { stroke: var(--green); }
+  .btn-copy-apikey.copied .copy-back {
+    stroke: var(--green);
+  }
 
   /* Hover states */
   .btn-peek-apikey:hover .eye-outline,
-  .btn-peek-apikey:hover .eye-slash { stroke: var(--text-primary); }
-  .btn-peek-apikey:hover .eye-pupil { fill: var(--text-primary); }
+  .btn-peek-apikey:hover .eye-slash {
+    stroke: var(--text-primary);
+  }
+  .btn-peek-apikey:hover .eye-pupil {
+    fill: var(--text-primary);
+  }
   .btn-copy-apikey:hover .copy-front,
-  .btn-copy-apikey:hover .copy-back { stroke: var(--text-primary); }
+  .btn-copy-apikey:hover .copy-back {
+    stroke: var(--text-primary);
+  }
 
   .ai-model-row {
     align-items: center;

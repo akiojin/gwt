@@ -27,9 +27,7 @@
   import CleanupModal from "./lib/components/CleanupModal.svelte";
   import QuitConfirmToast from "./lib/components/QuitConfirmToast.svelte";
   import ReportDialog from "./lib/components/ReportDialog.svelte";
-  import {
-    formatWindowTitle,
-  } from "./lib/windowTitle";
+  import { formatWindowTitle } from "./lib/windowTitle";
   import {
     buildWindowMenuTabsSignature,
     buildWindowMenuVisibleTabs,
@@ -124,8 +122,6 @@
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
     enabled: false,
     engine: "qwen3-asr",
-    hotkey: "Mod+Shift+M",
-    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
     quality: "balanced",
     model: "Qwen/Qwen3-ASR-1.7B",
@@ -237,7 +233,8 @@
     | "deps";
   let launchStep: LaunchStepId = $state("fetch");
   let launchDetail: string = $state("");
-  let launchStatus: "running" | "ok" | "error" | "cancelled" = $state("running");
+  let launchStatus: "running" | "ok" | "error" | "cancelled" =
+    $state("running");
   let launchError: string | null = $state(null);
   const LAUNCH_STEP_IDS: LaunchStepId[] = [
     "fetch",
@@ -286,7 +283,7 @@
       const branch = normalizeBranchName(active.label);
       if (!branch || branch === "Worktree" || branch === "Agent") return null;
       return branch;
-    })()
+    })(),
   );
 
   let terminalDiagnosticsLoading: boolean = $state(false);
@@ -380,7 +377,10 @@
   let reportDialogMode = $state<"bug" | "feature">("bug");
   let reportDialogPrefillError = $state<StructuredError | undefined>(undefined);
 
-  function showReportDialog(mode: "bug" | "feature", prefillError?: StructuredError) {
+  function showReportDialog(
+    mode: "bug" | "feature",
+    prefillError?: StructuredError,
+  ) {
     reportDialogMode = mode;
     reportDialogPrefillError = prefillError;
     reportDialogOpen = true;
@@ -401,11 +401,7 @@
   // Subscribe to error bus for report-worthy errors
   const unsubErrorBus = errorBus.subscribe((error) => {
     if (error.severity === "error" || error.severity === "critical") {
-      showToast(
-        `Error: ${error.message}`,
-        0,
-        { kind: "report-error", error },
-      );
+      showToast(`Error: ${error.message}`, 0, { kind: "report-error", error });
     }
   });
 
@@ -644,9 +640,7 @@
 
       const sessions = loadWindowSessions();
       const normalizedSessions = deduplicateByProjectPath(
-        sessions.filter(
-          (entry) => entry.label !== label && entry.projectPath,
-        ),
+        sessions.filter((entry) => entry.label !== label && entry.projectPath),
       );
 
       if (isRestoreLeader) {
@@ -654,7 +648,9 @@
           for (const entry of normalizedSessions) {
             await openAndNormalizeRestoredWindowSession(entry.label);
           }
-          await new Promise<void>((resolve) => setTimeout(resolve, releaseDelayMs));
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, releaseDelayMs),
+          );
           await applyRestoredWindowSession(label);
         } finally {
           await releaseWindowSessionRestoreLead(label);
@@ -815,7 +811,10 @@
             const payload = event.payload;
             if (launchJobId) {
               if (payload.jobId !== launchJobId) {
-                debugLaunchEvent("Ignored launch-progress for different job", payload);
+                debugLaunchEvent(
+                  "Ignored launch-progress for different job",
+                  payload,
+                );
                 return;
               }
               applyLaunchProgressPayload(payload);
@@ -824,11 +823,17 @@
 
             if (launchJobStartPending) {
               bufferLaunchProgressEvent(payload);
-              debugLaunchEvent("Buffered launch-progress before jobId assignment", payload);
+              debugLaunchEvent(
+                "Buffered launch-progress before jobId assignment",
+                payload,
+              );
               return;
             }
 
-            debugLaunchEvent("Ignored launch-progress without active job", payload);
+            debugLaunchEvent(
+              "Ignored launch-progress without active job",
+              payload,
+            );
           },
         );
         if (cancelled) {
@@ -862,7 +867,10 @@
             // Progress modal state update (moved from LaunchProgressModal).
             if (launchJobId) {
               if (payload.jobId !== launchJobId) {
-                debugLaunchEvent("Ignored launch-finished for different job", payload);
+                debugLaunchEvent(
+                  "Ignored launch-finished for different job",
+                  payload,
+                );
                 return;
               }
               applyLaunchFinishedPayload(payload);
@@ -871,11 +879,17 @@
 
             if (launchJobStartPending) {
               bufferLaunchFinishedEvent(payload);
-              debugLaunchEvent("Buffered launch-finished before jobId assignment", payload);
+              debugLaunchEvent(
+                "Buffered launch-finished before jobId assignment",
+                payload,
+              );
               return;
             }
 
-            debugLaunchEvent("Ignored launch-finished without active job", payload);
+            debugLaunchEvent(
+              "Ignored launch-finished without active job",
+              payload,
+            );
           },
         );
 
@@ -900,7 +914,8 @@
   // finished, the stored result is applied exactly as a launch-finished
   // event would be.
   $effect(() => {
-    if (!launchProgressOpen || !launchJobId || launchStatus !== "running") return;
+    if (!launchProgressOpen || !launchJobId || launchStatus !== "running")
+      return;
     const jobId = launchJobId;
     const timer = window.setInterval(async () => {
       if (launchJobId !== jobId || launchStatus !== "running") return;
@@ -920,8 +935,7 @@
         } else {
           // No result stored – genuinely lost.
           launchStatus = "error";
-          launchError =
-            "Launch job ended unexpectedly. Please retry.";
+          launchError = "Launch job ended unexpectedly. Please retry.";
         }
       } catch {
         /* ignore polling errors */
@@ -1024,8 +1038,6 @@
     value: Partial<VoiceInputSettings> | null | undefined,
   ): VoiceInputSettings {
     const engine = (value?.engine ?? "").trim().toLowerCase();
-    const hotkey = (value?.hotkey ?? "").trim();
-    const pttHotkey = (value?.ptt_hotkey ?? "").trim();
     const language = (value?.language ?? "").trim().toLowerCase();
     const quality = (value?.quality ?? "").trim().toLowerCase();
     const model = (value?.model ?? "").trim();
@@ -1034,7 +1046,9 @@
         ? (quality as VoiceInputSettings["quality"])
         : DEFAULT_VOICE_INPUT_SETTINGS.quality;
     const defaultModel =
-      normalizedQuality === "fast" ? "Qwen/Qwen3-ASR-0.6B" : "Qwen/Qwen3-ASR-1.7B";
+      normalizedQuality === "fast"
+        ? "Qwen/Qwen3-ASR-0.6B"
+        : "Qwen/Qwen3-ASR-1.7B";
 
     return {
       enabled: !!value?.enabled,
@@ -1042,9 +1056,6 @@
         engine === "qwen3-asr" || engine === "qwen" || engine === "whisper"
           ? "qwen3-asr"
           : DEFAULT_VOICE_INPUT_SETTINGS.engine,
-      hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT_SETTINGS.hotkey,
-      ptt_hotkey:
-        pttHotkey.length > 0 ? pttHotkey : DEFAULT_VOICE_INPUT_SETTINGS.ptt_hotkey,
       language:
         language === "ja" || language === "en" || language === "auto"
           ? (language as VoiceInputSettings["language"])
@@ -1069,7 +1080,9 @@
     return family.length > 0 ? family : DEFAULT_UI_FONT_FAMILY;
   }
 
-  function normalizeTerminalFontFamily(value: string | null | undefined): string {
+  function normalizeTerminalFontFamily(
+    value: string | null | undefined,
+  ): string {
     const family = (value ?? "").trim();
     return family.length > 0 ? family : DEFAULT_TERMINAL_FONT_FAMILY;
   }
@@ -1094,7 +1107,10 @@
 
   function applyTerminalFontFamily(family: string | null | undefined) {
     const normalized = normalizeTerminalFontFamily(family);
-    document.documentElement.style.setProperty("--terminal-font-family", normalized);
+    document.documentElement.style.setProperty(
+      "--terminal-font-family",
+      normalized,
+    );
     (window as any).__gwtTerminalFontFamily = normalized;
     window.dispatchEvent(
       new CustomEvent("gwt-terminal-font-family", { detail: normalized }),
@@ -1130,7 +1146,9 @@
     }
   }
 
-  async function rebuildAllBranchSessionSummaries(language: SettingsData["app_language"]) {
+  async function rebuildAllBranchSessionSummaries(
+    language: SettingsData["app_language"],
+  ) {
     if (!projectPath) return;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
@@ -1245,7 +1263,9 @@
     void updateWindowSession(path);
   }
 
-  async function openProjectAndApplyCurrentWindow(path: string): Promise<OpenProjectResult> {
+  async function openProjectAndApplyCurrentWindow(
+    path: string,
+  ): Promise<OpenProjectResult> {
     const { invoke } = await import("$lib/tauriInvoke");
     const result = await invoke<OpenProjectResult>("open_project", { path });
     if (result.action === "opened") {
@@ -1294,7 +1314,9 @@
   }
 
   function ensureAssistantTab() {
-    const existing = tabs.find((t) => t.type === "assistant" || t.id === "assistant");
+    const existing = tabs.find(
+      (t) => t.type === "assistant" || t.id === "assistant",
+    );
     if (existing) return;
 
     const tab: Tab = {
@@ -1351,7 +1373,9 @@
         delimiterSuffix += 1;
         delimiter = `${delimiterBase}_${delimiterSuffix}`;
       }
-      const normalized = logOutput.endsWith("\n") ? logOutput : `${logOutput}\n`;
+      const normalized = logOutput.endsWith("\n")
+        ? logOutput
+        : `${logOutput}\n`;
       const cmd = `cat <<'${delimiter}'\n${normalized}${delimiter}\n`;
       const data = Array.from(new TextEncoder().encode(cmd));
       await invoke("write_terminal", { paneId, data });
@@ -1401,7 +1425,9 @@
   }
 
   function parseE1004BranchName(errorMessage: string): string | null {
-    const match = errorMessage.match(/\[E1004\]\s+Branch already exists:\s*(.+)$/m);
+    const match = errorMessage.match(
+      /\[E1004\]\s+Branch already exists:\s*(.+)$/m,
+    );
     if (!match) return null;
     const raw = match[1]?.trim() ?? "";
     if (!raw) return null;
@@ -1498,7 +1524,8 @@
   async function resolveWindowsDocsShellId(): Promise<DocsEditorShellId> {
     try {
       const { invoke } = await import("$lib/tauriInvoke");
-      const settings = await invoke<Pick<SettingsData, "default_shell">>("get_settings");
+      const settings =
+        await invoke<Pick<SettingsData, "default_shell">>("get_settings");
       const shell = (settings.default_shell ?? "").trim().toLowerCase();
       if (shell === "wsl" || shell === "powershell" || shell === "cmd") {
         return shell;
@@ -1686,7 +1713,8 @@
     } catch (err) {
       console.error("Failed to cancel launch job:", err);
       launchStatus = "error";
-      launchError = "Failed to send cancel request. Close this dialog and retry.";
+      launchError =
+        "Failed to send cancel request. Close this dialog and retry.";
     }
   }
 
@@ -1854,9 +1882,7 @@
   }
 
   function openIssuesTab() {
-    const existing = tabs.find(
-      (t) => t.type === "issues" || t.id === "issues",
-    );
+    const existing = tabs.find((t) => t.type === "issues" || t.id === "issues");
     if (existing) {
       activeTabId = existing.id;
       return;
@@ -1872,9 +1898,7 @@
   }
 
   function openPullRequestsTab() {
-    const existing = tabs.find(
-      (t) => t.type === "prs" || t.id === "prs",
-    );
+    const existing = tabs.find((t) => t.type === "prs" || t.id === "prs");
     if (existing) {
       activeTabId = existing.id;
       return;
@@ -1907,7 +1931,9 @@
 
   function handleIssueCountChange(count: number) {
     tabs = tabs.map((t) =>
-      t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
+      t.id === "issues"
+        ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" }
+        : t,
     );
   }
 
@@ -1919,7 +1945,9 @@
   function handleSwitchToWorktreeFromTab(branchName: string) {
     // Find the matching agent tab and switch to it
     const agentTab = tabs.find(
-      (t) => t.type === "agent" && normalizeBranchName(t.label) === normalizeBranchName(branchName),
+      (t) =>
+        t.type === "agent" &&
+        normalizeBranchName(t.label) === normalizeBranchName(branchName),
     );
     if (agentTab) {
       activeTabId = agentTab.id;
@@ -1934,7 +1962,9 @@
     if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
     const label = `Issue #${issueNumber}`;
 
-    const existing = tabs.find((t) => t.type === "issueSpec" || t.id === "issueSpec");
+    const existing = tabs.find(
+      (t) => t.type === "issueSpec" || t.id === "issueSpec",
+    );
     if (existing) {
       tabs = tabs.map((t) =>
         t.id === existing.id
@@ -1943,7 +1973,7 @@
               label,
               issueNumber,
             }
-          : t
+          : t,
       );
       activeTabId = existing.id;
       return;
@@ -1969,11 +1999,7 @@
 
   function getActiveEditableElement(
     mode: "copy" | "paste" = "paste",
-  ):
-    | HTMLInputElement
-    | HTMLTextAreaElement
-    | HTMLElement
-    | null {
+  ): HTMLInputElement | HTMLTextAreaElement | HTMLElement | null {
     if (typeof document === "undefined") return null;
     const el = document.activeElement;
     if (!el) return null;
@@ -2063,7 +2089,9 @@
     try {
       await navigator.clipboard.writeText(text);
       copyFlashActive = true;
-      setTimeout(() => { copyFlashActive = false; }, 300);
+      setTimeout(() => {
+        copyFlashActive = false;
+      }, 300);
       showToast("Copied to clipboard", 2000);
     } catch {
       showToast("Failed to copy screen text", 4000);
@@ -2111,7 +2139,9 @@
         },
       });
       lastWindowMenuTabsSignature = tabsSignature;
-      if (shouldKeepSnapshotActiveTabCache(activeVisibleTabId, tabs, activeTabId)) {
+      if (
+        shouldKeepSnapshotActiveTabCache(activeVisibleTabId, tabs, activeTabId)
+      ) {
         lastWindowMenuActiveTabId = activeVisibleTabId;
       }
     } catch {
@@ -2621,8 +2651,7 @@
       ) {
         const staticType = tab.type === "assistant" ? "assistant" : tab.type;
         const staticId = tab.id === "assistant" ? "assistant" : tab.id;
-        const staticLabel =
-          tab.type === "assistant" ? "Assistant" : tab.label;
+        const staticLabel = tab.type === "assistant" ? "Assistant" : tab.label;
         storedTabs.push({
           type: staticType,
           id: staticId,
@@ -2657,9 +2686,7 @@
       }
 
       try {
-        const { setupMenuActionListener } = await import(
-          "./lib/menuAction"
-        );
+        const { setupMenuActionListener } = await import("./lib/menuAction");
         const unlistenFn = await setupMenuActionListener((action) => {
           void handleMenuAction(action);
         });
@@ -2708,14 +2735,18 @@
     voiceController = controller;
     controller.updateSettings();
 
-    // Allow terminal overlay voice buttons to toggle the voice controller.
-    const handleVoiceToggle = () => {
-      controller.toggleListening();
+    const handleVoicePttStart = () => {
+      controller.pressPushToTalk();
     };
-    window.addEventListener("gwt-voice-toggle", handleVoiceToggle);
+    const handleVoicePttStop = () => {
+      controller.releasePushToTalk();
+    };
+    window.addEventListener("gwt-voice-ptt-start", handleVoicePttStart);
+    window.addEventListener("gwt-voice-ptt-stop", handleVoicePttStop);
 
     return () => {
-      window.removeEventListener("gwt-voice-toggle", handleVoiceToggle);
+      window.removeEventListener("gwt-voice-ptt-start", handleVoicePttStart);
+      window.removeEventListener("gwt-voice-ptt-stop", handleVoicePttStop);
       controller.dispose();
       if (voiceController === controller) {
         voiceController = null;
@@ -2765,11 +2796,15 @@
 
   $effect(() => {
     function onOpenIssueSpec(event: Event) {
-      const payload = (event as CustomEvent<ProjectModeSpecIssuePayload>).detail;
+      const payload = (event as CustomEvent<ProjectModeSpecIssuePayload>)
+        .detail;
       if (!payload) return;
       openIssueSpecTab(payload);
     }
-    window.addEventListener("gwt-project-mode-open-spec-issue", onOpenIssueSpec);
+    window.addEventListener(
+      "gwt-project-mode-open-spec-issue",
+      onOpenIssueSpec,
+    );
     return () =>
       window.removeEventListener(
         "gwt-project-mode-open-spec-issue",
@@ -2895,8 +2930,8 @@
         {voiceInputPreparing}
         {voiceInputSupported}
         {voiceInputAvailable}
-        voiceInputAvailabilityReason={voiceInputAvailabilityReason}
-        voiceInputError={voiceInputError}
+        {voiceInputAvailabilityReason}
+        {voiceInputError}
       />
     </div>
     <StatusBar
@@ -2905,12 +2940,12 @@
       {terminalCount}
       {osEnvReady}
       voiceInputEnabled={voiceInputSettings.enabled}
-      voiceInputListening={voiceInputListening}
-      voiceInputPreparing={voiceInputPreparing}
-      voiceInputSupported={voiceInputSupported}
-      voiceInputAvailable={voiceInputAvailable}
-      voiceInputAvailabilityReason={voiceInputAvailabilityReason}
-      voiceInputError={voiceInputError}
+      {voiceInputListening}
+      {voiceInputPreparing}
+      {voiceInputSupported}
+      {voiceInputAvailable}
+      {voiceInputAvailabilityReason}
+      {voiceInputError}
     />
   </div>
 {/if}
@@ -2922,7 +2957,10 @@
     {osEnvReady}
     {prefillIssue}
     onLaunch={handleAgentLaunch}
-    onClose={() => { showAgentLaunch = false; prefillIssue = null; }}
+    onClose={() => {
+      showAgentLaunch = false;
+      prefillIssue = null;
+    }}
   />
 {/if}
 
@@ -2950,8 +2988,14 @@
 {#if showTerminalDiagnostics}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay modal-overlay" onclick={() => (showTerminalDiagnostics = false)}>
-    <div class="diag-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
+  <div
+    class="overlay modal-overlay"
+    onclick={() => (showTerminalDiagnostics = false)}
+  >
+    <div
+      class="diag-dialog modal-dialog-shell"
+      onclick={(e) => e.stopPropagation()}
+    >
       <h2>Terminal Diagnostics</h2>
 
       {#if terminalDiagnosticsLoading}
@@ -3064,7 +3108,10 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="overlay modal-overlay" onclick={() => (showOsEnvDebug = false)}>
-    <div class="env-debug-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
+    <div
+      class="env-debug-dialog modal-dialog-shell"
+      onclick={(e) => e.stopPropagation()}
+    >
       <h3>Captured Environment</h3>
       {#if osEnvDebugLoading}
         <p class="env-debug-loading">Loading...</p>
@@ -3107,7 +3154,10 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="overlay modal-overlay" onclick={() => (appError = null)}>
-    <div class="error-dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
+    <div
+      class="error-dialog modal-dialog-shell"
+      onclick={(e) => e.stopPropagation()}
+    >
       <h2>Error</h2>
       <p class="error-text">{appError}</p>
       <button class="about-close" onclick={() => (appError = null)}>
@@ -3129,7 +3179,10 @@
         <button class="toast-action" onclick={handleToastClick}>Update</button>
       {:else if toastAction?.kind === "report-error"}
         {@const reportError = toastAction.error}
-        <button class="toast-action" onclick={() => showReportDialog("bug", reportError)}>Report</button>
+        <button
+          class="toast-action"
+          onclick={() => showReportDialog("bug", reportError)}>Report</button
+        >
       {/if}
       <button
         class="toast-close"
@@ -3151,8 +3204,11 @@
   prefillError={reportDialogPrefillError}
   projectPath={projectPath ?? ""}
   screenCaptureBranch={currentBranch}
-  screenCaptureActiveTab={tabs.find((t) => t.id === activeTabId)?.label ?? activeTabId}
-  onclose={() => { reportDialogOpen = false; }}
+  screenCaptureActiveTab={tabs.find((t) => t.id === activeTabId)?.label ??
+    activeTabId}
+  onclose={() => {
+    reportDialogOpen = false;
+  }}
   onsuccess={(result) => {
     reportDialogOpen = false;
     showToast(`Issue #${result.number} created successfully.`, 8000);
@@ -3455,8 +3511,14 @@
   }
 
   @keyframes copy-flash-anim {
-    0% { opacity: 0; }
-    30% { opacity: 0.12; }
-    100% { opacity: 0; }
+    0% {
+      opacity: 0;
+    }
+    30% {
+      opacity: 0.12;
+    }
+    100% {
+      opacity: 0;
+    }
   }
 </style>

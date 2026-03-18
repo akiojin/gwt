@@ -8,8 +8,6 @@ import type {
 export const DEFAULT_VOICE_INPUT: VoiceInputSettings = {
   enabled: false,
   engine: "qwen3-asr",
-  hotkey: "Mod+Shift+M",
-  ptt_hotkey: "Mod+Shift+Space",
   language: "auto",
   quality: "balanced",
   model: "Qwen/Qwen3-ASR-1.7B",
@@ -26,11 +24,13 @@ export const UI_FONT_PRESETS: FontPreset[] = [
   { label: "System UI (Default)", value: DEFAULT_UI_FONT_FAMILY },
   {
     label: "Inter",
-    value: '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+    value:
+      '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
   },
   {
     label: "Noto Sans",
-    value: '"Noto Sans", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+    value:
+      '"Noto Sans", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
   },
   {
     label: "Source Sans 3",
@@ -62,7 +62,10 @@ export const TERMINAL_FONT_PRESETS: FontPreset[] = [
 export const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
 export const DEFAULT_PROFILE_KEY = "default";
 
-export function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
+export function getCurrentProfile(
+  cfg: ProfilesConfig | null,
+  key: string,
+): Profile | null {
   if (!cfg) return null;
   if (!key) return null;
   const p = cfg.profiles?.[key];
@@ -99,7 +102,9 @@ export function detectGpuAvailability(): boolean {
     const ext = gl.getExtension("WEBGL_debug_renderer_info") as {
       UNMASKED_RENDERER_WEBGL: number;
     } | null;
-    const renderer = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? "") : "";
+    const renderer = ext
+      ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? "")
+      : "";
     const normalized = renderer.toLowerCase();
     if (
       normalized.includes("swiftshader") ||
@@ -119,8 +124,6 @@ export function normalizeVoiceInputSettings(
   value: Partial<VoiceInputSettings> | null | undefined,
 ): VoiceInputSettings {
   const engine = (value?.engine ?? "").trim().toLowerCase();
-  const hotkey = (value?.hotkey ?? "").trim();
-  const pttHotkey = (value?.ptt_hotkey ?? "").trim();
   const language = (value?.language ?? "").trim().toLowerCase();
   const quality = (value?.quality ?? "").trim().toLowerCase();
   const model = (value?.model ?? "").trim();
@@ -129,7 +132,9 @@ export function normalizeVoiceInputSettings(
       ? (quality as VoiceInputSettings["quality"])
       : DEFAULT_VOICE_INPUT.quality;
   const defaultModel =
-    normalizedQuality === "fast" ? "Qwen/Qwen3-ASR-0.6B" : "Qwen/Qwen3-ASR-1.7B";
+    normalizedQuality === "fast"
+      ? "Qwen/Qwen3-ASR-0.6B"
+      : "Qwen/Qwen3-ASR-1.7B";
 
   return {
     enabled: !!value?.enabled,
@@ -137,8 +142,6 @@ export function normalizeVoiceInputSettings(
       engine === "qwen3-asr" || engine === "qwen" || engine === "whisper"
         ? "qwen3-asr"
         : DEFAULT_VOICE_INPUT.engine,
-    hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT.hotkey,
-    ptt_hotkey: pttHotkey.length > 0 ? pttHotkey : DEFAULT_VOICE_INPUT.ptt_hotkey,
     language:
       language === "ja" || language === "en" || language === "auto"
         ? (language as VoiceInputSettings["language"])
@@ -158,14 +161,18 @@ export function normalizeAppLanguage(
   return DEFAULT_APP_LANGUAGE;
 }
 
-export function normalizeUiFontFamily(value: string | null | undefined): string {
+export function normalizeUiFontFamily(
+  value: string | null | undefined,
+): string {
   const family = (value ?? "").trim();
   if (family.length === 0) return DEFAULT_UI_FONT_FAMILY;
   const match = UI_FONT_PRESETS.find((preset) => preset.value === family);
   return match ? match.value : family;
 }
 
-export function normalizeTerminalFontFamily(value: string | null | undefined): string {
+export function normalizeTerminalFontFamily(
+  value: string | null | undefined,
+): string {
   const family = (value ?? "").trim();
   if (family.length === 0) return DEFAULT_TERMINAL_FONT_FAMILY;
   const match = TERMINAL_FONT_PRESETS.find((preset) => preset.value === family);

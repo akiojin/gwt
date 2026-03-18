@@ -29,10 +29,7 @@ function voiceInputTab(page: Parameters<typeof test>[0]["page"]) {
   return page.getByRole("button", { name: "Voice Input", exact: true });
 }
 
-function fieldByLabel(
-  page: Parameters<typeof test>[0]["page"],
-  label: RegExp,
-) {
+function fieldByLabel(page: Parameters<typeof test>[0]["page"], label: RegExp) {
   return page
     .locator(".field")
     .filter({ has: page.locator("label", { hasText: label }) })
@@ -102,9 +99,7 @@ test.beforeEach(async ({ page }) => {
 test("opens Settings panel from menu action", async ({ page }) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
-  await expect(
-    page.getByRole("heading", { name: "Settings" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
 });
 
 test("Settings General tab is active by default", async ({ page }) => {
@@ -137,8 +132,10 @@ test("changes UI font size via spinbutton and saves", async ({ page }) => {
   await waitForInvokeCommand(page, "save_settings");
 
   const args = await getInvokeArgs(page, "save_settings");
-  const settings = (args as Record<string, unknown>)
-    ?.settings as Record<string, unknown>;
+  const settings = (args as Record<string, unknown>)?.settings as Record<
+    string,
+    unknown
+  >;
   expect(settings?.ui_font_size).toBe(16);
 });
 
@@ -156,8 +153,10 @@ test("changes terminal font size via spinbutton and saves", async ({
   await waitForInvokeCommand(page, "save_settings");
 
   const args = await getInvokeArgs(page, "save_settings");
-  const settings = (args as Record<string, unknown>)
-    ?.settings as Record<string, unknown>;
+  const settings = (args as Record<string, unknown>)?.settings as Record<
+    string,
+    unknown
+  >;
   expect(settings?.terminal_font_size).toBe(18);
 });
 
@@ -169,29 +168,8 @@ test("Voice Input tab shows fields", async ({ page }) => {
 
   await expect(page.locator("#voice-input-enabled")).toBeVisible();
   await enableVoiceInput(page);
-  await expect(page.locator("#voice-hotkey")).toBeVisible();
+  await expect(page.getByText(/Cmd\+Shift\+Space/)).toBeVisible();
   await expect(page.locator("#voice-language")).toBeVisible();
-});
-
-test("Voice Input hotkey can be changed", async ({ page }) => {
-  await page.goto("/");
-  await openSettings(
-    page,
-    standardSettingsResponses({ get_settings: voiceEnabledSettings() }),
-  );
-
-  await voiceInputTab(page).click();
-
-  await page.locator("#voice-hotkey").fill("Ctrl+Shift+V");
-  await page.getByRole("button", { name: "Save" }).click();
-
-  await waitForInvokeCommand(page, "save_settings");
-
-  const args = await getInvokeArgs(page, "save_settings");
-  const settings = (args as Record<string, unknown>)
-    ?.settings as Record<string, unknown>;
-  const voiceInput = settings?.voice_input as Record<string, unknown>;
-  expect(voiceInput?.hotkey).toBe("Ctrl+Shift+V");
 });
 
 test("Voice Input language can be changed", async ({ page }) => {
@@ -209,8 +187,10 @@ test("Voice Input language can be changed", async ({ page }) => {
   await waitForInvokeCommand(page, "save_settings");
 
   const args = await getInvokeArgs(page, "save_settings");
-  const settings = (args as Record<string, unknown>)
-    ?.settings as Record<string, unknown>;
+  const settings = (args as Record<string, unknown>)?.settings as Record<
+    string,
+    unknown
+  >;
   const voiceInput = settings?.voice_input as Record<string, unknown>;
   expect(voiceInput?.language).toBe("ja");
 });
@@ -223,9 +203,7 @@ test("Settings close button returns to branch view", async ({ page }) => {
     .locator(".settings-footer .btn-cancel", { hasText: "Close" })
     .click();
 
-  await expect(
-    page.getByRole("heading", { name: "Settings" }),
-  ).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeHidden();
 });
 
 test("Profiles tab shows default profile", async ({ page }) => {
@@ -274,8 +252,14 @@ test("creating a profile makes it active and save_profiles persists active profi
   await profilesTab(page).click();
 
   await profileNewButton(page).click();
-  await page.getByRole("dialog", { name: "Create Profile" }).getByLabel("Profile Name").fill("staging");
-  await page.getByRole("dialog", { name: "Create Profile" }).getByRole("button", { name: "Create", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "Create Profile" })
+    .getByLabel("Profile Name")
+    .fill("staging");
+  await page
+    .getByRole("dialog", { name: "Create Profile" })
+    .getByRole("button", { name: "Create", exact: true })
+    .click();
   await expect(profileSelect(page)).toHaveValue("staging");
 
   await page.locator(".env-add-row .env-key-input").fill("STAGE_KEY");
@@ -290,8 +274,10 @@ test("creating a profile makes it active and save_profiles persists active profi
   await waitForInvokeCommand(page, "save_profiles");
 
   const args = await getInvokeArgs(page, "save_profiles");
-  const config = (args as Record<string, unknown>)
-    ?.config as Record<string, unknown>;
+  const config = (args as Record<string, unknown>)?.config as Record<
+    string,
+    unknown
+  >;
   const profiles = config?.profiles as Record<string, unknown>;
   const staging = profiles?.staging as Record<string, unknown>;
   const stagingEnv = staging?.env as Record<string, unknown>;
@@ -326,7 +312,10 @@ test("deleting active non-default profile falls back to default", async ({
   };
 
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses({ get_profiles: twoProfiles }));
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_profiles: twoProfiles }),
+  );
 
   await profilesTab(page).click();
 
@@ -338,7 +327,9 @@ test("deleting active non-default profile falls back to default", async ({
     .click();
 
   await expect(profileSelect(page)).toHaveValue("default");
-  await expect(profileSelect(page).locator("option[value='dev']")).toHaveCount(0);
+  await expect(profileSelect(page).locator("option[value='dev']")).toHaveCount(
+    0,
+  );
 });
 
 test("Profiles tab shows API key peek/copy controls and preserves underscore key on peek", async ({
@@ -362,7 +353,10 @@ test("Profiles tab shows API key peek/copy controls and preserves underscore key
   };
 
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithApiKey }));
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_profiles: profilesWithApiKey }),
+  );
 
   await profilesTab(page).click();
 
@@ -423,7 +417,10 @@ test("copy API key button writes plaintext value and shows copied feedback", asy
   });
 
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithApiKey }));
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_profiles: profilesWithApiKey }),
+  );
 
   await profilesTab(page).click();
 
@@ -459,8 +456,10 @@ test("Profiles API key value with underscores is persisted on save_profiles", as
   await waitForInvokeCommand(page, "save_profiles");
 
   const args = await getInvokeArgs(page, "save_profiles");
-  const config = (args as Record<string, unknown>)
-    ?.config as Record<string, unknown>;
+  const config = (args as Record<string, unknown>)?.config as Record<
+    string,
+    unknown
+  >;
   const profiles = config?.profiles as Record<string, unknown>;
   const defaultProfile = profiles?.default as Record<string, unknown>;
   const ai = defaultProfile?.ai as Record<string, unknown>;
@@ -489,7 +488,10 @@ test("Profiles API key peek and copy buttons appear after typing", async ({
   };
 
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_profiles: profilesWithAi }),
+  );
 
   await profilesTab(page).click();
 
@@ -523,7 +525,10 @@ test("Profiles API key typed value is sent to list_ai_models on Refresh", async 
   };
 
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_profiles: profilesWithAi }),
+  );
 
   await profilesTab(page).click();
 
@@ -560,7 +565,10 @@ test("Profiles pasted API key shows actions and is sent to list_ai_models on Ref
   };
 
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_profiles: profilesWithAi }),
+  );
 
   await profilesTab(page).click();
 
@@ -616,7 +624,10 @@ test("Profiles pasted API key is sent to save_profiles on Save", async ({
   };
 
   await page.goto("/");
-  await openSettings(page, standardSettingsResponses({ get_profiles: profilesWithAi }));
+  await openSettings(
+    page,
+    standardSettingsResponses({ get_profiles: profilesWithAi }),
+  );
 
   await profilesTab(page).click();
 
@@ -642,7 +653,10 @@ test("Profiles pasted API key is sent to save_profiles on Save", async ({
   await waitForInvokeCommand(page, "save_profiles");
 
   const args = await getInvokeArgs(page, "save_profiles");
-  const config = (args as Record<string, unknown>)?.config as Record<string, unknown>;
+  const config = (args as Record<string, unknown>)?.config as Record<
+    string,
+    unknown
+  >;
   const profiles = config?.profiles as Record<string, unknown>;
   const defaultProfile = profiles?.default as Record<string, unknown>;
   const ai = defaultProfile?.ai as Record<string, unknown>;

@@ -38,8 +38,6 @@ const settingsFixture: SettingsData = {
   voice_input: {
     enabled: false,
     engine: "qwen3-asr",
-    hotkey: "Mod+Shift+M",
-    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
     quality: "balanced",
     model: "Qwen/Qwen3-ASR-1.7B",
@@ -1066,8 +1064,6 @@ describe("SettingsPanel", () => {
     invalidVoiceSettings.voice_input = {
       enabled: true,
       engine: "whisper",
-      hotkey: "",
-      ptt_hotkey: "",
       language: "xx" as "auto",
       quality: "bad" as "balanced",
       model: "",
@@ -1093,21 +1089,15 @@ describe("SettingsPanel", () => {
     await switchToTab(rendered, "Voice Input");
 
     const voiceEnabled = rendered.container.querySelector("#voice-input-enabled") as HTMLInputElement;
-    const voiceHotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement;
-    const voicePttHotkey = rendered.container.querySelector("#voice-ptt-hotkey") as HTMLInputElement;
     const voiceLanguage = rendered.container.querySelector("#voice-language") as HTMLSelectElement;
     const voiceQuality = rendered.container.querySelector("#voice-quality") as HTMLSelectElement;
     const voiceModel = rendered.container.querySelector("#voice-model") as HTMLInputElement;
 
     expect(voiceEnabled.checked).toBe(true);
-    expect(voiceHotkey.value).toBe("Mod+Shift+M");
-    expect(voicePttHotkey.value).toBe("Mod+Shift+Space");
     expect(voiceLanguage.value).toBe("auto");
     expect(voiceQuality.value).toBe("balanced");
     expect(voiceModel.value).toBe("Qwen/Qwen3-ASR-1.7B");
 
-    await fireEvent.input(voiceHotkey, { target: { value: "  Ctrl+M  " } });
-    await fireEvent.input(voicePttHotkey, { target: { value: "Ctrl+Shift+Space" } });
     await fireEvent.change(voiceLanguage, { target: { value: "ja" } });
     await fireEvent.change(voiceQuality, { target: { value: "fast" } });
     await fireEvent.click(voiceEnabled);
@@ -1119,8 +1109,6 @@ describe("SettingsPanel", () => {
           voice_input: expect.objectContaining({
             enabled: false,
             engine: "qwen3-asr",
-            hotkey: "Ctrl+M",
-            ptt_hotkey: "Ctrl+Shift+Space",
             language: "ja",
             quality: "fast",
             model: "Qwen/Qwen3-ASR-0.6B",
@@ -1315,13 +1303,13 @@ describe("SettingsPanel", () => {
       expect(voiceEnabled.disabled).toBe(false);
     });
 
-    const voiceHotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement;
-    const voicePttHotkey = rendered.container.querySelector("#voice-ptt-hotkey") as HTMLInputElement;
+    const voiceHotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement | null;
+    const voicePttHotkey = rendered.container.querySelector("#voice-ptt-hotkey") as HTMLInputElement | null;
     const voiceLanguage = rendered.container.querySelector("#voice-language") as HTMLSelectElement;
     const voiceQuality = rendered.container.querySelector("#voice-quality") as HTMLSelectElement;
 
-    expect(voiceHotkey.disabled).toBe(false);
-    expect(voicePttHotkey.disabled).toBe(false);
+    expect(voiceHotkey).toBeNull();
+    expect(voicePttHotkey).toBeNull();
     expect(voiceLanguage.disabled).toBe(false);
     expect(voiceQuality.disabled).toBe(false);
   });
@@ -1358,9 +1346,6 @@ describe("SettingsPanel", () => {
       expect((rendered.container.querySelector("#voice-input-enabled") as HTMLInputElement).disabled).toBe(false);
     });
 
-    const voiceHotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement;
-    await fireEvent.input(voiceHotkey, { target: { value: "Ctrl+Shift+V" } });
-
     const voiceLanguage = rendered.container.querySelector("#voice-language") as HTMLSelectElement;
     await fireEvent.change(voiceLanguage, { target: { value: "ja" } });
 
@@ -1370,7 +1355,6 @@ describe("SettingsPanel", () => {
       expect(invokeMock).toHaveBeenCalledWith("save_settings", {
         settings: expect.objectContaining({
           voice_input: expect.objectContaining({
-            hotkey: "Ctrl+Shift+V",
             language: "ja",
           }),
         }),
@@ -2136,8 +2120,6 @@ describe("SettingsPanel", () => {
     malformedSettings.voice_input = {
       enabled: true,
       engine: "whisper" as any,
-      hotkey: "",
-      ptt_hotkey: "",
       language: "fr" as any,
       quality: "ultra" as any,
       model: "",
@@ -2183,10 +2165,6 @@ describe("SettingsPanel", () => {
 
     await switchToTab(rendered, "Voice Input");
     await waitFor(() => {
-      const hotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement | null;
-      const pttHotkey = rendered.container.querySelector(
-        "#voice-ptt-hotkey",
-      ) as HTMLInputElement | null;
       const language = rendered.container.querySelector(
         "#voice-language",
       ) as HTMLSelectElement | null;
@@ -2194,8 +2172,6 @@ describe("SettingsPanel", () => {
         "#voice-quality",
       ) as HTMLSelectElement | null;
       const model = rendered.container.querySelector("#voice-model") as HTMLInputElement | null;
-      expect(hotkey?.value).toBe("Mod+Shift+M");
-      expect(pttHotkey?.value).toBe("Mod+Shift+Space");
       expect(language?.value).toBe("auto");
       expect(quality?.value).toBe("balanced");
       expect(model?.value).toBe("Qwen/Qwen3-ASR-1.7B");
