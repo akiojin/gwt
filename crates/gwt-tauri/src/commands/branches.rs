@@ -770,11 +770,7 @@ pub fn get_current_branch(
         let issue_display_names = branch
             .as_ref()
             .map(|branch| {
-                build_issue_display_name_map(
-                    std::slice::from_ref(&branch.name),
-                    &repo_path,
-                    &state,
-                )
+                build_issue_display_name_map(std::slice::from_ref(&branch.name), &repo_path, &state)
             })
             .unwrap_or_default();
         Ok(branch.map(|b| {
