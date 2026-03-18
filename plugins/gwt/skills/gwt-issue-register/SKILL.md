@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-register
-description: Register new GitHub work items from a request. Search existing Issues and `gwt-spec` Issues first, stop on duplicates, then either create a plain GitHub Issue or hand off to `gwt-spec-register` for a new SPEC. Use as the main entrypoint for new Issue/SPEC registration requests.
+description: Register new GitHub work items from a request. Search existing Issues and `gwt-spec` Issues first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or continue into the SPEC workflow. Use as the main entrypoint for new Issue/SPEC registration requests.
 ---
 
 # gwt Issue Register
@@ -12,7 +12,8 @@ feature request, enhancement idea, documentation task, or rough note.
 
 - If the user already has an Issue number or URL, use `gwt-issue-resolve`.
 - If the target `gwt-spec` issue is already known, use `gwt-spec-ops`.
-- If this skill determines that a new SPEC is required, hand off to `gwt-spec-register`.
+- If this skill determines that a new SPEC is required, create it through
+  `gwt-spec-register`, then continue through `gwt-spec-ops`.
 - Do not create both a plain Issue and a SPEC for the same request.
 
 ## Mandatory preflight: search existing issues first
@@ -25,15 +26,15 @@ Required behavior:
 2. Update the Issues index if needed.
 3. Run at least 2 semantic Issue queries derived from the request.
 4. Search for both plain Issues and `gwt-spec` Issues.
-5. Stop new creation when a clear existing destination or duplicate already exists.
+5. Reuse a clear existing destination instead of creating a duplicate.
 
 Do not skip duplicate search because the request "sounds new".
 
 ## Duplicate handling
 
-- If an open plain Issue clearly matches, stop registration and switch to `gwt-issue-resolve`.
-- If an open `gwt-spec` clearly owns the scope, stop registration and switch to `gwt-spec-ops`.
-- If the search returns plausible candidates but no single clear owner, stop registration and present the top 1-3 candidates instead of creating a new item.
+- If an open plain Issue clearly matches, switch to `gwt-issue-resolve` and continue there.
+- If an open `gwt-spec` clearly owns the scope, switch to `gwt-spec-ops` and continue there.
+- If the search returns plausible candidates but no single clear owner, stop and present the top 1-3 candidates instead of creating a new item.
 - Do not create a fresh Issue "just in case" when the duplicate check is inconclusive.
 
 ## Plain Issue vs SPEC decision
@@ -54,7 +55,7 @@ Create a new SPEC when the request includes any of these:
 - cross-cutting or multi-subsystem changes
 - non-trivial technical or product tradeoffs
 
-When the need for a SPEC is clear, do not create a plain Issue first. Switch to `gwt-spec-register`.
+When the need for a SPEC is clear, do not create a plain Issue first. Create the SPEC and continue through `gwt-spec-ops`.
 
 ## Title rules for plain Issues
 
@@ -121,23 +122,23 @@ Use `CLEAN` only when the duplicate search found no credible owner.
    - Use `gwt-issue-search` with at least 2 semantic queries.
    - Prefer open Issues and active canonical `gwt-spec` Issues.
 
-4. **Stop on duplicates or existing owners.**
+4. **Reuse duplicates or existing owners.**
    - If a clear open Issue already tracks the request, do not create a new item.
    - If a clear `gwt-spec` already owns the scope, do not create a new item.
-   - Report the result with `Chosen Path: EXISTING` and switch to the owning workflow.
+   - Report the result with `Chosen Path: EXISTING` and continue with the owning workflow.
 
 5. **Choose plain Issue or new SPEC.**
    - Use the decision rules above.
    - Plain Issue: create directly with `gh issue create`.
-   - New SPEC: switch to `gwt-spec-register`.
+   - New SPEC: create through `gwt-spec-register`, then continue through `gwt-spec-ops`.
 
 6. **Create the plain Issue when needed.**
    - Use the required title rule and issue body structure.
    - Fill the sections with concrete request context, not `_TODO_`.
 
-7. **Return the created Issue or handoff target.**
+7. **Return the created Issue or active owner.**
    - For plain Issue creation, return the issue number and URL.
-   - For existing owner or new SPEC, state the exact destination and next skill.
+   - For existing owner or new SPEC, state the exact destination and continue with that workflow unless an ambiguous product decision still blocks progress.
 
 ## Operations (gh CLI fallback)
 

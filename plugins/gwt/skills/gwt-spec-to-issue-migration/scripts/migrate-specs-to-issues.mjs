@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // migrate-specs-to-issues.mjs
-// Migrate local specs/SPEC-*/ directories to GitHub Issues with gwt-spec label.
+// Migrate local specs/SPEC-*/ directories and legacy body-canonical gwt-spec issues
+// to artifact-first GitHub Issues with gwt-spec label.
 //
 // Usage:
-//   node migrate-specs-to-issues.mjs [--dry-run] [--specs-dir DIR] [--label LABEL]...
+//   node migrate-specs-to-issues.mjs [--dry-run] [--specs-dir DIR] [--label LABEL]... [--convert-existing-issues]
 //
 // Options:
 //   --dry-run       Show what would be done without creating issues
 //   --specs-dir     Path to specs/ directory (default: auto-detect from target repository)
 //   --label LABEL   Additional label to apply (can be repeated; gwt-spec is always applied)
+//   --convert-existing-issues  Rewrite body-canonical gwt-spec issues to artifact-first format
 
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync, rmdirSync } from "node:fs";
@@ -16,9 +18,11 @@ import path from "node:path";
 
 let DRY_RUN = false;
 let SPECS_DIR = "";
+let CONVERT_EXISTING_ISSUES = false;
 const REPORT_FILE = "migration-report.json";
 const RATE_LIMIT_BATCH = 10;
 const RATE_LIMIT_SLEEP = 3;
+const EXEC_MAX_BUFFER = 20 * 1024 * 1024;
 const EXTRA_LABELS = [];
 let REPO_ROOT = "";
 const SPEC_DIRS = [];
@@ -52,6 +56,9 @@ for (let i = 0; i < args.length; i++) {
     case "--label":
       EXTRA_LABELS.push(args[++i]);
       break;
+    case "--convert-existing-issues":
+      CONVERT_EXISTING_ISSUES = true;
+      break;
     default:
       console.error(`Unknown option: ${args[i]}`);
       process.exit(1);
@@ -64,6 +71,7 @@ function resolveRepoRoot() {
     return execSync("git rev-parse --show-toplevel", {
       encoding: "utf8",
       stdio: ["pipe", "pipe", "ignore"],
+      maxBuffer: EXEC_MAX_BUFFER,
     }).trim();
   } catch {
     return "";
@@ -152,7 +160,7 @@ if (!SPECS_DIR) {
     SPECS_DIR = candidate;
   }
 
-  if (!SPECS_DIR) {
+  if (!SPECS_DIR && !CONVERT_EXISTING_ISSUES) {
     console.log("Specs directory not found under target repository. Nothing to migrate.");
     writeEmptyReportAndExit();
   }
@@ -162,22 +170,25 @@ if (!SPECS_DIR) {
 }
 
 if (!REPO_ROOT) {
-  REPO_ROOT = path.resolve(SPECS_DIR, "..");
+  REPO_ROOT = SPECS_DIR ? path.resolve(SPECS_DIR, "..") : resolveRepoRoot();
 }
 
-console.log(`Specs directory: ${SPECS_DIR}`);
+console.log(`Specs directory: ${SPECS_DIR || "(not used)"}`);
 console.log(`Dry run: ${DRY_RUN}`);
+console.log(`Convert existing issues: ${CONVERT_EXISTING_ISSUES}`);
 
 // Collect SPEC directories (exclude archive/)
-for (const entry of readdirSync(SPECS_DIR)) {
-  if (!entry.startsWith("SPEC-")) continue;
-  const fullPath = path.join(SPECS_DIR, entry);
-  if (statSync(fullPath).isDirectory()) SPEC_DIRS.push(fullPath);
+if (SPECS_DIR) {
+  for (const entry of readdirSync(SPECS_DIR)) {
+    if (!entry.startsWith("SPEC-")) continue;
+    const fullPath = path.join(SPECS_DIR, entry);
+    if (statSync(fullPath).isDirectory()) SPEC_DIRS.push(fullPath);
+  }
 }
 
 console.log(`Found ${SPEC_DIRS.length} spec directories to migrate`);
 
-if (SPEC_DIRS.length === 0) writeEmptyReportAndExit();
+if (SPEC_DIRS.length === 0 && !CONVERT_EXISTING_ISSUES) writeEmptyReportAndExit();
 
 // Initialize report
 const reportEntries = [];
@@ -198,78 +209,65 @@ function extractTitle(specFile) {
   return "Untitled spec";
 }
 
-function buildIssueBody(dir, specId) {
-  const spec = readSection(path.join(dir, "spec.md"));
-  const plan = readSection(path.join(dir, "plan.md"));
-  const tasks = readSection(path.join(dir, "tasks.md"));
-  const tdd = readSection(path.join(dir, "tdd.md"));
-  const research = readSection(path.join(dir, "research.md"));
-  const dataModel = readSection(path.join(dir, "data-model.md"));
-  const quickstart = readSection(path.join(dir, "quickstart.md"));
-
-  let contractsNote;
-  const contractsDir = path.join(dir, "contracts");
-  if (existsSync(contractsDir) && readdirSync(contractsDir).length > 0) {
-    contractsNote = "Migrated from local files. See artifact comments below.";
-  } else {
-    contractsNote =
-      "Artifact files under `contracts/` are managed in issue comments with `contract:<name>` entries.";
-  }
-
-  let checklistsNote;
-  const checklistsDir = path.join(dir, "checklists");
-  if (existsSync(checklistsDir) && readdirSync(checklistsDir).length > 0) {
-    checklistsNote = "Migrated from local files. See artifact comments below.";
-  } else {
-    checklistsNote =
-      "Artifact files under `checklists/` are managed in issue comments with `checklist:<name>` entries.";
-  }
-
+function buildIssueBody(specId) {
   return `<!-- GWT_SPEC_ID:${specId} -->
 
-## Spec
+## Artifact Index
 
-${spec}
+- \`doc:spec.md\`
+- \`doc:plan.md\`
+- \`doc:tasks.md\`
+- \`doc:research.md\`
+- \`doc:data-model.md\`
+- \`doc:quickstart.md\`
+- \`checklist:tdd.md\`
+- \`checklist:acceptance.md\`
+- \`contract:*\`
+- \`checklist:*\`
 
-## Plan
+## Status
 
-${plan}
+- Phase: Specify
+- Clarification: Migrated from legacy source
+- Analysis: Pending \`gwt-spec-analyze\`
 
-## Tasks
+## Links
 
-${tasks}
-
-## TDD
-
-${tdd}
-
-## Research
-
-${research}
-
-## Data Model
-
-${dataModel}
-
-## Quickstart
-
-${quickstart}
-
-## Contracts
-
-${contractsNote}
-
-## Checklists
-
-${checklistsNote}
-
-## Acceptance Checklist
-
-- [ ] Add acceptance checklist`;
+- Parent: ...
+- Related: ...
+- PRs: ...
+`;
 }
 
 function createArtifactComments(dir, issueNumber) {
   let hadError = false;
+  const docArtifacts = [
+    ["doc", "spec.md", readSection(path.join(dir, "spec.md"))],
+    ["doc", "plan.md", readSection(path.join(dir, "plan.md"))],
+    ["doc", "tasks.md", readSection(path.join(dir, "tasks.md"))],
+    ["checklist", "tdd.md", readSection(path.join(dir, "tdd.md"))],
+    ["doc", "research.md", readSection(path.join(dir, "research.md"))],
+    ["doc", "data-model.md", readSection(path.join(dir, "data-model.md"))],
+    ["doc", "quickstart.md", readSection(path.join(dir, "quickstart.md"))],
+  ];
+
+  for (const [kind, name, content] of docArtifacts) {
+    if (!content || content.trim() === "_TODO_") continue;
+    if (DRY_RUN) {
+      console.log(`  [dry-run] Would create ${kind} artifact comment: ${name}`);
+    } else {
+      const commentBody = `<!-- GWT_SPEC_ARTIFACT:${kind}:${name} -->\n${kind}:${name}\n\n${content.trim()}\n`;
+      try {
+        execSync(`gh issue comment ${issueNumber} --body ${JSON.stringify(commentBody)}`, {
+          stdio: ["pipe", "ignore", "ignore"],
+        });
+      } catch {
+        console.error(`  Warning: Failed to create ${kind} artifact: ${name}`);
+        hadError = true;
+      }
+    }
+  }
+
   for (const subdir of ["contracts", "checklists"]) {
     const artifactDir = path.join(dir, subdir);
     if (!existsSync(artifactDir) || !statSync(artifactDir).isDirectory()) continue;
@@ -300,6 +298,99 @@ function createArtifactComments(dir, issueNumber) {
   return !hadError;
 }
 
+function parseIssueSections(body) {
+  const sections = {};
+  const regex = /^##\s+(.+)$/gm;
+  const matches = [...body.matchAll(regex)];
+  for (let i = 0; i < matches.length; i++) {
+    const title = matches[i][1].trim();
+    const start = matches[i].index + matches[i][0].length;
+    const end = i + 1 < matches.length ? matches[i + 1].index : body.length;
+    sections[title] = body.slice(start, end).trim();
+  }
+  return sections;
+}
+
+function buildArtifactCommentBody(kind, name, content) {
+  return `<!-- GWT_SPEC_ARTIFACT:${kind}:${name} -->\n${kind}:${name}\n\n${content.trim()}\n`;
+}
+
+function migrateExistingBodyCanonicalIssues() {
+  console.log("");
+  console.log("Scanning existing gwt-spec issues for body-canonical migration...");
+
+  let issues = [];
+  try {
+    issues = JSON.parse(
+      execSync("gh issue list --label gwt-spec --state all --limit 200 --json number,title,body", {
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "ignore"],
+        maxBuffer: EXEC_MAX_BUFFER,
+      })
+    );
+  } catch {
+    console.error("  Failed to list existing gwt-spec issues");
+    return { converted: 0, failed: 0 };
+  }
+
+  const candidates = issues.filter((issue) => {
+    const body = issue.body || "";
+    return body.includes("## Spec") && !body.includes("## Artifact Index");
+  });
+
+  console.log(`Found ${candidates.length} body-canonical issues to migrate`);
+  let converted = 0;
+  let failedCount = 0;
+
+  for (const issue of candidates) {
+    const sections = parseIssueSections(issue.body || "");
+    const artifacts = [
+      ["doc", "spec.md", sections["Spec"] || ""],
+      ["doc", "plan.md", sections["Plan"] || ""],
+      ["doc", "tasks.md", sections["Tasks"] || ""],
+      ["checklist", "tdd.md", sections["TDD"] || ""],
+      ["doc", "research.md", sections["Research"] || ""],
+      ["doc", "data-model.md", sections["Data Model"] || ""],
+      ["doc", "quickstart.md", sections["Quickstart"] || ""],
+      ["checklist", "acceptance.md", sections["Acceptance Checklist"] || ""],
+    ].filter(([, , content]) => content && content.trim().length > 0);
+
+    if (DRY_RUN) {
+      console.log(`  [dry-run] Would migrate issue #${issue.number} to artifact-first format`);
+      continue;
+    }
+
+    let ok = true;
+    for (const [kind, name, content] of artifacts) {
+      try {
+        execSync(`gh issue comment ${issue.number} --body ${JSON.stringify(buildArtifactCommentBody(kind, name, content))}`, {
+          stdio: ["pipe", "ignore", "ignore"],
+        });
+      } catch {
+        console.error(`  Warning: failed to add ${kind}:${name} to issue #${issue.number}`);
+        ok = false;
+      }
+    }
+
+    try {
+      execSync(`gh issue edit ${issue.number} --body ${JSON.stringify(buildIssueBody(`#${issue.number}`))}`, {
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+    } catch {
+      console.error(`  Warning: failed to rewrite issue #${issue.number} body`);
+      ok = false;
+    }
+
+    if (ok) {
+      converted++;
+    } else {
+      failedCount++;
+    }
+  }
+
+  return { converted, failed: failedCount };
+}
+
 for (const dir of SPEC_DIRS) {
   const specName = path.basename(dir);
   const specFile = path.join(dir, "spec.md");
@@ -322,7 +413,7 @@ for (const dir of SPEC_DIRS) {
 
   console.log(`[${count}] Creating issue: ${title}`);
 
-  const issueBody = buildIssueBody(dir, specName);
+  const issueBody = buildIssueBody(specName);
   const labelArgs = ["--label", "gwt-spec"];
   for (const label of EXTRA_LABELS) {
     labelArgs.push("--label", label);
@@ -345,7 +436,7 @@ for (const dir of SPEC_DIRS) {
   const issueNumber = issueUrl.split("/").pop();
   console.log(`  Created issue #${issueNumber}`);
 
-  const updatedBody = buildIssueBody(dir, `#${issueNumber}`);
+  const updatedBody = buildIssueBody(`#${issueNumber}`);
   try {
     execSync(
       `gh issue edit ${issueNumber} --body ${JSON.stringify(updatedBody)}`,
@@ -370,6 +461,12 @@ for (const dir of SPEC_DIRS) {
     console.log(`  Rate limit pause: sleeping ${RATE_LIMIT_SLEEP}s...`);
     sleep(RATE_LIMIT_SLEEP);
   }
+}
+
+if (CONVERT_EXISTING_ISSUES) {
+  const converted = migrateExistingBodyCanonicalIssues();
+  success += converted.converted;
+  failed += converted.failed;
 }
 
 writeFileSync(REPORT_FILE, JSON.stringify(reportEntries, null, 2) + "\n");

@@ -251,4 +251,24 @@ describe("IssueSpecPanel", () => {
     // No TODO fallback when sections are filled
     expect(rendered.queryByText("TODO")).toBeNull();
   });
+
+  it("renders reconstructed sections even when body is artifact-index only", async () => {
+    invokeMock.mockResolvedValue({
+      ...detailFixture,
+      body: "<!-- GWT_SPEC_ID:#42 -->\n\n## Artifact Index\n\n- `doc:spec.md`",
+      sections: {
+        ...detailFixture.sections,
+        spec: "Artifact-backed specification content",
+      },
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      issueNumber: 42,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Artifact-backed specification content")).toBeTruthy();
+    });
+  });
 });
