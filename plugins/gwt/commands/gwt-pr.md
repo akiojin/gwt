@@ -25,6 +25,7 @@ Use this command to draft or update a GitHub PR with the gh CLI.
 7. If the merge commit is missing or not an ancestor of `HEAD`, compare `origin/<head>..HEAD` before any base-branch fallback.
 8. If both upstream and base comparisons fail, stop with `MANUAL CHECK`; do not create a PR by guesswork.
 9. Generate or update the PR body using the provided templates.
+10. If `gh pr create` or `gh pr edit` fails with `was submitted too quickly` or a secondary rate limit, retry through the REST pull-request endpoint with `gh api repos/<owner>/<repo>/pulls`.
 
 ## Examples
 

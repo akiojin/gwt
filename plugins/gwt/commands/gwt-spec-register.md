@@ -20,7 +20,8 @@ Use this command as a supplementary entrypoint when the user explicitly wants to
 2. Use `gwt-issue-search` before creating a new SPEC.
 3. If an existing canonical SPEC fits, continue with `gwt-spec-ops` instead of creating a duplicate.
 4. Otherwise create a new `gwt-spec` Issue with the artifact-index body and seed `doc:spec.md`.
-5. Return the created issue number to `gwt-spec-ops` unless the user explicitly asked to stop after registration.
+5. If `gh issue create` or `gh issue edit` is rate-limited, retry through the REST issue endpoints.
+6. Return the created issue number to `gwt-spec-ops` unless the user explicitly asked to stop after registration.
 
 ## Examples
 

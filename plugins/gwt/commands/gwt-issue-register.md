@@ -25,6 +25,7 @@ Use this command as the main entrypoint for new work registration.
 4. If a clear existing Issue or `gwt-spec` already owns the request, continue with that workflow instead of creating a duplicate.
 5. If the request needs new specification work, create the SPEC through `gwt-spec-register`, then continue through `gwt-spec-ops`.
 6. Otherwise create a plain GitHub Issue with the standard section structure.
+7. If `gh issue create` is rate-limited, retry through `POST /repos/<owner>/<repo>/issues` with `gh api`.
 
 ## Proactive Trigger Examples
 

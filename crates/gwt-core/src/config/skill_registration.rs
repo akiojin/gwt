@@ -2194,6 +2194,7 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(!codex_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
         assert!(codex_skill_content.contains(".codex/skills/gwt-pr/references/pr-body-template.md"));
+        assert!(codex_skill_content.contains("repos/<owner>/<repo>/pulls"));
 
         register_agent_skills_with_settings_at_project_root(
             SkillAgentType::Gemini,
@@ -2244,6 +2245,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(codex_pr_skill.contains("git merge-base --is-ancestor <merge_commit> HEAD"));
         assert!(codex_pr_skill.contains("git rev-list --count origin/<head>..HEAD"));
         assert!(codex_pr_skill.contains("MANUAL CHECK"));
+        assert!(codex_pr_skill.contains("repos/<owner>/<repo>/pulls"));
 
         let claude_pr_skill = std::fs::read_to_string(
             temp.path()
@@ -2268,6 +2270,7 @@ OPENAI_API_KEY = "legacy-key"
             .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
         assert!(claude_pr_command
             .contains("merge `origin/$base` into the current branch and push before PR creation."));
+        assert!(claude_pr_command.contains("REST pull-request endpoint"));
 
         let claude_pr_check_command = std::fs::read_to_string(
             temp.path()
@@ -2371,6 +2374,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(spec_register_skill.contains("gwt-issue-search"));
         assert!(spec_register_skill.contains("GWT_SPEC_ARTIFACT:doc:spec.md"));
         assert!(spec_register_skill.contains("gwt-spec-ops"));
+        assert!(spec_register_skill.contains("repos/<owner>/<repo>/issues"));
 
         let spec_clarify_skill = std::fs::read_to_string(
             temp.path()
@@ -2442,6 +2446,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(issue_register_command.contains("gwt-issue-search"));
         assert!(issue_register_command.contains("gwt-spec-register"));
         assert!(issue_register_command.contains("gwt-spec-ops"));
+        assert!(issue_register_command.contains("POST /repos/<owner>/<repo>/issues"));
 
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()

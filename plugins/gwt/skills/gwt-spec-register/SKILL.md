@@ -118,6 +118,7 @@ doc:spec.md
 3. **Create the new `gwt-spec` Issue.**
    - Use the built-in spec issue creation path when available.
    - If the built-in path is unavailable, use the documented `gh issue create` fallback.
+   - If `gh issue create` / `gh issue edit` hits a secondary rate limit, use the REST issue endpoints (`POST` / `PATCH /repos/<owner>/<repo>/issues/...`) instead of stopping.
    - After creation, update `<!-- GWT_SPEC_ID:#NEW -->` to `<!-- GWT_SPEC_ID:#{number} -->`.
 
 4. **Seed the initial `spec.md` artifact.**
@@ -141,6 +142,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --artifact "doc:spec.md" \
   --body-file /tmp/spec.md
 ```
+
+The shared helper uses GitHub issue comment REST endpoints for create/update and should be preferred over raw `gh issue comment`.
 
 ### Create new spec issue
 
@@ -178,6 +181,13 @@ EOF
 
 ```bash
 gh issue edit {number} --body "$(updated body with <!-- GWT_SPEC_ID:#{number} -->)"
+```
+
+If `gh issue create` or `gh issue edit` is rate-limited, fall back to:
+
+```bash
+gh api "repos/<owner>/<repo>/issues" --method POST --input /tmp/spec-create.json
+gh api "repos/<owner>/<repo>/issues/{number}" --method PATCH --input /tmp/spec-edit.json
 ```
 
 ### Create initial `spec.md` artifact comment

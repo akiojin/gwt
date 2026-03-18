@@ -221,11 +221,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" -
    - The script validates completeness and rejects the operation if any thread is missing a reply.
    - Requires `Repository Permissions > Contents: Read and Write`.
    - Resolve threads at this point (after code fix is pushed). Do not wait for CI completion to resolve threads.
+   - Review-thread reply/resolve remains GraphQL-based in this workflow; if GitHub rate-limits those mutations, back off and retry instead of fabricating a REST replacement.
 
 8. **Notify reviewers (mandatory).**
    - With `--add-comment "message"`, post a comment to the PR.
    - Include a summary of what was fixed (list each B-item and the action taken).
    - This step is not optional — always notify reviewers after fixes are applied.
+   - If `gh pr comment` hits a secondary rate limit, fall back to `POST /repos/<owner>/<repo>/issues/<pr_number>/comments` via `gh api`.
 
 9. **Verify fix (mandatory — do not skip).**
    - Re-run the inspection script with `--mode all` (regardless of initial mode).
@@ -352,6 +354,9 @@ Use `--reply-and-resolve` to reply to every unresolved thread and resolve them.
 ### Reviewer Notification
 
 Use `--add-comment "message"` to post a summary comment to the PR after fixes.
+
+- Primary path: `gh pr comment`
+- REST fallback when GitHub reports a secondary rate limit: `POST /repos/<owner>/<repo>/issues/<pr_number>/comments`
 
 ## Output Examples
 
