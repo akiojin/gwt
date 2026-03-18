@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import type { AssistantMessage, AssistantState, DashboardData } from "../types";
   import AssistantDashboard from "./AssistantDashboard.svelte";
+  import MarkdownRenderer from "./MarkdownRenderer.svelte";
 
   let assistantState: AssistantState | null = $state(null);
   let dashboard: DashboardData | null = $state(null);
@@ -249,12 +250,16 @@
             class:system={msg.role === "system" || msg.role === "tool"}
             class:tool-use={msg.kind === "tool_use"}
           >
-            <div class="message-content">
-              {#if msg.kind === "tool_use"}
-                <span class="action-icon">&#9654;</span>
-              {/if}
-              {msg.content}
-            </div>
+            {#if msg.role === "assistant" && msg.kind === "text"}
+              <MarkdownRenderer text={msg.content} className="assistant-message-markdown" />
+            {:else}
+              <div class="message-content">
+                {#if msg.kind === "tool_use"}
+                  <span class="action-icon">&#9654;</span>
+                {/if}
+                {msg.content}
+              </div>
+            {/if}
           </div>
         {/each}
 
@@ -373,6 +378,10 @@
   .message-content {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+
+  .message.assistant :global(.assistant-message-markdown) {
+    color: var(--text-primary);
   }
 
   .action-icon {

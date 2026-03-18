@@ -266,7 +266,7 @@ describe("AssistantPanel", () => {
       ...structuredClone(assistantStateFixture),
       messages: [
         {
-          role: "assistant",
+          role: "user",
           kind: "text",
           content: "line 1\nline 2",
           timestamp: 1,
@@ -285,6 +285,29 @@ describe("AssistantPanel", () => {
     expect(content.textContent?.replace(/^\s+/, "")).toBe("line 1\nline 2");
     const source = await import("./AssistantPanel.svelte?raw");
     expect(source.default).toContain("white-space: pre-wrap;");
+  });
+
+  it("renders assistant markdown output as formatted content", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "## Summary\n- item one\n- item two",
+          timestamp: 1,
+        },
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".message.assistant h2")?.textContent).toBe(
+        "Summary"
+      );
+      expect(rendered.container.querySelectorAll(".message.assistant li")).toHaveLength(2);
+    });
   });
 
   it("shows the user message immediately while assistant_send_message is pending", async () => {
