@@ -295,7 +295,7 @@
 </script>
 
 <div class="assistant-panel">
-  <AssistantDashboard {dashboard} />
+  <AssistantDashboard {dashboard} {assistantState} />
 
   <div class="chat-area">
     <div class="messages">

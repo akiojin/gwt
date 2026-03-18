@@ -30,6 +30,8 @@ const assistantStateFixture = {
   estimatedTokens: 0,
   startupStatus: "ready",
   startupSummaryReady: true,
+  blockers: [],
+  recommendedNextActions: [],
 };
 
 const dashboardFixture = {
@@ -271,6 +273,62 @@ describe("AssistantPanel", () => {
       expect(button.disabled).toBe(true);
       expect(rendered.getByText("Checking startup analysis cache...")).toBeTruthy();
       expect(rendered.getByText("Thinking...")).toBeTruthy();
+    });
+  });
+
+  it("shows the current goal and recommended next actions in the dashboard strip", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      workingGoal: "#1636 Assistant Mode",
+      goalConfidence: "high",
+      currentStatus: "monitoring",
+      recommendedNextActions: [
+        "ブランチ `feature/issue-1636` で agent を起動して作業を再開する",
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByTestId("assistant-goal-strip")).toBeTruthy();
+      expect(rendered.getByText("#1636 Assistant Mode")).toBeTruthy();
+      expect(rendered.getByText("Monitoring")).toBeTruthy();
+      expect(
+        rendered.getByText("ブランチ `feature/issue-1636` で agent を起動して作業を再開する")
+      ).toBeTruthy();
+    });
+  });
+
+  it("renders goal confirmation state with blockers", async () => {
+    initialAssistantState = {
+      ...structuredClone(assistantStateFixture),
+      currentStatus: "awaiting_goal_confirmation",
+      blockers: [
+        "README / CLAUDE.md / 現在の branch から、着手中のゴールを一意に特定できません。",
+      ],
+      recommendedNextActions: [
+        "現在のゴールを一文で確認し、必要なら issue または README に明記する",
+      ],
+      messages: [
+        {
+          role: "assistant",
+          kind: "text",
+          content: "## Assistant PM Update\n現在の作業ゴールを一文で確認してください。",
+          timestamp: 1,
+        },
+      ],
+    };
+
+    const rendered = await renderAssistantPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Needs Goal")).toBeTruthy();
+      expect(
+        rendered.getByText(
+          "README / CLAUDE.md / 現在の branch から、着手中のゴールを一意に特定できません。"
+        )
+      ).toBeTruthy();
+      expect(rendered.getByText("現在の作業ゴールを一文で確認してください。")).toBeTruthy();
     });
   });
 

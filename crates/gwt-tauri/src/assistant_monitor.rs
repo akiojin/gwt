@@ -1,26 +1,32 @@
 #![allow(dead_code)]
-//! Assistant Mode monitor — polls pane and git state, emits change events.
+//! Assistant Mode monitor: polls pane and git state, emits change events.
 
+use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::state::AppState;
+use gwt_core::git::{self, Branch};
+use gwt_core::terminal::pane::PaneStatus;
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tauri::Manager;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::state::AppState;
-
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
+const SCROLLBACK_HASH_BYTES: usize = 4096;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PaneSnapshot {
     pub pane_id: String,
     pub agent_name: String,
+    pub branch: String,
     pub status: String,
     pub scrollback_hash: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct GitStatusSnapshot {
     pub branch: String,
     pub uncommitted_count: u32,
@@ -63,20 +69,7 @@ impl ChangeDetector {
 }
 
 fn snapshots_equal(a: &MonitorSnapshot, b: &MonitorSnapshot) -> bool {
-    if a.panes.len() != b.panes.len() {
-        return false;
-    }
-    for (pa, pb) in a.panes.iter().zip(b.panes.iter()) {
-        if pa.pane_id != pb.pane_id
-            || pa.status != pb.status
-            || pa.scrollback_hash != pb.scrollback_hash
-        {
-            return false;
-        }
-    }
-    a.git.branch == b.git.branch
-        && a.git.uncommitted_count == b.git.uncommitted_count
-        && a.git.unpushed_count == b.git.unpushed_count
+    a.panes == b.panes && a.git == b.git
 }
 
 /// Handle for stopping the monitor task.
@@ -92,16 +85,13 @@ impl AssistantMonitorHandle {
 
 /// Start the assistant monitor polling loop.
 pub fn start_monitor(
-    state: &AppState,
+    app_handle: tauri::AppHandle,
+    window_label: String,
+    project_root: String,
     event_tx: mpsc::Sender<MonitorEvent>,
 ) -> AssistantMonitorHandle {
     let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
 
-    // Clone what we need from state for the spawned task
-    // AppState is not Send, so the monitor task will be integrated
-    // with Tauri's state management in Phase 5. For now, spawn a
-    // polling task that emits default snapshots.
-    let _ = state;
     tokio::spawn(async move {
         let mut detector = ChangeDetector::new();
         let mut interval = tokio::time::interval(POLL_INTERVAL);
@@ -112,26 +102,21 @@ pub fn start_monitor(
                     break;
                 }
                 _ = interval.tick() => {
-                    // In the actual integration, this will capture pane state
-                    // and git status from AppState. For now, emit a default snapshot.
-                    let snapshot = MonitorSnapshot {
-                        panes: Vec::new(),
-                        git: GitStatusSnapshot {
-                            branch: String::new(),
-                            uncommitted_count: 0,
-                            unpushed_count: 0,
-                        },
-                        timestamp: chrono::Utc::now().timestamp(),
-                    };
-
-                    if detector.detect_change(&snapshot)
-                        && event_tx
-                            .send(MonitorEvent::SnapshotChanged(snapshot))
-                            .await
-                            .is_err()
-                    {
-                        warn!("Monitor event receiver dropped; stopping monitor");
-                        break;
+                    match collect_snapshot(&app_handle, &window_label, &project_root) {
+                        Ok(snapshot) => {
+                            if detector.detect_change(&snapshot)
+                                && event_tx
+                                    .send(MonitorEvent::SnapshotChanged(snapshot))
+                                    .await
+                                    .is_err()
+                            {
+                                warn!("Monitor event receiver dropped; stopping monitor");
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            warn!(window = %window_label, error = %err, "Failed to collect assistant monitor snapshot");
+                        }
                     }
                 }
             }
@@ -139,6 +124,104 @@ pub fn start_monitor(
     });
 
     AssistantMonitorHandle { stop_tx }
+}
+
+fn collect_snapshot(
+    app_handle: &tauri::AppHandle,
+    _window_label: &str,
+    project_root: &str,
+) -> Result<MonitorSnapshot, String> {
+    let state = app_handle.state::<AppState>();
+    let repo_path = resolve_repo_path_for_project_root(Path::new(project_root))
+        .map_err(|e| format!("Failed to resolve repository path: {e}"))?;
+    let current_branch = Branch::current(&repo_path)
+        .map_err(|e| format!("Failed to resolve current branch: {e}"))?;
+    let worktree_path = resolve_worktree_path(&repo_path, current_branch.as_ref())
+        .unwrap_or_else(|| repo_path.clone());
+
+    let branch = current_branch
+        .as_ref()
+        .map(|value| value.name.clone())
+        .unwrap_or_default();
+    let unpushed_count = current_branch
+        .as_ref()
+        .map(|value| value.ahead.min(u32::MAX as usize) as u32)
+        .unwrap_or(0);
+    let uncommitted_count = git::get_working_tree_status(&worktree_path)
+        .map(|entries| entries.len().min(u32::MAX as usize) as u32)
+        .unwrap_or(0);
+
+    let panes = collect_project_panes(&state, &repo_path)?;
+
+    Ok(MonitorSnapshot {
+        panes,
+        git: GitStatusSnapshot {
+            branch,
+            uncommitted_count,
+            unpushed_count,
+        },
+        timestamp: chrono::Utc::now().timestamp(),
+    })
+}
+
+fn collect_project_panes(state: &AppState, repo_path: &Path) -> Result<Vec<PaneSnapshot>, String> {
+    let mut manager = state
+        .pane_manager
+        .lock()
+        .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+    let panes = manager
+        .panes_mut()
+        .iter_mut()
+        .filter(|pane| pane.project_root() == repo_path)
+        .map(|pane| {
+            let _ = pane.check_status();
+            let status = match pane.status() {
+                PaneStatus::Running => "running".to_string(),
+                PaneStatus::Completed(code) => format!("completed({code})"),
+                PaneStatus::Error(message) => format!("error: {message}"),
+            };
+            let scrollback_hash = pane
+                .read_scrollback_tail_raw(SCROLLBACK_HASH_BYTES)
+                .map(|bytes| hash_scrollback_bytes(&bytes))
+                .unwrap_or(0);
+            PaneSnapshot {
+                pane_id: pane.pane_id().to_string(),
+                agent_name: pane.agent_name().to_string(),
+                branch: pane.branch_name().to_string(),
+                status,
+                scrollback_hash,
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(panes)
+}
+
+fn resolve_worktree_path(repo_path: &Path, current_branch: Option<&Branch>) -> Option<PathBuf> {
+    if !git::is_bare_repository(repo_path) {
+        return Some(repo_path.to_path_buf());
+    }
+
+    let manager = gwt_core::worktree::WorktreeManager::new(repo_path).ok()?;
+    let worktrees = manager.list_basic().ok()?;
+
+    if let Some(branch_name) = current_branch.map(|branch| branch.name.as_str()) {
+        if let Some(worktree) = worktrees.iter().find(|worktree| {
+            worktree.is_active() && worktree.branch.as_deref() == Some(branch_name)
+        }) {
+            return Some(worktree.path.clone());
+        }
+    }
+
+    worktrees
+        .iter()
+        .find(|worktree| worktree.is_active() && !worktree.is_main)
+        .map(|worktree| worktree.path.clone())
+}
+
+fn hash_scrollback_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Hash scrollback text for change detection.
@@ -171,7 +254,13 @@ mod tests {
     fn test_change_detector_same_snapshot_no_change() {
         let mut detector = ChangeDetector::new();
         let snapshot = MonitorSnapshot {
-            panes: Vec::new(),
+            panes: vec![PaneSnapshot {
+                pane_id: "pane-1".to_string(),
+                agent_name: "codex".to_string(),
+                branch: "feature/x".to_string(),
+                status: "running".to_string(),
+                scrollback_hash: 1,
+            }],
             git: GitStatusSnapshot {
                 branch: "main".to_string(),
                 uncommitted_count: 0,
@@ -180,14 +269,9 @@ mod tests {
             timestamp: 0,
         };
         detector.detect_change(&snapshot);
-        // Same content, different timestamp — should not trigger
         let snapshot2 = MonitorSnapshot {
-            panes: Vec::new(),
-            git: GitStatusSnapshot {
-                branch: "main".to_string(),
-                uncommitted_count: 0,
-                unpushed_count: 0,
-            },
+            panes: snapshot.panes.clone(),
+            git: snapshot.git.clone(),
             timestamp: 100,
         };
         assert!(!detector.detect_change(&snapshot2));

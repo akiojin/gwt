@@ -722,4 +722,15 @@ export interface AssistantState {
   estimatedTokens: number;
   startupStatus: "idle" | "analyzing" | "ready" | "failed" | (string & {});
   startupSummaryReady: boolean;
+  workingGoal?: string | null;
+  goalConfidence?: "high" | "medium" | "low" | (string & {}) | null;
+  currentStatus?:
+    | "analyzing"
+    | "awaiting_goal_confirmation"
+    | "monitoring"
+    | "blocked"
+    | (string & {})
+    | null;
+  blockers: string[];
+  recommendedNextActions: string[];
 }
