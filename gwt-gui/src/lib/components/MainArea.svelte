@@ -421,7 +421,16 @@
         {:else if tab.type === "terminal"}
           <span class="tab-dot terminal"></span>
         {/if}
-        <span class="tab-label">{tab.label}</span>
+        {#if tab.type === "agent"}
+          <span class="tab-label tab-label-scroll" aria-label={tab.label}>
+            <span class="tab-label-track">
+              <span>{tab.label}</span>
+              <span aria-hidden="true">{tab.label}</span>
+            </span>
+          </span>
+        {:else}
+          <span class="tab-label">{tab.label}</span>
+        {/if}
         {#if !isPinnedTab(tab.type)}
           <button
             class="tab-close"
@@ -628,6 +637,29 @@
   .tab-label {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .tab-label-scroll {
+    display: inline-flex;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .tab-label-track {
+    display: inline-flex;
+    gap: 24px;
+    min-width: max-content;
+    animation: tab-label-marquee 12s linear infinite;
+  }
+
+  @keyframes tab-label-marquee {
+    from {
+      transform: translateX(0);
+    }
+
+    to {
+      transform: translateX(calc(-50% - 12px));
+    }
   }
 
   .tab-close {

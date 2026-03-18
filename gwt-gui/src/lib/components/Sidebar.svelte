@@ -57,6 +57,7 @@
     onOpenDocsEditor,
     onResize,
     onOpenCiLog,
+    onDisplayNameChanged,
     widthPx = 260,
     minWidthPx = 220,
     maxWidthPx = 520,
@@ -81,6 +82,7 @@
     onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
     onResize?: (nextWidthPx: number) => void;
     onOpenCiLog?: (runId: number) => void;
+    onDisplayNameChanged?: () => void;
     widthPx?: number;
     minWidthPx?: number;
     maxWidthPx?: number;
@@ -1245,6 +1247,7 @@
       });
       // Refresh branch list
       fetchBranches(fetchToken, true);
+      onDisplayNameChanged?.();
     } catch (err) {
       console.error("Failed to set display name:", err);
     }
@@ -1443,7 +1446,10 @@
           onNewTerminal={onNewTerminal}
           onOpenDocsEditor={onOpenDocsEditor}
           {onOpenCiLog}
-          onDisplayNameChanged={() => fetchBranches(fetchToken, true)}
+          onDisplayNameChanged={() => {
+            fetchBranches(fetchToken, true);
+            onDisplayNameChanged?.();
+          }}
         />
       </div>
     </div>

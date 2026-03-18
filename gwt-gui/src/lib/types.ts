@@ -200,6 +200,7 @@ export interface GitHubIssueSearchResult {
 export interface Tab {
   id: string;
   label: string;
+  branchName?: string;
   agentId?: AgentId;
   type:
     | "summary"
