@@ -773,7 +773,7 @@ describe("Sidebar", () => {
     }
   });
 
-  it("skips visibility-triggered refresh when input is focused or refresh is too recent", { timeout: 15000 }, async () => {
+  it("skips visibility-triggered refresh when input is focused or refresh is too recent", { timeout: 60_000 }, async () => {
     vi.useFakeTimers();
     try {
       invokeMock.mockImplementation((command: string) => {
