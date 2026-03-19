@@ -3030,4 +3030,144 @@ describe("SettingsPanel", () => {
       expect(savedSettings.agent_inject_agents_md).toBe(true);
     });
   });
+
+  // ── Issue Cache Sync (#1714) ──
+
+  it("shows Issue cache section in General tab Maintenance", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Issue cache")).toBeTruthy();
+      expect(rendered.getByRole("button", { name: "Diff Sync" })).toBeTruthy();
+      expect(rendered.getByRole("button", { name: "Full Sync" })).toBeTruthy();
+    });
+  });
+
+  it("Diff Sync button triggers sync_issue_cache with diff mode", async () => {
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "sync_issue_cache") {
+        return {
+          syncType: "diff",
+          updatedCount: 5,
+          deletedCount: 0,
+          durationMs: 123,
+          completedAt: Date.now(),
+          error: null,
+        };
+      }
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Diff Sync" })).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Diff Sync" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("sync_issue_cache", {
+        projectPath: "/tmp/test-project",
+        mode: "diff",
+      });
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText(/Updated: 5/)).toBeTruthy();
+      expect(rendered.getByText(/Deleted: 0/)).toBeTruthy();
+      expect(rendered.getByText(/Duration: 123ms/)).toBeTruthy();
+    });
+  });
+
+  it("Full Sync button triggers sync_issue_cache with full mode", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "sync_issue_cache") {
+        return {
+          syncType: "full",
+          updatedCount: 20,
+          deletedCount: 3,
+          durationMs: 456,
+          completedAt: Date.now(),
+          error: null,
+        };
+      }
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Full Sync" })).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Full Sync" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("sync_issue_cache", {
+        projectPath: "/tmp/test-project",
+        mode: "full",
+      });
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText(/Updated: 20/)).toBeTruthy();
+      expect(rendered.getByText(/Deleted: 3/)).toBeTruthy();
+      expect(rendered.getByText(/Duration: 456ms/)).toBeTruthy();
+    });
+  });
+
+  it("shows loading state during issue cache sync", async () => {
+    let resolveSyncPromise: ((value: unknown) => void) | null = null;
+    const syncPromise = new Promise((resolve) => {
+      resolveSyncPromise = resolve;
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "sync_issue_cache") return syncPromise;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Diff Sync" })).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Diff Sync" }));
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: /Syncing/ })).toBeTruthy();
+      const buttons = rendered.container.querySelectorAll(".btn.btn-ghost");
+      const syncButtons = Array.from(buttons).filter(
+        (btn) => btn.textContent?.includes("Sync") || btn.textContent?.includes("Syncing"),
+      );
+      for (const btn of syncButtons) {
+        expect((btn as HTMLButtonElement).disabled).toBe(true);
+      }
+    });
+
+    // Resolve the pending sync
+    resolveSyncPromise!({
+      syncType: "diff",
+      updatedCount: 1,
+      deletedCount: 0,
+      durationMs: 50,
+      completedAt: Date.now(),
+      error: null,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Diff Sync" })).toBeTruthy();
+      expect((rendered.getByRole("button", { name: "Diff Sync" }) as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
 });
