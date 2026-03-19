@@ -11,6 +11,7 @@ use super::recent_projects::RecentProjectsConfig;
 use super::tools::ToolsConfig;
 use crate::error::{GwtError, Result};
 use serde::de::{self, Deserializer};
+use tracing::instrument;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -30,6 +31,9 @@ pub struct Settings {
     pub worktree_root: String,
     /// Enable debug logging
     pub debug: bool,
+    /// Enable performance profiling (Chrome Trace output)
+    #[serde(default)]
+    pub profiling: bool,
     /// Log directory path
     pub log_dir: Option<PathBuf>,
     /// Log retention days
@@ -165,6 +169,8 @@ struct ConfigToml {
     default_base_branch: String,
     worktree_root: String,
     debug: bool,
+    #[serde(default)]
+    profiling: bool,
     log_dir: Option<PathBuf>,
     log_retention_days: u32,
     agent: AgentSettings,
@@ -192,6 +198,7 @@ struct LocalConfigToml {
     default_base_branch: String,
     worktree_root: String,
     debug: bool,
+    profiling: bool,
     log_dir: Option<PathBuf>,
     log_retention_days: u32,
     agent: AgentSettings,
@@ -209,6 +216,7 @@ impl From<Settings> for ConfigToml {
             default_base_branch: value.default_base_branch,
             worktree_root: value.worktree_root,
             debug: value.debug,
+            profiling: value.profiling,
             log_dir: value.log_dir,
             log_retention_days: value.log_retention_days,
             agent: value.agent,
@@ -232,6 +240,7 @@ impl From<Settings> for LocalConfigToml {
             default_base_branch: value.default_base_branch,
             worktree_root: value.worktree_root,
             debug: value.debug,
+            profiling: value.profiling,
             log_dir: value.log_dir,
             log_retention_days: value.log_retention_days,
             agent: value.agent,
@@ -251,6 +260,7 @@ impl From<ConfigToml> for Settings {
             default_base_branch: value.default_base_branch,
             worktree_root: value.worktree_root,
             debug: value.debug,
+            profiling: value.profiling,
             log_dir: value.log_dir,
             log_retention_days: value.log_retention_days,
             agent: value.agent,
@@ -278,6 +288,7 @@ impl Default for Settings {
             default_base_branch: "main".to_string(),
             worktree_root: ".worktrees".to_string(),
             debug: false,
+            profiling: false,
             log_dir: None,
             log_retention_days: 7,
             agent: AgentSettings::default(),
@@ -521,6 +532,7 @@ impl Settings {
     }
 
     /// Load settings from configuration files and environment
+    #[instrument(skip_all)]
     pub fn load(repo_root: &Path) -> Result<Self> {
         debug!(
             category = "config",
@@ -567,6 +579,7 @@ impl Settings {
     /// Load settings from global configuration file and environment.
     ///
     /// Reads `~/.gwt/config.toml`. Falls back to defaults when the file does not exist.
+    #[instrument(skip_all)]
     pub fn load_global() -> Result<Self> {
         Self::load_global_internal(true)
     }
@@ -650,6 +663,7 @@ impl Settings {
     /// Save settings to file (gwt-spec issue FR-008)
     ///
     /// Uses atomic write (temp file + rename) for data safety.
+    #[instrument(skip(self))]
     pub fn save(&self, path: &Path) -> Result<()> {
         debug!(
             category = "config",
@@ -695,6 +709,7 @@ impl Settings {
     }
 
     /// Save settings to the new global config path (~/.gwt/config.toml)
+    #[instrument(skip(self))]
     pub fn save_global(&self) -> Result<()> {
         let _guard = GLOBAL_SETTINGS_UPDATE_LOCK
             .lock()

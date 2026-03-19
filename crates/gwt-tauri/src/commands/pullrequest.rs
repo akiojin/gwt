@@ -16,7 +16,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::Emitter;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 /// gh CLI availability and authentication status
 #[derive(Debug, Clone, Serialize)]
@@ -1026,6 +1026,7 @@ fn fetch_pr_status_impl(
     })
 }
 
+#[instrument(skip_all, fields(command = "fetch_pr_status", project_path))]
 #[tauri::command]
 pub async fn fetch_pr_status(
     app: tauri::AppHandle<tauri::Wry>,
@@ -1072,6 +1073,7 @@ fn fetch_pr_detail_impl(
     Ok(to_pr_detail_response(&info))
 }
 
+#[instrument(skip_all, fields(command = "fetch_pr_detail", project_path, pr_number))]
 #[tauri::command]
 pub async fn fetch_pr_detail(
     project_path: String,
@@ -1115,6 +1117,7 @@ fn fetch_latest_branch_pr_impl(
     Ok(result)
 }
 
+#[instrument(skip_all, fields(command = "fetch_latest_branch_pr", project_path, branch))]
 #[tauri::command]
 pub async fn fetch_latest_branch_pr(
     project_path: String,
@@ -1138,6 +1141,7 @@ fn fetch_ci_log_impl(project_path: String, run_id: u64) -> Result<String, Struct
     Ok(output)
 }
 
+#[instrument(skip_all, fields(command = "fetch_ci_log", project_path, run_id))]
 #[tauri::command]
 pub async fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, StructuredError> {
     tauri::async_runtime::spawn_blocking(move || fetch_ci_log_impl(project_path, run_id))
@@ -1184,6 +1188,7 @@ fn update_pr_branch_impl(project_path: String, pr_number: u64) -> Result<String,
     Ok("Branch updated successfully".to_string())
 }
 
+#[instrument(skip_all, fields(command = "update_pr_branch", project_path, pr_number))]
 #[tauri::command]
 pub async fn update_pr_branch(project_path: String, pr_number: u64) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || update_pr_branch_impl(project_path, pr_number))
@@ -1218,6 +1223,7 @@ fn fetch_branch_pr_preflight_impl(
     Ok(to_branch_pr_preflight(base_ref, ahead_by, behind_by))
 }
 
+#[instrument(skip_all, fields(command = "fetch_branch_pr_preflight", project_path, branch))]
 #[tauri::command]
 pub async fn fetch_branch_pr_preflight(
     project_path: String,
@@ -1278,6 +1284,7 @@ fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<Strin
     Ok("Pull request merged successfully".to_string())
 }
 
+#[instrument(skip_all, fields(command = "merge_pull_request", project_path, pr_number))]
 #[tauri::command]
 pub async fn merge_pull_request(project_path: String, pr_number: u64) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || merge_pull_request_impl(project_path, pr_number))
@@ -1401,6 +1408,7 @@ fn fetch_pr_list_impl(
     Ok(FetchPrListResponse { items, gh_status })
 }
 
+#[instrument(skip_all, fields(command = "fetch_pr_list", project_path))]
 #[tauri::command]
 pub async fn fetch_pr_list(
     project_path: String,
@@ -1472,6 +1480,7 @@ fn fetch_github_user_impl(project_path: String) -> Result<GitHubUserResponse, St
     Ok(GitHubUserResponse { login, gh_status })
 }
 
+#[instrument(skip_all, fields(command = "fetch_github_user", project_path))]
 #[tauri::command]
 pub async fn fetch_github_user(
     project_path: String,
@@ -1502,6 +1511,7 @@ fn merge_pr_impl(
     )
 }
 
+#[instrument(skip_all, fields(command = "merge_pr", project_path, pr_number))]
 #[tauri::command]
 pub async fn merge_pr(
     project_path: String,
@@ -1529,6 +1539,7 @@ fn review_pr_impl(
     gwt_core::git::gh_cli::review_pr(&repo_path, pr_number, &action, body.as_deref())
 }
 
+#[instrument(skip_all, fields(command = "review_pr", project_path, pr_number))]
 #[tauri::command]
 pub async fn review_pr(
     project_path: String,
@@ -1550,6 +1561,7 @@ fn mark_pr_ready_impl(project_path: String, pr_number: u64) -> Result<String, St
     gwt_core::git::gh_cli::mark_pr_ready(&repo_path, pr_number)
 }
 
+#[instrument(skip_all, fields(command = "mark_pr_ready", project_path, pr_number))]
 #[tauri::command]
 pub async fn mark_pr_ready(project_path: String, pr_number: u64) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || mark_pr_ready_impl(project_path, pr_number))

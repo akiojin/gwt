@@ -5,7 +5,7 @@ use gwt_core::config::ProfilesConfig;
 use gwt_core::StructuredError;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use tauri::AppHandle;
-use tracing::error;
+use tracing::{error, instrument};
 
 fn with_panic_guard<T>(
     context: &str,
@@ -29,6 +29,7 @@ fn with_panic_guard<T>(
 }
 
 /// Get current profiles config (global: ~/.gwt/config.toml [profiles]).
+#[instrument(skip_all, fields(command = "get_profiles"))]
 #[tauri::command]
 pub fn get_profiles() -> Result<ProfilesConfig, StructuredError> {
     with_panic_guard("loading profiles", "get_profiles", || {
@@ -37,6 +38,7 @@ pub fn get_profiles() -> Result<ProfilesConfig, StructuredError> {
 }
 
 /// Save profiles config (writes into ~/.gwt/config.toml [profiles]).
+#[instrument(skip_all, fields(command = "save_profiles"))]
 #[tauri::command]
 pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<(), StructuredError> {
     with_panic_guard("saving profiles", "save_profiles", || {
@@ -49,6 +51,7 @@ pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<()
 }
 
 /// List AI models from a specific OpenAI-compatible endpoint (`GET /models`).
+#[instrument(skip_all, fields(command = "list_ai_models"))]
 #[tauri::command]
 pub fn list_ai_models(
     endpoint: String,

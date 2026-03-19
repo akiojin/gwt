@@ -8,6 +8,7 @@ use gwt_core::StructuredError;
 use serde::Serialize;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use tracing::instrument;
 
 const CLAUDE_MD_DEFAULT_CONTENT: &str = r#"# CLAUDE.md
 
@@ -166,6 +167,7 @@ pub(crate) fn ensure_managed_skills_block(path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+#[instrument(skip_all, fields(command = "check_and_fix_agent_instruction_docs", project_path, branch))]
 #[tauri::command]
 pub fn check_and_fix_agent_instruction_docs(
     project_path: String,

@@ -10,7 +10,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use tracing::{error, warn};
+use tracing::{error, instrument, warn};
 
 const VOICE_PYTHON_ENV: &str = "GWT_VOICE_PYTHON";
 const VOICE_SKIP_PROBE_ENV: &str = "GWT_VOICE_SKIP_QWEN_PROBE";
@@ -738,6 +738,7 @@ fn transcribe_sync(input: VoiceTranscriptionRequest) -> Result<VoiceTranscriptio
     })
 }
 
+#[instrument(skip_all, fields(command = "get_voice_capability"))]
 #[tauri::command]
 pub async fn get_voice_capability(
     gpu_available: bool,
@@ -786,6 +787,7 @@ pub async fn get_voice_capability(
     .map_err(|e| format!("Voice capability task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "prepare_voice_model"))]
 #[tauri::command]
 pub async fn prepare_voice_model(
     gpu_available: bool,
@@ -812,6 +814,7 @@ pub async fn prepare_voice_model(
     })
 }
 
+#[instrument(skip_all, fields(command = "ensure_voice_runtime"))]
 #[tauri::command]
 pub async fn ensure_voice_runtime() -> Result<VoiceRuntimeSetupResult, String> {
     tokio::task::spawn_blocking(ensure_managed_voice_runtime_sync)
@@ -819,6 +822,7 @@ pub async fn ensure_voice_runtime() -> Result<VoiceRuntimeSetupResult, String> {
         .map_err(|e| format!("Voice runtime setup task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "transcribe_voice_audio"))]
 #[tauri::command]
 pub async fn transcribe_voice_audio(
     input: VoiceTranscriptionRequest,

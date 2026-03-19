@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 use crate::assistant_engine::{AssistantEngine, AssistantStartupStatus};
 use crate::assistant_monitor::{self, MonitorEvent, MonitorSnapshot, PaneSnapshot};
@@ -120,6 +120,7 @@ struct StartupRecoveryInfo {
     detail: Option<String>,
     hints: Vec<String>,
 }
+#[instrument(skip_all, fields(command = "assistant_get_state"))]
 #[tauri::command]
 pub async fn assistant_get_state(
     window: tauri::Window,
@@ -160,6 +161,7 @@ pub async fn assistant_get_state(
     Ok(build_empty_assistant_state_response())
 }
 
+#[instrument(skip_all, fields(command = "assistant_send_message"))]
 #[tauri::command]
 pub async fn assistant_send_message(
     window: tauri::Window,
@@ -228,6 +230,7 @@ pub async fn assistant_send_message(
     ))
 }
 
+#[instrument(skip_all, fields(command = "assistant_start"))]
 #[tauri::command]
 pub async fn assistant_start(
     window: tauri::Window,
@@ -457,6 +460,7 @@ pub async fn assistant_start(
     ))
 }
 
+#[instrument(skip_all, fields(command = "assistant_stop"))]
 #[tauri::command]
 pub async fn assistant_stop(
     window: tauri::Window,
@@ -468,6 +472,7 @@ pub async fn assistant_stop(
     Ok(())
 }
 
+#[instrument(skip_all, fields(command = "assistant_get_dashboard"))]
 #[tauri::command]
 pub async fn assistant_get_dashboard(
     window: tauri::Window,

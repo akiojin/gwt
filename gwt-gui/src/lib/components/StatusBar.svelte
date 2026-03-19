@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { isProfilingEnabled } from "$lib/profiling.svelte";
+
   let {
     projectPath,
     currentBranch = "",
@@ -61,6 +63,9 @@
       [{terminalCount} terminal{terminalCount !== 1 ? "s" : ""}]
     </span>
   {/if}
+  {#if isProfilingEnabled()}
+    <span class="status-item profiling-badge">PROFILING</span>
+  {/if}
   {#if !osEnvReady}
     <span class="status-loading">Loading environment...</span>
   {/if}
@@ -117,6 +122,16 @@
 
   .spacer {
     flex: 1;
+  }
+
+  .profiling-badge {
+    background-color: var(--red, #e74c3c);
+    color: #fff;
+    padding: 0 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
   }
 
   .status-loading {

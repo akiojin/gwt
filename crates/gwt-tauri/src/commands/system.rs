@@ -6,7 +6,7 @@ use gwt_core::system_info::{GpuDynamicInfo, GpuStaticInfo};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
-use tracing::warn;
+use tracing::{instrument, warn};
 
 const GET_SYSTEM_INFO_WARN_THRESHOLD: Duration = Duration::from_millis(300);
 
@@ -129,6 +129,7 @@ fn get_system_info_impl(state: &AppState) -> SystemInfoResponse {
     }
 }
 
+#[instrument(skip_all, fields(command = "get_system_info"))]
 #[tauri::command]
 pub async fn get_system_info(app_handle: AppHandle) -> SystemInfoResponse {
     let started = Instant::now();
@@ -186,6 +187,7 @@ fn stats_entry_to_response(entry: &gwt_core::config::stats::StatsEntry) -> Stats
     }
 }
 
+#[instrument(skip_all, fields(command = "get_stats"))]
 #[tauri::command]
 pub fn get_stats() -> StatsResponse {
     let stats = Stats::load().unwrap_or_default();
@@ -203,6 +205,35 @@ pub fn get_stats() -> StatsResponse {
     StatsResponse {
         global: stats_entry_to_response(&stats.global),
         repos,
+    }
+}
+
+// --- Freeze detection: heartbeat + frontend metrics ---
+
+#[instrument(skip_all, fields(command = "heartbeat"))]
+#[tauri::command]
+pub fn heartbeat(state: tauri::State<'_, AppState>) {
+    if let Ok(mut slot) = state.last_heartbeat.lock() {
+        *slot = Some(Instant::now());
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct FrontendMetric {
+    pub command: String,
+    pub duration_ms: f64,
+}
+
+#[instrument(skip_all, fields(command = "report_frontend_metrics"))]
+#[tauri::command]
+pub fn report_frontend_metrics(metrics: Vec<FrontendMetric>) {
+    for m in &metrics {
+        tracing::info!(
+            target: "frontend",
+            command = %m.command,
+            duration_ms = m.duration_ms,
+            "Frontend invoke metric"
+        );
     }
 }
 

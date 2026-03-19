@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
+use tracing::instrument;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
 
@@ -449,6 +450,7 @@ fn fetch_github_issues_impl(
 }
 
 /// Fetch GitHub issues with pagination (FR-010)
+#[instrument(skip_all, fields(command = "fetch_github_issues", project_path))]
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_github_issues(
@@ -495,6 +497,7 @@ fn fetch_github_issue_detail_impl(
 }
 
 /// Fetch a single GitHub issue detail
+#[instrument(skip_all, fields(command = "fetch_github_issue_detail", project_path, issue_number))]
 #[tauri::command]
 pub async fn fetch_github_issue_detail(
     project_path: String,
@@ -593,6 +596,7 @@ fn fetch_branch_linked_issue_impl(
 }
 
 /// Fetch issue linked to branch naming pattern (`issue-<number>`).
+#[instrument(skip_all, fields(command = "fetch_branch_linked_issue", project_path, branch))]
 #[tauri::command]
 pub async fn fetch_branch_linked_issue(
     project_path: String,
@@ -633,6 +637,7 @@ where
     }
 }
 
+#[instrument(skip_all, fields(command = "check_gh_cli_status"))]
 #[tauri::command]
 pub fn check_gh_cli_status(
     state: State<AppState>,
@@ -646,6 +651,7 @@ pub fn check_gh_cli_status(
 }
 
 /// Find an existing branch for a given issue (FR-012)
+#[instrument(skip_all, fields(command = "find_existing_issue_branch", project_path, issue_number))]
 #[tauri::command]
 pub fn find_existing_issue_branch(
     project_path: String,
@@ -683,6 +689,7 @@ fn find_existing_issue_branches_bulk_impl(
 }
 
 /// Bulk lookup of existing issue branches for list rendering.
+#[instrument(skip_all, fields(command = "find_existing_issue_branches_bulk", project_path))]
 #[tauri::command]
 pub async fn find_existing_issue_branches_bulk(
     project_path: String,
@@ -701,6 +708,7 @@ pub async fn find_existing_issue_branches_bulk(
 }
 
 /// Link a branch to a GitHub issue via `gh issue develop` (FR-013)
+#[instrument(skip_all, fields(command = "link_branch_to_issue", project_path, issue_number, branch_name))]
 #[tauri::command]
 pub fn link_branch_to_issue(
     project_path: String,
@@ -718,6 +726,7 @@ pub fn link_branch_to_issue(
 /// Rollback an issue-linked branch (FR-014)
 ///
 /// Deletes local branch and optionally the remote branch.
+#[instrument(skip_all, fields(command = "rollback_issue_branch", project_path, branch_name))]
 #[tauri::command]
 pub fn rollback_issue_branch(
     project_path: String,
@@ -788,6 +797,7 @@ pub struct ClassifyResult {
 }
 
 /// Classify a GitHub issue into a branch prefix using AI.
+#[instrument(skip_all, fields(command = "classify_issue_branch_prefix"))]
 #[tauri::command]
 pub fn classify_issue_branch_prefix(
     title: String,
