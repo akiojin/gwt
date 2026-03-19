@@ -501,6 +501,26 @@ export interface BranchLinkedIssueInfo {
   url: string;
 }
 
+// ── Issue cache sync (#1714) ──
+
+export type SyncType = "diff" | "full";
+
+export interface SyncResult {
+  syncType: SyncType;
+  updatedCount: number;
+  deletedCount: number;
+  durationMs: number;
+  completedAt: number;
+  error: string | null;
+}
+
+export interface IssueCacheSyncState {
+  lastDiffSyncAt: number | null;
+  lastFullSyncAt: number | null;
+  lastIssueUpdatedAt: string | null;
+  lastResult: SyncResult | null;
+}
+
 export interface GhCliStatus {
   available: boolean;
   authenticated: boolean;

@@ -29,6 +29,7 @@ which = "8"
 base64 = "0.22"
 dirs = "6"
 dunce.workspace = true
+sha2.workspace = true
 reqwest.workspace = true
 walkdir = "2"
 portable-pty.workspace = true

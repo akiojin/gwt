@@ -566,12 +566,29 @@ fn is_issue_not_found_error(message: &str) -> bool {
         || (lower.contains("issue with the number") && lower.contains("(repository.issue)"))
 }
 
-/// Fetch issue linked to branch naming pattern (`issue-<number>`) – blocking impl
+/// Fetch issue linked to branch naming pattern (`issue-<number>`) – blocking impl.
+///
+/// Cache-first: checks local linkage store → exact cache before online fetch
+/// (#1714 FR-004).
 fn fetch_branch_linked_issue_impl(
     project_path: String,
     branch: String,
 ) -> Result<Option<BranchLinkedIssueInfo>, StructuredError> {
-    let Some(issue_number) = extract_issue_number_from_branch(&branch) else {
+    // Try local linkage store first, then branch name parse
+    let issue_number = {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "fetch_branch_linked_issue"))?;
+        let link_store =
+            gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        if let Some(link) = link_store.get_link(&branch) {
+            Some(link.issue_number)
+        } else {
+            extract_issue_number_from_branch(&branch)
+        }
+    };
+
+    let Some(issue_number) = issue_number else {
         return Ok(None);
     };
 
@@ -579,6 +596,20 @@ fn fetch_branch_linked_issue_impl(
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "fetch_branch_linked_issue"))?;
 
+    // Try exact cache first (#1714 FR-004)
+    let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
+    if let Some(entry) = cache.resolve(&repo_path, issue_number) {
+        let _ = cache.save(&repo_path);
+        return Ok(Some(BranchLinkedIssueInfo {
+            number: entry.number,
+            title: entry.title,
+            updated_at: entry.updated_at,
+            labels: entry.labels,
+            url: entry.url,
+        }));
+    }
+
+    // Fallback to spec issue detail for backward compatibility
     match get_spec_issue_detail(&repo_path, issue_number) {
         Ok(detail) => Ok(Some(BranchLinkedIssueInfo {
             number: detail.number,
@@ -606,6 +637,157 @@ pub async fn fetch_branch_linked_issue(
         StructuredError::internal(
             &format!("Task join failed: {e}"),
             "fetch_branch_linked_issue",
+        )
+    })?
+}
+
+// ── #1714: Issue cache sync commands ──
+
+/// Sync issue cache (diff or full). (#1714 FR-008, FR-009)
+#[tauri::command]
+pub async fn sync_issue_cache(
+    project_path: String,
+    mode: String,
+) -> Result<gwt_core::git::issue_cache::SyncResult, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "sync_issue_cache"))?;
+
+        let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
+        let result = match mode.as_str() {
+            "full" => cache.full_sync(&repo_path),
+            _ => cache.diff_sync(&repo_path),
+        }
+        .map_err(|e| StructuredError::internal(&e, "sync_issue_cache"))?;
+
+        cache
+            .save(&repo_path)
+            .map_err(|e| StructuredError::internal(&e, "sync_issue_cache"))?;
+
+        Ok(result)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(&format!("Task join failed: {e}"), "sync_issue_cache")
+    })?
+}
+
+/// Get issue cache sync status. (#1714 FR-010)
+#[tauri::command]
+pub async fn get_issue_cache_sync_status(
+    project_path: String,
+) -> Result<gwt_core::git::issue_cache::IssueCacheSyncState, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "get_issue_cache_sync_status"))?;
+
+        let cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
+        Ok(cache.sync_state)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "get_issue_cache_sync_status",
+        )
+    })?
+}
+
+/// Resolve worktree issue via linkage + exact cache. (#1714 FR-004)
+#[tauri::command]
+pub async fn resolve_worktree_issue(
+    project_path: String,
+    branch: String,
+) -> Result<Option<BranchLinkedIssueInfo>, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "resolve_worktree_issue"))?;
+
+        // 1. Check linkage store
+        let link_store =
+            gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        let issue_number = link_store
+            .get_link(&branch)
+            .map(|link| link.issue_number)
+            .or_else(|| gwt_core::git::issue_linkage::extract_issue_number(&branch));
+
+        let Some(issue_number) = issue_number else {
+            return Ok(None);
+        };
+
+        // 2. Resolve from exact cache (with online fallback)
+        let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
+        let entry = cache.resolve(&repo_path, issue_number);
+        let _ = cache.save(&repo_path);
+
+        Ok(entry.map(|e| BranchLinkedIssueInfo {
+            number: e.number,
+            title: e.title,
+            updated_at: e.updated_at,
+            labels: e.labels,
+            url: e.url,
+        }))
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "resolve_worktree_issue",
+        )
+    })?
+}
+
+/// Bootstrap worktree-issue linkage for all branches. (#1714 FR-007)
+#[tauri::command]
+pub async fn bootstrap_issue_linkage(
+    project_path: String,
+) -> Result<u32, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "bootstrap_issue_linkage"))?;
+
+        let mut link_store =
+            gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        let before = link_store.links.len();
+
+        // Get local branch names
+        let output = std::process::Command::new("git")
+            .args(["branch", "--format=%(refname:short)"])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| {
+                StructuredError::internal(
+                    &format!("Failed to list branches: {e}"),
+                    "bootstrap_issue_linkage",
+                )
+            })?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let branches: Vec<String> = stdout
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            link_store.bootstrap_from_branches(&branches);
+        }
+
+        link_store
+            .save(&repo_path)
+            .map_err(|e| StructuredError::internal(&e, "bootstrap_issue_linkage"))?;
+
+        let added = link_store.links.len() - before;
+        Ok(added as u32)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "bootstrap_issue_linkage",
         )
     })?
 }
