@@ -5,7 +5,9 @@
 mod logger;
 mod reader;
 
-pub use logger::{init_logger, log_error_message, log_gwt_error, LogConfig};
+pub use logger::{init_logger, log_error_message, log_gwt_error, LogConfig, ProfilingGuard};
+#[cfg(test)]
+pub use logger::init_test_tracing;
 pub use reader::{LogEntry, LogReader};
 
 use crate::error::Result;

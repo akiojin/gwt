@@ -53,6 +53,8 @@
   - 機能要件（FR-*）
   - 成功基準
 - Issue body の `## Plan`、`## Tasks` セクションも策定してから実装に入る
+- 新規 SPEC を作成した場合、現在のブランチでは実装に入らず、SPEC に基づく別ブランチ（Worktree）で実装する
+- 現在のコンバセーションでは Issue/SPEC 登録までで完了とする
 - 通常の GitHub Issue から開始する場合は、Issue 分析ワークフローにより直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
 - 新規 SPEC を明示的に起票する場合は SPEC 登録ワークフローで `gwt-spec` Issue を作成する
 - 対象の `gwt-spec` Issue が確定した後は SPEC 管理ワークフローに従って Spec/Plan/Tasks を更新し、実装進行を管理する

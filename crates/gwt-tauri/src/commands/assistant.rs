@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
+use tracing::{instrument, warn};
 
 use crate::assistant_engine::{AssistantEngine, AssistantStartupStatus};
 use crate::assistant_monitor::{self, MonitorEvent, MonitorSnapshot, PaneSnapshot};
@@ -119,6 +120,7 @@ struct StartupRecoveryInfo {
     detail: Option<String>,
     hints: Vec<String>,
 }
+#[instrument(skip_all, fields(command = "assistant_get_state"))]
 #[tauri::command]
 pub async fn assistant_get_state(
     window: tauri::Window,
@@ -159,6 +161,7 @@ pub async fn assistant_get_state(
     Ok(build_empty_assistant_state_response())
 }
 
+#[instrument(skip_all, fields(command = "assistant_send_message"))]
 #[tauri::command]
 pub async fn assistant_send_message(
     window: tauri::Window,
@@ -227,6 +230,7 @@ pub async fn assistant_send_message(
     ))
 }
 
+#[instrument(skip_all, fields(command = "assistant_start"))]
 #[tauri::command]
 pub async fn assistant_start(
     window: tauri::Window,
@@ -456,6 +460,7 @@ pub async fn assistant_start(
     ))
 }
 
+#[instrument(skip_all, fields(command = "assistant_stop"))]
 #[tauri::command]
 pub async fn assistant_stop(
     window: tauri::Window,
@@ -467,6 +472,7 @@ pub async fn assistant_stop(
     Ok(())
 }
 
+#[instrument(skip_all, fields(command = "assistant_get_dashboard"))]
 #[tauri::command]
 pub async fn assistant_get_dashboard(
     window: tauri::Window,
@@ -1047,18 +1053,29 @@ async fn handle_assistant_monitor_event(
     let state = app_handle.state::<AppState>();
 
     let previous_context = current_assistant_context(&state, window_label);
-    let next_context =
-        match resolve_assistant_context_with_snapshot(&state, window_label, &snapshot) {
-            Ok(context) => context,
-            Err(err) => AssistantContext {
-                current_status: Some("blocked".to_string()),
-                blockers: vec![format!("監視状態の更新に失敗しました: {err}")],
-                recommended_next_actions: vec![
-                    "プロジェクト状態を再読み込みし、Assistant を再起動する".to_string(),
-                ],
-                ..AssistantContext::default()
-            },
-        };
+    let ah = app_handle.clone();
+    let wl = window_label.to_string();
+    let snap = snapshot.clone();
+    let next_context = match tokio::task::spawn_blocking(move || {
+        let st = ah.state::<AppState>();
+        resolve_assistant_context_with_snapshot(&st, &wl, &snap)
+    })
+    .await
+    {
+        Ok(Ok(context)) => context,
+        Ok(Err(err)) => AssistantContext {
+            current_status: Some("blocked".to_string()),
+            blockers: vec![format!("監視状態の更新に失敗しました: {err}")],
+            recommended_next_actions: vec![
+                "プロジェクト状態を再読み込みし、Assistant を再起動する".to_string(),
+            ],
+            ..AssistantContext::default()
+        },
+        Err(join_err) => {
+            warn!(window = %window_label, error = %join_err, "context resolution panicked");
+            return;
+        }
+    };
 
     let project_path = state.project_for_window(window_label).unwrap_or_default();
     let context_path = assistant_context_cache_path(&project_path);
@@ -1134,8 +1151,11 @@ fn resolve_assistant_context_with_snapshot(
 
     let docs_goal = resolve_goal_from_docs(Path::new(&project_path));
     let issue_goal = resolve_goal_from_issue(&repo_path, &snapshot.git.branch);
-    let pr_ref = resolve_branch_pr_reference(&repo_path, &snapshot.git.branch);
-    let pr_ci_insight = resolve_pr_ci_insight(&repo_path, &snapshot.git.branch);
+    let cached_pr = PrCache::fetch_latest_for_branch(&repo_path, &snapshot.git.branch);
+    let pr_ref = cached_pr
+        .as_ref()
+        .map(|pr| (format!("#{} {}", pr.number, pr.title), pr.state.clone()));
+    let pr_ci_insight = resolve_pr_ci_insight_with_pr(&repo_path, cached_pr);
     let terminal_summary_insight =
         resolve_terminal_summary_insight(&project_path, &snapshot.git.branch, state);
     let current_branch_panes = snapshot
@@ -1462,13 +1482,11 @@ fn resolve_goal_from_issue(repo_path: &Path, branch: &str) -> Option<GoalResolut
     })
 }
 
-fn resolve_branch_pr_reference(repo_path: &Path, branch: &str) -> Option<(String, String)> {
-    let pr = PrCache::fetch_latest_for_branch(repo_path, branch)?;
-    Some((format!("#{} {}", pr.number, pr.title), pr.state))
-}
-
-fn resolve_pr_ci_insight(repo_path: &Path, branch: &str) -> Option<PrCiInsight> {
-    let pr = PrCache::fetch_latest_for_branch(repo_path, branch)?;
+fn resolve_pr_ci_insight_with_pr(
+    repo_path: &Path,
+    pr: Option<gwt_core::git::PullRequest>,
+) -> Option<PrCiInsight> {
+    let pr = pr?;
     if !pr.state.eq_ignore_ascii_case("OPEN") {
         return None;
     }

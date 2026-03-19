@@ -4,6 +4,7 @@ use crate::error::{ErrorCategory, GwtError, Result};
 use std::path::PathBuf;
 use tracing::error;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
     layer::SubscriberExt,
@@ -22,6 +23,8 @@ pub struct LogConfig {
     pub debug: bool,
     /// Log retention days
     pub retention_days: u32,
+    /// Enable performance profiling (Chrome Trace Event Format output)
+    pub profiling: bool,
 }
 
 impl Default for LogConfig {
@@ -31,6 +34,7 @@ impl Default for LogConfig {
             workspace: "default".to_string(),
             debug: false,
             retention_days: 7,
+            profiling: false,
         }
     }
 }
@@ -41,13 +45,24 @@ fn dirs_default_log_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".gwt/logs"))
 }
 
+/// Guard that flushes the Chrome Trace profiling file on drop.
+///
+/// Must be held alive for the entire application lifetime when profiling is enabled.
+/// When dropped, the trace file is flushed and finalized.
+pub struct ProfilingGuard {
+    _guard: Option<tracing_chrome::FlushGuard>,
+}
+
 /// Initialize the logger with JSON Lines output (Pino compatible)
-pub fn init_logger(config: &LogConfig) -> Result<()> {
+///
+/// Returns a [`ProfilingGuard`] that must be kept alive for the application lifetime.
+/// When profiling is enabled, dropping the guard flushes the Chrome Trace output file.
+pub fn init_logger(config: &LogConfig) -> Result<ProfilingGuard> {
     let log_dir = config.log_dir.join(&config.workspace);
     std::fs::create_dir_all(&log_dir)?;
 
     // Create rolling file appender (daily rotation)
-    let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "gwt.jsonl");
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, &log_dir, "gwt.jsonl");
 
     // Create JSON layer for file output
     let file_layer = fmt::layer()
@@ -69,9 +84,21 @@ pub fn init_logger(config: &LogConfig) -> Result<()> {
         None
     };
 
+    // Create Chrome Trace profiling layer (when enabled)
+    let (chrome_layer, chrome_guard) = if config.profiling {
+        let trace_path = log_dir.join("profile.json");
+        let (layer, guard) = ChromeLayerBuilder::new()
+            .file(trace_path)
+            .include_args(true)
+            .build();
+        (Some(layer), Some(guard))
+    } else {
+        (None, None)
+    };
+
     // Set up filter (RUST_LOG takes precedence when present)
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        if config.debug {
+        if config.debug || config.profiling {
             EnvFilter::new("gwt=debug,info")
         } else {
             EnvFilter::new("gwt=info,warn")
@@ -83,10 +110,13 @@ pub fn init_logger(config: &LogConfig) -> Result<()> {
         .with(filter)
         .with(file_layer)
         .with(console_layer)
+        .with(chrome_layer)
         .try_init()
         .ok(); // Ignore if already initialized
 
-    Ok(())
+    Ok(ProfilingGuard {
+        _guard: chrome_guard,
+    })
 }
 
 /// Log a GwtError with full context (code, category, message, details)
@@ -182,6 +212,22 @@ pub fn log_error_message(code: &str, category: &str, message: &str, details: Opt
     );
 }
 
+/// Initialize a lightweight tracing subscriber for tests.
+///
+/// Uses `try_init()` so it silently succeeds even when another test in the
+/// same process has already initialized the global subscriber.
+#[cfg(test)]
+pub fn init_test_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("gwt=debug"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_test_writer())
+        .try_init()
+        .ok();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +241,7 @@ mod tests {
             workspace: "test".to_string(),
             debug: false,
             retention_days: 7,
+            profiling: false,
         };
 
         // Should not panic
@@ -202,5 +249,40 @@ mod tests {
 
         // Log directory should be created
         assert!(temp.path().join("test").exists());
+    }
+
+    #[test]
+    fn test_init_logger_with_profiling() {
+        let temp = TempDir::new().unwrap();
+        let config = LogConfig {
+            log_dir: temp.path().to_path_buf(),
+            workspace: "profiling_test".to_string(),
+            debug: false,
+            retention_days: 7,
+            profiling: true,
+        };
+
+        let guard = init_logger(&config).unwrap();
+
+        // Log directory should be created
+        let log_dir = temp.path().join("profiling_test");
+        assert!(log_dir.exists());
+
+        // profile.json should be created when profiling is enabled
+        let profile_path = log_dir.join("profile.json");
+        assert!(
+            profile_path.exists(),
+            "profile.json should be created when profiling=true"
+        );
+
+        // Drop guard to flush the trace file
+        drop(guard);
+
+        // After flush, profile.json should have content
+        let content = std::fs::read_to_string(&profile_path).unwrap();
+        assert!(
+            !content.is_empty(),
+            "profile.json should have content after flush"
+        );
     }
 }

@@ -410,6 +410,32 @@ pub fn build_app(
 
                 // Project-scoped registration is executed when an agent is launched.
 
+                // Background task: frontend heartbeat watchdog (freeze detection)
+                {
+                    let watchdog_handle = _app.handle().clone();
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(Duration::from_secs(2));
+                        loop {
+                            interval.tick().await;
+                            let state = watchdog_handle.state::<AppState>();
+                            let elapsed = {
+                                let slot = state.last_heartbeat.lock().ok();
+                                slot.and_then(|guard| guard.map(|ts| ts.elapsed()))
+                            };
+                            if let Some(elapsed) = elapsed {
+                                if elapsed > Duration::from_secs(3) {
+                                    warn!(
+                                        category = "freeze_detection",
+                                        elapsed_ms = elapsed.as_millis(),
+                                        "Frontend heartbeat stale – possible UI freeze"
+                                    );
+                                    let _ = watchdog_handle.emit("freeze-detected", elapsed.as_millis() as u64);
+                                }
+                            }
+                        }
+                    });
+                }
+
                 // Background task: check gh CLI authentication (gwt-spec issue T009)
                 {
                     let app_handle = _app.handle().clone();
@@ -773,6 +799,8 @@ pub fn build_app(
             crate::commands::pullrequest::mark_pr_ready,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
+            crate::commands::system::heartbeat,
+            crate::commands::system::report_frontend_metrics,
             crate::commands::project_index::ensure_index_runtime,
             crate::commands::project_index::index_project_cmd,
             crate::commands::project_index::search_project_index_cmd,

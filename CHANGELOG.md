@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.16.0] - 2026-03-19
+
+### Bug Fixes
+
+- **spec:** リリースコマンドで gwt-spec Issue を自動クローズしない
+- アシスタントモニターのブロッキング処理を spawn_blocking に移動し UI フリーズを解消
+- **test:** MacOS の /var → /private/var シンボリックリンクによるテスト失敗を修正
+
+### Documentation
+
+- **spec:** Gwt-issue-search description を公式ガイド準拠に改善し CLAUDE.md に Worktree ルール追記
+- Gwt-issue-search の description を簡潔に更新
+
+### Features
+
+- **assistant:** Interrupt sends and queue tab replies (#1703)
+
+### Refactor
+
+- **ai:** Chat Completions API を削除し Responses API に完全移行
+
 ## [8.15.0] - 2026-03-18
 
 ### Bug Fixes

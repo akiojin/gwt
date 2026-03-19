@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize};
 
 use super::TerminalError;
+use tracing::instrument;
 
 /// Configuration for creating a new PTY.
 pub struct PtyConfig {
@@ -503,6 +504,7 @@ pub struct PtyHandle {
 
 impl PtyHandle {
     /// Create a new PTY, spawn the given command, and return a handle.
+    #[instrument(skip_all)]
     pub fn new(config: PtyConfig) -> Result<Self, TerminalError> {
         if !config.working_dir.exists() {
             return Err(TerminalError::PtyCreationFailed {
@@ -630,6 +632,7 @@ impl PtyHandle {
     }
 
     /// Resize the PTY to the given dimensions.
+    #[instrument(skip(self))]
     pub fn resize(&self, rows: u16, cols: u16) -> Result<(), TerminalError> {
         self.master
             .resize(PtySize {
@@ -653,6 +656,7 @@ impl PtyHandle {
     }
 
     /// Kill the child process.
+    #[instrument(skip(self))]
     pub fn kill(&mut self) -> Result<(), TerminalError> {
         self.child.kill().map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),

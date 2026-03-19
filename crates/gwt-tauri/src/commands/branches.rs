@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use tauri::{AppHandle, Manager, State};
-use tracing::error;
+use tracing::{error, instrument};
 
 /// Serializable branch info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -650,6 +650,7 @@ fn list_remote_branches_impl(
 }
 
 /// List all local branches in a repository
+#[instrument(skip_all, fields(command = "list_branches", project_path))]
 #[tauri::command]
 pub fn list_branches(
     project_path: String,
@@ -691,6 +692,7 @@ pub fn list_branches(
 }
 
 /// List branches that currently have a local worktree (gwt "Local" view)
+#[instrument(skip_all, fields(command = "list_worktree_branches", project_path))]
 #[tauri::command]
 pub async fn list_worktree_branches(
     project_path: String,
@@ -729,6 +731,7 @@ pub async fn list_worktree_branches(
 }
 
 /// List all remote branches in a repository
+#[instrument(skip_all, fields(command = "list_remote_branches", project_path))]
 #[tauri::command]
 pub async fn list_remote_branches(
     project_path: String,
@@ -750,6 +753,7 @@ pub async fn list_remote_branches(
 }
 
 /// Get the current branch
+#[instrument(skip_all, fields(command = "get_current_branch", project_path))]
 #[tauri::command]
 pub fn get_current_branch(
     project_path: String,

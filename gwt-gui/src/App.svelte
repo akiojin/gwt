@@ -569,6 +569,23 @@
     clearBufferedLaunchEvents();
   }
 
+  // Initialize profiling subsystem at startup.
+  $effect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { initProfiling } = await import("$lib/profiling.svelte");
+        if (!cancelled) await initProfiling();
+      } catch {
+        /* profiling init failure is non-fatal */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      import("$lib/profiling.svelte").then(({ teardownProfiling }) => teardownProfiling()).catch(() => {});
+    };
+  });
+
   // Poll OS env readiness at startup; stop once ready.
   $effect(() => {
     if (osEnvReady) return;

@@ -19,6 +19,7 @@ use gwt_core::worktree::WorktreeManager;
 use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use tracing::instrument;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -27,6 +28,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// Return tool-specific latest session entries for a branch (Quick Start).
 ///
 /// This is a read-only operation (no config/history writes).
+#[instrument(skip_all, fields(command = "get_branch_quick_start", project_path, branch))]
 #[tauri::command]
 pub fn get_branch_quick_start(
     project_path: String,
@@ -97,6 +99,7 @@ struct RunningPaneRef {
     tool_id: String,
 }
 
+#[instrument(skip_all, fields(command = "get_agent_sidebar_view", project_path))]
 #[tauri::command]
 pub fn get_agent_sidebar_view(
     project_path: String,
@@ -1939,6 +1942,7 @@ fn generate_and_cache_scrollback_summary(
 /// - Reads agent session file via the tool-specific session parser.
 /// - Summarizes using the active AI profile settings when enabled.
 /// - Never writes settings/history files as a side effect.
+#[instrument(skip_all, fields(command = "get_branch_session_summary", project_path, branch))]
 #[tauri::command]
 pub fn get_branch_session_summary(
     project_path: String,
@@ -1980,6 +1984,7 @@ pub(crate) fn get_branch_session_summary_for_assistant(
     Some(result)
 }
 
+#[instrument(skip_all, fields(command = "rebuild_all_branch_session_summaries", project_path))]
 #[tauri::command]
 pub fn rebuild_all_branch_session_summaries(
     project_path: String,

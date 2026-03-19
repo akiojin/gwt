@@ -4,7 +4,7 @@ use super::{CleanupCandidate, Worktree, WorktreeLocation, WorktreePath, Worktree
 use crate::error::{GwtError, Result};
 use crate::git::{get_main_repo_root, is_bare_repository, Branch, Remote, Repository};
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Protected branch names that cannot be deleted
 const PROTECTED_BRANCHES: &[&str] = &["main", "master", "develop", "release"];
@@ -27,6 +27,7 @@ impl WorktreeManager {
     /// correct location (e.g., /repo/.worktrees/ instead of /repo/.worktrees/branch/.worktrees/)
     ///
     /// gwt-spec issue T404-T405: Auto-detects bare repositories and uses Sibling location
+    #[instrument(skip_all)]
     pub fn new(repo_root: impl AsRef<Path>) -> Result<Self> {
         let repo_root = repo_root.as_ref().to_path_buf();
         // Resolve to main repo root in case we're inside a worktree
@@ -58,6 +59,7 @@ impl WorktreeManager {
     }
 
     /// List all worktrees
+    #[instrument(skip(self))]
     pub fn list(&self) -> Result<Vec<Worktree>> {
         let git_worktrees = self.repo.list_worktrees()?;
         let mut worktrees = Vec::with_capacity(git_worktrees.len());
@@ -102,6 +104,7 @@ impl WorktreeManager {
     }
 
     /// Get a specific worktree by branch name
+    #[instrument(skip(self))]
     pub fn get_by_branch(&self, branch_name: &str) -> Result<Option<Worktree>> {
         let worktrees = self.list()?;
         Ok(worktrees
@@ -335,6 +338,7 @@ impl WorktreeManager {
     }
 
     /// Create a new worktree for an existing branch
+    #[instrument(skip(self))]
     pub fn create_for_branch(&self, branch_name: &str) -> Result<Worktree> {
         debug!(
             category = "worktree",
@@ -645,6 +649,7 @@ impl WorktreeManager {
     }
 
     /// Create a new worktree with a new branch
+    #[instrument(skip(self))]
     pub fn create_new_branch(
         &self,
         branch_name: &str,
@@ -860,6 +865,7 @@ impl WorktreeManager {
     }
 
     /// Remove a worktree by path
+    #[instrument(skip(self))]
     pub fn remove(&self, path: &Path, force: bool) -> Result<()> {
         debug!(
             category = "worktree",
@@ -917,6 +923,7 @@ impl WorktreeManager {
     }
 
     /// Remove a worktree and delete the branch
+    #[instrument(skip(self))]
     pub fn remove_with_branch(&self, path: &Path, force: bool) -> Result<()> {
         debug!(
             category = "worktree",
@@ -954,6 +961,7 @@ impl WorktreeManager {
     }
 
     /// Remove a branch and its worktree if present (FR-011/FR-012)
+    #[instrument(skip(self))]
     pub fn cleanup_branch(
         &self,
         branch_name: &str,

@@ -13,6 +13,7 @@ use gwt_core::StructuredError;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
+use tracing::instrument;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -107,6 +108,7 @@ struct VersionHistoryUpdatedPayload {
     pub result: VersionHistoryResult,
 }
 
+#[instrument(skip_all, fields(command = "list_project_versions", project_path))]
 #[tauri::command]
 pub fn list_project_versions(
     project_path: String,
@@ -159,6 +161,7 @@ pub fn list_project_versions(
     Ok(ProjectVersions { items })
 }
 
+#[instrument(skip_all, fields(command = "get_project_version_history", project_path))]
 #[tauri::command]
 pub fn get_project_version_history(
     project_path: String,
@@ -1132,6 +1135,7 @@ pub fn prefetch_version_history_inner(project_path: &str, app_handle: &AppHandle
 /// This command is fire-and-forget: uncached versions are generated in the background
 /// using the existing `get_project_version_history` flow (which handles inflight
 /// deduplication and semaphore-based concurrency limiting).
+#[instrument(skip_all, fields(command = "prefetch_version_history", project_path))]
 #[tauri::command]
 pub fn prefetch_version_history(
     project_path: String,
