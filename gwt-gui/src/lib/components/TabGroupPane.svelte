@@ -353,7 +353,7 @@
         {#if !isAgentOrTerminal(tab)}
           <div class="panel-wrapper" class:active={group.activeTabId === tab.id}>
             {#if tab.type === "settings"}
-              <SettingsPanel onClose={() => onTabClose(tab.id)} />
+              <SettingsPanel {projectPath} onClose={() => onTabClose(tab.id)} />
             {:else if tab.type === "versionHistory"}
               <VersionHistoryPanel {projectPath} />
             {:else if tab.type === "issueSpec"}
