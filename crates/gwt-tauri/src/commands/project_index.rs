@@ -958,7 +958,8 @@ mod tests {
 
     fn init_repo_with_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempdir().expect("create tempdir");
-        let canonical_temp = dunce::canonicalize(temp.path()).unwrap_or_else(|_| temp.path().to_path_buf());
+        let canonical_temp =
+            dunce::canonicalize(temp.path()).unwrap_or_else(|_| temp.path().to_path_buf());
         let repo = canonical_temp.join("repo");
         fs::create_dir_all(&repo).expect("create repo dir");
 
