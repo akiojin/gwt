@@ -36,14 +36,11 @@ fn main() {
     // Initialize logging before anything else so all tracing output is captured.
     let settings = gwt_core::config::Settings::load_global().unwrap_or_default();
     let log_config = gwt_core::logging::LogConfig {
-        log_dir: settings
-            .log_dir
-            .clone()
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .map(|h| h.join(".gwt").join("logs"))
-                    .unwrap_or_else(|| std::path::PathBuf::from(".gwt/logs"))
-            }),
+        log_dir: settings.log_dir.clone().unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|h| h.join(".gwt").join("logs"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".gwt/logs"))
+        }),
         workspace: "default".to_string(),
         debug: settings.debug,
         retention_days: settings.log_retention_days,

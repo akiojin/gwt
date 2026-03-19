@@ -130,8 +130,7 @@ pub fn check_consultation_response(
     }
     let prefix = format!("{}_", pane_id);
     let mut latest: Option<(String, String)> = None;
-    let entries =
-        std::fs::read_dir(&outbox).map_err(|e| format!("Failed to read outbox: {e}"))?;
+    let entries = std::fs::read_dir(&outbox).map_err(|e| format!("Failed to read outbox: {e}"))?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with(&prefix) && name.ends_with("_response.md") {
