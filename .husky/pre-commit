@@ -1,3 +1,6 @@
 #!/usr/bin/env sh
 
-# Lint runs on pre-push to match CI.
+set -e
+
+echo "Validating SKILL.md frontmatter..."
+pnpm lint:skills

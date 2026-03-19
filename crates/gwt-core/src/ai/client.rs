@@ -13,7 +13,6 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tracing::warn;
 
 use crate::config::ResolvedAISettings;
 
@@ -25,6 +24,12 @@ const TEMPERATURE: f32 = 0.3;
 
 const MAX_RETRIES: usize = 5;
 const BACKOFF_BASE_SECS: u64 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryMode {
+    RetryTransientNetworkErrors,
+    FailFastOnNetworkErrors,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -101,6 +106,84 @@ pub enum ConversationItem {
     },
     /// tool 実行結果
     FunctionCallOutput { call_id: String, output: String },
+}
+
+/// A chat message that supports both plain text content and tool result content.
+/// Uses `Value` for content to allow `null` (for assistant messages with only tool_calls).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionsToolMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatCompletionsToolCallRef>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatCompletionsToolMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant_with_tool_calls(
+        content: Option<String>,
+        tool_calls: Vec<ChatCompletionsToolCallRef>,
+    ) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: Some(call_id.into()),
+        }
+    }
+}
+
+/// A tool call reference for the assistant message in chat completions format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionsToolCallRef {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: ChatCompletionsToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionsToolCallFunction {
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,66 +290,12 @@ impl AIClient {
             temperature: TEMPERATURE,
         };
 
-        let mut retries = 0usize;
-
-        loop {
-            let headers = self.build_auth_headers(&url)?;
-
-            let response = self
-                .client
-                .post(url.clone())
-                .headers(headers)
-                .json(&request_body)
-                .send();
-
-            match response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let resp_headers = resp.headers().clone();
-                    let body = resp.text().unwrap_or_default();
-                    if status == StatusCode::OK {
-                        let (text, usage) = parse_response_with_usage(&body)?;
-                        if let Some(tokens) = usage {
-                            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
-                        }
-                        return Ok(text);
-                    }
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(AIError::Unauthorized);
-                    }
-                    let error = if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = parse_retry_after(&body, &resp_headers);
-                        AIError::RateLimited { retry_after }
-                    } else {
-                        let message = extract_error_message(&body)
-                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        if status.is_server_error() {
-                            AIError::ServerError(message)
-                        } else {
-                            return Err(AIError::ServerError(message));
-                        }
-                    };
-
-                    if is_retryable(&error) && retries < MAX_RETRIES {
-                        let delay = backoff_delay(retries);
-                        warn!(
-                            retry = retries + 1,
-                            max_retries = MAX_RETRIES,
-                            delay_secs = delay.as_secs(),
-                            error = %error,
-                            "Retrying API request"
-                        );
-                        std::thread::sleep(delay);
-                        retries += 1;
-                        continue;
-                    }
-                    return Err(error);
-                }
-                Err(err) => {
-                    return Err(AIError::NetworkError(err.to_string()));
-                }
-            }
+        let body = self.send_with_retry(&url, &request_body, RetryMode::FailFastOnNetworkErrors)?;
+        let (text, usage) = parse_response_with_usage(&body)?;
+        if let Some(tokens) = usage {
+            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
         }
+        Ok(text)
     }
 
     /// Call Responses API with tool definitions and multi-turn conversation history.
@@ -292,16 +321,38 @@ impl AIClient {
             temperature,
         };
 
+        let body =
+            self.send_with_retry(&url, &request_body, RetryMode::RetryTransientNetworkErrors)?;
+        let (text, tool_calls, usage, status) = parse_response_with_tools(&body)?;
+        if let Some(tokens) = usage {
+            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
+        }
+        Ok(AIResponse {
+            text,
+            tool_calls,
+            usage_tokens: usage,
+            status,
+        })
+    }
+
+    /// Shared retry loop: POST the request, handle retries on transient errors,
+    /// and return the raw response body on success.
+    fn send_with_retry(
+        &self,
+        url: &Url,
+        request_body: &impl Serialize,
+        retry_mode: RetryMode,
+    ) -> Result<String, AIError> {
         let mut retries = 0usize;
 
         loop {
-            let headers = self.build_auth_headers(&url)?;
+            let headers = self.build_auth_headers(url)?;
 
             let response = self
                 .client
                 .post(url.clone())
                 .headers(headers)
-                .json(&request_body)
+                .json(request_body)
                 .send();
 
             match response {
@@ -310,17 +361,7 @@ impl AIClient {
                     let resp_headers = resp.headers().clone();
                     let body = resp.text().unwrap_or_default();
                     if status == StatusCode::OK {
-                        let (text, tool_calls, usage, parsed_status) =
-                            parse_response_with_tools(&body)?;
-                        if let Some(tokens) = usage {
-                            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
-                        }
-                        return Ok(AIResponse {
-                            text,
-                            tool_calls,
-                            usage_tokens: usage,
-                            status: parsed_status,
-                        });
+                        return Ok(body);
                     }
                     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                         return Err(AIError::Unauthorized);
@@ -347,8 +388,10 @@ impl AIClient {
                     std::thread::sleep(delay);
                 }
                 Err(e) => {
-                    if retries >= MAX_RETRIES {
-                        return Err(AIError::NetworkError(e.to_string()));
+                    let error = AIError::NetworkError(e.to_string());
+
+                    if !should_retry_network_error(retries, retry_mode) {
+                        return Err(error);
                     }
                     let delay = backoff_delay(retries);
                     retries += 1;
@@ -381,19 +424,31 @@ impl AIClient {
     }
 }
 
-fn build_responses_url(endpoint: &str) -> Result<Url, AIError> {
+/// Build an API URL by appending `suffix` to the endpoint path.
+/// Optionally strips `strip_suffix` from the path before appending (used to
+/// convert a `/responses` endpoint to `/chat/completions`).
+fn build_api_url(endpoint: &str, suffix: &str, strip_suffix: Option<&str>) -> Result<Url, AIError> {
     let mut url = Url::parse(endpoint)
         .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
     let mut path = url.path().trim_end_matches('/').to_string();
-    if !path.ends_with("/responses") {
+    if let Some(strip) = strip_suffix {
+        if path.ends_with(strip) {
+            path = path.trim_end_matches(strip).to_string();
+        }
+    }
+    if !path.ends_with(suffix) {
         if path.is_empty() {
-            path = "/responses".to_string();
+            path = suffix.to_string();
         } else {
-            path = format!("{}/responses", path);
+            path = format!("{}{}", path, suffix);
         }
         url.set_path(&path);
     }
     Ok(url)
+}
+
+fn build_responses_url(endpoint: &str) -> Result<Url, AIError> {
+    build_api_url(endpoint, "/responses", None)
 }
 
 fn is_azure_endpoint(url: &Url) -> bool {
@@ -612,6 +667,10 @@ fn is_retryable(error: &AIError) -> bool {
     }
 }
 
+fn should_retry_network_error(retries: usize, retry_mode: RetryMode) -> bool {
+    retry_mode == RetryMode::RetryTransientNetworkErrors && retries < MAX_RETRIES
+}
+
 fn is_permanent_server_error(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     if m.contains("http 501") {
@@ -756,18 +815,7 @@ impl AIClient {
 }
 
 fn build_models_url(endpoint: &str) -> Result<Url, AIError> {
-    let mut url = Url::parse(endpoint)
-        .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
-    let mut path = url.path().trim_end_matches('/').to_string();
-    if !path.ends_with("/models") {
-        if path.is_empty() {
-            path = "/models".to_string();
-        } else {
-            path = format!("{}/models", path);
-        }
-        url.set_path(&path);
-    }
-    Ok(url)
+    build_api_url(endpoint, "/models", None)
 }
 
 fn parse_models_response(body: &str) -> Result<Vec<ModelInfo>, AIError> {
@@ -802,6 +850,8 @@ pub fn format_error_for_display(error: &AIError) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{net::TcpListener, time::Instant};
+
     use super::*;
 
     // ========================================
@@ -1022,6 +1072,30 @@ mod tests {
     }
 
     #[test]
+    fn test_should_retry_network_error_for_tool_requests() {
+        assert!(should_retry_network_error(
+            0,
+            RetryMode::RetryTransientNetworkErrors
+        ));
+    }
+
+    #[test]
+    fn test_should_not_retry_network_error_for_one_shot_requests() {
+        assert!(!should_retry_network_error(
+            0,
+            RetryMode::FailFastOnNetworkErrors
+        ));
+    }
+
+    #[test]
+    fn test_should_not_retry_network_error_after_max_retries() {
+        assert!(!should_retry_network_error(
+            MAX_RETRIES,
+            RetryMode::RetryTransientNetworkErrors
+        ));
+    }
+
+    #[test]
     fn test_is_not_retryable_config_error() {
         let error = AIError::ConfigError("missing key".to_string());
         assert!(!is_retryable(&error));
@@ -1206,6 +1280,32 @@ mod tests {
         };
         let result = AIClient::new(settings);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_response_fails_fast_on_network_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let settings = ResolvedAISettings {
+            endpoint: format!("http://127.0.0.1:{port}/v1"),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "auto".to_string(),
+        };
+        let client = AIClient::new(settings).unwrap();
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+        }];
+
+        let start = Instant::now();
+        let result = client.create_response(messages);
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Err(AIError::NetworkError(_))));
+        assert!(elapsed < backoff_delay(0));
     }
 
     // ========================================

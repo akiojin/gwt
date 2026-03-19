@@ -41,6 +41,8 @@ jobs:
           ignore_files: |
             target/
             CHANGELOG.md
+      - name: Validate SKILL.md frontmatter
+        run: pnpm lint:skills
 
   commitlint:
     name: Commit Message Lint
