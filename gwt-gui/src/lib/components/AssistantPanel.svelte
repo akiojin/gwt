@@ -2,9 +2,11 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
-  import type { AssistantMessage, AssistantState, DashboardData } from "../types";
+  import type { AssistantState, DashboardData } from "../types";
   import AssistantDashboard from "./AssistantDashboard.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
+
+  type AssistantDeliveryMode = "interrupt" | "queue";
 
   interface Props {
     isActive?: boolean;
@@ -106,10 +108,19 @@
   }
 
   async function sendMessage() {
-    if (isComposing || assistantState?.isThinking) return;
-    const text = inputText.trim();
+    await sendMessageWithMode("interrupt");
+  }
+
+  async function sendMessageWithMode(
+    deliveryMode: AssistantDeliveryMode,
+    forcedText?: string,
+  ) {
+    if (isComposing) return;
+    const text = (forcedText ?? inputText).trim();
     if (!text) return;
     let previousState: AssistantState | null = null;
+    const previousInput = inputText;
+    let queuedDuringThinking = false;
 
     try {
       const readyState = await initializeAssistant();
@@ -118,41 +129,24 @@
       }
 
       previousState = assistantState ?? readyState;
-      const optimisticState: AssistantState = {
-        ...previousState,
-        isThinking: true,
-        messages: [
-          ...previousState.messages,
-          createOptimisticUserMessage(text),
-        ],
-      };
-
+      queuedDuringThinking =
+        deliveryMode === "queue" && Boolean(previousState?.isThinking);
       inputText = "";
-      assistantState = optimisticState;
       assistantState = await invoke<AssistantState>("assistant_send_message", {
         input: text,
+        deliveryMode,
       });
-      sentInputHistory = [...sentInputHistory, text];
       historyIndex = null;
       draftBeforeHistory = null;
     } catch (err) {
-      if (previousState) {
+      if (previousState && !queuedDuringThinking) {
         assistantState = previousState;
       }
-      inputText = text;
+      inputText = previousInput;
       historyIndex = null;
       draftBeforeHistory = null;
       console.error("Failed to send assistant message:", err);
     }
-  }
-
-  function createOptimisticUserMessage(content: string): AssistantMessage {
-    return {
-      role: "user",
-      kind: "text",
-      content,
-      timestamp: Date.now(),
-    };
   }
 
   function isImeEnterKeydown(event: KeyboardEvent): boolean {
@@ -231,6 +225,21 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (handleHistoryKeydown(e)) {
+      return;
+    }
+
+    if (
+      e.key === "Tab" &&
+      !e.shiftKey &&
+      !e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey
+    ) {
+      if (isImeEnterKeydown(e) || !inputText.trim()) {
+        return;
+      }
+      e.preventDefault();
+      void sendMessageWithMode("queue");
       return;
     }
 
@@ -338,6 +347,13 @@
       requestAnimationFrame(() => scrollToBottom());
     }
   });
+
+  $effect(() => {
+    sentInputHistory =
+      assistantState?.messages
+        ?.filter((message) => message.role === "user" && message.kind === "text")
+        .map((message) => message.content) ?? [];
+  });
 </script>
 
 <div class="assistant-panel">
@@ -421,6 +437,11 @@
       {#if assistantState && !assistantState.aiReady}
         <div class="ai-not-ready">AI not configured</div>
       {/if}
+      {#if assistantState?.queuedMessageCount}
+        <div class="queued-send-indicator" data-testid="assistant-queued-send-indicator">
+          Queued messages: {assistantState.queuedMessageCount}
+        </div>
+      {/if}
       <div class="input-row">
         <textarea
           bind:this={messageInputRef}
@@ -433,7 +454,6 @@
           disabled={
             !assistantState?.aiReady ||
             !assistantState?.sessionId ||
-            assistantState?.isThinking ||
             assistantState?.startupStatus === "failed"
           }
           rows={1}
@@ -445,7 +465,6 @@
           disabled={
             !assistantState?.aiReady ||
             !assistantState?.sessionId ||
-            assistantState?.isThinking ||
             assistantState?.startupStatus === "failed" ||
             !inputText.trim()
           }
@@ -626,6 +645,12 @@
   .ai-not-ready {
     font-size: var(--ui-font-xs);
     color: var(--yellow);
+    margin-bottom: 4px;
+  }
+
+  .queued-send-indicator {
+    font-size: var(--ui-font-xs);
+    color: var(--accent);
     margin-bottom: 4px;
   }
 

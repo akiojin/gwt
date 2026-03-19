@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use tracing::warn;
+use tracing::{instrument, warn};
 use uuid::Uuid;
 
 const CHROMA_VENV_DIR: &str = "chroma-venv";
@@ -802,6 +802,7 @@ fn run_files_action_with_crash_recovery(
 // Tauri commands
 // ---------------------------------------------------------------------------
 
+#[instrument(skip_all, fields(command = "ensure_index_runtime"))]
 #[tauri::command]
 pub async fn ensure_index_runtime() -> Result<IndexRuntimeSetupResult, String> {
     tokio::task::spawn_blocking(ensure_chroma_runtime_sync)
@@ -809,6 +810,7 @@ pub async fn ensure_index_runtime() -> Result<IndexRuntimeSetupResult, String> {
         .map_err(|e| format!("Index runtime setup task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "index_project_cmd", project_root))]
 #[tauri::command]
 pub async fn index_project_cmd(project_root: String) -> Result<IndexProjectResult, String> {
     tokio::task::spawn_blocking(move || {
@@ -822,6 +824,7 @@ pub async fn index_project_cmd(project_root: String) -> Result<IndexProjectResul
     .map_err(|e| format!("Index project task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "search_project_index_cmd", project_root))]
 #[tauri::command]
 pub async fn search_project_index_cmd(
     project_root: String,
@@ -837,6 +840,7 @@ pub async fn search_project_index_cmd(
     .map_err(|e| format!("Search project index task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "get_index_status_cmd", project_root))]
 #[tauri::command]
 pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusResult, String> {
     tokio::task::spawn_blocking(move || {
@@ -851,6 +855,7 @@ pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusRes
     .map_err(|e| format!("Get index status task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "index_github_issues_cmd", project_root))]
 #[tauri::command]
 pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssuesResult, String> {
     tokio::task::spawn_blocking(move || {
@@ -870,6 +875,7 @@ pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssues
     .map_err(|e| format!("Index GitHub issues task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "search_github_issues_cmd", project_root))]
 #[tauri::command]
 pub async fn search_github_issues_cmd(
     project_root: String,
@@ -958,7 +964,9 @@ mod tests {
 
     fn init_repo_with_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempdir().expect("create tempdir");
-        let repo = temp.path().join("repo");
+        let canonical_temp =
+            dunce::canonicalize(temp.path()).unwrap_or_else(|_| temp.path().to_path_buf());
+        let repo = canonical_temp.join("repo");
         fs::create_dir_all(&repo).expect("create repo dir");
 
         let output = command_os("git")
@@ -1012,7 +1020,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let worktree = temp.path().join(".worktrees").join("feature");
+        let worktree = canonical_temp.join(".worktrees").join("feature");
         let output = command_os("git")
             .current_dir(&repo)
             .args(["worktree", "add", "-b", "feature"])

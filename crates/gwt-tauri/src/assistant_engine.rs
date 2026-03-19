@@ -3,9 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gwt_core::ai::{
-    ChatCompletionsToolCallFunction, ChatCompletionsToolCallRef, ChatCompletionsToolMessage,
-};
+use gwt_core::ai::ConversationItem;
 use serde::Serialize;
 use tracing::{info, warn};
 
@@ -88,8 +86,9 @@ impl AssistantStartupStatus {
     }
 }
 
+#[derive(Clone)]
 pub struct AssistantEngine {
-    conversation: Vec<ChatCompletionsToolMessage>,
+    conversation: Vec<ConversationItem>,
     project_path: PathBuf,
     window_label: String,
     startup_status: AssistantStartupStatus,
@@ -100,7 +99,10 @@ pub struct AssistantEngine {
 
 impl AssistantEngine {
     pub fn new(project_path: PathBuf, window_label: String) -> Self {
-        let conversation = vec![ChatCompletionsToolMessage::system(SYSTEM_PROMPT)];
+        let conversation = vec![ConversationItem::Message {
+            role: "system".to_string(),
+            content: SYSTEM_PROMPT.to_string(),
+        }];
 
         Self {
             conversation,
@@ -114,7 +116,7 @@ impl AssistantEngine {
     }
 
     /// Get a copy of the conversation for serialization.
-    pub fn conversation(&self) -> &[ChatCompletionsToolMessage] {
+    pub fn conversation(&self) -> &[ConversationItem] {
         &self.conversation
     }
 
@@ -131,46 +133,67 @@ impl AssistantEngine {
     }
 
     pub fn handle_startup(&mut self, state: &AppState) -> Result<(), String> {
+        self.handle_startup_with_cancel(state, || false).map(|_| ())
+    }
+
+    pub fn handle_startup_with_cancel<F>(
+        &mut self,
+        state: &AppState,
+        should_cancel: F,
+    ) -> Result<bool, String>
+    where
+        F: Fn() -> bool,
+    {
         if self.startup_summary_ready {
-            return Ok(());
+            return Ok(true);
         }
 
         let base_len = self.conversation.len();
         self.startup_status = AssistantStartupStatus::Analyzing;
         self.startup_summary_ready = false;
-        self.conversation
-            .push(ChatCompletionsToolMessage::system(STARTUP_REPORT_PROMPT));
-
-        match self.run_llm_loop(state, AssistantToolMode::ReadOnly) {
-            Ok(_) => {
-                let summary = self
-                    .conversation
-                    .last()
-                    .and_then(|message| message.content.clone())
-                    .unwrap_or_default();
+        self.conversation.push(ConversationItem::Message {
+            role: "system".to_string(),
+            content: STARTUP_REPORT_PROMPT.to_string(),
+        });
+        match self.run_llm_loop(state, AssistantToolMode::ReadOnly, &should_cancel) {
+            Ok(Some(_)) => {
+                let summary = match self.conversation.last() {
+                    Some(ConversationItem::Message { content, .. }) => content.clone(),
+                    _ => String::new(),
+                };
                 self.finish_startup_transcript(base_len, &summary);
                 self.startup_status = AssistantStartupStatus::Ready;
                 self.startup_summary_ready = true;
-                Ok(())
+                Ok(true)
+            }
+            Ok(None) => {
+                self.conversation.truncate(base_len);
+                self.startup_status = AssistantStartupStatus::Idle;
+                self.startup_summary_ready = false;
+                Ok(false)
             }
             Err(err) => {
                 self.finish_startup_transcript(base_len, &format!("自律起動に失敗しました: {err}"));
                 self.startup_status = AssistantStartupStatus::Failed;
                 self.startup_summary_ready = false;
-                Ok(())
+                Ok(true)
             }
         }
     }
 
     pub fn push_visible_assistant_message(&mut self, content: impl Into<String>) {
-        self.conversation
-            .push(ChatCompletionsToolMessage::assistant(content));
+        self.conversation.push(ConversationItem::Message {
+            role: "assistant".to_string(),
+            content: content.into(),
+        });
     }
 
     #[cfg(test)]
     pub fn push_hidden_system_message_for_test(&mut self, content: impl Into<String>) {
-        self.conversation
-            .push(ChatCompletionsToolMessage::system(content));
+        self.conversation.push(ConversationItem::Message {
+            role: "system".to_string(),
+            content: content.into(),
+        });
     }
 
     pub fn apply_cached_startup_summary(&mut self, summary: impl Into<String>) {
@@ -191,8 +214,10 @@ impl AssistantEngine {
 
     fn finish_startup_transcript(&mut self, base_len: usize, summary: &str) {
         self.conversation.truncate(base_len);
-        self.conversation
-            .push(ChatCompletionsToolMessage::assistant(summary));
+        self.conversation.push(ConversationItem::Message {
+            role: "assistant".to_string(),
+            content: summary.to_string(),
+        });
     }
 
     /// Handle a user message: add to conversation, run LLM loop, return response.
@@ -201,10 +226,29 @@ impl AssistantEngine {
         input: &str,
         state: &AppState,
     ) -> Result<AssistantResponse, String> {
-        self.conversation
-            .push(ChatCompletionsToolMessage::user(input));
+        self.handle_user_message_with_cancel(input, state, || false)?
+            .ok_or_else(|| "Assistant run cancelled".to_string())
+    }
 
-        self.run_llm_loop(state, AssistantToolMode::FullAccess)
+    pub fn handle_user_message_with_cancel<F>(
+        &mut self,
+        input: &str,
+        state: &AppState,
+        should_cancel: F,
+    ) -> Result<Option<AssistantResponse>, String>
+    where
+        F: Fn() -> bool,
+    {
+        if should_cancel() {
+            return Ok(None);
+        }
+
+        self.conversation.push(ConversationItem::Message {
+            role: "user".to_string(),
+            content: input.to_string(),
+        });
+
+        self.run_llm_loop(state, AssistantToolMode::FullAccess, &should_cancel)
     }
 
     /// Handle a batch of monitor events: summarize changes, optionally call LLM.
@@ -234,13 +278,17 @@ impl AssistantEngine {
         }
 
         let summary = summaries.join("\n");
-        self.conversation
-            .push(ChatCompletionsToolMessage::user(format!(
+        self.conversation.push(ConversationItem::Message {
+            role: "user".to_string(),
+            content: format!(
                 "[System Monitor Update]\n{}\n\nAnalyze the current state and report any issues or suggestions.",
                 summary
-            )));
+            ),
+        });
 
-        let response = self.run_llm_loop(state, AssistantToolMode::FullAccess)?;
+        let response = self
+            .run_llm_loop(state, AssistantToolMode::FullAccess, &|| false)?
+            .ok_or_else(|| "Assistant monitor run cancelled".to_string())?;
         Ok(Some(response))
     }
 
@@ -260,7 +308,12 @@ impl AssistantEngine {
         // Ensure cut point doesn't orphan a "tool" role message (tool result without
         // the preceding assistant tool_calls message). Walk forward from the cut point
         // to find the first message that is NOT a "tool" role.
-        while cut < self.conversation.len() && self.conversation[cut].role == "tool" {
+        while cut < self.conversation.len()
+            && matches!(
+                self.conversation[cut],
+                ConversationItem::FunctionCallOutput { .. }
+            )
+        {
             cut += 1;
         }
 
@@ -282,7 +335,12 @@ impl AssistantEngine {
         &mut self,
         state: &AppState,
         tool_mode: AssistantToolMode,
-    ) -> Result<AssistantResponse, String> {
+        should_cancel: &impl Fn() -> bool,
+    ) -> Result<Option<AssistantResponse>, String> {
+        if should_cancel() {
+            return Ok(None);
+        }
+
         let tools = assistant_tools::assistant_tool_definitions(tool_mode);
         let mut actions_taken = Vec::new();
 
@@ -293,9 +351,21 @@ impl AssistantEngine {
         self.prune_conversation();
 
         for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
+            if should_cancel() {
+                return Ok(None);
+            }
+
             let messages = self.conversation.clone();
             let tools_clone = tools.clone();
             let settings = ai_settings.clone();
+
+            // Extract system prompt as instructions parameter.
+            let instructions = match messages.first() {
+                Some(ConversationItem::Message { role, content }) if role == "system" => {
+                    Some(content.clone())
+                }
+                _ => None,
+            };
 
             // Run the blocking AI call on a separate thread.
             // AIClient is created per-thread because it cannot be sent across threads
@@ -304,9 +374,10 @@ impl AssistantEngine {
                 let client = gwt_core::ai::AIClient::new(settings)
                     .map_err(|e| format!("Failed to create AI client: {}", e))?;
                 client
-                    .create_chat_completion_with_tools(
+                    .create_response_with_tools(
                         messages,
                         tools_clone,
+                        instructions,
                         ASSISTANT_MAX_TOKENS,
                         ASSISTANT_TEMPERATURE,
                     )
@@ -320,46 +391,42 @@ impl AssistantEngine {
                 self.estimated_tokens += tokens;
             }
 
-            if response.tool_calls.is_empty() {
-                // No tool calls — this is the final text response
-                self.conversation
-                    .push(ChatCompletionsToolMessage::assistant(response.text.clone()));
-
-                return Ok(AssistantResponse {
-                    text: response.text,
-                    actions_taken,
-                });
+            if should_cancel() {
+                return Ok(None);
             }
 
-            // Build tool_calls references for the assistant message
-            let tool_call_refs: Vec<ChatCompletionsToolCallRef> = response
-                .tool_calls
-                .iter()
-                .map(|tc| ChatCompletionsToolCallRef {
-                    id: tc.call_id.clone().unwrap_or_default(),
-                    call_type: "function".to_string(),
-                    function: ChatCompletionsToolCallFunction {
-                        name: tc.name.clone(),
-                        arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
-                    },
-                })
-                .collect();
+            if response.tool_calls.is_empty() {
+                // No tool calls — this is the final text response
+                if should_cancel() {
+                    return Ok(None);
+                }
+                self.conversation.push(ConversationItem::Message {
+                    role: "assistant".to_string(),
+                    content: response.text.clone(),
+                });
 
-            // Add the assistant message with tool_calls
-            let content = if response.text.is_empty() {
-                None
-            } else {
-                Some(response.text.clone())
-            };
-            self.conversation
-                .push(ChatCompletionsToolMessage::assistant_with_tool_calls(
-                    content,
-                    tool_call_refs,
-                ));
+                return Ok(Some(AssistantResponse {
+                    text: response.text,
+                    actions_taken,
+                }));
+            }
+
+            // Add each tool call as a separate FunctionCall item
+            for tc in &response.tool_calls {
+                self.conversation.push(ConversationItem::FunctionCall {
+                    call_id: tc.call_id.clone().unwrap_or_default(),
+                    name: tc.name.clone(),
+                    arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                });
+            }
 
             // Execute each tool call and add tool results
             let project_path = self.project_path.to_string_lossy().to_string();
             for tc in &response.tool_calls {
+                if should_cancel() {
+                    return Ok(None);
+                }
+
                 let tool_result = assistant_tools::execute_assistant_tool(
                     tc,
                     state,
@@ -380,10 +447,11 @@ impl AssistantEngine {
                 };
 
                 let call_id = tc.call_id.clone().unwrap_or_default();
-                self.conversation.push(ChatCompletionsToolMessage::tool(
-                    call_id,
-                    truncate_tool_result(&result_text),
-                ));
+                self.conversation
+                    .push(ConversationItem::FunctionCallOutput {
+                        call_id,
+                        output: truncate_tool_result(&result_text),
+                    });
             }
 
             info!(
@@ -394,10 +462,10 @@ impl AssistantEngine {
         }
 
         warn!("Assistant tool loop reached max iterations");
-        Ok(AssistantResponse {
+        Ok(Some(AssistantResponse {
             text: "Maximum tool call iterations reached. Please try again with a more specific request.".to_string(),
             actions_taken,
-        })
+        }))
     }
 }
 
@@ -460,7 +528,10 @@ mod tests {
         assert_eq!(engine.project_path(), Path::new("/repo"));
         // Conversation should have system message
         assert_eq!(engine.conversation.len(), 1);
-        assert_eq!(engine.conversation[0].role, "system");
+        assert!(matches!(
+            &engine.conversation[0],
+            ConversationItem::Message { role, .. } if role == "system"
+        ));
     }
 
     #[test]
@@ -468,38 +539,41 @@ mod tests {
         let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
         let base_len = engine.conversation.len();
 
+        engine.conversation.push(ConversationItem::Message {
+            role: "system".to_string(),
+            content: STARTUP_REPORT_PROMPT.to_string(),
+        });
+        engine.conversation.push(ConversationItem::FunctionCall {
+            call_id: "call-1".to_string(),
+            name: "some_tool".to_string(),
+            arguments: "{}".to_string(),
+        });
         engine
             .conversation
-            .push(ChatCompletionsToolMessage::system(STARTUP_REPORT_PROMPT));
-        engine
-            .conversation
-            .push(ChatCompletionsToolMessage::assistant_with_tool_calls(
-                None,
-                vec![],
-            ));
-        engine
-            .conversation
-            .push(ChatCompletionsToolMessage::tool("call-1", "tool-result"));
+            .push(ConversationItem::FunctionCallOutput {
+                call_id: "call-1".to_string(),
+                output: "tool-result".to_string(),
+            });
 
         engine.finish_startup_transcript(base_len, "startup summary");
 
         assert_eq!(engine.conversation.len(), base_len + 1);
-        assert_eq!(engine.conversation[0].role, "system");
-        assert_eq!(
-            engine
-                .conversation
-                .last()
-                .and_then(|message| message.content.as_deref()),
-            Some("startup summary")
-        );
+        assert!(matches!(
+            &engine.conversation[0],
+            ConversationItem::Message { role, .. } if role == "system"
+        ));
+        assert!(matches!(
+            engine.conversation.last(),
+            Some(ConversationItem::Message { content, .. }) if content == "startup summary"
+        ));
+        assert!(!engine.conversation.iter().any(|item| matches!(
+            item,
+            ConversationItem::Message { content, .. } if content == STARTUP_REPORT_PROMPT
+        )));
         assert!(!engine
             .conversation
             .iter()
-            .any(|message| message.content.as_deref() == Some(STARTUP_REPORT_PROMPT)));
-        assert!(!engine
-            .conversation
-            .iter()
-            .any(|message| message.role == "tool"));
+            .any(|item| matches!(item, ConversationItem::FunctionCallOutput { .. })));
     }
 
     #[test]
@@ -510,21 +584,16 @@ mod tests {
 
         assert_eq!(engine.startup_status(), AssistantStartupStatus::Ready);
         assert!(engine.startup_summary_ready());
-        assert_eq!(
-            engine
-                .conversation
-                .last()
-                .and_then(|message| message.content.as_deref()),
-            Some("cached")
-        );
+        assert!(matches!(
+            engine.conversation.last(),
+            Some(ConversationItem::Message { content, .. }) if content == "cached"
+        ));
     }
 
-    fn make_msg(role: &str, content: &str) -> ChatCompletionsToolMessage {
-        match role {
-            "system" => ChatCompletionsToolMessage::system(content),
-            "user" => ChatCompletionsToolMessage::user(content),
-            "assistant" => ChatCompletionsToolMessage::assistant(content),
-            _ => ChatCompletionsToolMessage::user(content),
+    fn make_msg(role: &str, content: &str) -> ConversationItem {
+        ConversationItem::Message {
+            role: role.to_string(),
+            content: content.to_string(),
         }
     }
 
@@ -557,12 +626,15 @@ mod tests {
         // Should be MAX_CONVERSATION_MESSAGES
         assert_eq!(engine.conversation.len(), MAX_CONVERSATION_MESSAGES);
         // First message is always system
-        assert_eq!(engine.conversation[0].role, "system");
+        assert!(matches!(
+            &engine.conversation[0],
+            ConversationItem::Message { role, .. } if role == "system"
+        ));
         // Last message should be the most recent
-        assert_eq!(
-            engine.conversation.last().unwrap().content.as_deref(),
-            Some("msg 59")
-        );
+        assert!(matches!(
+            engine.conversation.last(),
+            Some(ConversationItem::Message { content, .. }) if content == "msg 59"
+        ));
     }
 
     #[test]
@@ -576,26 +648,25 @@ mod tests {
                 .conversation
                 .push(make_msg("user", &format!("early {}", i)));
         }
-        // Assistant message with tool_calls
-        engine.conversation.push(ChatCompletionsToolMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![]),
-            tool_call_id: None,
+        // FunctionCall items
+        engine.conversation.push(ConversationItem::FunctionCall {
+            call_id: "call1".to_string(),
+            name: "tool1".to_string(),
+            arguments: "{}".to_string(),
         });
         // Tool results
-        engine.conversation.push(ChatCompletionsToolMessage {
-            role: "tool".to_string(),
-            content: Some("result1".to_string()),
-            tool_calls: None,
-            tool_call_id: Some("call1".to_string()),
-        });
-        engine.conversation.push(ChatCompletionsToolMessage {
-            role: "tool".to_string(),
-            content: Some("result2".to_string()),
-            tool_calls: None,
-            tool_call_id: Some("call2".to_string()),
-        });
+        engine
+            .conversation
+            .push(ConversationItem::FunctionCallOutput {
+                call_id: "call1".to_string(),
+                output: "result1".to_string(),
+            });
+        engine
+            .conversation
+            .push(ConversationItem::FunctionCallOutput {
+                call_id: "call2".to_string(),
+                output: "result2".to_string(),
+            });
         for i in 0..40 {
             engine
                 .conversation
@@ -604,10 +675,33 @@ mod tests {
         assert_eq!(engine.conversation.len(), 54);
         engine.prune_conversation();
         // First should be system
-        assert_eq!(engine.conversation[0].role, "system");
-        // No orphaned tool messages at the start of the kept window
-        assert_ne!(engine.conversation[1].role, "tool");
+        assert!(matches!(
+            &engine.conversation[0],
+            ConversationItem::Message { role, .. } if role == "system"
+        ));
+        // No orphaned FunctionCallOutput at the start of the kept window
+        assert!(!matches!(
+            &engine.conversation[1],
+            ConversationItem::FunctionCallOutput { .. }
+        ));
         // Should have been pruned
         assert!(engine.conversation.len() <= MAX_CONVERSATION_MESSAGES);
+    }
+
+    #[test]
+    fn handle_user_message_with_cancel_returns_none_before_mutating_conversation() {
+        let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
+        let state = crate::state::AppState::new();
+
+        let result = engine
+            .handle_user_message_with_cancel("hello", &state, || true)
+            .expect("cancelled run should not error");
+
+        assert!(result.is_none());
+        assert_eq!(engine.conversation.len(), 1);
+        assert!(matches!(
+            &engine.conversation[0],
+            ConversationItem::Message { role, .. } if role == "system"
+        ));
     }
 }

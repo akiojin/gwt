@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 use tauri::State;
+use tracing::instrument;
 use which::which;
 
 /// Serializable agent info for the frontend
@@ -194,6 +195,7 @@ fn fetch_npm_versions_via_bun(package: &str) -> Result<(Vec<String>, Vec<String>
 }
 
 /// Detect available coding agents
+#[instrument(skip_all, fields(command = "detect_agents"))]
 #[tauri::command]
 pub fn detect_agents() -> Vec<DetectedAgentInfo> {
     let bunx_path = resolve_command_path("bunx");
@@ -331,6 +333,7 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
 ///
 /// - Uses an in-memory cache in AppState to avoid repeated registry calls.
 /// - Returns a fallback of `latest` only when the registry is unreachable.
+#[instrument(skip_all, fields(command = "list_agent_versions", agent_id))]
 #[tauri::command]
 pub fn list_agent_versions(
     agent_id: String,

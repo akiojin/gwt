@@ -4,7 +4,7 @@
 //! Detection priority: docker-compose.yml/compose.yml > .devcontainer > Dockerfile
 
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 /// Type of Docker file detected in a worktree
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +51,7 @@ impl DockerFileType {
 /// 3. Dockerfile (Dockerfile)
 ///
 /// Returns None if no Docker files are found.
+#[instrument(skip_all)]
 pub fn detect_docker_files(worktree_path: &Path) -> Option<DockerFileType> {
     debug!(
         category = "docker",

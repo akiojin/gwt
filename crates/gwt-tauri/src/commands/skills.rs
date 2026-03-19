@@ -6,6 +6,7 @@ use gwt_core::config::{
 use gwt_core::StructuredError;
 use std::path::PathBuf;
 use tauri::{State, Window};
+use tracing::instrument;
 
 fn resolve_window_project_root(state: &AppState, window: &Window) -> Option<PathBuf> {
     let project_path = state
@@ -21,6 +22,7 @@ fn load_skill_registration_settings(command: &str) -> Result<Settings, Structure
     Settings::load_global().map_err(|e| StructuredError::from_gwt_error(&e, command))
 }
 
+#[instrument(skip_all, fields(command = "get_skill_registration_status_cmd", window_label = window.label()))]
 #[tauri::command]
 pub fn get_skill_registration_status_cmd(
     window: Window,
@@ -36,6 +38,7 @@ pub fn get_skill_registration_status_cmd(
     Ok(state.get_skill_registration_status())
 }
 
+#[instrument(skip_all, fields(command = "repair_skill_registration_cmd", window_label = window.label()))]
 #[tauri::command]
 pub fn repair_skill_registration_cmd(
     window: Window,

@@ -751,10 +751,12 @@ export interface AssistantState {
   currentStatus?:
     | "analyzing"
     | "awaiting_goal_confirmation"
+    | "awaiting_user_choice"
     | "monitoring"
     | "blocked"
     | (string & {})
     | null;
   blockers: string[];
   recommendedNextActions: string[];
+  queuedMessageCount: number;
 }
