@@ -376,9 +376,13 @@ pub fn shared_tool_definitions_for_mode(access_mode: ToolAccessMode) -> Vec<Tool
 
 pub fn is_shared_tool_allowed(tool_name: &str, access_mode: ToolAccessMode) -> bool {
     match tool_name {
-        TOOL_CAPTURE_SCROLLBACK_TAIL | TOOL_GET_SPEC_ISSUE | TOOL_SEARCH_SPEC_ISSUES
+        TOOL_CAPTURE_SCROLLBACK_TAIL
+        | TOOL_GET_SPEC_ISSUE
+        | TOOL_SEARCH_SPEC_ISSUES
         | TOOL_LIST_SPEC_ARTIFACTS => true,
-        TOOL_SEND_KEYS_TO_PANE | TOOL_UPSERT_SPEC_ISSUE | TOOL_UPSERT_SPEC_ARTIFACT
+        TOOL_SEND_KEYS_TO_PANE
+        | TOOL_UPSERT_SPEC_ISSUE
+        | TOOL_UPSERT_SPEC_ARTIFACT
         | TOOL_CLOSE_SPEC_ISSUE => access_mode.allows_write(),
         _ => false,
     }
@@ -403,7 +407,9 @@ pub fn execute_shared_tool_with_mode(
     access_mode: ToolAccessMode,
 ) -> Option<Result<String, String>> {
     match call.name.as_str() {
-        TOOL_SEND_KEYS_TO_PANE | TOOL_UPSERT_SPEC_ISSUE | TOOL_UPSERT_SPEC_ARTIFACT
+        TOOL_SEND_KEYS_TO_PANE
+        | TOOL_UPSERT_SPEC_ISSUE
+        | TOOL_UPSERT_SPEC_ARTIFACT
         | TOOL_CLOSE_SPEC_ISSUE
             if !access_mode.allows_write() =>
         {
@@ -480,11 +486,10 @@ pub fn execute_shared_tool_with_mode(
             let result = (|| {
                 let query = get_required_string_any(args, &["query"])?;
                 let limit = get_optional_u64_any(args, &["limit"]).unwrap_or(10).min(20) as u32;
-                let repo_path =
-                    crate::commands::project::resolve_repo_path_for_project_root(Path::new(
-                        project_path,
-                    ))
-                    .map_err(|e| format!("Failed to resolve repository path: {e}"))?;
+                let repo_path = crate::commands::project::resolve_repo_path_for_project_root(
+                    Path::new(project_path),
+                )
+                .map_err(|e| format!("Failed to resolve repository path: {e}"))?;
                 let issues = gwt_core::git::search_issues_with_query(
                     &repo_path, query, limit, "open", false, "spec",
                 )
