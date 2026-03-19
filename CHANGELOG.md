@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.17.1] - 2026-03-19
+
+### Bug Fixes
+
+- **tauri:** Reset legacy macOS WebKit local storage (#1721)
+
 ## [8.17.0] - 2026-03-19
 
 ### Bug Fixes
