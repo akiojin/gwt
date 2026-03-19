@@ -42,15 +42,30 @@
     buildRestoredProjectTabs,
     shouldRetryAgentTabRestore,
     type StoredProjectTab,
+    type StoredTabGroup,
+    type StoredTabLayoutNode,
     type StoredTerminalTab,
   } from "./lib/agentTabsPersistence";
-  import {
-    defaultAppTabs,
-    reorderTabsByDrop,
-    shouldAllowRestoredActiveTab,
-    type TabDropPosition,
-  } from "./lib/appTabs";
+  import { defaultAppTabs, shouldAllowRestoredActiveTab } from "./lib/appTabs";
   import { getNextTabId, getPreviousTabId } from "./lib/tabNavigation";
+  import {
+    addTabToActiveGroup,
+    canSplitTab,
+    createInitialTabLayout,
+    flattenTabIdsByLayout,
+    getGroupForTab,
+    moveTabToGroup,
+    removeTabFromLayout,
+    reorderTabsInGroup,
+    resizeSplitNode,
+    setActiveGroup,
+    setActiveTabInGroup,
+    splitTabToGroupEdge,
+    type TabDropPosition,
+    type TabGroupState,
+    type TabLayoutNode,
+    type TabSplitDirection,
+  } from "./lib/tabLayout";
   import {
     runStartupUpdateCheck,
     STARTUP_UPDATE_INITIAL_DELAY_MS,
@@ -260,6 +275,10 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state(defaultAppTabs());
+  const initialTabLayout = createInitialTabLayout(defaultAppTabs(), "assistant");
+  let layoutGroups: Record<string, TabGroupState> = $state(initialTabLayout.groups);
+  let layoutRoot: TabLayoutNode = $state(initialTabLayout.root);
+  let activeGroupId: string = $state(initialTabLayout.activeGroupId);
   let activeTabId: string = $state("assistant");
   let lastWindowMenuTabsSignature: string | null = null;
   let lastWindowMenuActiveTabId: string | null = null;
@@ -327,6 +346,61 @@
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
   type AvailableUpdateState = Extract<UpdateState, { state: "available" }>;
+
+  function readTabLayoutState() {
+    return {
+      groups: layoutGroups,
+      root: layoutRoot,
+      activeGroupId,
+    };
+  }
+
+  function applyTabLayoutState(next: {
+    groups: Record<string, TabGroupState>;
+    root: TabLayoutNode;
+    activeGroupId: string;
+  }) {
+    layoutGroups = next.groups;
+    layoutRoot = next.root;
+    activeGroupId = next.activeGroupId;
+    const nextActiveTabId =
+      next.groups[next.activeGroupId]?.activeTabId ??
+      tabs.find((tab) => tab.id === activeTabId)?.id ??
+      tabs[0]?.id ??
+      "";
+    activeTabId = nextActiveTabId;
+  }
+
+  function activeGroupTabIds(): string[] {
+    return layoutGroups[activeGroupId]?.tabIds ?? [];
+  }
+
+  function buildStoredLayoutGroups(): StoredTabGroup[] {
+    return Object.values(layoutGroups).map((group) => ({
+      id: group.id,
+      tabIds: [...group.tabIds],
+      activeTabId: group.activeTabId,
+    }));
+  }
+
+  function buildStoredLayoutRoot(node: TabLayoutNode): StoredTabLayoutNode {
+    if (node.type === "group") {
+      return {
+        type: "group",
+        groupId: node.groupId,
+      };
+    }
+    return {
+      type: "split",
+      id: node.id,
+      axis: node.axis,
+      sizes: node.sizes,
+      children: [
+        buildStoredLayoutRoot(node.children[0]),
+        buildStoredLayoutRoot(node.children[1]),
+      ],
+    };
+  }
 
   function showToast(
     message: string,
@@ -1879,18 +1953,68 @@
     removeTabLocal(tabId);
   }
 
-  function handleTabSelect(tabId: string) {
+  function handleTabSelect(groupId: string, tabId: string) {
+    activeGroupId = groupId;
     activeTabId = tabId;
   }
 
   function handleTabReorder(
+    groupId: string,
     dragTabId: string,
     overTabId: string,
     position: TabDropPosition,
   ) {
-    const nextTabs = reorderTabsByDrop(tabs, dragTabId, overTabId, position);
-    if (nextTabs === tabs) return;
-    tabs = nextTabs;
+    const next = reorderTabsInGroup(
+      readTabLayoutState(),
+      groupId,
+      dragTabId,
+      overTabId,
+      position,
+    );
+    applyTabLayoutState(next);
+  }
+
+  function handleTabMoveToGroup(
+    dragTabId: string,
+    targetGroupId: string,
+    overTabId: string | null = null,
+    position: TabDropPosition = "after",
+  ) {
+    const next = moveTabToGroup(
+      readTabLayoutState(),
+      dragTabId,
+      targetGroupId,
+      overTabId,
+      position,
+    );
+    applyTabLayoutState(next);
+  }
+
+  function handleTabSplitToGroupEdge(
+    dragTabId: string,
+    targetGroupId: string,
+    direction: TabSplitDirection,
+  ) {
+    if (!canSplitTab(readTabLayoutState(), dragTabId)) return;
+    const next = splitTabToGroupEdge(
+      readTabLayoutState(),
+      dragTabId,
+      targetGroupId,
+      direction,
+    );
+    applyTabLayoutState(next);
+  }
+
+  function handleGroupFocus(groupId: string) {
+    const next = setActiveGroup(readTabLayoutState(), groupId);
+    applyTabLayoutState(next);
+  }
+
+  function handleSplitResize(splitId: string, primaryFraction: number) {
+    const next = resizeSplitNode(readTabLayoutState(), splitId, primaryFraction);
+    layoutGroups = next.groups;
+    layoutRoot = next.root;
+    activeGroupId = next.activeGroupId;
   }
 
   function openSettingsTab() {
@@ -2487,17 +2611,71 @@
         break;
       }
       case "previous-tab": {
-        const prevId = getPreviousTabId(tabs, activeTabId);
+        const groupTabs = activeGroupTabIds()
+          .map((tabId) => tabs.find((tab) => tab.id === tabId))
+          .filter((tab): tab is Tab => Boolean(tab));
+        const prevId = getPreviousTabId(groupTabs, activeTabId);
         if (prevId) activeTabId = prevId;
         break;
       }
       case "next-tab": {
-        const nextId = getNextTabId(tabs, activeTabId);
+        const groupTabs = activeGroupTabIds()
+          .map((tabId) => tabs.find((tab) => tab.id === tabId))
+          .filter((tab): tab is Tab => Boolean(tab));
+        const nextId = getNextTabId(groupTabs, activeTabId);
         if (nextId) activeTabId = nextId;
         break;
       }
     }
   }
+
+  $effect(() => {
+    void tabs;
+    void activeTabId;
+    void activeGroupId;
+    void layoutGroups;
+    void layoutRoot;
+
+    const knownTabIds = new Set(tabs.map((tab) => tab.id));
+    let next = readTabLayoutState();
+
+    for (const group of Object.values(next.groups)) {
+      for (const tabId of [...group.tabIds]) {
+        if (!knownTabIds.has(tabId)) {
+          next = removeTabFromLayout(next, tabId);
+        }
+      }
+    }
+
+    for (const tab of tabs) {
+      if (!getGroupForTab(next, tab.id)) {
+        next = addTabToActiveGroup(next, tab.id);
+      }
+    }
+
+    if (activeTabId && knownTabIds.has(activeTabId)) {
+      const owningGroup = getGroupForTab(next, activeTabId);
+      if (owningGroup) {
+        next = setActiveGroup(next, owningGroup.id);
+        next = setActiveTabInGroup(next, owningGroup.id, activeTabId);
+      }
+    }
+
+    if (
+      next.groups !== layoutGroups ||
+      next.root !== layoutRoot ||
+      next.activeGroupId !== activeGroupId
+    ) {
+      layoutGroups = next.groups;
+      layoutRoot = next.root;
+      activeGroupId = next.activeGroupId;
+      const nextActiveTab =
+        next.groups[next.activeGroupId]?.activeTabId ?? tabs[0]?.id ?? "";
+      if (nextActiveTab && nextActiveTab !== activeTabId) {
+        activeTabId = nextActiveTab;
+      }
+    }
+  });
 
   $effect(() => {
     void tabs;
@@ -2616,6 +2794,20 @@
     tabs = mergedTabs;
     await refreshAgentTabLabelsForProject(targetProjectPath);
 
+    const restoredGroups: Record<string, TabGroupState> = Object.fromEntries(
+      restored.groups.map((group) => [
+        group.id,
+        {
+          id: group.id,
+          tabIds: [...group.tabIds],
+          activeTabId: group.activeTabId,
+        },
+      ]),
+    );
+    layoutGroups = restoredGroups;
+    layoutRoot = restored.root as TabLayoutNode;
+    activeGroupId = restored.activeGroupId ?? restored.groups[0]?.id ?? activeGroupId;
+
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     if (allowOverrideActive) {
       if (
@@ -2658,12 +2850,21 @@
     void tabs;
     void activeTabId;
     void agentTabsHydratedProjectPath;
+    void layoutGroups;
+    void layoutRoot;
+    void activeGroupId;
 
     if (!projectPath) return;
     if (agentTabsHydratedProjectPath !== projectPath) return;
 
+    const orderedTabIds = flattenTabIdsByLayout(readTabLayoutState());
+    const orderedTabs = orderedTabIds
+      .map((tabId) => tabs.find((tab) => tab.id === tabId))
+      .filter((tab): tab is Tab => Boolean(tab));
+    const fallbackOrderedTabs = orderedTabs.length > 0 ? orderedTabs : tabs;
+
     const storedTabs: StoredProjectTab[] = [];
-    for (const tab of tabs) {
+    for (const tab of fallbackOrderedTabs) {
       if (tab.type === "agent") {
         if (typeof tab.paneId !== "string" || tab.paneId.length === 0) continue;
         storedTabs.push({
@@ -2689,7 +2890,10 @@
         tab.type === "assistant" ||
         tab.type === "settings" ||
         tab.type === "versionHistory" ||
-        tab.type === "issues"
+        tab.type === "issues" ||
+        tab.type === "prs" ||
+        tab.type === "projectIndex" ||
+        tab.type === "issueSpec"
       ) {
         const staticType = tab.type === "assistant" ? "assistant" : tab.type;
         const staticId = tab.id === "assistant" ? "assistant" : tab.id;
@@ -2698,6 +2902,9 @@
           type: staticType,
           id: staticId,
           label: staticLabel,
+          ...(tab.type === "issueSpec" && tab.issueNumber
+            ? { issueNumber: tab.issueNumber }
+            : {}),
         });
       }
     }
@@ -2714,6 +2921,9 @@
     persistStoredProjectTabs(projectPath, {
       tabs: storedTabs,
       activeTabId: storedActiveTabId,
+      activeGroupId,
+      groups: buildStoredLayoutGroups(),
+      root: buildStoredLayoutRoot(layoutRoot),
     });
   });
 
@@ -2957,14 +3167,19 @@
       {/if}
       <MainArea
         {tabs}
-        {activeTabId}
-        {selectedBranch}
+        groups={layoutGroups}
+        layoutRoot={layoutRoot}
+        {activeGroupId}
         projectPath={projectPath as string}
         onLaunchAgent={requestAgentLaunch}
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onTabReorder={handleTabReorder}
+        onTabMoveToGroup={handleTabMoveToGroup}
+        onTabSplitToGroupEdge={handleTabSplitToGroupEdge}
+        onSplitResize={handleSplitResize}
+        onGroupFocus={handleGroupFocus}
         onWorkOnIssue={handleWorkOnIssueFromTab}
         onSwitchToWorktree={handleSwitchToWorktreeFromTab}
         onIssueCountChange={handleIssueCountChange}
