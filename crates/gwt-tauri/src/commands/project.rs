@@ -317,6 +317,57 @@ pub fn open_project(
                     crate::commands::project_index::spawn_background_index(index_path);
                 }
 
+                // #1714: Bootstrap issue linkage + auto full sync in background
+                {
+                    let sync_repo_path = repo_path.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        // Bootstrap linkage from branch names
+                        let mut link_store =
+                            gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(
+                                &sync_repo_path,
+                            );
+                        let output = gwt_core::process::git_command()
+                            .args(["branch", "--format=%(refname:short)"])
+                            .current_dir(&sync_repo_path)
+                            .output();
+                        if let Ok(output) = output {
+                            if output.status.success() {
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                let branches: Vec<String> = stdout
+                                    .lines()
+                                    .map(|l| l.trim().to_string())
+                                    .filter(|l| !l.is_empty())
+                                    .collect();
+                                link_store.bootstrap_from_branches(&branches);
+                                let _ = link_store.save(&sync_repo_path);
+                            }
+                        }
+
+                        // Auto full sync of issue exact cache
+                        let mut cache =
+                            gwt_core::git::issue_cache::IssueExactCache::load(&sync_repo_path);
+                        match cache.full_sync(&sync_repo_path) {
+                            Ok(result) => {
+                                let _ = cache.save(&sync_repo_path);
+                                tracing::info!(
+                                    category = "issue_cache",
+                                    updated = result.updated_count,
+                                    deleted = result.deleted_count,
+                                    duration_ms = result.duration_ms,
+                                    "Auto full sync completed on project open"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    category = "issue_cache",
+                                    error = %e,
+                                    "Auto full sync failed on project open (cache preserved)"
+                                );
+                            }
+                        }
+                    });
+                }
+
                 return Ok(OpenProjectResult {
                     info,
                     action: OpenProjectAction::Opened,
