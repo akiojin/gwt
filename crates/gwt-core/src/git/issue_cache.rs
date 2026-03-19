@@ -189,7 +189,22 @@ impl IssueExactCache {
         let start = std::time::Instant::now();
         let since = self.sync_state.last_issue_updated_at.as_deref();
 
-        let issues = super::issue::fetch_all_issues_via_rest(repo_path, since)?;
+        let issues = match super::issue::fetch_all_issues_via_rest(repo_path, since) {
+            Ok(issues) => issues,
+            Err(e) => {
+                let now = now_millis();
+                let result = SyncResult {
+                    sync_type: SyncType::Diff,
+                    updated_count: 0,
+                    deleted_count: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    completed_at: now,
+                    error: Some(e.clone()),
+                };
+                self.sync_state.last_result = Some(result.clone());
+                return Err(e);
+            }
+        };
 
         let mut updated_count = 0u32;
         let mut max_updated_at: Option<String> = self.sync_state.last_issue_updated_at.clone();

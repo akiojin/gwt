@@ -758,6 +758,7 @@
   }
 
   async function syncIssueCache(mode: "diff" | "full") {
+    const startedAt = Date.now();
     issueCacheSyncing = true;
     issueCacheSyncResult = null;
     try {
@@ -769,6 +770,14 @@
       issueCacheSyncResult = result;
     } catch (e) {
       console.error("Issue cache sync failed:", e);
+      issueCacheSyncResult = {
+        syncType: mode,
+        updatedCount: 0,
+        deletedCount: 0,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        completedAt: Date.now(),
+        error: toErrorMessage(e),
+      };
     } finally {
       issueCacheSyncing = false;
     }
@@ -1013,9 +1022,15 @@
                     </button>
                   </div>
                   {#if issueCacheSyncResult}
-                    <span class="field-hint">
-                      Updated: {issueCacheSyncResult.updatedCount}, Deleted: {issueCacheSyncResult.deletedCount}, Duration: {issueCacheSyncResult.durationMs}ms
-                    </span>
+                    {#if issueCacheSyncResult.error}
+                      <span class="field-hint field-hint-warning">
+                        Sync failed: {issueCacheSyncResult.error}
+                      </span>
+                    {:else}
+                      <span class="field-hint">
+                        Updated: {issueCacheSyncResult.updatedCount}, Deleted: {issueCacheSyncResult.deletedCount}, Duration: {issueCacheSyncResult.durationMs}ms
+                      </span>
+                    {/if}
                   {/if}
                 </div>
               </div>

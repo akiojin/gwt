@@ -13,7 +13,7 @@ use gwt_core::{
     config::ProfilesConfig,
     git::{
         create_linked_branch, fetch_issue_detail, fetch_issues_with_options, find_branch_for_issue,
-        find_branches_for_issues, get_spec_issue_detail, is_gh_cli_authenticated,
+        find_branches_for_issues, is_gh_cli_authenticated,
         is_gh_cli_available, search_issues_with_query,
     },
     worktree::WorktreeManager,
@@ -572,6 +572,7 @@ fn extract_issue_number_from_branch(branch: &str) -> Option<u64> {
     None
 }
 
+#[cfg(test)]
 fn is_issue_not_found_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("could not resolve to an issue")
@@ -619,19 +620,8 @@ fn fetch_branch_linked_issue_impl(
             url: entry.url,
         }));
     }
-
-    // Fallback to spec issue detail for backward compatibility
-    match get_spec_issue_detail(&repo_path, issue_number) {
-        Ok(detail) => Ok(Some(BranchLinkedIssueInfo {
-            number: detail.number,
-            title: detail.title,
-            updated_at: detail.updated_at,
-            labels: detail.labels,
-            url: detail.url,
-        })),
-        Err(err) if is_issue_not_found_error(&err) => Ok(None),
-        Err(err) => Err(StructuredError::internal(&err, "fetch_branch_linked_issue")),
-    }
+    let _ = cache.save(&repo_path);
+    Ok(None)
 }
 
 /// Fetch issue linked to branch naming pattern (`issue-<number>`).
@@ -772,15 +762,21 @@ pub async fn bootstrap_issue_linkage(project_path: String) -> Result<u32, Struct
                 )
             })?;
 
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let branches: Vec<String> = stdout
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            link_store.bootstrap_from_branches(&branches);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(StructuredError::internal(
+                &format!("Failed to list branches: {}", stderr.trim()),
+                "bootstrap_issue_linkage",
+            ));
         }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let branches: Vec<String> = stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        link_store.bootstrap_from_branches(&branches);
 
         link_store
             .save(&repo_path)

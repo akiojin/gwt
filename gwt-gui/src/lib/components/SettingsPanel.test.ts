@@ -3170,4 +3170,35 @@ describe("SettingsPanel", () => {
       expect((rendered.getByRole("button", { name: "Diff Sync" }) as HTMLButtonElement).disabled).toBe(false);
     });
   });
+
+  it("shows a sync error and re-enables buttons when issue cache sync fails", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "sync_issue_cache") throw new Error("sync failed");
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Diff Sync" })).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Diff Sync" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("sync_issue_cache", {
+        projectPath: "/tmp/test-project",
+        mode: "diff",
+      });
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Sync failed: sync failed")).toBeTruthy();
+      expect((rendered.getByRole("button", { name: "Diff Sync" }) as HTMLButtonElement).disabled).toBe(false);
+      expect((rendered.getByRole("button", { name: "Full Sync" }) as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
 });

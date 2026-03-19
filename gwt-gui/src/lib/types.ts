@@ -503,21 +503,34 @@ export interface BranchLinkedIssueInfo {
 
 // ── Issue cache sync (#1714) ──
 
+/** Sync mode accepted by the issue cache maintenance commands. */
 export type SyncType = "diff" | "full";
 
+/** Result returned by `sync_issue_cache`. Timestamp values use Unix milliseconds. */
 export interface SyncResult {
+  /** Sync mode that produced this result. */
   syncType: SyncType;
+  /** Number of cache entries added or refreshed during the sync. */
   updatedCount: number;
+  /** Number of stale cache entries removed during the sync. */
   deletedCount: number;
+  /** Total sync duration in milliseconds. */
   durationMs: number;
+  /** Completion timestamp in Unix milliseconds. */
   completedAt: number;
+  /** Error message when the sync failed, otherwise `null`. */
   error: string | null;
 }
 
+/** Persisted watermark and last-result state for issue cache synchronization. */
 export interface IssueCacheSyncState {
+  /** Unix-millis timestamp of the most recent completed diff sync, or `null`. */
   lastDiffSyncAt: number | null;
+  /** Unix-millis timestamp of the most recent completed full sync, or `null`. */
   lastFullSyncAt: number | null;
+  /** ISO 8601 `updated_at` watermark used for the next diff sync, or `null`. */
   lastIssueUpdatedAt: string | null;
+  /** Most recent sync result, or `null` when no sync has run yet. */
   lastResult: SyncResult | null;
 }
 
