@@ -171,7 +171,10 @@ mod tests {
     }
 }
 
-#[instrument(skip_all, fields(command = "get_git_change_summary", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "get_git_change_summary", project_path, branch)
+)]
 #[tauri::command]
 pub fn get_git_change_summary(
     project_path: String,
@@ -194,7 +197,10 @@ pub fn get_git_change_summary(
         .map_err(|e| StructuredError::from_gwt_error(&e, "get_git_change_summary"))
 }
 
-#[instrument(skip_all, fields(command = "get_branch_diff_files", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "get_branch_diff_files", project_path, branch)
+)]
 #[tauri::command]
 pub fn get_branch_diff_files(
     project_path: String,
@@ -245,7 +251,10 @@ pub fn get_branch_commits(
         .map_err(|e| StructuredError::from_gwt_error(&e, "get_branch_commits"))
 }
 
-#[instrument(skip_all, fields(command = "get_working_tree_status", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "get_working_tree_status", project_path, branch)
+)]
 #[tauri::command]
 pub fn get_working_tree_status(
     project_path: String,
