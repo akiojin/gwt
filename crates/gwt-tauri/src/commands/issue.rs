@@ -579,8 +579,7 @@ fn fetch_branch_linked_issue_impl(
         let project_root = Path::new(&project_path);
         let repo_path = resolve_repo_path_for_project_root(project_root)
             .map_err(|e| StructuredError::internal(&e, "fetch_branch_linked_issue"))?;
-        let link_store =
-            gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        let link_store = gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
         if let Some(link) = link_store.get_link(&branch) {
             Some(link.issue_number)
         } else {
@@ -668,9 +667,7 @@ pub async fn sync_issue_cache(
         Ok(result)
     })
     .await
-    .map_err(|e| {
-        StructuredError::internal(&format!("Task join failed: {e}"), "sync_issue_cache")
-    })?
+    .map_err(|e| StructuredError::internal(&format!("Task join failed: {e}"), "sync_issue_cache"))?
 }
 
 /// Get issue cache sync status. (#1714 FR-010)
@@ -707,8 +704,7 @@ pub async fn resolve_worktree_issue(
             .map_err(|e| StructuredError::internal(&e, "resolve_worktree_issue"))?;
 
         // 1. Check linkage store
-        let link_store =
-            gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        let link_store = gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
         let issue_number = link_store
             .get_link(&branch)
             .map(|link| link.issue_number)
@@ -733,25 +729,19 @@ pub async fn resolve_worktree_issue(
     })
     .await
     .map_err(|e| {
-        StructuredError::internal(
-            &format!("Task join failed: {e}"),
-            "resolve_worktree_issue",
-        )
+        StructuredError::internal(&format!("Task join failed: {e}"), "resolve_worktree_issue")
     })?
 }
 
 /// Bootstrap worktree-issue linkage for all branches. (#1714 FR-007)
 #[tauri::command]
-pub async fn bootstrap_issue_linkage(
-    project_path: String,
-) -> Result<u32, StructuredError> {
+pub async fn bootstrap_issue_linkage(project_path: String) -> Result<u32, StructuredError> {
     tauri::async_runtime::spawn_blocking(move || {
         let project_root = Path::new(&project_path);
         let repo_path = resolve_repo_path_for_project_root(project_root)
             .map_err(|e| StructuredError::internal(&e, "bootstrap_issue_linkage"))?;
 
-        let mut link_store =
-            gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        let mut link_store = gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
         let before = link_store.links.len();
 
         // Get local branch names
@@ -785,10 +775,7 @@ pub async fn bootstrap_issue_linkage(
     })
     .await
     .map_err(|e| {
-        StructuredError::internal(
-            &format!("Task join failed: {e}"),
-            "bootstrap_issue_linkage",
-        )
+        StructuredError::internal(&format!("Task join failed: {e}"), "bootstrap_issue_linkage")
     })?
 }
 

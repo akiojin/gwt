@@ -126,8 +126,8 @@ impl WorktreeIssueLinkStore {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create linkage directory: {e}"))?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Serialization error: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| format!("Serialization error: {e}"))?;
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, &json).map_err(|e| format!("Failed to write linkage file: {e}"))?;
         fs::rename(&tmp, &path).map_err(|e| format!("Failed to rename linkage file: {e}"))?;
@@ -154,11 +154,7 @@ impl WorktreeIssueLinkStore {
                 branch_name: branch.to_string(),
                 issue_number,
                 source,
-                linked_at: self
-                    .links
-                    .get(branch)
-                    .map(|e| e.linked_at)
-                    .unwrap_or(now),
+                linked_at: self.links.get(branch).map(|e| e.linked_at).unwrap_or(now),
                 updated_at: now,
             },
         );
@@ -217,7 +213,10 @@ mod tests {
         let json = serde_json::to_string_pretty(&store).unwrap();
         let parsed: WorktreeIssueLinkStore = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.links.len(), 2);
-        assert_eq!(parsed.links["feature/issue-1"].source, LinkSource::BranchParse);
+        assert_eq!(
+            parsed.links["feature/issue-1"].source,
+            LinkSource::BranchParse
+        );
         assert_eq!(
             parsed.links["feature/issue-2"].source,
             LinkSource::GitHubLinkage
@@ -354,7 +353,10 @@ mod tests {
         let loaded = WorktreeIssueLinkStore::load(repo_path);
         assert_eq!(loaded.links.len(), 2);
         assert_eq!(loaded.links["feature/issue-10"].issue_number, 10);
-        assert_eq!(loaded.links["feature/issue-20"].source, LinkSource::GitHubLinkage);
+        assert_eq!(
+            loaded.links["feature/issue-20"].source,
+            LinkSource::GitHubLinkage
+        );
     }
 
     #[test]

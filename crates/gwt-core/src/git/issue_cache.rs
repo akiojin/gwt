@@ -162,11 +162,7 @@ impl IssueExactCache {
     /// 3. Online success → update cache, return entry
     /// 4. Online fail + cache hit → return stale cache (NFR-006)
     /// 5. Online fail + cache miss → return None
-    pub fn resolve(
-        &mut self,
-        repo_path: &Path,
-        issue_number: u64,
-    ) -> Option<IssueExactCacheEntry> {
+    pub fn resolve(&mut self, repo_path: &Path, issue_number: u64) -> Option<IssueExactCacheEntry> {
         // Fast path: cache hit
         if let Some(entry) = self.entries.get(&issue_number) {
             return Some(entry.clone());
