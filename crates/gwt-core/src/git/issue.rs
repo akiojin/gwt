@@ -2,16 +2,20 @@
 //!
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
-use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::path::Path;
-use std::process::{Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::Path,
+    process::{Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
-use super::gh_cli::{gh_command, is_gh_available, run_gh_output_with_repair};
-use super::remote::Remote;
-use super::repository::{find_bare_repo_in_dir, is_git_repo};
+use super::{
+    gh_cli::{gh_command, is_gh_available, run_gh_output_with_repair},
+    remote::Remote,
+    repository::{find_bare_repo_in_dir, is_git_repo},
+};
 
 // `gh issue list --json comments` returns at most this many comments per issue.
 const GH_COMMENTS_PREVIEW_LIMIT: u32 = 100;
@@ -1411,9 +1415,11 @@ pub fn create_linked_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
         let output = crate::process::command("git")

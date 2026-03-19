@@ -5,16 +5,16 @@
 //! - Gemini: `<project>/.gemini/skills`
 //! - Claude: `<project>/.claude/{skills,commands,hooks}` + `<project>/.claude/settings.local.json`
 
-use super::Settings;
-use crate::error::GwtError;
-use crate::process::command;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use std::path::{Path, PathBuf};
-use tracing::{info, warn};
-
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use tracing::{info, warn};
+
+use super::Settings;
+use crate::{error::GwtError, process::command};
 
 // Auto-generated skill catalog from build.rs (parses plugins/gwt/skills/*/SKILL.md).
 include!(concat!(env!("OUT_DIR"), "/skill_catalog_generated.rs"));
@@ -2247,6 +2247,8 @@ OPENAI_API_KEY = "legacy-key"
         assert!(codex_pr_skill.contains("git merge-base --is-ancestor <merge_commit> HEAD"));
         assert!(codex_pr_skill.contains("git rev-list --count origin/<head>..HEAD"));
         assert!(codex_pr_skill.contains("MANUAL CHECK"));
+        assert!(codex_pr_skill.contains("REST-first"));
+        assert!(codex_pr_skill.contains("pulls?state=all&head=<owner>:<head>"));
         assert!(codex_pr_skill.contains("repos/<owner>/<repo>/pulls"));
 
         let claude_pr_skill = std::fs::read_to_string(
@@ -2260,6 +2262,8 @@ OPENAI_API_KEY = "legacy-key"
         assert!(claude_pr_skill.contains("git merge-base --is-ancestor <merge_commit> HEAD"));
         assert!(claude_pr_skill.contains("git rev-list --count origin/<head>..HEAD"));
         assert!(claude_pr_skill.contains("MANUAL CHECK"));
+        assert!(claude_pr_skill.contains("REST-first"));
+        assert!(claude_pr_skill.contains("pulls?state=all&head=<owner>:<head>"));
 
         let claude_pr_command = std::fs::read_to_string(
             temp.path()
@@ -2269,10 +2273,11 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(claude_pr_command
-            .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
+            .contains("compare `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before concluding `NO ACTION`."));
         assert!(claude_pr_command
             .contains("merge `origin/$base` into the current branch and push before PR creation."));
         assert!(claude_pr_command.contains("REST pull-request endpoint"));
+        assert!(claude_pr_command.contains("REST list/view endpoints as the primary transport"));
 
         let claude_pr_check_command = std::fs::read_to_string(
             temp.path()
@@ -2282,9 +2287,56 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(claude_pr_check_command
-            .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
+            .contains("compare `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO ACTION`."));
         assert!(claude_pr_check_command
             .contains("return `MANUAL CHECK` instead of inferring `CREATE PR`."));
+        assert!(claude_pr_check_command.contains("REST pull-request list endpoint"));
+
+        let codex_pr_check_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-pr-check")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(codex_pr_check_skill.contains("REST-first"));
+        assert!(codex_pr_check_skill.contains("pulls?state=all&head=<owner>:<head>"));
+
+        let codex_pr_check_script = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-pr-check")
+                .join("scripts")
+                .join("check_pr_status.py"),
+        )
+        .unwrap();
+        assert!(codex_pr_check_script.contains("pulls?state=all&head={head_filter}&per_page=100"));
+        assert!(codex_pr_check_script.contains("repos/{repo_slug}/pulls/{pr_number}"));
+
+        let codex_pr_fix_skill = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-pr-fix")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(codex_pr_fix_skill.contains("REST-first"));
+        assert!(codex_pr_fix_skill.contains("GraphQL remains only for unresolved review threads"));
+
+        let codex_pr_fix_script = std::fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("skills")
+                .join("gwt-pr-fix")
+                .join("scripts")
+                .join("inspect_pr_checks.py"),
+        )
+        .unwrap();
+        assert!(codex_pr_fix_script.contains("commits/{head_sha}/check-runs"));
+        assert!(codex_pr_fix_script.contains("repos/{repo_slug}/issues/{pr_value}/comments"));
     }
 
     #[test]

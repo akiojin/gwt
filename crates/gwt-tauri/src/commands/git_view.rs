@@ -1,15 +1,18 @@
 //! GitView commands for branch diff, commits, working tree, and stash
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use gwt_core::git::{
-    self, FileChange, FileDiff, GitChangeSummary, GitViewCommit, Remote, StashEntry,
-    WorkingTreeEntry,
+use std::path::{Path, PathBuf};
+
+use gwt_core::{
+    git::{
+        self, FileChange, FileDiff, GitChangeSummary, GitViewCommit, Remote, StashEntry,
+        WorkingTreeEntry,
+    },
+    worktree::WorktreeManager,
+    StructuredError,
 };
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
-use std::path::Path;
-use std::path::PathBuf;
 use tracing::instrument;
+
+use crate::commands::project::resolve_repo_path_for_project_root;
 
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
     let Some((first, rest)) = branch.split_once('/') else {

@@ -1,14 +1,18 @@
 //! Migration executor (gwt-spec issue T806-T812, T815, T901-T909)
 
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Component, Path, PathBuf},
+};
+
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
+
 use super::{
     backup::create_backup, config::MigrationConfig, error::MigrationError, state::MigrationState,
     validator::validate_migration,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use serde::{Deserialize, Serialize};
-use std::ffi::{OsStr, OsString};
-use std::path::{Component, Path, PathBuf};
-use tracing::{debug, info, warn};
 
 /// Information about a worktree being migrated
 #[derive(Debug, Clone)]
@@ -1258,8 +1262,9 @@ pub fn derive_bare_repo_name(url_or_path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_derive_bare_repo_name() {

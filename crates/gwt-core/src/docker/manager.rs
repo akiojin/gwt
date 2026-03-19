@@ -3,18 +3,23 @@
 //! Manages Docker containers for worktrees, including startup, shutdown,
 //! and executing commands inside containers.
 
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
+
 use chrono::{DateTime, Utc};
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use serde_yaml::Value;
 use tracing::{debug, info, instrument, warn};
 
-use super::container::{ContainerInfo, ContainerStatus};
-use super::detector::DockerFileType;
-use super::port::PortAllocator;
+use super::{
+    container::{ContainerInfo, ContainerStatus},
+    detector::DockerFileType,
+    port::PortAllocator,
+};
 use crate::{GwtError, Result};
-use serde_yaml::Value;
 
 fn extract_port_envs_from_compose(content: &str) -> Vec<(String, u16)> {
     extract_port_envs_from_compose_filtered(content, None)
@@ -1279,8 +1284,9 @@ impl DockerManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::{Duration, SystemTime};
+
+    use super::*;
 
     // T-202: Container name generation test
     #[test]

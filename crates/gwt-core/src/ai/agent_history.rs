@@ -7,15 +7,18 @@
 //! - New format: ~/.gwt/agent-history.toml
 //! - Legacy format: ~/.config/gwt/agent-history.json
 
-use crate::config::migration::{ensure_config_dir, write_atomic};
+use std::{
+    collections::HashMap,
+    fs, io,
+    path::{Path, PathBuf},
+};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::{debug, info, warn};
+
+use crate::config::migration::{ensure_config_dir, write_atomic};
 
 /// Error type for agent history operations
 #[derive(Error, Debug)]
@@ -300,8 +303,9 @@ impl AgentHistoryStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     // T101: Test AgentHistoryEntry serialization/deserialization
     #[test]

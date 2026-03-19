@@ -1,15 +1,19 @@
 //! Project structure index commands backed by ChromaDB (Python runtime).
 
-use crate::commands::project::{resolve_project_root, resolve_repo_path_for_project_root};
+use std::{
+    collections::HashMap,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+};
+
 use gwt_core::process::command_os;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{instrument, warn};
 use uuid::Uuid;
+
+use crate::commands::project::{resolve_project_root, resolve_repo_path_for_project_root};
 
 const CHROMA_VENV_DIR: &str = "chroma-venv";
 const CHROMA_RUNTIME_PIP_DEPS: &[&str] = &["chromadb"];
@@ -932,9 +936,11 @@ pub fn spawn_background_index(project_root: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     fn managed_chroma_python() -> Option<PathBuf> {
         let venv_dir = chroma_venv_dir().ok()?;

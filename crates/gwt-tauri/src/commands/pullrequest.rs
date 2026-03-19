@@ -1,22 +1,27 @@
 //! Pull Request status commands for gwt-spec issue workflows
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use chrono::{DateTime, Utc};
-use gwt_core::git::gh_cli::{run_gh_output_with_repair, run_gh_output_with_timeout_and_repair};
-use gwt_core::git::graphql;
-use gwt_core::git::{
-    is_gh_cli_authenticated, is_gh_cli_available, Branch, PrCache, PrListItem, PrStatusInfo,
-    Remote, ReviewComment, ReviewInfo, WorkflowRunInfo,
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    thread,
+    time::{Duration, Instant},
 };
-use gwt_core::StructuredError;
+
+use chrono::{DateTime, Utc};
+use gwt_core::{
+    git::{
+        gh_cli::{run_gh_output_with_repair, run_gh_output_with_timeout_and_repair},
+        graphql, is_gh_cli_authenticated, is_gh_cli_available, Branch, PrCache, PrListItem,
+        PrStatusInfo, Remote, ReviewComment, ReviewInfo, WorkflowRunInfo,
+    },
+    StructuredError,
+};
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tracing::{instrument, warn};
+
+use crate::commands::project::resolve_repo_path_for_project_root;
 
 /// gh CLI availability and authentication status
 #[derive(Debug, Clone, Serialize)]
@@ -1583,9 +1588,11 @@ pub async fn mark_pr_ready(project_path: String, pr_number: u64) -> Result<Strin
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
         let output = gwt_core::process::command("git")

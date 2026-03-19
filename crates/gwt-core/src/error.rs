@@ -9,8 +9,7 @@
 //! - E6xxx: Docker operation errors
 //! - E7xxx: Terminal operation errors
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::{path::PathBuf, sync::OnceLock};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

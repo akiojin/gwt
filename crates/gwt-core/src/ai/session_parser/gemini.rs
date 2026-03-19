@@ -1,12 +1,16 @@
 //! Gemini CLI session parser.
 
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use chrono::{DateTime, Utc};
+
 use super::{
     find_session_file, parse_json_session, AgentType, SessionListEntry, SessionParseError,
     SessionParser,
 };
-use chrono::{DateTime, Utc};
-use std::fs;
-use std::path::{Path, PathBuf};
 
 pub struct GeminiSessionParser {
     home_dir: PathBuf,
@@ -117,9 +121,11 @@ fn count_messages(json: &serde_json::Value) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     fn make_parser(home: &std::path::Path) -> GeminiSessionParser {
         GeminiSessionParser::new(home.to_path_buf())

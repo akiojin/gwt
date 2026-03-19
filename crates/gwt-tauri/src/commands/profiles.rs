@@ -1,9 +1,12 @@
 //! Profiles (env + AI settings) management commands
 
-use gwt_core::ai::{format_error_for_display, AIClient, ModelInfo};
-use gwt_core::config::ProfilesConfig;
-use gwt_core::StructuredError;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+use gwt_core::{
+    ai::{format_error_for_display, AIClient, ModelInfo},
+    config::ProfilesConfig,
+    StructuredError,
+};
 use tauri::AppHandle;
 use tracing::{error, instrument};
 
@@ -80,18 +83,22 @@ pub fn list_ai_models(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-    use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
+
     use tauri::{
         ipc::{CallbackFn, InvokeBody},
+        test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY},
         webview::InvokeRequest,
         WebviewWindowBuilder,
     };
+
+    use super::*;
 
     fn spawn_models_server(
         body: &'static str,

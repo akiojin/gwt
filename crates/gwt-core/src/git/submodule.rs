@@ -1,6 +1,7 @@
 //! Git submodule operations (gwt-spec issue US6)
 
 use std::path::Path;
+
 use tracing::{debug, warn};
 
 /// Check if repository has submodules (gwt-spec issue T1001)
@@ -78,9 +79,11 @@ pub fn list_submodules(repo_root: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_has_submodules_false() {

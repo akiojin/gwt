@@ -1,16 +1,18 @@
 //! Terminal pane: integrates PTY and scrollback
 
-use std::collections::HashMap;
-use std::io::Write;
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
-use std::path::Path;
-
-use super::pty::{PtyConfig, PtyHandle};
-use super::scrollback::ScrollbackFile;
-use super::AgentColor;
-use super::TerminalError;
 use tracing::instrument;
+
+use super::{
+    pty::{PtyConfig, PtyHandle},
+    scrollback::ScrollbackFile,
+    AgentColor, TerminalError,
+};
 
 /// Status of a terminal pane's child process.
 #[derive(Debug, Clone, PartialEq)]
@@ -227,9 +229,9 @@ impl TerminalPane {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, time::Duration};
+
     use super::*;
-    use std::sync::mpsc;
-    use std::time::Duration;
 
     /// Helper: read from PTY reader in a separate thread with timeout.
     fn read_with_timeout(
