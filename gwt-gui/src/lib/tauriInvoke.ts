@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { errorBus, type StructuredError } from "./errorBus";
+import { isProfilingEnabled, recordInvokeMetric } from "./profiling.svelte";
 
 function parseStructuredError(
   err: unknown,
@@ -34,9 +35,26 @@ export async function invoke<T>(
   command: string,
   args?: Record<string, unknown>,
 ): Promise<T> {
+  const profiling = isProfilingEnabled();
+  const start = profiling ? performance.now() : 0;
   try {
-    return await tauriInvoke<T>(command, args);
+    const result = await tauriInvoke<T>(command, args);
+    if (profiling) {
+      recordInvokeMetric({
+        command,
+        durationMs: performance.now() - start,
+        timestamp: Date.now(),
+      });
+    }
+    return result;
   } catch (err) {
+    if (profiling) {
+      recordInvokeMetric({
+        command,
+        durationMs: performance.now() - start,
+        timestamp: Date.now(),
+      });
+    }
     const structured = parseStructuredError(err, command);
     errorBus.emit(structured);
     throw structured;

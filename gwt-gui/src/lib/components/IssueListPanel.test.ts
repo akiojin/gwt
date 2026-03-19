@@ -1264,7 +1264,7 @@ describe("IssueListPanel", () => {
     const specIssue = makeIssue({
       number: 70,
       title: "Spec Issue",
-      body: "Some spec body",
+      body: "<!-- GWT_SPEC_ID:#70 -->\n\n## Artifact Index\n\n- `doc:spec.md`",
       labels: [{ name: "gwt-spec", color: "0075ca" }],
     });
 
@@ -1292,12 +1292,12 @@ describe("IssueListPanel", () => {
             url: "https://github.com/test/repo/issues/70",
             updatedAt: "2026-01-01T00:00:00Z",
             etag: "etag-70",
-            body: "body",
+            body: "<!-- GWT_SPEC_ID:#70 -->\n\n## Artifact Index\n\n- `doc:spec.md`",
             sections: {
-              spec: "s",
-              plan: "p",
-              tasks: "t",
-              tdd: "d",
+              spec: "artifact spec",
+              plan: "artifact plan",
+              tasks: "artifact tasks",
+              tdd: "artifact tdd",
               research: "",
               dataModel: "",
               quickstart: "",
@@ -1323,8 +1323,7 @@ describe("IssueListPanel", () => {
 
     await waitFor(() => {
       expect(rendered.getByText(/Back/)).toBeTruthy();
-      // The IssueSpecPanel component should be rendered for spec issues
-      // We can check the detail body exists
+      expect(rendered.getByText("artifact spec")).toBeTruthy();
       expect(rendered.container.querySelector(".ilp-detail-body")).toBeTruthy();
     });
   });

@@ -3,14 +3,21 @@
 //! Both `assistant_tools` and `agent_tools` use these shared utilities to avoid
 //! code duplication across the two tool-call dispatch modules.
 
+use std::path::Path;
+
+use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 use serde_json::{json, Value};
 
-use crate::commands::issue_spec::{
-    get_spec_issue_detail_cmd, upsert_spec_issue_cmd, SpecIssueSectionsData,
+use crate::{
+    commands::{
+        issue_spec::{
+            close_spec_issue_cmd, get_spec_issue_detail_cmd, list_spec_issue_artifact_comments_cmd,
+            upsert_spec_issue_artifact_comment_cmd, upsert_spec_issue_cmd, SpecIssueSectionsData,
+        },
+        terminal::{capture_scrollback_tail_from_state, send_keys_to_pane_from_state},
+    },
+    state::AppState,
 };
-use crate::commands::terminal::{capture_scrollback_tail_from_state, send_keys_to_pane_from_state};
-use crate::state::AppState;
-use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 
 // ── Tool name constants (shared tools) ──────────────────────────────
 
@@ -30,6 +37,10 @@ pub const TOOL_SEND_KEYS_TO_PANE: &str = "send_keys_to_pane";
 pub const TOOL_CAPTURE_SCROLLBACK_TAIL: &str = "capture_scrollback_tail";
 pub const TOOL_GET_SPEC_ISSUE: &str = "get_spec_issue";
 pub const TOOL_UPSERT_SPEC_ISSUE: &str = "upsert_spec_issue";
+pub const TOOL_SEARCH_SPEC_ISSUES: &str = "search_spec_issues";
+pub const TOOL_LIST_SPEC_ARTIFACTS: &str = "list_spec_issue_artifacts";
+pub const TOOL_UPSERT_SPEC_ARTIFACT: &str = "upsert_spec_issue_artifact";
+pub const TOOL_CLOSE_SPEC_ISSUE: &str = "close_spec_issue";
 
 // ── Argument helpers ────────────────────────────────────────────────
 
@@ -290,13 +301,93 @@ pub fn shared_tool_definitions_for_mode(access_mode: ToolAccessMode) -> Vec<Tool
         });
     }
 
+    if is_shared_tool_allowed(TOOL_SEARCH_SPEC_ISSUES, access_mode) {
+        tools.push(ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_SEARCH_SPEC_ISSUES.to_string(),
+                description: "Search gwt-spec issues by query.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query text" },
+                        "limit": { "type": "integer", "description": "Maximum number of results (max 20)", "minimum": 1, "maximum": 20 }
+                    },
+                    "required": ["query"]
+                }),
+            },
+        });
+    }
+
+    if is_shared_tool_allowed(TOOL_LIST_SPEC_ARTIFACTS, access_mode) {
+        tools.push(ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_LIST_SPEC_ARTIFACTS.to_string(),
+                description: "List spec artifact comments for an issue.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "issue_number": { "type": "integer", "minimum": 1 },
+                        "kind": { "type": "string", "enum": ["doc", "contract", "checklist"] }
+                    },
+                    "required": ["issue_number"]
+                }),
+            },
+        });
+    }
+
+    if is_shared_tool_allowed(TOOL_UPSERT_SPEC_ARTIFACT, access_mode) {
+        tools.push(ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_UPSERT_SPEC_ARTIFACT.to_string(),
+                description: "Create or update a spec artifact comment.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "issue_number": { "type": "integer", "minimum": 1 },
+                        "kind": { "type": "string", "enum": ["doc", "contract", "checklist"] },
+                        "artifact_name": { "type": "string" },
+                        "content": { "type": "string" },
+                        "expected_etag": { "type": "string" }
+                    },
+                    "required": ["issue_number", "kind", "artifact_name", "content"]
+                }),
+            },
+        });
+    }
+
+    if is_shared_tool_allowed(TOOL_CLOSE_SPEC_ISSUE, access_mode) {
+        tools.push(ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_CLOSE_SPEC_ISSUE.to_string(),
+                description: "Close a spec issue.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "issue_number": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["issue_number"]
+                }),
+            },
+        });
+    }
+
     tools
 }
 
 pub fn is_shared_tool_allowed(tool_name: &str, access_mode: ToolAccessMode) -> bool {
     match tool_name {
-        TOOL_CAPTURE_SCROLLBACK_TAIL | TOOL_GET_SPEC_ISSUE => true,
-        TOOL_SEND_KEYS_TO_PANE | TOOL_UPSERT_SPEC_ISSUE => access_mode.allows_write(),
+        TOOL_CAPTURE_SCROLLBACK_TAIL
+        | TOOL_GET_SPEC_ISSUE
+        | TOOL_SEARCH_SPEC_ISSUES
+        | TOOL_LIST_SPEC_ARTIFACTS => true,
+        TOOL_SEND_KEYS_TO_PANE
+        | TOOL_UPSERT_SPEC_ISSUE
+        | TOOL_UPSERT_SPEC_ARTIFACT
+        | TOOL_CLOSE_SPEC_ISSUE => access_mode.allows_write(),
         _ => false,
     }
 }
@@ -320,14 +411,17 @@ pub fn execute_shared_tool_with_mode(
     access_mode: ToolAccessMode,
 ) -> Option<Result<String, String>> {
     match call.name.as_str() {
-        TOOL_SEND_KEYS_TO_PANE if !access_mode.allows_write() => Some(Err(format!(
-            "Tool {} is not available in read-only mode",
-            call.name
-        ))),
-        TOOL_UPSERT_SPEC_ISSUE if !access_mode.allows_write() => Some(Err(format!(
-            "Tool {} is not available in read-only mode",
-            call.name
-        ))),
+        TOOL_SEND_KEYS_TO_PANE
+        | TOOL_UPSERT_SPEC_ISSUE
+        | TOOL_UPSERT_SPEC_ARTIFACT
+        | TOOL_CLOSE_SPEC_ISSUE
+            if !access_mode.allows_write() =>
+        {
+            Some(Err(format!(
+                "Tool {} is not available in read-only mode",
+                call.name
+            )))
+        }
         TOOL_SEND_KEYS_TO_PANE => {
             let result = (|| {
                 let pane_id = get_required_string_any(args, &["pane_id", "paneId"])?;
@@ -389,6 +483,84 @@ pub fn execute_shared_tool_with_mode(
                 .map_err(|e| e.message)?;
                 serde_json::to_string(&detail)
                     .map_err(|e| format!("Failed to serialize result: {e}"))
+            })();
+            Some(result)
+        }
+        TOOL_SEARCH_SPEC_ISSUES => {
+            let result = (|| {
+                let query = get_required_string_any(args, &["query"])?;
+                let limit = get_optional_u64_any(args, &["limit"]).unwrap_or(10).min(20) as u32;
+                let repo_path = crate::commands::project::resolve_repo_path_for_project_root(
+                    Path::new(project_path),
+                )
+                .map_err(|e| format!("Failed to resolve repository path: {e}"))?;
+                let issues = gwt_core::git::search_issues_with_query(
+                    &repo_path, query, limit, "open", false, "spec",
+                )
+                .map_err(|e| format!("Failed to search spec issues: {e}"))?;
+                let items: Vec<serde_json::Value> = issues
+                    .into_iter()
+                    .map(|issue| {
+                        json!({
+                            "number": issue.number,
+                            "title": issue.title,
+                            "state": issue.state,
+                            "updatedAt": issue.updated_at,
+                            "url": issue.html_url,
+                            "labels": issue.labels.into_iter().map(|l| l.name).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                serde_json::to_string(&json!({ "issues": items }))
+                    .map_err(|e| format!("Failed to serialize result: {e}"))
+            })();
+            Some(result)
+        }
+        TOOL_LIST_SPEC_ARTIFACTS => {
+            let result = (|| {
+                let issue_number = get_required_u64_any(args, &["issue_number", "issueNumber"])?;
+                let kind = get_optional_string_any(args, &["kind"]).map(str::to_string);
+                let artifacts = list_spec_issue_artifact_comments_cmd(
+                    project_path.to_string(),
+                    issue_number,
+                    kind,
+                )
+                .map_err(|e| e.message)?;
+                serde_json::to_string(&artifacts)
+                    .map_err(|e| format!("Failed to serialize result: {e}"))
+            })();
+            Some(result)
+        }
+        TOOL_UPSERT_SPEC_ARTIFACT => {
+            let result = (|| {
+                let issue_number = get_required_u64_any(args, &["issue_number", "issueNumber"])?;
+                let kind = get_required_string_any(args, &["kind"])?.to_string();
+                let artifact_name =
+                    get_required_string_any(args, &["artifact_name", "artifactName"])?.to_string();
+                let content = get_required_string_any(args, &["content"])?.to_string();
+                let expected_etag =
+                    get_optional_string_any(args, &["expected_etag", "expectedEtag"])
+                        .map(str::to_string);
+                let artifact = upsert_spec_issue_artifact_comment_cmd(
+                    project_path.to_string(),
+                    issue_number,
+                    kind,
+                    artifact_name,
+                    content,
+                    expected_etag,
+                )
+                .map_err(|e| e.message)?;
+                serde_json::to_string(&artifact)
+                    .map_err(|e| format!("Failed to serialize result: {e}"))
+            })();
+            Some(result)
+        }
+        TOOL_CLOSE_SPEC_ISSUE => {
+            let result = (|| {
+                let issue_number = get_required_u64_any(args, &["issue_number", "issueNumber"])?;
+                close_spec_issue_cmd(project_path.to_string(), issue_number)
+                    .map_err(|e| e.message)?;
+                Ok(json!({"ok": true, "issue_number": issue_number}).to_string())
             })();
             Some(result)
         }
@@ -460,7 +632,7 @@ mod tests {
 
     #[test]
     fn shared_tool_definitions_count() {
-        assert_eq!(shared_tool_definitions().len(), 4);
+        assert_eq!(shared_tool_definitions().len(), 8);
     }
 
     #[test]
@@ -470,15 +642,20 @@ mod tests {
             .map(|tool| tool.function.name)
             .collect();
 
-        assert_eq!(names.len(), 2);
+        assert_eq!(names.len(), 4);
         assert!(names.contains(&TOOL_CAPTURE_SCROLLBACK_TAIL.to_string()));
         assert!(names.contains(&TOOL_GET_SPEC_ISSUE.to_string()));
+        assert!(names.contains(&TOOL_SEARCH_SPEC_ISSUES.to_string()));
+        assert!(names.contains(&TOOL_LIST_SPEC_ARTIFACTS.to_string()));
         assert!(!names.contains(&TOOL_SEND_KEYS_TO_PANE.to_string()));
         assert!(!names.contains(&TOOL_UPSERT_SPEC_ISSUE.to_string()));
+        assert!(!names.contains(&TOOL_UPSERT_SPEC_ARTIFACT.to_string()));
+        assert!(!names.contains(&TOOL_CLOSE_SPEC_ISSUE.to_string()));
     }
 
     #[test]
     fn shared_tool_access_mode_marks_mutating_tools_as_disallowed_in_read_only() {
+        // Read-only tools are always allowed
         assert!(is_shared_tool_allowed(
             TOOL_CAPTURE_SCROLLBACK_TAIL,
             ToolAccessMode::ReadOnly
@@ -487,12 +664,29 @@ mod tests {
             TOOL_GET_SPEC_ISSUE,
             ToolAccessMode::ReadOnly
         ));
+        assert!(is_shared_tool_allowed(
+            TOOL_SEARCH_SPEC_ISSUES,
+            ToolAccessMode::ReadOnly
+        ));
+        assert!(is_shared_tool_allowed(
+            TOOL_LIST_SPEC_ARTIFACTS,
+            ToolAccessMode::ReadOnly
+        ));
+        // Mutating tools are disallowed in read-only mode
         assert!(!is_shared_tool_allowed(
             TOOL_SEND_KEYS_TO_PANE,
             ToolAccessMode::ReadOnly
         ));
         assert!(!is_shared_tool_allowed(
             TOOL_UPSERT_SPEC_ISSUE,
+            ToolAccessMode::ReadOnly
+        ));
+        assert!(!is_shared_tool_allowed(
+            TOOL_UPSERT_SPEC_ARTIFACT,
+            ToolAccessMode::ReadOnly
+        ));
+        assert!(!is_shared_tool_allowed(
+            TOOL_CLOSE_SPEC_ISSUE,
             ToolAccessMode::ReadOnly
         ));
     }

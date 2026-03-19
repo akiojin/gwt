@@ -4,20 +4,28 @@
 //! (v*), generates a simple grouped changelog from commit subjects, and (when AI is
 //! configured) generates a summary in the configured language.
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::state::{AppState, VersionHistoryCacheEntry};
-use gwt_core::ai::{format_error_for_display, AIClient, AIError, ChatMessage};
-use gwt_core::config::ProfilesConfig;
-use gwt_core::git::Remote;
-use gwt_core::StructuredError;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::{Path, PathBuf},
+};
+
+use gwt_core::{
+    ai::{format_error_for_display, AIClient, AIError, ChatMessage},
+    config::ProfilesConfig,
+    git::Remote,
+    StructuredError,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::{Path, PathBuf};
-use tauri::Manager;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tracing::instrument;
+
+use crate::{
+    commands::project::resolve_repo_path_for_project_root,
+    state::{AppState, VersionHistoryCacheEntry},
+};
 
 /// Compute the cache file path for a given repo path.
 ///
@@ -107,6 +115,7 @@ struct VersionHistoryUpdatedPayload {
     pub result: VersionHistoryResult,
 }
 
+#[instrument(skip_all, fields(command = "list_project_versions", project_path))]
 #[tauri::command]
 pub fn list_project_versions(
     project_path: String,
@@ -159,6 +168,10 @@ pub fn list_project_versions(
     Ok(ProjectVersions { items })
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "get_project_version_history", project_path)
+)]
 #[tauri::command]
 pub fn get_project_version_history(
     project_path: String,
@@ -1132,6 +1145,7 @@ pub fn prefetch_version_history_inner(project_path: &str, app_handle: &AppHandle
 /// This command is fire-and-forget: uncached versions are generated in the background
 /// using the existing `get_project_version_history` flow (which handles inflight
 /// deduplication and semaphore-based concurrency limiting).
+#[instrument(skip_all, fields(command = "prefetch_version_history", project_path))]
 #[tauri::command]
 pub fn prefetch_version_history(
     project_path: String,
@@ -1160,13 +1174,13 @@ fn is_unborn_head(repo_path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, fs, path::Path};
+
+    use gwt_core::config::{AISettings, Profile};
+    use tempfile::TempDir;
+
     use super::*;
     use crate::commands::{TestEnvGuard, ENV_LOCK};
-    use gwt_core::config::{AISettings, Profile};
-    use std::collections::HashMap;
-    use std::fs;
-    use std::path::Path;
-    use tempfile::TempDir;
 
     fn init_git_repo(path: &Path) {
         let out = gwt_core::process::command("git")

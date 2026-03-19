@@ -1,4 +1,5 @@
 {
+  "hooks": {},
   "enabledPlugins": {
     "cli-design@akiojin-skills": true,
     "code-review@claude-plugins-official": true,

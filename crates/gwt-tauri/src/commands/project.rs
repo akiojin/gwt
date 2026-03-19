@@ -1,23 +1,24 @@
 //! Project/repo management commands
 
-use crate::state::AppState;
-use gwt_core::config::{
-    repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
+use std::{fs, io::Read, path::Path, process::Stdio};
+
+use gwt_core::{
+    config::{
+        repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
+    },
+    git::{self, Branch},
+    migration::{
+        derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig,
+        MigrationState,
+    },
+    StructuredError,
 };
-use gwt_core::git::{self, Branch};
-use gwt_core::migration::{
-    derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig, MigrationState,
-};
-use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::process::Stdio;
-use std::{fs, io::Read};
-use tauri::Manager;
-use tauri::State;
-use tauri::{AppHandle, Emitter};
-use tracing::warn;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tracing::{instrument, warn};
 use uuid::Uuid;
+
+use crate::state::AppState;
 
 /// Serializable project info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +174,7 @@ fn dir_is_empty(path: &Path) -> bool {
 }
 
 /// Probe a path and return how the GUI should handle it.
+#[instrument(skip_all, fields(command = "probe_path"))]
 #[tauri::command]
 pub fn probe_path(path: String) -> ProbePathResult {
     let p = Path::new(&path);
@@ -238,6 +240,7 @@ pub fn probe_path(path: String) -> ProbePathResult {
 }
 
 /// Open a project (set project_path in AppState)
+#[instrument(skip_all, fields(command = "open_project", window_label = window.label()))]
 #[tauri::command]
 pub fn open_project(
     window: tauri::Window,
@@ -349,6 +352,7 @@ pub fn open_project(
 }
 
 /// Get current project info from state
+#[instrument(skip_all, fields(command = "get_project_info", window_label = window.label()))]
 #[tauri::command]
 pub fn get_project_info(window: tauri::Window, state: State<AppState>) -> Option<ProjectInfo> {
     let path_str = state.project_for_window(window.label())?;
@@ -371,6 +375,7 @@ pub fn get_project_info(window: tauri::Window, state: State<AppState>) -> Option
 }
 
 /// Close the current window's project (clear window-scoped state)
+#[instrument(skip_all, fields(command = "close_project", window_label = window.label()))]
 #[tauri::command]
 pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<(), StructuredError> {
     state.clear_project_for_window(window.label());
@@ -379,6 +384,7 @@ pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<()
 }
 
 /// Check if a path is a git repository
+#[instrument(skip_all, fields(command = "is_git_repo"))]
 #[tauri::command]
 pub fn is_git_repo(path: String) -> bool {
     git::is_git_repo(Path::new(&path))
@@ -481,6 +487,7 @@ fn extract_percent(s: &str) -> Option<u8> {
 
 /// Create a new project by bare-cloning a GitHub repository into `<parent>/<repo>.git`
 /// and then opening it (updating window-scoped project state).
+#[instrument(skip_all, fields(command = "create_project", window_label = window.label()))]
 #[tauri::command]
 pub fn create_project(
     window: tauri::Window,
@@ -658,6 +665,7 @@ fn encode_migration_state(state: &MigrationState) -> (String, Option<usize>, Opt
 }
 
 /// Start a bare migration job for a normal repository (gwt-spec issue US7).
+#[instrument(skip_all, fields(command = "start_migration_job", window_label = window.label()))]
 #[tauri::command]
 pub fn start_migration_job(
     window: tauri::Window,
@@ -751,6 +759,7 @@ pub fn start_migration_job(
 }
 
 /// Quit the app (used by forced migration refusal).
+#[instrument(skip_all, fields(command = "quit_app"))]
 #[tauri::command]
 pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), StructuredError> {
     crate::app::cleanup_pty_processes(&state);
@@ -760,6 +769,7 @@ pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), Str
 }
 
 /// Cancel the "Press ⌘Q again to quit" confirmation state.
+#[instrument(skip_all, fields(command = "cancel_quit_confirm"))]
 #[tauri::command]
 pub fn cancel_quit_confirm(state: State<AppState>) {
     state.cancel_quit_confirm();
@@ -767,9 +777,10 @@ pub fn cancel_quit_confirm(state: State<AppState>) {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::config::Settings;
+
     use super::*;
     use crate::state::AppState;
-    use gwt_core::config::Settings;
 
     fn init_test_git_dir(root: &Path) {
         std::fs::create_dir_all(root.join(".git").join("info")).unwrap();

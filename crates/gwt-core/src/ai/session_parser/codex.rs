@@ -1,13 +1,17 @@
 //! Codex CLI session parser.
 
+use std::{
+    fs,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
+
+use chrono::{DateTime, Utc};
+
 use super::{
     find_session_file, parse_jsonl_session, AgentType, SessionListEntry, SessionParseError,
     SessionParser,
 };
-use chrono::{DateTime, Utc};
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
 
 pub struct CodexSessionParser {
     home_dir: PathBuf,
@@ -214,8 +218,9 @@ fn parse_codex_session_id(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn test_session_file_path_finds_payload_id() {

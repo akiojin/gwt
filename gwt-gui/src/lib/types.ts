@@ -743,9 +743,28 @@ export interface GitDashboard {
   unpushedCount: number;
 }
 
+export interface SpecProgressSummary {
+  issueNumber: number;
+  title: string;
+  phase: string;
+  tasksTotal: number;
+  tasksCompleted: number;
+}
+
+export interface CiStatusSummary {
+  prNumber: number;
+  prTitle: string;
+  checkStatus: "passing" | "failing" | "pending" | (string & {});
+  failingChecks: string[];
+  reviewStatus: "approved" | "changes_requested" | "pending" | (string & {});
+}
+
 export interface DashboardData {
   panes: PaneDashboard[];
   git: GitDashboard;
+  specProgress?: SpecProgressSummary | null;
+  ciStatus?: CiStatusSummary | null;
+  consultationCount?: number;
 }
 
 export interface AssistantState {
@@ -771,10 +790,12 @@ export interface AssistantState {
   currentStatus?:
     | "analyzing"
     | "awaiting_goal_confirmation"
+    | "awaiting_user_choice"
     | "monitoring"
     | "blocked"
     | (string & {})
     | null;
   blockers: string[];
   recommendedNextActions: string[];
+  queuedMessageCount: number;
 }

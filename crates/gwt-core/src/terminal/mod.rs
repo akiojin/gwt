@@ -8,8 +8,7 @@ pub mod runner;
 pub mod scrollback;
 pub mod shell;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 pub use error::TerminalError;
 

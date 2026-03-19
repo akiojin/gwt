@@ -6,8 +6,7 @@
 //! - Completion signal instructions
 //! - Adaptive context (directory tree, related tasks, etc.)
 
-use super::scanner::RepositoryScanResult;
-use super::task::Task;
+use super::{scanner::RepositoryScanResult, task::Task};
 
 /// Builder for sub-agent prompts
 pub struct PromptBuilder {
@@ -90,9 +89,11 @@ impl PromptBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::scanner::{BuildSystem, RepositoryScanResult};
-    use crate::agent::task::Task;
-    use crate::agent::types::TaskId;
+    use crate::agent::{
+        scanner::{BuildSystem, RepositoryScanResult},
+        task::Task,
+        types::TaskId,
+    };
 
     fn make_scan_result() -> RepositoryScanResult {
         RepositoryScanResult {

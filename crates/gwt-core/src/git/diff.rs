@@ -1,10 +1,14 @@
 //! Git diff and branch comparison operations for GitView
 
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
+
 use super::{is_bare_repository, Repository};
 use crate::error::{GwtError, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 
 const DIFF_LINE_LIMIT: usize = 1000;
 const DEFAULT_BASE_BRANCH_CANDIDATES: [&str; 3] = ["main", "master", "develop"];
@@ -702,9 +706,11 @@ pub fn get_git_change_summary(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
         let output = crate::process::command("git")

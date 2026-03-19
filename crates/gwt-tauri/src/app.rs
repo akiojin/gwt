@@ -1,22 +1,21 @@
 //! Tauri app wiring (builder configuration + run event handling)
 
-use crate::state::AppState;
-use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Duration;
-use tauri::Manager;
-use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
-use tracing::{info, warn};
+use std::{
+    collections::HashMap,
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 
 #[cfg(not(test))]
 use gwt_core::config::os_env;
-
-#[cfg(not(test))]
-use tokio::io::AsyncReadExt;
-
+use tauri::{Emitter, EventTarget, Manager, WebviewWindowBuilder};
 #[cfg(not(test))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+#[cfg(not(test))]
+use tokio::io::AsyncReadExt;
+use tracing::{info, warn};
+
+use crate::state::AppState;
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
@@ -410,6 +409,32 @@ pub fn build_app(
 
                 // Project-scoped registration is executed when an agent is launched.
 
+                // Background task: frontend heartbeat watchdog (freeze detection)
+                {
+                    let watchdog_handle = _app.handle().clone();
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(Duration::from_secs(2));
+                        loop {
+                            interval.tick().await;
+                            let state = watchdog_handle.state::<AppState>();
+                            let elapsed = {
+                                let slot = state.last_heartbeat.lock().ok();
+                                slot.and_then(|guard| guard.map(|ts| ts.elapsed()))
+                            };
+                            if let Some(elapsed) = elapsed {
+                                if elapsed > Duration::from_secs(3) {
+                                    warn!(
+                                        category = "freeze_detection",
+                                        elapsed_ms = elapsed.as_millis(),
+                                        "Frontend heartbeat stale – possible UI freeze"
+                                    );
+                                    let _ = watchdog_handle.emit("freeze-detected", elapsed.as_millis() as u64);
+                                }
+                            }
+                        }
+                    });
+                }
+
                 // Background task: check gh CLI authentication (gwt-spec issue T009)
                 {
                     let app_handle = _app.handle().clone();
@@ -777,6 +802,8 @@ pub fn build_app(
             crate::commands::pullrequest::mark_pr_ready,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
+            crate::commands::system::heartbeat,
+            crate::commands::system::report_frontend_metrics,
             crate::commands::project_index::ensure_index_runtime,
             crate::commands::project_index::index_project_cmd,
             crate::commands::project_index::search_project_index_cmd,
@@ -1036,8 +1063,9 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
 
     #[test]
     fn should_prevent_window_close_when_not_quitting() {

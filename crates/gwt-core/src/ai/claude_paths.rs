@@ -27,8 +27,9 @@ pub(crate) fn encode_claude_project_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     #[test]
     fn encode_claude_project_path_replaces_separators() {

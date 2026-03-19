@@ -6,14 +6,17 @@
 //!     --qualities fast,balanced,accurate \
 //!     --output tests/voice_eval/latest-report.json
 
+use std::{
+    collections::HashMap,
+    env,
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::env;
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 const VOICE_MODELS_ENV: &str = "GWT_VOICE_MODEL_DIR";

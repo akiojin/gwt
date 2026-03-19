@@ -1,15 +1,21 @@
 //! Codex CLI Integration
 
-use super::trait_agent::{AgentCapabilities, AgentInfo, AgentTrait, TaskResult};
-use super::{command_exists, get_command_version};
-use crate::error::{GwtError, Result};
+use std::{
+    cmp::Ordering,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
 use async_trait::async_trait;
-use std::cmp::Ordering;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tokio::process::Command;
+
+use super::{
+    command_exists, get_command_version,
+    trait_agent::{AgentCapabilities, AgentInfo, AgentTrait, TaskResult},
+};
+use crate::error::{GwtError, Result};
 
 const DEFAULT_CODEX_MODEL_LATEST: &str = "gpt-5.4";
 const DEFAULT_CODEX_MODEL_LEGACY: &str = "gpt-5.2-codex";

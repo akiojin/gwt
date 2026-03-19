@@ -1,10 +1,14 @@
 //! Repository operations
 
+use std::{
+    borrow::Cow,
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
+
+use tracing::{debug, error, info, instrument, warn};
+
 use crate::error::{GwtError, Result};
-use std::borrow::Cow;
-use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
-use tracing::{debug, error, info, warn};
 
 /// Strip the Windows extended-length path prefix (`\\?\` or `//?/`)
 /// that Git may produce in worktree/rev-parse output on Windows.
@@ -258,6 +262,7 @@ impl Repository {
     /// gix may have issues (e.g., WSL).
     ///
     /// Issue #774: Added fallback to external git commands for WSL compatibility.
+    #[instrument(skip_all)]
     pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
 
@@ -348,6 +353,7 @@ impl Repository {
     /// gix may have issues (e.g., WSL).
     ///
     /// Issue #774: Added fallback to external git commands for WSL compatibility.
+    #[instrument(skip_all)]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         match gix::open(path) {
@@ -456,6 +462,7 @@ impl Repository {
     }
 
     /// Check if there are uncommitted changes (staged or unstaged)
+    #[instrument(skip(self))]
     pub fn has_uncommitted_changes(&self) -> Result<bool> {
         // Use external git for reliability with worktrees
         let output = crate::process::command("git")
@@ -480,6 +487,7 @@ impl Repository {
     }
 
     /// Check if there are unpushed commits
+    #[instrument(skip(self))]
     pub fn has_unpushed_commits(&self) -> Result<bool> {
         let output = crate::process::command("git")
             .args(["log", "@{u}..", "--oneline"])
@@ -493,6 +501,7 @@ impl Repository {
     }
 
     /// Get the current HEAD reference name
+    #[instrument(skip(self))]
     pub fn head_name(&self) -> Result<Option<String>> {
         if let Some(repo) = self.gix_repo() {
             match repo.head_name() {
@@ -529,6 +538,7 @@ impl Repository {
     }
 
     /// Get the current HEAD commit SHA
+    #[instrument(skip(self))]
     pub fn head_commit(&self) -> Result<String> {
         if let Some(repo) = self.gix_repo() {
             match repo.head_id() {
@@ -633,6 +643,7 @@ impl Repository {
     }
 
     /// Pull with fast-forward only
+    #[instrument(skip(self))]
     pub fn pull_fast_forward(&self) -> Result<()> {
         let output = crate::process::command("git")
             .args(["pull", "--ff-only"])
@@ -654,6 +665,7 @@ impl Repository {
     }
 
     /// Fetch all remotes
+    #[instrument(skip(self))]
     pub fn fetch_all(&self) -> Result<()> {
         let output = crate::process::command("git")
             .args(["fetch", "--all", "--prune"])
@@ -675,6 +687,7 @@ impl Repository {
     }
 
     /// List all worktrees using git worktree list
+    #[instrument(skip(self))]
     pub fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
         let output = crate::process::command("git")
             .args(["worktree", "list", "--porcelain"])
@@ -741,6 +754,7 @@ impl Repository {
     }
 
     /// Create a new worktree
+    #[instrument(skip(self))]
     pub fn create_worktree(&self, path: &Path, branch: &str, new_branch: bool) -> Result<()> {
         debug!(
             category = "git",
@@ -801,6 +815,7 @@ impl Repository {
     }
 
     /// Remove a worktree
+    #[instrument(skip(self))]
     pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         debug!(
             category = "git",
@@ -1168,8 +1183,9 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn is_valid_worktree_meta_dir_accepts_direct_child() {

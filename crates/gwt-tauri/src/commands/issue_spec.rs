@@ -1,15 +1,21 @@
 //! Issue-first spec commands
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use gwt_core::git::{
-    close_spec_issue, create_spec_issue, delete_spec_issue_artifact_comment, get_spec_issue_detail,
-    list_spec_issue_artifact_comments, sync_issue_to_project, update_spec_issue, upsert_spec_issue,
-    upsert_spec_issue_artifact_comment, ProjectSyncResult, SpecIssueArtifactComment,
-    SpecIssueArtifactKind, SpecIssueDetail, SpecIssueSections, SpecProjectPhase,
-};
-use gwt_core::StructuredError;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+use gwt_core::{
+    git::{
+        close_spec_issue, create_spec_issue, delete_spec_issue_artifact_comment,
+        get_spec_issue_detail, list_spec_issue_artifact_comments, sync_issue_to_project,
+        update_spec_issue, upsert_spec_issue, upsert_spec_issue_artifact_comment,
+        ProjectSyncResult, SpecIssueArtifactComment, SpecIssueArtifactKind, SpecIssueDetail,
+        SpecIssueSections, SpecProjectPhase,
+    },
+    StructuredError,
+};
+use serde::{Deserialize, Serialize};
+use tracing::instrument;
+
+use crate::commands::project::resolve_repo_path_for_project_root;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +100,7 @@ impl From<SpecIssueSections> for SpecIssueSectionsData {
 impl From<SpecIssueArtifactComment> for SpecIssueArtifactCommentData {
     fn from(value: SpecIssueArtifactComment) -> Self {
         let kind = match value.kind {
+            SpecIssueArtifactKind::Doc => "doc".to_string(),
             SpecIssueArtifactKind::Contract => "contract".to_string(),
             SpecIssueArtifactKind::Checklist => "checklist".to_string(),
         };
@@ -135,6 +142,7 @@ impl From<ProjectSyncResult> for SyncSpecIssueProjectResult {
     }
 }
 
+#[instrument(skip_all, fields(command = "create_spec_issue_cmd", project_path))]
 #[tauri::command]
 pub fn create_spec_issue_cmd(
     project_path: String,
@@ -149,6 +157,7 @@ pub fn create_spec_issue_cmd(
     Ok(detail.into())
 }
 
+#[instrument(skip_all, fields(command = "update_spec_issue_cmd", project_path))]
 #[tauri::command]
 pub fn update_spec_issue_cmd(
     project_path: String,
@@ -171,6 +180,7 @@ pub fn update_spec_issue_cmd(
     Ok(detail.into())
 }
 
+#[instrument(skip_all, fields(command = "upsert_spec_issue_cmd", project_path))]
 #[tauri::command]
 pub fn upsert_spec_issue_cmd(
     project_path: String,
@@ -193,6 +203,10 @@ pub fn upsert_spec_issue_cmd(
     Ok(detail.into())
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "get_spec_issue_detail_cmd", project_path, issue_number)
+)]
 #[tauri::command]
 pub fn get_spec_issue_detail_cmd(
     project_path: String,
@@ -206,6 +220,10 @@ pub fn get_spec_issue_detail_cmd(
     Ok(detail.into())
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "append_spec_contract_comment_cmd", project_path)
+)]
 #[tauri::command]
 pub fn append_spec_contract_comment_cmd(
     project_path: String,
@@ -224,6 +242,10 @@ pub fn append_spec_contract_comment_cmd(
     Ok(())
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "upsert_spec_issue_artifact_comment_cmd", project_path)
+)]
 #[tauri::command]
 pub fn upsert_spec_issue_artifact_comment_cmd(
     project_path: String,
@@ -250,6 +272,10 @@ pub fn upsert_spec_issue_artifact_comment_cmd(
     Ok(comment.into())
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "list_spec_issue_artifact_comments_cmd", project_path)
+)]
 #[tauri::command]
 pub fn list_spec_issue_artifact_comments_cmd(
     project_path: String,
@@ -271,6 +297,10 @@ pub fn list_spec_issue_artifact_comments_cmd(
     Ok(comments.into_iter().map(Into::into).collect())
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "delete_spec_issue_artifact_comment_cmd", project_path)
+)]
 #[tauri::command]
 pub fn delete_spec_issue_artifact_comment_cmd(
     project_path: String,
@@ -294,6 +324,10 @@ pub fn delete_spec_issue_artifact_comment_cmd(
     .map_err(|e| StructuredError::internal(&e, "delete_spec_issue_artifact_comment_cmd"))
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "close_spec_issue_cmd", project_path, issue_number)
+)]
 #[tauri::command]
 pub fn close_spec_issue_cmd(
     project_path: String,
@@ -306,6 +340,10 @@ pub fn close_spec_issue_cmd(
         .map_err(|e| StructuredError::internal(&e, "close_spec_issue_cmd"))
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "sync_spec_issue_project_cmd", project_path)
+)]
 #[tauri::command]
 pub fn sync_spec_issue_project_cmd(
     project_path: String,
@@ -338,6 +376,7 @@ fn parse_phase(value: &str) -> Result<SpecProjectPhase, String> {
 
 fn parse_artifact_kind(value: &str) -> Result<SpecIssueArtifactKind, String> {
     match value.trim().to_ascii_lowercase().as_str() {
+        "doc" => Ok(SpecIssueArtifactKind::Doc),
         "contract" => Ok(SpecIssueArtifactKind::Contract),
         "checklist" => Ok(SpecIssueArtifactKind::Checklist),
         _ => Err(format!("Invalid artifact kind: {}", value.trim())),
@@ -362,6 +401,10 @@ mod tests {
 
     #[test]
     fn parse_artifact_kind_accepts_known_values() {
+        assert!(matches!(
+            parse_artifact_kind("doc").unwrap(),
+            SpecIssueArtifactKind::Doc
+        ));
         assert!(matches!(
             parse_artifact_kind("contract").unwrap(),
             SpecIssueArtifactKind::Contract

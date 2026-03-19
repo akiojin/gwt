@@ -18,12 +18,16 @@
 //! }
 //! ```
 
-use super::claude_hooks::unregister_gwt_hooks;
-use crate::error::GwtError;
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    path::{Path, PathBuf},
+};
+
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::Entry, HashMap};
-use std::path::{Path, PathBuf};
+
+use super::claude_hooks::unregister_gwt_hooks;
+use crate::error::GwtError;
 
 /// Marketplace source information
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -537,8 +541,9 @@ pub fn setup_gwt_plugin() -> Result<(), GwtError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     // FR-001: Check marketplace registration status
     #[test]

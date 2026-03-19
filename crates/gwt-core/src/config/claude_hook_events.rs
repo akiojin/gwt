@@ -3,11 +3,12 @@
 //! This module processes hook payloads from Claude Code (stdin JSON) and updates
 //! gwt session status stored under `~/.gwt/sessions/`.
 
-use crate::error::{GwtError, Result};
-use serde_json::Value;
 use std::path::PathBuf;
 
+use serde_json::Value;
+
 use super::session::{AgentStatus, Session};
+use crate::error::{GwtError, Result};
 
 fn extract_worktree_path(payload: &Value) -> Option<PathBuf> {
     let cwd = payload
@@ -75,12 +76,12 @@ pub fn process_claude_hook_event(event: &str, payload_json: &str) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{ffi::OsString, path::Path, sync::MutexGuard};
+
     use serde_json::json;
-    use std::ffi::OsString;
-    use std::path::Path;
-    use std::sync::MutexGuard;
     use tempfile::TempDir;
+
+    use super::*;
 
     struct EnvVarGuard {
         key: &'static str,

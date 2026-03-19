@@ -2,9 +2,9 @@
 //!
 //! Provides PR information using GitHub CLI (gh) for branch-to-PR title mapping.
 
+use std::{collections::HashMap, path::Path};
+
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
 
 use super::gh_cli::{is_gh_available, run_gh_output_with_repair};
 

@@ -2,6 +2,7 @@
 
 use gwt_core::config;
 use serde::Serialize;
+use tracing::instrument;
 
 /// Recent project entry returned to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -12,6 +13,7 @@ pub struct RecentProjectEntry {
 }
 
 /// Get recent projects (most recent 10 entries).
+#[instrument(skip_all, fields(command = "get_recent_projects"))]
 #[tauri::command]
 pub fn get_recent_projects() -> Vec<RecentProjectEntry> {
     config::load_recent_projects()

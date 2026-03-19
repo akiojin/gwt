@@ -3,15 +3,20 @@
 //! Converts ParsedSession to Claude Code JSONL format.
 //! Claude Code stores sessions in `~/.claude/projects/{encoded-path}/{session-id}.jsonl`
 
+use std::{
+    fs::{self, File},
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+};
+
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
 
 use super::{ConversionError, ConversionMetadata, ConversionResult, LossInfo, SessionEncoder};
-use crate::ai::claude_paths::encode_claude_project_path;
-use crate::ai::session_parser::{AgentType, MessageRole, ParsedSession};
+use crate::ai::{
+    claude_paths::encode_claude_project_path,
+    session_parser::{AgentType, MessageRole, ParsedSession},
+};
 
 /// Encoder for Claude Code JSONL format.
 pub struct ClaudeEncoder {
@@ -138,9 +143,10 @@ impl SessionEncoder for ClaudeEncoder {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::ai::session_parser::{SessionMessage, ToolExecution};
-    use tempfile::tempdir;
 
     fn sample_session() -> ParsedSession {
         ParsedSession {

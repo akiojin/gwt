@@ -1,18 +1,23 @@
 #![allow(dead_code)]
 //! Assistant Mode monitor: polls pane and git state, emits change events.
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::state::AppState;
-use gwt_core::git::{self, Branch};
-use gwt_core::terminal::pane::PaneStatus;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use gwt_core::{
+    git::{self, Branch},
+    terminal::pane::PaneStatus,
+};
 use serde::Serialize;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tauri::Manager;
 use tokio::sync::mpsc;
 use tracing::warn;
+
+use crate::{commands::project::resolve_repo_path_for_project_root, state::AppState};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const SCROLLBACK_HASH_BYTES: usize = 4096;
@@ -37,6 +42,7 @@ pub struct GitStatusSnapshot {
 pub struct MonitorSnapshot {
     pub panes: Vec<PaneSnapshot>,
     pub git: GitStatusSnapshot,
+    pub pending_consultations: u32,
     pub timestamp: i64,
 }
 
@@ -69,7 +75,7 @@ impl ChangeDetector {
 }
 
 fn snapshots_equal(a: &MonitorSnapshot, b: &MonitorSnapshot) -> bool {
-    a.panes == b.panes && a.git == b.git
+    a.panes == b.panes && a.git == b.git && a.pending_consultations == b.pending_consultations
 }
 
 /// Handle for stopping the monitor task.
@@ -102,8 +108,14 @@ pub fn start_monitor(
                     break;
                 }
                 _ = interval.tick() => {
-                    match collect_snapshot(&app_handle, &window_label, &project_root) {
-                        Ok(snapshot) => {
+                    let ah = app_handle.clone();
+                    let wl = window_label.clone();
+                    let pr = project_root.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        collect_snapshot(&ah, &wl, &pr)
+                    }).await;
+                    match result {
+                        Ok(Ok(snapshot)) => {
                             if detector.detect_change(&snapshot)
                                 && event_tx
                                     .send(MonitorEvent::SnapshotChanged(snapshot))
@@ -114,8 +126,11 @@ pub fn start_monitor(
                                 break;
                             }
                         }
-                        Err(err) => {
+                        Ok(Err(err)) => {
                             warn!(window = %window_label, error = %err, "Failed to collect assistant monitor snapshot");
+                        }
+                        Err(join_err) => {
+                            warn!(window = %window_label, error = %join_err, "collect_snapshot panicked");
                         }
                     }
                 }
@@ -152,6 +167,8 @@ fn collect_snapshot(
         .unwrap_or(0);
 
     let panes = collect_project_panes(&state, &repo_path)?;
+    let pending_consultations =
+        crate::consultation::count_pending_consultations(Path::new(project_root));
 
     Ok(MonitorSnapshot {
         panes,
@@ -160,6 +177,7 @@ fn collect_snapshot(
             uncommitted_count,
             unpushed_count,
         },
+        pending_consultations,
         timestamp: chrono::Utc::now().timestamp(),
     })
 }
@@ -245,6 +263,7 @@ mod tests {
                 uncommitted_count: 0,
                 unpushed_count: 0,
             },
+            pending_consultations: 0,
             timestamp: 0,
         };
         assert!(detector.detect_change(&snapshot));
@@ -266,12 +285,14 @@ mod tests {
                 uncommitted_count: 0,
                 unpushed_count: 0,
             },
+            pending_consultations: 0,
             timestamp: 0,
         };
         detector.detect_change(&snapshot);
         let snapshot2 = MonitorSnapshot {
             panes: snapshot.panes.clone(),
             git: snapshot.git.clone(),
+            pending_consultations: 0,
             timestamp: 100,
         };
         assert!(!detector.detect_change(&snapshot2));

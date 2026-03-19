@@ -3,14 +3,19 @@
 //! Manages the lifecycle of terminal panes,
 //! including tab switching, fullscreen toggle, and batch operations.
 
-use super::pane::{PaneConfig, TerminalPane};
-use super::BuiltinLaunchConfig;
-use super::TerminalError;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use tracing::instrument;
+
+use super::{
+    pane::{PaneConfig, TerminalPane},
+    BuiltinLaunchConfig, TerminalError,
+};
 
 /// Manages multiple terminal panes with tab-based switching.
 pub struct PaneManager {
@@ -126,6 +131,7 @@ impl PaneManager {
     }
 
     /// Kill all panes (FR-092).
+    #[instrument(skip(self))]
     pub fn kill_all(&mut self) -> Result<(), TerminalError> {
         for pane in &mut self.panes {
             pane.kill()?;
@@ -137,6 +143,7 @@ impl PaneManager {
     ///
     /// Creates a `TerminalPane` from the given config and adds it to the manager.
     /// Returns the generated pane ID.
+    #[instrument(skip(self, config))]
     pub fn launch_agent(
         &mut self,
         repo_root: &Path,
@@ -179,6 +186,7 @@ impl PaneManager {
     ///
     /// Similar to `launch_agent()` but skips `save_branch_mapping()`.
     /// Returns the generated pane ID.
+    #[instrument(skip(self, config))]
     pub fn spawn_shell(
         &mut self,
         repo_root: &Path,
@@ -352,10 +360,10 @@ impl Default for PaneManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::terminal::pane::PaneConfig;
-    use crate::terminal::AgentColor;
     use tempfile::TempDir;
+
+    use super::*;
+    use crate::terminal::{pane::PaneConfig, AgentColor};
 
     /// Helper: create a TerminalPane backed by `/usr/bin/true` (exits immediately).
     fn create_test_pane(id: &str) -> TerminalPane {

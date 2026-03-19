@@ -2,12 +2,15 @@
 //!
 //! Manages pseudo-terminal creation, I/O, resize, and cleanup.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize};
+use tracing::instrument;
 
 use super::TerminalError;
 
@@ -503,6 +506,7 @@ pub struct PtyHandle {
 
 impl PtyHandle {
     /// Create a new PTY, spawn the given command, and return a handle.
+    #[instrument(skip_all)]
     pub fn new(config: PtyConfig) -> Result<Self, TerminalError> {
         if !config.working_dir.exists() {
             return Err(TerminalError::PtyCreationFailed {
@@ -630,6 +634,7 @@ impl PtyHandle {
     }
 
     /// Resize the PTY to the given dimensions.
+    #[instrument(skip(self))]
     pub fn resize(&self, rows: u16, cols: u16) -> Result<(), TerminalError> {
         self.master
             .resize(PtySize {
@@ -653,6 +658,7 @@ impl PtyHandle {
     }
 
     /// Kill the child process.
+    #[instrument(skip(self))]
     pub fn kill(&mut self) -> Result<(), TerminalError> {
         self.child.kill().map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
@@ -662,9 +668,9 @@ impl PtyHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, time::Duration};
+
     use super::*;
-    use std::sync::mpsc;
-    use std::time::Duration;
 
     #[test]
     fn escape_powershell_single_quoted_duplicates_single_quotes() {

@@ -5,12 +5,15 @@
 mod logger;
 mod reader;
 
-pub use logger::{init_logger, log_error_message, log_gwt_error, LogConfig};
+use std::path::Path;
+
+use chrono::{Duration, Utc};
+#[cfg(test)]
+pub use logger::init_test_tracing;
+pub use logger::{init_logger, log_error_message, log_gwt_error, LogConfig, ProfilingGuard};
 pub use reader::{LogEntry, LogReader};
 
 use crate::error::Result;
-use chrono::{Duration, Utc};
-use std::path::Path;
 
 /// Clean up old log files based on retention days
 pub fn cleanup_old_logs(log_dir: &Path, retention_days: u32) -> Result<usize> {
@@ -49,8 +52,9 @@ pub fn today_log_path(log_dir: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_cleanup_old_logs() {
@@ -129,8 +133,7 @@ mod tests {
         std::fs::write(&log_file, initial_entries.join("\n") + "\n").unwrap();
 
         // Simulate append (like a new session would do)
-        use std::fs::OpenOptions;
-        use std::io::Write;
+        use std::{fs::OpenOptions, io::Write};
         let mut file = OpenOptions::new().append(true).open(&log_file).unwrap();
         writeln!(
             file,
