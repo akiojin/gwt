@@ -146,7 +146,6 @@ fn webkit_local_storage_targets(home_dir: &Path) -> Vec<PathBuf> {
         if direct_local_storage.exists() {
             targets.push(direct_local_storage);
         }
-
         let Ok(origin_children) = std::fs::read_dir(origin_dir.path()) else {
             continue;
         };
