@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "cargo tauri dev",
     "build": "cargo tauri build",
+    "install:local:macos": "bash installers/macos/install-local.sh",
+    "install:local:macos:skip-build": "bash installers/macos/install-local.sh --skip-build",
     "test": "cargo test -p gwt-core -p gwt-tauri --all-features",
     "test:frontend": "cd gwt-gui && pnpm test",
     "test:e2e": "cd gwt-gui && pnpm test:e2e",
