@@ -100,12 +100,7 @@ pub struct AssistantEngine {
 
 impl AssistantEngine {
     pub fn new(project_path: PathBuf, window_label: String) -> Self {
-        let conversation = vec![ChatCompletionsToolMessage {
-            role: "system".to_string(),
-            content: Some(SYSTEM_PROMPT.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-        }];
+        let conversation = vec![ChatCompletionsToolMessage::system(SYSTEM_PROMPT)];
 
         Self {
             conversation,
@@ -143,12 +138,8 @@ impl AssistantEngine {
         let base_len = self.conversation.len();
         self.startup_status = AssistantStartupStatus::Analyzing;
         self.startup_summary_ready = false;
-        self.conversation.push(ChatCompletionsToolMessage {
-            role: "system".to_string(),
-            content: Some(STARTUP_REPORT_PROMPT.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        self.conversation
+            .push(ChatCompletionsToolMessage::system(STARTUP_REPORT_PROMPT));
 
         match self.run_llm_loop(state, AssistantToolMode::ReadOnly) {
             Ok(_) => {
@@ -172,22 +163,14 @@ impl AssistantEngine {
     }
 
     pub fn push_visible_assistant_message(&mut self, content: impl Into<String>) {
-        self.conversation.push(ChatCompletionsToolMessage {
-            role: "assistant".to_string(),
-            content: Some(content.into()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        self.conversation
+            .push(ChatCompletionsToolMessage::assistant(content));
     }
 
     #[cfg(test)]
     pub fn push_hidden_system_message_for_test(&mut self, content: impl Into<String>) {
-        self.conversation.push(ChatCompletionsToolMessage {
-            role: "system".to_string(),
-            content: Some(content.into()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        self.conversation
+            .push(ChatCompletionsToolMessage::system(content));
     }
 
     pub fn apply_cached_startup_summary(&mut self, summary: impl Into<String>) {
@@ -208,12 +191,8 @@ impl AssistantEngine {
 
     fn finish_startup_transcript(&mut self, base_len: usize, summary: &str) {
         self.conversation.truncate(base_len);
-        self.conversation.push(ChatCompletionsToolMessage {
-            role: "assistant".to_string(),
-            content: Some(summary.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        self.conversation
+            .push(ChatCompletionsToolMessage::assistant(summary));
     }
 
     /// Handle a user message: add to conversation, run LLM loop, return response.
@@ -222,12 +201,8 @@ impl AssistantEngine {
         input: &str,
         state: &AppState,
     ) -> Result<AssistantResponse, String> {
-        self.conversation.push(ChatCompletionsToolMessage {
-            role: "user".to_string(),
-            content: Some(input.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        self.conversation
+            .push(ChatCompletionsToolMessage::user(input));
 
         self.run_llm_loop(state, AssistantToolMode::FullAccess)
     }
@@ -259,15 +234,11 @@ impl AssistantEngine {
         }
 
         let summary = summaries.join("\n");
-        self.conversation.push(ChatCompletionsToolMessage {
-            role: "user".to_string(),
-            content: Some(format!(
+        self.conversation
+            .push(ChatCompletionsToolMessage::user(format!(
                 "[System Monitor Update]\n{}\n\nAnalyze the current state and report any issues or suggestions.",
                 summary
-            )),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+            )));
 
         let response = self.run_llm_loop(state, AssistantToolMode::FullAccess)?;
         Ok(Some(response))
@@ -351,12 +322,8 @@ impl AssistantEngine {
 
             if response.tool_calls.is_empty() {
                 // No tool calls — this is the final text response
-                self.conversation.push(ChatCompletionsToolMessage {
-                    role: "assistant".to_string(),
-                    content: Some(response.text.clone()),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
+                self.conversation
+                    .push(ChatCompletionsToolMessage::assistant(response.text.clone()));
 
                 return Ok(AssistantResponse {
                     text: response.text,
@@ -379,16 +346,16 @@ impl AssistantEngine {
                 .collect();
 
             // Add the assistant message with tool_calls
-            self.conversation.push(ChatCompletionsToolMessage {
-                role: "assistant".to_string(),
-                content: if response.text.is_empty() {
-                    None
-                } else {
-                    Some(response.text.clone())
-                },
-                tool_calls: Some(tool_call_refs),
-                tool_call_id: None,
-            });
+            let content = if response.text.is_empty() {
+                None
+            } else {
+                Some(response.text.clone())
+            };
+            self.conversation
+                .push(ChatCompletionsToolMessage::assistant_with_tool_calls(
+                    content,
+                    tool_call_refs,
+                ));
 
             // Execute each tool call and add tool results
             let project_path = self.project_path.to_string_lossy().to_string();
@@ -413,12 +380,10 @@ impl AssistantEngine {
                 };
 
                 let call_id = tc.call_id.clone().unwrap_or_default();
-                self.conversation.push(ChatCompletionsToolMessage {
-                    role: "tool".to_string(),
-                    content: Some(truncate_tool_result(&result_text)),
-                    tool_calls: None,
-                    tool_call_id: Some(call_id),
-                });
+                self.conversation.push(ChatCompletionsToolMessage::tool(
+                    call_id,
+                    truncate_tool_result(&result_text),
+                ));
             }
 
             info!(
@@ -503,24 +468,18 @@ mod tests {
         let mut engine = AssistantEngine::new(PathBuf::from("/repo"), "main".to_string());
         let base_len = engine.conversation.len();
 
-        engine.conversation.push(ChatCompletionsToolMessage {
-            role: "system".to_string(),
-            content: Some(STARTUP_REPORT_PROMPT.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-        engine.conversation.push(ChatCompletionsToolMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![]),
-            tool_call_id: None,
-        });
-        engine.conversation.push(ChatCompletionsToolMessage {
-            role: "tool".to_string(),
-            content: Some("tool-result".to_string()),
-            tool_calls: None,
-            tool_call_id: Some("call-1".to_string()),
-        });
+        engine
+            .conversation
+            .push(ChatCompletionsToolMessage::system(STARTUP_REPORT_PROMPT));
+        engine
+            .conversation
+            .push(ChatCompletionsToolMessage::assistant_with_tool_calls(
+                None,
+                vec![],
+            ));
+        engine
+            .conversation
+            .push(ChatCompletionsToolMessage::tool("call-1", "tool-result"));
 
         engine.finish_startup_transcript(base_len, "startup summary");
 
@@ -561,11 +520,11 @@ mod tests {
     }
 
     fn make_msg(role: &str, content: &str) -> ChatCompletionsToolMessage {
-        ChatCompletionsToolMessage {
-            role: role.to_string(),
-            content: Some(content.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
+        match role {
+            "system" => ChatCompletionsToolMessage::system(content),
+            "user" => ChatCompletionsToolMessage::user(content),
+            "assistant" => ChatCompletionsToolMessage::assistant(content),
+            _ => ChatCompletionsToolMessage::user(content),
         }
     }
 

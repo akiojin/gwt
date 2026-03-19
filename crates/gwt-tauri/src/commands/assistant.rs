@@ -10,7 +10,9 @@ use crate::assistant_engine::{AssistantEngine, AssistantStartupStatus};
 use crate::assistant_monitor::{self, MonitorEvent, MonitorSnapshot, PaneSnapshot};
 use crate::commands::sessions::get_branch_session_summary_for_assistant;
 use crate::state::{AppState, AssistantContext};
-use gwt_core::git::{self, get_spec_issue_detail, graphql, Branch, PrCache, WorkflowRunInfo};
+use gwt_core::git::{
+    self, get_spec_issue_detail, graphql, Branch, PrCache, PullRequest, WorkflowRunInfo,
+};
 use gwt_core::process::command as process_command;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
@@ -869,8 +871,11 @@ fn resolve_assistant_context_with_snapshot(
 
     let docs_goal = resolve_goal_from_docs(Path::new(&project_path));
     let issue_goal = resolve_goal_from_issue(&repo_path, &snapshot.git.branch);
-    let pr_ref = resolve_branch_pr_reference(&repo_path, &snapshot.git.branch);
-    let pr_ci_insight = resolve_pr_ci_insight(&repo_path, &snapshot.git.branch);
+    let cached_pr = PrCache::fetch_latest_for_branch(&repo_path, &snapshot.git.branch);
+    let pr_ref = cached_pr
+        .as_ref()
+        .map(|pr| (format!("#{} {}", pr.number, pr.title), pr.state.clone()));
+    let pr_ci_insight = resolve_pr_ci_insight_from_pr(&repo_path, cached_pr.as_ref());
     let terminal_summary_insight =
         resolve_terminal_summary_insight(&project_path, &snapshot.git.branch, state);
     let current_branch_panes = snapshot
@@ -1197,13 +1202,11 @@ fn resolve_goal_from_issue(repo_path: &Path, branch: &str) -> Option<GoalResolut
     })
 }
 
-fn resolve_branch_pr_reference(repo_path: &Path, branch: &str) -> Option<(String, String)> {
-    let pr = PrCache::fetch_latest_for_branch(repo_path, branch)?;
-    Some((format!("#{} {}", pr.number, pr.title), pr.state))
-}
-
-fn resolve_pr_ci_insight(repo_path: &Path, branch: &str) -> Option<PrCiInsight> {
-    let pr = PrCache::fetch_latest_for_branch(repo_path, branch)?;
+fn resolve_pr_ci_insight_from_pr(
+    repo_path: &Path,
+    pr: Option<&PullRequest>,
+) -> Option<PrCiInsight> {
+    let pr = pr?;
     if !pr.state.eq_ignore_ascii_case("OPEN") {
         return None;
     }

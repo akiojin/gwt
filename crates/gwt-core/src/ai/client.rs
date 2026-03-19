@@ -173,6 +173,56 @@ pub struct ChatCompletionsToolMessage {
     pub tool_call_id: Option<String>,
 }
 
+impl ChatCompletionsToolMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant_with_tool_calls(
+        content: Option<String>,
+        tool_calls: Vec<ChatCompletionsToolCallRef>,
+    ) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: Some(call_id.into()),
+        }
+    }
+}
+
 /// A tool call reference for the assistant message in chat completions format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionsToolCallRef {
@@ -322,10 +372,6 @@ impl AIClient {
                     let error = if status == StatusCode::TOO_MANY_REQUESTS {
                         let retry_after = parse_retry_after(&body, &resp_headers);
                         AIError::RateLimited { retry_after }
-                    } else if status.is_server_error() {
-                        let message = extract_error_message(&body)
-                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        AIError::ServerError(message)
                     } else {
                         let message = extract_error_message(&body)
                             .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
@@ -339,17 +385,6 @@ impl AIClient {
                         }
                         return Err(AIError::ServerError(message));
                     };
-
-                    if let AIError::ServerError(message) = &error {
-                        if should_fallback_to_chat_completions(status, message) {
-                            warn!(
-                                status = status.as_u16(),
-                                reason = %message,
-                                "Responses API unavailable; falling back to chat completions"
-                            );
-                            return self.create_chat_completion(&messages);
-                        }
-                    }
 
                     if is_retryable(&error) && retries < MAX_RETRIES {
                         let delay = backoff_delay(retries);
@@ -399,68 +434,16 @@ impl AIClient {
             temperature: TEMPERATURE,
         };
 
-        let mut retries = 0usize;
-
-        loop {
-            let headers = self.build_auth_headers(&url)?;
-
-            let response = self
-                .client
-                .post(url.clone())
-                .headers(headers)
-                .json(&request_body)
-                .send();
-
-            match response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let resp_headers = resp.headers().clone();
-                    let body = resp.text().unwrap_or_default();
-                    if status == StatusCode::OK {
-                        let (text, tool_calls, usage) = parse_response_with_tools(&body)?;
-                        if let Some(tokens) = usage {
-                            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
-                        }
-                        return Ok(AIResponse {
-                            text,
-                            tool_calls,
-                            usage_tokens: usage,
-                        });
-                    }
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(AIError::Unauthorized);
-                    }
-                    let error = if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = parse_retry_after(&body, &resp_headers);
-                        AIError::RateLimited { retry_after }
-                    } else if status.is_server_error() {
-                        let message = extract_error_message(&body)
-                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        AIError::ServerError(message)
-                    } else {
-                        let message = extract_error_message(&body)
-                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        return Err(AIError::ServerError(message));
-                    };
-
-                    if !is_retryable(&error) || retries >= MAX_RETRIES {
-                        return Err(error);
-                    }
-
-                    let delay = backoff_delay(retries);
-                    retries += 1;
-                    std::thread::sleep(delay);
-                }
-                Err(e) => {
-                    if retries >= MAX_RETRIES {
-                        return Err(AIError::NetworkError(e.to_string()));
-                    }
-                    let delay = backoff_delay(retries);
-                    retries += 1;
-                    std::thread::sleep(delay);
-                }
-            }
+        let body = self.send_with_retry(&url, &request_body)?;
+        let (text, tool_calls, usage) = parse_response_with_tools(&body)?;
+        if let Some(tokens) = usage {
+            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
         }
+        Ok(AIResponse {
+            text,
+            tool_calls,
+            usage_tokens: usage,
+        })
     }
 
     /// ChatCompletions API with tool calling support.
@@ -485,16 +468,35 @@ impl AIClient {
             temperature,
         };
 
+        let body = self.send_with_retry(&url, &request_body)?;
+        let (text, tool_calls, usage) = parse_chat_completion_with_tools(&body)?;
+        if let Some(tokens) = usage {
+            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
+        }
+        Ok(AIResponse {
+            text,
+            tool_calls,
+            usage_tokens: usage,
+        })
+    }
+
+    /// Shared retry loop: POST the request, handle retries on transient errors,
+    /// and return the raw response body on success.
+    fn send_with_retry(
+        &self,
+        url: &Url,
+        request_body: &impl Serialize,
+    ) -> Result<String, AIError> {
         let mut retries = 0usize;
 
         loop {
-            let headers = self.build_auth_headers(&url)?;
+            let headers = self.build_auth_headers(url)?;
 
             let response = self
                 .client
                 .post(url.clone())
                 .headers(headers)
-                .json(&request_body)
+                .json(request_body)
                 .send();
 
             match response {
@@ -503,15 +505,7 @@ impl AIClient {
                     let resp_headers = resp.headers().clone();
                     let body = resp.text().unwrap_or_default();
                     if status == StatusCode::OK {
-                        let (text, tool_calls, usage) = parse_chat_completion_with_tools(&body)?;
-                        if let Some(tokens) = usage {
-                            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
-                        }
-                        return Ok(AIResponse {
-                            text,
-                            tool_calls,
-                            usage_tokens: usage,
-                        });
+                        return Ok(body);
                     }
                     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                         return Err(AIError::Unauthorized);
@@ -652,37 +646,39 @@ impl AIClient {
     }
 }
 
-fn build_responses_url(endpoint: &str) -> Result<Url, AIError> {
+/// Build an API URL by appending `suffix` to the endpoint path.
+/// Optionally strips `strip_suffix` from the path before appending (used to
+/// convert a `/responses` endpoint to `/chat/completions`).
+fn build_api_url(
+    endpoint: &str,
+    suffix: &str,
+    strip_suffix: Option<&str>,
+) -> Result<Url, AIError> {
     let mut url = Url::parse(endpoint)
         .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
     let mut path = url.path().trim_end_matches('/').to_string();
-    if !path.ends_with("/responses") {
+    if let Some(strip) = strip_suffix {
+        if path.ends_with(strip) {
+            path = path.trim_end_matches(strip).to_string();
+        }
+    }
+    if !path.ends_with(suffix) {
         if path.is_empty() {
-            path = "/responses".to_string();
+            path = suffix.to_string();
         } else {
-            path = format!("{}/responses", path);
+            path = format!("{}{}", path, suffix);
         }
         url.set_path(&path);
     }
     Ok(url)
 }
 
+fn build_responses_url(endpoint: &str) -> Result<Url, AIError> {
+    build_api_url(endpoint, "/responses", None)
+}
+
 fn build_chat_completions_url(endpoint: &str) -> Result<Url, AIError> {
-    let mut url = Url::parse(endpoint)
-        .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
-    let mut path = url.path().trim_end_matches('/').to_string();
-    if path.ends_with("/responses") {
-        path = path.trim_end_matches("/responses").to_string();
-    }
-    if !path.ends_with("/chat/completions") {
-        if path.is_empty() {
-            path = "/chat/completions".to_string();
-        } else {
-            path = format!("{}/chat/completions", path);
-        }
-        url.set_path(&path);
-    }
-    Ok(url)
+    build_api_url(endpoint, "/chat/completions", Some("/responses"))
 }
 
 fn is_azure_endpoint(url: &Url) -> bool {
@@ -1229,18 +1225,7 @@ impl AIClient {
 }
 
 fn build_models_url(endpoint: &str) -> Result<Url, AIError> {
-    let mut url = Url::parse(endpoint)
-        .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
-    let mut path = url.path().trim_end_matches('/').to_string();
-    if !path.ends_with("/models") {
-        if path.is_empty() {
-            path = "/models".to_string();
-        } else {
-            path = format!("{}/models", path);
-        }
-        url.set_path(&path);
-    }
-    Ok(url)
+    build_api_url(endpoint, "/models", None)
 }
 
 fn parse_models_response(body: &str) -> Result<Vec<ModelInfo>, AIError> {
