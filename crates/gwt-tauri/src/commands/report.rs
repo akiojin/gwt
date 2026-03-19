@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::State;
+use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +101,7 @@ fn is_log_file_candidate(path: &Path) -> bool {
 }
 
 /// Read the last `max_lines` lines from the most recent log file.
+#[instrument(skip_all, fields(command = "read_recent_logs"))]
 #[tauri::command]
 pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredError> {
     let max = max_lines.unwrap_or(100) as usize;
@@ -122,6 +124,7 @@ pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredErro
 }
 
 /// Get basic system info for error reports.
+#[instrument(skip_all, fields(command = "get_report_system_info"))]
 #[tauri::command]
 pub fn get_report_system_info() -> ReportSystemInfo {
     ReportSystemInfo {
@@ -218,6 +221,7 @@ fn parse_owner_repo_from_remote(url: &str) -> Option<(String, String)> {
 }
 
 /// Detect the current working repository's owner/repo from git remote.
+#[instrument(skip_all, fields(command = "detect_report_target", project_path))]
 #[tauri::command]
 pub fn detect_report_target(project_path: String) -> Result<ReportTarget, StructuredError> {
     let output = gwt_core::process::command("git")
@@ -245,6 +249,7 @@ pub fn detect_report_target(project_path: String) -> Result<ReportTarget, Struct
 }
 
 /// Create a GitHub issue using the gh CLI.
+#[instrument(skip_all, fields(command = "create_github_issue"))]
 #[tauri::command]
 pub fn create_github_issue(
     owner: String,
@@ -298,6 +303,7 @@ const SCREEN_CAPTURE_MAX_BYTES: usize = 8192;
 ///
 /// Iterates over all active panes and captures their scrollback tail.
 /// ANSI escape sequences are stripped to produce plain text output.
+#[instrument(skip_all, fields(command = "capture_screen_text"))]
 #[tauri::command]
 pub fn capture_screen_text(
     state: State<'_, crate::state::AppState>,

@@ -53,6 +53,8 @@
   - 機能要件（FR-*）
   - 成功基準
 - Issue body の `## Plan`、`## Tasks` セクションも策定してから実装に入る
+- 新規 SPEC を作成した場合、現在のブランチでは実装に入らず、SPEC に基づく別ブランチ（Worktree）で実装する
+- 現在のコンバセーションでは Issue/SPEC 登録までで完了とする
 - 通常の GitHub Issue から開始する場合は、Issue 分析ワークフローにより直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
 - 新規 SPEC を明示的に起票する場合は SPEC 登録ワークフローで `gwt-spec` Issue を作成する
 - 対象の `gwt-spec` Issue が確定した後は SPEC 管理ワークフローに従って Spec/Plan/Tasks を更新し、実装進行を管理する
@@ -237,7 +239,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 |-------|---------|-------------|
 | gwt-issue-register | `/gwt:gwt-issue-register` | Register new GitHub work items from a request. Search existing Issues and `gwt-spec` Issues first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or continue into the SPEC workflow. Use as the main entrypoint for new Issue/SPEC registration requests. |
 | gwt-issue-resolve | `/gwt:gwt-issue-resolve` | Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing gwt-spec issue, or promoted to a new spec issue, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration. |
-| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub gwt-spec Issues using vector embeddings. Use before creating or updating any spec issue. |
+| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub gwt-spec Issues using vector embeddings. Use when searching for existing specs, finding related gwt-spec issues, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. |
 | gwt-spec-register | `/gwt:gwt-spec-register` | Create a new GitHub Issue-first SPEC container when no existing canonical SPEC fits. Seed the Issue body as an artifact index plus a `spec.md` comment, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
 | gwt-spec-clarify | `/gwt:gwt-spec-clarify` | Clarify an existing `gwt-spec` by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. Use directly or through `gwt-spec-ops`. |
 | gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`. |

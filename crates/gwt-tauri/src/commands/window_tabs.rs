@@ -3,6 +3,7 @@ use gwt_core::StructuredError;
 use serde::Deserialize;
 use std::collections::HashSet;
 use tauri::{Manager, State};
+use tracing::instrument;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +57,7 @@ fn normalize_tabs(entries: Vec<WindowAgentTabEntry>) -> Vec<AgentTabMenuState> {
     tabs
 }
 
+#[instrument(skip_all, fields(command = "sync_window_agent_tabs", window_label = window.label()))]
 #[tauri::command]
 pub fn sync_window_agent_tabs(
     window: tauri::Window,
@@ -81,6 +83,7 @@ pub fn sync_window_agent_tabs(
         .map_err(|e| StructuredError::internal(&e.to_string(), "sync_window_agent_tabs"))
 }
 
+#[instrument(skip_all, fields(command = "sync_window_active_tab", window_label = window.label()))]
 #[tauri::command]
 pub fn sync_window_active_tab(
     window: tauri::Window,

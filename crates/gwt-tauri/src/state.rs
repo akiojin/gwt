@@ -4,7 +4,7 @@ use gwt_core::config::os_env::EnvSource;
 use gwt_core::config::SkillRegistrationStatus;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::update::UpdateManager;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -94,6 +94,19 @@ pub struct AssistantContext {
     pub recommended_next_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantActiveRunKind {
+    Startup,
+    User,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AssistantRuntimeState {
+    pub active_generation: Option<u64>,
+    pub active_kind: Option<AssistantActiveRunKind>,
+    pub queued_inputs: VecDeque<String>,
+}
+
 const WINDOW_SESSION_RESTORE_LEAD_TTL_MS: u64 = 15_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,9 +183,13 @@ pub struct AppState {
     /// Assistant sessions currently running startup analysis, keyed by window label
     /// with a human-readable progress status.
     pub assistant_startup_inflight: Mutex<HashMap<String, String>>,
+    /// Assistant runtime metadata per window label.
+    pub assistant_runtime: Mutex<HashMap<String, AssistantRuntimeState>>,
     /// Assistant Mode monitor handle per window label.
     pub assistant_monitor_handle:
         Mutex<HashMap<String, crate::assistant_monitor::AssistantMonitorHandle>>,
+    /// Last heartbeat timestamp from the frontend (freeze detection).
+    pub last_heartbeat: Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -218,7 +235,9 @@ impl AppState {
             assistant_context: Mutex::new(HashMap::new()),
             assistant_session_generation: Mutex::new(HashMap::new()),
             assistant_startup_inflight: Mutex::new(HashMap::new()),
+            assistant_runtime: Mutex::new(HashMap::new()),
             assistant_monitor_handle: Mutex::new(HashMap::new()),
+            last_heartbeat: Mutex::new(None),
         }
     }
 
@@ -363,6 +382,9 @@ impl AppState {
         if let Ok(mut map) = self.assistant_startup_inflight.lock() {
             map.remove(window_label);
         }
+        if let Ok(mut map) = self.assistant_runtime.lock() {
+            map.remove(window_label);
+        }
         if let Ok(mut map) = self.assistant_monitor_handle.lock() {
             if let Some(handle) = map.remove(window_label) {
                 tokio::spawn(async move {
@@ -404,6 +426,54 @@ impl AppState {
             .and_then(|map| map.get(window_label).copied())
             .map(|current| current == generation)
             .unwrap_or(false)
+    }
+
+    pub fn assistant_runtime_snapshot(&self, window_label: &str) -> AssistantRuntimeState {
+        self.assistant_runtime
+            .lock()
+            .ok()
+            .and_then(|map| map.get(window_label).cloned())
+            .unwrap_or_default()
+    }
+
+    pub fn set_assistant_active_run(
+        &self,
+        window_label: &str,
+        generation: u64,
+        kind: AssistantActiveRunKind,
+    ) {
+        if let Ok(mut map) = self.assistant_runtime.lock() {
+            let runtime = map.entry(window_label.to_string()).or_default();
+            runtime.active_generation = Some(generation);
+            runtime.active_kind = Some(kind);
+        }
+    }
+
+    pub fn clear_assistant_active_run_if_generation(&self, window_label: &str, generation: u64) {
+        if let Ok(mut map) = self.assistant_runtime.lock() {
+            if let Some(runtime) = map.get_mut(window_label) {
+                if runtime.active_generation == Some(generation) {
+                    runtime.active_generation = None;
+                    runtime.active_kind = None;
+                }
+            }
+        }
+    }
+
+    pub fn enqueue_assistant_input(&self, window_label: &str, input: String) -> usize {
+        if let Ok(mut map) = self.assistant_runtime.lock() {
+            let runtime = map.entry(window_label.to_string()).or_default();
+            runtime.queued_inputs.push_back(input);
+            return runtime.queued_inputs.len();
+        }
+        0
+    }
+
+    pub fn dequeue_assistant_input(&self, window_label: &str) -> Option<String> {
+        let Ok(mut map) = self.assistant_runtime.lock() else {
+            return None;
+        };
+        map.get_mut(window_label)?.queued_inputs.pop_front()
     }
 
     fn now_millis() -> u64 {
@@ -911,6 +981,26 @@ mod tests {
         let second = state.begin_assistant_session_for_window("main");
         assert!(second > first);
         assert!(state.is_current_assistant_session("main", second));
+    }
+
+    #[test]
+    fn assistant_runtime_queue_is_fifo() {
+        let state = AppState::new();
+
+        state.enqueue_assistant_input("main", "first".to_string());
+        state.enqueue_assistant_input("main", "second".to_string());
+
+        let runtime = state.assistant_runtime_snapshot("main");
+        assert_eq!(runtime.queued_inputs.len(), 2);
+        assert_eq!(
+            state.dequeue_assistant_input("main"),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            state.dequeue_assistant_input("main"),
+            Some("second".to_string())
+        );
+        assert_eq!(state.dequeue_assistant_input("main"), None);
     }
 
     #[test]
