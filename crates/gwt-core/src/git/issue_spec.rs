@@ -4,11 +4,13 @@
 //! canonical source of truth, with Issue body sections retained as a fallback
 //! for legacy specs.
 
-use super::gh_cli::run_gh_output_with_repair;
+use super::gh_cli::{gh_command, run_gh_output_with_repair};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use uuid::Uuid;
 
 const SPEC_LABEL: &str = "gwt-spec";
 const PROJECT_FIELD_STATUS: &str = "Status";
@@ -230,7 +232,7 @@ pub fn get_spec_issue_detail(
     }
 
     let mut detail = parse_issue_detail_json(&String::from_utf8_lossy(&output.stdout))?;
-    let (_, comments) = fetch_issue_node_and_comments(repo_path, issue_number)?;
+    let comments = fetch_issue_comments(repo_path, issue_number)?;
     let artifacts = comments
         .into_iter()
         .filter_map(|comment| parse_artifact_comment(issue_number, comment))
@@ -244,7 +246,7 @@ pub fn list_spec_issue_artifact_comments(
     issue_number: u64,
     kind: Option<SpecIssueArtifactKind>,
 ) -> Result<Vec<SpecIssueArtifactComment>, String> {
-    let (_, comments) = fetch_issue_node_and_comments(repo_path, issue_number)?;
+    let comments = fetch_issue_comments(repo_path, issue_number)?;
     let mut artifacts = comments
         .into_iter()
         .filter_map(|comment| parse_artifact_comment(issue_number, comment))
@@ -272,7 +274,7 @@ pub fn upsert_spec_issue_artifact_comment(
         return Err("content is required".to_string());
     }
 
-    let (issue_node_id, comments) = fetch_issue_node_and_comments(repo_path, issue_number)?;
+    let comments = fetch_issue_comments(repo_path, issue_number)?;
     let body = render_artifact_comment_body(kind, artifact_name, content);
     let existing = comments
         .into_iter()
@@ -284,7 +286,7 @@ pub fn upsert_spec_issue_artifact_comment(
         return update_issue_comment(repo_path, issue_number, &found.comment_id, &body);
     }
 
-    add_issue_comment(repo_path, issue_number, &issue_node_id, &body)
+    add_issue_comment(repo_path, issue_number, &body)
 }
 
 pub fn delete_spec_issue_artifact_comment(
@@ -298,7 +300,7 @@ pub fn delete_spec_issue_artifact_comment(
     if artifact_name.is_empty() {
         return Err("artifact_name is required".to_string());
     }
-    let (_, comments) = fetch_issue_node_and_comments(repo_path, issue_number)?;
+    let comments = fetch_issue_comments(repo_path, issue_number)?;
     let existing = comments
         .into_iter()
         .filter_map(|comment| parse_artifact_comment(issue_number, comment))
@@ -781,48 +783,34 @@ struct IssueCommentNode {
     url: Option<String>,
 }
 
-fn fetch_issue_node_and_comments(
+fn fetch_issue_comments(
     repo_path: &Path,
     issue_number: u64,
-) -> Result<(String, Vec<IssueCommentNode>), String> {
-    let issue_number = issue_number.to_string();
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue",
-            "view",
-            issue_number.as_str(),
-            "--json",
-            "id,comments",
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue view comments: {e}"))?;
+) -> Result<Vec<IssueCommentNode>, String> {
+    let endpoint = format!(
+        "repos/{}/issues/{issue_number}/comments?per_page=100",
+        repo_name_with_owner(repo_path)?
+    );
+    let output = run_gh_output_with_repair(repo_path, ["api", endpoint.as_str()])
+        .map_err(|e| format!("Failed to execute gh api issue comments: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh issue view failed: {}", stderr.trim()));
+        return Err(format!("gh api issue comments failed: {}", stderr.trim()));
     }
-    let value: Value = serde_json::from_slice(&output.stdout)
+    let comments: Vec<Value> = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Invalid issue comments JSON: {e}"))?;
-    let issue_node_id = value
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| "Issue node id missing".to_string())?;
-    let comments = value
-        .get("comments")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(parse_issue_comment_node)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Ok((issue_node_id, comments))
+    Ok(comments
+        .iter()
+        .filter_map(parse_issue_comment_node)
+        .collect::<Vec<_>>())
 }
 
 fn parse_issue_comment_node(value: &Value) -> Option<IssueCommentNode> {
-    let id = value.get("id").and_then(Value::as_str)?.to_string();
+    let id = match value.get("id")? {
+        Value::String(v) => v.clone(),
+        Value::Number(v) => v.to_string(),
+        _ => return None,
+    };
     let body = value
         .get("body")
         .and_then(Value::as_str)
@@ -831,11 +819,17 @@ fn parse_issue_comment_node(value: &Value) -> Option<IssueCommentNode> {
     let updated_at = value
         .get("updatedAt")
         .and_then(Value::as_str)
+        .or_else(|| value.get("updated_at").and_then(Value::as_str))
         .or_else(|| value.get("lastEditedAt").and_then(Value::as_str))
         .or_else(|| value.get("createdAt").and_then(Value::as_str))
+        .or_else(|| value.get("created_at").and_then(Value::as_str))
         .unwrap_or_default()
         .to_string();
-    let url = value.get("url").and_then(Value::as_str).map(str::to_string);
+    let url = value
+        .get("url")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("html_url").and_then(Value::as_str))
+        .map(str::to_string);
     Some(IssueCommentNode {
         id,
         body,
@@ -926,27 +920,48 @@ fn render_artifact_comment_body(
     )
 }
 
+fn build_issue_comment_payload(body: &str) -> Value {
+    json!({ "body": body })
+}
+
+fn run_gh_api_with_json_input(
+    repo_path: &Path,
+    endpoint: &str,
+    method: &str,
+    payload: &Value,
+) -> Result<std::process::Output, String> {
+    let temp_path = std::env::temp_dir().join(format!("gwt-gh-api-{}.json", Uuid::new_v4()));
+    let json_bytes = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to encode gh api payload as JSON: {e}"))?;
+    std::fs::write(&temp_path, json_bytes)
+        .map_err(|e| format!("Failed to write temporary gh api payload file: {e}"))?;
+
+    let output = gh_command()
+        .args(["api", endpoint, "--method", method, "--input"])
+        .arg(&temp_path)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh api {method} {endpoint}: {e}"))?;
+
+    let _ = std::fs::remove_file(&temp_path);
+    Ok(output)
+}
+
 fn add_issue_comment(
     repo_path: &Path,
     issue_number: u64,
-    issue_node_id: &str,
     body: &str,
 ) -> Result<SpecIssueArtifactComment, String> {
-    let query = "mutation($subject:ID!, $body:String!){ addComment(input:{subjectId:$subject, body:$body}) { commentEdge { node { id body updatedAt url } } } }";
-    let output = run_gh_output_with_repair(
+    let endpoint = format!(
+        "repos/{}/issues/{issue_number}/comments",
+        repo_name_with_owner(repo_path)?
+    );
+    let output = run_gh_api_with_json_input(
         repo_path,
-        [
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("subject={issue_node_id}"),
-            "-F",
-            &format!("body={body}"),
-        ],
-    )
-    .map_err(|e| format!("Failed to add issue artifact comment: {e}"))?;
+        &endpoint,
+        "POST",
+        &build_issue_comment_payload(body),
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact add failed: {}", stderr.trim()));
@@ -972,21 +987,16 @@ fn update_issue_comment(
     comment_id: &str,
     body: &str,
 ) -> Result<SpecIssueArtifactComment, String> {
-    let query = "mutation($id:ID!, $body:String!){ updateIssueComment(input:{id:$id, body:$body}) { issueComment { id body updatedAt url } } }";
-    let output = run_gh_output_with_repair(
+    let endpoint = format!(
+        "repos/{}/issues/comments/{comment_id}",
+        repo_name_with_owner(repo_path)?
+    );
+    let output = run_gh_api_with_json_input(
         repo_path,
-        [
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("id={comment_id}"),
-            "-F",
-            &format!("body={body}"),
-        ],
-    )
-    .map_err(|e| format!("Failed to update issue artifact comment: {e}"))?;
+        &endpoint,
+        "PATCH",
+        &build_issue_comment_payload(body),
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact update failed: {}", stderr.trim()));
@@ -1006,19 +1016,13 @@ fn update_issue_comment(
 }
 
 fn delete_issue_comment(repo_path: &Path, comment_id: &str) -> Result<(), String> {
-    let query = "mutation($id:ID!){ deleteIssueComment(input:{id:$id}) { clientMutationId } }";
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("id={comment_id}"),
-        ],
-    )
-    .map_err(|e| format!("Failed to delete issue artifact comment: {e}"))?;
+    let endpoint = format!(
+        "repos/{}/issues/comments/{comment_id}",
+        repo_name_with_owner(repo_path)?
+    );
+    let output =
+        run_gh_output_with_repair(repo_path, ["api", endpoint.as_str(), "--method", "DELETE"])
+            .map_err(|e| format!("Failed to delete issue artifact comment: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact delete failed: {}", stderr.trim()));
@@ -1577,6 +1581,50 @@ mod tests {
         assert_eq!(parsed.kind, SpecIssueArtifactKind::Doc);
         assert_eq!(parsed.artifact_name, "spec.md");
         assert_eq!(parsed.content, "# Spec");
+    }
+
+    #[test]
+    fn render_artifact_comment_body_preserves_japanese_content() {
+        let body = render_artifact_comment_body(
+            SpecIssueArtifactKind::Doc,
+            "spec.md",
+            "# Feature Specification: パフォーマンスプロファイリング基盤\n\n日本語本文",
+        );
+        let parsed = parse_artifact_header_and_content(&body).expect("parse japanese body");
+        assert_eq!(parsed.artifact_name, "spec.md");
+        assert_eq!(
+            parsed.content,
+            "# Feature Specification: パフォーマンスプロファイリング基盤\n\n日本語本文"
+        );
+    }
+
+    #[test]
+    fn build_issue_comment_payload_round_trips_non_ascii_body() {
+        let payload = build_issue_comment_payload("日本語の artifact コメント本文");
+        let json = serde_json::to_string(&payload).expect("serialize payload");
+        let round_trip: Value = serde_json::from_str(&json).expect("parse payload");
+        assert_eq!(
+            round_trip.get("body").and_then(Value::as_str),
+            Some("日本語の artifact コメント本文")
+        );
+    }
+
+    #[test]
+    fn parse_issue_comment_node_supports_rest_shape() {
+        let value = json!({
+            "id": 12345,
+            "body": "<!-- GWT_SPEC_ARTIFACT:doc:spec.md -->\ndoc:spec.md\n\n日本語本文",
+            "updated_at": "2026-03-19T00:00:00Z",
+            "html_url": "https://github.com/akiojin/gwt/issues/1705#issuecomment-1"
+        });
+        let parsed = parse_issue_comment_node(&value).expect("parse rest comment");
+        assert_eq!(parsed.id, "12345");
+        assert_eq!(parsed.updated_at, "2026-03-19T00:00:00Z");
+        assert_eq!(
+            parsed.url.as_deref(),
+            Some("https://github.com/akiojin/gwt/issues/1705#issuecomment-1")
+        );
+        assert!(parsed.body.contains("日本語本文"));
     }
 
     #[test]
