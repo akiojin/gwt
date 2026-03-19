@@ -958,7 +958,8 @@ mod tests {
 
     fn init_repo_with_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempdir().expect("create tempdir");
-        let repo = temp.path().join("repo");
+        let canonical_temp = dunce::canonicalize(temp.path()).unwrap_or_else(|_| temp.path().to_path_buf());
+        let repo = canonical_temp.join("repo");
         fs::create_dir_all(&repo).expect("create repo dir");
 
         let output = command_os("git")
@@ -1012,7 +1013,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let worktree = temp.path().join(".worktrees").join("feature");
+        let worktree = canonical_temp.join(".worktrees").join("feature");
         let output = command_os("git")
             .current_dir(&repo)
             .args(["worktree", "add", "-b", "feature"])
