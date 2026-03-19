@@ -14,8 +14,8 @@ use gwt_core::{
     config::ProfilesConfig,
     git::{
         create_linked_branch, fetch_issue_detail, fetch_issues_with_options, find_branch_for_issue,
-        find_branches_for_issues, is_gh_cli_authenticated,
-        is_gh_cli_available, search_issues_with_query,
+        find_branches_for_issues, is_gh_cli_authenticated, is_gh_cli_available,
+        search_issues_with_query,
     },
     worktree::WorktreeManager,
     StructuredError,
