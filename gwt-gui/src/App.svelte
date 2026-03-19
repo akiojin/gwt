@@ -55,6 +55,7 @@
     flattenTabIdsByLayout,
     getGroupForTab,
     moveTabToGroup,
+    normalizeTabLayoutState,
     removeTabFromLayout,
     reorderTabsInGroup,
     resizeSplitNode,
@@ -373,11 +374,11 @@
   type AvailableUpdateState = Extract<UpdateState, { state: "available" }>;
 
   function readTabLayoutState() {
-    return {
+    return normalizeTabLayoutState({
       groups: layoutGroups,
       root: layoutRoot,
       activeGroupId,
-    };
+    }, activeTabId);
   }
 
   function applyTabLayoutState(next: {
@@ -385,11 +386,12 @@
     root: TabLayoutNode;
     activeGroupId: string;
   }) {
-    layoutGroups = next.groups;
-    layoutRoot = next.root;
-    activeGroupId = next.activeGroupId;
+    const normalized = normalizeTabLayoutState(next, activeTabId);
+    layoutGroups = normalized.groups;
+    layoutRoot = normalized.root;
+    activeGroupId = normalized.activeGroupId;
     const nextActiveTabId =
-      next.groups[next.activeGroupId]?.activeTabId ??
+      normalized.groups[normalized.activeGroupId]?.activeTabId ??
       tabs.find((tab) => tab.id === activeTabId)?.id ??
       tabs[0]?.id ??
       "";
@@ -2071,9 +2073,7 @@
 
   function handleSplitResize(splitId: string, primaryFraction: number) {
     const next = resizeSplitNode(readTabLayoutState(), splitId, primaryFraction);
-    layoutGroups = next.groups;
-    layoutRoot = next.root;
-    activeGroupId = next.activeGroupId;
+    applyTabLayoutState(next);
   }
 
   function openSettingsTab() {
@@ -2725,11 +2725,14 @@
       next.root !== layoutRoot ||
       next.activeGroupId !== activeGroupId
     ) {
-      layoutGroups = next.groups;
-      layoutRoot = next.root;
-      activeGroupId = next.activeGroupId;
+      const normalized = normalizeTabLayoutState(next, activeTabId);
+      layoutGroups = normalized.groups;
+      layoutRoot = normalized.root;
+      activeGroupId = normalized.activeGroupId;
       const nextActiveTab =
-        next.groups[next.activeGroupId]?.activeTabId ?? tabs[0]?.id ?? "";
+        normalized.groups[normalized.activeGroupId]?.activeTabId ??
+        tabs[0]?.id ??
+        "";
       if (nextActiveTab && nextActiveTab !== activeTabId) {
         activeTabId = nextActiveTab;
       }
@@ -2873,9 +2876,12 @@
         },
       ]),
     );
-    layoutGroups = restoredGroups;
-    layoutRoot = restored.root as TabLayoutNode;
-    activeGroupId = restored.activeGroupId ?? restored.groups[0]?.id ?? activeGroupId;
+    applyTabLayoutState({
+      groups: restoredGroups,
+      root: restored.root as TabLayoutNode,
+      activeGroupId:
+        restored.activeGroupId ?? restored.groups[0]?.id ?? activeGroupId,
+    });
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     if (allowOverrideActive) {

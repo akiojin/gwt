@@ -279,18 +279,19 @@
   }
 
   .split-divider {
-    flex: 0 0 6px;
-    background: var(--bg-secondary);
+    flex: 0 0 4px;
+    background: color-mix(in srgb, var(--bg-secondary) 45%, transparent);
     cursor: col-resize;
-    border-left: 1px solid var(--border-color);
-    border-right: 1px solid var(--border-color);
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 75%, transparent);
+  }
+
+  .split-divider:hover {
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-secondary));
   }
 
   .split-divider.vertical {
     cursor: row-resize;
     border-left: none;
-    border-right: none;
-    border-top: 1px solid var(--border-color);
-    border-bottom: 1px solid var(--border-color);
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 75%, transparent);
   }
 </style>

@@ -5,6 +5,7 @@ import {
   createInitialTabLayout,
   flattenTabIdsByLayout,
   moveTabToGroup,
+  normalizeTabLayoutState,
   removeTabFromLayout,
   reorderTabsInGroup,
   setActiveGroup,
@@ -132,5 +133,47 @@ describe("tabLayout", () => {
     const next = setActiveGroup(split, otherGroupId);
 
     expect(next.activeGroupId).toBe(otherGroupId);
+  });
+
+  it("collapses a dangling split tree back to one full group", () => {
+    const layout = createInitialTabLayout(
+      [{ id: "assistant" }, { id: "settings" }, { id: "issues" }],
+      "assistant",
+    );
+    const split = splitTabToGroupEdge(
+      layout,
+      "issues",
+      layout.activeGroupId,
+      "right",
+    );
+    const survivingGroupId =
+      Object.keys(split.groups).find((id) => id !== split.activeGroupId) ??
+      split.activeGroupId;
+
+    const normalized = normalizeTabLayoutState({
+      ...split,
+      root: {
+        type: "split",
+        id: "split-corrupt",
+        axis: "horizontal",
+        sizes: [0.5, 0.5],
+        children: [
+          { type: "group", groupId: survivingGroupId },
+          { type: "group", groupId: "missing-group" },
+        ],
+      },
+    });
+
+    expect(normalized.root).toEqual({
+      type: "group",
+      groupId: survivingGroupId,
+    });
+    expect(Object.keys(normalized.groups)).toEqual([survivingGroupId]);
+    expect(normalized.groups[survivingGroupId]?.tabIds).toEqual([
+      "assistant",
+      "settings",
+      "issues",
+    ]);
+    expect(normalized.activeGroupId).toBe(survivingGroupId);
   });
 });

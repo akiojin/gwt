@@ -418,11 +418,11 @@
     min-height: 0;
     overflow: hidden;
     background: var(--bg-primary);
-    border: 1px solid var(--border-color);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-color) 72%, transparent);
   }
 
   .group-pane.active-group {
-    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 36%, var(--border-color));
   }
 
   .tab-bar {
@@ -610,6 +610,7 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    background: var(--bg-primary);
   }
 
   .panel-wrapper,
@@ -623,7 +624,7 @@
   }
 
   .panel-wrapper {
-    padding: 24px;
+    padding: 0;
   }
 
   .panel-wrapper.active,

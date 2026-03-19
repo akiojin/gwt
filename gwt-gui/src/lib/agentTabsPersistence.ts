@@ -1,7 +1,11 @@
 import type { Tab, TerminalInfo } from "./types";
 import { inferAgentId } from "./agentUtils";
 import type { TabGroupState, TabLayoutNode } from "./tabLayout";
-import { createInitialTabLayout, flattenTabIdsByLayout } from "./tabLayout";
+import {
+  createInitialTabLayout,
+  flattenTabIdsByLayout,
+  normalizeTabLayoutState,
+} from "./tabLayout";
 
 /**
  * localStorage key used to persist tab state (per project path).
@@ -728,11 +732,14 @@ function buildRestoredLayoutState(
     Object.keys(nextGroups)[0] ||
     "";
 
-  return {
-    groups: nextGroups,
-    root,
-    activeGroupId: activeGroupIdRaw,
-  };
+  return normalizeTabLayoutState(
+    {
+      groups: nextGroups,
+      root,
+      activeGroupId: activeGroupIdRaw,
+    },
+    restoredActiveTabId,
+  );
 }
 
 export function loadStoredProjectAgentTabs(
