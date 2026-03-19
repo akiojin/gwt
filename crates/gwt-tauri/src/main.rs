@@ -17,14 +17,14 @@ mod single_instance;
 mod state;
 mod tool_helpers;
 
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{io::Read, sync::Arc};
+
+#[cfg(any(test, target_os = "macos"))]
+use std::path::{Path, PathBuf};
 
 use state::AppState;
 
+#[cfg(any(test, target_os = "macos"))]
 const LEGACY_WEBKIT_LOCAL_STORAGE_RESET_SENTINEL: &str = "webkit-localstorage-reset-issue-1720-v1";
 
 fn main() {
