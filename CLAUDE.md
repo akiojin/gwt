@@ -261,7 +261,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 | Skill | Command | Description |
 |-------|---------|-------------|
 | gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
-| gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
+| gwt-agent-communication | `/gwt:gwt-agent-communication` | Agent↔Assistant consultation protocol for PM-mode orchestration. |
 | gwt-spec-to-issue-migration | — | Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script. |
 
 ### Recommended Workflow

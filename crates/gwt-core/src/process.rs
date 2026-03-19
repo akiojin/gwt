@@ -3,11 +3,9 @@
 //! On Windows, GUI applications should spawn child processes without creating
 //! transient console windows.
 
-use std::ffi::OsStr;
-use std::process::Command;
-
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::{ffi::OsStr, process::Command};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;

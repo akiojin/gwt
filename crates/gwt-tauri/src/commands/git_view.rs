@@ -1,14 +1,18 @@
 //! GitView commands for branch diff, commits, working tree, and stash
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use gwt_core::git::{
-    self, FileChange, FileDiff, GitChangeSummary, GitViewCommit, Remote, StashEntry,
-    WorkingTreeEntry,
+use std::path::{Path, PathBuf};
+
+use gwt_core::{
+    git::{
+        self, FileChange, FileDiff, GitChangeSummary, GitViewCommit, Remote, StashEntry,
+        WorkingTreeEntry,
+    },
+    worktree::WorktreeManager,
+    StructuredError,
 };
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
-use std::path::Path;
-use std::path::PathBuf;
+use tracing::instrument;
+
+use crate::commands::project::resolve_repo_path_for_project_root;
 
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
     let Some((first, rest)) = branch.split_once('/') else {
@@ -170,6 +174,10 @@ mod tests {
     }
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "get_git_change_summary", project_path, branch)
+)]
 #[tauri::command]
 pub fn get_git_change_summary(
     project_path: String,
@@ -192,6 +200,10 @@ pub fn get_git_change_summary(
         .map_err(|e| StructuredError::from_gwt_error(&e, "get_git_change_summary"))
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "get_branch_diff_files", project_path, branch)
+)]
 #[tauri::command]
 pub fn get_branch_diff_files(
     project_path: String,
@@ -207,6 +219,7 @@ pub fn get_branch_diff_files(
         .map_err(|e| StructuredError::from_gwt_error(&e, "get_branch_diff_files"))
 }
 
+#[instrument(skip_all, fields(command = "get_file_diff", project_path, branch))]
 #[tauri::command]
 pub fn get_file_diff(
     project_path: String,
@@ -223,6 +236,7 @@ pub fn get_file_diff(
         .map_err(|e| StructuredError::from_gwt_error(&e, "get_file_diff"))
 }
 
+#[instrument(skip_all, fields(command = "get_branch_commits", project_path, branch))]
 #[tauri::command]
 pub fn get_branch_commits(
     project_path: String,
@@ -240,6 +254,10 @@ pub fn get_branch_commits(
         .map_err(|e| StructuredError::from_gwt_error(&e, "get_branch_commits"))
 }
 
+#[instrument(
+    skip_all,
+    fields(command = "get_working_tree_status", project_path, branch)
+)]
 #[tauri::command]
 pub fn get_working_tree_status(
     project_path: String,
@@ -273,6 +291,7 @@ pub fn get_working_tree_status(
         .map_err(|e| StructuredError::from_gwt_error(&e, "get_working_tree_status"))
 }
 
+#[instrument(skip_all, fields(command = "get_stash_list", project_path, branch))]
 #[tauri::command]
 pub fn get_stash_list(
     project_path: String,
@@ -295,6 +314,7 @@ pub fn get_stash_list(
         .map_err(|e| StructuredError::from_gwt_error(&e, "get_stash_list"))
 }
 
+#[instrument(skip_all, fields(command = "get_base_branch_candidates", project_path))]
 #[tauri::command]
 pub fn get_base_branch_candidates(project_path: String) -> Result<Vec<String>, StructuredError> {
     let project_root = Path::new(&project_path);

@@ -1,8 +1,8 @@
-use crate::state::AppState;
-use tauri::State;
-use tauri::{AppHandle, Manager, WebviewWindowBuilder, Window, Wry};
-use tracing::{info, warn};
+use tauri::{AppHandle, Manager, State, WebviewWindowBuilder, Window, Wry};
+use tracing::{info, instrument, warn};
 use uuid::Uuid;
+
+use crate::state::AppState;
 
 fn normalize_window_label(label: Option<String>) -> String {
     let trimmed = label.unwrap_or_default().trim().to_string();
@@ -46,21 +46,25 @@ fn open_window_with_label(app: &AppHandle<Wry>, label: &str) -> Result<(), Strin
     Ok(())
 }
 
+#[instrument(skip_all, fields(command = "get_current_window_label", window_label = window.label()))]
 #[tauri::command]
 pub fn get_current_window_label(window: Window) -> String {
     window.label().to_string()
 }
 
+#[instrument(skip_all, fields(command = "try_acquire_window_restore_leader", window_label = label))]
 #[tauri::command]
 pub fn try_acquire_window_restore_leader(state: State<AppState>, label: String) -> bool {
     state.try_acquire_window_session_restore_leader(&label)
 }
 
+#[instrument(skip_all, fields(command = "release_window_restore_leader", window_label = label))]
 #[tauri::command]
 pub fn release_window_restore_leader(state: State<AppState>, label: String) {
     state.release_window_session_restore_leader(&label);
 }
 
+#[instrument(skip_all, fields(command = "open_gwt_window"))]
 #[tauri::command]
 pub fn open_gwt_window(app: AppHandle<Wry>, label: Option<String>) -> String {
     let requested = normalize_window_label(label);

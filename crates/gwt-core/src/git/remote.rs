@@ -1,8 +1,10 @@
 //! Remote operations
 
-use crate::error::{GwtError, Result};
 use std::path::Path;
+
 use tracing::{debug, error, info};
+
+use crate::error::{GwtError, Result};
 
 /// Represents a Git remote
 #[derive(Debug, Clone)]
@@ -398,8 +400,9 @@ impl Remote {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn create_test_repo() -> TempDir {
         let temp = TempDir::new().unwrap();

@@ -3,11 +3,12 @@
 //! - Entries are deduplicated by path (same path updates `last_opened`).
 //! - Non-existent paths are automatically removed on load.
 
-use super::settings::Settings;
-use crate::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
+
+use super::settings::Settings;
+use crate::error::Result;
 
 /// A single recent project entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,9 +99,10 @@ fn save_recent_projects(projects: &[RecentProject]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
     use crate::config::{TestEnvGuard, HOME_LOCK};
-    use tempfile::TempDir;
 
     #[test]
     fn test_record_and_load() {

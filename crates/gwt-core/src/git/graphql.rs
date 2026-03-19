@@ -3,13 +3,13 @@
 //! Provides functions to build GraphQL queries, execute them via `gh api graphql`,
 //! and parse responses into `PrStatusInfo` structs.
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::time::Duration;
+use std::{collections::HashMap, path::Path, time::Duration};
 
-use super::gh_cli::run_gh_output_with_timeout_and_repair;
-use super::issue::resolve_repo_slug;
-use super::pullrequest::{PrStatusInfo, ReviewComment, ReviewInfo, WorkflowRunInfo};
+use super::{
+    gh_cli::run_gh_output_with_timeout_and_repair,
+    issue::resolve_repo_slug,
+    pullrequest::{PrStatusInfo, ReviewComment, ReviewInfo, WorkflowRunInfo},
+};
 
 /// GraphQL rate limit snapshot returned by GitHub API.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

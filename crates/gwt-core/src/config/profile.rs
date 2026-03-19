@@ -1,10 +1,12 @@
 //! Profile management for environment variables in `~/.gwt/config.toml`.
 
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use tracing::info;
+
 use super::settings::Settings;
 use crate::error::{GwtError, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tracing::info;
 
 /// Environment profile
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -358,8 +360,9 @@ impl Default for ProfilesConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn ai_settings(model: &str) -> AISettings {
         AISettings {

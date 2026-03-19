@@ -8,17 +8,21 @@
 //!   - Installer payload (.dmg/.msi) => run installer with privileges/UAC, then restart
 //! - Internal helper modes (`__internal`) to safely apply updates after the parent process exits
 
+use std::{
+    ffi::OsStr,
+    fs, io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
-use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
+use reqwest::{
+    blocking::Client,
+    header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT},
+};
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsStr;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const DEFAULT_OWNER: &str = "akiojin";
 const DEFAULT_REPO: &str = "gwt";

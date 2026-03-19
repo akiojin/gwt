@@ -1,13 +1,17 @@
 //! Claude Code session parser.
 
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use chrono::{DateTime, Utc};
+
 use super::{
     find_session_file, parse_jsonl_session, AgentType, SessionListEntry, SessionParseError,
     SessionParser,
 };
 use crate::ai::claude_paths::encode_claude_project_path;
-use chrono::{DateTime, Utc};
-use std::fs;
-use std::path::{Path, PathBuf};
 
 pub struct ClaudeSessionParser {
     home_dir: PathBuf,
@@ -150,8 +154,9 @@ impl ClaudeSessionParser {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn list_sessions_filters_by_encoded_worktree_dir() {

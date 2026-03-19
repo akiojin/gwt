@@ -1,19 +1,28 @@
 //! Worktree cleanup commands (gwt-spec issue, gwt-spec issue)
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::commands::terminal::capture_scrollback_tail_from_state;
-use crate::state::AppState;
-use gwt_core::config::{agent_has_hook_support, infer_agent_status, Session};
-use gwt_core::git::gh_cli::PrStatus;
-use gwt_core::git::Branch;
-use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::atomic::Ordering,
+};
+
+use gwt_core::{
+    config::{agent_has_hook_support, infer_agent_status, Session},
+    git::{gh_cli::PrStatus, Branch},
+    terminal::pane::PaneStatus,
+    worktree::WorktreeManager,
+    StructuredError,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager};
+use tracing::instrument;
+
+use crate::{
+    commands::{
+        project::resolve_repo_path_for_project_root, terminal::capture_scrollback_tail_from_state,
+    },
+    state::AppState,
+};
 
 /// Safety level for a worktree (FR-500)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -315,6 +324,7 @@ fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<Workt
 }
 
 /// List all worktrees with safety info (gwt-spec issue T1)
+#[instrument(skip_all, fields(command = "list_worktrees", project_path))]
 #[tauri::command]
 pub async fn list_worktrees(
     project_path: String,
@@ -332,6 +342,7 @@ pub async fn list_worktrees(
 }
 
 /// Check gh CLI availability (gwt-spec issue T010)
+#[instrument(skip_all, fields(command = "check_gh_available"))]
 #[tauri::command]
 pub async fn check_gh_available(
     state: tauri::State<'_, AppState>,
@@ -349,6 +360,7 @@ pub async fn check_gh_available(
 }
 
 /// Get PR statuses for cleanup (gwt-spec issue T011)
+#[instrument(skip_all, fields(command = "get_cleanup_pr_statuses", project_path))]
 #[tauri::command]
 pub async fn get_cleanup_pr_statuses(
     project_path: String,
@@ -387,6 +399,10 @@ pub async fn get_cleanup_pr_statuses(
 /// Get branch deletion protection info for cleanup (#1404).
 ///
 /// Returns branch names that cannot be deleted remotely due to repository rules.
+#[instrument(
+    skip_all,
+    fields(command = "get_cleanup_branch_protection", project_path)
+)]
 #[tauri::command]
 pub async fn get_cleanup_branch_protection(
     project_path: String,
@@ -412,6 +428,7 @@ pub async fn get_cleanup_branch_protection(
 }
 
 /// Get cleanup settings for a project (gwt-spec issue T019)
+#[instrument(skip_all, fields(command = "get_cleanup_settings", project_path))]
 #[tauri::command]
 pub async fn get_cleanup_settings(
     project_path: String,
@@ -423,6 +440,7 @@ pub async fn get_cleanup_settings(
 }
 
 /// Set cleanup settings for a project (gwt-spec issue T019)
+#[instrument(skip_all, fields(command = "set_cleanup_settings", project_path))]
 #[tauri::command]
 pub async fn set_cleanup_settings(
     project_path: String,
@@ -436,6 +454,7 @@ pub async fn set_cleanup_settings(
 }
 
 /// Cleanup multiple worktrees (gwt-spec issue T2, gwt-spec issue T013-T014)
+#[instrument(skip_all, fields(command = "cleanup_worktrees", project_path))]
 #[tauri::command]
 pub async fn cleanup_worktrees(
     project_path: String,
@@ -586,6 +605,7 @@ pub async fn cleanup_worktrees(
 /// This command is retained for backward compatibility but the frontend now routes
 /// all deletions through `CleanupModal` → `cleanup_worktrees` (gwt-spec issue FR-612).
 #[deprecated(note = "Use cleanup_worktrees with a single branch instead (gwt-spec issue FR-612)")]
+#[instrument(skip_all, fields(command = "cleanup_single_worktree", project_path))]
 #[tauri::command]
 pub async fn cleanup_single_worktree(
     project_path: String,

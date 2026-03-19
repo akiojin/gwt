@@ -1,14 +1,20 @@
-use gwt_core::agent::SessionStore;
-use gwt_core::ai::SessionSummaryCache;
-use gwt_core::config::os_env::EnvSource;
-use gwt_core::config::SkillRegistrationStatus;
-use gwt_core::terminal::manager::PaneManager;
-use gwt_core::update::UpdateManager;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use gwt_core::{
+    agent::SessionStore,
+    ai::SessionSummaryCache,
+    config::{os_env::EnvSource, SkillRegistrationStatus},
+    terminal::manager::PaneManager,
+    update::UpdateManager,
+};
 use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone)]
@@ -86,12 +92,21 @@ pub struct WindowMigrationState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DispatchedTask {
+    pub pane_id: String,
+    pub description: String,
+    pub dispatched_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssistantContext {
     pub working_goal: Option<String>,
     pub goal_confidence: Option<String>,
     pub current_status: Option<String>,
     pub blockers: Vec<String>,
     pub recommended_next_actions: Vec<String>,
+    pub dispatched_tasks: Vec<DispatchedTask>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +203,8 @@ pub struct AppState {
     /// Assistant Mode monitor handle per window label.
     pub assistant_monitor_handle:
         Mutex<HashMap<String, crate::assistant_monitor::AssistantMonitorHandle>>,
+    /// Last heartbeat timestamp from the frontend (freeze detection).
+    pub last_heartbeat: Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -235,6 +252,7 @@ impl AppState {
             assistant_startup_inflight: Mutex::new(HashMap::new()),
             assistant_runtime: Mutex::new(HashMap::new()),
             assistant_monitor_handle: Mutex::new(HashMap::new()),
+            last_heartbeat: Mutex::new(None),
         }
     }
 
@@ -724,9 +742,10 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::assistant_engine::AssistantEngine;
-    use std::path::PathBuf;
 
     #[test]
     fn version_history_semaphore_has_three_permits() {

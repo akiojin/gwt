@@ -5,9 +5,10 @@
 
 #![allow(dead_code)]
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::path::PathBuf;
 
 /// Log entry categories
 #[derive(Debug, Clone, Serialize)]

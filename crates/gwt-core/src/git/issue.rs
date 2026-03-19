@@ -2,16 +2,20 @@
 //!
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
-use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::path::Path;
-use std::process::{Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::Path,
+    process::{Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
-use super::gh_cli::{gh_command, is_gh_available, run_gh_output_with_repair};
-use super::remote::Remote;
-use super::repository::{find_bare_repo_in_dir, is_git_repo};
+use super::{
+    gh_cli::{gh_command, is_gh_available, run_gh_output_with_repair},
+    remote::Remote,
+    repository::{find_bare_repo_in_dir, is_git_repo},
+};
 
 // `gh issue list --json comments` returns at most this many comments per issue.
 const GH_COMMENTS_PREVIEW_LIMIT: u32 = 100;
@@ -851,7 +855,136 @@ fn parse_gh_issue_json(json: &str) -> Result<GitHubIssue, String> {
     Ok(issues.remove(0))
 }
 
-/// Fetch a single issue detail from GitHub using gh CLI
+/// Whether an error message indicates a retryable failure (rate limit, auth,
+/// transport) that should trigger REST API fallback.
+fn is_retryable_gh_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("api rate")
+        || lower.contains("403")
+        || lower.contains("secondary rate")
+        || lower.contains("could not resolve host")
+        || lower.contains("connection refused")
+        || lower.contains("timed out")
+        || lower.contains("network is unreachable")
+}
+
+/// Fetch a single issue detail from GitHub REST API (`gh api`).
+///
+/// Used as fallback when `gh issue view` fails due to rate limit / 403 /
+/// transport errors. The REST response uses snake_case field names.
+fn fetch_issue_detail_via_rest(
+    repo_path: &Path,
+    repo_slug: &str,
+    issue_number: u64,
+) -> Result<GitHubIssue, String> {
+    let endpoint = format!("repos/{}/issues/{}", repo_slug, issue_number);
+    let output = run_gh_output_with_repair(repo_path, ["api", endpoint.as_str()])
+        .map_err(|e| format!("Failed to execute gh api: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh api issue detail failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_rest_api_issue_json(&stdout)
+}
+
+/// Parse a GitHub REST API issue JSON response (snake_case fields).
+fn parse_rest_api_issue_json(json: &str) -> Result<GitHubIssue, String> {
+    let item: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("Failed to parse REST JSON: {}", e))?;
+
+    let number = item
+        .get("number")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "Missing number in REST response".to_string())?;
+    let title = item
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let updated_at = item
+        .get("updated_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let labels = item
+        .get("labels")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|label| {
+                    let name = label.get("name")?.as_str()?.to_string();
+                    let color = label
+                        .get("color")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(GitHubLabel { name, color })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let body = item.get("body").and_then(|v| v.as_str()).map(String::from);
+    let state = item
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("open")
+        .to_uppercase();
+    let html_url = item
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let assignees = item
+        .get("assignees")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let login = a.get("login")?.as_str()?.to_string();
+                    let avatar_url = a
+                        .get("avatar_url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(GitHubAssignee { login, avatar_url })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let comments_count = item
+        .get("comments")
+        .and_then(|v| v.as_u64())
+        .map(|c| u32::try_from(c).unwrap_or(u32::MAX))
+        .unwrap_or(0);
+    let milestone = item.get("milestone").and_then(|v| {
+        if v.is_null() {
+            return None;
+        }
+        let title = v.get("title")?.as_str()?.to_string();
+        let number = v.get("number")?.as_u64()? as u32;
+        Some(GitHubMilestone { title, number })
+    });
+
+    Ok(GitHubIssue {
+        number,
+        title,
+        updated_at,
+        labels,
+        body,
+        state,
+        html_url,
+        assignees,
+        comments_count,
+        milestone,
+    })
+}
+
+/// Fetch a single issue detail from GitHub using gh CLI, with REST API
+/// fallback on rate limit / 403 / transport errors (#1714 FR-005).
 pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubIssue, String> {
     let repo_slug = resolve_repo_slug(repo_path);
 
@@ -868,18 +1001,95 @@ pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubI
         args.push(slug.to_string());
     }
 
-    let output = run_gh_output_with_repair(repo_path, &args)
-        .map_err(|e| format!("Failed to execute gh CLI: {}", e))?;
+    let output = run_gh_output_with_repair(repo_path, &args);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh issue view failed: {}", stderr));
+    // Primary path: gh issue view succeeded
+    match output {
+        Ok(ref out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut issue = parse_gh_issue_json(&stdout)?;
+            hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), &mut issue);
+            Ok(issue)
+        }
+        Ok(ref out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // Only fallback on retryable errors when we have a repo slug
+            if let Some(slug) = repo_slug.as_deref() {
+                if is_retryable_gh_error(&stderr) {
+                    return fetch_issue_detail_via_rest(repo_path, slug, issue_number);
+                }
+            }
+            Err(format!("gh issue view failed: {}", stderr))
+        }
+        Err(e) => {
+            // Transport/execution error → try REST fallback
+            if let Some(slug) = repo_slug.as_deref() {
+                return fetch_issue_detail_via_rest(repo_path, slug, issue_number);
+            }
+            Err(format!("Failed to execute gh CLI: {}", e))
+        }
+    }
+}
+
+/// Fetch issues from GitHub REST API for cache sync (#1714 FR-008).
+///
+/// Uses `gh api` with optional `since` watermark for diff sync.
+/// Returns all matching issues (paginated).
+pub fn fetch_all_issues_via_rest(
+    repo_path: &Path,
+    since: Option<&str>,
+) -> Result<Vec<GitHubIssue>, String> {
+    let repo_slug =
+        resolve_repo_slug(repo_path).ok_or_else(|| "Cannot resolve repo slug".to_string())?;
+
+    let mut all_issues = Vec::new();
+    let mut page = 1u32;
+    let per_page = 100;
+
+    loop {
+        let mut endpoint = format!(
+            "repos/{}/issues?state=all&per_page={}&page={}&sort=updated&direction=desc",
+            repo_slug, per_page, page
+        );
+        if let Some(since_ts) = since {
+            endpoint.push_str(&format!("&since={}", since_ts));
+        }
+
+        let output = run_gh_output_with_repair(repo_path, ["api", endpoint.as_str()])
+            .map_err(|e| format!("Failed to execute gh api for issue list: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("gh api issue list failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let items: Vec<serde_json::Value> = serde_json::from_str(&stdout)
+            .map_err(|e| format!("Failed to parse issue list JSON: {}", e))?;
+
+        if items.is_empty() {
+            break;
+        }
+
+        for item in &items {
+            // GitHub REST API returns PRs mixed with issues; skip PRs
+            if item.get("pull_request").is_some() {
+                continue;
+            }
+            let item_json = serde_json::to_string(item)
+                .map_err(|e| format!("Failed to serialize issue item: {}", e))?;
+            if let Ok(issue) = parse_rest_api_issue_json(&item_json) {
+                all_issues.push(issue);
+            }
+        }
+
+        if items.len() < per_page as usize {
+            break;
+        }
+        page += 1;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut issue = parse_gh_issue_json(&stdout)?;
-    hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), &mut issue);
-    Ok(issue)
+    Ok(all_issues)
 }
 
 enum IssueSearchToken {
@@ -1411,9 +1621,11 @@ pub fn create_linked_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
         let output = crate::process::command("git")

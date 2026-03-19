@@ -10,9 +10,11 @@
 //! 3. Writes always use new format (TOML)
 //! 4. Old files are never auto-deleted (use `gwt config cleanup`)
 
-use crate::error::{GwtError, Result};
 use std::path::Path;
+
 use tracing::{debug, error, info, warn};
+
+use crate::error::{GwtError, Result};
 
 /// Migrate JSON configuration to TOML
 pub fn migrate_json_to_toml(json_path: &Path, toml_path: &Path) -> Result<()> {
@@ -299,8 +301,9 @@ impl CleanupCandidate {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_migrate_json_to_toml() {

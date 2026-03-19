@@ -54,6 +54,7 @@ require_file "$WORKFLOW"
 
 require_not_contains "$WORKFLOW" "npm install -g"
 require_contains "$WORKFLOW" "corepack prepare pnpm@10.29.2 --activate"
+require_contains "$WORKFLOW" "pnpm lint:skills"
 require_contains "$WORKFLOW" "pnpm dlx @commitlint/cli@20.4.1"
 
 TEST_WORKFLOW="$ROOT_DIR/.github/workflows/test.yml"

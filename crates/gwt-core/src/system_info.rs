@@ -1,15 +1,14 @@
 //! System resource monitoring (CPU, memory, GPU).
 
-use std::sync::OnceLock;
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
-
 #[cfg(target_os = "macos")]
 use std::sync::Mutex;
+use std::sync::OnceLock;
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 use serde::Deserialize;
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 #[cfg(target_os = "windows")]
 use wmi::WMIConnection;
 

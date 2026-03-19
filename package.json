@@ -1,6 +1,6 @@
 {
   "name": "gwt",
-  "version": "8.16.0",
+  "version": "8.17.0",
   "private": true,
   "description": "Tauri desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
@@ -15,6 +15,7 @@
     "installer:macos": "bash installers/macos/build-installer.sh",
     "installer:windows": "powershell -ExecutionPolicy Bypass -File installers/windows/build-msi.ps1",
     "prepare": "test -n \"$CI\" || bunx husky install",
+    "lint:skills": "bash scripts/validate-skill-frontmatter.sh",
     "lint:husky": "bash scripts/verify-husky-hooks.sh"
   },
   "keywords": [
