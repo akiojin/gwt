@@ -11,10 +11,10 @@ use super::recent_projects::RecentProjectsConfig;
 use super::tools::ToolsConfig;
 use crate::error::{GwtError, Result};
 use serde::de::{self, Deserializer};
-use tracing::instrument;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tracing::instrument;
 use tracing::{debug, error, info};
 
 static GLOBAL_SETTINGS_UPDATE_LOCK: Mutex<()> = Mutex::new(());

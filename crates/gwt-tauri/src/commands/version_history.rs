@@ -13,12 +13,12 @@ use gwt_core::StructuredError;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use tracing::instrument;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
+use tracing::instrument;
 
 /// Compute the cache file path for a given repo path.
 ///
@@ -161,7 +161,10 @@ pub fn list_project_versions(
     Ok(ProjectVersions { items })
 }
 
-#[instrument(skip_all, fields(command = "get_project_version_history", project_path))]
+#[instrument(
+    skip_all,
+    fields(command = "get_project_version_history", project_path)
+)]
 #[tauri::command]
 pub fn get_project_version_history(
     project_path: String,

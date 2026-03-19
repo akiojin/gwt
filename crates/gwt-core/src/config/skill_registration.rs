@@ -2555,7 +2555,13 @@ OPENAI_API_KEY = "legacy-key"
         let codex_fix_pr_dir = temp.path().join(".codex").join("skills").join("gwt-fix-pr");
         std::fs::create_dir_all(codex_fix_pr_dir.join("scripts")).unwrap();
         std::fs::write(codex_fix_pr_dir.join("SKILL.md"), "legacy").unwrap();
-        std::fs::write(codex_fix_pr_dir.join("scripts").join("inspect_pr_checks.py"), "legacy").unwrap();
+        std::fs::write(
+            codex_fix_pr_dir
+                .join("scripts")
+                .join("inspect_pr_checks.py"),
+            "legacy",
+        )
+        .unwrap();
 
         register_agent_skills_with_settings_at_project_root(
             SkillAgentType::Codex,

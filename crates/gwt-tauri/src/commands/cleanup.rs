@@ -391,7 +391,10 @@ pub async fn get_cleanup_pr_statuses(
 /// Get branch deletion protection info for cleanup (#1404).
 ///
 /// Returns branch names that cannot be deleted remotely due to repository rules.
-#[instrument(skip_all, fields(command = "get_cleanup_branch_protection", project_path))]
+#[instrument(
+    skip_all,
+    fields(command = "get_cleanup_branch_protection", project_path)
+)]
 #[tauri::command]
 pub async fn get_cleanup_branch_protection(
     project_path: String,
