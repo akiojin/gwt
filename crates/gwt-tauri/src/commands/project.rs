@@ -326,7 +326,7 @@ pub fn open_project(
                             gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(
                                 &sync_repo_path,
                             );
-                        let output = std::process::Command::new("git")
+                        let output = gwt_core::process::git_command()
                             .args(["branch", "--format=%(refname:short)"])
                             .current_dir(&sync_repo_path)
                             .output();

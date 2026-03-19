@@ -788,7 +788,7 @@ pub async fn bootstrap_issue_linkage(project_path: String) -> Result<u32, Struct
         let before = link_store.links.len();
 
         // Get local branch names
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::git_command()
             .args(["branch", "--format=%(refname:short)"])
             .current_dir(&repo_path)
             .output()
