@@ -250,4 +250,39 @@ mod tests {
         // Log directory should be created
         assert!(temp.path().join("test").exists());
     }
+
+    #[test]
+    fn test_init_logger_with_profiling() {
+        let temp = TempDir::new().unwrap();
+        let config = LogConfig {
+            log_dir: temp.path().to_path_buf(),
+            workspace: "profiling_test".to_string(),
+            debug: false,
+            retention_days: 7,
+            profiling: true,
+        };
+
+        let guard = init_logger(&config).unwrap();
+
+        // Log directory should be created
+        let log_dir = temp.path().join("profiling_test");
+        assert!(log_dir.exists());
+
+        // profile.json should be created when profiling is enabled
+        let profile_path = log_dir.join("profile.json");
+        assert!(
+            profile_path.exists(),
+            "profile.json should be created when profiling=true"
+        );
+
+        // Drop guard to flush the trace file
+        drop(guard);
+
+        // After flush, profile.json should have content
+        let content = std::fs::read_to_string(&profile_path).unwrap();
+        assert!(
+            !content.is_empty(),
+            "profile.json should have content after flush"
+        );
+    }
 }
