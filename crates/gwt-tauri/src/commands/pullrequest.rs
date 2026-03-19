@@ -1117,7 +1117,10 @@ fn fetch_latest_branch_pr_impl(
     Ok(result)
 }
 
-#[instrument(skip_all, fields(command = "fetch_latest_branch_pr", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "fetch_latest_branch_pr", project_path, branch)
+)]
 #[tauri::command]
 pub async fn fetch_latest_branch_pr(
     project_path: String,
@@ -1188,7 +1191,10 @@ fn update_pr_branch_impl(project_path: String, pr_number: u64) -> Result<String,
     Ok("Branch updated successfully".to_string())
 }
 
-#[instrument(skip_all, fields(command = "update_pr_branch", project_path, pr_number))]
+#[instrument(
+    skip_all,
+    fields(command = "update_pr_branch", project_path, pr_number)
+)]
 #[tauri::command]
 pub async fn update_pr_branch(project_path: String, pr_number: u64) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || update_pr_branch_impl(project_path, pr_number))
@@ -1223,7 +1229,10 @@ fn fetch_branch_pr_preflight_impl(
     Ok(to_branch_pr_preflight(base_ref, ahead_by, behind_by))
 }
 
-#[instrument(skip_all, fields(command = "fetch_branch_pr_preflight", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "fetch_branch_pr_preflight", project_path, branch)
+)]
 #[tauri::command]
 pub async fn fetch_branch_pr_preflight(
     project_path: String,
@@ -1284,7 +1293,10 @@ fn merge_pull_request_impl(project_path: String, pr_number: u64) -> Result<Strin
     Ok("Pull request merged successfully".to_string())
 }
 
-#[instrument(skip_all, fields(command = "merge_pull_request", project_path, pr_number))]
+#[instrument(
+    skip_all,
+    fields(command = "merge_pull_request", project_path, pr_number)
+)]
 #[tauri::command]
 pub async fn merge_pull_request(project_path: String, pr_number: u64) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || merge_pull_request_impl(project_path, pr_number))

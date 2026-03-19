@@ -407,7 +407,10 @@ mod tests {
 }
 
 /// Detect docker compose context for a branch (best-effort, read-only).
-#[instrument(skip_all, fields(command = "detect_docker_context", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "detect_docker_context", project_path, branch)
+)]
 #[tauri::command]
 pub fn detect_docker_context(
     project_path: String,

@@ -167,7 +167,10 @@ pub(crate) fn ensure_managed_skills_block(path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-#[instrument(skip_all, fields(command = "check_and_fix_agent_instruction_docs", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "check_and_fix_agent_instruction_docs", project_path, branch)
+)]
 #[tauri::command]
 pub fn check_and_fix_agent_instruction_docs(
     project_path: String,

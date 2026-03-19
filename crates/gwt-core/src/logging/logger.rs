@@ -218,8 +218,7 @@ pub fn log_error_message(code: &str, category: &str, message: &str, details: Opt
 /// same process has already initialized the global subscriber.
 #[cfg(test)]
 pub fn init_test_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("gwt=debug"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("gwt=debug"));
 
     tracing_subscriber::registry()
         .with(filter)
