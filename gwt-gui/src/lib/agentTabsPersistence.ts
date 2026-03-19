@@ -1,5 +1,7 @@
 import type { Tab, TerminalInfo } from "./types";
 import { inferAgentId } from "./agentUtils";
+import type { TabGroupState, TabLayoutNode } from "./tabLayout";
+import { createInitialTabLayout, flattenTabIdsByLayout } from "./tabLayout";
 
 /**
  * localStorage key used to persist tab state (per project path).
@@ -26,9 +28,17 @@ export type StoredTerminalTab = {
 };
 
 export type StoredStaticTab = {
-  type: "assistant" | "settings" | "versionHistory" | "issues";
+  type:
+    | "assistant"
+    | "settings"
+    | "versionHistory"
+    | "issues"
+    | "prs"
+    | "projectIndex"
+    | "issueSpec";
   id: string;
   label: string;
+  issueNumber?: number;
 };
 
 export type StoredProjectTab =
@@ -42,6 +52,9 @@ export type StoredProjectTab =
 export type StoredProjectTabs = {
   tabs: StoredProjectTab[];
   activeTabId: string | null;
+  activeGroupId?: string | null;
+  groups?: StoredTabGroup[];
+  root?: StoredTabLayoutNode | null;
 };
 
 /**
@@ -50,6 +63,9 @@ export type StoredProjectTabs = {
 export type BuildRestoredProjectTabsResult = {
   tabs: Tab[];
   activeTabId: string | null;
+  activeGroupId: string | null;
+  groups: StoredTabGroup[];
+  root: StoredTabLayoutNode;
   terminalTabsToRespawn: StoredTerminalTab[];
   activeTerminalPaneIdToRespawn: string | null;
 };
@@ -79,9 +95,28 @@ export function shouldRetryAgentTabRestore(
 }
 
 type StoredProjectTabsRoot = {
-  version: 2;
+  version: 2 | 3;
   byProjectPath: Record<string, StoredProjectTabs>;
 };
+
+export type StoredTabGroup = {
+  id: string;
+  tabIds: string[];
+  activeTabId: string | null;
+};
+
+export type StoredTabLayoutNode =
+  | {
+      type: "group";
+      groupId: string;
+    }
+  | {
+      type: "split";
+      id: string;
+      axis: "horizontal" | "vertical";
+      sizes: [number, number];
+      children: [StoredTabLayoutNode, StoredTabLayoutNode];
+    };
 
 type LegacyStoredAgentTab = {
   paneId: string;
@@ -165,7 +200,10 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     type === "assistant" ||
     type === "settings" ||
     type === "versionHistory" ||
-    type === "issues"
+    type === "issues" ||
+    type === "prs" ||
+    type === "projectIndex" ||
+    type === "issueSpec"
   ) {
     const canonicalType = type === "assistant" ? "assistant" : type;
     const fallbackId =
@@ -175,7 +213,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
           ? "settings"
           : canonicalType === "issues"
             ? "issues"
-            : "versionHistory";
+            : canonicalType === "prs"
+              ? "prs"
+              : canonicalType === "projectIndex"
+                ? "projectIndex"
+                : canonicalType === "issueSpec"
+                  ? "issueSpec"
+                  : "versionHistory";
     const fallbackLabel =
       canonicalType === "assistant"
         ? "Assistant"
@@ -183,7 +227,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
           ? "Settings"
           : canonicalType === "issues"
             ? "Issues"
-            : "Version History";
+            : canonicalType === "prs"
+              ? "Pull Requests"
+              : canonicalType === "projectIndex"
+                ? "Project Index"
+                : canonicalType === "issueSpec"
+                  ? "Issue"
+                  : "Version History";
     const idRaw = normalizeString(obj.id);
     const id =
       canonicalType === "assistant"
@@ -194,7 +244,16 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
       canonicalType === "assistant" && (type === "assistant" || !labelRaw)
         ? "Assistant"
         : labelRaw || fallbackLabel;
-    return { type: canonicalType, id, label };
+    const issueNumber =
+      canonicalType === "issueSpec" && Number.isFinite(Number(obj.issueNumber))
+        ? Number(obj.issueNumber)
+        : undefined;
+    return {
+      type: canonicalType,
+      id,
+      label,
+      ...(issueNumber && issueNumber > 0 ? { issueNumber } : {}),
+    };
   }
 
   return null;
@@ -223,7 +282,104 @@ function sanitizeProjectTabsEntry(rawEntry: unknown): StoredProjectTabs | null {
   }
 
   const activeTabId = normalizeString(entry.activeTabId) || null;
-  return { tabs, activeTabId };
+  const groups = sanitizeStoredGroups(entry.groups, tabs.map(resolveStoredTabId));
+  const root = sanitizeStoredRoot(entry.root, groups.map((group) => group.id));
+  const activeGroupId = normalizeString(entry.activeGroupId) || null;
+
+  return {
+    tabs,
+    activeTabId,
+    ...(groups.length > 0 ? { groups } : {}),
+    ...(root ? { root } : {}),
+    ...(activeGroupId ? { activeGroupId } : {}),
+  };
+}
+
+function resolveStoredTabId(tab: StoredProjectTab): string {
+  if (tab.type === "agent") return `agent-${tab.paneId}`;
+  if (tab.type === "terminal") return `terminal-${tab.paneId}`;
+  return tab.id;
+}
+
+function sanitizeStoredGroups(
+  rawGroups: unknown,
+  knownTabIds: string[],
+): StoredTabGroup[] {
+  if (!Array.isArray(rawGroups) || knownTabIds.length === 0) {
+    return [];
+  }
+
+  const known = new Set(knownTabIds);
+  const groups: StoredTabGroup[] = [];
+  const seenGroups = new Set<string>();
+
+  for (const rawGroup of rawGroups) {
+    if (!rawGroup || typeof rawGroup !== "object") continue;
+    const obj = rawGroup as Record<string, unknown>;
+    const id = normalizeString(obj.id);
+    if (!id || seenGroups.has(id)) continue;
+    const tabIds = Array.isArray(obj.tabIds)
+      ? obj.tabIds
+          .map((value) => normalizeString(value))
+          .filter((value) => value && known.has(value))
+      : [];
+    if (tabIds.length === 0) continue;
+    const activeTabIdRaw = normalizeString(obj.activeTabId);
+    groups.push({
+      id,
+      tabIds,
+      activeTabId: activeTabIdRaw && tabIds.includes(activeTabIdRaw) ? activeTabIdRaw : (tabIds[0] ?? null),
+    });
+    seenGroups.add(id);
+  }
+
+  return groups;
+}
+
+function sanitizeStoredRoot(
+  rawRoot: unknown,
+  knownGroupIds: string[],
+): StoredTabLayoutNode | null {
+  if (!rawRoot || typeof rawRoot !== "object" || knownGroupIds.length === 0) {
+    return null;
+  }
+  const known = new Set(knownGroupIds);
+
+  function visit(rawNode: unknown): StoredTabLayoutNode | null {
+    if (!rawNode || typeof rawNode !== "object") return null;
+    const obj = rawNode as Record<string, unknown>;
+    const type = normalizeString(obj.type);
+    if (type === "group") {
+      const groupId = normalizeString(obj.groupId);
+      return groupId && known.has(groupId) ? { type: "group", groupId } : null;
+    }
+    if (type !== "split") return null;
+    const id = normalizeString(obj.id);
+    const axis =
+      normalizeString(obj.axis) === "vertical" ? "vertical" : "horizontal";
+    const childrenRaw = Array.isArray(obj.children) ? obj.children : [];
+    if (childrenRaw.length !== 2) return null;
+    const first = visit(childrenRaw[0]);
+    const second = visit(childrenRaw[1]);
+    if (!first && !second) return null;
+    if (!first) return second;
+    if (!second) return first;
+    const sizesRaw = Array.isArray(obj.sizes) ? obj.sizes : [];
+    const firstSize = Number(sizesRaw[0]);
+    const primary =
+      Number.isFinite(firstSize) && firstSize > 0 && firstSize < 1
+        ? firstSize
+        : 0.5;
+    return {
+      type: "split",
+      id: id || `split-restored-${knownGroupIds.length}`,
+      axis,
+      sizes: [primary, 1 - primary],
+      children: [first, second],
+    };
+  }
+
+  return visit(rawRoot);
 }
 
 function sanitizeLegacyProjectTabsEntry(
@@ -257,7 +413,7 @@ function sanitizeLegacyProjectTabsEntry(
   return { tabs, activePaneId };
 }
 
-function loadStoredProjectTabsV2(
+function loadStoredProjectTabsCurrent(
   projectPath: string,
   store: Storage,
 ): StoredProjectTabs | null {
@@ -269,7 +425,7 @@ function loadStoredProjectTabsV2(
     if (!parsed || typeof parsed !== "object") return null;
     const root = parsed as Partial<StoredProjectTabsRoot>;
 
-    if (root.version !== 2) return null;
+    if (root.version !== 2 && root.version !== 3) return null;
     if (!root.byProjectPath || typeof root.byProjectPath !== "object")
       return null;
 
@@ -351,7 +507,7 @@ export function loadStoredProjectTabs(
   if (!key) return null;
 
   return (
-    loadStoredProjectTabsV2(key, store) ??
+    loadStoredProjectTabsCurrent(key, store) ??
     loadStoredProjectTabsLegacy(key, store)
   );
 }
@@ -374,18 +530,18 @@ export function persistStoredProjectTabs(
 
   try {
     const raw = store.getItem(PROJECT_TABS_STORAGE_KEY);
-    let root: StoredProjectTabsRoot = { version: 2, byProjectPath: {} };
+    let root: StoredProjectTabsRoot = { version: 3, byProjectPath: {} };
 
     if (raw) {
       const parsed: unknown = JSON.parse(raw);
       if (parsed && typeof parsed === "object") {
         const existing = parsed as Partial<StoredProjectTabsRoot>;
         if (
-          existing.version === 2 &&
+          (existing.version === 2 || existing.version === 3) &&
           existing.byProjectPath &&
           typeof existing.byProjectPath === "object"
         ) {
-          root = { version: 2, byProjectPath: existing.byProjectPath };
+          root = { version: existing.version, byProjectPath: existing.byProjectPath };
         }
       }
     }
@@ -492,11 +648,90 @@ export function buildRestoredProjectTabs(
       ? activeTerminalPaneId
       : null;
 
+  const restoredLayout = buildRestoredLayoutState(
+    stored,
+    restoredTabs,
+    activeTabId,
+  );
+
   return {
     tabs: restoredTabs,
     activeTabId,
+    activeGroupId: restoredLayout.activeGroupId,
+    groups: Object.values(restoredLayout.groups),
+    root: restoredLayout.root as StoredTabLayoutNode,
     terminalTabsToRespawn,
     activeTerminalPaneIdToRespawn,
+  };
+}
+
+function buildRestoredLayoutState(
+  stored: StoredProjectTabs,
+  restoredTabs: Tab[],
+  restoredActiveTabId: string | null,
+): { groups: Record<string, TabGroupState>; root: TabLayoutNode; activeGroupId: string } {
+  if (restoredTabs.length === 0) {
+    return createInitialTabLayout([], null);
+  }
+
+  const restoredTabIds = restoredTabs.map((tab) => tab.id);
+  const knownTabs = new Set(restoredTabIds);
+  const storedGroups = Array.isArray(stored.groups) ? stored.groups : [];
+  const nextGroups: Record<string, TabGroupState> = {};
+
+  for (const group of storedGroups) {
+    const tabIds = group.tabIds.filter((tabId) => knownTabs.has(tabId));
+    if (tabIds.length === 0) continue;
+    nextGroups[group.id] = {
+      id: group.id,
+      tabIds,
+      activeTabId:
+        group.activeTabId && tabIds.includes(group.activeTabId)
+          ? group.activeTabId
+          : (tabIds[0] ?? null),
+    };
+  }
+
+  let root =
+    stored.root && Object.keys(nextGroups).length > 0
+      ? sanitizeStoredRoot(stored.root, Object.keys(nextGroups))
+      : null;
+
+  if (!root || Object.keys(nextGroups).length === 0) {
+    return createInitialTabLayout(restoredTabs, restoredActiveTabId);
+  }
+
+  const assigned = new Set<string>();
+  for (const group of Object.values(nextGroups)) {
+    for (const tabId of group.tabIds) {
+      assigned.add(tabId);
+    }
+  }
+
+  const missingTabIds = restoredTabIds.filter((tabId) => !assigned.has(tabId));
+  if (missingTabIds.length > 0) {
+    const firstGroupId = Object.keys(nextGroups)[0];
+    if (firstGroupId) {
+      const target = nextGroups[firstGroupId];
+      target.tabIds = [...target.tabIds, ...missingTabIds];
+      if (!target.activeTabId) {
+        target.activeTabId = target.tabIds[0] ?? null;
+      }
+    }
+  }
+
+  const activeGroupIdRaw =
+    normalizeString(stored.activeGroupId) ||
+    Object.values(nextGroups).find(
+      (group) => group.activeTabId && group.activeTabId === restoredActiveTabId,
+    )?.id ||
+    Object.keys(nextGroups)[0] ||
+    "";
+
+  return {
+    groups: nextGroups,
+    root,
+    activeGroupId: activeGroupIdRaw,
   };
 }
 
