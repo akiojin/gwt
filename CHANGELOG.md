@@ -1,6 +1,33 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [8.17.0] - 2026-03-19
+
+### Bug Fixes
+
+- **gui:** Stabilize sidebar visibility refresh test (#1715)
+- **issue-spec:** Preserve utf-8 in spec artifact comments (#1716)
+
+### Features
+
+- パフォーマンスプロファイリング基盤を追加 (#1705)
+- **assistant:** Transform assistant mode into project manager (#1706)
+- **skills:** Use REST-first transport for PR workflows (#1713)
+- **gui:** Add split tab group layout (#1717)
+- **issue:** Add worktree-issue linkage and local issue cache (#1714) (#1718)
+
+### Miscellaneous Tasks
+
+- **skills:** Remove stale gwt-fix-pr assets (#1707)
+
+### Refactor
+
+- **ai:** Send_with_retry統一・コンストラクタ追加・URL builder共通化 (#1708)
+
+### Testing
+
+- Profiling=true で profile.json 生成を確認するテスト追加 (#1705)
+
 ## [8.16.0] - 2026-03-19
 
 ### Bug Fixes
