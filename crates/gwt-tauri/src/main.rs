@@ -54,9 +54,6 @@ fn main() {
     };
     let _profiling_guard = gwt_core::logging::init_logger(&log_config);
 
-    #[cfg(target_os = "macos")]
-    maybe_reset_legacy_webkit_local_storage();
-
     let single_instance_guard = match crate::single_instance::try_acquire_single_instance() {
         Ok(crate::single_instance::AcquireOutcome::Acquired(guard)) => Arc::new(guard),
         Ok(crate::single_instance::AcquireOutcome::AlreadyRunning(running)) => {
@@ -74,6 +71,9 @@ fn main() {
             return;
         }
     };
+
+    #[cfg(target_os = "macos")]
+    maybe_reset_legacy_webkit_local_storage();
 
     let app_state = AppState::new();
 
@@ -142,13 +142,25 @@ fn webkit_local_storage_targets(home_dir: &Path) -> Vec<PathBuf> {
     };
 
     for origin_dir in origin_dirs.flatten() {
+        let direct_local_storage = origin_dir.path().join("LocalStorage");
+        if direct_local_storage.exists() {
+            targets.push(direct_local_storage);
+        }
+
         let Ok(origin_children) = std::fs::read_dir(origin_dir.path()) else {
             continue;
         };
         for origin_child in origin_children.flatten() {
-            let local_storage = origin_child.path().join("LocalStorage");
-            if local_storage.exists() {
-                targets.push(local_storage);
+            let origin_child_path = origin_child.path();
+            if origin_child_path.file_name().and_then(|name| name.to_str()) == Some("LocalStorage")
+            {
+                targets.push(origin_child_path);
+                continue;
+            }
+
+            let nested_local_storage = origin_child_path.join("LocalStorage");
+            if nested_local_storage.exists() {
+                targets.push(nested_local_storage);
             }
         }
     }
@@ -400,6 +412,26 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert!(targets.contains(&top_level));
         assert!(targets.contains(&nested));
+    }
+
+    #[test]
+    fn webkit_local_storage_targets_collects_direct_origin_local_storage() {
+        let temp = tempdir().unwrap();
+        let home = temp.path();
+        let direct_origin_local_storage = home
+            .join("Library")
+            .join("WebKit")
+            .join("com.akiojin.gwt")
+            .join("WebsiteData")
+            .join("Default")
+            .join("origin-a")
+            .join("LocalStorage");
+        std::fs::create_dir_all(&direct_origin_local_storage).unwrap();
+
+        let targets = webkit_local_storage_targets(home);
+
+        assert_eq!(targets.len(), 1);
+        assert!(targets.contains(&direct_origin_local_storage));
     }
 
     #[test]
