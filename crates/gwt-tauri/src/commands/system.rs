@@ -14,6 +14,56 @@ use crate::state::AppState;
 
 const GET_SYSTEM_INFO_WARN_THRESHOLD: Duration = Duration::from_millis(300);
 
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupDiagnostics {
+    pub startup_trace: bool,
+    pub disable_tray: bool,
+    pub disable_login_shell_capture: bool,
+    pub disable_heartbeat_watchdog: bool,
+    pub disable_session_watcher: bool,
+    pub disable_startup_update_check: bool,
+    pub disable_profiling: bool,
+    pub disable_tab_restore: bool,
+    pub disable_window_session_restore: bool,
+}
+
+fn parse_env_flag(value: Option<std::ffi::OsString>) -> bool {
+    value
+        .and_then(|value| value.into_string().ok())
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+pub fn startup_diagnostics_from_env() -> StartupDiagnostics {
+    StartupDiagnostics {
+        startup_trace: parse_env_flag(std::env::var_os("GWT_DIAG_STARTUP_TRACE")),
+        disable_tray: parse_env_flag(std::env::var_os("GWT_DIAG_DISABLE_TRAY")),
+        disable_login_shell_capture: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_LOGIN_SHELL_CAPTURE",
+        )),
+        disable_heartbeat_watchdog: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_HEARTBEAT_WATCHDOG",
+        )),
+        disable_session_watcher: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_SESSION_WATCHER",
+        )),
+        disable_startup_update_check: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_STARTUP_UPDATE_CHECK",
+        )),
+        disable_profiling: parse_env_flag(std::env::var_os("GWT_DIAG_DISABLE_PROFILING")),
+        disable_tab_restore: parse_env_flag(std::env::var_os("GWT_DIAG_DISABLE_TAB_RESTORE")),
+        disable_window_session_restore: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_WINDOW_SESSION_RESTORE",
+        )),
+    }
+}
+
 // --- T030: SystemInfoResponse / GpuInfo ---
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +262,12 @@ pub fn get_stats() -> StatsResponse {
     }
 }
 
+#[instrument(skip_all, fields(command = "get_startup_diagnostics"))]
+#[tauri::command]
+pub fn get_startup_diagnostics() -> StartupDiagnostics {
+    startup_diagnostics_from_env()
+}
+
 // --- Freeze detection: heartbeat + frontend metrics ---
 
 #[instrument(skip_all, fields(command = "heartbeat"))]
@@ -352,5 +408,20 @@ mod tests {
 
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].name, "NVIDIA GPU");
+    }
+
+    #[test]
+    fn parse_env_flag_accepts_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(parse_env_flag(Some(std::ffi::OsString::from(value))));
+        }
+    }
+
+    #[test]
+    fn parse_env_flag_rejects_falsey_values() {
+        assert!(!parse_env_flag(None));
+        for value in ["0", "false", "FALSE", "no", "off", ""] {
+            assert!(!parse_env_flag(Some(std::ffi::OsString::from(value))));
+        }
     }
 }

@@ -133,6 +133,30 @@
     issueUrl?: string | null;
   }
 
+  interface StartupDiagnostics {
+    startupTrace: boolean;
+    disableTray: boolean;
+    disableLoginShellCapture: boolean;
+    disableHeartbeatWatchdog: boolean;
+    disableSessionWatcher: boolean;
+    disableStartupUpdateCheck: boolean;
+    disableProfiling: boolean;
+    disableTabRestore: boolean;
+    disableWindowSessionRestore: boolean;
+  }
+
+  const DEFAULT_STARTUP_DIAGNOSTICS: StartupDiagnostics = {
+    startupTrace: false,
+    disableTray: false,
+    disableLoginShellCapture: false,
+    disableHeartbeatWatchdog: false,
+    disableSessionWatcher: false,
+    disableStartupUpdateCheck: false,
+    disableProfiling: false,
+    disableTabRestore: false,
+    disableWindowSessionRestore: false,
+  };
+
   const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
   const SIDEBAR_MODE_STORAGE_KEY = "gwt.sidebar.mode";
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
@@ -318,6 +342,7 @@
   let osEnvReady = $state(false);
   let startupOsEnvCaptureChecked = false;
   let startupOsEnvCaptureResolved = $state(false);
+  let startupDiagnostics: StartupDiagnostics | null = $state(null);
   let voiceInputSettings: VoiceInputSettings = $state(
     DEFAULT_VOICE_INPUT_SETTINGS,
   );
@@ -569,8 +594,36 @@
     clearBufferedLaunchEvents();
   }
 
+  $effect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!isTauriRuntimeAvailable()) {
+        startupDiagnostics = DEFAULT_STARTUP_DIAGNOSTICS;
+        return;
+      }
+      try {
+        const { invoke } = await import("$lib/tauriInvoke");
+        const diagnostics = await invoke<StartupDiagnostics>(
+          "get_startup_diagnostics",
+        );
+        if (!cancelled) {
+          startupDiagnostics = diagnostics;
+        }
+      } catch {
+        if (!cancelled) {
+          startupDiagnostics = DEFAULT_STARTUP_DIAGNOSTICS;
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
   // Initialize profiling subsystem at startup.
   $effect(() => {
+    if (startupDiagnostics === null) return;
+    if (startupDiagnostics.disableProfiling) return;
     let cancelled = false;
     (async () => {
       try {
@@ -640,6 +693,8 @@
 
   // Best-effort: request update state once on startup.
   $effect(() => {
+    if (startupDiagnostics === null) return;
+    if (startupDiagnostics.disableStartupUpdateCheck) return;
     if (lastUpdateToastVersion !== null) return;
     const controller = new AbortController();
     void runStartupUpdateCheck({
@@ -662,6 +717,8 @@
 
   // Listen for app update state notifications from backend startup checks.
   $effect(() => {
+    if (startupDiagnostics === null) return;
+    if (startupDiagnostics.disableStartupUpdateCheck) return;
     let unlisten: null | (() => void) = null;
     let cancelled = false;
     (async () => {
@@ -725,6 +782,8 @@
   });
 
   $effect(() => {
+    if (startupDiagnostics === null) return;
+    if (startupDiagnostics.disableWindowSessionRestore) return;
     if (windowSessionRestoreStarted) return;
     windowSessionRestoreStarted = true;
     const releaseDelayMs = 3000;
@@ -2727,6 +2786,16 @@
     token: number,
     attempt = 0,
   ) {
+    if (startupDiagnostics?.disableTabRestore) {
+      if (
+        projectPath === targetProjectPath &&
+        agentTabsRestoreToken === token
+      ) {
+        agentTabsHydratedProjectPath = targetProjectPath;
+      }
+      return;
+    }
+
     const stored = loadStoredProjectTabs(targetProjectPath);
 
     // Even if no stored state exists, mark hydrated so persistence can proceed.
