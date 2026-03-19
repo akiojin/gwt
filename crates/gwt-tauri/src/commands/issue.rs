@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -33,6 +34,8 @@ const ISSUE_LIST_CACHE_TTL_MS: i64 = 120_000;
 const ISSUE_LIST_CACHE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const ISSUE_LIST_INFLIGHT_WAIT_MS: u64 = 5_000;
 const GH_STATUS_OS_ENV_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+static ISSUE_CACHE_PERSIST_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueCategory {
@@ -206,6 +209,19 @@ fn issue_cache_key(
         "page={page}&per_page={per_page}&state={state}&category={}&include_body={include_body}",
         category.as_str()
     )
+}
+
+fn issue_cache_persist_lock(repo_path: &Path) -> Arc<Mutex<()>> {
+    let key = dunce::canonicalize(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let locks = ISSUE_CACHE_PERSIST_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = locks.lock().unwrap();
+    guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 fn decode_cached_issue_response(entry: &IssueListCacheEntry) -> Option<FetchIssuesResponse> {
@@ -607,6 +623,13 @@ fn fetch_branch_linked_issue_impl(
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "fetch_branch_linked_issue"))?;
+    let cache_lock = issue_cache_persist_lock(&repo_path);
+    let _cache_guard = cache_lock.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Issue cache lock poisoned: {e}"),
+            "fetch_branch_linked_issue",
+        )
+    })?;
 
     // Try exact cache first (#1714 FR-004)
     let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
@@ -658,6 +681,13 @@ pub async fn sync_issue_cache(
         let project_root = Path::new(&project_path);
         let repo_path = resolve_repo_path_for_project_root(project_root)
             .map_err(|e| StructuredError::internal(&e, "sync_issue_cache"))?;
+        let cache_lock = issue_cache_persist_lock(&repo_path);
+        let _cache_guard = cache_lock.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Issue cache lock poisoned: {e}"),
+                "sync_issue_cache",
+            )
+        })?;
 
         let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
         let result = match mode.as_str() {
@@ -719,6 +749,13 @@ pub async fn resolve_worktree_issue(
         let Some(issue_number) = issue_number else {
             return Ok(None);
         };
+        let cache_lock = issue_cache_persist_lock(&repo_path);
+        let _cache_guard = cache_lock.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Issue cache lock poisoned: {e}"),
+                "resolve_worktree_issue",
+            )
+        })?;
 
         // 2. Resolve from exact cache (with online fallback)
         let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);

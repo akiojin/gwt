@@ -91,6 +91,22 @@ fn cache_file_path(repo_path: &Path) -> PathBuf {
         .join(format!("{}.json", repo_hash(repo_path)))
 }
 
+fn rename_with_replace(tmp: &Path, path: &Path, label: &str) -> Result<(), String> {
+    match fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(rename_err) if path.exists() => {
+            fs::remove_file(path)
+                .map_err(|e| format!("Failed to replace existing {label} file: {e}"))?;
+            fs::rename(tmp, path).map_err(|e| {
+                format!(
+                    "Failed to rename {label} file after replace fallback (initial rename error: {rename_err}): {e}"
+                )
+            })
+        }
+        Err(rename_err) => Err(format!("Failed to rename {label} file: {rename_err}")),
+    }
+}
+
 // ── IssueExactCache public API ──
 
 impl IssueExactCache {
@@ -116,7 +132,7 @@ impl IssueExactCache {
             serde_json::to_string_pretty(self).map_err(|e| format!("Serialization error: {e}"))?;
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, &json).map_err(|e| format!("Failed to write cache file: {e}"))?;
-        fs::rename(&tmp, &path).map_err(|e| format!("Failed to rename cache file: {e}"))?;
+        rename_with_replace(&tmp, &path, "cache")?;
         Ok(())
     }
 
