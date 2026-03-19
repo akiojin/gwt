@@ -6,6 +6,7 @@
     SettingsData,
     ShellInfo,
     VoiceInputSettings,
+    SyncResult,
   } from "../types";
   import {
     UI_FONT_PRESETS,
@@ -24,7 +25,7 @@
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import CreateProfileDialog from "./CreateProfileDialog.svelte";
 
-  let { onClose }: { onClose: () => void } = $props();
+  let { projectPath, onClose }: { projectPath: string; onClose: () => void } = $props();
 
   type SettingsTabId =
     | "general"
@@ -53,6 +54,9 @@
   let voiceUnavailableReason: string | null = $state(null);
   let voiceRuntimeSettingUp: boolean = $state(false);
   let voiceSetupMessage: string | null = $state(null);
+
+  let issueCacheSyncing: boolean = $state(false);
+  let issueCacheSyncResult: SyncResult | null = $state(null);
 
   let selectedProfileKey: string = $state("");
   let newEnvKey: string = $state("");
@@ -753,6 +757,23 @@
     peekingApiKey = !peekingApiKey;
   }
 
+  async function syncIssueCache(mode: "diff" | "full") {
+    issueCacheSyncing = true;
+    issueCacheSyncResult = null;
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const result = await invoke<SyncResult>("sync_issue_cache", {
+        projectPath,
+        mode,
+      });
+      issueCacheSyncResult = result;
+    } catch (e) {
+      console.error("Issue cache sync failed:", e);
+    } finally {
+      issueCacheSyncing = false;
+    }
+  }
+
   function updateVoiceInputField(
     field: keyof VoiceInputSettings,
     value: VoiceInputSettings[keyof VoiceInputSettings],
@@ -970,6 +991,32 @@
                   <span class="field-hint">
                     Days before logs are automatically deleted (1–365).
                   </span>
+                </div>
+
+                <div class="field">
+                  <!-- svelte-ignore a11y_label_has_associated_control -->
+                  <label>Issue cache</label>
+                  <div style="display: flex; gap: 8px; align-items: center;">
+                    <button
+                      class="btn btn-ghost"
+                      disabled={issueCacheSyncing}
+                      onclick={() => syncIssueCache("diff")}
+                    >
+                      {issueCacheSyncing ? "Syncing\u2026" : "Diff Sync"}
+                    </button>
+                    <button
+                      class="btn btn-ghost"
+                      disabled={issueCacheSyncing}
+                      onclick={() => syncIssueCache("full")}
+                    >
+                      Full Sync
+                    </button>
+                  </div>
+                  {#if issueCacheSyncResult}
+                    <span class="field-hint">
+                      Updated: {issueCacheSyncResult.updatedCount}, Deleted: {issueCacheSyncResult.deletedCount}, Duration: {issueCacheSyncResult.durationMs}ms
+                    </span>
+                  {/if}
                 </div>
               </div>
             </div>

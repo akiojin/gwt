@@ -1004,12 +1004,8 @@ pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubI
         Ok(ref out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let mut issue = parse_gh_issue_json(&stdout)?;
-            hydrate_comments_count_from_rest_if_needed(
-                repo_path,
-                repo_slug.as_deref(),
-                &mut issue,
-            );
-            return Ok(issue);
+            hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), &mut issue);
+            Ok(issue)
         }
         Ok(ref out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1019,14 +1015,14 @@ pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubI
                     return fetch_issue_detail_via_rest(repo_path, slug, issue_number);
                 }
             }
-            return Err(format!("gh issue view failed: {}", stderr));
+            Err(format!("gh issue view failed: {}", stderr))
         }
         Err(e) => {
             // Transport/execution error → try REST fallback
             if let Some(slug) = repo_slug.as_deref() {
                 return fetch_issue_detail_via_rest(repo_path, slug, issue_number);
             }
-            return Err(format!("Failed to execute gh CLI: {}", e));
+            Err(format!("Failed to execute gh CLI: {}", e))
         }
     }
 }

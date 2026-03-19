@@ -74,6 +74,7 @@ async function renderSettingsPanel(overrides: Record<string, unknown> = {}) {
   const { default: SettingsPanel } = await import("./SettingsPanel.svelte");
   return render(SettingsPanel, {
     props: {
+      projectPath: "/tmp/test-project",
       onClose: vi.fn(),
       ...overrides,
     },
