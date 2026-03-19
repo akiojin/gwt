@@ -197,6 +197,8 @@ pub struct AppState {
     /// Assistant Mode monitor handle per window label.
     pub assistant_monitor_handle:
         Mutex<HashMap<String, crate::assistant_monitor::AssistantMonitorHandle>>,
+    /// Last heartbeat timestamp from the frontend (freeze detection).
+    pub last_heartbeat: Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -244,6 +246,7 @@ impl AppState {
             assistant_startup_inflight: Mutex::new(HashMap::new()),
             assistant_runtime: Mutex::new(HashMap::new()),
             assistant_monitor_handle: Mutex::new(HashMap::new()),
+            last_heartbeat: Mutex::new(None),
         }
     }
 

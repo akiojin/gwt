@@ -6,6 +6,7 @@ use gwt_core::ai::{
 use gwt_core::config::ProfilesConfig;
 use gwt_core::StructuredError;
 use serde::Serialize;
+use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,6 +21,7 @@ pub struct BranchSuggestResult {
 /// Suggest 1 branch name for "New Branch Name".
 ///
 /// This never writes config/history files.
+#[instrument(skip_all, fields(command = "suggest_branch_name"))]
 #[tauri::command]
 pub fn suggest_branch_name(description: String) -> Result<BranchSuggestResult, StructuredError> {
     let description = description.trim().to_string();
@@ -58,6 +60,7 @@ pub fn suggest_branch_name(description: String) -> Result<BranchSuggestResult, S
 }
 
 /// Check whether AI configuration is available without invoking model inference.
+#[instrument(skip_all, fields(command = "is_ai_configured"))]
 #[tauri::command]
 pub fn is_ai_configured() -> Result<bool, StructuredError> {
     let profiles = ProfilesConfig::load()

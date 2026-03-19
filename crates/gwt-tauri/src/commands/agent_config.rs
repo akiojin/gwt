@@ -3,7 +3,7 @@
 use gwt_core::config::AgentConfig;
 use gwt_core::StructuredError;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use tracing::error;
+use tracing::{error, instrument};
 
 fn with_panic_guard<T>(
     context: &str,
@@ -27,6 +27,7 @@ fn with_panic_guard<T>(
 }
 
 /// Get current agent config from ~/.gwt/config.toml
+#[instrument(skip_all, fields(command = "get_agent_config"))]
 #[tauri::command]
 pub fn get_agent_config() -> Result<AgentConfig, StructuredError> {
     with_panic_guard("loading agent config", "get_agent_config", || {
@@ -35,6 +36,7 @@ pub fn get_agent_config() -> Result<AgentConfig, StructuredError> {
 }
 
 /// Save agent config into ~/.gwt/config.toml
+#[instrument(skip_all, fields(command = "save_agent_config"))]
 #[tauri::command]
 pub fn save_agent_config(config: AgentConfig) -> Result<(), StructuredError> {
     with_panic_guard("saving agent config", "save_agent_config", || {

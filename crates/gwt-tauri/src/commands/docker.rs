@@ -12,6 +12,7 @@ use gwt_core::StructuredError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DockerContext {
@@ -406,6 +407,7 @@ mod tests {
 }
 
 /// Detect docker compose context for a branch (best-effort, read-only).
+#[instrument(skip_all, fields(command = "detect_docker_context", project_path, branch))]
 #[tauri::command]
 pub fn detect_docker_context(
     project_path: String,

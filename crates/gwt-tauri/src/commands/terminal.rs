@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tracing::instrument;
 use uuid::Uuid;
 use which::which;
 
@@ -2210,6 +2211,7 @@ fn launch_with_wsl_pty_write(
 }
 
 /// Launch a new terminal pane with an agent
+#[instrument(skip_all, fields(command = "launch_terminal", window_label = window.label()))]
 #[tauri::command]
 pub fn launch_terminal(
     window: tauri::Window,
@@ -2350,6 +2352,7 @@ fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
 /// shell is used. When `shell` is omitted, Windows first consults
 /// `terminal.default_shell` in settings, then falls back to auto-resolution.
 /// On non-Windows platforms the parameter is silently ignored.
+#[instrument(skip_all, fields(command = "spawn_shell"))]
 #[tauri::command]
 pub fn spawn_shell(
     working_dir: Option<String>,
@@ -5144,6 +5147,7 @@ pub(crate) fn launch_agent_for_project_root(
 }
 
 /// Launch an agent with gwt semantics (worktree + profiles)
+#[instrument(skip_all, fields(command = "launch_agent", window_label = window.label()))]
 #[tauri::command]
 pub fn launch_agent(
     window: tauri::Window,
@@ -5165,6 +5169,7 @@ pub fn launch_agent(
 }
 
 /// Start an async launch job with progress events (gwt-spec issue US15).
+#[instrument(skip_all, fields(command = "start_launch_job", window_label = window.label()))]
 #[tauri::command]
 pub fn start_launch_job(
     window: tauri::Window,
@@ -5270,6 +5275,7 @@ pub fn start_launch_job(
 }
 
 /// Cancel a running launch job (best-effort).
+#[instrument(skip_all, fields(command = "cancel_launch_job", job_id))]
 #[tauri::command]
 pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), StructuredError> {
     let id = job_id.trim();
@@ -5299,6 +5305,7 @@ pub struct LaunchJobPollResult {
 
 /// Poll the state of a launch job.  Returns the final result when
 /// available so the frontend can recover even if Tauri events are lost.
+#[instrument(skip_all, fields(command = "poll_launch_job", job_id))]
 #[tauri::command]
 pub fn poll_launch_job(job_id: String, state: State<AppState>) -> LaunchJobPollResult {
     let id = job_id.trim();
@@ -5753,6 +5760,7 @@ const DEFAULT_SCROLLBACK_TAIL_BYTES: usize = 256 * 1024;
 const MAX_SCROLLBACK_TAIL_BYTES: usize = 1024 * 1024;
 
 /// Write data to a terminal pane
+#[instrument(skip_all, fields(command = "write_terminal", pane_id))]
 #[tauri::command]
 pub fn write_terminal(
     pane_id: String,
@@ -5897,6 +5905,7 @@ pub(crate) fn send_keys_broadcast_from_state(
 ///
 /// When `project_root` is provided, access is restricted to panes belonging
 /// to that project (multi-project isolation).
+#[instrument(skip_all, fields(command = "send_keys_to_pane", pane_id))]
 #[tauri::command]
 pub fn send_keys_to_pane(
     pane_id: String,
@@ -5910,6 +5919,7 @@ pub fn send_keys_to_pane(
 }
 
 /// Broadcast text to all running terminal panes. Returns number of panes sent.
+#[instrument(skip_all, fields(command = "send_keys_broadcast"))]
 #[tauri::command]
 pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize, StructuredError> {
     send_keys_broadcast_from_state(&state, &text)
@@ -5917,6 +5927,7 @@ pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize
 }
 
 /// Resize a terminal pane
+#[instrument(skip_all, fields(command = "resize_terminal", pane_id))]
 #[tauri::command]
 pub fn resize_terminal(
     pane_id: String,
@@ -5942,6 +5953,7 @@ pub fn resize_terminal(
 }
 
 /// Close a terminal pane
+#[instrument(skip_all, fields(command = "close_terminal", pane_id))]
 #[tauri::command]
 pub fn close_terminal(
     pane_id: String,
@@ -5978,6 +5990,7 @@ pub fn close_terminal(
 /// When `project_root` is provided, only panes belonging to that project are
 /// returned (multi-project isolation). When omitted, all panes are listed
 /// (backwards-compatible).
+#[instrument(skip_all, fields(command = "list_terminals"))]
 #[tauri::command]
 pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> Vec<TerminalInfo> {
     let manager = match state.pane_manager.lock() {
@@ -6158,6 +6171,7 @@ fn probe_terminal_ansi_from_state(
 }
 
 /// Probe a pane's scrollback tail for ANSI/SGR/color usage (diagnostics).
+#[instrument(skip_all, fields(command = "probe_terminal_ansi", pane_id))]
 #[tauri::command]
 pub fn probe_terminal_ansi(
     state: State<AppState>,
@@ -6171,6 +6185,7 @@ pub fn probe_terminal_ansi(
 ///
 /// When `project_root` is provided, access is restricted to panes belonging
 /// to that project (multi-project isolation).
+#[instrument(skip_all, fields(command = "capture_scrollback_tail", pane_id))]
 #[tauri::command]
 pub fn capture_scrollback_tail(
     state: State<AppState>,
@@ -6187,6 +6202,7 @@ pub fn capture_scrollback_tail(
 /// Signal that the frontend listener is ready and retrieve initial scrollback
 /// as raw bytes (ANSI sequences preserved).  After this call, `stream_pty_output`
 /// will start emitting `terminal-output` events for the pane.
+#[instrument(skip_all, fields(command = "terminal_ready", pane_id))]
 #[tauri::command]
 pub fn terminal_ready(
     state: State<AppState>,
@@ -6245,6 +6261,7 @@ fn os_env_source_to_string(
     }
 }
 
+#[instrument(skip_all, fields(command = "get_captured_environment"))]
 #[tauri::command]
 pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
     let mut entries: Vec<CapturedEnvEntry> = state
@@ -6266,6 +6283,7 @@ pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
     }
 }
 
+#[instrument(skip_all, fields(command = "is_os_env_ready"))]
 #[tauri::command]
 pub fn is_os_env_ready(state: State<AppState>) -> bool {
     state.is_os_env_ready()
@@ -6282,6 +6300,7 @@ pub struct ShellInfo {
 /// Return the list of available Windows shells.
 ///
 /// On non-Windows platforms this always returns an empty list.
+#[instrument(skip_all, fields(command = "get_available_shells"))]
 #[tauri::command]
 pub async fn get_available_shells() -> Result<Vec<ShellInfo>, StructuredError> {
     #[cfg(target_os = "windows")]
@@ -6378,6 +6397,7 @@ fn validate_clipboard_image_data(data: &[u8]) -> Result<(), StructuredError> {
 }
 
 /// Save clipboard image data to a temporary file and return the prompt path.
+#[instrument(skip_all, fields(command = "save_clipboard_image", pane_id))]
 #[tauri::command]
 pub fn save_clipboard_image(
     pane_id: String,

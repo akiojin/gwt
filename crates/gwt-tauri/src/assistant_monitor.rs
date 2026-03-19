@@ -103,8 +103,14 @@ pub fn start_monitor(
                     break;
                 }
                 _ = interval.tick() => {
-                    match collect_snapshot(&app_handle, &window_label, &project_root) {
-                        Ok(snapshot) => {
+                    let ah = app_handle.clone();
+                    let wl = window_label.clone();
+                    let pr = project_root.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        collect_snapshot(&ah, &wl, &pr)
+                    }).await;
+                    match result {
+                        Ok(Ok(snapshot)) => {
                             if detector.detect_change(&snapshot)
                                 && event_tx
                                     .send(MonitorEvent::SnapshotChanged(snapshot))
@@ -115,8 +121,11 @@ pub fn start_monitor(
                                 break;
                             }
                         }
-                        Err(err) => {
+                        Ok(Err(err)) => {
                             warn!(window = %window_label, error = %err, "Failed to collect assistant monitor snapshot");
+                        }
+                        Err(join_err) => {
+                            warn!(window = %window_label, error = %join_err, "collect_snapshot panicked");
                         }
                     }
                 }

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use super::container::{ContainerInfo, ContainerStatus};
 use super::detector::DockerFileType;
@@ -586,6 +586,7 @@ impl DockerManager {
     /// * `worktree_path` - Path to the worktree directory
     /// * `worktree_name` - Name of the worktree (used for container naming)
     /// * `docker_file_type` - Type of Docker file detected
+    #[instrument(skip_all)]
     pub fn new(
         worktree_path: &Path,
         worktree_name: &str,
@@ -691,6 +692,7 @@ impl DockerManager {
     }
 
     /// Get the status of the container
+    #[instrument(skip(self))]
     pub fn get_status(&self) -> ContainerStatus {
         let env_vars = self.collect_passthrough_env();
         let running_output = crate::process::command("docker")
@@ -733,6 +735,7 @@ impl DockerManager {
     /// Start the Docker container
     ///
     /// Runs `docker compose up -d` in the worktree directory.
+    #[instrument(skip(self))]
     pub fn start(&self) -> Result<ContainerInfo> {
         self.start_internal()
     }
@@ -804,6 +807,7 @@ impl DockerManager {
     /// Stop the Docker container
     ///
     /// Runs `docker compose down` in the worktree directory.
+    #[instrument(skip(self))]
     pub fn stop(&self) -> Result<()> {
         info!(
             category = "docker",
@@ -1158,6 +1162,7 @@ impl DockerManager {
     /// Rebuild the Docker image
     ///
     /// Runs `docker compose build` in the worktree directory.
+    #[instrument(skip(self))]
     pub fn rebuild(&mut self) -> Result<()> {
         info!(
             category = "docker",

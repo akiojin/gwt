@@ -24,6 +24,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    setupFiles: ["./vitest.setup.ts"],
     exclude: [...configDefaults.exclude, "e2e/**", "e2e-tauri/**"],
     coverage: {
       provider: "v8",
