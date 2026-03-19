@@ -37,6 +37,7 @@ pub struct GitStatusSnapshot {
 pub struct MonitorSnapshot {
     pub panes: Vec<PaneSnapshot>,
     pub git: GitStatusSnapshot,
+    pub pending_consultations: u32,
     pub timestamp: i64,
 }
 
@@ -69,7 +70,7 @@ impl ChangeDetector {
 }
 
 fn snapshots_equal(a: &MonitorSnapshot, b: &MonitorSnapshot) -> bool {
-    a.panes == b.panes && a.git == b.git
+    a.panes == b.panes && a.git == b.git && a.pending_consultations == b.pending_consultations
 }
 
 /// Handle for stopping the monitor task.
@@ -152,6 +153,8 @@ fn collect_snapshot(
         .unwrap_or(0);
 
     let panes = collect_project_panes(&state, &repo_path)?;
+    let pending_consultations =
+        crate::consultation::count_pending_consultations(Path::new(project_root));
 
     Ok(MonitorSnapshot {
         panes,
@@ -160,6 +163,7 @@ fn collect_snapshot(
             uncommitted_count,
             unpushed_count,
         },
+        pending_consultations,
         timestamp: chrono::Utc::now().timestamp(),
     })
 }
@@ -245,6 +249,7 @@ mod tests {
                 uncommitted_count: 0,
                 unpushed_count: 0,
             },
+            pending_consultations: 0,
             timestamp: 0,
         };
         assert!(detector.detect_change(&snapshot));
@@ -266,12 +271,14 @@ mod tests {
                 uncommitted_count: 0,
                 unpushed_count: 0,
             },
+            pending_consultations: 0,
             timestamp: 0,
         };
         detector.detect_change(&snapshot);
         let snapshot2 = MonitorSnapshot {
             panes: snapshot.panes.clone(),
             git: snapshot.git.clone(),
+            pending_consultations: 0,
             timestamp: 100,
         };
         assert!(!detector.detect_change(&snapshot2));

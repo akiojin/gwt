@@ -86,12 +86,21 @@ pub struct WindowMigrationState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DispatchedTask {
+    pub pane_id: String,
+    pub description: String,
+    pub dispatched_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssistantContext {
     pub working_goal: Option<String>,
     pub goal_confidence: Option<String>,
     pub current_status: Option<String>,
     pub blockers: Vec<String>,
     pub recommended_next_actions: Vec<String>,
+    pub dispatched_tasks: Vec<DispatchedTask>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -53,6 +53,7 @@ pub struct AIResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage_tokens: Option<u64>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -109,10 +110,13 @@ struct ResponsesRequest<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesResponse {
     output: Vec<ResponseOutputItem>,
     #[serde(default)]
     usage: Option<UsageInfo>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,7 +304,8 @@ impl AIClient {
                     let resp_headers = resp.headers().clone();
                     let body = resp.text().unwrap_or_default();
                     if status == StatusCode::OK {
-                        let (text, tool_calls, usage) = parse_response_with_tools(&body)?;
+                        let (text, tool_calls, usage, parsed_status) =
+                            parse_response_with_tools(&body)?;
                         if let Some(tokens) = usage {
                             self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
                         }
@@ -308,6 +313,7 @@ impl AIClient {
                             text,
                             tool_calls,
                             usage_tokens: usage,
+                            status: parsed_status,
                         });
                     }
                     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -481,7 +487,10 @@ fn parse_response_with_usage(body: &str) -> Result<(String, Option<u64>), AIErro
     Ok((texts.join(""), usage_tokens))
 }
 
-fn parse_response_with_tools(body: &str) -> Result<(String, Vec<ToolCall>, Option<u64>), AIError> {
+#[allow(clippy::type_complexity)]
+fn parse_response_with_tools(
+    body: &str,
+) -> Result<(String, Vec<ToolCall>, Option<u64>, Option<String>), AIError> {
     let value: Value = serde_json::from_str(body)
         .map_err(|e| AIError::ParseError(format!("Invalid response: {}", e)))?;
     let output = value
@@ -537,7 +546,13 @@ fn parse_response_with_tools(body: &str) -> Result<(String, Vec<ToolCall>, Optio
         .get("usage")
         .and_then(|u| u.get("total_tokens"))
         .and_then(|v| v.as_u64());
-    Ok((texts.join(""), tool_calls, usage_tokens))
+
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok((texts.join(""), tool_calls, usage_tokens, status))
 }
 
 fn parse_tool_call(value: &Value) -> Option<ToolCall> {
@@ -1071,17 +1086,46 @@ mod tests {
                     "arguments": "{\"pane_id\":\"pane-1\",\"text\":\"ls\\n\"}"
                 }]
             }],
-            "usage": {"total_tokens": 42}
+            "usage": {"total_tokens": 42},
+            "status": "completed"
         }"#;
-        let (text, calls, usage) = parse_response_with_tools(body).unwrap();
+        let (text, calls, usage, status) = parse_response_with_tools(body).unwrap();
         assert_eq!(text, "Starting.");
         assert_eq!(usage, Some(42));
+        assert_eq!(status, Some("completed".to_string()));
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "send_keys_to_pane");
         assert_eq!(
             calls[0].arguments.get("pane_id").and_then(|v| v.as_str()),
             Some("pane-1")
         );
+    }
+
+    #[test]
+    fn test_parse_response_with_tools_incomplete_status() {
+        let body = r#"{
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Partial."}]
+            }],
+            "status": "incomplete"
+        }"#;
+        let (_, _, _, status) = parse_response_with_tools(body).unwrap();
+        assert_eq!(status, Some("incomplete".to_string()));
+    }
+
+    #[test]
+    fn test_parse_response_with_tools_no_status() {
+        let body = r#"{
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello."}]
+            }]
+        }"#;
+        let (_, _, _, status) = parse_response_with_tools(body).unwrap();
+        assert_eq!(status, None);
     }
 
     // ========================================

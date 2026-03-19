@@ -44,6 +44,8 @@ pub const TOOL_UPSERT_SPEC_ARTIFACT: &str = "upsert_spec_issue_artifact";
 pub const TOOL_LIST_SPEC_ARTIFACTS: &str = "list_spec_issue_artifacts";
 pub const TOOL_DELETE_SPEC_ARTIFACT: &str = "delete_spec_issue_artifact";
 pub const TOOL_SYNC_SPEC_PROJECT: &str = "sync_spec_issue_project";
+pub const TOOL_CONSULT_ASSISTANT: &str = "consult_assistant";
+pub const TOOL_CHECK_CONSULTATION_RESPONSE: &str = "check_consultation_response";
 
 pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = shared_tool_definitions();
@@ -159,6 +161,36 @@ fn agent_specific_tool_definitions() -> Vec<ToolDefinition> {
                         "project_id": { "type": "string" }
                     },
                     "required": ["issue_number", "phase"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_CONSULT_ASSISTANT.to_string(),
+                description: "Send a consultation question to the Assistant PM. The question is written to the inbox and the Assistant will respond asynchronously.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "The question to ask the Assistant PM" },
+                        "context": { "type": "string", "description": "Additional context for the question" },
+                        "pane_id": { "type": "string", "description": "Pane ID of the requesting agent (optional, auto-detected if omitted)" }
+                    },
+                    "required": ["question", "context"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_CHECK_CONSULTATION_RESPONSE.to_string(),
+                description: "Check if the Assistant PM has responded to a previous consultation.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pane_id": { "type": "string", "description": "Pane ID to check responses for (optional, auto-detected if omitted)" }
+                    },
+                    "required": []
                 }),
             },
         },
@@ -279,6 +311,36 @@ pub fn execute_tool_call(
             .map_err(|e| e.message)?;
             serde_json::to_string(&result).map_err(|e| format!("Failed to serialize result: {e}"))
         }
+        TOOL_CONSULT_ASSISTANT => {
+            let project_path = project_path_lazy()?;
+            let question = get_required_string_any(&args, &["question"])?;
+            let context = get_required_string_any(&args, &["context"])?;
+            let pane_id = get_optional_string_any(&args, &["pane_id", "paneId"])
+                .unwrap_or(window_label);
+            let agent_name = get_optional_string_any(&args, &["agent_name", "agentName"])
+                .unwrap_or("agent");
+            let timestamp = crate::consultation::write_consultation_request(
+                std::path::Path::new(&project_path),
+                pane_id,
+                agent_name,
+                question,
+                context,
+            )?;
+            Ok(json!({ "status": "submitted", "timestamp": timestamp }).to_string())
+        }
+        TOOL_CHECK_CONSULTATION_RESPONSE => {
+            let project_path = project_path_lazy()?;
+            let pane_id = get_optional_string_any(&args, &["pane_id", "paneId"])
+                .unwrap_or(window_label);
+            let response = crate::consultation::check_consultation_response(
+                std::path::Path::new(&project_path),
+                pane_id,
+            )?;
+            match response {
+                Some(content) => Ok(json!({ "status": "responded", "content": content }).to_string()),
+                None => Ok(json!({ "status": "pending" }).to_string()),
+            }
+        }
         _ => Err(format!("Unknown tool: {}", call.name)),
     }
 }
@@ -317,6 +379,8 @@ mod tests {
         assert!(names.contains(&TOOL_LIST_SPEC_ARTIFACTS.to_string()));
         assert!(names.contains(&TOOL_DELETE_SPEC_ARTIFACT.to_string()));
         assert!(names.contains(&TOOL_SYNC_SPEC_PROJECT.to_string()));
+        assert!(names.contains(&TOOL_CONSULT_ASSISTANT.to_string()));
+        assert!(names.contains(&TOOL_CHECK_CONSULTATION_RESPONSE.to_string()));
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod assistant_engine;
 mod assistant_monitor;
 mod assistant_tools;
 mod commands;
+mod consultation;
 mod menu;
 mod pty_skills;
 mod session_watcher;

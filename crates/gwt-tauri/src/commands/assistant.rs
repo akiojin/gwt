@@ -71,9 +71,32 @@ pub struct GitDashboard {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SpecProgressSummary {
+    pub issue_number: u64,
+    pub title: String,
+    pub phase: String,
+    pub tasks_total: u32,
+    pub tasks_completed: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CiStatusSummary {
+    pub pr_number: u64,
+    pub pr_title: String,
+    pub check_status: String,
+    pub failing_checks: Vec<String>,
+    pub review_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DashboardResponse {
     pub panes: Vec<PaneDashboard>,
     pub git: GitDashboard,
+    pub spec_progress: Option<SpecProgressSummary>,
+    pub ci_status: Option<CiStatusSummary>,
+    pub consultation_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -483,6 +506,9 @@ fn build_dashboard_response(
         return Ok(DashboardResponse {
             panes: Vec::new(),
             git: build_git_dashboard(state, window_label)?,
+            spec_progress: None,
+            ci_status: None,
+            consultation_count: 0,
         });
     };
     let repo_path = project_path.as_str();
@@ -507,9 +533,16 @@ fn build_dashboard_response(
             .collect::<Vec<_>>()
     };
 
+    let git = build_git_dashboard(state, window_label)?;
+    let spec_progress = resolve_spec_progress(&repo_path, &git.branch, &project_path);
+    let ci_status = resolve_ci_status(&repo_path, &git.branch);
+
     Ok(DashboardResponse {
         panes,
-        git: build_git_dashboard(state, window_label)?,
+        git,
+        spec_progress,
+        ci_status,
+        consultation_count: 0,
     })
 }
 
@@ -1361,6 +1394,7 @@ fn resolve_assistant_context_with_snapshot(
         current_status,
         blockers,
         recommended_next_actions,
+        dispatched_tasks: Vec::new(),
     })
 }
 
@@ -1370,6 +1404,10 @@ fn collect_current_monitor_snapshot(
 ) -> Result<MonitorSnapshot, String> {
     let git = build_git_dashboard(state, window_label)?;
     let panes = collect_current_pane_snapshots(state, window_label)?;
+    let pending_consultations = state
+        .project_for_window(window_label)
+        .map(|p| crate::consultation::count_pending_consultations(Path::new(&p)))
+        .unwrap_or(0);
     Ok(MonitorSnapshot {
         panes,
         git: assistant_monitor::GitStatusSnapshot {
@@ -1377,6 +1415,7 @@ fn collect_current_monitor_snapshot(
             uncommitted_count: git.uncommitted_count,
             unpushed_count: git.unpushed_count,
         },
+        pending_consultations,
         timestamp: chrono::Utc::now().timestamp(),
     })
 }
@@ -1600,6 +1639,63 @@ fn pending_required_check_names(checks: &[WorkflowRunInfo]) -> Vec<String> {
         })
         .map(|check| check.workflow_name.clone())
         .collect()
+}
+
+fn resolve_spec_progress(
+    repo_path: &Path,
+    branch: &str,
+    _project_path: &str,
+) -> Option<SpecProgressSummary> {
+    let issue_number = extract_issue_number_from_branch(branch)?;
+    let detail = get_spec_issue_detail(repo_path, issue_number).ok()?;
+
+    let tasks_section = &detail.sections.tasks;
+    let tasks_total = tasks_section.matches("- [").count() as u32;
+    let tasks_completed = tasks_section.matches("- [x]").count() as u32;
+
+    let phase = if tasks_section.is_empty() && detail.sections.plan.is_empty() {
+        "draft"
+    } else if tasks_section.is_empty() {
+        "planned"
+    } else if tasks_completed == tasks_total && tasks_total > 0 {
+        "done"
+    } else {
+        "in-progress"
+    };
+
+    Some(SpecProgressSummary {
+        issue_number: detail.number,
+        title: detail.title,
+        phase: phase.to_string(),
+        tasks_total,
+        tasks_completed,
+    })
+}
+
+fn resolve_ci_status(repo_path: &Path, branch: &str) -> Option<CiStatusSummary> {
+    let insight = resolve_pr_ci_insight(repo_path, branch)?;
+
+    let check_status = if !insight.failing_required_checks.is_empty() {
+        "failing"
+    } else if !insight.pending_required_checks.is_empty() {
+        "pending"
+    } else {
+        "passing"
+    };
+
+    let review_status = if !insight.changes_requested_by.is_empty() {
+        "changes_requested"
+    } else {
+        "pending"
+    };
+
+    Some(CiStatusSummary {
+        pr_number: insight.pr_number,
+        pr_title: insight.pr_title,
+        check_status: check_status.to_string(),
+        failing_checks: insight.failing_required_checks,
+        review_status: review_status.to_string(),
+    })
 }
 
 fn extract_issue_number_from_branch(branch: &str) -> Option<u64> {
@@ -1965,6 +2061,7 @@ mod tests {
             current_status: Some("monitoring".to_string()),
             blockers: vec!["none".to_string()],
             recommended_next_actions: vec!["do the work".to_string()],
+            ..AssistantContext::default()
         };
 
         save_assistant_context_cache(&path, &entry).unwrap();
@@ -2011,6 +2108,7 @@ mod tests {
             current_status: Some("blocked".to_string()),
             blockers: vec!["Agent stopped".to_string()],
             recommended_next_actions: vec!["Restart the agent".to_string()],
+            ..AssistantContext::default()
         };
 
         let message = format_assistant_context_message(&context);

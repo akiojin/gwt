@@ -26,6 +26,9 @@ pub const TOOL_RUN_COMMAND: &str = "run_command";
 pub const TOOL_LIST_PANES: &str = "list_panes";
 pub const TOOL_LIST_ISSUES: &str = "list_issues";
 pub const TOOL_LIST_PULL_REQUESTS: &str = "list_pull_requests";
+pub const TOOL_LIST_CONSULTATIONS: &str = "list_consultations";
+pub const TOOL_READ_CONSULTATION: &str = "read_consultation";
+pub const TOOL_RESPOND_TO_CONSULTATION: &str = "respond_to_consultation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssistantToolMode {
@@ -189,6 +192,35 @@ fn assistant_specific_tool_definitions(access_mode: ToolAccessMode) -> Vec<ToolD
         },
     ];
 
+    // Consultation tools (read-only: list and read; write: respond)
+    tools.push(ToolDefinition {
+        tool_type: "function".to_string(),
+        function: ToolFunction {
+            name: TOOL_LIST_CONSULTATIONS.to_string(),
+            description: "List pending consultation requests from coding agents.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+    });
+    tools.push(ToolDefinition {
+        tool_type: "function".to_string(),
+        function: ToolFunction {
+            name: TOOL_READ_CONSULTATION.to_string(),
+            description: "Read a specific consultation request from a coding agent.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pane_id": { "type": "string", "description": "Pane ID of the requesting agent" },
+                    "timestamp": { "type": "string", "description": "Timestamp of the consultation request" }
+                },
+                "required": ["pane_id", "timestamp"]
+            }),
+        },
+    });
+
     if access_mode.allows_write() {
         tools.push(ToolDefinition {
             tool_type: "function".to_string(),
@@ -204,6 +236,22 @@ fn assistant_specific_tool_definitions(access_mode: ToolAccessMode) -> Vec<ToolD
                 }),
             },
         });
+        tools.push(ToolDefinition {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: TOOL_RESPOND_TO_CONSULTATION.to_string(),
+                description: "Respond to a consultation request from a coding agent.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pane_id": { "type": "string", "description": "Pane ID of the requesting agent" },
+                        "timestamp": { "type": "string", "description": "Timestamp of the consultation request" },
+                        "response": { "type": "string", "description": "Response to the consultation" }
+                    },
+                    "required": ["pane_id", "timestamp", "response"]
+                }),
+            },
+        });
     }
 
     tools
@@ -215,8 +263,11 @@ pub fn assistant_tool_allowed(name: &str, mode: AssistantToolMode) -> bool {
         AssistantToolMode::ReadOnly => !matches!(
             name,
             TOOL_RUN_COMMAND
+                | TOOL_RESPOND_TO_CONSULTATION
                 | crate::tool_helpers::TOOL_SEND_KEYS_TO_PANE
                 | crate::tool_helpers::TOOL_UPSERT_SPEC_ISSUE
+                | crate::tool_helpers::TOOL_UPSERT_SPEC_ARTIFACT
+                | crate::tool_helpers::TOOL_CLOSE_SPEC_ISSUE
         ),
     }
 }
@@ -316,6 +367,38 @@ pub fn execute_assistant_tool(
         TOOL_LIST_PANES => list_project_panes(state, project_path),
         TOOL_LIST_ISSUES => list_project_issues(project_path, &args),
         TOOL_LIST_PULL_REQUESTS => list_project_pull_requests(project_path, &args),
+        TOOL_LIST_CONSULTATIONS => {
+            let consultations =
+                crate::consultation::list_pending_consultations(Path::new(project_path))?;
+            serde_json::to_string(&consultations)
+                .map_err(|e| format!("Failed to serialize consultations: {e}"))
+        }
+        TOOL_READ_CONSULTATION => {
+            let pane_id = get_required_string_any(&args, &["pane_id", "paneId"])?;
+            let timestamp = get_required_string_any(&args, &["timestamp"])?;
+            let consultation =
+                crate::consultation::read_consultation(Path::new(project_path), pane_id, timestamp)?;
+            serde_json::to_string(&consultation)
+                .map_err(|e| format!("Failed to serialize consultation: {e}"))
+        }
+        TOOL_RESPOND_TO_CONSULTATION => {
+            if !access_mode.allows_write() {
+                return Err(format!(
+                    "Tool is not available in {:?} mode: {}",
+                    mode, call.name
+                ));
+            }
+            let pane_id = get_required_string_any(&args, &["pane_id", "paneId"])?;
+            let timestamp = get_required_string_any(&args, &["timestamp"])?;
+            let response = get_required_string_any(&args, &["response"])?;
+            crate::consultation::write_consultation_response(
+                Path::new(project_path),
+                pane_id,
+                timestamp,
+                response,
+            )?;
+            Ok(json!({ "status": "responded" }).to_string())
+        }
         _ => Err(format!("Unknown tool: {}", call.name)),
     }
 }
@@ -507,11 +590,18 @@ mod tests {
             .collect();
 
         assert!(!names.contains(&TOOL_RUN_COMMAND.to_string()));
+        assert!(!names.contains(&TOOL_RESPOND_TO_CONSULTATION.to_string()));
         assert!(!names.contains(&crate::tool_helpers::TOOL_SEND_KEYS_TO_PANE.to_string()));
         assert!(!names.contains(&crate::tool_helpers::TOOL_UPSERT_SPEC_ISSUE.to_string()));
+        assert!(!names.contains(&crate::tool_helpers::TOOL_UPSERT_SPEC_ARTIFACT.to_string()));
+        assert!(!names.contains(&crate::tool_helpers::TOOL_CLOSE_SPEC_ISSUE.to_string()));
         assert!(names.contains(&TOOL_LIST_PANES.to_string()));
         assert!(names.contains(&TOOL_LIST_ISSUES.to_string()));
         assert!(names.contains(&TOOL_LIST_PULL_REQUESTS.to_string()));
+        assert!(names.contains(&TOOL_LIST_CONSULTATIONS.to_string()));
+        assert!(names.contains(&TOOL_READ_CONSULTATION.to_string()));
+        assert!(names.contains(&crate::tool_helpers::TOOL_SEARCH_SPEC_ISSUES.to_string()));
+        assert!(names.contains(&crate::tool_helpers::TOOL_LIST_SPEC_ARTIFACTS.to_string()));
     }
 
     #[test]
