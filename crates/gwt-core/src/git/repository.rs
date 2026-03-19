@@ -1,10 +1,14 @@
 //! Repository operations
 
-use crate::error::{GwtError, Result};
-use std::borrow::Cow;
-use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
+use std::{
+    borrow::Cow,
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
+
 use tracing::{debug, error, info, instrument, warn};
+
+use crate::error::{GwtError, Result};
 
 /// Strip the Windows extended-length path prefix (`\\?\` or `//?/`)
 /// that Git may produce in worktree/rev-parse output on Windows.
@@ -1179,8 +1183,9 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn is_valid_worktree_meta_dir_accepts_direct_child() {

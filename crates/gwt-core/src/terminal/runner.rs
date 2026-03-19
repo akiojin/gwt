@@ -1,8 +1,10 @@
 //! Utilities for launching npm-based tools (bunx/npx) in environments where PATH may differ
 //! from an interactive shell (e.g., GUI apps).
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 /// Fallback runner for executing npm packages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,8 +442,9 @@ pub fn build_fallback_launch(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     fn command_path_in_dir(dir: &Path, command: &str) -> PathBuf {
         if cfg!(windows) {

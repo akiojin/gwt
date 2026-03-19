@@ -1,8 +1,10 @@
 //! Migration validation (gwt-spec issue T801-T803)
 
-use super::{MigrationConfig, MigrationError};
 use std::path::Path;
+
 use tracing::debug;
+
+use super::{MigrationConfig, MigrationError};
 
 /// Validation result
 #[derive(Debug)]
@@ -221,8 +223,9 @@ fn is_writable(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_validation_result_success() {

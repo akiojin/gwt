@@ -2,8 +2,9 @@
 //!
 //! This module generates and parses a single branch name suggestion with a fixed prefix.
 
-use super::client::{AIClient, AIError, ChatMessage};
 use serde::Deserialize;
+
+use super::client::{AIClient, AIError, ChatMessage};
 
 pub const BRANCH_SUGGEST_SYSTEM_PROMPT: &str = "You are a git branch naming assistant. Generate exactly 1 branch name suggestion based on the user's description.\n\nRules:\n- The suggestion must include exactly one of these prefixes: feature/, bugfix/, hotfix/, release/\n- Use lowercase\n- Use hyphens for separators\n- Keep names concise (<= 50 characters including prefix)\n\nRespond with JSON only in this format: {\"suggestion\": \"prefix/name\"}";
 

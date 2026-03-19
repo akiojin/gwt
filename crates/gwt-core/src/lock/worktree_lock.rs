@@ -1,10 +1,14 @@
 //! Worktree file locking
 
-use crate::error::{GwtError, Result};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+};
+
 use fs2::FileExt;
-use std::fs::File;
-use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
+
+use crate::error::{GwtError, Result};
 
 /// Lock file name
 const LOCK_FILE_NAME: &str = ".gwt.lock";
@@ -165,8 +169,9 @@ impl Drop for WorktreeLock {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_lock_unlock() {

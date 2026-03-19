@@ -3,8 +3,8 @@
 //! Provides utilities for finding available ports and resolving port conflicts
 //! when running multiple Docker containers.
 
-use std::collections::HashMap;
-use std::net::TcpListener;
+use std::{collections::HashMap, net::TcpListener};
+
 use tracing::debug;
 
 /// Default port range start

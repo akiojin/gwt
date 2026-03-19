@@ -1,11 +1,12 @@
 //! Custom coding agent configuration management in `~/.gwt/config.toml`.
 
+use std::{collections::HashMap, path::Path};
+
+use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
+
 use super::settings::Settings;
 use crate::config::migration::{ensure_config_dir, write_atomic};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
-use tracing::{debug, info, warn};
 
 /// Agent execution type
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,8 +341,9 @@ impl ToolsConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_tools_config_parse_toml() {

@@ -1,13 +1,12 @@
 #![allow(dead_code)]
 //! Assistant Mode session state
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::conversation::Conversation;
-use super::session::SessionStatus;
-use super::types::SessionId;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::{conversation::Conversation, session::SessionStatus, types::SessionId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantSession {

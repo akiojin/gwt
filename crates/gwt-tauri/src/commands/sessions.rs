@@ -1,29 +1,39 @@
 //! Session history commands (Quick Start)
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::commands::terminal::capture_scrollback_tail_from_state;
-use crate::state::AppState;
-use gwt_core::ai::{
-    format_error_for_display, summarize_scrollback, summarize_session, AIClient, AIError,
-    AgentType as AiAgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
-    OpenCodeSessionParser, ScrollbackCacheEntry, ScrollbackRollingContext, ScrollbackSummaryBuild,
-    SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use gwt_core::config::{ProfilesConfig, ResolvedAISettings, Session, ToolSessionEntry};
-use gwt_core::git::{
-    fetch_issues_with_options, get_spec_issue_detail, Branch, FetchIssuesResult, SpecIssueDetail,
+
+use gwt_core::{
+    ai::{
+        format_error_for_display, summarize_scrollback, summarize_session, AIClient, AIError,
+        AgentType as AiAgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
+        OpenCodeSessionParser, ScrollbackCacheEntry, ScrollbackRollingContext,
+        ScrollbackSummaryBuild, SessionParseError, SessionParser, SessionSummary,
+        SessionSummaryCache,
+    },
+    config::{ProfilesConfig, ResolvedAISettings, Session, ToolSessionEntry},
+    git::{
+        fetch_issues_with_options, get_spec_issue_detail, Branch, FetchIssuesResult,
+        SpecIssueDetail,
+    },
+    terminal::{pane::PaneStatus, scrollback::ScrollbackFile},
+    worktree::WorktreeManager,
+    StructuredError,
 };
-use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::terminal::scrollback::ScrollbackFile;
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::instrument;
+
+use crate::{
+    commands::{
+        project::resolve_repo_path_for_project_root, terminal::capture_scrollback_tail_from_state,
+    },
+    state::AppState,
+};
 
 /// Return tool-specific latest session entries for a branch (Quick Start).
 ///
@@ -2167,13 +2177,12 @@ pub fn set_branch_display_name(
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, fs, path::Path, time::Duration};
+
+    use tempfile::TempDir;
+
     use super::*;
     use crate::commands::{TestEnvGuard, ENV_LOCK};
-    use std::cell::RefCell;
-    use std::fs;
-    use std::path::Path;
-    use std::time::Duration;
-    use tempfile::TempDir;
 
     fn init_git_repo(path: &Path) {
         let out = gwt_core::process::command("git")

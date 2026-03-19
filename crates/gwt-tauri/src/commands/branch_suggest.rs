@@ -1,10 +1,10 @@
 //! AI branch name suggestion command (GUI Launch Agent)
 
-use gwt_core::ai::{
-    format_error_for_display, suggest_branch_name as core_suggest_branch_name, AIClient,
+use gwt_core::{
+    ai::{format_error_for_display, suggest_branch_name as core_suggest_branch_name, AIClient},
+    config::ProfilesConfig,
+    StructuredError,
 };
-use gwt_core::config::ProfilesConfig;
-use gwt_core::StructuredError;
 use serde::Serialize;
 use tracing::instrument;
 

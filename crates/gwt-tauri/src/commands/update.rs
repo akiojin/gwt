@@ -1,12 +1,14 @@
 //! App self-update commands (GitHub Releases).
 
-use crate::state::AppState;
 use chrono::Utc;
-use gwt_core::update::PreparedPayload;
-use gwt_core::update::UpdateState;
-use gwt_core::StructuredError;
+use gwt_core::{
+    update::{PreparedPayload, UpdateState},
+    StructuredError,
+};
 use tauri::{AppHandle, State};
 use tracing::{instrument, warn};
+
+use crate::state::AppState;
 
 #[instrument(skip_all, fields(command = "check_app_update"))]
 #[tauri::command]

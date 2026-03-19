@@ -1,9 +1,14 @@
 //! Session summary generation and cache.
 
-use super::client::{AIClient, AIError, ChatMessage};
-use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
-use std::collections::{BTreeSet, HashMap};
-use std::time::SystemTime;
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::SystemTime,
+};
+
+use super::{
+    client::{AIClient, AIError, ChatMessage},
+    session_parser::{MessageRole, ParsedSession, SessionMessage},
+};
 
 pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## <Purpose heading in the user's language>\n<1 sentence: the worktree/branch objective (why) + key constraints + explicit exclusions>\n\n## <Summary heading in the user's language>\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## <Highlights heading in the user's language>\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nAll headings and all content must be in the user's language.\nDo not output JSON, code fences, or any extra text.\n\nPurpose writing rule:\n- The Purpose section must describe the intended outcome of the worktree/branch.\n- Treat PR/MR creation, PR template filling, merge/push, and status checks as means (how), not purpose (why).\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.\n\nWhen the session language is Japanese, headings must be exactly in this order:\n- ## 目的\n- ## 要約\n- ## ハイライト\nWhen the session language is English, headings must be exactly in this order:\n- ## Purpose\n- ## Summary\n- ## Highlights.";
 

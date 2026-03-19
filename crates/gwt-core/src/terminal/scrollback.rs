@@ -2,9 +2,11 @@
 //!
 //! Manages terminal output persistence to disk for scrollback.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
 use crate::terminal::TerminalError;
 
@@ -301,8 +303,9 @@ pub fn strip_ansi(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn create_test_scrollback(tmp: &TempDir, name: &str) -> ScrollbackFile {
         let path = tmp.path().join(format!("{name}.log"));

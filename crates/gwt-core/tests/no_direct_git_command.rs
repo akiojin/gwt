@@ -1,5 +1,7 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")

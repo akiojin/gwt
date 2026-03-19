@@ -2,11 +2,15 @@
 //!
 //! Configuration is stored only in `.gwt/project.toml`.
 
-use crate::config::migration::{ensure_config_dir, write_atomic};
-use crate::error::{GwtError, Result};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
+
+use crate::{
+    config::migration::{ensure_config_dir, write_atomic},
+    error::{GwtError, Result},
+};
 
 /// New TOML configuration file name
 const CONFIG_FILE_NAME_TOML: &str = "project.toml";
@@ -145,8 +149,9 @@ impl BareProjectConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_new_config() {

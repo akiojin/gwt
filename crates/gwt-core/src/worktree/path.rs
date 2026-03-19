@@ -1,7 +1,8 @@
 //! Worktree path generation
 
-use super::WorktreeLocation;
 use std::path::{Path, PathBuf};
+
+use super::WorktreeLocation;
 
 /// Worktree path utilities
 pub struct WorktreePath;
