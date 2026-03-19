@@ -804,10 +804,9 @@ describe("Sidebar", () => {
         onBranchSelect: vi.fn(),
       });
 
-      await rendered.findByText(branchFixture.name);
-      await waitFor(() => {
-        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
-      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rendered.getByText(branchFixture.name)).toBeTruthy();
+      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
       const searchInput = rendered.getByPlaceholderText("Filter branches...") as HTMLInputElement;
 
       const beforeFocusedRefresh = countInvokeCalls("fetch_pr_status");
