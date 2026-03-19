@@ -19,6 +19,12 @@ const TEMPERATURE: f32 = 0.3;
 const MAX_RETRIES: usize = 5;
 const BACKOFF_BASE_SECS: u64 = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryMode {
+    RetryTransientNetworkErrors,
+    FailFastOnNetworkErrors,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -274,7 +280,7 @@ impl AIClient {
             temperature: TEMPERATURE,
         };
 
-        let body = self.send_with_retry(&url, &request_body)?;
+        let body = self.send_with_retry(&url, &request_body, RetryMode::FailFastOnNetworkErrors)?;
         let (text, usage) = parse_response_with_usage(&body)?;
         if let Some(tokens) = usage {
             self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
@@ -305,7 +311,8 @@ impl AIClient {
             temperature,
         };
 
-        let body = self.send_with_retry(&url, &request_body)?;
+        let body =
+            self.send_with_retry(&url, &request_body, RetryMode::RetryTransientNetworkErrors)?;
         let (text, tool_calls, usage) = parse_response_with_tools(&body)?;
         if let Some(tokens) = usage {
             self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
@@ -323,6 +330,7 @@ impl AIClient {
         &self,
         url: &Url,
         request_body: &impl Serialize,
+        retry_mode: RetryMode,
     ) -> Result<String, AIError> {
         let mut retries = 0usize;
 
@@ -369,8 +377,10 @@ impl AIClient {
                     std::thread::sleep(delay);
                 }
                 Err(e) => {
-                    if retries >= MAX_RETRIES {
-                        return Err(AIError::NetworkError(e.to_string()));
+                    let error = AIError::NetworkError(e.to_string());
+
+                    if !should_retry_network_error(retries, retry_mode) {
+                        return Err(error);
                     }
                     let delay = backoff_delay(retries);
                     retries += 1;
@@ -406,11 +416,7 @@ impl AIClient {
 /// Build an API URL by appending `suffix` to the endpoint path.
 /// Optionally strips `strip_suffix` from the path before appending (used to
 /// convert a `/responses` endpoint to `/chat/completions`).
-fn build_api_url(
-    endpoint: &str,
-    suffix: &str,
-    strip_suffix: Option<&str>,
-) -> Result<Url, AIError> {
+fn build_api_url(endpoint: &str, suffix: &str, strip_suffix: Option<&str>) -> Result<Url, AIError> {
     let mut url = Url::parse(endpoint)
         .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
     let mut path = url.path().trim_end_matches('/').to_string();
@@ -641,6 +647,10 @@ fn is_retryable(error: &AIError) -> bool {
     }
 }
 
+fn should_retry_network_error(retries: usize, retry_mode: RetryMode) -> bool {
+    retry_mode == RetryMode::RetryTransientNetworkErrors && retries < MAX_RETRIES
+}
+
 fn is_permanent_server_error(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     if m.contains("http 501") {
@@ -821,6 +831,8 @@ pub fn format_error_for_display(error: &AIError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::time::Instant;
 
     // ========================================
     // URL Building Tests
@@ -1040,6 +1052,30 @@ mod tests {
     }
 
     #[test]
+    fn test_should_retry_network_error_for_tool_requests() {
+        assert!(should_retry_network_error(
+            0,
+            RetryMode::RetryTransientNetworkErrors
+        ));
+    }
+
+    #[test]
+    fn test_should_not_retry_network_error_for_one_shot_requests() {
+        assert!(!should_retry_network_error(
+            0,
+            RetryMode::FailFastOnNetworkErrors
+        ));
+    }
+
+    #[test]
+    fn test_should_not_retry_network_error_after_max_retries() {
+        assert!(!should_retry_network_error(
+            MAX_RETRIES,
+            RetryMode::RetryTransientNetworkErrors
+        ));
+    }
+
+    #[test]
     fn test_is_not_retryable_config_error() {
         let error = AIError::ConfigError("missing key".to_string());
         assert!(!is_retryable(&error));
@@ -1195,6 +1231,32 @@ mod tests {
         };
         let result = AIClient::new(settings);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_response_fails_fast_on_network_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let settings = ResolvedAISettings {
+            endpoint: format!("http://127.0.0.1:{port}/v1"),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "auto".to_string(),
+        };
+        let client = AIClient::new(settings).unwrap();
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+        }];
+
+        let start = Instant::now();
+        let result = client.create_response(messages);
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Err(AIError::NetworkError(_))));
+        assert!(elapsed < backoff_delay(0));
     }
 
     // ========================================
