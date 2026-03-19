@@ -23,7 +23,7 @@ Use this command to draft or update a GitHub PR with the gh CLI.
 5. If that merge produces conflicts, inspect the conflict carefully and only ask the user when it cannot be resolved with high confidence.
 6. Use REST list/view endpoints as the primary transport: `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100` for lookup and `gh api repos/<owner>/<repo>/pulls/<number>` for the final URL.
 7. When all PRs for the head are merged, validate merge commit ancestry before counting post-merge commits.
-8. If the merge commit is missing or not an ancestor of `HEAD`, compare `origin/<head>..HEAD` before any base-branch fallback.
+8. If the merge commit is missing or not an ancestor of `HEAD`, compare `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before concluding `NO ACTION`.
 9. If both upstream and base comparisons fail, stop with `MANUAL CHECK`; do not create a PR by guesswork.
 10. Generate or update the PR body using the provided templates.
 11. Create or update PRs through the REST pull-request endpoint first; use `gh pr create` / `gh pr edit` only as fallback.

@@ -21,7 +21,7 @@ Use this command to inspect PR status for the current branch with the gh CLI.
 3. Prefer the REST pull-request list endpoint as the primary transport for PR discovery.
 4. Ensure `gh auth status` succeeds before running PR checks, or continue with token-backed REST auth when `GH_TOKEN` / `GITHUB_TOKEN` is already provided.
 5. When all PRs for the head are merged, validate merge commit ancestry before counting post-merge commits.
-6. If the merge commit is missing or not an ancestor of `HEAD`, compare `origin/<head>..HEAD` before any base-branch fallback.
+6. If the merge commit is missing or not an ancestor of `HEAD`, compare `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO ACTION`.
 7. If both upstream and base comparisons fail, return `MANUAL CHECK` instead of inferring `CREATE PR`.
 8. Return the human-readable summary from the script:
    - Result

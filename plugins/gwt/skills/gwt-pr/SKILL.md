@@ -40,11 +40,11 @@ When all PRs for the head branch are merged, you **must** check whether there ar
    - `git rev-list --count <merge_commit>..HEAD`
 4. **If the merge commit is missing or not an ancestor of `HEAD`**, fallback to the branch upstream first:
    - `git rev-list --count origin/<head>..HEAD`
-5. **If the upstream comparison fails**, fallback to the base branch comparison:
+5. **If the upstream comparison returns `0` or fails**, compare against the base branch:
    - `git rev-list --count origin/<base>..HEAD`
 6. **Decision**:
    - If the selected count is greater than 0 → create a new PR
-   - If the selected count is 0 → report "No new changes since merge" and finish
+   - If both upstream and base comparisons report `0` → report "No new changes since merge" and finish
    - If both fallback comparisons fail → stop and report `MANUAL CHECK`
 
 ### Why this matters
@@ -155,7 +155,8 @@ Next
    - Get merge commit from the latest merged item returned by `GET /repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>`
    - If the merge commit is an ancestor of `HEAD`, count `git rev-list --count <merge_commit>..HEAD`
    - If the merge commit is missing or not an ancestor, count `git rev-list --count origin/<head>..HEAD` first
-   - Only if the upstream comparison fails, count `git rev-list --count origin/<base>..HEAD`
+   - If the upstream count is `0`, still count `git rev-list --count origin/<base>..HEAD` before concluding `NO_ACTION`
+   - Only if both fallback comparisons fail, stop with `MANUAL CHECK`
    - If the selected count is 0 → finish with message "No new changes since merge"
    - If the selected count is >0 → proceed to create new PR
    - If neither comparison is usable → stop with `MANUAL CHECK`
@@ -269,14 +270,9 @@ else
   else
     upstream_commits=$(git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo "")
 
-    if [ -n "$upstream_commits" ]; then
-      if [ "$upstream_commits" -gt 0 ]; then
-        echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
-        action=create
-      else
-        echo "No new commits ahead of origin/$head - nothing to do"
-        action=none
-      fi
+    if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
+      echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
+      action=create
     else
       fallback_commits=$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "")
 
@@ -285,7 +281,7 @@ else
           echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base - creating new PR"
           action=create
         else
-          echo "Upstream comparison unavailable and no commits ahead of origin/$base - nothing to do"
+          echo "No commits ahead of origin/$head or origin/$base - nothing to do"
           action=none
         fi
       else

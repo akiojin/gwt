@@ -2273,7 +2273,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(claude_pr_command
-            .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
+            .contains("compare `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before concluding `NO ACTION`."));
         assert!(claude_pr_command
             .contains("merge `origin/$base` into the current branch and push before PR creation."));
         assert!(claude_pr_command.contains("REST pull-request endpoint"));
@@ -2287,7 +2287,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(claude_pr_check_command
-            .contains("compare `origin/<head>..HEAD` before any base-branch fallback."));
+            .contains("compare `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO ACTION`."));
         assert!(claude_pr_check_command
             .contains("return `MANUAL CHECK` instead of inferring `CREATE PR`."));
         assert!(claude_pr_check_command.contains("REST pull-request list endpoint"));

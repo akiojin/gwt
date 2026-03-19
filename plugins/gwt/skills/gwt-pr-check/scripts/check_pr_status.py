@@ -270,30 +270,17 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
         )
 
     upstream_commits = git_count(repo, f"origin/{head}..HEAD")
-    if upstream_commits is not None:
-        if upstream_commits > 0:
-            return Result(
-                status="ALL_MERGED_WITH_NEW_COMMITS",
-                action="CREATE_PR",
-                summary=f">> CREATE PR — {upstream_commits} new commit(s) after last merge (#{latest_merged['number']}).",
-                details=[f"   head: {head} -> base: {base}"],
-                dirty=dirty,
-                head=head,
-                base=base,
-                pr_number=latest_merged["number"],
-                new_commits=upstream_commits,
-                fallback_used=True,
-            )
+    if upstream_commits is not None and upstream_commits > 0:
         return Result(
-            status="ALL_MERGED_NO_NEW_COMMITS",
-            action="NO_ACTION",
-            summary=f"-- NO ACTION — All PRs merged, no new commits on `{head}`.",
-            details=[],
+            status="ALL_MERGED_WITH_NEW_COMMITS",
+            action="CREATE_PR",
+            summary=f">> CREATE PR — {upstream_commits} new commit(s) after last merge (#{latest_merged['number']}).",
+            details=[f"   head: {head} -> base: {base}"],
             dirty=dirty,
             head=head,
             base=base,
             pr_number=latest_merged["number"],
-            new_commits=0,
+            new_commits=upstream_commits,
             fallback_used=True,
         )
 

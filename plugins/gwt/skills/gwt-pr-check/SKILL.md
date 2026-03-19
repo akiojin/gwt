@@ -48,10 +48,11 @@ This skill is **check-only**:
    - First compare against branch upstream (preferred):
      - `git rev-list --count origin/<head>..HEAD`
    - Count > 0 -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR` (fallback)
-   - Count == 0 -> `ALL_MERGED_NO_NEW_COMMITS` + `NO_ACTION` (fallback)
-   - If upstream comparison fails, compare against base:
+   - If upstream count is `0`, still compare against base:
      - `git rev-list --count origin/<base>..HEAD`
-   - If base comparison fails -> `CHECK_FAILED` + `MANUAL_CHECK`
+   - Base count > 0 -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR` (fallback)
+   - Base count == 0 -> `ALL_MERGED_NO_NEW_COMMITS` + `NO_ACTION`
+   - If both comparisons fail -> `CHECK_FAILED` + `MANUAL_CHECK`
 
 ## Output contract
 
@@ -193,7 +194,7 @@ Append the following line **only** when the worktree is dirty:
 4. Prefer the REST pull-request list endpoint over `gh pr list` when checking branch PR state.
 5. List PRs for head branch and classify using rules above.
 6. When all PRs are merged, validate merge commit ancestry before counting commits.
-7. If merge commit is not usable, fallback to `origin/<head>..HEAD` first.
+7. If merge commit is not usable, fallback to `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO_ACTION`.
 8. Print human-readable result using the default template.
 9. Append JSON only if the user explicitly asks for machine-readable output.
 
@@ -264,21 +265,15 @@ else
     upstream_commits="$(
       git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo ""
     )"
-    if [ -n "$upstream_commits" ]; then
-      if [ "$upstream_commits" -gt 0 ]; then
-        status="ALL_MERGED_WITH_NEW_COMMITS"
-        action="CREATE_PR"
-        reason="Fallback check found commits ahead of origin/$head"
-      else
-        status="ALL_MERGED_NO_NEW_COMMITS"
-        action="NO_ACTION"
-        reason="Fallback check found no commits ahead of origin/$head"
-      fi
-    else
     fallback_commits="$(
       git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo ""
     )"
-    if [ -n "$fallback_commits" ]; then
+
+    if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
+      status="ALL_MERGED_WITH_NEW_COMMITS"
+      action="CREATE_PR"
+      reason="Fallback check found commits ahead of origin/$head"
+    elif [ -n "$fallback_commits" ]; then
       if [ "$fallback_commits" -gt 0 ]; then
         status="ALL_MERGED_WITH_NEW_COMMITS"
         action="CREATE_PR"
@@ -286,28 +281,27 @@ else
       else
         status="ALL_MERGED_NO_NEW_COMMITS"
         action="NO_ACTION"
-        reason="Fallback check found no commits ahead of origin/$base"
+        reason="Fallback check found no commits ahead of origin/$head or origin/$base"
       fi
     else
       status="CHECK_FAILED"
       action="MANUAL_CHECK"
       reason="Could not resolve merge commit and fallback comparison failed"
     fi
-    fi
   fi
 fi
 
 latest_merged_pr="$(
   echo "$pr_json" \
-    | jq -r 'sort_by(.mergedAt) | last | .number // empty'
+    | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .number // empty'
 )"
 unmerged_pr="$(
   echo "$pr_json" \
-    | jq -r 'map(select(.mergedAt == null)) | first | .number // empty'
+    | jq -r 'map(select(.merged_at == null)) | first | .number // empty'
 )"
 unmerged_pr_url="$(
   echo "$pr_json" \
-    | jq -r 'map(select(.mergedAt == null)) | first | .url // empty'
+    | jq -r 'map(select(.merged_at == null)) | first | .html_url // empty'
 )"
 
 case "$status" in
