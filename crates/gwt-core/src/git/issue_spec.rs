@@ -5,10 +5,11 @@
 //! for legacy specs.
 
 use std::{collections::HashMap, path::Path};
+
+use super::gh_cli::run_gh_output_with_repair;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use super::gh_cli::{gh_command, run_gh_output_with_repair};
 
 const SPEC_LABEL: &str = "gwt-spec";
 const PROJECT_FIELD_STATUS: &str = "Status";
@@ -785,6 +786,8 @@ fn fetch_issue_comments(
     repo_path: &Path,
     issue_number: u64,
 ) -> Result<Vec<IssueCommentNode>, String> {
+    // Spec issues keep artifact comments small in practice. If this expands to
+    // general issue discussions, this endpoint will need pagination.
     let endpoint = format!(
         "repos/{}/issues/{issue_number}/comments?per_page=100",
         repo_name_with_owner(repo_path)?
@@ -934,15 +937,21 @@ fn run_gh_api_with_json_input(
     std::fs::write(&temp_path, json_bytes)
         .map_err(|e| format!("Failed to write temporary gh api payload file: {e}"))?;
 
-    let output = gh_command()
-        .args(["api", endpoint, "--method", method, "--input"])
-        .arg(&temp_path)
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute gh api {method} {endpoint}: {e}"))?;
+    let temp_path_str = temp_path.to_string_lossy().into_owned();
+    let result = run_gh_output_with_repair(
+        repo_path,
+        [
+            "api",
+            endpoint,
+            "--method",
+            method,
+            "--input",
+            temp_path_str.as_str(),
+        ],
+    );
 
     let _ = std::fs::remove_file(&temp_path);
-    Ok(output)
+    result.map_err(|e| format!("Failed to execute gh api {method} {endpoint}: {e}"))
 }
 
 fn add_issue_comment(
