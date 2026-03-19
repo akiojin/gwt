@@ -3,15 +3,19 @@
 //! Manages the lifecycle of terminal panes,
 //! including tab switching, fullscreen toggle, and batch operations.
 
-use super::pane::{PaneConfig, TerminalPane};
-use super::BuiltinLaunchConfig;
-use super::TerminalError;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 use tracing::instrument;
+
+use super::{
+    pane::{PaneConfig, TerminalPane},
+    BuiltinLaunchConfig, TerminalError,
+};
 
 /// Manages multiple terminal panes with tab-based switching.
 pub struct PaneManager {
@@ -356,10 +360,10 @@ impl Default for PaneManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::terminal::pane::PaneConfig;
-    use crate::terminal::AgentColor;
     use tempfile::TempDir;
+
+    use super::*;
+    use crate::terminal::{pane::PaneConfig, AgentColor};
 
     /// Helper: create a TerminalPane backed by `/usr/bin/true` (exits immediately).
     fn create_test_pane(id: &str) -> TerminalPane {

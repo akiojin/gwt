@@ -2,15 +2,17 @@
 //!
 //! Manages pseudo-terminal creation, I/O, resize, and cleanup.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize};
+use tracing::instrument;
 
 use super::TerminalError;
-use tracing::instrument;
 
 /// Configuration for creating a new PTY.
 pub struct PtyConfig {
@@ -666,9 +668,9 @@ impl PtyHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, time::Duration};
+
     use super::*;
-    use std::sync::mpsc;
-    use std::time::Duration;
 
     #[test]
     fn escape_powershell_single_quoted_duplicates_single_quotes() {

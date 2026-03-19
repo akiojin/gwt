@@ -1,8 +1,8 @@
 //! Agent-specific configuration (global, not per-profile)
 
-use gwt_core::config::AgentConfig;
-use gwt_core::StructuredError;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+use gwt_core::{config::AgentConfig, StructuredError};
 use tracing::{error, instrument};
 
 fn with_panic_guard<T>(

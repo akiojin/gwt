@@ -3,6 +3,7 @@
 //! These tests verify the end-to-end bare clone and worktree creation workflow.
 
 use std::path::PathBuf;
+
 use tempfile::TempDir;
 
 /// Get the default branch name (main or master)

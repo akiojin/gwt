@@ -1,22 +1,21 @@
 //! Tauri app wiring (builder configuration + run event handling)
 
-use crate::state::AppState;
-use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Duration;
-use tauri::Manager;
-use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
-use tracing::{info, warn};
+use std::{
+    collections::HashMap,
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 
 #[cfg(not(test))]
 use gwt_core::config::os_env;
-
-#[cfg(not(test))]
-use tokio::io::AsyncReadExt;
-
+use tauri::{Emitter, EventTarget, Manager, WebviewWindowBuilder};
 #[cfg(not(test))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+#[cfg(not(test))]
+use tokio::io::AsyncReadExt;
+use tracing::{info, warn};
+
+use crate::state::AppState;
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
@@ -1060,8 +1059,9 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
 
     #[test]
     fn should_prevent_window_close_when_not_quitting() {

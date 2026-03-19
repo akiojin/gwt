@@ -1,10 +1,14 @@
 //! Log reader for viewing historical logs
 
-use crate::error::Result;
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
+
 use serde::Deserialize;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+
+use crate::error::Result;
 
 /// Fields from tracing-subscriber JSON output
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -147,8 +151,9 @@ impl LogReader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_list_files() {

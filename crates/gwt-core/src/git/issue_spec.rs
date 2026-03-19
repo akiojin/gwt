@@ -4,11 +4,12 @@
 //! canonical source of truth, with Issue body sections retained as a fallback
 //! for legacy specs.
 
-use super::gh_cli::run_gh_output_with_repair;
+use std::{collections::HashMap, path::Path};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::path::Path;
+
+use super::gh_cli::run_gh_output_with_repair;
 
 const SPEC_LABEL: &str = "gwt-spec";
 const PROJECT_FIELD_STATUS: &str = "Status";

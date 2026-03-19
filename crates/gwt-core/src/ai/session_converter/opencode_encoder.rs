@@ -3,10 +3,13 @@
 //! Converts ParsedSession to OpenCode JSON format.
 //! OpenCode stores sessions in `~/.opencode/sessions/{session-id}.json`
 
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::fs;
-use std::path::{Path, PathBuf};
 
 use super::{ConversionError, ConversionMetadata, ConversionResult, LossInfo, SessionEncoder};
 use crate::ai::session_parser::{AgentType, MessageRole, ParsedSession};
@@ -140,9 +143,10 @@ impl SessionEncoder for OpenCodeEncoder {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::ai::session_parser::{SessionMessage, ToolExecution};
-    use tempfile::tempdir;
 
     fn sample_session() -> ParsedSession {
         ParsedSession {

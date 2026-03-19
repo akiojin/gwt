@@ -3,9 +3,9 @@
 //! Parses .devcontainer/devcontainer.json files and converts them
 //! to docker-compose compatible configurations.
 
+use std::{fmt, path::Path};
+
 use serde::Deserialize;
-use std::fmt;
-use std::path::Path;
 use tracing::debug;
 
 use crate::{GwtError, Result};
@@ -285,8 +285,9 @@ fn remove_json_comments(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     // T-501: devcontainer.json parsing test
     #[test]

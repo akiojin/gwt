@@ -1,37 +1,48 @@
 //! Terminal/PTY management commands for xterm.js integration
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::state::{AppState, PaneLaunchMeta, PaneRuntimeContext};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
 use chrono::Utc;
-use gwt_core::ai::SessionParser;
-use gwt_core::config::stats::Stats;
-use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
-use gwt_core::docker::{
-    compose_available, daemon_running, detect_docker_files, docker_available,
-    normalize_docker_compose_path, try_start_daemon, DevContainerConfig, DockerFileType,
-    DockerManager, PortAllocator,
+use gwt_core::{
+    ai::SessionParser,
+    config::{stats::Stats, AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings},
+    docker::{
+        compose_available, daemon_running, detect_docker_files, docker_available,
+        normalize_docker_compose_path, try_start_daemon, DevContainerConfig, DockerFileType,
+        DockerManager, PortAllocator,
+    },
+    git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote},
+    terminal::{
+        pane::PaneStatus,
+        runner::{
+            choose_fallback_runner, normalize_windows_command_path, resolve_command_path,
+            FallbackRunner,
+        },
+        scrollback::{strip_ansi, ScrollbackFile},
+        AgentColor, BuiltinLaunchConfig,
+    },
+    worktree::WorktreeManager,
+    StructuredError,
 };
-use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
-use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::terminal::runner::{
-    choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
-};
-use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
-use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
-use serde::Deserialize;
-use serde::Serialize;
-use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::instrument;
 use uuid::Uuid;
 use which::which;
+
+use crate::{
+    commands::project::resolve_repo_path_for_project_root,
+    state::{AppState, PaneLaunchMeta, PaneRuntimeContext},
+};
 
 /// Terminal output event payload sent to the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -2450,12 +2461,11 @@ pub fn spawn_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::cell::Cell;
-    use std::ffi::OsString;
-    use std::path::Path;
-    use std::time::Duration;
+    use std::{cell::Cell, ffi::OsString, path::Path, time::Duration};
+
     use tempfile::TempDir;
+
+    use super::*;
 
     struct ScopedEnvVar {
         key: &'static str,
@@ -6434,8 +6444,9 @@ pub fn save_clipboard_image(
 
 #[cfg(test)]
 mod attachment_path_tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn create_staged_image_destination_places_files_under_launch_tmp_images() {

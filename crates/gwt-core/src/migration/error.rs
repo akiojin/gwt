@@ -1,6 +1,7 @@
 //! Migration error types (gwt-spec issue T704)
 
 use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Migration-specific errors

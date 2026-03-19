@@ -1,20 +1,28 @@
 //! Worktree cleanup commands (gwt-spec issue, gwt-spec issue)
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::commands::terminal::capture_scrollback_tail_from_state;
-use crate::state::AppState;
-use gwt_core::config::{agent_has_hook_support, infer_agent_status, Session};
-use gwt_core::git::gh_cli::PrStatus;
-use gwt_core::git::Branch;
-use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::atomic::Ordering,
+};
+
+use gwt_core::{
+    config::{agent_has_hook_support, infer_agent_status, Session},
+    git::{gh_cli::PrStatus, Branch},
+    terminal::pane::PaneStatus,
+    worktree::WorktreeManager,
+    StructuredError,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::instrument;
+
+use crate::{
+    commands::{
+        project::resolve_repo_path_for_project_root, terminal::capture_scrollback_tail_from_state,
+    },
+    state::AppState,
+};
 
 /// Safety level for a worktree (FR-500)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]

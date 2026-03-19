@@ -1,19 +1,25 @@
 //! Agent detection commands
 
-use crate::commands::terminal::builtin_agent_def;
-use crate::state::{AgentVersionsCache, AppState};
-use gwt_core::agent::{claude, codex, gemini, AgentInfo};
-use gwt_core::terminal::runner::{
-    choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
+use std::{collections::HashMap, time::Duration};
+
+use gwt_core::{
+    agent::{claude, codex, gemini, AgentInfo},
+    terminal::runner::{
+        choose_fallback_runner, normalize_windows_command_path, resolve_command_path,
+        FallbackRunner,
+    },
+    StructuredError,
 };
-use gwt_core::StructuredError;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::time::Duration;
 use tauri::State;
 use tracing::instrument;
 use which::which;
+
+use crate::{
+    commands::terminal::builtin_agent_def,
+    state::{AgentVersionsCache, AppState},
+};
 
 /// Serializable agent info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -394,9 +400,11 @@ pub fn list_agent_versions(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
     use std::path::Path;
+
+    use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn encode_npm_package_for_url_encodes_scoped_package() {

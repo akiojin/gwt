@@ -1,15 +1,18 @@
 //! Voice input commands backed by Qwen3-ASR (Python runtime).
 
+use std::{
+    collections::HashSet,
+    fs,
+    io::Write,
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Mutex,
+};
+
 use gwt_core::process::command_os;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fs;
-use std::io::Write;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Mutex;
 use tracing::{error, instrument, warn};
 
 const VOICE_PYTHON_ENV: &str = "GWT_VOICE_PYTHON";

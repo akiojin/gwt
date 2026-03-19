@@ -1,13 +1,11 @@
 //! Session state for agent workflows
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::conversation::Conversation;
-use super::task::Task;
-use super::types::SessionId;
-use super::worktree::WorktreeRef;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::{conversation::Conversation, task::Task, types::SessionId, worktree::WorktreeRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {

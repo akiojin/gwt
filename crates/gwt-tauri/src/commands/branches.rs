@@ -1,21 +1,29 @@
 //! Branch management commands
 
-use crate::commands::issue::FetchIssuesResponse;
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::commands::terminal::capture_scrollback_tail_from_state;
-use crate::state::AppState;
-use gwt_core::config::{agent_has_hook_support, infer_agent_status, AgentStatus, Session};
-use gwt_core::git::{fetch_issue_detail, is_bare_repository, Branch, Remote};
-use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
+use std::{
+    collections::{HashMap, HashSet},
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::Path,
+};
+
+use gwt_core::{
+    config::{agent_has_hook_support, infer_agent_status, AgentStatus, Session},
+    git::{fetch_issue_detail, is_bare_repository, Branch, Remote},
+    terminal::pane::PaneStatus,
+    worktree::WorktreeManager,
+    StructuredError,
+};
 use serde::Serialize;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
 use tauri::{AppHandle, Manager, State};
 use tracing::{error, instrument};
+
+use crate::{
+    commands::{
+        issue::FetchIssuesResponse, project::resolve_repo_path_for_project_root,
+        terminal::capture_scrollback_tail_from_state,
+    },
+    state::AppState,
+};
 
 /// Serializable branch info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -796,12 +804,11 @@ pub fn get_current_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::state::AppState;
-    use crate::state::IssueListCacheEntry;
-    use gwt_core::config::AgentStatus;
-    use gwt_core::process::command;
+    use gwt_core::{config::AgentStatus, process::command};
     use tempfile::TempDir;
+
+    use super::*;
+    use crate::state::{AppState, IssueListCacheEntry};
 
     fn init_git_repo(path: &Path) {
         let init = command("git").args(["init"]).current_dir(path).output();

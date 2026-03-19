@@ -5,16 +5,16 @@
 //! - Gemini: `<project>/.gemini/skills`
 //! - Claude: `<project>/.claude/{skills,commands,hooks}` + `<project>/.claude/settings.local.json`
 
-use super::Settings;
-use crate::error::GwtError;
-use crate::process::command;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use std::path::{Path, PathBuf};
-use tracing::{info, warn};
-
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use tracing::{info, warn};
+
+use super::Settings;
+use crate::{error::GwtError, process::command};
 
 // Auto-generated skill catalog from build.rs (parses plugins/gwt/skills/*/SKILL.md).
 include!(concat!(env!("OUT_DIR"), "/skill_catalog_generated.rs"));

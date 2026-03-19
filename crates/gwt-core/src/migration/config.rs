@@ -1,7 +1,8 @@
 //! Migration configuration (gwt-spec issue T702)
 
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 /// Migration configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

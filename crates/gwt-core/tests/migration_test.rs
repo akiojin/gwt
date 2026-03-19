@@ -3,6 +3,7 @@
 //! These tests verify the migration from .worktrees/ method to bare method.
 
 use std::path::PathBuf;
+
 use tempfile::TempDir;
 
 /// Initialize tracing for tests

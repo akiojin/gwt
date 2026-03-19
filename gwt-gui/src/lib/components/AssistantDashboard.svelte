@@ -78,6 +78,61 @@
       </div>
     {/if}
 
+    {#if dashboard.specProgress}
+      <div class="spec-progress">
+        <h3>SPEC Progress</h3>
+        <div class="spec-card">
+          <div class="spec-header">
+            <span class="spec-title">#{dashboard.specProgress.issueNumber} {dashboard.specProgress.title}</span>
+            <span class="phase-badge" data-phase={dashboard.specProgress.phase}>
+              {dashboard.specProgress.phase}
+            </span>
+          </div>
+          {#if dashboard.specProgress.tasksTotal > 0}
+            <div class="progress-bar-container">
+              <div
+                class="progress-bar-fill"
+                style="width: {(dashboard.specProgress.tasksCompleted / dashboard.specProgress.tasksTotal) * 100}%"
+              ></div>
+            </div>
+            <span class="progress-text">
+              {dashboard.specProgress.tasksCompleted}/{dashboard.specProgress.tasksTotal} tasks
+            </span>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
+    {#if dashboard.ciStatus}
+      <div class="ci-status">
+        <h3>CI / Review</h3>
+        <div class="ci-card">
+          <span
+            class="ci-indicator"
+            class:passing={dashboard.ciStatus.checkStatus === "passing"}
+            class:failing={dashboard.ciStatus.checkStatus === "failing"}
+            class:pending={dashboard.ciStatus.checkStatus === "pending"}
+          ></span>
+          <div class="ci-info">
+            <span class="ci-pr">PR #{dashboard.ciStatus.prNumber} {dashboard.ciStatus.prTitle}</span>
+            <span class="ci-detail">
+              Checks: {dashboard.ciStatus.checkStatus}
+              {#if dashboard.ciStatus.failingChecks.length > 0}
+                ({dashboard.ciStatus.failingChecks.join(", ")})
+              {/if}
+              · Review: {dashboard.ciStatus.reviewStatus}
+            </span>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if (dashboard.consultationCount ?? 0) > 0}
+      <div class="consultation-badge">
+        <span class="badge-text">{dashboard.consultationCount} pending consultation{dashboard.consultationCount === 1 ? '' : 's'}</span>
+      </div>
+    {/if}
+
     <div class="git-summary">
       <h3>Git Summary</h3>
       <div class="git-info">
@@ -215,6 +270,128 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+
+  .spec-progress,
+  .ci-status {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .spec-card,
+  .ci-card {
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .spec-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .spec-title {
+    font-size: var(--ui-font-sm);
+    color: var(--text-primary);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .phase-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: var(--ui-font-xs);
+    background: color-mix(in srgb, var(--accent) 20%, var(--bg-primary));
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .progress-bar-container {
+    height: 4px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--border-color) 50%, transparent);
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+
+  .progress-text {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+  }
+
+  .ci-card {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .ci-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background-color: var(--text-muted);
+  }
+
+  .ci-indicator.passing {
+    background-color: var(--green);
+  }
+
+  .ci-indicator.failing {
+    background-color: var(--red);
+  }
+
+  .ci-indicator.pending {
+    background-color: var(--yellow);
+  }
+
+  .ci-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .ci-pr {
+    font-size: var(--ui-font-sm);
+    color: var(--text-primary);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ci-detail {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+  }
+
+  .consultation-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-secondary));
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-color));
+  }
+
+  .badge-text {
+    font-size: var(--ui-font-sm);
+    color: var(--text-primary);
   }
 
   .git-info {

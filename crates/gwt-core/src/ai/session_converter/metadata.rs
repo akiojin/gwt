@@ -3,8 +3,7 @@
 //! This module handles persistent storage of conversion metadata, allowing
 //! traceability of session conversions.
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use super::ConversionMetadata;
 
@@ -112,9 +111,10 @@ impl ConversionMetadataStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::Utc;
     use tempfile::tempdir;
+
+    use super::*;
 
     fn sample_metadata() -> ConversionMetadata {
         ConversionMetadata {

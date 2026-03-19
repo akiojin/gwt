@@ -2,10 +2,11 @@
 //!
 //! Currently used for storing Claude Code provider settings (e.g. GLM/z.ai manual config).
 
-use super::settings::Settings;
-use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
+
+use super::settings::Settings;
+use crate::error::Result;
 
 fn default_glm_base_url() -> String {
     // z.ai DevPack manual configuration
@@ -126,8 +127,9 @@ impl AgentConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn agent_config_default_roundtrip() {

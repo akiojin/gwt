@@ -1,10 +1,13 @@
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    net::{TcpStream, ToSocketAddrs},
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 const LOCK_FILE_NAME: &str = "app-instance.lock";
@@ -280,8 +283,9 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn acquire_fails_when_second_instance_is_running() {

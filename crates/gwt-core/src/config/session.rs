@@ -1,10 +1,12 @@
 //! Session management
 
-use crate::error::{GwtError, Result};
+use std::path::{Path, PathBuf};
+
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::path::{Path, PathBuf};
+
+use crate::error::{GwtError, Result};
 
 /// Agent status for state visualization (gwt-spec issue FR-100a)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -386,9 +388,11 @@ pub fn get_session_for_branch<'a>(sessions: &'a [Session], branch: &str) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     // Mutex to serialize tests that use GWT_SESSIONS_DIR environment variable
     static ENV_MUTEX: Mutex<()> = Mutex::new(());

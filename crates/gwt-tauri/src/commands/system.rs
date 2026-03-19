@@ -1,12 +1,16 @@
 //! Tauri commands for system info and statistics.
 
-use crate::state::AppState;
-use gwt_core::config::stats::Stats;
-use gwt_core::system_info::{GpuDynamicInfo, GpuStaticInfo};
-use serde::Serialize;
 use std::time::{Duration, Instant};
+
+use gwt_core::{
+    config::stats::Stats,
+    system_info::{GpuDynamicInfo, GpuStaticInfo},
+};
+use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use tracing::{instrument, warn};
+
+use crate::state::AppState;
 
 const GET_SYSTEM_INFO_WARN_THRESHOLD: Duration = Duration::from_millis(300);
 
