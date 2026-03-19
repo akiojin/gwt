@@ -15,9 +15,9 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
-use crate::state::AppState;
 #[cfg(not(test))]
 use crate::commands::system::{startup_diagnostics_from_env, StartupDiagnostics};
+use crate::state::AppState;
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
@@ -464,30 +464,12 @@ pub fn build_app(
                         "Startup heartbeat watchdog disabled by diagnostics"
                     );
                 } else {
-                    log_startup_checkpoint(&startup_diagnostics, "heartbeat_watchdog.begin");
-                    let watchdog_handle = _app.handle().clone();
-                    tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(Duration::from_secs(2));
-                        loop {
-                            interval.tick().await;
-                            let state = watchdog_handle.state::<AppState>();
-                            let elapsed = {
-                                let slot = state.last_heartbeat.lock().ok();
-                                slot.and_then(|guard| guard.map(|ts| ts.elapsed()))
-                            };
-                            if let Some(elapsed) = elapsed {
-                                if elapsed > Duration::from_secs(3) {
-                                    warn!(
-                                        category = "freeze_detection",
-                                        elapsed_ms = elapsed.as_millis(),
-                                        "Frontend heartbeat stale – possible UI freeze"
-                                    );
-                                    let _ = watchdog_handle.emit("freeze-detected", elapsed.as_millis() as u64);
-                                }
-                            }
-                        }
-                    });
-                    log_startup_checkpoint(&startup_diagnostics, "heartbeat_watchdog.ready");
+                    log_startup_checkpoint(&startup_diagnostics, "heartbeat_watchdog.deferred");
+                    info!(
+                        category = "startup_diag",
+                        checkpoint = "heartbeat_watchdog.deferred",
+                        "Frontend heartbeat watchdog will arm after the first heartbeat"
+                    );
                 }
 
                 // Background task: check gh CLI authentication (gwt-spec issue T009)

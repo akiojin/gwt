@@ -1,13 +1,16 @@
 //! Tauri commands for system info and statistics.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use gwt_core::{
     config::stats::Stats,
     system_info::{GpuDynamicInfo, GpuStaticInfo},
 };
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tracing::{instrument, warn};
 
 use crate::state::AppState;
@@ -272,9 +275,47 @@ pub fn get_startup_diagnostics() -> StartupDiagnostics {
 
 #[instrument(skip_all, fields(command = "heartbeat"))]
 #[tauri::command]
-pub fn heartbeat(state: tauri::State<'_, AppState>) {
+pub fn heartbeat(state: tauri::State<'_, AppState>, app_handle: AppHandle) {
     if let Ok(mut slot) = state.last_heartbeat.lock() {
         *slot = Some(Instant::now());
+    }
+
+    if startup_diagnostics_from_env().disable_heartbeat_watchdog {
+        return;
+    }
+
+    if state
+        .heartbeat_watchdog_started
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                let state = app_handle.state::<AppState>();
+                let elapsed = {
+                    let slot = state.last_heartbeat.lock().ok();
+                    slot.and_then(|guard| guard.map(|ts| ts.elapsed()))
+                };
+                if let Some(elapsed) = elapsed {
+                    if elapsed > Duration::from_secs(3) {
+                        warn!(
+                            category = "freeze_detection",
+                            elapsed_ms = elapsed.as_millis(),
+                            "Frontend heartbeat stale – possible UI freeze"
+                        );
+                        let _ = app_handle.emit("freeze-detected", elapsed.as_millis() as u64);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            category = "startup_diag",
+            checkpoint = "heartbeat_watchdog.ready",
+            "Frontend heartbeat watchdog armed after first heartbeat"
+        );
     }
 }
 
