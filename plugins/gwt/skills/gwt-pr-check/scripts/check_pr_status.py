@@ -53,6 +53,27 @@ def require_success(proc: subprocess.CompletedProcess[str], context: str) -> str
     return proc.stdout.strip()
 
 
+def fetch_repo_slug(repo: Path) -> str:
+    proc = run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], repo)
+    return require_success(proc, "gh repo view")
+
+
+def parse_repo_owner_name(repo_slug: str) -> tuple[str, str]:
+    parts = repo_slug.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise RuntimeError(f"invalid repo slug: {repo_slug}")
+    return parts[0], parts[1]
+
+
+def fetch_pull_request(repo: Path, pr_number: int | str) -> dict[str, Any]:
+    repo_slug = fetch_repo_slug(repo)
+    proc = run(["gh", "api", f"repos/{repo_slug}/pulls/{pr_number}"], repo)
+    data = json.loads(require_success(proc, "gh api pull request"))
+    if not isinstance(data, dict):
+        raise RuntimeError("gh api pull request: expected JSON object")
+    return data
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", default=".")
@@ -64,21 +85,39 @@ def parse_args() -> argparse.Namespace:
 
 
 def list_prs(repo: Path, head: str) -> list[dict[str, Any]]:
+    repo_slug = fetch_repo_slug(repo)
+    owner, _ = parse_repo_owner_name(repo_slug)
+    head_filter = f"{owner}:{head}"
     proc = run(
         [
             "gh",
-            "pr",
-            "list",
-            "--head",
-            head,
-            "--state",
-            "all",
-            "--json",
-            "number,state,mergedAt,updatedAt,url,title,mergeCommit,baseRefName,headRefName",
+            "api",
+            f"repos/{repo_slug}/pulls?state=all&head={head_filter}&per_page=100",
         ],
         repo,
     )
-    return json.loads(require_success(proc, "gh pr list"))
+    pulls = json.loads(require_success(proc, "gh api pulls list"))
+    if not isinstance(pulls, list):
+        raise RuntimeError("gh api pulls list: expected JSON array")
+
+    normalized: list[dict[str, Any]] = []
+    for pr in pulls:
+        if not isinstance(pr, dict):
+            continue
+        normalized.append(
+            {
+                "number": pr.get("number"),
+                "state": pr.get("state"),
+                "mergedAt": pr.get("merged_at"),
+                "updatedAt": pr.get("updated_at"),
+                "url": pr.get("html_url"),
+                "title": pr.get("title"),
+                "mergeCommit": {"oid": pr.get("merge_commit_sha")} if pr.get("merge_commit_sha") else {},
+                "baseRefName": ((pr.get("base") or {}) if isinstance(pr.get("base"), dict) else {}).get("ref"),
+                "headRefName": ((pr.get("head") or {}) if isinstance(pr.get("head"), dict) else {}).get("ref"),
+            }
+        )
+    return normalized
 
 
 def git_count(repo: Path, revspec: str) -> int | None:
@@ -157,16 +196,19 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
     unmerged = [pr for pr in prs if pr.get("mergedAt") is None]
     if unmerged:
         pr = latest_by(unmerged, "updatedAt") or unmerged[0]
+        pr_url = pr.get("url")
+        if not pr_url and pr.get("number"):
+            pr_url = fetch_pull_request(repo, pr["number"]).get("html_url")
         return Result(
             status="UNMERGED_PR_EXISTS",
             action="PUSH_ONLY",
             summary=f"> PUSH ONLY — Unmerged PR open for `{head}`.",
-            details=[f"   PR: #{pr['number']} {pr['url']}"],
+            details=[f"   PR: #{pr['number']} {pr_url}"],
             dirty=dirty,
             head=head,
             base=base,
             pr_number=pr["number"],
-            pr_url=pr["url"],
+            pr_url=pr_url,
             reason="At least one PR for the head branch is not merged",
         )
 

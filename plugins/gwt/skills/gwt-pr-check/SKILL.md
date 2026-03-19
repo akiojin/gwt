@@ -1,13 +1,13 @@
 ---
 name: gwt-pr-check
-description: "Check GitHub PR status with the gh CLI, including unmerged PR detection and post-merge new-commit detection for the current branch."
+description: "Check GitHub PR status with the gh CLI using REST-first PR lookups, including unmerged PR detection and post-merge new-commit detection for the current branch."
 ---
 
 # GH PR Check
 
 ## Overview
 
-Check PR status for the current branch with `gh` and report a recommended next action.
+Check PR status for the current branch with `gh` and report a recommended next action, using REST-first pull-request lookups instead of `gh pr list` as the primary path.
 
 This skill is **check-only**:
 
@@ -26,8 +26,10 @@ This skill is **check-only**:
 3. Fetch latest remote refs before comparing:
    - `git fetch origin`
 4. List PRs for head branch:
-   - `gh pr list --head <head> --state all --json`
-   - `number,state,mergedAt,updatedAt,url,title,mergeCommit,baseRefName,headRefName`
+   - Resolve repo slug: `gh repo view --json nameWithOwner -q .nameWithOwner`
+   - Resolve owner from `<owner>/<repo>`
+   - Primary lookup path:
+     - `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100`
 5. Classify:
    - No PR found -> `NO_PR` + recommended action `CREATE_PR`
    - Any PR where `mergedAt == null`
@@ -184,14 +186,16 @@ Append the following line **only** when the worktree is dirty:
    - `git rev-parse --abbrev-ref HEAD`
 2. Confirm auth:
    - `gh auth status`
+   - If `GH_TOKEN` / `GITHUB_TOKEN` is already set for REST calls, do not treat `gh auth status` as the sole readiness gate.
 3. Collect context:
    - `git status --porcelain`
    - `git fetch origin`
-4. List PRs for head branch and classify using rules above.
-5. When all PRs are merged, validate merge commit ancestry before counting commits.
-6. If merge commit is not usable, fallback to `origin/<head>..HEAD` first.
-7. Print human-readable result using the default template.
-8. Append JSON only if the user explicitly asks for machine-readable output.
+4. Prefer the REST pull-request list endpoint over `gh pr list` when checking branch PR state.
+5. List PRs for head branch and classify using rules above.
+6. When all PRs are merged, validate merge commit ancestry before counting commits.
+7. If merge commit is not usable, fallback to `origin/<head>..HEAD` first.
+8. Print human-readable result using the default template.
+9. Append JSON only if the user explicitly asks for machine-readable output.
 
 ## Quick start
 
@@ -219,9 +223,11 @@ fi
 
 git fetch origin
 
-pr_json="$(gh pr list --head "$head" --state all --json number,state,mergedAt,updatedAt,url,title,mergeCommit)"
+repo_slug="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+owner="${repo_slug%%/*}"
+pr_json="$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")"
 pr_count="$(echo "$pr_json" | jq 'length')"
-unmerged_count="$(echo "$pr_json" | jq 'map(select(.mergedAt == null)) | length')"
+unmerged_count="$(echo "$pr_json" | jq 'map(select(.merged_at == null)) | length')"
 
 if [ "$pr_count" -eq 0 ]; then
   status="NO_PR"
@@ -232,7 +238,7 @@ elif [ "$unmerged_count" -gt 0 ]; then
   action="PUSH_ONLY"
   reason="At least one PR for the head branch is not merged"
 else
-  merge_commit="$(echo "$pr_json" | jq -r 'sort_by(.mergedAt) | last | .mergeCommit.oid')"
+  merge_commit="$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')"
   merge_commit_ancestor=0
   if [ -n "$merge_commit" ] && [ "$merge_commit" != "null" ] && \
      git merge-base --is-ancestor "$merge_commit" HEAD 2>/dev/null; then
