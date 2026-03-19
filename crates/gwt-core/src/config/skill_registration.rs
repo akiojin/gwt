@@ -604,9 +604,11 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
 
 const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
     "skills/gwt-fix-issue",
+    "skills/gwt-fix-pr",
     "skills/gwt-issue-ops",
     "skills/gwt-issue-spec-ops",
     "commands/gwt-fix-issue.md",
+    "commands/gwt-fix-pr.md",
     "commands/gwt-issue-ops.md",
     "commands/gwt-issue-spec-ops.md",
     "commands/gwt-spec-ops.md",
@@ -2548,6 +2550,12 @@ OPENAI_API_KEY = "legacy-key"
         std::fs::create_dir_all(&claude_commands_dir).unwrap();
         std::fs::write(claude_commands_dir.join("gwt-issue-ops.md"), "legacy").unwrap();
         std::fs::write(claude_commands_dir.join("gwt-spec-ops.md"), "legacy").unwrap();
+        std::fs::write(claude_commands_dir.join("gwt-fix-pr.md"), "legacy").unwrap();
+
+        let codex_fix_pr_dir = temp.path().join(".codex").join("skills").join("gwt-fix-pr");
+        std::fs::create_dir_all(codex_fix_pr_dir.join("scripts")).unwrap();
+        std::fs::write(codex_fix_pr_dir.join("SKILL.md"), "legacy").unwrap();
+        std::fs::write(codex_fix_pr_dir.join("scripts").join("inspect_pr_checks.py"), "legacy").unwrap();
 
         register_agent_skills_with_settings_at_project_root(
             SkillAgentType::Codex,
@@ -2579,6 +2587,18 @@ OPENAI_API_KEY = "legacy-key"
             .join(".claude")
             .join("commands")
             .join("gwt-spec-ops.md")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".claude")
+            .join("commands")
+            .join("gwt-fix-pr.md")
+            .exists());
+        assert!(!temp
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("gwt-fix-pr")
             .exists());
         assert!(temp
             .path()
