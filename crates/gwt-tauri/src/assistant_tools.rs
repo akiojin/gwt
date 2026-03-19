@@ -1,17 +1,21 @@
 #![allow(dead_code)]
 //! Built-in tool definitions for Assistant Mode LLM tool-call dispatch.
 
-use serde_json::json;
-use std::path::Path;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
-use crate::state::AppState;
-use crate::tool_helpers::{
-    execute_shared_tool_with_mode, get_optional_string_any, get_optional_u64_any,
-    get_required_string_any, normalize_args, shared_tool_definitions_for_mode, ToolAccessMode,
+use gwt_core::{
+    ai::{ToolCall, ToolDefinition, ToolFunction},
+    process::command as process_command,
 };
-use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
-use gwt_core::process::command as process_command;
+use serde_json::json;
+
+use crate::{
+    state::AppState,
+    tool_helpers::{
+        execute_shared_tool_with_mode, get_optional_string_any, get_optional_u64_any,
+        get_required_string_any, normalize_args, shared_tool_definitions_for_mode, ToolAccessMode,
+    },
+};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -376,8 +380,11 @@ pub fn execute_assistant_tool(
         TOOL_READ_CONSULTATION => {
             let pane_id = get_required_string_any(&args, &["pane_id", "paneId"])?;
             let timestamp = get_required_string_any(&args, &["timestamp"])?;
-            let consultation =
-                crate::consultation::read_consultation(Path::new(project_path), pane_id, timestamp)?;
+            let consultation = crate::consultation::read_consultation(
+                Path::new(project_path),
+                pane_id,
+                timestamp,
+            )?;
             serde_json::to_string(&consultation)
                 .map_err(|e| format!("Failed to serialize consultation: {e}"))
         }
@@ -578,9 +585,10 @@ fn list_project_pull_requests(
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::ai::ToolCall;
+
     use super::*;
     use crate::state::AppState;
-    use gwt_core::ai::ToolCall;
 
     #[test]
     fn read_only_mode_excludes_mutating_tools() {

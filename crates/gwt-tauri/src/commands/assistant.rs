@@ -1,20 +1,25 @@
 #![allow(dead_code)]
 //! Assistant Mode Tauri commands
 
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+use gwt_core::{
+    git::{self, get_spec_issue_detail, graphql, Branch, PrCache, WorkflowRunInfo},
+    process::command as process_command,
+    terminal::pane::PaneStatus,
+    worktree::WorktreeManager,
+};
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
 use tracing::{instrument, warn};
 
-use crate::assistant_engine::{AssistantEngine, AssistantStartupStatus};
-use crate::assistant_monitor::{self, MonitorEvent, MonitorSnapshot, PaneSnapshot};
-use crate::commands::sessions::get_branch_session_summary_for_assistant;
-use crate::state::{AppState, AssistantActiveRunKind, AssistantContext, AssistantRuntimeState};
-use gwt_core::git::{self, get_spec_issue_detail, graphql, Branch, PrCache, WorkflowRunInfo};
-use gwt_core::process::command as process_command;
-use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::worktree::WorktreeManager;
+use crate::{
+    assistant_engine::{AssistantEngine, AssistantStartupStatus},
+    assistant_monitor::{self, MonitorEvent, MonitorSnapshot, PaneSnapshot},
+    commands::sessions::get_branch_session_summary_for_assistant,
+    state::{AppState, AssistantActiveRunKind, AssistantContext, AssistantRuntimeState},
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1964,8 +1969,9 @@ fn check_ai_configured() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
 
     #[test]
     fn assistant_build_messages_from_conversation_hides_system_messages() {

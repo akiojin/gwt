@@ -1,14 +1,20 @@
 //! CLAUDE.md / AGENTS.md / GEMINI.md check/fix command
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use gwt_core::config::{inject_managed_skills_block, write_atomic, Settings};
-use gwt_core::git::Remote;
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
+
+use gwt_core::{
+    config::{inject_managed_skills_block, write_atomic, Settings},
+    git::Remote,
+    worktree::WorktreeManager,
+    StructuredError,
+};
 use serde::Serialize;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
 use tracing::instrument;
+
+use crate::commands::project::resolve_repo_path_for_project_root;
 
 const CLAUDE_MD_DEFAULT_CONTENT: &str = r#"# CLAUDE.md
 
@@ -167,7 +173,10 @@ pub(crate) fn ensure_managed_skills_block(path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-#[instrument(skip_all, fields(command = "check_and_fix_agent_instruction_docs", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "check_and_fix_agent_instruction_docs", project_path, branch)
+)]
 #[tauri::command]
 pub fn check_and_fix_agent_instruction_docs(
     project_path: String,
@@ -246,9 +255,10 @@ pub fn check_and_fix_agent_instruction_docs(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gwt_core::process::command;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn run_git(path: &Path, args: &[&str]) {
         let out = command("git")

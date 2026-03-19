@@ -1,11 +1,14 @@
 //! Native menubar wiring (Tauri menu).
 
-use crate::state::AppState;
+use std::{collections::HashMap, path::Path};
+
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::Path;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, SubmenuBuilder};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{
+    menu::{CheckMenuItem, Menu, MenuItem, SubmenuBuilder},
+    AppHandle, Manager, Wry,
+};
+
+use crate::state::AppState;
 
 pub const MENU_ACTION_EVENT: &str = "menu-action";
 

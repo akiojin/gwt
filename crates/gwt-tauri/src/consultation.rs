@@ -1,7 +1,8 @@
 //! File-based inbox/outbox for Agent↔Assistant consultation.
 
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsultationRequest {
@@ -29,16 +30,13 @@ fn outbox_dir(project_root: &Path) -> PathBuf {
     project_root.join(".gwt").join("assistant").join("outbox")
 }
 
-pub fn list_pending_consultations(
-    project_root: &Path,
-) -> Result<Vec<ConsultationRequest>, String> {
+pub fn list_pending_consultations(project_root: &Path) -> Result<Vec<ConsultationRequest>, String> {
     let dir = inbox_dir(project_root);
     if !dir.exists() {
         return Ok(Vec::new());
     }
     let mut results = Vec::new();
-    let entries =
-        std::fs::read_dir(&dir).map_err(|e| format!("Failed to read inbox: {e}"))?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("Failed to read inbox: {e}"))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {

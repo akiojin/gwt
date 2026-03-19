@@ -1,11 +1,13 @@
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Output, Stdio},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
-use std::thread;
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "windows")]
 const GH_FALLBACK_PATHS: &[&str] = &[
@@ -947,8 +949,9 @@ fn wait_with_timeout(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn is_gh_available_returns_bool() {

@@ -4,10 +4,11 @@
 //! This module provides detection and removal helpers for gwt-managed hook
 //! entries in that file.
 
-use crate::error::GwtError;
+use std::{collections::HashMap, path::Path};
+
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
+
+use crate::error::GwtError;
 
 const HOOK_COMMAND_DELIMITER: &str = " hook ";
 
@@ -247,8 +248,9 @@ pub fn unregister_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_detect_missing_gwt_hooks() {

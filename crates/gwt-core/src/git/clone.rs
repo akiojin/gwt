@@ -2,9 +2,11 @@
 //!
 //! Provides bare repository cloning functionality.
 
-use crate::error::{GwtError, Result};
 use std::path::Path;
+
 use tracing::{debug, info};
+
+use crate::error::{GwtError, Result};
 
 /// Clone configuration (gwt-spec issue T301)
 #[derive(Debug, Clone)]

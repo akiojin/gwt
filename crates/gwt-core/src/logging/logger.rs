@@ -1,7 +1,7 @@
 //! Logger initialization
 
-use crate::error::{ErrorCategory, GwtError, Result};
 use std::path::PathBuf;
+
 use tracing::error;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_chrome::ChromeLayerBuilder;
@@ -11,6 +11,8 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
     EnvFilter,
 };
+
+use crate::error::{ErrorCategory, GwtError, Result};
 
 /// Logger configuration
 #[derive(Debug, Clone)]
@@ -218,8 +220,7 @@ pub fn log_error_message(code: &str, category: &str, message: &str, details: Opt
 /// same process has already initialized the global subscriber.
 #[cfg(test)]
 pub fn init_test_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("gwt=debug"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("gwt=debug"));
 
     tracing_subscriber::registry()
         .with(filter)
@@ -230,8 +231,9 @@ pub fn init_test_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_init_logger() {

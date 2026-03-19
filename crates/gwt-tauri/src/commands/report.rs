@@ -1,11 +1,16 @@
 //! Tauri commands for error reporting and feature suggestions.
 
-use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
-use gwt_core::StructuredError;
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use gwt_core::{
+    terminal::scrollback::{strip_ansi, ScrollbackFile},
+    StructuredError,
+};
 use serde::Serialize;
-use std::collections::HashSet;
-use std::fs;
-use std::path::{Path, PathBuf};
 use tauri::State;
 use tracing::instrument;
 
@@ -352,11 +357,11 @@ pub fn capture_screen_text(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::collections::HashSet;
-    use std::thread;
-    use std::time::Duration;
+    use std::{collections::HashSet, thread, time::Duration};
+
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn parse_ssh_remote() {

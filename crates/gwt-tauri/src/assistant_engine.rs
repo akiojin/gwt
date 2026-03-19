@@ -1,18 +1,21 @@
 #![allow(dead_code)]
 //! Assistant Mode engine — LLM conversation loop with tool calling.
 
-use std::collections::hash_map::DefaultHasher;
-use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{hash_map::DefaultHasher, VecDeque},
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+};
 
 use gwt_core::ai::ConversationItem;
 use serde::Serialize;
 use tracing::{info, warn};
 
-use crate::assistant_monitor::MonitorEvent;
-use crate::assistant_tools::{self, AssistantToolMode};
-use crate::state::AppState;
+use crate::{
+    assistant_monitor::MonitorEvent,
+    assistant_tools::{self, AssistantToolMode},
+    state::AppState,
+};
 
 const MAX_TOOL_LOOP_HARD_LIMIT: usize = 100;
 const ASSISTANT_MAX_TOKENS: u32 = 4096;

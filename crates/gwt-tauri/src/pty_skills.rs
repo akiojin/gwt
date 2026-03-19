@@ -23,12 +23,15 @@
 // Functions will be called from ReAct loop integration (Phase 9-12).
 #![allow(dead_code)]
 
-use crate::commands::terminal::{
-    capture_scrollback_tail_from_state, send_keys_broadcast_from_state,
-    send_keys_to_pane_from_state,
-};
-use crate::state::AppState;
 use gwt_core::terminal::pane::PaneStatus;
+
+use crate::{
+    commands::terminal::{
+        capture_scrollback_tail_from_state, send_keys_broadcast_from_state,
+        send_keys_to_pane_from_state,
+    },
+    state::AppState,
+};
 
 /// Result of a PTY skill operation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -124,11 +127,13 @@ pub fn list_panes(state: &AppState) -> Vec<PaneInfo> {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::terminal::{
+        pane::{PaneConfig, TerminalPane},
+        AgentColor,
+    };
+
     use super::*;
-    use crate::commands::TestEnvGuard;
-    use crate::commands::ENV_LOCK;
-    use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
-    use gwt_core::terminal::AgentColor;
+    use crate::commands::{TestEnvGuard, ENV_LOCK};
 
     #[test]
     fn pty_skill_result_serialization_roundtrip() {

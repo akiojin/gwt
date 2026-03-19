@@ -1,13 +1,18 @@
 //! Persistent storage for agent sessions
 
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::path::{Path, PathBuf};
 
-use super::session::{AgentSession, SessionStatus};
-use super::task::TaskStatus;
-use super::types::SessionId;
+use super::{
+    session::{AgentSession, SessionStatus},
+    task::TaskStatus,
+    types::SessionId,
+};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -218,9 +223,7 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::task::Task;
-    use crate::agent::types::TaskId;
-    use crate::agent::worktree::WorktreeRef;
+    use crate::agent::{task::Task, types::TaskId, worktree::WorktreeRef};
 
     fn make_store(dir: &Path) -> SessionStore {
         SessionStore::with_dir(dir.to_path_buf())

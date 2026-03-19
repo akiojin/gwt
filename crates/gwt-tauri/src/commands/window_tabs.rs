@@ -1,9 +1,11 @@
-use crate::state::{AgentTabMenuState, AppState};
+use std::collections::HashSet;
+
 use gwt_core::StructuredError;
 use serde::Deserialize;
-use std::collections::HashSet;
 use tauri::{Manager, State};
 use tracing::instrument;
+
+use crate::state::{AgentTabMenuState, AppState};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

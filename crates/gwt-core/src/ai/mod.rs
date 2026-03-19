@@ -9,6 +9,7 @@ pub mod session_converter;
 pub mod session_parser;
 pub mod summary;
 
+pub use agent_history::{AgentHistoryEntry, AgentHistoryError, AgentHistoryStore};
 pub use branch_suggest::{
     parse_branch_suggestion, suggest_branch_name, BRANCH_SUGGEST_SYSTEM_PROMPT,
 };
@@ -34,5 +35,3 @@ pub use summary::{
     ScrollbackCacheEntry, ScrollbackRollingContext, ScrollbackSummaryBuild, ScrollbackSummaryMode,
     SessionMetrics, SessionSummary, SessionSummaryCache, SESSION_SYSTEM_PROMPT_BASE,
 };
-
-pub use agent_history::{AgentHistoryEntry, AgentHistoryError, AgentHistoryStore};

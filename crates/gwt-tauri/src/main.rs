@@ -17,9 +17,9 @@ mod single_instance;
 mod state;
 mod tool_helpers;
 
+use std::{io::Read, sync::Arc};
+
 use state::AppState;
-use std::io::Read;
-use std::sync::Arc;
 
 fn main() {
     // Self-update helper mode: do not start GUI, just execute requested update action.

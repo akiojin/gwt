@@ -4,18 +4,25 @@
 //!
 //! Global config: `~/.gwt/config.toml`
 
-use super::agent_config::AgentConfig;
-use super::migration::{ensure_config_dir, write_atomic};
-use super::profile::{Profile, ProfilesConfig};
-use super::recent_projects::RecentProjectsConfig;
-use super::tools::ToolsConfig;
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+use serde::{
+    de::{self, Deserializer},
+    Deserialize, Serialize,
+};
+use tracing::{debug, error, info, instrument};
+
+use super::{
+    agent_config::AgentConfig,
+    migration::{ensure_config_dir, write_atomic},
+    profile::{Profile, ProfilesConfig},
+    recent_projects::RecentProjectsConfig,
+    tools::ToolsConfig,
+};
 use crate::error::{GwtError, Result};
-use serde::de::{self, Deserializer};
-use tracing::instrument;
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use tracing::{debug, error, info};
 
 static GLOBAL_SETTINGS_UPDATE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -771,8 +778,9 @@ fn parse_env_bool(value: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_default_settings() {

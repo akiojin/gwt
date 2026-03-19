@@ -1,8 +1,9 @@
 //! Lock guard for RAII-based locking
 
+use std::path::Path;
+
 use super::WorktreeLock;
 use crate::error::Result;
-use std::path::Path;
 
 /// RAII lock guard that automatically releases the lock when dropped
 pub struct LockGuard {
@@ -36,8 +37,9 @@ impl Drop for LockGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_lock_guard_raii() {

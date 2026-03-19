@@ -1,18 +1,23 @@
 #![allow(dead_code)]
 //! Assistant Mode monitor: polls pane and git state, emits change events.
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::state::AppState;
-use gwt_core::git::{self, Branch};
-use gwt_core::terminal::pane::PaneStatus;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use gwt_core::{
+    git::{self, Branch},
+    terminal::pane::PaneStatus,
+};
 use serde::Serialize;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tauri::Manager;
 use tokio::sync::mpsc;
 use tracing::warn;
+
+use crate::{commands::project::resolve_repo_path_for_project_root, state::AppState};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const SCROLLBACK_HASH_BYTES: usize = 4096;

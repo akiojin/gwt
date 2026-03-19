@@ -1,10 +1,14 @@
 //! Worktree manager
 
-use super::{CleanupCandidate, Worktree, WorktreeLocation, WorktreePath, WorktreeStatus};
-use crate::error::{GwtError, Result};
-use crate::git::{get_main_repo_root, is_bare_repository, Branch, Remote, Repository};
 use std::path::{Path, PathBuf};
+
 use tracing::{debug, error, info, instrument, warn};
+
+use super::{CleanupCandidate, Worktree, WorktreeLocation, WorktreePath, WorktreeStatus};
+use crate::{
+    error::{GwtError, Result},
+    git::{get_main_repo_root, is_bare_repository, Branch, Remote, Repository},
+};
 
 /// Protected branch names that cannot be deleted
 const PROTECTED_BRANCHES: &[&str] = &["main", "master", "develop", "release"];
@@ -1337,8 +1341,9 @@ fn resolve_remote_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn canonicalize_or_self(path: &Path) -> PathBuf {
         dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())

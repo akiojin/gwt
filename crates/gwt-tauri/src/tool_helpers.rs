@@ -5,15 +5,19 @@
 
 use std::path::Path;
 
+use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 use serde_json::{json, Value};
 
-use crate::commands::issue_spec::{
-    close_spec_issue_cmd, get_spec_issue_detail_cmd, list_spec_issue_artifact_comments_cmd,
-    upsert_spec_issue_artifact_comment_cmd, upsert_spec_issue_cmd, SpecIssueSectionsData,
+use crate::{
+    commands::{
+        issue_spec::{
+            close_spec_issue_cmd, get_spec_issue_detail_cmd, list_spec_issue_artifact_comments_cmd,
+            upsert_spec_issue_artifact_comment_cmd, upsert_spec_issue_cmd, SpecIssueSectionsData,
+        },
+        terminal::{capture_scrollback_tail_from_state, send_keys_to_pane_from_state},
+    },
+    state::AppState,
 };
-use crate::commands::terminal::{capture_scrollback_tail_from_state, send_keys_to_pane_from_state};
-use crate::state::AppState;
-use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 
 // ── Tool name constants (shared tools) ──────────────────────────────
 

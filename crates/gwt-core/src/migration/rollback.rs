@@ -1,11 +1,15 @@
 //! Migration rollback (gwt-spec issue T813-T814)
 
-use super::{backup::restore_backup, config::MigrationConfig, error::MigrationError};
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Component, Path},
+};
+
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Deserialize;
-use std::ffi::{OsStr, OsString};
-use std::path::{Component, Path};
 use tracing::{debug, info, warn};
+
+use super::{backup::restore_backup, config::MigrationConfig, error::MigrationError};
 
 const EVACUATION_MANIFEST_FILENAME: &str = "evacuation-manifest.json";
 const EVACUATION_MANIFEST_ENCODING: &str = "base64-os";
@@ -303,8 +307,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_retry_with_backoff_success() {

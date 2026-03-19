@@ -1,23 +1,24 @@
 //! Project/repo management commands
 
-use crate::state::AppState;
-use gwt_core::config::{
-    repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
+use std::{fs, io::Read, path::Path, process::Stdio};
+
+use gwt_core::{
+    config::{
+        repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
+    },
+    git::{self, Branch},
+    migration::{
+        derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig,
+        MigrationState,
+    },
+    StructuredError,
 };
-use gwt_core::git::{self, Branch};
-use gwt_core::migration::{
-    derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig, MigrationState,
-};
-use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::process::Stdio;
-use std::{fs, io::Read};
-use tauri::Manager;
-use tauri::State;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{instrument, warn};
 use uuid::Uuid;
+
+use crate::state::AppState;
 
 /// Serializable project info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -776,9 +777,10 @@ pub fn cancel_quit_confirm(state: State<AppState>) {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::config::Settings;
+
     use super::*;
     use crate::state::AppState;
-    use gwt_core::config::Settings;
 
     fn init_test_git_dir(root: &Path) {
         std::fs::create_dir_all(root.join(".git").join("info")).unwrap();

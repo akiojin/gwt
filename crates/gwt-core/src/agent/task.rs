@@ -3,9 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::sub_agent::SubAgent;
-use super::types::TaskId;
-use super::worktree::WorktreeRef;
+use super::{sub_agent::SubAgent, types::TaskId, worktree::WorktreeRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {

@@ -2,13 +2,19 @@
 //!
 //! Persisted to `~/.gwt/stats.toml`.
 
-use crate::config::migration::{backup_broken_file, ensure_config_dir, write_atomic};
-use crate::error::{GwtError, Result};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use tracing::{debug, info, warn};
+
+use crate::{
+    config::migration::{backup_broken_file, ensure_config_dir, write_atomic},
+    error::{GwtError, Result},
+};
 
 static STATS_UPDATE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -140,8 +146,9 @@ impl Stats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     // --- T011: default + roundtrip ---
 

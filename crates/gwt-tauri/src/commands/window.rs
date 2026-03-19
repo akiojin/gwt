@@ -1,8 +1,8 @@
-use crate::state::AppState;
-use tauri::State;
-use tauri::{AppHandle, Manager, WebviewWindowBuilder, Window, Wry};
+use tauri::{AppHandle, Manager, State, WebviewWindowBuilder, Window, Wry};
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
+
+use crate::state::AppState;
 
 fn normalize_window_label(label: Option<String>) -> String {
     let trimmed = label.unwrap_or_default().trim().to_string();

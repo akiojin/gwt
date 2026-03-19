@@ -4,6 +4,7 @@
 //! Detection priority: docker-compose.yml/compose.yml > .devcontainer > Dockerfile
 
 use std::path::{Path, PathBuf};
+
 use tracing::{debug, instrument};
 
 /// Type of Docker file detected in a worktree
@@ -100,8 +101,9 @@ pub fn detect_docker_files(worktree_path: &Path) -> Option<DockerFileType> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     // T-101: docker-compose.yml detection test
     #[test]

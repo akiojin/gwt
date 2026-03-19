@@ -1,11 +1,15 @@
 //! Settings management commands
 
-use gwt_core::config::{Settings, SkillRegistrationPreferences};
-use gwt_core::GwtError;
-use gwt_core::StructuredError;
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::PathBuf,
+};
+
+use gwt_core::{
+    config::{Settings, SkillRegistrationPreferences},
+    GwtError, StructuredError,
+};
 use serde::{Deserialize, Serialize};
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
 use tracing::{error, instrument};
 
 fn with_panic_guard<T>(

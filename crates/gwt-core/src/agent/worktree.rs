@@ -1,8 +1,9 @@
 //! Worktree references for Project Mode
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 use super::types::TaskId;
 

@@ -1,15 +1,21 @@
 //! OpenAI-compatible API client (Responses API only)
 
-use crate::config::ResolvedAISettings;
-use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-use reqwest::{StatusCode, Url};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+use reqwest::{
+    blocking::Client,
+    header::{HeaderMap, HeaderValue, AUTHORIZATION},
+    StatusCode, Url,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use thiserror::Error;
 use tracing::warn;
+
+use crate::config::ResolvedAISettings;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);

@@ -23,19 +23,23 @@
 //! - `sync_spec_issue_project` — Sync an issue-first spec issue to GitHub Project V2
 //!   and update its phase status (draft/ready/planned/ready-for-dev/in-progress/done/blocked).
 
+use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 use serde_json::json;
 
-use crate::commands::issue_spec::{
-    delete_spec_issue_artifact_comment_cmd, list_spec_issue_artifact_comments_cmd,
-    sync_spec_issue_project_cmd, upsert_spec_issue_artifact_comment_cmd,
+use crate::{
+    commands::{
+        issue_spec::{
+            delete_spec_issue_artifact_comment_cmd, list_spec_issue_artifact_comments_cmd,
+            sync_spec_issue_project_cmd, upsert_spec_issue_artifact_comment_cmd,
+        },
+        terminal::send_keys_broadcast_from_state,
+    },
+    state::AppState,
+    tool_helpers::{
+        self, execute_shared_tool, get_optional_string_any, get_required_string_any,
+        get_required_u64_any, normalize_args, shared_tool_definitions,
+    },
 };
-use crate::commands::terminal::send_keys_broadcast_from_state;
-use crate::state::AppState;
-use crate::tool_helpers::{
-    self, execute_shared_tool, get_optional_string_any, get_required_string_any,
-    get_required_u64_any, normalize_args, shared_tool_definitions,
-};
-use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
 
 // Agent-specific tool name constants
 pub const TOOL_SEND_KEYS_BROADCAST: &str = "send_keys_broadcast";
@@ -315,10 +319,10 @@ pub fn execute_tool_call(
             let project_path = project_path_lazy()?;
             let question = get_required_string_any(&args, &["question"])?;
             let context = get_required_string_any(&args, &["context"])?;
-            let pane_id = get_optional_string_any(&args, &["pane_id", "paneId"])
-                .unwrap_or(window_label);
-            let agent_name = get_optional_string_any(&args, &["agent_name", "agentName"])
-                .unwrap_or("agent");
+            let pane_id =
+                get_optional_string_any(&args, &["pane_id", "paneId"]).unwrap_or(window_label);
+            let agent_name =
+                get_optional_string_any(&args, &["agent_name", "agentName"]).unwrap_or("agent");
             let timestamp = crate::consultation::write_consultation_request(
                 std::path::Path::new(&project_path),
                 pane_id,
@@ -330,14 +334,16 @@ pub fn execute_tool_call(
         }
         TOOL_CHECK_CONSULTATION_RESPONSE => {
             let project_path = project_path_lazy()?;
-            let pane_id = get_optional_string_any(&args, &["pane_id", "paneId"])
-                .unwrap_or(window_label);
+            let pane_id =
+                get_optional_string_any(&args, &["pane_id", "paneId"]).unwrap_or(window_label);
             let response = crate::consultation::check_consultation_response(
                 std::path::Path::new(&project_path),
                 pane_id,
             )?;
             match response {
-                Some(content) => Ok(json!({ "status": "responded", "content": content }).to_string()),
+                Some(content) => {
+                    Ok(json!({ "status": "responded", "content": content }).to_string())
+                }
                 None => Ok(json!({ "status": "pending" }).to_string()),
             }
         }
@@ -353,15 +359,19 @@ fn get_project_path_for_window(state: &AppState, window_label: &str) -> Result<S
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::commands::TestEnvGuard;
-    use crate::commands::ENV_LOCK;
-    use crate::tool_helpers::{
-        TOOL_CAPTURE_SCROLLBACK_TAIL, TOOL_GET_SPEC_ISSUE, TOOL_SEND_KEYS_TO_PANE,
-        TOOL_UPSERT_SPEC_ISSUE,
+    use gwt_core::terminal::{
+        pane::{PaneConfig, TerminalPane},
+        AgentColor,
     };
-    use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
-    use gwt_core::terminal::AgentColor;
+
+    use super::*;
+    use crate::{
+        commands::{TestEnvGuard, ENV_LOCK},
+        tool_helpers::{
+            TOOL_CAPTURE_SCROLLBACK_TAIL, TOOL_GET_SPEC_ISSUE, TOOL_SEND_KEYS_TO_PANE,
+            TOOL_UPSERT_SPEC_ISSUE,
+        },
+    };
 
     #[test]
     fn builtin_tool_definitions_has_expected_names() {

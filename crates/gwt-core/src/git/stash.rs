@@ -1,9 +1,11 @@
 //! Git stash operations for GitView
 
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
 use super::{is_bare_repository, Repository};
 use crate::error::{GwtError, Result};
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 /// A stash entry with metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,9 +114,11 @@ fn get_stash_file_count(repo_path: &Path, index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
         let output = crate::process::command("git")

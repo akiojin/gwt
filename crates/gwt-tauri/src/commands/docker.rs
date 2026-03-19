@@ -1,18 +1,24 @@
 //! Docker context commands for GUI binding
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use gwt_core::config::{ProfilesConfig, Settings};
-use gwt_core::docker::{
-    compose_available, daemon_running, detect_docker_files, docker_available, ContainerStatus,
-    DevContainerConfig, DockerFileType, DockerManager,
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
 };
-use gwt_core::git::Remote;
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
+
+use gwt_core::{
+    config::{ProfilesConfig, Settings},
+    docker::{
+        compose_available, daemon_running, detect_docker_files, docker_available, ContainerStatus,
+        DevContainerConfig, DockerFileType, DockerManager,
+    },
+    git::Remote,
+    worktree::WorktreeManager,
+    StructuredError,
+};
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use tracing::instrument;
+
+use crate::commands::project::resolve_repo_path_for_project_root;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DockerContext {
@@ -407,7 +413,10 @@ mod tests {
 }
 
 /// Detect docker compose context for a branch (best-effort, read-only).
-#[instrument(skip_all, fields(command = "detect_docker_context", project_path, branch))]
+#[instrument(
+    skip_all,
+    fields(command = "detect_docker_context", project_path, branch)
+)]
 #[tauri::command]
 pub fn detect_docker_context(
     project_path: String,

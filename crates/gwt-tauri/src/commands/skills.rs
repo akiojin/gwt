@@ -1,12 +1,16 @@
-use crate::state::AppState;
-use gwt_core::config::{
-    get_skill_registration_status_with_settings_at_project_root,
-    repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
-};
-use gwt_core::StructuredError;
 use std::path::PathBuf;
+
+use gwt_core::{
+    config::{
+        get_skill_registration_status_with_settings_at_project_root,
+        repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
+    },
+    StructuredError,
+};
 use tauri::{State, Window};
 use tracing::instrument;
+
+use crate::state::AppState;
 
 fn resolve_window_project_root(state: &AppState, window: &Window) -> Option<PathBuf> {
     let project_path = state

@@ -1,10 +1,13 @@
 //! Session parser infrastructure for agent histories.
 
+use std::{
+    fs,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
+
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
 
 pub mod claude;
 pub mod codex;
@@ -602,8 +605,9 @@ pub(crate) fn find_session_file(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn test_parse_jsonl_session_basic() {

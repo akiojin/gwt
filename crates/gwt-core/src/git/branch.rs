@@ -1,13 +1,17 @@
 //! Branch operations
 
-use crate::error::{GwtError, Result};
-use std::collections::HashMap;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
 use tracing::{debug, error, info, warn};
+
+use crate::error::{GwtError, Result};
 
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 const GH_MERGE_BASE_BAD_KEY: &str = "branch..gh-merge-base";
@@ -1189,10 +1193,14 @@ impl std::fmt::Display for DivergenceStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::{
+        io::Write,
+        path::{Path, PathBuf},
+    };
+
     use tempfile::TempDir;
+
+    use super::*;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
         let output = crate::process::command("git")

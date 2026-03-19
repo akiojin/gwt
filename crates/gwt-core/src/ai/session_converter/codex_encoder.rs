@@ -3,11 +3,14 @@
 //! Converts ParsedSession to Codex CLI JSONL format.
 //! Codex CLI stores sessions in `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`
 
+use std::{
+    fs::{self, File},
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+};
+
 use chrono::{Datelike, Utc};
 use serde_json::{json, Value};
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
 
 use super::{ConversionError, ConversionMetadata, ConversionResult, LossInfo, SessionEncoder};
 use crate::ai::session_parser::{AgentType, MessageRole, ParsedSession};
@@ -156,9 +159,10 @@ impl SessionEncoder for CodexEncoder {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::ai::session_parser::{SessionMessage, ToolExecution};
-    use tempfile::tempdir;
 
     fn sample_session() -> ParsedSession {
         ParsedSession {
