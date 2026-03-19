@@ -968,14 +968,7 @@ fn add_issue_comment(
     }
     let value: Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Invalid artifact add JSON: {e}"))?;
-    let node = value
-        .get("data")
-        .and_then(|v| v.get("addComment"))
-        .and_then(|v| v.get("commentEdge"))
-        .and_then(|v| v.get("node"))
-        .cloned()
-        .ok_or_else(|| "Added artifact comment payload missing".to_string())?;
-    let comment = parse_issue_comment_node(&node)
+    let comment = parse_issue_comment_node(&value)
         .ok_or_else(|| "Added artifact comment invalid".to_string())?;
     parse_artifact_comment(issue_number, comment)
         .ok_or_else(|| "Failed to parse added artifact comment".to_string())
@@ -1003,13 +996,7 @@ fn update_issue_comment(
     }
     let value: Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Invalid artifact update JSON: {e}"))?;
-    let node = value
-        .get("data")
-        .and_then(|v| v.get("updateIssueComment"))
-        .and_then(|v| v.get("issueComment"))
-        .cloned()
-        .ok_or_else(|| "Updated artifact comment payload missing".to_string())?;
-    let comment = parse_issue_comment_node(&node)
+    let comment = parse_issue_comment_node(&value)
         .ok_or_else(|| "Updated artifact comment payload invalid".to_string())?;
     parse_artifact_comment(issue_number, comment)
         .ok_or_else(|| "Failed to parse updated artifact comment".to_string())
