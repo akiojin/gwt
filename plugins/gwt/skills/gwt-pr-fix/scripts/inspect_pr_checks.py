@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -378,6 +379,8 @@ def ensure_gh_available(repo_root: Path) -> bool:
     result = run_gh_command(["auth", "status"], cwd=repo_root)
     if result.returncode == 0:
         return True
+    if os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN"):
+        return True
     message = (result.stderr or result.stdout or "").strip()
     print(message or "Error: gh not authenticated.", file=sys.stderr)
     return False
@@ -397,32 +400,34 @@ def resolve_pr(pr_value: str | None, repo_root: Path) -> str | None:
         extracted = extract_pr_number(pr_value)
         if extracted:
             return extracted
-        result = run_gh_command(["pr", "view", pr_value, "--json", "number"], cwd=repo_root)
-        if result.returncode != 0:
-            message = (result.stderr or result.stdout or "").strip()
-            print(message or "Error: unable to resolve PR.", file=sys.stderr)
-            return None
-        try:
-            data = json.loads(result.stdout or "{}")
-        except json.JSONDecodeError:
-            print("Error: unable to parse PR JSON.", file=sys.stderr)
-            return None
-        number = data.get("number")
-        if not number:
-            print("Error: no PR number found.", file=sys.stderr)
-            return None
-        return str(number)
-    result = run_gh_command(["pr", "view", "--json", "number"], cwd=repo_root)
-    if result.returncode != 0:
-        message = (result.stderr or result.stdout or "").strip()
-        print(message or "Error: unable to resolve PR.", file=sys.stderr)
+        print("Error: unable to resolve PR.", file=sys.stderr)
         return None
-    try:
-        data = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        print("Error: unable to parse PR JSON.", file=sys.stderr)
+
+    head_process = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if head_process.returncode != 0:
+        message = (head_process.stderr or head_process.stdout or "").strip()
+        print(message or "Error: unable to resolve current branch.", file=sys.stderr)
         return None
-    number = data.get("number")
+    head = head_process.stdout.strip()
+
+    prs = list_pull_requests_for_head(repo_root, head, state="open")
+    if not prs:
+        prs = list_pull_requests_for_head(repo_root, head, state="all")
+    if not prs:
+        print("Error: no PR found for current branch.", file=sys.stderr)
+        return None
+
+    latest = sorted(
+        [pr for pr in prs if isinstance(pr, dict)],
+        key=lambda pr: pr.get("updated_at") or pr.get("created_at") or "",
+    )[-1]
+    number = latest.get("number")
     if not number:
         print("Error: no PR number found.", file=sys.stderr)
         return None
@@ -451,26 +456,64 @@ def parse_repo_owner_name(repo_slug: str) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
+def fetch_pull_request(pr_value: str, repo_root: Path) -> dict[str, Any] | None:
+    repo_slug = fetch_repo_slug(repo_root)
+    if not repo_slug:
+        return None
+
+    result = run_gh_command(
+        ["api", f"repos/{repo_slug}/pulls/{pr_value}"],
+        cwd=repo_root,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def list_pull_requests_for_head(
+    repo_root: Path,
+    head: str,
+    state: str = "open",
+) -> list[dict[str, Any]]:
+    repo_slug = fetch_repo_slug(repo_root)
+    if not repo_slug:
+        return []
+
+    parsed = parse_repo_owner_name(repo_slug)
+    if not parsed:
+        return []
+    owner, _ = parsed
+    head_filter = f"{owner}:{head}"
+
+    result = run_gh_command(
+        ["api", f"repos/{repo_slug}/pulls?state={state}&head={head_filter}&per_page=100"],
+        cwd=repo_root,
+    )
+    if result.returncode != 0:
+        return []
+    try:
+        data = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
 # =============================================================================
 # Conflict detection
 # =============================================================================
 
 def check_conflicts(pr_value: str, repo_root: Path) -> dict[str, Any]:
     """Check if PR has merge conflicts."""
-    result = run_gh_command(
-        ["pr", "view", pr_value, "--json", "mergeable,mergeStateStatus,baseRefName,headRefName"],
-        cwd=repo_root,
-    )
-    if result.returncode != 0:
+    data = fetch_pull_request(pr_value, repo_root)
+    if data is None:
         return {"error": "Failed to fetch merge state", "hasConflicts": False}
 
-    try:
-        data = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        return {"error": "Failed to parse merge state JSON", "hasConflicts": False}
-
     mergeable_raw = data.get("mergeable")
-    merge_state_status = data.get("mergeStateStatus", "UNKNOWN")
+    merge_state_status = data.get("mergeable_state", "UNKNOWN")
     merge_state_normalized = normalize_field(merge_state_status)
 
     # Handle different return types from gh CLI:
@@ -500,8 +543,8 @@ def check_conflicts(pr_value: str, repo_root: Path) -> dict[str, Any]:
         "mergeable": mergeable_display,
         "mergeStateStatus": merge_state_status,
         "updateBranchRequired": update_branch_required,
-        "baseRefName": data.get("baseRefName", ""),
-        "headRefName": data.get("headRefName", ""),
+        "baseRefName": ((data.get("base") or {}) if isinstance(data.get("base"), dict) else {}).get("ref", ""),
+        "headRefName": ((data.get("head") or {}) if isinstance(data.get("head"), dict) else {}).get("ref", ""),
     }
 
 
@@ -575,14 +618,10 @@ def fetch_change_requests(pr_value: str, repo_root: Path) -> list[dict[str, Any]
 
 def fetch_pr_author_login(pr_value: str, repo_root: Path) -> str:
     """Fetch PR author login to filter out self-comments."""
-    result = run_gh_command(["pr", "view", pr_value, "--json", "author"], cwd=repo_root)
-    if result.returncode != 0:
+    data = fetch_pull_request(pr_value, repo_root)
+    if data is None:
         return ""
-    try:
-        data = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        return ""
-    author = data.get("author") or {}
+    author = data.get("user") or {}
     login = author.get("login") if isinstance(author, dict) else ""
     return str(login or "")
 
@@ -941,14 +980,6 @@ def resolve_thread(thread_id: str, repo_root: Path) -> bool:
 
 def add_pr_comment(pr_value: str, body: str, repo_root: Path) -> bool:
     """Add a comment to the PR."""
-    result = run_gh_command(["pr", "comment", pr_value, "-b", body], cwd=repo_root)
-    if result.returncode == 0:
-        return True
-
-    message = (result.stderr or result.stdout or "").lower()
-    if "submitted too quickly" not in message and "secondary rate limit" not in message:
-        return False
-
     repo_slug = fetch_repo_slug(repo_root)
     if not repo_slug:
         return False
@@ -957,7 +988,7 @@ def add_pr_comment(pr_value: str, body: str, repo_root: Path) -> bool:
         json.dump({"body": body}, tmp, ensure_ascii=False)
         tmp_path = Path(tmp.name)
     try:
-        fallback = run_gh_command(
+        result = run_gh_command(
             [
                 "api",
                 f"repos/{repo_slug}/issues/{pr_value}/comments",
@@ -968,6 +999,10 @@ def add_pr_comment(pr_value: str, body: str, repo_root: Path) -> bool:
             ],
             cwd=repo_root,
         )
+        if result.returncode == 0:
+            return True
+
+        fallback = run_gh_command(["pr", "comment", pr_value, "-b", body], cwd=repo_root)
         return fallback.returncode == 0
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -982,64 +1017,62 @@ def fetch_checks(
     repo_root: Path,
     required_only: bool,
 ) -> tuple[list[dict[str, Any]] | None, str]:
-    primary_fields = ["name", "state", "conclusion", "detailsUrl", "startedAt", "completedAt"]
     note = ""
-    use_required = required_only
+    if required_only:
+        note = "REST check-runs endpoint does not expose required-only filtering; showing all checks instead."
 
-    def run_checks(fields: Sequence[str], include_required: bool) -> GhResult:
-        args = ["pr", "checks", pr_value]
-        if include_required:
-            args.append("--required")
-        args.extend(["--json", ",".join(fields)])
-        return run_gh_command(args, cwd=repo_root)
+    repo_slug = fetch_repo_slug(repo_root)
+    if not repo_slug:
+        print("Error: failed to resolve repository for check-runs.", file=sys.stderr)
+        return None, note
 
-    result = run_checks(primary_fields, use_required)
+    pr_data = fetch_pull_request(pr_value, repo_root)
+    if pr_data is None:
+        print("Error: failed to resolve PR head sha for check-runs.", file=sys.stderr)
+        return None, note
+
+    head = pr_data.get("head") or {}
+    head_sha = head.get("sha") if isinstance(head, dict) else None
+    if not head_sha:
+        print("Error: PR head sha missing.", file=sys.stderr)
+        return None, note
+
+    result = run_gh_command(
+        ["api", f"repos/{repo_slug}/commits/{head_sha}/check-runs"],
+        cwd=repo_root,
+    )
     if result.returncode != 0:
-        message = "\n".join(filter(None, [result.stderr, result.stdout])).strip()
-        if use_required and required_flag_unsupported(message):
-            use_required = False
-            note = "gh pr checks --required not supported; showing all checks instead."
-            result = run_checks(primary_fields, use_required)
-            message = "\n".join(filter(None, [result.stderr, result.stdout])).strip()
-        if result.returncode != 0:
-            available_fields = parse_available_fields(message)
-            if available_fields:
-                fallback_fields = [
-                    "name",
-                    "state",
-                    "bucket",
-                    "link",
-                    "startedAt",
-                    "completedAt",
-                    "workflow",
-                ]
-                selected_fields = [field for field in fallback_fields if field in available_fields]
-                if not selected_fields:
-                    print("Error: no usable fields available for gh pr checks.", file=sys.stderr)
-                    return None, note
-                result = run_checks(selected_fields, use_required)
-                if result.returncode != 0 and use_required:
-                    message = "\n".join(filter(None, [result.stderr, result.stdout])).strip()
-                    if required_flag_unsupported(message):
-                        use_required = False
-                        note = "gh pr checks --required not supported; showing all checks instead."
-                        result = run_checks(selected_fields, use_required)
-                if result.returncode != 0:
-                    message = (result.stderr or result.stdout or "").strip()
-                    print(message or "Error: gh pr checks failed.", file=sys.stderr)
-                    return None, note
-            else:
-                print(message or "Error: gh pr checks failed.", file=sys.stderr)
-                return None, note
+        message = (result.stderr or result.stdout or "").strip()
+        print(message or "Error: gh api check-runs failed.", file=sys.stderr)
+        return None, note
     try:
-        data = json.loads(result.stdout or "[]")
+        payload = json.loads(result.stdout or "{}")
     except json.JSONDecodeError:
         print("Error: unable to parse checks JSON.", file=sys.stderr)
         return None, note
-    if not isinstance(data, list):
+    if not isinstance(payload, dict):
         print("Error: unexpected checks JSON shape.", file=sys.stderr)
         return None, note
-    return data, note
+    check_runs = payload.get("check_runs", [])
+    if not isinstance(check_runs, list):
+        print("Error: unexpected check-runs payload.", file=sys.stderr)
+        return None, note
+
+    checks: list[dict[str, Any]] = []
+    for run_data in check_runs:
+        if not isinstance(run_data, dict):
+            continue
+        checks.append(
+            {
+                "name": run_data.get("name", ""),
+                "status": run_data.get("status", ""),
+                "conclusion": run_data.get("conclusion", ""),
+                "detailsUrl": run_data.get("details_url") or run_data.get("html_url") or "",
+                "startedAt": run_data.get("started_at", ""),
+                "completedAt": run_data.get("completed_at", ""),
+            }
+        )
+    return checks, note
 
 
 def is_failing(check: dict[str, Any]) -> bool:
@@ -1151,17 +1184,11 @@ def extract_job_id(url: str) -> str | None:
 
 
 def fetch_run_metadata(run_id: str, repo_root: Path) -> dict[str, Any] | None:
-    fields = [
-        "conclusion",
-        "status",
-        "workflowName",
-        "name",
-        "event",
-        "headBranch",
-        "headSha",
-        "url",
-    ]
-    result = run_gh_command(["run", "view", run_id, "--json", ",".join(fields)], cwd=repo_root)
+    repo_slug = fetch_repo_slug(repo_root)
+    if not repo_slug:
+        return None
+
+    result = run_gh_command(["api", f"repos/{repo_slug}/actions/runs/{run_id}"], cwd=repo_root)
     if result.returncode != 0:
         return None
     try:
@@ -1170,7 +1197,16 @@ def fetch_run_metadata(run_id: str, repo_root: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict):
         return None
-    return data
+    return {
+        "conclusion": data.get("conclusion"),
+        "status": data.get("status"),
+        "workflowName": data.get("name"),
+        "name": data.get("display_title") or data.get("name"),
+        "event": data.get("event"),
+        "headBranch": data.get("head_branch"),
+        "headSha": data.get("head_sha"),
+        "url": data.get("html_url") or data.get("url"),
+    }
 
 
 def fetch_check_log(

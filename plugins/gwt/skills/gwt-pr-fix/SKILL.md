@@ -1,6 +1,6 @@
 ---
 name: gwt-pr-fix
-description: Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Autonomously fix high-confidence blockers, reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Ask the user only for ambiguous conflicts or design decisions.
+description: Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Use REST-first transport for CI/reviews/comments, keep GraphQL only for unresolved review thread discovery and reply/resolve, autonomously fix high-confidence blockers, reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Ask the user only for ambiguous conflicts or design decisions.
 metadata:
   short-description: Fix failing GitHub PRs comprehensively
 ---
@@ -18,9 +18,15 @@ Use gh to inspect PRs for:
 - Change Requests from reviewers
 - Unresolved review threads
 
+REST-first boundary:
+
+- PR resolution, CI/check reads, reviews, review comments, and issue comments: REST-first
+- Unresolved review thread discovery: GraphQL-only for now
+- Review thread reply / resolve: GraphQL-only for now
+
 Then inspect, fix, **reply to every reviewer comment** (with action taken or reason for not addressing), resolve all threads, and notify reviewers.
 
-Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), then run `gh auth status` with escalated permissions (include workflow/repo scopes) so `gh` commands succeed.
+Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), but allow direct `GH_TOKEN` / `GITHUB_TOKEN` REST auth when available instead of blocking only on `gh auth status`.
 
 ## Comment Response Policy
 
@@ -123,7 +129,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" -
    - If unauthenticated, ask the user to log in before proceeding.
 
 2. **Resolve the PR.**
-   - Prefer the current branch PR: `gh pr view --json number,url`.
+   - Prefer the current branch PR through a REST head-branch lookup.
    - If the user provides a PR number or URL, use that directly.
 
 3. **Inspect based on mode:**
@@ -137,14 +143,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" -
 
    **Reviews Mode (`--mode reviews`):**
    - Fetch reviews with `CHANGES_REQUESTED` state.
-   - Fetch unresolved review threads using GraphQL.
-   - Fetch ALL reviewer comments (review summaries, inline review comments, issue comments) without truncation.
+   - Fetch ALL reviewer comments (review summaries, inline review comments, issue comments) without truncation through REST.
+   - Fetch unresolved review threads using GraphQL only.
    - Display reviewer, comment body (full text), file path, and line number.
    - Decide if reviewer feedback requires action (any change request, unresolved thread, or reviewer comment).
 
    **Checks Mode (`--mode checks`):**
-   - Run bundled script to inspect failing CI checks.
-   - Add `--required-only` to limit output to required checks when supported.
+   - Run bundled script to inspect failing CI checks through REST check-runs.
+   - Add `--required-only` to limit output when a reliable required-only source is available; otherwise report that all checks are being shown.
    - Fetch GitHub Actions logs and extract failure snippets.
    - For external checks (Buildkite, etc.), report URL only.
 
@@ -221,13 +227,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" -
    - The script validates completeness and rejects the operation if any thread is missing a reply.
    - Requires `Repository Permissions > Contents: Read and Write`.
    - Resolve threads at this point (after code fix is pushed). Do not wait for CI completion to resolve threads.
-   - Review-thread reply/resolve remains GraphQL-based in this workflow; if GitHub rate-limits those mutations, back off and retry instead of fabricating a REST replacement.
+   - GraphQL remains only for unresolved review threads and thread reply/resolve in this workflow; if GitHub rate-limits those mutations, back off and retry instead of fabricating a REST replacement.
 
 8. **Notify reviewers (mandatory).**
-   - With `--add-comment "message"`, post a comment to the PR.
+   - With `--add-comment "message"`, post a comment to the PR through REST first.
    - Include a summary of what was fixed (list each B-item and the action taken).
    - This step is not optional — always notify reviewers after fixes are applied.
-   - If `gh pr comment` hits a secondary rate limit, fall back to `POST /repos/<owner>/<repo>/issues/<pr_number>/comments` via `gh api`.
+   - If the REST comment path fails unexpectedly, fall back to `gh pr comment`.
 
 9. **Verify fix (mandatory — do not skip).**
    - Re-run the inspection script with `--mode all` (regardless of initial mode).
@@ -355,8 +361,8 @@ Use `--reply-and-resolve` to reply to every unresolved thread and resolve them.
 
 Use `--add-comment "message"` to post a summary comment to the PR after fixes.
 
-- Primary path: `gh pr comment`
-- REST fallback when GitHub reports a secondary rate limit: `POST /repos/<owner>/<repo>/issues/<pr_number>/comments`
+- Primary path: `POST /repos/<owner>/<repo>/issues/<pr_number>/comments`
+- `gh pr comment` is fallback-only
 
 ## Output Examples
 

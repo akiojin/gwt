@@ -1,13 +1,13 @@
 ---
 name: gwt-pr
-description: "Create or update GitHub Pull Requests with the gh CLI, including deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches)."
+description: "Create or update GitHub Pull Requests with the gh CLI, preferring REST-first `gh api` flows for PR list/create/update/view while deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches)."
 ---
 
 # GH PR
 
 ## Overview
 
-Create or update GitHub Pull Requests with the gh CLI using a detailed body template and strict same-branch rules.
+Create or update GitHub Pull Requests with the gh CLI using a detailed body template, strict same-branch rules, and REST-first transport for PR list/create/update/view operations.
 
 ## Decision rules (must follow)
 
@@ -19,7 +19,10 @@ Create or update GitHub Pull Requests with the gh CLI using a detailed body temp
    - Present 3 options: continue as-is, abort, or manual cleanup then rerun.
    - **Do not** run `git stash`, `git commit`, or `git clean` automatically unless explicitly requested.
 4. **Check for an existing PR for the current head branch.**
-   - `gh pr list --head <head> --state all --json number,state,mergedAt,updatedAt,url,title,mergeCommit`
+   - Resolve the repo slug first: `gh repo view --json nameWithOwner -q .nameWithOwner`
+   - Resolve the repo owner from `<owner>/<repo>`
+   - Primary lookup path:
+     - `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100`
 5. **If no PR exists** → create a new PR.
 6. **If any PR exists and is NOT merged** (`mergedAt` is null) → push only and finish (do **not** create a new PR).
    - This applies to OPEN or CLOSED (unmerged) PRs.
@@ -31,17 +34,17 @@ Create or update GitHub Pull Requests with the gh CLI using a detailed body temp
 
 When all PRs for the head branch are merged, you **must** check whether there are new commits after the merge:
 
-1. **Get the merge commit SHA** of the most recent merged PR.
+1. **Get the merge commit SHA** of the most recent merged PR from the REST PR payload (`merge_commit_sha`).
 2. **Validate merge commit ancestry first**: `git merge-base --is-ancestor <merge_commit> HEAD`
 3. **If the merge commit is an ancestor of `HEAD`**, count commits after the merge:
    - `git rev-list --count <merge_commit>..HEAD`
 4. **If the merge commit is missing or not an ancestor of `HEAD`**, fallback to the branch upstream first:
    - `git rev-list --count origin/<head>..HEAD`
-5. **If the upstream comparison fails**, fallback to the base branch comparison:
+5. **If the upstream comparison returns `0` or fails**, compare against the base branch:
    - `git rev-list --count origin/<base>..HEAD`
 6. **Decision**:
    - If the selected count is greater than 0 → create a new PR
-   - If the selected count is 0 → report "No new changes since merge" and finish
+   - If both upstream and base comparisons report `0` → report "No new changes since merge" and finish
    - If both fallback comparisons fail → stop and report `MANUAL CHECK`
 
 ### Why this matters
@@ -144,14 +147,16 @@ Next
    - If you cannot resolve the conflict with high confidence, stop and ask the user before proceeding.
 
 5. **Check existing PR for head branch**
+   - Use the REST pull-request list endpoint as the primary transport.
    - Use decision rules above to pick action.
-   - Treat `mergedAt` as the source of truth for "merged".
+   - Treat `merged_at` as the source of truth for "merged".
 
 6. **If all PRs are merged, perform post-merge commit check**
-   - Get merge commit: `gh pr list --head <head> --state merged --json mergeCommit -q '.[0].mergeCommit.oid'`
+   - Get merge commit from the latest merged item returned by `GET /repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>`
    - If the merge commit is an ancestor of `HEAD`, count `git rev-list --count <merge_commit>..HEAD`
    - If the merge commit is missing or not an ancestor, count `git rev-list --count origin/<head>..HEAD` first
-   - Only if the upstream comparison fails, count `git rev-list --count origin/<base>..HEAD`
+   - If the upstream count is `0`, still count `git rev-list --count origin/<base>..HEAD` before concluding `NO_ACTION`
+   - Only if both fallback comparisons fail, stop with `MANUAL CHECK`
    - If the selected count is 0 → finish with message "No new changes since merge"
    - If the selected count is >0 → proceed to create new PR
    - If neither comparison is usable → stop with `MANUAL CHECK`
@@ -174,18 +179,17 @@ Next
    - **If any required section still contains TODO after inference, ask only for the irreducible missing information.**
 
 10. **Create or update the PR**
-    - Primary path:
-      - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-      - Update (only if user asked): `gh pr edit <number> --title "<title>" --body-file <file>`
-    - If `gh pr create` or `gh pr edit` fails with a secondary rate limit or `was submitted too quickly`, do not stop.
-    - Resolve the repo slug first: `gh repo view --json nameWithOwner -q .nameWithOwner`
-    - REST fallback:
+    - Primary path (REST-first):
       - Create: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
-      - Update: `gh api repos/<owner>/<repo>/pulls/<number> --method PATCH --input <json-file>`
-    - Keep the same title/body content across the primary path and REST fallback.
+      - Update (only if user asked): `gh api repos/<owner>/<repo>/pulls/<number> --method PATCH --input <json-file>`
+    - Fallback path:
+      - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
+      - Update: `gh pr edit <number> --title "<title>" --body-file <file>`
+    - If one path fails with a secondary rate limit or `was submitted too quickly`, retry with the other path before stopping.
+    - Keep the same title/body content across the REST and `gh pr` paths.
 
 11. **Return PR URL**
-    - `gh pr view <number> --json url -q .url`
+    - `gh api repos/<owner>/<repo>/pulls/<number> --jq .html_url`
 
 12. **Post-PR CI/merge check (automatic).**
     - After PR creation or push, load `skills/gwt-pr-fix/SKILL.md` and follow its workflow to inspect CI status, merge state, and review feedback.
@@ -234,10 +238,12 @@ if [ "${behind_count:-0}" -gt 0 ]; then
   git push -u origin "$head"
 fi
 
-# Check existing PRs for the head branch
-pr_json=$(gh pr list --head "$head" --state all --json number,state,mergedAt,mergeCommit)
+# Check existing PRs for the head branch (REST-first)
+repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+owner="${repo_slug%%/*}"
+pr_json=$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")
 pr_count=$(echo "$pr_json" | jq 'length')
-unmerged_count=$(echo "$pr_json" | jq 'map(select(.mergedAt == null)) | length')
+unmerged_count=$(echo "$pr_json" | jq 'map(select(.merged_at == null)) | length')
 
 if [ "$pr_count" -eq 0 ]; then
   action=create
@@ -245,7 +251,7 @@ elif [ "$unmerged_count" -gt 0 ]; then
   action=push_only
 else
   # All PRs are merged - check for post-merge commits
-  merge_commit=$(echo "$pr_json" | jq -r 'sort_by(.mergedAt) | last | .mergeCommit.oid')
+  merge_commit=$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')
   new_commits=""
 
   if [ -n "$merge_commit" ] && [ "$merge_commit" != "null" ] && \
@@ -264,14 +270,9 @@ else
   else
     upstream_commits=$(git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo "")
 
-    if [ -n "$upstream_commits" ]; then
-      if [ "$upstream_commits" -gt 0 ]; then
-        echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
-        action=create
-      else
-        echo "No new commits ahead of origin/$head - nothing to do"
-        action=none
-      fi
+    if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
+      echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
+      action=create
     else
       fallback_commits=$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "")
 
@@ -280,7 +281,7 @@ else
           echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base - creating new PR"
           action=create
         else
-          echo "Upstream comparison unavailable and no commits ahead of origin/$base - nothing to do"
+          echo "No commits ahead of origin/$head or origin/$base - nothing to do"
           action=none
         fi
       else
@@ -297,17 +298,16 @@ case "$action" in
     cp "$PR_BODY_TEMPLATE" /tmp/pr-body.md
 
     git push -u origin "$head"
-    gh pr create -B "$base" -H "$head" --title "..." --body-file /tmp/pr-body.md || {
-      repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-      jq -n --arg title "..." --arg head "$head" --arg base "$base" --rawfile body /tmp/pr-body.md \
-        '{title:$title, head:$head, base:$base, body:$body}' >/tmp/pr-create.json
-      gh api "repos/$repo_slug/pulls" --method POST --input /tmp/pr-create.json
+    jq -n --arg title "..." --arg head "$head" --arg base "$base" --rawfile body /tmp/pr-body.md \
+      '{title:$title, head:$head, base:$base, body:$body}' >/tmp/pr-create.json
+    gh api "repos/$repo_slug/pulls" --method POST --input /tmp/pr-create.json || {
+      gh pr create -B "$base" -H "$head" --title "..." --body-file /tmp/pr-body.md
     }
     ;;
   push_only)
     echo "Existing unmerged PR found - pushing changes only"
     git push
-    gh pr list --head "$head" --state open --json url -q '.[0].url'
+    echo "$pr_json" | jq -r 'map(select(.merged_at == null)) | sort_by(.updated_at) | last | .html_url'
     ;;
   none)
     echo "No action needed - no new changes since last merge"
