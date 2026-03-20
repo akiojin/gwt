@@ -31,7 +31,8 @@
     | "profiles"
     | "terminal"
     | "voiceInput"
-    | "agent";
+    | "agent"
+    | "developer";
   let activeSettingsTab: SettingsTabId = $state("general");
 
   let showCreateProfileDialog: boolean = $state(false);
@@ -430,6 +431,11 @@
         settings.terminal_font_family,
       );
       settings.voice_input = normalizeVoiceInputSettings(settings.voice_input);
+      import("$lib/profiling.svelte")
+        .then(({ setProfilingEnabled }) =>
+          setProfilingEnabled(!!plainSettings.profiling),
+        )
+        .catch(() => {});
       window.dispatchEvent(
         new CustomEvent("gwt-settings-updated", {
           detail: {
@@ -812,6 +818,11 @@
           class:active={activeSettingsTab === "agent"}
           onclick={() => (activeSettingsTab = "agent")}
         >Agent</button>
+        <button
+          class="settings-tab-btn"
+          class:active={activeSettingsTab === "developer"}
+          onclick={() => (activeSettingsTab = "developer")}
+        >Developer</button>
       </div>
 
       <div class="settings-tab-content">
@@ -1651,6 +1662,33 @@
                     }}
                     placeholder="gemini"
                   />
+                </div>
+              </div>
+            </div>
+          </div>
+        {:else if activeSettingsTab === "developer"}
+          <div class="section-content">
+            <div class="settings-section">
+              <h3 class="settings-section-title">Profiling</h3>
+              <div class="settings-section-body">
+                <div class="field">
+                  <div class="ai-toggle">
+                    <input
+                      id="profiling-enabled"
+                      type="checkbox"
+                      checked={!!settings.profiling}
+                      onchange={(e) => {
+                        const current = settings as SettingsData;
+                        const enabled = (e.target as HTMLInputElement).checked;
+                        settings = { ...current, profiling: enabled };
+                      }}
+                    />
+                    <label for="profiling-enabled">Enable Profiling</label>
+                  </div>
+                  <span class="field-hint">
+                    Writes Chrome Trace output to `profile.json` and enables
+                    profiling-related frontend metrics.
+                  </span>
                 </div>
               </div>
             </div>
