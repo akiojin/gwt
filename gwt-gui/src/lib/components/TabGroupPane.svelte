@@ -305,7 +305,7 @@
     {/each}
   </div>
 
-  <div class="group-content">
+  <div class="group-content" class:drag-active={draggedTabId !== null}>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="split-target split-target-top"
@@ -353,7 +353,7 @@
         {#if !isAgentOrTerminal(tab)}
           <div class="panel-wrapper" class:active={group.activeTabId === tab.id}>
             {#if tab.type === "settings"}
-              <SettingsPanel onClose={() => onTabClose(tab.id)} />
+              <SettingsPanel {projectPath} onClose={() => onTabClose(tab.id)} />
             {:else if tab.type === "versionHistory"}
               <VersionHistoryPanel {projectPath} />
             {:else if tab.type === "issueSpec"}
@@ -636,6 +636,10 @@
     position: absolute;
     z-index: 5;
     opacity: 0;
+    pointer-events: none;
+  }
+
+  .group-content.drag-active .split-target {
     pointer-events: auto;
   }
 

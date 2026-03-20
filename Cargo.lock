@@ -2376,7 +2376,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "8.16.0"
+version = "8.17.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2397,6 +2397,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serial_test",
+ "sha2",
  "sysinfo",
  "tar",
  "tempfile",
@@ -2416,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-tauri"
-version = "8.16.0"
+version = "8.17.2"
 dependencies = [
  "chrono",
  "directories",
