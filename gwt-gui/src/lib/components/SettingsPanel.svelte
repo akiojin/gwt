@@ -415,6 +415,12 @@
 
       const { invoke } = await import("$lib/tauriInvoke");
       await invoke("save_settings", { settings: plainSettings });
+      try {
+        const { setProfilingEnabled } = await import("$lib/profiling.svelte");
+        setProfilingEnabled(!!plainSettings.profiling);
+      } catch (err) {
+        console.warn("Failed to sync frontend profiling state:", err);
+      }
       if (profiles) {
         const plainProfiles = toPlainData(buildProfilesConfigWithApiKeyDraft());
         const aiInPayload = plainProfiles.profiles?.[selectedProfileKey]?.ai;
@@ -435,11 +441,6 @@
         settings.terminal_font_family,
       );
       settings.voice_input = normalizeVoiceInputSettings(settings.voice_input);
-      import("$lib/profiling.svelte")
-        .then(({ setProfilingEnabled }) =>
-          setProfilingEnabled(!!plainSettings.profiling),
-        )
-        .catch(() => {});
       window.dispatchEvent(
         new CustomEvent("gwt-settings-updated", {
           detail: {

@@ -9,9 +9,14 @@ import type {
 
 
 const invokeMock = vi.fn();
+const setProfilingEnabledMock = vi.fn();
 
 vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
+}));
+
+vi.mock("$lib/profiling.svelte", () => ({
+  setProfilingEnabled: setProfilingEnabledMock,
 }));
 
 const tauriCoreInvokeMock = vi.fn();
@@ -116,6 +121,7 @@ describe("SettingsPanel", () => {
   beforeEach(() => {
     cleanup();
     invokeMock.mockReset();
+    setProfilingEnabledMock.mockReset();
     tauriCoreInvokeMock.mockReset();
     tauriCoreInvokeMock.mockImplementation(async (command: string) => {
       if (command === "get_voice_capability") {
@@ -755,6 +761,7 @@ describe("SettingsPanel", () => {
           profiling: true,
         }),
       });
+      expect(setProfilingEnabledMock).toHaveBeenCalledWith(true);
     });
   });
 

@@ -416,9 +416,11 @@ mod tests {
 
     #[test]
     fn test_existing_profiling_state_stays_independent_from_debug() {
-        let mut core = Settings::default();
-        core.debug = false;
-        core.profiling = true;
+        let core = Settings {
+            debug: false,
+            profiling: true,
+            ..Settings::default()
+        };
 
         let data = SettingsData::from(&core);
         assert!(!data.debug);
