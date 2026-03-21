@@ -341,6 +341,8 @@ mod tests {
         core.appearance.ui_font_size = 16;
         core.appearance.terminal_font_size = 20;
         core.app_language = "ja".to_string();
+        core.debug = true;
+        core.profiling = true;
         core.voice_input.enabled = true;
         core.voice_input.engine = "qwen3-asr".to_string();
         core.voice_input.language = "ja".to_string();
@@ -353,6 +355,8 @@ mod tests {
         assert_eq!(data.ui_font_family, default_ui_font_family());
         assert_eq!(data.terminal_font_family, default_terminal_font_family());
         assert_eq!(data.app_language, "ja");
+        assert!(data.debug);
+        assert!(data.profiling);
         assert!(data.voice_input.enabled);
         assert_eq!(data.voice_input.engine, "qwen3-asr");
         assert_eq!(data.voice_input.language, "ja");
@@ -364,6 +368,8 @@ mod tests {
         assert_eq!(back.appearance.ui_font_size, 16);
         assert_eq!(back.appearance.terminal_font_size, 20);
         assert_eq!(back.app_language, "ja");
+        assert!(back.debug);
+        assert!(back.profiling);
         assert!(back.voice_input.enabled);
         assert_eq!(back.voice_input.engine, "qwen3-asr");
         assert_eq!(back.voice_input.language, "ja");
@@ -395,6 +401,30 @@ mod tests {
         data.default_shell = Some("   ".to_string());
         let back = data.to_settings().unwrap();
         assert!(back.terminal.default_shell.is_none());
+    }
+
+    #[test]
+    fn test_profiling_flag_round_trips_on_save() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.debug = false;
+        data.profiling = true;
+
+        let back = data.to_settings().unwrap();
+        assert!(!back.debug);
+        assert!(back.profiling);
+    }
+
+    #[test]
+    fn test_existing_profiling_state_stays_independent_from_debug() {
+        let core = Settings {
+            debug: false,
+            profiling: true,
+            ..Settings::default()
+        };
+
+        let data = SettingsData::from(&core);
+        assert!(!data.debug);
+        assert!(data.profiling);
     }
 
     #[test]
