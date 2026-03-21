@@ -327,7 +327,8 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "agent-p1",
@@ -361,12 +362,13 @@ describe("agentTabsPersistence", () => {
       [makeTerminal("p1"), makeTerminal("p2")],
     );
 
-    expect(restored.tabs.length).toBe(4);
+    expect(restored.tabs.length).toBe(5);
     expect(restored.activeTabId).toBe("settings");
     expect(restored.terminalTabsToRespawn).toEqual([]);
     expect(restored.activeTerminalPaneIdToRespawn).toBeNull();
     expect(restored.tabs).toEqual([
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       {
         id: "settings",
         label: "Settings",
@@ -401,7 +403,8 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       {
         id: "agent-p1",
         label: "one",
@@ -432,7 +435,8 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       {
         id: "agent-a-live",
         label: "feature-a",
@@ -493,7 +497,7 @@ describe("agentTabsPersistence", () => {
     expect(restored.groups).toEqual([
       {
         id: "group-a",
-        tabIds: ["assistant", "settings", "issues"],
+        tabIds: ["settings", "agentCanvas", "branchBrowser", "issues"],
         activeTabId: "issues",
       },
     ]);
@@ -851,7 +855,7 @@ describe("agentTabsPersistence", () => {
       },
       [],
     );
-    expect(restored.activeTabId).toBe("assistant");
+    expect(restored.activeTabId).toBe("agentCanvas");
   });
 
   it("buildRestoredProjectTabs deduplicates tabs by key", () => {

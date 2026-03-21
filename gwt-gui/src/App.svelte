@@ -2828,7 +2828,8 @@
     void layoutGroups;
     void layoutRoot;
 
-    const knownTabIds = new Set(tabs.map((tab) => tab.id));
+    const shellTabs = tabs.filter((tab) => isShellTab(tab));
+    const knownTabIds = new Set(shellTabs.map((tab) => tab.id));
     let next = readTabLayoutState();
 
     for (const group of Object.values(next.groups)) {
@@ -2839,7 +2840,7 @@
       }
     }
 
-    for (const tab of tabs) {
+    for (const tab of shellTabs) {
       if (!getGroupForTab(next, tab.id)) {
         next = addTabToActiveGroup(next, tab.id);
       }
@@ -3017,18 +3018,22 @@
     });
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
+    selectedCanvasSessionTabId = restored.activeCanvasSessionTabId;
     if (allowOverrideActive) {
       if (
         restored.activeTabId &&
         mergedTabs.some((tab) => tab.id === restored.activeTabId)
       ) {
         activeTabId = restored.activeTabId;
+      } else if (restored.activeCanvasSessionTabId) {
+        activeTabId = "agentCanvas";
       } else if (restored.activeTerminalPaneIdToRespawn) {
         const paneId = respawnedTerminalResult.paneIdMap.get(
           restored.activeTerminalPaneIdToRespawn,
         );
         if (paneId) {
-          activeTabId = `terminal-${paneId}`;
+          selectedCanvasSessionTabId = `terminal-${paneId}`;
+          activeTabId = "agentCanvas";
         }
       }
     } else if (!mergedTabs.some((tab) => tab.id === activeTabId)) {
@@ -3065,11 +3070,15 @@
     if (!projectPath) return;
     if (agentTabsHydratedProjectPath !== projectPath) return;
 
-    const orderedTabIds = flattenTabIdsByLayout(readTabLayoutState());
-    const orderedTabs = orderedTabIds
+    const orderedShellTabIds = flattenTabIdsByLayout(readTabLayoutState());
+    const orderedShellTabs = orderedShellTabIds
       .map((tabId) => tabs.find((tab) => tab.id === tabId))
       .filter((tab): tab is Tab => Boolean(tab));
-    const fallbackOrderedTabs = orderedTabs.length > 0 ? orderedTabs : tabs;
+    const seenShellIds = new Set(orderedShellTabs.map((tab) => tab.id));
+    const fallbackOrderedTabs =
+      orderedShellTabs.length > 0
+        ? [...orderedShellTabs, ...tabs.filter((tab) => !seenShellIds.has(tab.id))]
+        : tabs;
 
     const storedTabs: StoredProjectTab[] = [];
     for (const tab of fallbackOrderedTabs) {
@@ -3122,11 +3131,12 @@
       return tab.id === activeTabId;
     })
       ? activeTabId
-      : null;
+      : fallbackOrderedTabs.find((tab) => isShellTab(tab))?.id ?? "agentCanvas";
 
     persistStoredProjectTabs(projectPath, {
       tabs: storedTabs,
       activeTabId: storedActiveTabId,
+      activeCanvasSessionTabId: selectedCanvasSessionTabId,
       activeGroupId,
       groups: buildStoredLayoutGroups(),
       root: buildStoredLayoutRoot(layoutRoot),
