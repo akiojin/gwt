@@ -33,6 +33,8 @@
     projectPath,
     branchBrowserConfig = undefined,
     currentBranch = "",
+    selectedCanvasSessionTabId = null,
+    onCanvasSessionSelect = () => {},
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -67,6 +69,8 @@
     projectPath: string;
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
+    selectedCanvasSessionTabId?: string | null;
+    onCanvasSessionSelect?: (tabId: string) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -405,6 +409,8 @@
                 {projectPath}
                 {currentBranch}
                 tabs={canvasSessionTabs}
+                selectedSessionTabId={selectedCanvasSessionTabId}
+                onSessionSelect={onCanvasSessionSelect}
                 onOpenSettings={onOpenSettings ?? (() => {})}
                 {voiceInputEnabled}
                 {voiceInputListening}

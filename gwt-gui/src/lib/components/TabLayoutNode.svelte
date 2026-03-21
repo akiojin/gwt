@@ -23,6 +23,8 @@
     projectPath,
     branchBrowserConfig = undefined,
     currentBranch = "",
+    selectedCanvasSessionTabId = null,
+    onCanvasSessionSelect = () => {},
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -59,6 +61,8 @@
     projectPath: string;
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
+    selectedCanvasSessionTabId?: string | null;
+    onCanvasSessionSelect?: (tabId: string) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -151,6 +155,8 @@
       {projectPath}
       {branchBrowserConfig}
       {currentBranch}
+      {selectedCanvasSessionTabId}
+      {onCanvasSessionSelect}
       {draggedTabId}
       {dropTarget}
       {onGroupFocus}
@@ -195,6 +201,8 @@
         {projectPath}
         {branchBrowserConfig}
         {currentBranch}
+        {selectedCanvasSessionTabId}
+        {onCanvasSessionSelect}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}
@@ -240,6 +248,8 @@
         {projectPath}
         {branchBrowserConfig}
         {currentBranch}
+        {selectedCanvasSessionTabId}
+        {onCanvasSessionSelect}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}

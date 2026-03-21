@@ -27,6 +27,8 @@
     projectPath,
     branchBrowserConfig = undefined,
     currentBranch = "",
+    selectedCanvasSessionTabId = null,
+    onCanvasSessionSelect = () => {},
     onLaunchAgent,
     onQuickLaunch,
     onTabSelect,
@@ -57,6 +59,8 @@
     projectPath: string;
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
+    selectedCanvasSessionTabId?: string | null;
+    onCanvasSessionSelect?: (tabId: string) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect:
@@ -301,6 +305,8 @@
     {projectPath}
     {branchBrowserConfig}
     {currentBranch}
+    {selectedCanvasSessionTabId}
+    {onCanvasSessionSelect}
     {draggedTabId}
     {dropTarget}
     {onGroupFocus}

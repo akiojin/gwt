@@ -335,6 +335,7 @@
       return branch;
     })(),
   );
+  let selectedCanvasSessionTabId: string | null = $state(null);
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -1528,6 +1529,26 @@
     activeTabId = "branchBrowser";
   }
 
+  function getSelectedCanvasSessionTab(): Tab | null {
+    if (!selectedCanvasSessionTabId) return null;
+    return (
+      tabs.find(
+        (tab) =>
+          tab.id === selectedCanvasSessionTabId &&
+          (tab.type === "agent" || tab.type === "terminal"),
+      ) ?? null
+    );
+  }
+
+  function handleCanvasSessionSelect(tabId: string) {
+    const sessionTab = tabs.find(
+      (tab) => tab.id === tabId && (tab.type === "agent" || tab.type === "terminal"),
+    );
+    if (!sessionTab) return;
+    selectedCanvasSessionTabId = tabId;
+    openAgentCanvasTab();
+  }
+
   function handleSidebarModeChange(next: SidebarMode) {
     if (sidebarMode === next) return;
     sidebarMode = next;
@@ -1560,6 +1581,7 @@
         cwd: workingDir || undefined,
       };
       tabs = [...tabs, newTab];
+      selectedCanvasSessionTabId = newTab.id;
       openAgentCanvasTab();
 
       // Resolve and read logs via backend so bare-repo project roots still work.
@@ -1776,6 +1798,7 @@
         cwd: workingDir,
       };
       tabs = [...tabs, tab];
+      selectedCanvasSessionTabId = tab.id;
       openAgentCanvasTab();
 
       const command = `${buildDocsEditorCommand(platform, shellId)}\n`;
@@ -1982,6 +2005,7 @@
     }
 
     tabs = [...tabs, newTab];
+    selectedCanvasSessionTabId = newTab.id;
     openAgentCanvasTab();
     if (projectPath) {
       agentTabsHydratedProjectPath = null;
@@ -2041,6 +2065,11 @@
 
     const nextTabs = tabs.filter((t) => t.id !== tabId);
     tabs = nextTabs;
+    if (selectedCanvasSessionTabId === tabId) {
+      const fallbackSession =
+        nextTabs.find((t) => t.type === "agent" || t.type === "terminal") ?? null;
+      selectedCanvasSessionTabId = fallbackSession?.id ?? null;
+    }
 
     if (activeTabId !== tabId) return;
     const fallback =
@@ -2068,6 +2097,14 @@
   function handleTabSelect(groupId: string, tabId: string) {
     activeGroupId = groupId;
     activeTabId = tabId;
+    if (tabId === "agentCanvas" || tabId === "branchBrowser") {
+      return;
+    }
+    const selected = tabs.find((tab) => tab.id === tabId);
+    if (selected?.type === "agent" || selected?.type === "terminal") {
+      selectedCanvasSessionTabId = tabId;
+      activeTabId = "agentCanvas";
+    }
   }
 
   function handleTabReorder(
@@ -2264,11 +2301,17 @@
   }
 
   function getActiveTerminalPaneId(): string | null {
-    const active = tabs.find((t) => t.id === activeTabId);
-    if (!active || (active.type !== "agent" && active.type !== "terminal")) {
-      return null;
+    const active = tabs.find((t) => t.id === activeTabId) ?? null;
+    if (active?.type === "agent" || active?.type === "terminal") {
+      return active.paneId && active.paneId.length > 0 ? active.paneId : null;
     }
-    return active.paneId && active.paneId.length > 0 ? active.paneId : null;
+    if (active?.type === "agentCanvas") {
+      const selected = getSelectedCanvasSessionTab();
+      if (selected?.paneId) {
+        return selected.paneId;
+      }
+    }
+    return null;
   }
 
   function getActiveEditableElement(
@@ -2351,13 +2394,16 @@
 
   async function handleScreenCopy() {
     const activeTab = tabs.find((t) => t.id === activeTabId);
+    const selectedCanvasSession =
+      activeTab?.type === "agentCanvas" ? getSelectedCanvasSessionTab() : null;
+    const effectiveActiveTab = selectedCanvasSession ?? activeTab ?? null;
     const text = collectScreenText({
       branch: currentBranch,
-      activeTab: activeTab?.label ?? activeTabId,
-      activeTabType: activeTab?.type,
+      activeTab: effectiveActiveTab?.label ?? activeTabId,
+      activeTabType: effectiveActiveTab?.type,
       activePaneId:
-        activeTab?.type === "agent" || activeTab?.type === "terminal"
-          ? activeTab.paneId
+        effectiveActiveTab?.type === "agent" || effectiveActiveTab?.type === "terminal"
+          ? effectiveActiveTab.paneId
           : undefined,
     });
     try {
@@ -2453,7 +2499,8 @@
             t.id === tabId && (t.type === "agent" || t.type === "terminal"),
         )
       ) {
-        activeTabId = tabId;
+        selectedCanvasSessionTabId = tabId;
+        activeTabId = "agentCanvas";
       }
       return;
     }
@@ -2562,6 +2609,7 @@
           void updateWindowSession(null);
           tabs = defaultAppTabs();
           activeTabId = "agentCanvas";
+          selectedCanvasSessionTabId = null;
           selectedBranch = null;
           currentBranch = "";
         }
@@ -2686,6 +2734,7 @@
             cwd: workingDir || undefined,
           };
           tabs = [...tabs, newTab];
+          selectedCanvasSessionTabId = newTab.id;
           openAgentCanvasTab();
         } catch (err) {
           console.error("Failed to spawn shell:", err);
@@ -3271,6 +3320,8 @@
         projectPath={projectPath as string}
         {branchBrowserConfig}
         {currentBranch}
+        {selectedCanvasSessionTabId}
+        onCanvasSessionSelect={handleCanvasSessionSelect}
         onLaunchAgent={requestAgentLaunch}
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}

@@ -7,6 +7,8 @@
     projectPath,
     currentBranch = "",
     tabs,
+    selectedSessionTabId = null,
+    onSessionSelect = () => {},
     onOpenSettings,
     voiceInputEnabled = false,
     voiceInputListening = false,
@@ -19,6 +21,8 @@
     projectPath: string;
     currentBranch?: string;
     tabs: Tab[];
+    selectedSessionTabId?: string | null;
+    onSessionSelect?: (tabId: string) => void;
     onOpenSettings?: () => void;
     voiceInputEnabled?: boolean;
     voiceInputListening?: boolean;
@@ -69,11 +73,14 @@
     </section>
 
     {#each sessionCards as tab (tab.id)}
-      <section
+      <button
         class="canvas-card session-card"
         class:agent-session={tab.type === "agent"}
         class:terminal-session={tab.type === "terminal"}
+        class:selected={selectedSessionTabId === tab.id}
         data-testid={`agent-canvas-session-${tab.id}`}
+        type="button"
+        onclick={() => onSessionSelect(tab.id)}
       >
         <span class="session-edge" aria-hidden="true"></span>
         <div class="card-header">
@@ -100,7 +107,7 @@
             </div>
           {/if}
         </div>
-      </section>
+      </button>
     {/each}
   </div>
 </div>
@@ -173,6 +180,17 @@
   .session-card {
     grid-column: 2;
     min-height: 280px;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    font: inherit;
+  }
+
+  .session-card.selected {
+    border-color: color-mix(in srgb, var(--accent) 58%, var(--border-color));
+    box-shadow:
+      0 14px 28px rgba(0, 0, 0, 0.16),
+      0 0 0 1px color-mix(in srgb, var(--accent) 36%, transparent);
   }
 
   .session-edge {
