@@ -1540,6 +1540,34 @@
     );
   }
 
+  function isShellTab(tab: Tab): boolean {
+    return (
+      tab.type === "agentCanvas" ||
+      tab.type === "branchBrowser" ||
+      tab.type === "settings" ||
+      tab.type === "versionHistory" ||
+      tab.type === "issues" ||
+      tab.type === "prs" ||
+      tab.type === "projectIndex" ||
+      tab.type === "issueSpec"
+    );
+  }
+
+  function getShellTabs(): Tab[] {
+    return tabs.filter((tab) => isShellTab(tab));
+  }
+
+  function getEffectiveWindowMenuActiveTabId(): string | null {
+    const active = tabs.find((t) => t.id === activeTabId) ?? null;
+    if (active?.type === "agent" || active?.type === "terminal") {
+      return active.id;
+    }
+    if (active?.type === "agentCanvas") {
+      return getSelectedCanvasSessionTab()?.id ?? null;
+    }
+    return null;
+  }
+
   function handleCanvasSessionSelect(tabId: string) {
     const sessionTab = tabs.find(
       (tab) => tab.id === tabId && (tab.type === "agent" || tab.type === "terminal"),
@@ -2261,10 +2289,12 @@
     // Find the matching agent tab and switch to it
     const agentTab = findAgentTabByBranchName(tabs, branchName);
     if (agentTab) {
-      activeTabId = agentTab.id;
+      selectedCanvasSessionTabId = agentTab.id;
+      openAgentCanvasTab();
       return;
     }
-    // If no tab exists, select the branch in the sidebar
+    // If no session exists yet, move the user to Branch Browser and refresh its source view.
+    openBranchBrowserTab();
     sidebarRefreshKey++;
   }
 
@@ -2448,10 +2478,11 @@
       if (tabsSignature === lastWindowMenuTabsSignature) {
         return;
       }
-      const activeVisibleTabId = resolveActiveWindowMenuTabId(
-        visibleTabs,
-        activeTabId,
-      );
+      const requestedActiveTabId = getEffectiveWindowMenuActiveTabId();
+      const activeVisibleTabId =
+        requestedActiveTabId === null
+          ? null
+          : resolveActiveWindowMenuTabId(visibleTabs, requestedActiveTabId);
       await invoke("sync_window_agent_tabs", {
         request: {
           tabs: visibleTabs,
@@ -2460,7 +2491,11 @@
       });
       lastWindowMenuTabsSignature = tabsSignature;
       if (
-        shouldKeepSnapshotActiveTabCache(activeVisibleTabId, tabs, activeTabId)
+        shouldKeepSnapshotActiveTabCache(
+          activeVisibleTabId,
+          tabs,
+          requestedActiveTabId ?? activeTabId,
+        )
       ) {
         lastWindowMenuActiveTabId = activeVisibleTabId;
       }
@@ -2473,10 +2508,11 @@
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const visibleTabs = buildWindowMenuVisibleTabs(tabs);
-      const activeVisibleTabId = resolveActiveWindowMenuTabId(
-        visibleTabs,
-        activeTabId,
-      );
+      const requestedActiveTabId = getEffectiveWindowMenuActiveTabId();
+      const activeVisibleTabId =
+        requestedActiveTabId === null
+          ? null
+          : resolveActiveWindowMenuTabId(visibleTabs, requestedActiveTabId);
       if (activeVisibleTabId === lastWindowMenuActiveTabId) {
         return;
       }
@@ -2689,7 +2725,8 @@
             (t) => t.type === "agent" || t.type === "terminal",
           );
           if (firstAgent) {
-            activeTabId = firstAgent.id;
+            selectedCanvasSessionTabId = firstAgent.id;
+            openAgentCanvasTab();
           }
         }
         break;
@@ -2742,7 +2779,9 @@
         break;
       }
       case "terminal-diagnostics": {
-        const active = tabs.find((t) => t.id === activeTabId) ?? null;
+        const active =
+          getSelectedCanvasSessionTab() ??
+          (tabs.find((t) => t.id === activeTabId) ?? null);
         const paneId = active?.paneId ?? "";
         if (!paneId) {
           appError = "No active terminal tab.";
@@ -2770,18 +2809,12 @@
         break;
       }
       case "previous-tab": {
-        const groupTabs = activeGroupTabIds()
-          .map((tabId) => tabs.find((tab) => tab.id === tabId))
-          .filter((tab): tab is Tab => Boolean(tab));
-        const prevId = getPreviousTabId(groupTabs, activeTabId);
+        const prevId = getPreviousTabId(getShellTabs(), activeTabId);
         if (prevId) activeTabId = prevId;
         break;
       }
       case "next-tab": {
-        const groupTabs = activeGroupTabIds()
-          .map((tabId) => tabs.find((tab) => tab.id === tabId))
-          .filter((tab): tab is Tab => Boolean(tab));
-        const nextId = getNextTabId(groupTabs, activeTabId);
+        const nextId = getNextTabId(getShellTabs(), activeTabId);
         if (nextId) activeTabId = nextId;
         break;
       }
