@@ -1,6 +1,7 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
 ## [8.17.2] - 2026-03-20
 
 ### Bug Fixes
