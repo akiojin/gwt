@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
+  import type {
+    BranchBrowserPanelConfig,
+    GitHubIssueInfo,
+    LaunchAgentRequest,
+    Tab,
+  } from "../types";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -20,6 +25,8 @@
     activeTabId = undefined,
     selectedBranch: _selectedBranch = undefined,
     projectPath,
+    branchBrowserConfig = undefined,
+    currentBranch = "",
     onLaunchAgent,
     onQuickLaunch,
     onTabSelect,
@@ -48,6 +55,8 @@
     activeTabId?: string | undefined;
     selectedBranch?: unknown;
     projectPath: string;
+    branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
+    currentBranch?: string;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect:
@@ -290,6 +299,8 @@
     {tabsById}
     activeGroupId={resolvedActiveGroupId}
     {projectPath}
+    {branchBrowserConfig}
+    {currentBranch}
     {draggedTabId}
     {dropTarget}
     {onGroupFocus}

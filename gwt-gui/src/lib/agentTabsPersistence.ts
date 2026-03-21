@@ -34,6 +34,8 @@ export type StoredTerminalTab = {
 export type StoredStaticTab = {
   type:
     | "assistant"
+    | "agentCanvas"
+    | "branchBrowser"
     | "settings"
     | "versionHistory"
     | "issues"
@@ -202,6 +204,8 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
 
   if (
     type === "assistant" ||
+    type === "agentCanvas" ||
+    type === "branchBrowser" ||
     type === "settings" ||
     type === "versionHistory" ||
     type === "issues" ||
@@ -209,10 +213,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     type === "projectIndex" ||
     type === "issueSpec"
   ) {
-    const canonicalType = type === "assistant" ? "assistant" : type;
+    const canonicalType =
+      type === "assistant" ? "agentCanvas" : type;
     const fallbackId =
-      canonicalType === "assistant"
-        ? "assistant"
+      canonicalType === "agentCanvas"
+        ? "agentCanvas"
+        : canonicalType === "branchBrowser"
+          ? "branchBrowser"
         : canonicalType === "settings"
           ? "settings"
           : canonicalType === "issues"
@@ -225,8 +232,10 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
                   ? "issueSpec"
                   : "versionHistory";
     const fallbackLabel =
-      canonicalType === "assistant"
-        ? "Assistant"
+      canonicalType === "agentCanvas"
+        ? "Agent Canvas"
+        : canonicalType === "branchBrowser"
+          ? "Branch Browser"
         : canonicalType === "settings"
           ? "Settings"
           : canonicalType === "issues"
@@ -240,13 +249,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
                   : "Version History";
     const idRaw = normalizeString(obj.id);
     const id =
-      canonicalType === "assistant"
-        ? "assistant"
+      canonicalType === "agentCanvas"
+        ? "agentCanvas"
         : idRaw || fallbackId;
     const labelRaw = typeof obj.label === "string" ? obj.label.trim() : "";
     const label =
-      canonicalType === "assistant" && (type === "assistant" || !labelRaw)
-        ? "Assistant"
+      canonicalType === "agentCanvas" && (type === "assistant" || !labelRaw)
+        ? "Agent Canvas"
         : labelRaw || fallbackLabel;
     const issueNumber =
       canonicalType === "issueSpec" && Number.isFinite(Number(obj.issueNumber))

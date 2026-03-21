@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
+  import type {
+    BranchBrowserPanelConfig,
+    GitHubIssueInfo,
+    LaunchAgentRequest,
+    Tab,
+  } from "../types";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -14,6 +19,8 @@
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
   import ProjectIndexPanel from "./ProjectIndexPanel.svelte";
   import AssistantPanel from "./AssistantPanel.svelte";
+  import AgentCanvasPanel from "./AgentCanvasPanel.svelte";
+  import BranchBrowserPanel from "./BranchBrowserPanel.svelte";
 
   function isAgentOrTerminal(tab: Tab | null | undefined): boolean {
     return tab?.type === "agent" || tab?.type === "terminal";
@@ -24,6 +31,8 @@
     tabsById,
     activeGroupId,
     projectPath,
+    branchBrowserConfig = undefined,
+    currentBranch = "",
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -56,6 +65,8 @@
     tabsById: Record<string, Tab>;
     activeGroupId: string;
     projectPath: string;
+    branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
+    currentBranch?: string;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -110,6 +121,19 @@
   let groupTabs = $derived(
     group.tabIds.map((tabId) => tabsById[tabId]).filter(Boolean),
   );
+  let visibleGroupTabs = $derived(
+    groupTabs.filter(
+      (tab) =>
+        tab.type !== "assistant" &&
+        tab.type !== "agent" &&
+        tab.type !== "terminal",
+    ),
+  );
+  let canvasSessionTabs = $derived(
+    Object.values(tabsById).filter(
+      (tab) => tab.type === "agent" || tab.type === "terminal",
+    ),
+  );
   let activeTab = $derived(
     group.activeTabId ? tabsById[group.activeTabId] : null,
   );
@@ -120,7 +144,7 @@
   );
 
   function isPinnedTab(tab: Tab | null | undefined) {
-    return tab?.type === "assistant";
+    return tab?.type === "agentCanvas" || tab?.type === "branchBrowser";
   }
 
   function canSplitCurrentGroup(): boolean {
@@ -178,7 +202,7 @@
     ondragover={(event) => onGroupDragOver(group.id, event)}
     ondrop={(event) => onGroupDrop(group.id, event)}
   >
-    {#each groupTabs as tab (tab.id)}
+    {#each visibleGroupTabs as tab (tab.id)}
       <div
         class="tab"
         role="tab"
@@ -339,7 +363,7 @@
       ondrop={(event) => onSplitDrop(group.id, "left", event)}
     ></div>
 
-    {#if groupTabs.length === 0}
+    {#if visibleGroupTabs.length === 0}
       <div class="placeholder">
         <h2>Select a tab</h2>
       </div>
@@ -376,6 +400,22 @@
               />
             {:else if tab.type === "projectIndex"}
               <ProjectIndexPanel {projectPath} />
+            {:else if tab.type === "agentCanvas"}
+              <AgentCanvasPanel
+                {projectPath}
+                {currentBranch}
+                tabs={canvasSessionTabs}
+                onOpenSettings={onOpenSettings ?? (() => {})}
+                {voiceInputEnabled}
+                {voiceInputListening}
+                {voiceInputPreparing}
+                {voiceInputSupported}
+                {voiceInputAvailable}
+                {voiceInputAvailabilityReason}
+                {voiceInputError}
+              />
+            {:else if tab.type === "branchBrowser" && branchBrowserConfig}
+              <BranchBrowserPanel config={branchBrowserConfig} />
             {:else if tab.type === "assistant"}
               <AssistantPanel
                 isActive={group.activeTabId === tab.id}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type {
+    BranchBrowserPanelConfig,
     Tab,
     BranchInfo,
     GitHubIssueInfo,
@@ -16,7 +17,6 @@
     UpdateState,
     VoiceInputSettings,
   } from "./lib/types";
-  import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import AboutDialog from "./lib/components/AboutDialog.svelte";
@@ -300,11 +300,11 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state(defaultAppTabs());
-  const initialTabLayout = createInitialTabLayout(defaultAppTabs(), "assistant");
+  const initialTabLayout = createInitialTabLayout(defaultAppTabs(), "agentCanvas");
   let layoutGroups: Record<string, TabGroupState> = $state(initialTabLayout.groups);
   let layoutRoot: TabLayoutNode = $state(initialTabLayout.root);
   let activeGroupId: string = $state(initialTabLayout.activeGroupId);
-  let activeTabId: string = $state("assistant");
+  let activeTabId: string = $state("agentCanvas");
   let lastWindowMenuTabsSignature: string | null = null;
   let lastWindowMenuActiveTabId: string | null = null;
   let agentPasteHintDismissed = loadAgentPasteHintDismissed();
@@ -335,7 +335,6 @@
       return branch;
     })(),
   );
-
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -355,6 +354,34 @@
   let voiceInputAvailabilityReason: string | null = $state(null);
   let voiceInputError: string | null = $state(null);
   let voiceController: VoiceInputController | null = null;
+  let branchBrowserConfig = $derived<BranchBrowserPanelConfig | undefined>(
+    projectPath
+      ? {
+          projectPath,
+          refreshKey: sidebarRefreshKey,
+          widthPx: sidebarWidthPx,
+          minWidthPx: MIN_SIDEBAR_WIDTH_PX,
+          maxWidthPx: MAX_SIDEBAR_WIDTH_PX,
+          mode: sidebarMode,
+          selectedBranch,
+          currentBranch,
+          agentTabBranches,
+          activeAgentTabBranch,
+          appLanguage,
+          onModeChange: handleSidebarModeChange,
+          onResize: handleSidebarResize,
+          onBranchSelect: handleBranchSelect,
+          onBranchActivate: handleBranchActivate,
+          onCleanupRequest: handleCleanupRequest,
+          onLaunchAgent: requestAgentLaunch,
+          onQuickLaunch: handleAgentLaunch,
+          onNewTerminal: handleNewTerminal,
+          onOpenDocsEditor: handleOpenDocsEditor,
+          onOpenCiLog: handleOpenCiLog,
+          onDisplayNameChanged: handleBranchDisplayNameChanged,
+        }
+      : undefined,
+  );
 
   const systemMonitor = createSystemMonitor();
 
@@ -1471,18 +1498,34 @@
     persistSidebarWidth(next);
   }
 
-  function ensureAssistantTab() {
-    const existing = tabs.find(
-      (t) => t.type === "assistant" || t.id === "assistant",
-    );
-    if (existing) return;
-
-    const tab: Tab = {
-      id: "assistant",
-      label: "Assistant",
-      type: "assistant",
-    };
+  function ensureWorkspaceTab(tab: Tab) {
+    if (tabs.some((candidate) => candidate.id === tab.id || candidate.type === tab.type)) {
+      return;
+    }
     tabs = [...tabs, tab];
+  }
+
+  function ensurePrimaryShellTabs() {
+    ensureWorkspaceTab({
+      id: "agentCanvas",
+      label: "Agent Canvas",
+      type: "agentCanvas",
+    });
+    ensureWorkspaceTab({
+      id: "branchBrowser",
+      label: "Branch Browser",
+      type: "branchBrowser",
+    });
+  }
+
+  function openAgentCanvasTab() {
+    ensurePrimaryShellTabs();
+    activeTabId = "agentCanvas";
+  }
+
+  function openBranchBrowserTab() {
+    ensurePrimaryShellTabs();
+    activeTabId = "branchBrowser";
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
@@ -1517,7 +1560,7 @@
         cwd: workingDir || undefined,
       };
       tabs = [...tabs, newTab];
-      activeTabId = newTab.id;
+      openAgentCanvasTab();
 
       // Resolve and read logs via backend so bare-repo project roots still work.
       const logOutput = await invoke<string>("fetch_ci_log", {
@@ -1665,7 +1708,7 @@
         cwd: workingDir || undefined,
       };
       tabs = [...tabs, newTab];
-      activeTabId = newTab.id;
+      openAgentCanvasTab();
     } catch (err) {
       console.error("Failed to spawn new terminal:", err);
     }
@@ -1733,7 +1776,7 @@
         cwd: workingDir,
       };
       tabs = [...tabs, tab];
-      activeTabId = tab.id;
+      openAgentCanvasTab();
 
       const command = `${buildDocsEditorCommand(platform, shellId)}\n`;
       const data = Array.from(new TextEncoder().encode(command));
@@ -1807,9 +1850,9 @@
     if (tab.type === "assistant" || tab.id === "assistant") {
       return {
         ...tab,
-        id: "assistant",
-        label: "Assistant",
-        type: "assistant",
+        id: "agentCanvas",
+        label: "Agent Canvas",
+        type: "agentCanvas",
       };
     }
     return tab;
@@ -1827,11 +1870,19 @@
       merged.push(normalized);
     }
 
-    if (!merged.some((tab) => tab.id === "assistant")) {
+    if (!merged.some((tab) => tab.id === "agentCanvas")) {
       merged.unshift({
-        id: "assistant",
-        label: "Assistant",
-        type: "assistant",
+        id: "agentCanvas",
+        label: "Agent Canvas",
+        type: "agentCanvas",
+      });
+    }
+
+    if (!merged.some((tab) => tab.id === "branchBrowser")) {
+      merged.splice(1, 0, {
+        id: "branchBrowser",
+        label: "Branch Browser",
+        type: "branchBrowser",
       });
     }
 
@@ -1931,7 +1982,7 @@
     }
 
     tabs = [...tabs, newTab];
-    activeTabId = newTab.id;
+    openAgentCanvasTab();
     if (projectPath) {
       agentTabsHydratedProjectPath = null;
       triggerRestoreProjectAgentTabs(projectPath);
@@ -2510,13 +2561,13 @@
           projectPath = null;
           void updateWindowSession(null);
           tabs = defaultAppTabs();
-          activeTabId = "assistant";
+          activeTabId = "agentCanvas";
           selectedBranch = null;
           currentBranch = "";
         }
         break;
       case "toggle-sidebar":
-        sidebarVisible = !sidebarVisible;
+        openBranchBrowserTab();
         break;
       case "launch-agent":
         if (projectPath) {
@@ -2635,7 +2686,7 @@
             cwd: workingDir || undefined,
           };
           tabs = [...tabs, newTab];
-          activeTabId = newTab.id;
+          openAgentCanvasTab();
         } catch (err) {
           console.error("Failed to spawn shell:", err);
         }
@@ -2899,7 +2950,7 @@
         }
       }
     } else if (!mergedTabs.some((tab) => tab.id === activeTabId)) {
-      activeTabId = mergedTabs[0]?.id ?? "assistant";
+      activeTabId = mergedTabs[0]?.id ?? "agentCanvas";
     }
 
     agentTabsHydratedProjectPath = targetProjectPath;
@@ -2962,7 +3013,8 @@
         continue;
       }
       if (
-        tab.type === "assistant" ||
+        tab.type === "agentCanvas" ||
+        tab.type === "branchBrowser" ||
         tab.type === "settings" ||
         tab.type === "versionHistory" ||
         tab.type === "issues" ||
@@ -2970,13 +3022,10 @@
         tab.type === "projectIndex" ||
         tab.type === "issueSpec"
       ) {
-        const staticType = tab.type === "assistant" ? "assistant" : tab.type;
-        const staticId = tab.id === "assistant" ? "assistant" : tab.id;
-        const staticLabel = tab.type === "assistant" ? "Assistant" : tab.label;
         storedTabs.push({
-          type: staticType,
-          id: staticId,
-          label: staticLabel,
+          type: tab.type,
+          id: tab.id,
+          label: tab.label,
           ...(tab.type === "issueSpec" && tab.issueNumber
             ? { issueNumber: tab.issueNumber }
             : {}),
@@ -3214,38 +3263,14 @@
 {:else}
   <div class="app-layout">
     <div class="app-body">
-      {#if sidebarVisible}
-        <Sidebar
-          {projectPath}
-          refreshKey={sidebarRefreshKey}
-          widthPx={sidebarWidthPx}
-          minWidthPx={MIN_SIDEBAR_WIDTH_PX}
-          maxWidthPx={MAX_SIDEBAR_WIDTH_PX}
-          mode={sidebarMode}
-          onModeChange={handleSidebarModeChange}
-          {selectedBranch}
-          {currentBranch}
-          {agentTabBranches}
-          {activeAgentTabBranch}
-          {appLanguage}
-          onResize={handleSidebarResize}
-          onBranchSelect={handleBranchSelect}
-          onBranchActivate={handleBranchActivate}
-          onCleanupRequest={handleCleanupRequest}
-          onLaunchAgent={requestAgentLaunch}
-          onQuickLaunch={handleAgentLaunch}
-          onNewTerminal={handleNewTerminal}
-          onOpenDocsEditor={handleOpenDocsEditor}
-          onOpenCiLog={handleOpenCiLog}
-          onDisplayNameChanged={handleBranchDisplayNameChanged}
-        />
-      {/if}
       <MainArea
         {tabs}
         groups={layoutGroups}
         layoutRoot={layoutRoot}
         {activeGroupId}
         projectPath={projectPath as string}
+        {branchBrowserConfig}
+        {currentBranch}
         onLaunchAgent={requestAgentLaunch}
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}

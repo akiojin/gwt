@@ -208,7 +208,9 @@ export interface Tab {
   agentId?: AgentId;
   type:
     | "summary"
+    | "agentCanvas"
     | "agent"
+    | "branchBrowser"
     | "settings"
     | "versionHistory"
     | "terminal"
@@ -220,6 +222,31 @@ export interface Tab {
   paneId?: string;
   cwd?: string;
   issueNumber?: number;
+}
+
+export interface BranchBrowserPanelConfig {
+  projectPath: string;
+  refreshKey: number;
+  widthPx: number;
+  minWidthPx: number;
+  maxWidthPx: number;
+  mode: "branch";
+  selectedBranch?: BranchInfo | null;
+  currentBranch: string;
+  agentTabBranches: string[];
+  activeAgentTabBranch?: string | null;
+  appLanguage: SettingsData["app_language"];
+  onModeChange?: (next: "branch") => void;
+  onResize?: (nextWidthPx: number) => void;
+  onBranchSelect: (branch: BranchInfo) => void;
+  onBranchActivate?: (branch: BranchInfo) => void;
+  onCleanupRequest?: (preSelectedBranch?: string) => void;
+  onLaunchAgent?: () => void;
+  onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
+  onNewTerminal?: () => void;
+  onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
+  onOpenCiLog?: (runId: number) => void;
+  onDisplayNameChanged?: () => void;
 }
 
 export interface ToolSessionEntry {

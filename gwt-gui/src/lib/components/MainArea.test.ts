@@ -113,22 +113,42 @@ describe("MainArea", () => {
 
   it("renders a single group by default", () => {
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = renderMainArea({ tabs });
 
     expect(rendered.container.querySelectorAll(".group-pane")).toHaveLength(1);
+    expect(rendered.container.querySelectorAll(".tab")).toHaveLength(3);
+  });
+
+  it("keeps agent and terminal sessions off the top-level tab bar when Agent Canvas is present", () => {
+    const tabs: Tab[] = [
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
+      {
+        id: "agent-1",
+        label: "Worktree Agent",
+        type: "agent",
+        agentId: "codex",
+      },
+      { id: "terminal-1", label: "Shell", type: "terminal" },
+    ];
+    const rendered = renderMainArea({ tabs });
+
     expect(rendered.container.querySelectorAll(".tab")).toHaveLength(2);
+    expect(rendered.container.textContent).toContain("Agent Canvas");
+    expect(rendered.container.querySelector('[data-tab-id="agent-1"]')).toBeNull();
   });
 
   it("renders split groups from the layout tree", () => {
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "issues", label: "Issues", type: "issues" },
     ];
-    const base = createInitialTabLayout(tabs, "assistant");
+    const base = createInitialTabLayout(tabs, "agentCanvas");
     const split = splitTabToGroupEdge(base, "issues", base.activeGroupId, "right");
     const rendered = renderMainArea({ tabs, layout: split });
 
@@ -139,12 +159,14 @@ describe("MainArea", () => {
   it("keeps Assistant pinned and emits close for non-pinned tabs", async () => {
     const onTabClose = vi.fn();
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = renderMainArea({ tabs, onTabClose });
 
-    expect(getTabByLabel(rendered.container, "Assistant").querySelector(".tab-close")).toBeNull();
+    expect(getTabByLabel(rendered.container, "Agent Canvas").querySelector(".tab-close")).toBeNull();
+    expect(getTabByLabel(rendered.container, "Branch Browser").querySelector(".tab-close")).toBeNull();
     const closeButton = getTabByLabel(rendered.container, "Settings").querySelector(
       ".tab-close",
     ) as HTMLButtonElement;
@@ -152,38 +174,36 @@ describe("MainArea", () => {
     expect(onTabClose).toHaveBeenCalledWith("settings");
   });
 
-  it("renders agent tabs with scrolling label markup and agent-specific dots", () => {
+  it("renders agent sessions inside Agent Canvas instead of the top-level tab bar", () => {
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
       {
         id: "agent-1",
         label: "Long Agent Label",
         type: "agent",
-        paneId: "pane-1",
         agentId: "codex",
       },
     ];
     const rendered = renderMainArea({ tabs });
-    const agentTab = rendered.container.querySelector('[data-tab-id="agent-1"]');
-    expect(agentTab?.querySelector(".tab-label-scroll .tab-label-track")).toBeTruthy();
-    expect(agentTab?.querySelector(".tab-dot.codex")).toBeTruthy();
+    expect(rendered.container.querySelector('[data-tab-id="agent-1"]')).toBeNull();
+    expect(rendered.container.querySelector('[data-testid="agent-canvas-session-agent-1"]')).toBeTruthy();
   });
 
-  it("shows waiting placeholder when the active agent tab has no paneId", () => {
+  it("shows a worktree card and assistant card inside Agent Canvas", () => {
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
-      { id: "agent-1", label: "Agent", type: "agent" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
     ];
-    const layout = createInitialTabLayout(tabs, "agent-1");
+    const layout = createInitialTabLayout(tabs, "agentCanvas");
     const rendered = renderMainArea({ tabs, layout });
 
-    expect(rendered.container.textContent).toContain("Agent starting...");
+    expect(rendered.container.querySelector('[data-testid="agent-canvas-assistant-card"]')).toBeTruthy();
+    expect(rendered.container.querySelector('[data-testid="agent-canvas-worktree-card"]')).toBeTruthy();
   });
 
   it("emits tab select with group id", async () => {
     const onTabSelect = vi.fn();
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = renderMainArea({
@@ -199,7 +219,7 @@ describe("MainArea", () => {
   it("emits reorder during dragover inside the same group", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "issues", label: "Issues", type: "issues" },
     ];
@@ -250,11 +270,11 @@ describe("MainArea", () => {
   it("emits move-to-group when dropping onto another group tab bar", async () => {
     const onTabMoveToGroup = vi.fn();
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "issues", label: "Issues", type: "issues" },
     ];
-    const base = createInitialTabLayout(tabs, "assistant");
+    const base = createInitialTabLayout(tabs, "agentCanvas");
     const split = splitTabToGroupEdge(base, "issues", base.activeGroupId, "right");
     const rendered = renderMainArea({ tabs, layout: split, onTabMoveToGroup });
 
@@ -281,7 +301,7 @@ describe("MainArea", () => {
   it("emits split-to-edge when dropping on a split target", async () => {
     const onTabSplitToGroupEdge = vi.fn();
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "issues", label: "Issues", type: "issues" },
     ];
@@ -311,7 +331,7 @@ describe("MainArea", () => {
   it("offers an explicit split action from the tab menu", async () => {
     const onTabSplitToGroupEdge = vi.fn();
     const tabs: Tab[] = [
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = renderMainArea({ tabs, onTabSplitToGroupEdge });

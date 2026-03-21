@@ -270,7 +270,7 @@ describe("agentTabsPersistence", () => {
     const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded).toEqual({
       tabs: [
-        { type: "assistant", id: "assistant", label: "Assistant" },
+        { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
         { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
         { type: "agent", paneId: "new", label: "new-agent" },
       ],
@@ -777,7 +777,7 @@ describe("agentTabsPersistence", () => {
     );
     const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded!.tabs).toEqual([
-      { type: "assistant", id: "assistant", label: "Assistant" },
+      { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
       { type: "issues", id: "issues", label: "Issues" },
     ]);
   });

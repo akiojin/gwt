@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
+  import type {
+    BranchBrowserPanelConfig,
+    GitHubIssueInfo,
+    LaunchAgentRequest,
+    Tab,
+  } from "../types";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -16,6 +21,8 @@
     tabsById,
     activeGroupId,
     projectPath,
+    branchBrowserConfig = undefined,
+    currentBranch = "",
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -50,6 +57,8 @@
     tabsById: Record<string, Tab>;
     activeGroupId: string;
     projectPath: string;
+    branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
+    currentBranch?: string;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -140,6 +149,8 @@
       {tabsById}
       {activeGroupId}
       {projectPath}
+      {branchBrowserConfig}
+      {currentBranch}
       {draggedTabId}
       {dropTarget}
       {onGroupFocus}
@@ -182,6 +193,8 @@
         {tabsById}
         {activeGroupId}
         {projectPath}
+        {branchBrowserConfig}
+        {currentBranch}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}
@@ -225,6 +238,8 @@
         {tabsById}
         {activeGroupId}
         {projectPath}
+        {branchBrowserConfig}
+        {currentBranch}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}
