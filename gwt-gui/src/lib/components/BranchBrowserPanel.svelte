@@ -193,55 +193,7 @@
     />
   </div>
 
-  <div class="browser-body">
-    <section class="branch-list-panel">
-      {#if loading}
-        <div class="state-msg">Loading branches...</div>
-      {:else if errorMessage}
-        <div class="state-msg error">{errorMessage}</div>
-      {:else if filteredEntries.length === 0}
-        <div class="state-msg">No branches found.</div>
-      {:else}
-        <div class="branch-list">
-          {#each filteredEntries as entry (entry.id)}
-            <button
-              type="button"
-              class="branch-row"
-              class:selected={selectedEntry?.id === entry.id}
-              onclick={() => config.onBranchSelect(entry.primary_branch)}
-              ondblclick={() =>
-                entry.resolution_action !== "resolveAmbiguity" &&
-                config.onBranchActivate?.(entry.primary_branch)}
-            >
-              <div class="branch-primary">
-                <span class="branch-name">{entry.primary_branch.display_name ?? entry.primary_branch.name}</span>
-                {#if entry.primary_branch.display_name && entry.primary_branch.display_name !== entry.primary_branch.name}
-                  <span class="branch-sub">{entry.primary_branch.name}</span>
-                {/if}
-              </div>
-              <div class="branch-meta">
-                {#if entry.worktree?.safety_level}
-                  <span
-                    class={`safety-pill ${entry.worktree.safety_level}`}
-                    title={safetyTitleForLevel(entry.worktree.safety_level)}
-                  >
-                    {entry.worktree.safety_level}
-                  </span>
-                {/if}
-                {#if divergenceIndicator(entry.primary_branch)}
-                  <span
-                    class={`divergence-pill ${divergenceClass(entry.primary_branch.divergence_status)}`}
-                  >
-                    {divergenceIndicator(entry.primary_branch)}
-                  </span>
-                {/if}
-              </div>
-            </button>
-          {/each}
-        </div>
-      {/if}
-    </section>
-
+  <div class="browser-body single-surface" data-testid="branch-browser-surface">
     <section class="detail-panel" data-testid="branch-browser-detail">
       {#if resolvedSelectedBranch}
         <div class="detail-card">
@@ -305,6 +257,54 @@
         </div>
       {:else}
         <div class="state-msg">Select a branch or worktree to inspect it.</div>
+      {/if}
+    </section>
+
+    <section class="branch-list-panel">
+      {#if loading}
+        <div class="state-msg">Loading branches...</div>
+      {:else if errorMessage}
+        <div class="state-msg error">{errorMessage}</div>
+      {:else if filteredEntries.length === 0}
+        <div class="state-msg">No branches found.</div>
+      {:else}
+        <div class="branch-list">
+          {#each filteredEntries as entry (entry.id)}
+            <button
+              type="button"
+              class="branch-row"
+              class:selected={selectedEntry?.id === entry.id}
+              onclick={() => config.onBranchSelect(entry.primary_branch)}
+              ondblclick={() =>
+                entry.resolution_action !== "resolveAmbiguity" &&
+                config.onBranchActivate?.(entry.primary_branch)}
+            >
+              <div class="branch-primary">
+                <span class="branch-name">{entry.primary_branch.display_name ?? entry.primary_branch.name}</span>
+                {#if entry.primary_branch.display_name && entry.primary_branch.display_name !== entry.primary_branch.name}
+                  <span class="branch-sub">{entry.primary_branch.name}</span>
+                {/if}
+              </div>
+              <div class="branch-meta">
+                {#if entry.worktree?.safety_level}
+                  <span
+                    class={`safety-pill ${entry.worktree.safety_level}`}
+                    title={safetyTitleForLevel(entry.worktree.safety_level)}
+                  >
+                    {entry.worktree.safety_level}
+                  </span>
+                {/if}
+                {#if divergenceIndicator(entry.primary_branch)}
+                  <span
+                    class={`divergence-pill ${divergenceClass(entry.primary_branch.divergence_status)}`}
+                  >
+                    {divergenceIndicator(entry.primary_branch)}
+                  </span>
+                {/if}
+              </div>
+            </button>
+          {/each}
+        </div>
       {/if}
     </section>
   </div>
@@ -390,8 +390,8 @@
   .browser-body {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(280px, 420px) minmax(280px, 1fr);
+    display: flex;
+    flex-direction: column;
     gap: 16px;
   }
 
@@ -415,7 +415,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    max-height: 100%;
+    height: 100%;
     overflow: auto;
   }
 
@@ -490,12 +490,15 @@
 
   .detail-panel {
     display: flex;
-    align-items: stretch;
-    justify-content: stretch;
+    flex: 0 0 auto;
   }
 
   .detail-card {
     width: 100%;
+  }
+
+  .branch-list-panel {
+    flex: 1 1 auto;
   }
 
   .detail-header {
@@ -553,10 +556,6 @@
     .search-input {
       min-width: 0;
       width: 100%;
-    }
-
-    .browser-body {
-      grid-template-columns: minmax(0, 1fr);
     }
   }
 </style>
