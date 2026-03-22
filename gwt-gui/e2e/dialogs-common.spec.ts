@@ -7,6 +7,7 @@ import {
   emitTauriEvent,
   standardBranchResponses,
   setMockCommandResponses,
+  expectAgentCanvasVisible,
 } from "./support/helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -20,9 +21,7 @@ test.beforeEach(async ({ page }) => {
 test("Bug Report dialog opens from menu action", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "report-issue" });
@@ -35,9 +34,7 @@ test("Bug Report dialog opens from menu action", async ({ page }) => {
 test("Bug Report dialog has title input", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "report-issue" });
@@ -48,9 +45,7 @@ test("Bug Report dialog has title input", async ({ page }) => {
 test("Bug Report dialog has steps field", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "report-issue" });
@@ -61,9 +56,7 @@ test("Bug Report dialog has steps field", async ({ page }) => {
 test("Feature Request dialog opens from menu action", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "suggest-feature" });
@@ -76,9 +69,7 @@ test("Feature Request dialog opens from menu action", async ({ page }) => {
 test("Feature Request dialog has description field", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "suggest-feature" });
@@ -91,9 +82,7 @@ test("Bug Report dialog covers most of viewport height", async ({
 }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "report-issue" });
@@ -117,9 +106,7 @@ test("Bug Report dialog covers most of viewport height", async ({
 test("Bug Report form text has readable font size", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "report-issue" });
@@ -146,9 +133,7 @@ test("About dialog opens from menu action", async ({ page }) => {
   await page.goto("/");
   await setMockCommandResponses(page, standardBranchResponses());
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "about" });
@@ -162,9 +147,7 @@ test("switching between Bug Report and Feature Request tabs", async ({
 }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
 

@@ -275,11 +275,46 @@ export async function openProjectAndSelectBranch(
   ).toBeVisible();
   await openRecentProject(page);
 
+  await page.locator('[data-tab-id="branchBrowser"]').click();
+  const visibleBrowser = page.locator('[data-testid="branch-browser-panel"]:visible');
+  await expect(visibleBrowser).toBeVisible();
+
   const branchButton = page
-    .locator(".branch-item")
+    .locator(".branch-row")
     .filter({ hasText: branchName });
   await expect(branchButton).toBeVisible();
   await branchButton.click();
+
+  await expect(page.getByTestId("branch-browser-detail")).toContainText(
+    branchName,
+  );
+}
+
+export async function openBranchBrowser(page: Page): Promise<void> {
+  await page.locator('[data-tab-id="branchBrowser"]').click();
+  await expect(
+    page.locator('[data-testid="branch-browser-panel"]:visible'),
+  ).toBeVisible();
+}
+
+export async function expectAgentCanvasVisible(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Agent Canvas" })).toBeVisible();
+  await expect(page.getByTestId("agent-canvas-board")).toBeVisible();
+}
+
+export async function selectBranchInBrowser(
+  page: Page,
+  branchName: string,
+): Promise<void> {
+  await openBranchBrowser(page);
+  const branchButton = page
+    .locator(".branch-row")
+    .filter({ hasText: branchName });
+  await expect(branchButton).toBeVisible();
+  await branchButton.click();
+  await expect(page.getByTestId("branch-browser-detail")).toContainText(
+    branchName,
+  );
 }
 
 export async function openSettings(

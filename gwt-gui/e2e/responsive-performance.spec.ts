@@ -134,7 +134,7 @@ test("top-level tab switching stays responsive", async ({ page }) => {
             return;
           }
           if (performance.now() - start > timeoutMs) {
-            reject(new Error(`Timed out waiting for active pane: ${paneId}`));
+            reject(new Error(`Timed out waiting for shell surface: ${tabId}`));
             return;
           }
           requestAnimationFrame(tick);
@@ -247,11 +247,39 @@ test("project open stays interactive while issue cache warmup runs in background
     },
   });
 
-  const start = Date.now();
-  await openRecentProject(page);
-  await expect(page.getByRole("heading", { name: "Agent Canvas" })).toBeVisible();
-  const duration = Date.now() - start;
+  const duration = await page.evaluate(async () => {
+    const recentItem = document.querySelector<HTMLButtonElement>(
+      "button.recent-item",
+    );
+    if (!recentItem) throw new Error("recent project button missing");
 
+    const start = performance.now();
+    recentItem.click();
+
+    await new Promise<void>((resolve, reject) => {
+      const timeoutMs = 5_000;
+      const tick = () => {
+        const heading = Array.from(document.querySelectorAll("h2")).find(
+          (node) => node.textContent?.trim() === "Agent Canvas",
+        );
+        const board = document.querySelector('[data-testid="agent-canvas-board"]');
+        if (heading && board) {
+          resolve();
+          return;
+        }
+        if (performance.now() - start > timeoutMs) {
+          reject(new Error("Agent Canvas did not become interactive in time"));
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    });
+
+    return performance.now() - start;
+  });
+
+  await expect(page.getByRole("heading", { name: "Agent Canvas" })).toBeVisible();
   expect(duration).toBeLessThan(1_000);
   await waitForInvokeCommand(page, "sync_issue_cache");
 });

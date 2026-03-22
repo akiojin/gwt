@@ -263,10 +263,35 @@ test("Agent Canvas renders terminal session content directly inside the card", a
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "new-terminal" });
 
+  const sessionCard = page.getByTestId("agent-canvas-session-terminal-mock-pane-1");
   const sessionSurface = page.getByTestId(
     "agent-canvas-session-surface-terminal-mock-pane-1",
   );
+  await expect(sessionCard).toBeVisible();
   await expect(sessionSurface).toBeVisible();
   await expect(page.getByText("mock terminal output")).toBeVisible();
   await expect(page.locator('[data-testid="agent-canvas-detail-overlay"]')).toHaveCount(0);
+
+  const cardBox = await sessionCard.boundingBox();
+  const surfaceBox = await sessionSurface.boundingBox();
+  if (!cardBox || !surfaceBox) {
+    throw new Error("session card layout boxes missing");
+  }
+
+  expect(cardBox.width).toBeGreaterThan(500);
+  expect(cardBox.height).toBeGreaterThan(360);
+  expect(surfaceBox.height).toBeGreaterThan(260);
+  expect(surfaceBox.width).toBeGreaterThan(500);
+  expect(surfaceBox.y).toBeGreaterThanOrEqual(cardBox.y);
+  expect(surfaceBox.y + surfaceBox.height).toBeLessThanOrEqual(
+    cardBox.y + cardBox.height,
+  );
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(sessionCard).toBeVisible();
+  const resizedSurfaceBox = await sessionSurface.boundingBox();
+  if (!resizedSurfaceBox) {
+    throw new Error("resized session surface box missing");
+  }
+  expect(resizedSurfaceBox.height).toBeGreaterThan(220);
 });

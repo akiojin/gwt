@@ -42,14 +42,16 @@
   const CARD_WIDTH = 280;
   const CARD_HEIGHT = 164;
   const SESSION_CARD_WIDTH = 540;
-  const SESSION_CARD_HEIGHT = 320;
+  const SESSION_CARD_HEIGHT = 400;
   const BOARD_PADDING = 40;
-  const BOARD_MIN_WIDTH = 1180;
-  const BOARD_MIN_HEIGHT = 820;
+  const BOARD_MIN_WIDTH = 1760;
+  const BOARD_MIN_HEIGHT = 1220;
   const MIN_ZOOM = 0.7;
   const MAX_ZOOM = 1.6;
   const ZOOM_STEP = 0.1;
   const SESSION_VISIBILITY_MARGIN = 120;
+  const SESSION_COLUMN_GAP = 48;
+  const ROW_GAP = 36;
 
   let {
     projectPath,
@@ -203,12 +205,16 @@
     };
 
     const worktreeRow = new Map<string, number>();
+    const sessionBaseX = BOARD_PADDING + CARD_WIDTH + 96;
+    const firstWorktreeY = BOARD_PADDING + CARD_HEIGHT + 72;
+    const rowStride = SESSION_CARD_HEIGHT + ROW_GAP;
+    const worktreeYOffset = Math.round((SESSION_CARD_HEIGHT - CARD_HEIGHT) / 2);
     let rowIndex = 0;
     for (const card of cards) {
       if (card.kind !== "worktree") continue;
       next[card.id] = {
         x: BOARD_PADDING,
-        y: BOARD_PADDING + CARD_HEIGHT + 60 + rowIndex * (CARD_HEIGHT + 28),
+        y: firstWorktreeY + rowIndex * rowStride + worktreeYOffset,
         width: CARD_WIDTH,
         height: CARD_HEIGHT,
       };
@@ -225,8 +231,8 @@
       const sessionIndex = sessionCounts.get(worktreeId || card.id) ?? 0;
       sessionCounts.set(worktreeId || card.id, sessionIndex + 1);
       next[card.id] = {
-        x: BOARD_PADDING + CARD_WIDTH + 80 + sessionIndex * (CARD_WIDTH + 40),
-        y: BOARD_PADDING + CARD_HEIGHT + 60 + baseRow * (CARD_HEIGHT + 28),
+        x: sessionBaseX + sessionIndex * (SESSION_CARD_WIDTH + SESSION_COLUMN_GAP),
+        y: firstWorktreeY + baseRow * rowStride,
         width: SESSION_CARD_WIDTH,
         height: SESSION_CARD_HEIGHT,
       };
@@ -991,6 +997,7 @@
     min-height: 0;
     border-bottom: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
     background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+    min-width: 0;
   }
 
   .session-placeholder {
