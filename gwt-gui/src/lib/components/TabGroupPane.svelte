@@ -34,6 +34,7 @@
     projectPath,
     branchBrowserConfig = undefined,
     currentBranch = "",
+    flatShell = false,
     selectedCanvasSessionTabId = null,
     canvasWorktrees = [],
     selectedCanvasWorktreeBranch = null,
@@ -54,6 +55,7 @@
     onGroupDrop,
     onSplitDragOver,
     onSplitDrop,
+    onSplitResize = () => {},
     onLaunchAgent: _onLaunchAgent,
     onQuickLaunch: _onQuickLaunch,
     onWorkOnIssue,
@@ -74,6 +76,7 @@
     projectPath: string;
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
+    flatShell?: boolean;
     selectedCanvasSessionTabId?: string | null;
     canvasWorktrees?: WorktreeInfo[];
     selectedCanvasWorktreeBranch?: string | null;
@@ -116,6 +119,7 @@
       direction: TabSplitDirection,
       event: DragEvent,
     ) => void;
+    onSplitResize?: (splitId: string, primaryFraction: number) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
@@ -202,6 +206,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="group-pane"
+  class:flat-shell={flatShell}
   role="group"
   class:active-group={isActiveGroup}
   onmousedown={() => onGroupFocus(group.id)}
@@ -485,6 +490,11 @@
 
   .group-pane.active-group {
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 36%, var(--border-color));
+  }
+
+  .group-pane.flat-shell,
+  .group-pane.flat-shell.active-group {
+    box-shadow: none;
   }
 
   .tab-bar {
