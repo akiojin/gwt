@@ -7,6 +7,8 @@ description: Analyze a `gwt-spec` artifact set for completeness and consistency 
 
 Use this skill as the final gate before implementation starts.
 
+This skill is a **pre-implementation readiness gate only**. It does not certify that implementation is complete.
+
 - `gwt-spec-analyze` is still non-implementation work.
 - Do not implement code here.
 - If artifacts are missing, distinguish between gaps that `gwt-spec-ops` can repair automatically and gaps that truly require user input.
@@ -67,6 +69,18 @@ Next:
 - `CLEAR`: implementation may proceed through `gwt-spec-implement`
 - `AUTO-FIXABLE`: `gwt-spec-ops` should repair the artifact set and rerun analysis
 - `NEEDS-DECISION`: the report must point to the exact user decision or unresolved ambiguity
+
+## Boundary
+
+- `CLEAR` means the artifact set is ready for execution.
+- `CLEAR` does **not** mean the SPEC may be marked complete.
+- Completion requires a post-implementation reconciliation pass in `gwt-spec-implement` against:
+  - `doc:spec.md`
+  - `doc:tasks.md`
+  - `checklist:acceptance.md`
+  - `checklist:tdd.md`
+  - latest progress comments
+  - executed verification evidence
 
 ## Operations
 

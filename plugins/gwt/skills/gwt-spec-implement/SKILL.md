@@ -61,6 +61,7 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
    - Update `doc:tasks.md` with completed work when the task format supports completion markers.
    - Post Issue progress comments using the required `Progress / Done / Next` template.
    - Keep comments factual and incremental.
+   - Do not mark the SPEC complete yet; completion requires the exit gate below.
 
 7. **Keep PR flow moving.**
    - If there is no active PR for the branch, or prior PRs are already merged, use `gwt-pr`.
@@ -70,6 +71,11 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
 8. **Repeat until the scoped tasks are done.**
    - Continue task-by-task until the SPEC is complete or a true decision blocker remains.
 
+9. **Run the post-implementation completion gate.**
+   - Reconcile the implemented behavior against `doc:spec.md`, `doc:tasks.md`, `checklist:acceptance.md`, `checklist:tdd.md`, latest progress comments, and executed verification.
+   - If these artifacts disagree, return to `gwt-spec-ops` and repair the artifact set or rollback false completion markers.
+   - Only after reconciliation passes may the workflow declare the SPEC complete.
+
 ## Stop Conditions
 
 Stop only when:
@@ -77,6 +83,16 @@ Stop only when:
 - the next task depends on a product or scope decision that is not inferable
 - a merge conflict or review request is ambiguous enough to risk the wrong behavior
 - the required repo/auth/tooling access is unavailable
+
+## Completion gate requirements
+
+Before declaring completion:
+
+- every claimed completed task in `doc:tasks.md` must match the implementation
+- `checklist:acceptance.md` must reflect actual accepted behavior
+- `checklist:tdd.md` must reflect actual verification evidence
+- progress comments must not claim completion that the artifacts or code do not support
+- if any of the above diverge, the next step is `gwt-spec-ops`, not `gwt-pr`
 
 ## Exit report
 
