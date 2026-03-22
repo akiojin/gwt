@@ -44,7 +44,12 @@ When all PRs for the head branch are merged, you **must** check whether there ar
    - `git rev-list --count origin/<head>..HEAD`
 5. **If the upstream comparison returns `0` or fails**, compare against the base branch:
    - `git rev-list --count origin/<base>..HEAD`
-6. **Decision**:
+6. **Before creating a PR from post-merge commit counts, verify the branch still differs from the base branch**:
+   - `git diff --quiet origin/<base>...HEAD --`
+   - Exit code `1` → a PR-worthy diff exists; proceed
+   - Exit code `0` → no PR-worthy diff remains; finish with `NO ACTION`
+   - Any other failure → stop with `MANUAL CHECK`
+7. **Decision**:
    - If the selected count is greater than 0 → create a new PR
    - If both upstream and base comparisons report `0` → report "No new changes since merge" and finish
    - If both fallback comparisons fail → stop and report `MANUAL CHECK`
@@ -159,6 +164,8 @@ Next
    - If the merge commit is an ancestor of `HEAD`, count `git rev-list --count <merge_commit>..HEAD`
    - If the merge commit is missing or not an ancestor, count `git rev-list --count origin/<head>..HEAD` first
    - If the upstream count is `0`, still count `git rev-list --count origin/<base>..HEAD` before concluding `NO_ACTION`
+   - If any count is greater than `0`, verify `git diff --quiet origin/<base>...HEAD --` before creating a PR
+   - If the base compare is empty, return `NO ACTION` because merged base commits alone do not justify a new PR
    - Only if both fallback comparisons fail, stop with `MANUAL CHECK`
    - If the selected count is 0 → finish with message "No new changes since merge"
    - If the selected count is >0 → proceed to create new PR
@@ -205,6 +212,15 @@ Next
 head=$(git rev-parse --abbrev-ref HEAD)
 base=develop
 PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"
+
+base_compare_has_diff() {
+  git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
+  case $? in
+    0) echo "no" ;;
+    1) echo "yes" ;;
+    *) echo "" ;;
+  esac
+}
 
 if [ ! -f "$PR_BODY_TEMPLATE" ]; then
   echo "PR template not found: $PR_BODY_TEMPLATE" >&2
@@ -268,8 +284,17 @@ else
 
   if [ -n "$new_commits" ]; then
     if [ "$new_commits" -gt 0 ]; then
-      echo "Found $new_commits commit(s) after merge - creating new PR"
-      action=create
+      compare_has_diff="$(base_compare_has_diff)"
+      if [ "$compare_has_diff" = "yes" ]; then
+        echo "Found $new_commits commit(s) after merge and a diff against origin/$base - creating new PR"
+        action=create
+      elif [ "$compare_has_diff" = "no" ]; then
+        echo "No PR-worthy diff remains against origin/$base - nothing to do"
+        action=none
+      else
+        echo "Manual check required: could not compare HEAD against origin/$base" >&2
+        action=manual_check
+      fi
     else
       echo "No new commits since merge - nothing to do"
       action=none
@@ -278,15 +303,33 @@ else
     upstream_commits=$(git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo "")
 
     if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
-      echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
-      action=create
+      compare_has_diff="$(base_compare_has_diff)"
+      if [ "$compare_has_diff" = "yes" ]; then
+        echo "Found $upstream_commits commit(s) ahead of origin/$head and a diff against origin/$base - creating new PR"
+        action=create
+      elif [ "$compare_has_diff" = "no" ]; then
+        echo "No PR-worthy diff remains against origin/$base - nothing to do"
+        action=none
+      else
+        echo "Manual check required: could not compare HEAD against origin/$base" >&2
+        action=manual_check
+      fi
     else
       fallback_commits=$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "")
 
       if [ -n "$fallback_commits" ]; then
         if [ "$fallback_commits" -gt 0 ]; then
-          echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base - creating new PR"
-          action=create
+          compare_has_diff="$(base_compare_has_diff)"
+          if [ "$compare_has_diff" = "yes" ]; then
+            echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base with a diff - creating new PR"
+            action=create
+          elif [ "$compare_has_diff" = "no" ]; then
+            echo "No PR-worthy diff remains against origin/$base - nothing to do"
+            action=none
+          else
+            echo "Manual check required: could not compare HEAD against origin/$base" >&2
+            action=manual_check
+          fi
         else
           echo "No commits ahead of origin/$head or origin/$base - nothing to do"
           action=none
