@@ -1,6 +1,12 @@
 //! Project/repo management commands
 
-use std::{fs, io::Read, path::Path, process::Stdio};
+use std::{
+    fs,
+    io::Read,
+    path::Path,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use gwt_core::{
     config::{
@@ -19,6 +25,8 @@ use tracing::{instrument, warn};
 use uuid::Uuid;
 
 use crate::state::AppState;
+
+const OPEN_PROJECT_WARN_THRESHOLD: Duration = Duration::from_millis(500);
 
 /// Serializable project info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -247,6 +255,7 @@ pub fn open_project(
     path: String,
     state: State<AppState>,
 ) -> Result<OpenProjectResult, StructuredError> {
+    let started = Instant::now();
     let p = Path::new(&path);
 
     if !p.exists() {
@@ -283,6 +292,11 @@ pub fn open_project(
     let current_window_label = window.label().to_string();
     let previous_project_path = state.project_for_window(&current_window_label);
     for _attempt in 0..2 {
+        let _claim_span = tracing::info_span!(
+            "project_open.claim_window",
+            window_label = %current_window_label
+        )
+        .entered();
         match state.claim_project_for_window_with_identity(
             &current_window_label,
             project_root_str.clone(),
@@ -293,17 +307,32 @@ pub fn open_project(
                     state.clear_assistant_session_for_window(&current_window_label);
                 }
                 state.push_window_focus(&current_window_label);
-                repair_project_skill_registration(&state, &project_root);
+                {
+                    let _span = tracing::info_span!(
+                        "project_open.skill_registration",
+                        project_path = %project_root_str
+                    )
+                    .entered();
+                    repair_project_skill_registration(&state, &project_root);
+                }
                 // Record to recent projects history
                 let _ = gwt_core::config::record_recent_project(&project_root_str);
 
-                let _ = crate::menu::rebuild_menu(window.app_handle());
+                {
+                    let _span = tracing::info_span!("project_open.rebuild_menu").entered();
+                    let _ = crate::menu::rebuild_menu(window.app_handle());
+                }
 
                 // #1714: Bootstrap issue linkage in the background. Keep project-open
                 // interactive; cache sync and other heavyweight warmups run later.
                 {
                     let sync_repo_path = repo_path.clone();
                     tauri::async_runtime::spawn_blocking(move || {
+                        let _span = tracing::info_span!(
+                            "project_open.issue_cache_bootstrap",
+                            repo_path = %sync_repo_path.display()
+                        )
+                        .entered();
                         // Bootstrap linkage from branch names
                         let mut link_store =
                             gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(
@@ -327,6 +356,16 @@ pub fn open_project(
                         }
 
                     });
+                }
+
+                let elapsed = started.elapsed();
+                if elapsed > OPEN_PROJECT_WARN_THRESHOLD {
+                    warn!(
+                        category = "project_start",
+                        project_path = %project_root_str,
+                        elapsed_ms = elapsed.as_millis(),
+                        "open_project took longer than expected"
+                    );
                 }
 
                 return Ok(OpenProjectResult {
