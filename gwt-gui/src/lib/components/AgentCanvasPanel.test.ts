@@ -23,6 +23,24 @@ const worktree: WorktreeInfo = {
 };
 
 describe("AgentCanvasPanel", () => {
+  it("opens assistant detail in an overlay instead of a persistent side pane", async () => {
+    const rendered = render(AgentCanvasPanel, {
+      props: {
+        projectPath: "/tmp/project",
+        currentBranch: "feature/canvas",
+        tabs: [],
+        worktrees: [worktree],
+      },
+    });
+
+    expect(rendered.queryByTestId("agent-canvas-detail-overlay")).toBeNull();
+    await fireEvent.click(rendered.getByTestId("agent-canvas-assistant-card"));
+    expect(rendered.getByTestId("agent-canvas-detail-overlay")).toBeTruthy();
+    expect(rendered.getByTestId("agent-canvas-detail-dialog").textContent).toContain(
+      "Assistant",
+    );
+  });
+
   it("opens worktree details from the worktree card", async () => {
     const tabs: Tab[] = [
       {

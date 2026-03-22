@@ -100,6 +100,7 @@
   let canvasWorktrees = $derived(graph.worktrees);
   let popupWorktreeBranch = $state<string | null>(null);
   let worktreeDetailsOpen = $state(false);
+  let detailOverlayCardId = $state<string | null>(null);
   let viewport = $state<AgentCanvasViewport>(createDefaultAgentCanvasViewport());
   let cardLayouts = $state<Record<string, AgentCanvasCardLayout>>({});
   let selectedCardId = $state<string>("assistant");
@@ -137,7 +138,7 @@
         kind: "assistant",
         title: "Assistant",
         subtitle: "Workspace assistant",
-        detail: "Use the detail pane to interact without stretching the canvas.",
+        detail: "Click cards to open focused detail without splitting the workspace.",
       },
     ];
 
@@ -301,8 +302,11 @@
       : null,
   );
 
-  let selectedCard = $derived.by(
-    () => renderableCards.find((card) => card.id === selectedCardId) ?? renderableCards[0] ?? null,
+  let overlayCard = $derived.by(
+    () =>
+      detailOverlayCardId
+        ? renderableCards.find((card) => card.id === detailOverlayCardId) ?? null
+        : null,
   );
 
   let edgeLines = $derived.by(() =>
@@ -360,8 +364,12 @@
     selectedCardId = card.id;
     if (card.kind === "worktree" && card.worktree?.branch) {
       onWorktreeSelect(card.worktree.branch);
+      detailOverlayCardId = null;
     } else if ((card.kind === "agent" || card.kind === "terminal") && card.tab) {
       onSessionSelect(card.tab.id);
+      detailOverlayCardId = card.id;
+    } else if (card.kind === "assistant") {
+      detailOverlayCardId = card.id;
     }
   }
 
@@ -372,6 +380,7 @@
     }
     const cardId = `worktree:${worktree.path}`;
     selectedCardId = cardId;
+    detailOverlayCardId = null;
     worktreeDetailsOpen = true;
   }
 
@@ -462,7 +471,7 @@
   <div class="canvas-toolbar">
     <div>
       <h2>Agent Canvas</h2>
-      <p>Drag cards on the board and open the selected card in the detail pane.</p>
+      <p>Drag cards on the board and open focused detail in a popup without splitting the workspace.</p>
     </div>
     <div class="toolbar-group">
       <div class="toolbar-chip">Cards: {renderableCards.length}</div>
@@ -476,168 +485,174 @@
     </div>
   </div>
 
-  <div class="canvas-shell">
-    <section class="canvas-board-panel">
+  <section class="canvas-board-panel" data-testid="agent-canvas-surface">
+    <div
+      class="canvas-board"
+      bind:this={boardEl}
+      role="presentation"
+      data-testid="agent-canvas-board"
+      onpointerdown={beginPan}
+      onpointermove={handlePointerMove}
+      onpointerup={clearPointerState}
+      onpointercancel={clearPointerState}
+      onwheel={handleWheel}
+    >
       <div
-        class="canvas-board"
-        bind:this={boardEl}
-        role="presentation"
-        data-testid="agent-canvas-board"
-        onpointerdown={beginPan}
-        onpointermove={handlePointerMove}
-        onpointerup={clearPointerState}
-        onpointercancel={clearPointerState}
-        onwheel={handleWheel}
+        class="canvas-surface"
+        style={`width:${surfaceBounds.width}px;height:${surfaceBounds.height}px;transform: translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom});`}
       >
-        <div
-          class="canvas-surface"
-          style={`width:${surfaceBounds.width}px;height:${surfaceBounds.height}px;transform: translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom});`}
+        <svg
+          class="canvas-edges"
+          viewBox={`0 0 ${surfaceBounds.width} ${surfaceBounds.height}`}
+          width={surfaceBounds.width}
+          height={surfaceBounds.height}
+          aria-hidden="true"
         >
-          <svg
-            class="canvas-edges"
-            viewBox={`0 0 ${surfaceBounds.width} ${surfaceBounds.height}`}
-            width={surfaceBounds.width}
-            height={surfaceBounds.height}
-            aria-hidden="true"
-          >
-            {#each edgeLines as edge (edge.id)}
-              <line
-                x1={edge.x1}
-                y1={edge.y1}
-                x2={edge.x2}
-                y2={edge.y2}
-                class="edge-line"
-                data-testid={edgeTestId(edge.targetCardId)}
-              ></line>
-            {/each}
-          </svg>
-
-          {#each renderableCards as card (card.id)}
-            <div
-              class="canvas-card"
-              class:selected={selectedCardId === card.id}
-              class:assistant-card={card.kind === "assistant"}
-              class:worktree-card={card.kind === "worktree"}
-              class:session-card={card.kind === "agent" || card.kind === "terminal"}
-              role="button"
-              tabindex="0"
-              data-testid={
-                card.kind === "assistant"
-                  ? "agent-canvas-assistant-card"
-                  : card.kind === "worktree" && card.worktree
-                    ? worktreeCardTestId(card.worktree)
-                    : card.tab
-                      ? `agent-canvas-session-${card.tab.id}`
-                      : `agent-canvas-card-${card.id}`
-              }
-              style={`transform: translate(${cardLayouts[card.id]?.x ?? 0}px, ${cardLayouts[card.id]?.y ?? 0}px); width:${cardLayouts[card.id]?.width ?? CARD_WIDTH}px; height:${cardLayouts[card.id]?.height ?? CARD_HEIGHT}px;`}
-              onclick={() => {
-                if (card.kind === "worktree" && card.worktree) {
-                  activateWorktreeCard(card.worktree);
-                } else {
-                  selectCard(card);
-                }
-              }}
-              onkeydown={(event) => handleCardKeydown(card, event)}
-            >
-              <div class="card-header">
-                <div class="card-heading">
-                  <span class="card-kind">{card.kind === "agent" ? "Agent" : card.kind === "terminal" ? "Terminal" : card.kind === "worktree" ? "Worktree" : "Assistant"}</span>
-                  <span class="card-title">{card.title}</span>
-                </div>
-                <button
-                  type="button"
-                  class="card-drag-handle"
-                  aria-label="Drag card"
-                  onpointerdown={(event) => beginCardDrag(card.id, event)}
-                  onclick={(event) => event.stopPropagation()}
-                >
-                  ::
-                </button>
-              </div>
-
-              <div class="card-body">
-                <p class="card-subtitle">{card.subtitle}</p>
-                <p class="card-copy">{card.detail}</p>
-                {#if card.kind === "worktree" && card.worktree}
-                  <div class="card-footer">
-                    <span class="card-status">{card.worktree.safety_level}</span>
-                    <span>{sessionsByWorktreeId.get(card.id)?.length ?? 0} sessions</span>
-                  </div>
-                {:else if card.kind === "agent" || card.kind === "terminal"}
-                  <div class="card-footer">
-                    <span class="card-status">{card.kind === "agent" ? "Interactive" : "Shell"}</span>
-                    <span>{card.tab?.paneId ? "Live detail available" : "Waiting for pane"}</span>
-                  </div>
-                {/if}
-              </div>
-            </div>
+          {#each edgeLines as edge (edge.id)}
+            <line
+              x1={edge.x1}
+              y1={edge.y1}
+              x2={edge.x2}
+              y2={edge.y2}
+              class="edge-line"
+              data-testid={edgeTestId(edge.targetCardId)}
+            ></line>
           {/each}
-        </div>
-      </div>
-    </section>
+        </svg>
 
-    <section class="canvas-detail" data-testid="agent-canvas-detail">
-      {#if selectedCard?.kind === "assistant"}
-        <AssistantPanel
-          isActive={true}
-          {projectPath}
-          onOpenSettings={onOpenSettings ?? (() => {})}
-        />
-      {:else if (selectedCard?.kind === "agent" || selectedCard?.kind === "terminal") && selectedCard.tab}
-        {#if selectedCard.tab.paneId}
-          <TerminalView
-            paneId={selectedCard.tab.paneId}
-            active={true}
-            agentId={selectedCard.kind === "agent" ? selectedCard.tab.agentId ?? null : null}
-            {voiceInputEnabled}
-            {voiceInputListening}
-            {voiceInputPreparing}
-            {voiceInputSupported}
-            {voiceInputAvailable}
-            {voiceInputAvailabilityReason}
-            {voiceInputError}
-          />
-        {:else}
-          <div class="detail-placeholder">
-            {selectedCard.kind === "agent" ? "Agent starting..." : "Terminal starting..."}
+        {#each renderableCards as card (card.id)}
+          <div
+            class="canvas-card"
+            class:selected={selectedCardId === card.id}
+            class:assistant-card={card.kind === "assistant"}
+            class:worktree-card={card.kind === "worktree"}
+            class:session-card={card.kind === "agent" || card.kind === "terminal"}
+            role="button"
+            tabindex="0"
+            data-testid={
+              card.kind === "assistant"
+                ? "agent-canvas-assistant-card"
+                : card.kind === "worktree" && card.worktree
+                  ? worktreeCardTestId(card.worktree)
+                  : card.tab
+                    ? `agent-canvas-session-${card.tab.id}`
+                    : `agent-canvas-card-${card.id}`
+            }
+            style={`transform: translate(${cardLayouts[card.id]?.x ?? 0}px, ${cardLayouts[card.id]?.y ?? 0}px); width:${cardLayouts[card.id]?.width ?? CARD_WIDTH}px; height:${cardLayouts[card.id]?.height ?? CARD_HEIGHT}px;`}
+            onclick={() => {
+              if (card.kind === "worktree" && card.worktree) {
+                activateWorktreeCard(card.worktree);
+              } else {
+                selectCard(card);
+              }
+            }}
+            onkeydown={(event) => handleCardKeydown(card, event)}
+          >
+            <div class="card-header">
+              <div class="card-heading">
+                <span class="card-kind">{card.kind === "agent" ? "Agent" : card.kind === "terminal" ? "Terminal" : card.kind === "worktree" ? "Worktree" : "Assistant"}</span>
+                <span class="card-title">{card.title}</span>
+              </div>
+              <button
+                type="button"
+                class="card-drag-handle"
+                aria-label="Drag card"
+                onpointerdown={(event) => beginCardDrag(card.id, event)}
+                onclick={(event) => event.stopPropagation()}
+              >
+                ::
+              </button>
+            </div>
+
+            <div class="card-body">
+              <p class="card-subtitle">{card.subtitle}</p>
+              <p class="card-copy">{card.detail}</p>
+              {#if card.kind === "worktree" && card.worktree}
+                <div class="card-footer">
+                  <span class="card-status">{card.worktree.safety_level}</span>
+                  <span>{sessionsByWorktreeId.get(card.id)?.length ?? 0} sessions</span>
+                </div>
+              {:else if card.kind === "agent" || card.kind === "terminal"}
+                <div class="card-footer">
+                  <span class="card-status">{card.kind === "agent" ? "Interactive" : "Shell"}</span>
+                  <span>{card.tab?.paneId ? "Open detail" : "Waiting for pane"}</span>
+                </div>
+              {/if}
+            </div>
           </div>
-        {/if}
-      {:else if selectedCard?.kind === "worktree" && selectedCard.worktree}
-        <div class="worktree-detail-card">
-          <div class="detail-header">
-            <span class="detail-kind">Worktree</span>
-            <h3>{selectedCard.worktree.branch || currentBranch || "Project Root"}</h3>
-          </div>
-          <div class="detail-grid">
-            <div class="detail-row">
-              <span class="detail-label">Project</span>
-              <span class="detail-value">{projectPath}</span>
-            </div>
-            <div class="detail-row">
-              <span class="detail-label">Branch</span>
-              <span class="detail-value">{selectedCard.worktree.branch || currentBranch || "Project Root"}</span>
-            </div>
-            <div class="detail-row">
-              <span class="detail-label">Worktree Path</span>
-              <span class="detail-value">{selectedCard.worktree.path}</span>
-            </div>
-            <div class="detail-row">
-              <span class="detail-label">Linked Sessions</span>
-              <span class="detail-value">{sessionsByWorktreeId.get(selectedCard.id)?.length ?? 0}</span>
-            </div>
-          </div>
+        {/each}
+      </div>
+    </div>
+  </section>
+
+  {#if overlayCard}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="detail-overlay"
+      data-testid="agent-canvas-detail-overlay"
+      onclick={() => (detailOverlayCardId = null)}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="detail-dialog"
+        data-testid="agent-canvas-detail-dialog"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        onclick={(event) => event.stopPropagation()}
+      >
+        <div class="dialog-header">
+          <span class="card-kind">
+            {overlayCard.kind === "assistant"
+              ? "Assistant"
+              : overlayCard.kind === "worktree"
+                ? "Worktree"
+                : overlayCard.kind === "agent"
+                  ? "Agent"
+                  : "Terminal"}
+          </span>
+          <span class="card-title">{overlayCard.title}</span>
           <button
             type="button"
-            class="detail-action"
-            onclick={() => activateWorktreeCard(selectedCard.worktree!)}
+            class="dialog-close-inline"
+            onclick={() => (detailOverlayCardId = null)}
           >
-            Open popup
+            Close
           </button>
         </div>
-      {/if}
-    </section>
-  </div>
+        <div class="detail-dialog-body">
+          {#if overlayCard.kind === "assistant"}
+            <AssistantPanel
+              isActive={true}
+              {projectPath}
+              onOpenSettings={onOpenSettings ?? (() => {})}
+            />
+          {:else if (overlayCard.kind === "agent" || overlayCard.kind === "terminal") && overlayCard.tab}
+            {#if overlayCard.tab.paneId}
+              <TerminalView
+                paneId={overlayCard.tab.paneId}
+                active={true}
+                agentId={overlayCard.kind === "agent" ? overlayCard.tab.agentId ?? null : null}
+                {voiceInputEnabled}
+                {voiceInputListening}
+                {voiceInputPreparing}
+                {voiceInputSupported}
+                {voiceInputAvailable}
+                {voiceInputAvailabilityReason}
+                {voiceInputError}
+              />
+            {:else}
+              <div class="detail-placeholder">
+                {overlayCard.kind === "agent" ? "Agent starting..." : "Terminal starting..."}
+              </div>
+            {/if}
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if worktreeDetailsOpen}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -707,7 +722,6 @@
   .card-header,
   .card-heading,
   .card-footer,
-  .detail-header,
   .dialog-header {
     display: flex;
     align-items: center;
@@ -758,16 +772,8 @@
     min-width: 74px;
   }
 
-  .canvas-shell {
+  .canvas-board-panel {
     flex: 1;
-    min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1.1fr) minmax(340px, 0.9fr);
-    gap: 18px;
-  }
-
-  .canvas-board-panel,
-  .canvas-detail {
     min-height: 0;
     border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
     border-radius: 18px;
@@ -918,47 +924,7 @@
     letter-spacing: 0.05em;
   }
 
-  .canvas-detail {
-    display: flex;
-    min-height: 0;
-  }
-
-  .detail-placeholder,
-  .worktree-detail-card {
-    display: flex;
-    flex: 1;
-    min-height: 0;
-  }
-
-  .detail-placeholder {
-    align-items: center;
-    justify-content: center;
-    color: var(--text-muted);
-  }
-
-  .worktree-detail-card {
-    flex-direction: column;
-    gap: 18px;
-    padding: 20px;
-  }
-
-  .detail-header {
-    justify-content: space-between;
-  }
-
-  .detail-kind {
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-size: 0.8rem;
-  }
-
-  .detail-header h3 {
-    margin: 0;
-    font-size: 1rem;
-  }
-
-  .detail-grid,
+  .detail-dialog-body,
   .dialog-body {
     display: grid;
     gap: 12px;
@@ -980,7 +946,6 @@
     overflow-wrap: anywhere;
   }
 
-  .detail-action,
   .dialog-close {
     width: fit-content;
     border: 1px solid var(--border-color);
@@ -1014,13 +979,54 @@
     margin: 0 16px 16px;
   }
 
-  @media (max-width: 1200px) {
-    .canvas-shell {
-      grid-template-columns: minmax(0, 1fr);
-    }
+  .detail-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.46);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+  }
 
-    .canvas-detail {
-      min-height: 320px;
+  .detail-dialog {
+    width: min(1100px, calc(100vw - 48px));
+    height: min(760px, calc(100vh - 48px));
+    border-radius: 18px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-secondary) 85%, var(--bg-primary));
+    box-shadow: 0 22px 44px rgba(0, 0, 0, 0.24);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .detail-dialog-body {
+    min-height: 0;
+    flex: 1;
+  }
+
+  .detail-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    height: 100%;
+  }
+
+  .dialog-close-inline {
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+
+  @media (max-width: 1200px) {
+    .detail-dialog {
+      width: calc(100vw - 24px);
+      height: calc(100vh - 24px);
     }
   }
 </style>
