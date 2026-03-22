@@ -129,17 +129,19 @@ async function openProjectAndSelectBranch(
   ).toBeVisible();
   await dismissSkillRegistrationScopeDialogIfPresent(page);
   await page.locator("button.recent-item").first().click();
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expect(page.locator('[data-tab-id="branchBrowser"]')).toBeVisible();
+  await page.locator('[data-tab-id="branchBrowser"]').click();
 
-  const branchButton = page
-    .locator(".branch-item")
+  const visibleBrowser = page.locator('[data-testid="branch-browser-panel"]:visible');
+  await expect(visibleBrowser).toBeVisible();
+
+  const branchButton = visibleBrowser
+    .locator(".branch-row")
     .filter({ hasText: branchFeature.name });
   await expect(branchButton).toBeVisible();
   await branchButton.click();
 
-  await expect(page.locator(".branch-detail h2")).toContainText(
+  await expect(page.getByTestId("branch-browser-detail")).toContainText(
     branchFeature.name,
   );
 }
@@ -205,6 +207,18 @@ async function openSettingsFromMenu(page: Page) {
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
 }
 
+async function emitMenuAction(page: Page, action: string) {
+  await waitForMenuActionListener(page);
+  await page.evaluate((menuAction) => {
+    const globalWindow = window as unknown as {
+      __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
+    };
+    globalWindow.__GWT_MOCK_EMIT_EVENT__?.("menu-action", {
+      action: menuAction,
+    });
+  }, action);
+}
+
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page, {
     commandResponses: {
@@ -224,7 +238,7 @@ test("launches with selected Windows shell from Launch Agent form", async ({
     get_available_shells: availableShells,
   });
 
-  await page.getByRole("button", { name: "Launch Agent..." }).click();
+  await emitMenuAction(page, "launch-agent");
   await expect(
     page.getByRole("dialog", { name: "Launch Agent" }),
   ).toBeVisible();
@@ -275,7 +289,7 @@ test("disables shell selection in Docker mode and does not send terminalShell", 
     },
   });
 
-  await page.getByRole("button", { name: "Launch Agent..." }).click();
+  await emitMenuAction(page, "launch-agent");
   await expect(
     page.getByRole("dialog", { name: "Launch Agent" }),
   ).toBeVisible();
@@ -450,7 +464,7 @@ test("opens a terminal from WorktreeSummaryPanel New Terminal button", async ({
     list_worktrees: [],
   });
 
-  await page.getByTitle("New Terminal").click();
+  await emitMenuAction(page, "new-terminal");
   await waitForInvokeCommand(page, "spawn_shell");
 
   const spawnArgs = await page.evaluate(() => {

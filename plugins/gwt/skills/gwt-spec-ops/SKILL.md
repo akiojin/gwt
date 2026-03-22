@@ -247,7 +247,8 @@ When the artifact set is ready:
 1. Run `gwt-spec-implement`.
 2. Keep issue progress comments current.
 3. Use `gwt-pr` and `gwt-pr-fix` to keep PR work moving without waiting for extra permission on routine branch-sync or CI fixes.
-4. Return to artifact maintenance only when execution uncovers a real spec bug or newly required clarification.
+4. After implementation, require a completion-gate reconciliation across `doc:spec.md`, `doc:tasks.md`, `checklist:acceptance.md`, `checklist:tdd.md`, progress comments, and verification evidence before treating the SPEC as complete.
+5. Return to artifact maintenance whenever execution uncovers a real spec bug, false completion markers, malformed checklist artifacts, or newly required clarification.
 
 ### 8. Quality checklists
 

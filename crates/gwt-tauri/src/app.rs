@@ -15,10 +15,23 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
+#[cfg(not(test))]
+use crate::commands::system::{startup_diagnostics_from_env, StartupDiagnostics};
 use crate::state::AppState;
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
+}
+
+#[cfg(not(test))]
+fn log_startup_checkpoint(diagnostics: &StartupDiagnostics, checkpoint: &'static str) {
+    if diagnostics.startup_trace {
+        info!(
+            category = "startup_diag",
+            checkpoint = checkpoint,
+            "Startup checkpoint"
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -297,90 +310,112 @@ pub fn build_app(
         .setup(move |_app| {
             #[cfg(not(test))]
             {
+                let startup_diagnostics = startup_diagnostics_from_env();
+                log_startup_checkpoint(&startup_diagnostics, "setup.begin");
+
                 if let Some(guard) = single_instance_guard.as_ref() {
                     spawn_single_instance_focus_listener(_app.handle().clone(), guard.clone());
                 }
 
                 // Native menubar (gwt-spec issue)
+                log_startup_checkpoint(&startup_diagnostics, "menu.begin");
                 if let Err(e) = crate::menu::rebuild_menu(_app.handle()) {
                     warn!(category = "menu", error = %e, "Failed to build initial menu");
                 } else {
                     info!(category = "menu", "Initial native menu built");
                 }
+                log_startup_checkpoint(&startup_diagnostics, "menu.ready");
 
                 // System tray (gwt-spec issue FR-310〜FR-313)
-                let tray_menu = tauri::menu::Menu::new(_app)?;
-                let show_item =
-                    tauri::menu::MenuItem::with_id(_app, "tray-show", "Show", true, None::<&str>)?;
-                let quit_item =
-                    tauri::menu::MenuItem::with_id(_app, "tray-quit", "Quit", true, None::<&str>)?;
-                tray_menu.append_items(&[&show_item, &quit_item])?;
+                if startup_diagnostics.disable_tray {
+                    info!(
+                        category = "startup_diag",
+                        checkpoint = "tray.skipped",
+                        "Startup tray creation disabled by diagnostics"
+                    );
+                } else {
+                    log_startup_checkpoint(&startup_diagnostics, "tray.begin");
+                    let tray_menu = tauri::menu::Menu::new(_app)?;
+                    let show_item = tauri::menu::MenuItem::with_id(
+                        _app,
+                        "tray-show",
+                        "Show",
+                        true,
+                        None::<&str>,
+                    )?;
+                    let quit_item = tauri::menu::MenuItem::with_id(
+                        _app,
+                        "tray-quit",
+                        "Quit",
+                        true,
+                        None::<&str>,
+                    )?;
+                    tray_menu.append_items(&[&show_item, &quit_item])?;
 
-                // NOTE: Requires `tauri` features `tray-icon` + `image-png`.
-                // macOS: use a template icon so the system can tint it appropriately.
-                // Others: use a high-contrast 2-tone icon for light/dark tray backgrounds.
-                #[cfg(target_os = "macos")]
-                let tray_icon_bytes = include_bytes!("../icons/trayTemplate.png");
-                #[cfg(not(target_os = "macos"))]
-                let tray_icon_bytes = include_bytes!("../icons/tray.png");
-                let icon = tauri::image::Image::from_bytes(tray_icon_bytes)?;
+                    #[cfg(target_os = "macos")]
+                    let tray_icon_bytes = include_bytes!("../icons/trayTemplate.png");
+                    #[cfg(not(target_os = "macos"))]
+                    let tray_icon_bytes = include_bytes!("../icons/tray.png");
+                    let icon = tauri::image::Image::from_bytes(tray_icon_bytes)?;
 
-                let _tray = tauri::tray::TrayIconBuilder::with_id("gwt-tray")
-                    .icon(icon)
-                    .tooltip("gwt")
-                    .menu(&tray_menu)
-                    .on_menu_event(|app, event| match event.id().as_ref() {
-                        "tray-show" => {
-                            show_best_window(app);
-                        }
-                        "tray-quit" => {
-                            let state = app.state::<AppState>();
-                            if !has_running_agents(&state) {
-                                cleanup_pty_processes(&state);
-                                state.request_quit();
-                                app.exit(0);
-                                return;
+                    let _tray = tauri::tray::TrayIconBuilder::with_id("gwt-tray")
+                        .icon(icon)
+                        .tooltip("gwt")
+                        .menu(&tray_menu)
+                        .on_menu_event(|app, event| match event.id().as_ref() {
+                            "tray-show" => {
+                                show_best_window(app);
                             }
+                            "tray-quit" => {
+                                let state = app.state::<AppState>();
+                                if !has_running_agents(&state) {
+                                    cleanup_pty_processes(&state);
+                                    state.request_quit();
+                                    app.exit(0);
+                                    return;
+                                }
 
-                            if !try_begin_exit_confirm(&state) {
-                                return;
+                                if !try_begin_exit_confirm(&state) {
+                                    return;
+                                }
+
+                                let app_handle = app.clone();
+                                app.dialog()
+                                    .message("Agents are still running. Quit gwt anyway?")
+                                    .kind(MessageDialogKind::Warning)
+                                    .buttons(MessageDialogButtons::OkCancelCustom(
+                                        "Quit".to_string(),
+                                        "Cancel".to_string(),
+                                    ))
+                                    .show(move |ok| {
+                                        let state = app_handle.state::<AppState>();
+                                        end_exit_confirm(&state);
+                                        if ok {
+                                            cleanup_pty_processes(&state);
+                                            state.request_quit();
+                                            app_handle.exit(0);
+                                        }
+                                    });
                             }
+                            _ => {}
+                        })
+                        .on_tray_icon_event(|tray, event| {
+                            use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+                            if let TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } = event
+                            {
+                                show_best_window(tray.app_handle());
+                            }
+                        })
+                        .build(_app)?;
 
-                            let app_handle = app.clone();
-                            app.dialog()
-                                .message("Agents are still running. Quit gwt anyway?")
-                                .kind(MessageDialogKind::Warning)
-                                .buttons(MessageDialogButtons::OkCancelCustom(
-                                    "Quit".to_string(),
-                                    "Cancel".to_string(),
-                                ))
-                                .show(move |ok| {
-                                    let state = app_handle.state::<AppState>();
-                                    end_exit_confirm(&state);
-                                    if ok {
-                                        cleanup_pty_processes(&state);
-                                        state.request_quit();
-                                        app_handle.exit(0);
-                                    }
-                                });
-                        }
-                        _ => {}
-                    })
-                    .on_tray_icon_event(|tray, event| {
-                        use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
-                        if let TrayIconEvent::Click {
-                            button: MouseButton::Left,
-                            button_state: MouseButtonState::Up,
-                            ..
-                        } = event
-                        {
-                            show_best_window(tray.app_handle());
-                        }
-                    })
-                    .build(_app)?;
-
-                #[cfg(target_os = "macos")]
-                _tray.set_icon_as_template(true)?;
+                    #[cfg(target_os = "macos")]
+                    _tray.set_icon_as_template(true)?;
+                    log_startup_checkpoint(&startup_diagnostics, "tray.ready");
+                }
 
                 // Startup shell environment behavior.
                 // On Unix, capture from login shell to get PATH extensions (nvm, pyenv, etc.).
@@ -388,12 +423,24 @@ pub fn build_app(
                 {
                     #[cfg(unix)]
                     {
-                        info!(
-                            category = "os_env",
-                            mode = "login_shell",
-                            "Capturing environment from login shell"
-                        );
-                        spawn_login_shell_env_capture(_app.handle().clone());
+                        if startup_diagnostics.disable_login_shell_capture {
+                            let state = _app.state::<AppState>();
+                            state.set_os_env_process_env_snapshot();
+                            info!(
+                                category = "startup_diag",
+                                checkpoint = "os_env.skipped",
+                                mode = "process_env",
+                                "Startup login shell capture disabled by diagnostics"
+                            );
+                        } else {
+                            log_startup_checkpoint(&startup_diagnostics, "os_env.begin");
+                            info!(
+                                category = "os_env",
+                                mode = "login_shell",
+                                "Capturing environment from login shell"
+                            );
+                            spawn_login_shell_env_capture(_app.handle().clone());
+                        }
                     }
                     #[cfg(not(unix))]
                     {
@@ -410,29 +457,19 @@ pub fn build_app(
                 // Project-scoped registration is executed when an agent is launched.
 
                 // Background task: frontend heartbeat watchdog (freeze detection)
-                {
-                    let watchdog_handle = _app.handle().clone();
-                    tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(Duration::from_secs(2));
-                        loop {
-                            interval.tick().await;
-                            let state = watchdog_handle.state::<AppState>();
-                            let elapsed = {
-                                let slot = state.last_heartbeat.lock().ok();
-                                slot.and_then(|guard| guard.map(|ts| ts.elapsed()))
-                            };
-                            if let Some(elapsed) = elapsed {
-                                if elapsed > Duration::from_secs(3) {
-                                    warn!(
-                                        category = "freeze_detection",
-                                        elapsed_ms = elapsed.as_millis(),
-                                        "Frontend heartbeat stale – possible UI freeze"
-                                    );
-                                    let _ = watchdog_handle.emit("freeze-detected", elapsed.as_millis() as u64);
-                                }
-                            }
-                        }
-                    });
+                if startup_diagnostics.disable_heartbeat_watchdog {
+                    info!(
+                        category = "startup_diag",
+                        checkpoint = "heartbeat_watchdog.skipped",
+                        "Startup heartbeat watchdog disabled by diagnostics"
+                    );
+                } else {
+                    log_startup_checkpoint(&startup_diagnostics, "heartbeat_watchdog.deferred");
+                    info!(
+                        category = "startup_diag",
+                        checkpoint = "heartbeat_watchdog.deferred",
+                        "Frontend heartbeat watchdog will arm after the first heartbeat"
+                    );
                 }
 
                 // Background task: check gh CLI authentication (gwt-spec issue T009)
@@ -453,7 +490,14 @@ pub fn build_app(
                 }
 
                 // Background task: watch session files for agent status changes (gwt-spec issue FR-820)
-                {
+                if startup_diagnostics.disable_session_watcher {
+                    info!(
+                        category = "startup_diag",
+                        checkpoint = "session_watcher.skipped",
+                        "Startup session watcher disabled by diagnostics"
+                    );
+                } else {
+                    log_startup_checkpoint(&startup_diagnostics, "session_watcher.begin");
                     let watcher_handle = _app.handle().clone();
                     if let Err(e) = crate::session_watcher::start_session_watcher(watcher_handle) {
                         warn!(
@@ -462,10 +506,18 @@ pub fn build_app(
                             "Failed to start session watcher (agent status updates will use polling fallback)"
                         );
                     }
+                    log_startup_checkpoint(&startup_diagnostics, "session_watcher.ready");
                 }
 
                 // Background task: check app update (best-effort, TTL cached).
-                {
+                if startup_diagnostics.disable_startup_update_check {
+                    info!(
+                        category = "startup_diag",
+                        checkpoint = "startup_update_check.skipped",
+                        "Startup update check disabled by diagnostics"
+                    );
+                } else {
+                    log_startup_checkpoint(&startup_diagnostics, "startup_update_check.begin");
                     let mgr = _app.state::<AppState>().update_manager.clone();
                     let app_handle_clone = _app.handle().clone();
                     tauri::async_runtime::spawn_blocking(move || {
@@ -482,7 +534,9 @@ pub fn build_app(
                         }
                         let _ = app_handle_clone.emit("app-update-state", &state);
                     });
+                    log_startup_checkpoint(&startup_diagnostics, "startup_update_check.ready");
                 }
+                log_startup_checkpoint(&startup_diagnostics, "setup.ready");
             }
 
             Ok(())
@@ -679,6 +733,8 @@ pub fn build_app(
             crate::commands::branches::list_branches,
             crate::commands::branches::list_worktree_branches,
             crate::commands::branches::list_remote_branches,
+            crate::commands::branches::list_branch_inventory,
+            crate::commands::branches::materialize_worktree_ref,
             crate::commands::branches::get_current_branch,
             crate::commands::project::open_project,
             crate::commands::project::probe_path,
@@ -802,6 +858,7 @@ pub fn build_app(
             crate::commands::pullrequest::mark_pr_ready,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
+            crate::commands::system::get_startup_diagnostics,
             crate::commands::system::heartbeat,
             crate::commands::system::report_frontend_metrics,
             crate::commands::project_index::ensure_index_runtime,

@@ -32,9 +32,11 @@ This skill is **check-only**:
      - `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100`
 5. Classify:
    - No PR found -> `NO_PR` + recommended action `CREATE_PR`
-   - Any PR where `mergedAt == null`
+   - Any OPEN PR where `mergedAt == null`
      -> `UNMERGED_PR_EXISTS` + recommended action `PUSH_ONLY`
-   - All PRs merged -> perform post-merge commit check
+   - Only CLOSED and unmerged PRs exist
+     -> `CLOSED_UNMERGED_ONLY` + recommended action `CREATE_PR`
+   - Otherwise, when at least one PR is merged -> perform post-merge commit check
 6. Post-merge commit check (critical when all PRs are merged):
    - Select latest merged PR by `mergedAt`
    - Get merge commit SHA from `mergeCommit.oid`
@@ -65,6 +67,7 @@ Recommended status values:
 
 - `NO_PR`
 - `UNMERGED_PR_EXISTS`
+- `CLOSED_UNMERGED_ONLY`
 - `ALL_MERGED_WITH_NEW_COMMITS`
 - `ALL_MERGED_NO_NEW_COMMITS`
 - `CHECK_FAILED`
@@ -96,6 +99,16 @@ Per-status format:
 
 - **NO_PR**:
   `>> CREATE PR — No PR exists for <head> -> <base>.`
+- **UNMERGED_PR_EXISTS** (2 lines):
+  `> PUSH ONLY — Unmerged PR open for <head>.`
+
+- **CLOSED_UNMERGED_ONLY** (2 lines):
+
+  ```text
+  >> CREATE PR — No open PR exists for <head> -> <base>; only closed unmerged PRs were found.
+     Last closed PR: #<number> <url>
+  ```
+
 - **UNMERGED_PR_EXISTS** (2 lines):
 
   ```text
@@ -132,6 +145,7 @@ Append the following line **only** when the worktree is dirty:
 | --- | --- | --- | --- |
 | `NO_PR` | `>>` | `CREATE PR` | No PR exists |
 | `UNMERGED_PR_EXISTS` | `>` | `PUSH ONLY` | Unmerged PR open |
+| `CLOSED_UNMERGED_ONLY` | `>>` | `CREATE PR` | Only closed unmerged PRs exist |
 | `ALL_MERGED_WITH_NEW_COMMITS` | `>>` | `CREATE PR` | N new commit(s) |
 | `ALL_MERGED_NO_NEW_COMMITS` | `--` | `NO ACTION` | All PRs merged |
 | `CHECK_FAILED` | `!!` | `MANUAL CHECK` | Could not determine |
@@ -149,6 +163,13 @@ Append the following line **only** when the worktree is dirty:
 ```text
 > PUSH ONLY — Unmerged PR open for `feature/my-branch`.
    PR: #456 https://github.com/org/repo/pull/456
+```
+
+**CLOSED_UNMERGED_ONLY:**
+
+```text
+>> CREATE PR — No open PR exists for `feature/my-branch` -> `develop`; only closed unmerged PRs were found.
+   Last closed PR: #455 https://github.com/org/repo/pull/455
 ```
 
 **ALL_MERGED_WITH_NEW_COMMITS:**
@@ -193,10 +214,11 @@ Append the following line **only** when the worktree is dirty:
    - `git fetch origin`
 4. Prefer the REST pull-request list endpoint over `gh pr list` when checking branch PR state.
 5. List PRs for head branch and classify using rules above.
-6. When all PRs are merged, validate merge commit ancestry before counting commits.
-7. If merge commit is not usable, fallback to `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO_ACTION`.
-8. Print human-readable result using the default template.
-9. Append JSON only if the user explicitly asks for machine-readable output.
+6. Treat only `state == open && merged_at == null` as an active blocking PR.
+7. When at least one PR is merged and no active blocking PR exists, validate merge commit ancestry before counting commits.
+8. If merge commit is not usable, fallback to `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO_ACTION`.
+9. Print human-readable result using the default template.
+10. Append JSON only if the user explicitly asks for machine-readable output.
 
 ## Quick start
 
@@ -228,16 +250,29 @@ repo_slug="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 owner="${repo_slug%%/*}"
 pr_json="$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")"
 pr_count="$(echo "$pr_json" | jq 'length')"
-unmerged_count="$(echo "$pr_json" | jq 'map(select(.merged_at == null)) | length')"
+open_unmerged_count="$(echo "$pr_json" | jq 'map(select(.state == "open" and .merged_at == null)) | length')"
+merged_count="$(echo "$pr_json" | jq 'map(select(.merged_at != null)) | length')"
+closed_unmerged_pr="$(
+  echo "$pr_json" \
+    | jq -r 'map(select(.state == "closed" and .merged_at == null)) | sort_by(.updated_at) | last | .number // empty'
+)"
+closed_unmerged_pr_url="$(
+  echo "$pr_json" \
+    | jq -r 'map(select(.state == "closed" and .merged_at == null)) | sort_by(.updated_at) | last | .html_url // empty'
+)"
 
 if [ "$pr_count" -eq 0 ]; then
   status="NO_PR"
   action="CREATE_PR"
   reason="No PR found for head branch"
-elif [ "$unmerged_count" -gt 0 ]; then
+elif [ "$open_unmerged_count" -gt 0 ]; then
   status="UNMERGED_PR_EXISTS"
   action="PUSH_ONLY"
-  reason="At least one PR for the head branch is not merged"
+  reason="At least one OPEN PR for the head branch is not merged"
+elif [ "$merged_count" -eq 0 ]; then
+  status="CLOSED_UNMERGED_ONLY"
+  action="CREATE_PR"
+  reason="Only closed, unmerged PRs exist for the head branch"
 else
   merge_commit="$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')"
   merge_commit_ancestor=0
@@ -297,11 +332,11 @@ latest_merged_pr="$(
 )"
 unmerged_pr="$(
   echo "$pr_json" \
-    | jq -r 'map(select(.merged_at == null)) | first | .number // empty'
+    | jq -r 'map(select(.state == "open" and .merged_at == null)) | sort_by(.updated_at) | last | .number // empty'
 )"
 unmerged_pr_url="$(
   echo "$pr_json" \
-    | jq -r 'map(select(.merged_at == null)) | first | .html_url // empty'
+    | jq -r 'map(select(.state == "open" and .merged_at == null)) | sort_by(.updated_at) | last | .html_url // empty'
 )"
 
 case "$status" in
@@ -311,6 +346,10 @@ case "$status" in
   UNMERGED_PR_EXISTS)
     echo "> PUSH ONLY — Unmerged PR open for \`$head\`."
     echo "   PR: #$unmerged_pr $unmerged_pr_url"
+    ;;
+  CLOSED_UNMERGED_ONLY)
+    echo ">> CREATE PR — No open PR exists for \`$head\` -> \`$base\`; only closed unmerged PRs were found."
+    echo "   Last closed PR: #$closed_unmerged_pr $closed_unmerged_pr_url"
     ;;
   ALL_MERGED_WITH_NEW_COMMITS)
     n="${new_commits:-$upstream_commits}"
