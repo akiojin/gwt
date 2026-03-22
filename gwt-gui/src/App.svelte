@@ -85,10 +85,15 @@
   } from "./lib/windowSessionRestore";
   import { collectScreenText } from "./lib/screenCapture";
   import {
+    startupProfilingTracker,
+    type StartupFrontendMetric,
+  } from "./lib/startupProfiling";
+  import {
     isAllowedExternalHttpUrl,
     openExternalUrl,
   } from "./lib/openExternalUrl";
   import { errorBus, type StructuredError } from "./lib/errorBus";
+  import { recordFrontendMetric } from "./lib/profiling.svelte";
   import { toastBus } from "./lib/toastBus";
   import {
     AGENT_PASTE_HINT_DISMISSED_KEY,
@@ -304,6 +309,7 @@
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
   let projectHydrationToken = 0;
+  let activeStartupProfileToken: string | null = null;
   const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
   const AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS = 1200;
 
@@ -1377,11 +1383,13 @@
   }
 
   async function applyRestoredWindowSession(label: string) {
+    const startupToken = startupProfilingTracker.start("restore_session");
     const result = await restoreCurrentWindowSession(label);
     if (result.kind === "opened") {
-      handleOpenedProjectPath(result.result.info.path);
+      handleOpenedProjectPath(result.result.info.path, startupToken);
       return;
     }
+    startupProfilingTracker.discard(startupToken);
     if (result.kind === "migrationRequired") {
       migrationSourceRoot = result.sourceRoot;
       migrationOpen = true;
@@ -1400,23 +1408,41 @@
     return;
   }
 
-  function handleOpenedProjectPath(path: string) {
+  function flushStartupMetrics(metrics: StartupFrontendMetric[]) {
+    for (const metric of metrics) {
+      recordFrontendMetric(metric);
+    }
+  }
+
+  function handleOpenedProjectPath(
+    path: string,
+    startupToken: string | null = null,
+  ) {
+    activeStartupProfileToken = startupToken;
     projectPath = path;
     const hydrationToken = ++projectHydrationToken;
-    void fetchCurrentBranch(path, hydrationToken);
-    void refreshCanvasWorktrees(path, hydrationToken);
+    void fetchCurrentBranch(path, hydrationToken, startupToken);
+    void refreshCanvasWorktrees(path, hydrationToken, startupToken);
     void updateWindowSession(path);
   }
 
   async function openProjectAndApplyCurrentWindow(
     path: string,
   ): Promise<OpenProjectResult> {
-    const { invoke } = await import("$lib/tauriInvoke");
-    const result = await invoke<OpenProjectResult>("open_project", { path });
-    if (result.action === "opened") {
-      handleOpenedProjectPath(result.info.path);
+    const startupToken = startupProfilingTracker.start("open_project");
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const result = await invoke<OpenProjectResult>("open_project", { path });
+      if (result.action === "opened") {
+        handleOpenedProjectPath(result.info.path, startupToken);
+      } else {
+        startupProfilingTracker.discard(startupToken);
+      }
+      return result;
+    } catch (err) {
+      startupProfilingTracker.discard(startupToken);
+      throw err;
     }
-    return result;
   }
 
   async function setWindowTitle() {
@@ -1436,8 +1462,8 @@
     }
   }
 
-  function handleProjectOpen(path: string) {
-    handleOpenedProjectPath(path);
+  function handleProjectOpen(path: string, startupToken?: string) {
+    handleOpenedProjectPath(path, startupToken ?? null);
   }
 
   function handleBranchSelect(branch: BranchInfo) {
@@ -1642,8 +1668,11 @@
   async function fetchCurrentBranch(
     targetProjectPath = projectPath,
     hydrationToken = projectHydrationToken,
+    startupToken: string | null = activeStartupProfileToken,
   ) {
     if (!targetProjectPath) return;
+    startupProfilingTracker.beginPhase(startupToken, "fetch_current_branch");
+    let success = false;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const branch = await invoke<BranchInfo | null>("get_current_branch", {
@@ -1659,17 +1688,29 @@
           selectedCanvasWorktreePath = resolveCanvasWorktreePath(branch.name);
         }
       }
+      success = true;
     } catch (err) {
       console.error("Failed to fetch current branch:", err);
       currentBranch = "";
+    } finally {
+      flushStartupMetrics(
+        startupProfilingTracker.finishPhase(
+          startupToken,
+          "fetch_current_branch",
+          success,
+        ),
+      );
     }
   }
 
   async function refreshCanvasWorktrees(
     targetProjectPath = projectPath,
     hydrationToken = projectHydrationToken,
+    startupToken: string | null = activeStartupProfileToken,
   ) {
     if (!targetProjectPath) return;
+    startupProfilingTracker.beginPhase(startupToken, "refresh_canvas_worktrees");
+    let success = false;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
@@ -1692,8 +1733,17 @@
       } else {
         selectedCanvasWorktreePath = resolveCanvasWorktreePath(selectedCanvasWorktreeBranch);
       }
+      success = true;
     } catch (err) {
       console.error("Failed to refresh canvas worktrees:", err);
+    } finally {
+      flushStartupMetrics(
+        startupProfilingTracker.finishPhase(
+          startupToken,
+          "refresh_canvas_worktrees",
+          success,
+        ),
+      );
     }
   }
 
@@ -1987,9 +2037,12 @@
     );
   }
 
-  function triggerRestoreProjectAgentTabs(targetProjectPath: string) {
+  function triggerRestoreProjectAgentTabs(
+    targetProjectPath: string,
+    startupToken: string | null = activeStartupProfileToken,
+  ) {
     const token = ++agentTabsRestoreToken;
-    void restoreProjectAgentTabs(targetProjectPath, token);
+    void restoreProjectAgentTabs(targetProjectPath, token, startupToken);
   }
 
   async function handleAgentLaunch(request: LaunchAgentRequest) {
@@ -2887,8 +2940,11 @@
   async function restoreProjectAgentTabs(
     targetProjectPath: string,
     token: number,
+    startupToken: string | null = activeStartupProfileToken,
     attempt = 0,
   ) {
+    startupProfilingTracker.beginPhase(startupToken, "restore_project_agent_tabs");
+    let success = false;
     if (startupDiagnostics?.disableTabRestore) {
       if (
         projectPath === targetProjectPath &&
@@ -2900,6 +2956,14 @@
         selectedCanvasCardId = null;
         branchBrowserState = DEFAULT_BRANCH_BROWSER_STATE;
       }
+      success = true;
+      flushStartupMetrics(
+        startupProfilingTracker.finishPhase(
+          startupToken,
+          "restore_project_agent_tabs",
+          success,
+        ),
+      );
       return;
     }
 
@@ -2914,6 +2978,14 @@
       ) {
         agentTabsHydratedProjectPath = targetProjectPath;
       }
+      success = true;
+      flushStartupMetrics(
+        startupProfilingTracker.finishPhase(
+          startupToken,
+          "restore_project_agent_tabs",
+          success,
+        ),
+      );
       return;
     }
 
@@ -2949,7 +3021,12 @@
       agentTabsRestoreToken === token
     ) {
       setTimeout(() => {
-        void restoreProjectAgentTabs(targetProjectPath, token, attempt + 1);
+        void restoreProjectAgentTabs(
+          targetProjectPath,
+          token,
+          startupToken,
+          attempt + 1,
+        );
       }, getAgentTabRestoreDelayMs(attempt));
       return;
     }
@@ -3010,6 +3087,14 @@
     }
 
     agentTabsHydratedProjectPath = targetProjectPath;
+    success = true;
+    flushStartupMetrics(
+      startupProfilingTracker.finishPhase(
+        startupToken,
+        "restore_project_agent_tabs",
+        success,
+      ),
+    );
   }
 
   // Restore persisted tabs when a project is opened.
@@ -3027,7 +3112,7 @@
     selectedCanvasCardId = null;
     branchBrowserState = DEFAULT_BRANCH_BROWSER_STATE;
     const target = projectPath;
-    triggerRestoreProjectAgentTabs(target);
+    triggerRestoreProjectAgentTabs(target, activeStartupProfileToken);
   });
 
   $effect(() => {

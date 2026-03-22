@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
+    time::{Duration, Instant},
 };
 
 use gwt_core::{
@@ -15,7 +16,7 @@ use gwt_core::{
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
-use tracing::{error, instrument};
+use tracing::{error, instrument, warn};
 
 use crate::{
     commands::{
@@ -24,6 +25,8 @@ use crate::{
     },
     state::AppState,
 };
+
+const LIST_WORKTREE_BRANCHES_WARN_THRESHOLD: Duration = Duration::from_millis(300);
 
 /// Serializable branch info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -706,6 +709,11 @@ fn list_worktree_branches_impl(
     project_path: &str,
     state: &AppState,
 ) -> Result<WorktreeBranchListing, StructuredError> {
+    let _span = tracing::info_span!(
+        "startup.list_worktree_branches_impl",
+        project_path = %project_path
+    )
+    .entered();
     let project_root = Path::new(project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "list_worktree_branches"))?;
@@ -889,6 +897,8 @@ pub async fn list_worktree_branches(
     project_path: String,
     app_handle: AppHandle,
 ) -> Result<Vec<BranchInfo>, StructuredError> {
+    let started = Instant::now();
+    let project_path_for_warn = project_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         with_panic_guard(
             "listing worktree branches",
@@ -918,6 +928,18 @@ pub async fn list_worktree_branches(
             &format!("Unexpected error while listing worktree branches: {e}"),
             "list_worktree_branches",
         )
+    })
+    .inspect(|_result| {
+        let elapsed = started.elapsed();
+        if elapsed > LIST_WORKTREE_BRANCHES_WARN_THRESHOLD {
+            warn!(
+                category = "project_start",
+                command = "list_worktree_branches",
+                project_path = %project_path_for_warn,
+                elapsed_ms = elapsed.as_millis(),
+                "list_worktree_branches took longer than expected"
+            );
+        }
     })?
 }
 
