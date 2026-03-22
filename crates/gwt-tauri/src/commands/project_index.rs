@@ -903,6 +903,12 @@ pub async fn search_github_issues_cmd(
 /// Build index for a project in the background. Non-fatal on errors.
 pub fn spawn_background_index(project_root: String) {
     tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let _span = tracing::info_span!(
+            "startup.spawn_background_index",
+            project_root = %project_root
+        )
+        .entered();
         // 1. Ensure runtime
         if let Err(e) = ensure_chroma_runtime_sync() {
             warn!(
@@ -920,6 +926,7 @@ pub fn spawn_background_index(project_root: String) {
                     category = "project_index",
                     files_indexed = resp.files_indexed.unwrap_or(0),
                     duration_ms = resp.duration_ms.unwrap_or(0),
+                    elapsed_ms = started.elapsed().as_millis(),
                     "Project index built successfully"
                 );
             }

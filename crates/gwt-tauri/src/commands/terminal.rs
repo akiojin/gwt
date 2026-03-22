@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use chrono::Utc;
@@ -35,9 +35,11 @@ use gwt_core::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tracing::instrument;
+use tracing::{instrument, warn};
 use uuid::Uuid;
 use which::which;
+
+const LIST_TERMINALS_WARN_THRESHOLD: Duration = Duration::from_millis(150);
 
 use crate::{
     commands::project::resolve_repo_path_for_project_root,
@@ -6003,13 +6005,14 @@ pub fn close_terminal(
 #[instrument(skip_all, fields(command = "list_terminals"))]
 #[tauri::command]
 pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> Vec<TerminalInfo> {
+    let started = Instant::now();
     let manager = match state.pane_manager.lock() {
         Ok(m) => m,
         Err(_) => return Vec::new(),
     };
 
     let project_filter = project_root.map(PathBuf::from);
-    manager
+    let terminals = manager
         .panes()
         .iter()
         .filter(|pane| match &project_filter {
@@ -6030,6 +6033,17 @@ pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> V
             }
         })
         .collect()
+    ;
+    let elapsed = started.elapsed();
+    if elapsed > LIST_TERMINALS_WARN_THRESHOLD {
+        warn!(
+            category = "project_start",
+            command = "list_terminals",
+            elapsed_ms = elapsed.as_millis(),
+            "list_terminals took longer than expected"
+        );
+    }
+    terminals
 }
 
 pub(crate) fn capture_scrollback_tail_from_state(
