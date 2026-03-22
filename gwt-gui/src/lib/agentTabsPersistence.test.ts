@@ -524,7 +524,7 @@ describe("agentTabsPersistence", () => {
     expect(restored.activeTerminalPaneIdToRespawn).toBe("t-old");
   });
 
-  it("buildRestoredProjectTabs collapses corrupted split roots back to one visible group", () => {
+  it("buildRestoredProjectTabs ignores stale split metadata and restores flat shell tabs", () => {
     const restored = buildRestoredProjectTabs(
       {
         tabs: [
@@ -556,22 +556,17 @@ describe("agentTabsPersistence", () => {
             { type: "group", groupId: "missing-group" },
           ],
         },
-      },
+      } as any,
       [],
     );
 
-    expect(restored.groups).toEqual([
-      {
-        id: "group-a",
-        tabIds: ["settings", "agentCanvas", "branchBrowser", "issues"],
-        activeTabId: "issues",
-      },
+    expect(restored.tabs).toEqual([
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
+      { id: "settings", label: "Settings", type: "settings" },
+      { id: "issues", label: "Issues", type: "issues" },
     ]);
-    expect(restored.root).toEqual({
-      type: "group",
-      groupId: "group-a",
-    });
-    expect(restored.activeGroupId).toBe("group-a");
+    expect(restored.activeTabId).toBe("issues");
   });
 
   it("shouldRetryAgentTabRestore handles transient empty matches", () => {
