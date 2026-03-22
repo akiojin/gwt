@@ -71,7 +71,11 @@ pub fn generate_managed_skills_block() -> String {
     block.push('\n');
     block.push_str("## Available Skills & Commands (gwt)\n\n");
     block.push_str("Skills are located in `.claude/skills/<name>/SKILL.md`.\n");
-    block.push_str("Commands can be invoked as `/gwt:<command-name>`.\n\n");
+    block.push_str("Commands can be invoked as `/gwt:<command-name>`.\n");
+    block.push_str("Routing rule: if the user is registering new work and no GitHub Issue number or URL exists yet, use `gwt-issue-register` before any manual `gh issue create` or SPEC command.\n");
+    block.push_str(
+        "Never bypass `gwt-issue-register` for duplicate search or ISSUE vs SPEC selection.\n\n",
+    );
 
     block.push_str("### Issue & SPEC Management\n\n");
     block.push_str("| Skill | Command | Description |\n");
@@ -2369,6 +2373,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(issue_register_skill.contains("gwt-issue-search"));
         assert!(issue_register_skill.contains("gwt-spec-register"));
         assert!(issue_register_skill.contains("gwt-issue-resolve"));
+        assert!(issue_register_skill.contains("Do not call `gh issue create` manually"));
 
         let project_index_skill = std::fs::read_to_string(
             temp.path()
@@ -2501,6 +2506,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(issue_register_command.contains("gwt-spec-register"));
         assert!(issue_register_command.contains("gwt-spec-ops"));
         assert!(issue_register_command.contains("POST /repos/<owner>/<repo>/issues"));
+        assert!(issue_register_command.contains("instead of creating a GitHub Issue directly"));
 
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
@@ -2978,6 +2984,9 @@ another-pattern
                 "managed block should NOT contain command ref for no-command skill: {command_ref}"
             );
         }
+
+        assert!(block.contains("no GitHub Issue number or URL exists yet"));
+        assert!(block.contains("Never bypass `gwt-issue-register`"));
     }
 
     #[test]
