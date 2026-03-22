@@ -1,0 +1,151 @@
+import { expect, test } from "@playwright/test";
+import { installTauriMock } from "./support/tauri-mock";
+import {
+  branchDevelop,
+  branchFeature,
+  branchMain,
+  defaultRecentProject,
+  openRecentProject,
+  setMockCommandResponses,
+} from "./support/helpers";
+
+const existingWorktree = {
+  path: "/tmp/gwt-playwright/.gwt/worktrees/feature-workflow-demo",
+  branch: branchFeature.name,
+  commit: branchFeature.commit,
+  status: "active",
+  is_main: false,
+  has_changes: false,
+  has_unpushed: false,
+  is_current: false,
+  is_protected: false,
+  is_agent_running: false,
+  agent_status: "unknown",
+  ahead: 1,
+  behind: 0,
+  is_gone: false,
+  last_tool_usage: null,
+  safety_level: "warning",
+};
+
+test.beforeEach(async ({ page }) => {
+  await installTauriMock(page, {
+    commandResponses: {
+      get_recent_projects: [defaultRecentProject],
+    },
+  });
+});
+
+test("Branch Browser can focus an existing worktree and create a remote one into Agent Canvas", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    window.localStorage.setItem(
+      "gwt.projectTabs.v2",
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/tmp/gwt-playwright": {
+            tabs: [
+              { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
+              { type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" },
+            ],
+            activeTabId: "branchBrowser",
+          },
+        },
+      }),
+    );
+  });
+  await setMockCommandResponses(page, {
+    list_branch_inventory: [
+      {
+        id: branchMain.name,
+        canonical_name: branchMain.name,
+        primary_branch: branchMain,
+        local_branch: branchMain,
+        remote_branch: null,
+        has_local: true,
+        has_remote: false,
+        worktree: null,
+        worktree_count: 0,
+        resolution_action: "createWorktree",
+      },
+      {
+        id: branchDevelop.name,
+        canonical_name: branchDevelop.name,
+        primary_branch: branchDevelop,
+        local_branch: branchDevelop,
+        remote_branch: null,
+        has_local: true,
+        has_remote: false,
+        worktree: null,
+        worktree_count: 0,
+        resolution_action: "createWorktree",
+      },
+      {
+        id: branchFeature.name,
+        canonical_name: branchFeature.name,
+        primary_branch: branchFeature,
+        local_branch: branchFeature,
+        remote_branch: null,
+        has_local: true,
+        has_remote: false,
+        worktree: existingWorktree,
+        worktree_count: 1,
+        resolution_action: "focusExisting",
+      },
+      {
+        id: "feature/new-browser-flow",
+        canonical_name: "feature/new-browser-flow",
+        primary_branch: {
+          ...branchFeature,
+          name: "origin/feature/new-browser-flow",
+          commit: "remote123",
+        },
+        local_branch: null,
+        remote_branch: {
+          ...branchFeature,
+          name: "origin/feature/new-browser-flow",
+          commit: "remote123",
+        },
+        has_local: false,
+        has_remote: true,
+        worktree: null,
+        worktree_count: 0,
+        resolution_action: "createWorktree",
+      },
+    ],
+    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
+    list_remote_branches: [
+      { ...branchFeature, name: "origin/feature/new-browser-flow", commit: "remote123" },
+    ],
+    list_worktrees: [existingWorktree],
+  });
+  await openRecentProject(page);
+  const visibleBrowser = page.locator('[data-testid="branch-browser-panel"]:visible');
+  await expect(visibleBrowser).toBeVisible();
+  await expect(page.locator(".branch-row", { hasText: branchFeature.name })).toBeVisible();
+
+  await page.locator(".branch-row", { hasText: branchFeature.name }).click();
+  await page.getByRole("button", { name: "Focus Worktree" }).click();
+
+  await expect(
+    page.locator('[data-testid^="agent-canvas-worktree-card-"]', {
+      hasText: branchFeature.name,
+    }),
+  ).toBeVisible();
+
+  await page.getByRole("tab", { name: "Branch Browser" }).click();
+  await expect(page.locator('[data-testid="branch-browser-panel"]:visible')).toBeVisible();
+  await page.getByRole("button", { name: "Remote" }).click();
+  await expect(page.locator(".branch-row", { hasText: "origin/feature/new-browser-flow" })).toBeVisible();
+  await page.locator(".branch-row", { hasText: "origin/feature/new-browser-flow" }).click();
+  await page.getByRole("button", { name: "Create Worktree" }).click();
+
+  await expect(
+    page.locator('[data-testid^="agent-canvas-worktree-card-"]', {
+      hasText: "feature/new-browser-flow",
+    }),
+  ).toBeVisible();
+});

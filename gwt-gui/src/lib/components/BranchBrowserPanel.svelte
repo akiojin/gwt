@@ -1,14 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "$lib/tauriInvoke";
-  import type { BranchBrowserPanelConfig, BranchInfo, WorktreeInfo } from "../types";
+  import type { BranchBrowserPanelConfig, BranchInventoryEntry } from "../types";
+  import { branchInventoryKey } from "../branchInventory";
   import {
-    buildWorktreeMap,
     divergenceClass,
     divergenceIndicator,
-    getSafetyLevel,
-    getSafetyTitle,
-    stripRemotePrefix,
+    safetyTitleForLevel,
     sortBranches,
     type SidebarFilterType,
   } from "./sidebarHelpers";
@@ -19,116 +17,52 @@
   let searchQuery = $state("");
   let loading = $state(true);
   let errorMessage: string | null = $state(null);
-  let branches: BranchInfo[] = $state([]);
-  let remoteBranchNames = $state(new Set<string>());
-  let worktreeMap = $state(new Map<string, WorktreeInfo>());
+  let remotePrimaryNames = $state(new Set<string>());
   let requestToken = 0;
 
   const filters: SidebarFilterType[] = ["Local", "Remote", "All"];
 
-  type BranchBrowserEntry = {
-    key: string;
-    branch: BranchInfo;
-    hasLocal: boolean;
-    hasRemote: boolean;
-    worktree: WorktreeInfo | null;
-  };
+  let branchEntries = $state<BranchInventoryEntry[]>([]);
 
-  function branchKey(name: string): string {
-    return name.trim().startsWith("origin/") ? stripRemotePrefix(name) : name.trim();
-  }
-
-  function buildEntries(
-    local: BranchInfo[],
-    remote: BranchInfo[],
-    worktrees: WorktreeInfo[],
+  function matchesFilter(
+    entry: BranchInventoryEntry,
     filter: SidebarFilterType,
-  ): BranchBrowserEntry[] {
-    const worktreeByBranch = buildWorktreeMap(worktrees);
-
-    if (filter === "Local") {
-      return local.map((branch) => ({
-        key: branchKey(branch.name),
-        branch,
-        hasLocal: true,
-        hasRemote: false,
-        worktree: worktreeByBranch.get(branchKey(branch.name)) ?? null,
-      }));
-    }
-
-    if (filter === "Remote") {
-      return remote.map((branch) => ({
-        key: branchKey(branch.name),
-        branch,
-        hasLocal: false,
-        hasRemote: true,
-        worktree: worktreeByBranch.get(branchKey(branch.name)) ?? null,
-      }));
-    }
-
-    const merged = new Map<string, BranchBrowserEntry>();
-    for (const branch of local) {
-      const key = branchKey(branch.name);
-      merged.set(key, {
-        key,
-        branch,
-        hasLocal: true,
-        hasRemote: false,
-        worktree: worktreeByBranch.get(key) ?? null,
-      });
-    }
-    for (const branch of remote) {
-      const key = branchKey(branch.name);
-      const existing = merged.get(key);
-      if (existing) {
-        merged.set(key, {
-          ...existing,
-          hasRemote: true,
-        });
-      } else {
-        merged.set(key, {
-          key,
-          branch,
-          hasLocal: false,
-          hasRemote: true,
-          worktree: worktreeByBranch.get(key) ?? null,
-        });
-      }
-    }
-    return Array.from(merged.values());
+  ): boolean {
+    if (filter === "Local") return entry.has_local;
+    if (filter === "Remote") return entry.has_remote;
+    return true;
   }
 
-  let branchEntries = $state<BranchBrowserEntry[]>([]);
-
-  let filteredBranches = $derived.by(() => {
+  let filteredEntries = $derived.by(() => {
     const q = searchQuery.trim().toLowerCase();
-    return sortBranches(
-      branchEntries
-        .map((entry) => entry.branch)
-        .filter((branch) => {
-        if (!q) return true;
-        const haystack = `${branch.display_name ?? ""} ${branch.name}`.toLowerCase();
-        return haystack.includes(q);
-      }),
+    const matchingEntries = branchEntries.filter((entry) => {
+      if (!matchesFilter(entry, activeFilter)) return false;
+      if (!q) return true;
+      const branch = entry.primary_branch;
+      const haystack =
+        `${branch.display_name ?? ""} ${branch.name} ${entry.canonical_name}`.toLowerCase();
+      return haystack.includes(q);
+    });
+    const sortedBranches = sortBranches(
+      matchingEntries.map((entry) => entry.primary_branch),
       activeFilter,
-      remoteBranchNames,
+      remotePrimaryNames,
       "name",
     );
-  });
-
-  let selectedWorktree = $derived.by(() => {
-    const selectedBranchName = config.selectedBranch?.name?.trim() ?? "";
-    if (!selectedBranchName) return null;
-    return (
-      worktreeMap.get(selectedBranchName) ??
-      worktreeMap.get(selectedBranchName.replace(/^origin\//, "")) ??
-      null
+    const orderedNames = new Map(
+      sortedBranches.map((branch, index) => [branch.name, index]),
+    );
+    return [...matchingEntries].sort(
+      (a, b) =>
+        (orderedNames.get(a.primary_branch.name) ?? Number.MAX_SAFE_INTEGER) -
+        (orderedNames.get(b.primary_branch.name) ?? Number.MAX_SAFE_INTEGER),
     );
   });
+
   let selectedEntry = $derived.by(() => {
     const selectedBranchName = config.selectedBranch?.name?.trim() ?? "";
-    const key = branchKey(selectedBranchName);
-    return branchEntries.find((entry) => entry.key === key) ?? null;
+    const key = branchInventoryKey(selectedBranchName);
+    return branchEntries.find((entry) => entry.canonical_name === key) ?? null;
   });
 
   async function fetchBranches(path: string) {
@@ -137,28 +71,36 @@
     errorMessage = null;
 
     try {
-      const [local, remote, worktrees] = await Promise.all([
-        invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path }),
-        invoke<BranchInfo[]>("list_remote_branches", { projectPath: path }),
-        invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }),
-      ]);
+      const entries = await invoke<BranchInventoryEntry[]>("list_branch_inventory", {
+        projectPath: path,
+      });
       if (token !== requestToken) return;
-      branches = activeFilter === "Local" ? local : activeFilter === "Remote" ? remote : local;
-      remoteBranchNames = new Set(remote.map((branch) => branchKey(branch.name)));
-      worktreeMap = buildWorktreeMap(worktrees);
-      branchEntries = buildEntries(local, remote, worktrees, activeFilter);
+      branchEntries = entries;
+      remotePrimaryNames = new Set(
+        entries
+          .filter((entry) => !entry.has_local && entry.has_remote)
+          .map((entry) => entry.primary_branch.name),
+      );
     } catch (error) {
       if (token !== requestToken) return;
-      errorMessage =
-        error instanceof Error ? error.message : String(error);
-      branches = [];
+      errorMessage = error instanceof Error ? error.message : String(error);
       branchEntries = [];
-      remoteBranchNames = new Set();
-      worktreeMap = new Map();
+      remotePrimaryNames = new Set();
     } finally {
       if (token === requestToken) {
         loading = false;
       }
+    }
+  }
+
+  function actionLabel(entry: BranchInventoryEntry): string {
+    switch (entry.resolution_action) {
+      case "focusExisting":
+        return "Focus Worktree";
+      case "resolveAmbiguity":
+        return "Resolve Ambiguity";
+      default:
+        return "Create Worktree";
     }
   }
 
@@ -170,10 +112,8 @@
   $effect(() => {
     const path = config.projectPath;
     const refreshKey = config.refreshKey;
-    const filter = activeFilter;
     void refreshKey;
     if (!path) return;
-    void filter;
     void fetchBranches(path);
   });
 </script>
@@ -220,36 +160,40 @@
         <div class="state-msg">Loading branches...</div>
       {:else if errorMessage}
         <div class="state-msg error">{errorMessage}</div>
-      {:else if filteredBranches.length === 0}
+      {:else if filteredEntries.length === 0}
         <div class="state-msg">No branches found.</div>
       {:else}
         <div class="branch-list">
-          {#each filteredBranches as branch}
+          {#each filteredEntries as entry (entry.id)}
             <button
               type="button"
               class="branch-row"
-              class:selected={selectedEntry?.key === branchKey(branch.name)}
-              onclick={() => config.onBranchSelect(branch)}
-              ondblclick={() => config.onBranchActivate?.(branch)}
+              class:selected={selectedEntry?.id === entry.id}
+              onclick={() => config.onBranchSelect(entry.primary_branch)}
+              ondblclick={() =>
+                entry.resolution_action !== "resolveAmbiguity" &&
+                config.onBranchActivate?.(entry.primary_branch)}
             >
               <div class="branch-primary">
-                <span class="branch-name">{branch.display_name ?? branch.name}</span>
-                {#if branch.display_name && branch.display_name !== branch.name}
-                  <span class="branch-sub">{branch.name}</span>
+                <span class="branch-name">{entry.primary_branch.display_name ?? entry.primary_branch.name}</span>
+                {#if entry.primary_branch.display_name && entry.primary_branch.display_name !== entry.primary_branch.name}
+                  <span class="branch-sub">{entry.primary_branch.name}</span>
                 {/if}
               </div>
               <div class="branch-meta">
-                {#if getSafetyLevel(branch, worktreeMap)}
+                {#if entry.worktree?.safety_level}
                   <span
-                    class={`safety-pill ${getSafetyLevel(branch, worktreeMap)}`}
-                    title={getSafetyTitle(branch, worktreeMap)}
+                    class={`safety-pill ${entry.worktree.safety_level}`}
+                    title={safetyTitleForLevel(entry.worktree.safety_level)}
                   >
-                    {getSafetyLevel(branch, worktreeMap)}
+                    {entry.worktree.safety_level}
                   </span>
                 {/if}
-                {#if divergenceIndicator(branch)}
-                  <span class={`divergence-pill ${divergenceClass(branch.divergence_status)}`}>
-                    {divergenceIndicator(branch)}
+                {#if divergenceIndicator(entry.primary_branch)}
+                  <span
+                    class={`divergence-pill ${divergenceClass(entry.primary_branch.divergence_status)}`}
+                  >
+                    {divergenceIndicator(entry.primary_branch)}
                   </span>
                 {/if}
               </div>
@@ -277,19 +221,31 @@
             </div>
             <div class="detail-row">
               <span class="detail-label">Worktree</span>
-              <span class="detail-value mono">{selectedWorktree?.path ?? "Not materialized"}</span>
+              <span class="detail-value mono">{selectedEntry?.worktree?.path ?? "Not materialized"}</span>
             </div>
             <div class="detail-row">
               <span class="detail-label">Coverage</span>
               <span class="detail-value">
-                {#if selectedEntry?.hasLocal && selectedEntry?.hasRemote}
+                {#if selectedEntry?.has_local && selectedEntry?.has_remote}
                   Local + Remote
-                {:else if selectedEntry?.hasLocal}
+                {:else if selectedEntry?.has_local}
                   Local
-                {:else if selectedEntry?.hasRemote}
+                {:else if selectedEntry?.has_remote}
                   Remote
                 {:else}
                   Unknown
+                {/if}
+              </span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Resolution</span>
+              <span class="detail-value">
+                {#if selectedEntry?.resolution_action === "focusExisting"}
+                  Existing worktree
+                {:else if selectedEntry?.resolution_action === "resolveAmbiguity"}
+                  Multiple worktrees
+                {:else}
+                  Create new worktree
                 {/if}
               </span>
             </div>
@@ -298,9 +254,13 @@
             <button
               type="button"
               class="cleanup-btn"
-              onclick={() => config.onBranchActivate?.(config.selectedBranch!)}
+              disabled={selectedEntry?.resolution_action === "resolveAmbiguity"}
+              onclick={() => {
+                if (selectedEntry?.resolution_action === "resolveAmbiguity") return;
+                config.onBranchActivate?.(config.selectedBranch!);
+              }}
             >
-              {selectedWorktree ? "Focus Worktree" : "Create Worktree"}
+              {selectedEntry ? actionLabel(selectedEntry) : "Create Worktree"}
             </button>
           </div>
         </div>
@@ -361,6 +321,11 @@
     padding: 7px 12px;
     cursor: pointer;
     font: inherit;
+  }
+
+  .cleanup-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
   }
 
   .filter-btn.active {

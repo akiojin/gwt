@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Tab, WorktreeInfo } from "../types";
+  import { buildAgentCanvasGraph } from "../agentCanvas";
   import AssistantPanel from "./AssistantPanel.svelte";
   import TerminalView from "../terminal/TerminalView.svelte";
 
@@ -39,52 +40,16 @@
     voiceInputError?: string | null;
   } = $props();
 
-  let sessionCards = $derived(
-    tabs.filter((tab) => tab.type === "agent" || tab.type === "terminal"),
-  );
+  let graph = $derived(buildAgentCanvasGraph(projectPath, currentBranch, tabs, worktrees));
+  let sessionCards = $derived(graph.sessionCards.map((card) => card.tab));
   let worktreeDetailsOpen = $state(false);
   let popupWorktreeBranch = $state<string | null>(null);
-  let canvasWorktrees = $derived(
-    worktrees.length > 0
-      ? worktrees
-      : [
-          {
-            path: projectPath,
-            branch: currentBranch || "Project Root",
-            commit: "",
-            status: "active",
-            is_main: false,
-            has_changes: false,
-            has_unpushed: false,
-            is_current: true,
-            is_protected: false,
-            is_agent_running: false,
-            agent_status: "unknown",
-            ahead: 0,
-            behind: 0,
-            is_gone: false,
-            last_tool_usage: null,
-            safety_level: "safe",
-          } satisfies WorktreeInfo,
-        ],
-  );
+  let canvasWorktrees = $derived(graph.worktrees);
   let popupWorktree = $derived(
     popupWorktreeBranch
       ? canvasWorktrees.find((worktree) => worktree.branch === popupWorktreeBranch) ?? null
       : null,
   );
-
-  function sessionBelongsToWorktree(tab: Tab, worktree: WorktreeInfo): boolean {
-    const worktreeBranch = (worktree.branch ?? "").trim();
-    const tabBranch = (tab.branchName ?? "").trim();
-    if (worktreeBranch && tabBranch) {
-      return worktreeBranch === tabBranch;
-    }
-    if (worktree.is_current && !tabBranch) {
-      return true;
-    }
-    return false;
-  }
 
   function worktreeCardTestId(worktree: WorktreeInfo): string {
     const raw = worktree.branch ?? "project-root";
@@ -139,27 +104,31 @@
         </p>
       </button>
 
-      {#each sessionCards.filter((tab) => sessionBelongsToWorktree(tab, worktree)) as tab (tab.id)}
+      {#each graph.sessionCards.filter((card) => card.worktreeCardId === `worktree:${worktree.path}`) as card (card.id)}
         <button
           class="canvas-card session-card"
-          class:agent-session={tab.type === "agent"}
-          class:terminal-session={tab.type === "terminal"}
-          class:selected={selectedSessionTabId === tab.id}
-          data-testid={`agent-canvas-session-${tab.id}`}
+          class:agent-session={card.tab.type === "agent"}
+          class:terminal-session={card.tab.type === "terminal"}
+          class:selected={selectedSessionTabId === card.tab.id}
+          data-testid={`agent-canvas-session-${card.tab.id}`}
           type="button"
-          onclick={() => onSessionSelect(tab.id)}
+          onclick={() => onSessionSelect(card.tab.id)}
         >
-          <span class="session-edge" aria-hidden="true"></span>
+          <span
+            class="session-edge"
+            aria-hidden="true"
+            data-testid={`agent-canvas-edge-${card.id.replace(/[^a-zA-Z0-9_-]+/g, "-")}`}
+          ></span>
           <div class="card-header">
-            <span class="card-kind">{tab.type === "agent" ? "Agent" : "Terminal"}</span>
-            <span class="card-title">{tab.label}</span>
+            <span class="card-kind">{card.tab.type === "agent" ? "Agent" : "Terminal"}</span>
+            <span class="card-title">{card.tab.label}</span>
           </div>
           <div class="card-body">
-            {#if tab.paneId}
+            {#if card.tab.paneId}
               <TerminalView
-                paneId={tab.paneId}
+                paneId={card.tab.paneId}
                 active={true}
-                agentId={tab.type === "agent" ? tab.agentId ?? null : null}
+                agentId={card.tab.type === "agent" ? card.tab.agentId ?? null : null}
                 {voiceInputEnabled}
                 {voiceInputListening}
                 {voiceInputPreparing}
@@ -170,7 +139,7 @@
               />
             {:else}
               <div class="session-placeholder">
-                {tab.type === "agent" ? "Agent starting..." : "Terminal starting..."}
+                {card.tab.type === "agent" ? "Agent starting..." : "Terminal starting..."}
               </div>
             {/if}
           </div>
@@ -212,7 +181,7 @@
           </div>
           <div class="detail-row">
             <span class="detail-label">Sessions</span>
-            <span class="detail-value">{sessionCards.filter((tab) => popupWorktree ? sessionBelongsToWorktree(tab, popupWorktree) : true).length}</span>
+            <span class="detail-value">{graph.sessionCards.filter((card) => popupWorktree ? card.worktreeCardId === `worktree:${popupWorktree.path}` : true).length}</span>
           </div>
           <div class="detail-row">
             <span class="detail-label">Worktree Path</span>

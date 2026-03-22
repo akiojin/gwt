@@ -138,6 +138,42 @@ describe("agentTabsPersistence", () => {
     });
   });
 
+  it("loadStoredProjectTabs preserves worktreePath for canvas session tabs", () => {
+    store.setItem(
+      PROJECT_TABS_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/repo": {
+            tabs: [
+              {
+                type: "terminal",
+                paneId: "t1",
+                label: "Shell",
+                branchName: "feature/demo",
+                worktreePath: "/repo/.gwt/worktrees/feature-demo",
+              },
+            ],
+            activeTabId: "terminal-t1",
+          },
+        },
+      }),
+    );
+
+    expect(loadStoredProjectTabs("/repo", store)).toEqual({
+      tabs: [
+        {
+          type: "terminal",
+          paneId: "t1",
+          label: "Shell",
+          branchName: "feature/demo",
+          worktreePath: "/repo/.gwt/worktrees/feature-demo",
+        },
+      ],
+      activeTabId: "terminal-t1",
+    });
+  });
+
   it("loadStoredProjectTabs falls back to legacy v1 state with terminal support", () => {
     store.setItem(
       PROJECT_AGENT_TABS_STORAGE_KEY,
@@ -241,6 +277,36 @@ describe("agentTabsPersistence", () => {
           activeTabId: "terminal-t1",
         },
       },
+    });
+  });
+
+  it("persistStoredProjectTabs isolates state per window label when provided", () => {
+    persistStoredProjectTabs(
+      "/repo",
+      {
+        tabs: [{ type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" }],
+        activeTabId: "agentCanvas",
+      },
+      store,
+      "main",
+    );
+    persistStoredProjectTabs(
+      "/repo",
+      {
+        tabs: [{ type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" }],
+        activeTabId: "branchBrowser",
+      },
+      store,
+      "project-2",
+    );
+
+    expect(loadStoredProjectTabs("/repo", store, "main")).toEqual({
+      tabs: [{ type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" }],
+      activeTabId: "agentCanvas",
+    });
+    expect(loadStoredProjectTabs("/repo", store, "project-2")).toEqual({
+      tabs: [{ type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" }],
+      activeTabId: "branchBrowser",
     });
   });
 

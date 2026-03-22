@@ -1,7 +1,12 @@
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import BranchBrowserPanel from "./BranchBrowserPanel.svelte";
-import type { BranchBrowserPanelConfig, BranchInfo, WorktreeInfo } from "../types";
+import type {
+  BranchBrowserPanelConfig,
+  BranchInfo,
+  BranchInventoryEntry,
+  WorktreeInfo,
+} from "../types";
 
 const invokeMock = vi.fn();
 
@@ -55,6 +60,32 @@ const worktree: WorktreeInfo = {
   safety_level: "warning",
 };
 
+const localEntry: BranchInventoryEntry = {
+  id: "feature/local",
+  canonical_name: "feature/local",
+  primary_branch: localBranch,
+  local_branch: localBranch,
+  remote_branch: null,
+  has_local: true,
+  has_remote: false,
+  worktree,
+  worktree_count: 1,
+  resolution_action: "focusExisting",
+};
+
+const remoteEntry: BranchInventoryEntry = {
+  id: "feature/remote",
+  canonical_name: "feature/remote",
+  primary_branch: remoteBranch,
+  local_branch: null,
+  remote_branch: remoteBranch,
+  has_local: false,
+  has_remote: true,
+  worktree: null,
+  worktree_count: 0,
+  resolution_action: "createWorktree",
+};
+
 function createConfig(overrides: Partial<BranchBrowserPanelConfig> = {}): BranchBrowserPanelConfig {
   return {
     projectPath: "/tmp/project",
@@ -76,9 +107,9 @@ describe("BranchBrowserPanel", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockImplementation((command: string) => {
-      if (command === "list_worktree_branches") return Promise.resolve([localBranch]);
-      if (command === "list_remote_branches") return Promise.resolve([remoteBranch]);
-      if (command === "list_worktrees") return Promise.resolve([worktree]);
+      if (command === "list_branch_inventory") {
+        return Promise.resolve([localEntry, remoteEntry]);
+      }
       return Promise.resolve([]);
     });
   });
@@ -99,7 +130,7 @@ describe("BranchBrowserPanel", () => {
     });
 
     await waitFor(() => expect(rendered.getByText("Local feature")).toBeTruthy());
-    expect(invokeMock).toHaveBeenCalledWith("list_worktree_branches", {
+    expect(invokeMock).toHaveBeenCalledWith("list_branch_inventory", {
       projectPath: "/tmp/project",
     });
     expect(rendered.getByTestId("branch-browser-detail").textContent).toContain(
@@ -120,20 +151,19 @@ describe("BranchBrowserPanel", () => {
     await waitFor(() =>
       expect(rendered.getByText("origin/feature/remote")).toBeTruthy(),
     );
-    expect(invokeMock).toHaveBeenCalledWith("list_remote_branches", {
-      projectPath: "/tmp/project",
-    });
   });
 
   it("merges local and remote refs into one canonical entry in All mode", async () => {
-    const matchingRemote: BranchInfo = {
-      ...remoteBranch,
-      name: "origin/feature/local",
+    const mergedEntry: BranchInventoryEntry = {
+      ...localEntry,
+      has_remote: true,
+      remote_branch: {
+        ...remoteBranch,
+        name: "origin/feature/local",
+      },
     };
     invokeMock.mockImplementation((command: string) => {
-      if (command === "list_worktree_branches") return Promise.resolve([localBranch]);
-      if (command === "list_remote_branches") return Promise.resolve([matchingRemote]);
-      if (command === "list_worktrees") return Promise.resolve([worktree]);
+      if (command === "list_branch_inventory") return Promise.resolve([mergedEntry]);
       return Promise.resolve([]);
     });
 
@@ -189,9 +219,7 @@ describe("BranchBrowserPanel", () => {
 
   it("shows create worktree when the selected branch has no materialized worktree", async () => {
     invokeMock.mockImplementation((command: string) => {
-      if (command === "list_worktree_branches") return Promise.resolve([]);
-      if (command === "list_remote_branches") return Promise.resolve([remoteBranch]);
-      if (command === "list_worktrees") return Promise.resolve([]);
+      if (command === "list_branch_inventory") return Promise.resolve([remoteEntry]);
       return Promise.resolve([]);
     });
 
@@ -206,5 +234,37 @@ describe("BranchBrowserPanel", () => {
     await waitFor(() =>
       expect(rendered.getByRole("button", { name: "Create Worktree" })).toBeTruthy(),
     );
+  });
+
+  it("disables activation when multiple worktrees map to one ref", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_branch_inventory") {
+        return Promise.resolve([
+          {
+            ...localEntry,
+            worktree: null,
+            worktree_count: 2,
+            resolution_action: "resolveAmbiguity" as const,
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const onBranchActivate = vi.fn();
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          selectedBranch: localBranch,
+          onBranchActivate,
+        }),
+      },
+    });
+
+    const button = await waitFor(() =>
+      rendered.getByRole("button", { name: "Resolve Ambiguity" }),
+    );
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(onBranchActivate).not.toHaveBeenCalled();
   });
 });

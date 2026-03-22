@@ -51,6 +51,29 @@ pub struct MaterializeWorktreeResult {
     pub created: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BranchInventoryResolutionAction {
+    FocusExisting,
+    CreateWorktree,
+    ResolveAmbiguity,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchInventoryEntry {
+    pub id: String,
+    pub canonical_name: String,
+    pub primary_branch: BranchInfo,
+    pub local_branch: Option<BranchInfo>,
+    pub remote_branch: Option<BranchInfo>,
+    pub has_local: bool,
+    pub has_remote: bool,
+    pub worktree: Option<crate::commands::cleanup::WorktreeInfo>,
+    pub worktree_count: usize,
+    pub resolution_action: BranchInventoryResolutionAction,
+}
+
 impl From<Branch> for BranchInfo {
     fn from(b: Branch) -> Self {
         let divergence_status = b.divergence_status().to_string();
@@ -223,6 +246,78 @@ fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str
     branch
 }
 
+fn branch_inventory_key(branch: &str, remotes: &[Remote]) -> String {
+    strip_known_remote_prefix(branch, remotes)
+        .trim()
+        .to_string()
+}
+
+fn build_branch_inventory_entries(
+    local: Vec<BranchInfo>,
+    remote: Vec<BranchInfo>,
+    worktrees: Vec<crate::commands::cleanup::WorktreeInfo>,
+    remotes: &[Remote],
+) -> Vec<BranchInventoryEntry> {
+    let mut local_by_key = HashMap::new();
+    let mut remote_by_key = HashMap::new();
+    let mut keys = HashSet::new();
+
+    for info in local {
+        let key = branch_inventory_key(&info.name, remotes);
+        keys.insert(key.clone());
+        local_by_key.insert(key, info);
+    }
+
+    for info in remote {
+        let key = branch_inventory_key(&info.name, remotes);
+        keys.insert(key.clone());
+        remote_by_key.insert(key, info);
+    }
+
+    let mut worktrees_by_key: HashMap<String, Vec<crate::commands::cleanup::WorktreeInfo>> =
+        HashMap::new();
+    for worktree in worktrees {
+        let key = branch_inventory_key(&worktree.branch, remotes);
+        worktrees_by_key.entry(key).or_default().push(worktree);
+    }
+
+    let mut sorted_keys = keys.into_iter().collect::<Vec<_>>();
+    sorted_keys.sort();
+
+    sorted_keys
+        .into_iter()
+        .filter_map(|key| {
+            let local_branch = local_by_key.remove(&key);
+            let remote_branch = remote_by_key.remove(&key);
+            let primary_branch = local_branch.clone().or_else(|| remote_branch.clone())?;
+            let matching_worktrees = worktrees_by_key.remove(&key).unwrap_or_default();
+            let worktree_count = matching_worktrees.len();
+            let worktree = if worktree_count == 1 {
+                matching_worktrees.into_iter().next()
+            } else {
+                None
+            };
+            let resolution_action = match worktree_count {
+                0 => BranchInventoryResolutionAction::CreateWorktree,
+                1 => BranchInventoryResolutionAction::FocusExisting,
+                _ => BranchInventoryResolutionAction::ResolveAmbiguity,
+            };
+            Some(BranchInventoryEntry {
+                id: key.clone(),
+                canonical_name: key,
+                primary_branch,
+                has_local: local_branch.is_some(),
+                has_remote: remote_branch.is_some(),
+                local_branch,
+                remote_branch,
+                worktree,
+                worktree_count,
+                resolution_action,
+            })
+        })
+        .collect()
+}
+
 fn materialize_worktree_ref_impl(
     project_path: &str,
     branch_ref: &str,
@@ -236,9 +331,7 @@ fn materialize_worktree_ref_impl(
 
     let mut existing = crate::commands::cleanup::list_worktrees_impl(project_path, state)?
         .into_iter()
-        .filter(|info| {
-            info.branch == normalized_branch || info.branch == branch_ref
-        })
+        .filter(|info| info.branch == normalized_branch || info.branch == branch_ref)
         .collect::<Vec<_>>();
 
     if existing.len() > 1 {
@@ -716,6 +809,26 @@ fn list_remote_branches_impl(
     Ok(infos)
 }
 
+fn list_branch_inventory_impl(
+    project_path: &str,
+    state: &AppState,
+) -> Result<Vec<BranchInventoryEntry>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))?;
+    let remotes = Remote::list(&repo_path).unwrap_or_default();
+    let local = list_worktree_branches_impl(project_path, state)?;
+    let remote = list_remote_branches_impl(project_path, state)?;
+    let worktrees = crate::commands::cleanup::list_worktrees_impl(project_path, state)
+        .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))?;
+    Ok(build_branch_inventory_entries(
+        local.infos,
+        remote,
+        worktrees,
+        &remotes,
+    ))
+}
+
 /// List all local branches in a repository
 #[instrument(skip_all, fields(command = "list_branches", project_path))]
 #[tauri::command]
@@ -755,6 +868,17 @@ pub fn list_branches(
             );
         }
         Ok(infos)
+    })
+}
+
+#[instrument(skip_all, fields(command = "list_branch_inventory", project_path))]
+#[tauri::command]
+pub fn list_branch_inventory(
+    project_path: String,
+    state: State<AppState>,
+) -> Result<Vec<BranchInventoryEntry>, StructuredError> {
+    with_panic_guard("listing branch inventory", "list_branch_inventory", || {
+        list_branch_inventory_impl(&project_path, &state)
     })
 }
 
@@ -819,7 +943,10 @@ pub async fn list_remote_branches(
     })?
 }
 
-#[instrument(skip_all, fields(command = "materialize_worktree_ref", project_path, branch_ref))]
+#[instrument(
+    skip_all,
+    fields(command = "materialize_worktree_ref", project_path, branch_ref)
+)]
 #[tauri::command]
 pub async fn materialize_worktree_ref(
     project_path: String,
@@ -894,6 +1021,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::commands::cleanup::{SafetyLevel, WorktreeInfo};
     use crate::state::{AppState, IssueListCacheEntry};
 
     fn init_git_repo(path: &Path) {
@@ -1052,6 +1180,100 @@ mod tests {
         assert!(!second.created);
         assert_eq!(second.worktree.branch, branch);
         assert_eq!(second.worktree.path, first.worktree.path);
+    }
+
+    fn make_branch_info(name: &str) -> BranchInfo {
+        BranchInfo {
+            name: name.to_string(),
+            display_name: None,
+            commit: "abc1234".to_string(),
+            is_current: false,
+            is_agent_running: false,
+            agent_status: "unknown".to_string(),
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            divergence_status: "UpToDate".to_string(),
+            commit_timestamp: Some(1_700_000_000_000),
+            is_gone: false,
+            last_tool_usage: None,
+        }
+    }
+
+    fn make_worktree_info(path: &str, branch: &str) -> WorktreeInfo {
+        WorktreeInfo {
+            path: path.to_string(),
+            branch: branch.to_string(),
+            commit: "abc1234".to_string(),
+            status: "active".to_string(),
+            is_main: false,
+            has_changes: false,
+            has_unpushed: false,
+            is_current: false,
+            is_protected: false,
+            is_agent_running: false,
+            agent_status: "unknown".to_string(),
+            ahead: 0,
+            behind: 0,
+            is_gone: false,
+            last_tool_usage: None,
+            safety_level: SafetyLevel::Safe,
+        }
+    }
+
+    #[test]
+    fn test_build_branch_inventory_entries_merges_local_and_remote_refs() {
+        let entries = build_branch_inventory_entries(
+            vec![make_branch_info("feature/inventory")],
+            vec![make_branch_info("origin/feature/inventory")],
+            vec![make_worktree_info(
+                "/tmp/wt-feature-inventory",
+                "feature/inventory",
+            )],
+            &[Remote::new("origin", "https://example.com/repo.git")],
+        );
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.canonical_name, "feature/inventory");
+        assert!(entry.has_local);
+        assert!(entry.has_remote);
+        assert_eq!(entry.primary_branch.name, "feature/inventory");
+        assert_eq!(
+            entry.resolution_action,
+            BranchInventoryResolutionAction::FocusExisting
+        );
+        assert_eq!(entry.worktree_count, 1);
+        assert_eq!(
+            entry
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.branch.as_str()),
+            Some("feature/inventory")
+        );
+    }
+
+    #[test]
+    fn test_build_branch_inventory_entries_marks_ambiguous_worktrees() {
+        let entries = build_branch_inventory_entries(
+            vec![make_branch_info("feature/ambiguous")],
+            Vec::new(),
+            vec![
+                make_worktree_info("/tmp/wt-a", "feature/ambiguous"),
+                make_worktree_info("/tmp/wt-b", "feature/ambiguous"),
+            ],
+            &[Remote::new("origin", "https://example.com/repo.git")],
+        );
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.worktree_count, 2);
+        assert!(entry.worktree.is_none());
+        assert_eq!(
+            entry.resolution_action,
+            BranchInventoryResolutionAction::ResolveAmbiguity
+        );
     }
 
     // --- display_name tests ---

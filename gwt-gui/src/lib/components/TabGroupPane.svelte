@@ -226,7 +226,7 @@
         class:dragging={draggedTabId === tab.id}
         class:drop-before={isTabDropTarget(tab.id, "before")}
         class:drop-after={isTabDropTarget(tab.id, "after")}
-        draggable="true"
+        draggable={!disableSplit}
         title={tab.type === "terminal" ? tab.cwd || "" : ""}
         onclick={() => onTabSelect(group.id, tab.id)}
         onkeydown={(event) => {

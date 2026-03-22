@@ -21,6 +21,7 @@ export type StoredAgentTab = {
   paneId: string;
   label: string;
   branchName?: string;
+  worktreePath?: string;
   agentId?: Tab["agentId"];
 };
 
@@ -30,6 +31,7 @@ export type StoredTerminalTab = {
   label: string;
   cwd?: string;
   branchName?: string;
+  worktreePath?: string;
 };
 
 export type StoredStaticTab = {
@@ -172,6 +174,15 @@ function normalizeAgentId(value: unknown): Tab["agentId"] | undefined {
   return undefined;
 }
 
+function buildProjectStorageKey(
+  projectPath: string,
+  windowLabel?: string | null,
+): string {
+  const path = projectPath.trim();
+  const label = normalizeString(windowLabel);
+  return label ? `${path}::window=${label}` : path;
+}
+
 function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
@@ -182,12 +193,14 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     if (!paneId) return null;
     const label = typeof obj.label === "string" ? obj.label : "";
     const branchName = normalizeString(obj.branchName);
+    const worktreePath = normalizeString(obj.worktreePath);
     const agentId = normalizeAgentId(obj.agentId);
     return {
       type: "agent",
       paneId,
       label,
       ...(branchName ? { branchName } : {}),
+      ...(worktreePath ? { worktreePath } : {}),
       ...(agentId ? { agentId } : {}),
     };
   }
@@ -198,12 +211,14 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     const label = typeof obj.label === "string" ? obj.label : "";
     const cwd = typeof obj.cwd === "string" ? obj.cwd : undefined;
     const branchName = normalizeString(obj.branchName);
+    const worktreePath = normalizeString(obj.worktreePath);
     return {
       type: "terminal",
       paneId,
       label,
       ...(cwd ? { cwd } : {}),
       ...(branchName ? { branchName } : {}),
+      ...(worktreePath ? { worktreePath } : {}),
     };
   }
 
@@ -535,16 +550,19 @@ function loadStoredProjectTabsLegacy(
 export function loadStoredProjectTabs(
   projectPath: string,
   storage?: Storage | null,
+  windowLabel?: string | null,
 ): StoredProjectTabs | null {
   const store = getStorageSafe(storage);
   if (!store) return null;
 
-  const key = projectPath.trim();
-  if (!key) return null;
+  const baseKey = projectPath.trim();
+  if (!baseKey) return null;
+  const scopedKey = buildProjectStorageKey(baseKey, windowLabel);
 
   return (
-    loadStoredProjectTabsCurrent(key, store) ??
-    loadStoredProjectTabsLegacy(key, store)
+    loadStoredProjectTabsCurrent(scopedKey, store) ??
+    loadStoredProjectTabsCurrent(baseKey, store) ??
+    loadStoredProjectTabsLegacy(baseKey, store)
   );
 }
 
@@ -557,11 +575,12 @@ export function persistStoredProjectTabs(
   projectPath: string,
   state: StoredProjectTabs,
   storage?: Storage | null,
+  windowLabel?: string | null,
 ) {
   const store = getStorageSafe(storage);
   if (!store) return;
 
-  const key = projectPath.trim();
+  const key = buildProjectStorageKey(projectPath, windowLabel);
   if (!key) return;
 
   try {
@@ -620,11 +639,13 @@ export function buildRestoredProjectTabs(
         normalizeString(tab.branchName) ||
         normalizeString(terminal?.branch_name) ||
         normalizeString(tab.label);
+      const worktreePath = normalizeString(tab.worktreePath);
       const agentId = inferAgentId(terminal?.agent_name) ?? tab.agentId;
       restoredTabs.push({
         id: `agent-${tab.paneId}`,
         label: tab.label,
         ...(branchName ? { branchName } : {}),
+        ...(worktreePath ? { worktreePath } : {}),
         type: "agent",
         paneId: tab.paneId,
         ...(agentId ? { agentId } : {}),
@@ -645,6 +666,7 @@ export function buildRestoredProjectTabs(
           paneId: tab.paneId,
           ...(tab.cwd ? { cwd: tab.cwd } : {}),
           ...(tab.branchName ? { branchName: tab.branchName } : {}),
+          ...(tab.worktreePath ? { worktreePath: tab.worktreePath } : {}),
         });
       } else {
         terminalTabsToRespawn.push(tab);
@@ -808,8 +830,9 @@ function buildRestoredLayoutState(
 export function loadStoredProjectAgentTabs(
   projectPath: string,
   storage?: Storage | null,
+  windowLabel?: string | null,
 ): StoredProjectAgentTabs | null {
-  const stored = loadStoredProjectTabs(projectPath, storage);
+  const stored = loadStoredProjectTabs(projectPath, storage, windowLabel);
   if (!stored) return null;
 
   const tabs = stored.tabs
@@ -832,6 +855,7 @@ export function persistStoredProjectAgentTabs(
   projectPath: string,
   state: StoredProjectAgentTabs,
   storage?: Storage | null,
+  windowLabel?: string | null,
 ) {
   const agentTabs: StoredProjectTab[] = state.tabs
     .map((tab) => {
@@ -846,7 +870,7 @@ export function persistStoredProjectAgentTabs(
     })
     .filter((tab): tab is StoredAgentTab => tab !== null);
 
-  const existing = loadStoredProjectTabs(projectPath, storage);
+  const existing = loadStoredProjectTabs(projectPath, storage, windowLabel);
   const preservedTabs = (existing?.tabs ?? []).filter((tab) => tab.type !== "agent");
 
   const activePaneId = normalizeString(state.activePaneId ?? "");
@@ -867,6 +891,7 @@ export function persistStoredProjectAgentTabs(
         : {}),
     },
     storage,
+    windowLabel,
   );
 }
 

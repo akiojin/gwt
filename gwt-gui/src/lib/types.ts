@@ -30,6 +30,24 @@ export interface BranchInfo {
   last_tool_usage?: string | null;
 }
 
+export type BranchInventoryResolutionAction =
+  | "focusExisting"
+  | "createWorktree"
+  | "resolveAmbiguity";
+
+export interface BranchInventoryEntry {
+  id: string;
+  canonical_name: string;
+  primary_branch: BranchInfo;
+  local_branch?: BranchInfo | null;
+  remote_branch?: BranchInfo | null;
+  has_local: boolean;
+  has_remote: boolean;
+  worktree?: WorktreeInfo | null;
+  worktree_count: number;
+  resolution_action: BranchInventoryResolutionAction;
+}
+
 export interface MaterializeWorktreeResult {
   worktree: WorktreeInfo;
   created: boolean;
@@ -210,6 +228,7 @@ export interface Tab {
   id: string;
   label: string;
   branchName?: string;
+  worktreePath?: string;
   agentId?: AgentId;
   type:
     | "summary"

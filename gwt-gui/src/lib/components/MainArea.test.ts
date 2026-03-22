@@ -123,6 +123,44 @@ describe("MainArea", () => {
     expect(rendered.container.querySelectorAll(".tab")).toHaveLength(3);
   });
 
+  it("honors the explicit activeTabId when fallback layout is used", () => {
+    const tabs: Tab[] = [
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
+    ];
+
+    const rendered = render(MainArea, {
+      props: {
+        tabs,
+        activeTabId: "branchBrowser",
+        projectPath: "/tmp/project",
+        onLaunchAgent: vi.fn(),
+        onQuickLaunch: vi.fn(),
+        onTabSelect: vi.fn(),
+        onTabClose: vi.fn(),
+        onTabReorder: vi.fn(),
+        branchBrowserConfig: {
+          projectPath: "/tmp/project",
+          refreshKey: 0,
+          widthPx: 260,
+          minWidthPx: 220,
+          maxWidthPx: 520,
+          mode: "branch",
+          currentBranch: "main",
+          agentTabBranches: [],
+          activeAgentTabBranch: null,
+          appLanguage: "en",
+          onBranchSelect: vi.fn(),
+        },
+      },
+    });
+
+    expect(
+      rendered.container.querySelector('[data-tab-id="branchBrowser"]')?.classList.contains("active"),
+    ).toBe(true);
+    expect(rendered.container.querySelector('[data-testid="branch-browser-panel"]')).toBeTruthy();
+  });
+
   it("keeps agent and terminal sessions off the top-level tab bar when Agent Canvas is present", () => {
     const tabs: Tab[] = [
       { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },

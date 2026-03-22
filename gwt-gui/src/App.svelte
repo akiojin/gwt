@@ -319,6 +319,7 @@
   let selectedCanvasSessionTabId: string | null = $state(null);
   let canvasWorktrees: WorktreeInfo[] = $state([]);
   let selectedCanvasWorktreeBranch: string | null = $state(null);
+  let selectedCanvasWorktreePath: string | null = $state(null);
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -1417,6 +1418,17 @@
     }
   }
 
+  function resolveCanvasWorktreePath(branchName?: string | null): string | null {
+    const normalizedBranch = (branchName ?? "").trim();
+    if (!normalizedBranch) {
+      return selectedCanvasWorktreePath;
+    }
+    return (
+      canvasWorktrees.find((worktree) => worktree.branch === normalizedBranch)?.path ??
+      selectedCanvasWorktreePath
+    );
+  }
+
   async function focusOrCreateWorktreeFromBranch(branch: BranchInfo) {
     if (!projectPath) return;
     handleBranchSelect(branch);
@@ -1432,6 +1444,7 @@
       );
       await refreshCanvasWorktrees(projectPath);
       selectedCanvasWorktreeBranch = result.worktree.branch;
+      selectedCanvasWorktreePath = result.worktree.path;
       openAgentCanvasTab();
       showToast(
         result.created
@@ -1530,9 +1543,9 @@
     );
     if (!sessionTab) return;
     selectedCanvasSessionTabId = tabId;
-    if (sessionTab.branchName) {
-      selectedCanvasWorktreeBranch = sessionTab.branchName;
-    }
+    selectedCanvasWorktreeBranch = sessionTab.branchName ?? selectedCanvasWorktreeBranch;
+    selectedCanvasWorktreePath =
+      sessionTab.worktreePath ?? resolveCanvasWorktreePath(sessionTab.branchName);
     openAgentCanvasTab();
   }
 
@@ -1567,6 +1580,7 @@
         ...(selectedCanvasWorktreeBranch
           ? { branchName: selectedCanvasWorktreeBranch }
           : {}),
+        ...(workingDir ? { worktreePath: workingDir } : {}),
         cwd: workingDir || undefined,
       };
       tabs = [...tabs, newTab];
@@ -1608,6 +1622,9 @@
         if (!selectedCanvasWorktreeBranch) {
           selectedCanvasWorktreeBranch = branch.name;
         }
+        if (!selectedCanvasWorktreePath) {
+          selectedCanvasWorktreePath = resolveCanvasWorktreePath(branch.name);
+        }
       }
     } catch (err) {
       console.error("Failed to fetch current branch:", err);
@@ -1625,17 +1642,19 @@
       if (targetProjectPath !== projectPath) return;
       canvasWorktrees = worktrees;
       if (!selectedCanvasWorktreeBranch) {
-        selectedCanvasWorktreeBranch =
-          worktrees.find((worktree) => worktree.is_current)?.branch ??
-          worktrees[0]?.branch ??
-          null;
+        const selectedWorktree =
+          worktrees.find((worktree) => worktree.is_current) ?? worktrees[0] ?? null;
+        selectedCanvasWorktreeBranch = selectedWorktree?.branch ?? null;
+        selectedCanvasWorktreePath = selectedWorktree?.path ?? null;
       } else if (
         !worktrees.some((worktree) => worktree.branch === selectedCanvasWorktreeBranch)
       ) {
-        selectedCanvasWorktreeBranch =
-          worktrees.find((worktree) => worktree.is_current)?.branch ??
-          worktrees[0]?.branch ??
-          null;
+        const selectedWorktree =
+          worktrees.find((worktree) => worktree.is_current) ?? worktrees[0] ?? null;
+        selectedCanvasWorktreeBranch = selectedWorktree?.branch ?? null;
+        selectedCanvasWorktreePath = selectedWorktree?.path ?? null;
+      } else {
+        selectedCanvasWorktreePath = resolveCanvasWorktreePath(selectedCanvasWorktreeBranch);
       }
     } catch (err) {
       console.error("Failed to refresh canvas worktrees:", err);
@@ -1710,28 +1729,11 @@
 
   async function resolveNewTerminalWorkingDir(): Promise<string | null> {
     if (!projectPath) return null;
-
-    const branchName = selectedBranch?.name?.trim() || "";
-    if (!branchName) return projectPath;
-
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
-        projectPath,
-      });
-      const normalizedBranchName = normalizeBranchName(branchName);
-      const selectedWorktree = worktrees.find((worktree) => {
-        const worktreeBranch = (worktree.branch ?? "").trim();
-        if (!worktreeBranch) return false;
-        return normalizeBranchName(worktreeBranch) === normalizedBranchName;
-      });
-      const selectedPath = selectedWorktree?.path?.trim() || "";
-      if (selectedPath) return selectedPath;
-    } catch (err) {
-      console.error("Failed to resolve selected worktree path:", err);
-    }
-
-    return projectPath;
+    return (
+      selectedCanvasWorktreePath ||
+      resolveCanvasWorktreePath(selectedCanvasWorktreeBranch) ||
+      projectPath
+    );
   }
 
   async function handleNewTerminal() {
@@ -1749,6 +1751,7 @@
         ...(selectedCanvasWorktreeBranch
           ? { branchName: selectedCanvasWorktreeBranch }
           : {}),
+        ...(workingDir ? { worktreePath: workingDir } : {}),
         cwd: workingDir || undefined,
       };
       tabs = [...tabs, newTab];
@@ -1821,6 +1824,7 @@
         ...(selectedCanvasWorktreeBranch
           ? { branchName: selectedCanvasWorktreeBranch }
           : {}),
+        ...(workingDir ? { worktreePath: workingDir } : {}),
         cwd: workingDir,
       };
       tabs = [...tabs, tab];
@@ -1871,6 +1875,8 @@
             label: terminalTabLabel(workingDir, storedTab.label || "Terminal"),
             type: "terminal",
             paneId,
+            ...(storedTab.branchName ? { branchName: storedTab.branchName } : {}),
+            ...(storedTab.worktreePath ? { worktreePath: storedTab.worktreePath } : {}),
             cwd: workingDir,
           });
         } catch (err) {
@@ -2024,6 +2030,9 @@
       type: "agent",
       paneId,
       ...(requestedBranch ? { branchName: requestedBranch } : {}),
+      ...(resolveCanvasWorktreePath(requestedBranch)
+        ? { worktreePath: resolveCanvasWorktreePath(requestedBranch) ?? undefined }
+        : {}),
     };
 
     if (requestedAgentId) {
@@ -2051,6 +2060,10 @@
           const resolvedBranch = terminal.branch_name?.trim() ?? "";
           if (resolvedBranch) {
             updates.branchName = resolvedBranch;
+            const resolvedWorktreePath = resolveCanvasWorktreePath(resolvedBranch);
+            if (resolvedWorktreePath) {
+              updates.worktreePath = resolvedWorktreePath;
+            }
             if (needsBranchResolution) {
               updates.label = worktreeTabLabel(resolvedBranch);
             }
@@ -2095,6 +2108,10 @@
       const fallbackSession =
         nextTabs.find((t) => t.type === "agent" || t.type === "terminal") ?? null;
       selectedCanvasSessionTabId = fallbackSession?.id ?? null;
+      selectedCanvasWorktreeBranch = fallbackSession?.branchName ?? selectedCanvasWorktreeBranch;
+      selectedCanvasWorktreePath =
+        fallbackSession?.worktreePath ??
+        resolveCanvasWorktreePath(fallbackSession?.branchName);
     }
 
     if (activeTabId !== tabId) return;
@@ -2129,6 +2146,9 @@
     const selected = tabs.find((tab) => tab.id === tabId);
     if (selected?.type === "agent" || selected?.type === "terminal") {
       selectedCanvasSessionTabId = tabId;
+      selectedCanvasWorktreeBranch = selected.branchName ?? selectedCanvasWorktreeBranch;
+      selectedCanvasWorktreePath =
+        selected.worktreePath ?? resolveCanvasWorktreePath(selected.branchName);
       activeTabId = "agentCanvas";
     }
   }
@@ -2243,6 +2263,8 @@
     const agentTab = findAgentTabByBranchName(tabs, branchName);
     if (agentTab) {
       selectedCanvasSessionTabId = agentTab.id;
+      selectedCanvasWorktreeBranch = branchName;
+      selectedCanvasWorktreePath = resolveCanvasWorktreePath(branchName);
       openAgentCanvasTab();
       return;
     }
@@ -2600,6 +2622,7 @@
           activeTabId = "agentCanvas";
           selectedCanvasSessionTabId = null;
           selectedCanvasWorktreeBranch = null;
+          selectedCanvasWorktreePath = null;
           canvasWorktrees = [];
           selectedBranch = null;
           currentBranch = "";
@@ -2723,6 +2746,10 @@
             label,
             type: "terminal",
             paneId,
+            ...(selectedCanvasWorktreeBranch
+              ? { branchName: selectedCanvasWorktreeBranch }
+              : {}),
+            ...(workingDir ? { worktreePath: workingDir } : {}),
             cwd: workingDir || undefined,
           };
           tabs = [...tabs, newTab];
@@ -2836,7 +2863,8 @@
       return;
     }
 
-    const stored = loadStoredProjectTabs(targetProjectPath);
+    const windowLabel = await resolveCurrentWindowLabel();
+    const stored = loadStoredProjectTabs(targetProjectPath, undefined, windowLabel);
 
     // Even if no stored state exists, mark hydrated so persistence can proceed.
     if (!stored) {
@@ -2905,6 +2933,16 @@
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     selectedCanvasSessionTabId = restored.activeCanvasSessionTabId;
+    const restoredCanvasSession =
+      restored.activeCanvasSessionTabId
+        ? mergedTabs.find((tab) => tab.id === restored.activeCanvasSessionTabId)
+        : null;
+    if (restoredCanvasSession?.branchName) {
+      selectedCanvasWorktreeBranch = restoredCanvasSession.branchName;
+      selectedCanvasWorktreePath =
+        restoredCanvasSession.worktreePath ??
+        resolveCanvasWorktreePath(restoredCanvasSession.branchName);
+    }
     if (allowOverrideActive) {
       if (
         restored.activeTabId &&
@@ -2969,6 +3007,7 @@
           paneId: tab.paneId,
           label: tab.label,
           ...(tab.branchName ? { branchName: tab.branchName } : {}),
+          ...(tab.worktreePath ? { worktreePath: tab.worktreePath } : {}),
           ...(tab.agentId ? { agentId: tab.agentId } : {}),
         });
         continue;
@@ -2980,6 +3019,8 @@
           paneId: tab.paneId,
           label: tab.label,
           ...(tab.cwd ? { cwd: tab.cwd } : {}),
+          ...(tab.branchName ? { branchName: tab.branchName } : {}),
+          ...(tab.worktreePath ? { worktreePath: tab.worktreePath } : {}),
         });
         continue;
       }
@@ -3017,7 +3058,7 @@
       tabs: storedTabs,
       activeTabId: storedActiveTabId,
       activeCanvasSessionTabId: selectedCanvasSessionTabId,
-    });
+    }, undefined, currentWindowLabel);
   });
 
   // Native menubar integration (Tauri emits "menu-action" to the focused window).
@@ -3171,16 +3212,6 @@
         e.preventDefault();
         void handleMenuAction("cleanup-worktrees");
       }
-      if (
-        e.ctrlKey &&
-        e.code === "Backquote" &&
-        !e.shiftKey &&
-        !e.altKey &&
-        !e.metaKey
-      ) {
-        e.preventDefault();
-        void handleMenuAction("new-terminal");
-      }
       // Cmd+O / Ctrl+O → Open Project
       if (
         e.key === "o" &&
@@ -3234,6 +3265,7 @@
     <div class="app-body">
       <MainArea
         {tabs}
+        {activeTabId}
         projectPath={projectPath as string}
         {branchBrowserConfig}
         {currentBranch}
@@ -3260,6 +3292,7 @@
         selectedCanvasWorktreeBranch={selectedCanvasWorktreeBranch}
         onCanvasWorktreeSelect={(branchName) => {
           selectedCanvasWorktreeBranch = branchName;
+          selectedCanvasWorktreePath = resolveCanvasWorktreePath(branchName);
         }}
       />
     </div>
