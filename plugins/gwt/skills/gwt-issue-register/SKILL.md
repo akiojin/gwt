@@ -10,6 +10,11 @@ feature request, enhancement idea, documentation task, or rough note.
 
 `gwt-issue-register` is the main entrypoint for new work registration.
 
+Hard routing rule:
+
+- If the user is asking to create, file, register, or draft new work and does not already have a GitHub Issue number or URL, start with this skill.
+- Do not call `gh issue create` manually and do not jump to `gwt-spec-register` before this skill completes duplicate search and ISSUE vs SPEC selection.
+
 - If the user already has an Issue number or URL, use `gwt-issue-resolve`.
 - If the target `gwt-spec` issue is already known, use `gwt-spec-ops`.
 - If this skill determines that a new SPEC is required, create it through

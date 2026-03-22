@@ -232,6 +232,8 @@
 
 Skills are located in `.claude/skills/<name>/SKILL.md`.
 Commands can be invoked as `/gwt:<command-name>`.
+Routing rule: if the user is registering new work and no GitHub Issue number or URL exists yet, use `gwt-issue-register` before any manual `gh issue create` or SPEC command.
+Never bypass `gwt-issue-register` for duplicate search or ISSUE vs SPEC selection.
 
 ### Issue & SPEC Management
 
