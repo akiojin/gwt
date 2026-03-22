@@ -142,10 +142,6 @@ describe("MainArea", () => {
         branchBrowserConfig: {
           projectPath: "/tmp/project",
           refreshKey: 0,
-          widthPx: 260,
-          minWidthPx: 220,
-          maxWidthPx: 520,
-          mode: "branch",
           currentBranch: "main",
           agentTabBranches: [],
           activeAgentTabBranch: null,

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { invoke } from "$lib/tauriInvoke";
   import type {
     BranchBrowserPanelConfig,
@@ -24,6 +23,7 @@
   let errorMessage: string | null = $state(null);
   let remotePrimaryNames = $state(new Set<string>());
   let requestToken = 0;
+  let lastFetchRequestKey = $state("");
   let lastHydrationKey = $state("");
   let lastStateEmitKey = $state("");
 
@@ -117,16 +117,14 @@
     }
   }
 
-  onMount(() => {
-    if (!config.projectPath) return;
-    void fetchBranches(config.projectPath);
-  });
-
   $effect(() => {
     const path = config.projectPath;
     const refreshKey = config.refreshKey;
     void refreshKey;
     if (!path) return;
+    const nextFetchRequestKey = `${path}::${refreshKey}`;
+    if (nextFetchRequestKey === lastFetchRequestKey) return;
+    lastFetchRequestKey = nextFetchRequestKey;
     void fetchBranches(path);
   });
 

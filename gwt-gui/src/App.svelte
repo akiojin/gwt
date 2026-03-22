@@ -148,12 +148,7 @@
     disableWindowSessionRestore: false,
   };
 
-  const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
-  const SIDEBAR_MODE_STORAGE_KEY = "gwt.sidebar.mode";
-  const DEFAULT_SIDEBAR_WIDTH_PX = 260;
-  const MIN_SIDEBAR_WIDTH_PX = 220;
-  const MAX_SIDEBAR_WIDTH_PX = 520;
-  type SidebarMode = "branch";
+  const ISSUE_CACHE_WARMUP_DELAY_MS = 2_000;
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
     enabled: false,
@@ -172,53 +167,6 @@
     query: "",
     selectedBranchName: null,
   };
-
-  function clampSidebarWidth(widthPx: number): number {
-    if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
-    return Math.max(
-      MIN_SIDEBAR_WIDTH_PX,
-      Math.min(MAX_SIDEBAR_WIDTH_PX, Math.round(widthPx)),
-    );
-  }
-
-  function loadSidebarWidth(): number {
-    if (typeof window === "undefined") return DEFAULT_SIDEBAR_WIDTH_PX;
-    try {
-      const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
-      if (!raw) return DEFAULT_SIDEBAR_WIDTH_PX;
-      return clampSidebarWidth(Number(raw));
-    } catch {
-      return DEFAULT_SIDEBAR_WIDTH_PX;
-    }
-  }
-
-  function persistSidebarWidth(widthPx: number) {
-    if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(widthPx));
-    } catch {
-      // Ignore localStorage failures (e.g., disabled in strict environments).
-    }
-  }
-
-  function loadSidebarMode(): SidebarMode {
-    if (typeof window === "undefined") return "branch";
-    try {
-      const raw = window.localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY);
-      return raw === "branch" ? "branch" : "branch";
-    } catch {
-      return "branch";
-    }
-  }
-
-  function persistSidebarMode(mode: SidebarMode) {
-    if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(SIDEBAR_MODE_STORAGE_KEY, mode);
-    } catch {
-      // Ignore localStorage failures (e.g., disabled in strict environments).
-    }
-  }
 
   function loadAgentPasteHintDismissed(): boolean {
     if (typeof window === "undefined") return false;
@@ -241,9 +189,6 @@
   }
 
   let projectPath: string | null = $state(null);
-  let sidebarVisible: boolean = $state(true);
-  let sidebarWidthPx: number = $state(loadSidebarWidth());
-  let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
   let prefillIssue: GitHubIssueInfo | null = $state(null);
   let showCleanupModal: boolean = $state(false);
@@ -252,7 +197,9 @@
   let aboutInitialTab: "general" | "system" | "statistics" = $state("general");
   let showTerminalDiagnostics: boolean = $state(false);
   let appError: string | null = $state(null);
-  let sidebarRefreshKey: number = $state(0);
+  let worktreeInventoryRefreshKey: number = $state(0);
+  let issueCacheWarmupTimer: ReturnType<typeof setTimeout> | null = null;
+  let issueCacheWarmupProjectPath: string | null = null;
   let worktreesEventAvailable: boolean = $state(false);
   let windowSessionRestoreStarted: boolean = false;
   let currentWindowLabel: string | null = $state(null);
@@ -360,11 +307,7 @@
     projectPath
       ? {
           projectPath,
-          refreshKey: sidebarRefreshKey,
-          widthPx: sidebarWidthPx,
-          minWidthPx: MIN_SIDEBAR_WIDTH_PX,
-          maxWidthPx: MAX_SIDEBAR_WIDTH_PX,
-          mode: sidebarMode,
+          refreshKey: worktreeInventoryRefreshKey,
           initialFilter: branchBrowserState.filter,
           initialQuery: branchBrowserState.query,
           selectedBranchName: branchBrowserState.selectedBranchName,
@@ -381,8 +324,6 @@
           agentTabBranches,
           activeAgentTabBranch,
           appLanguage,
-          onModeChange: handleSidebarModeChange,
-          onResize: handleSidebarResize,
           onBranchSelect: handleBranchSelect,
           onBranchActivate: handleBranchActivate,
           onCleanupRequest: handleCleanupRequest,
@@ -849,7 +790,7 @@
             if (typeof raw === "string" && raw && raw !== projectPath) return;
           }
 
-          sidebarRefreshKey++;
+          worktreeInventoryRefreshKey++;
           void refreshCanvasWorktrees(projectPath);
         },
       );
@@ -1406,6 +1347,35 @@
     void fetchCurrentBranch(path, hydrationToken);
     void refreshCanvasWorktrees(path, hydrationToken);
     void updateWindowSession(path);
+    scheduleIssueCacheWarmup(path);
+  }
+
+  function clearIssueCacheWarmupTimer() {
+    if (issueCacheWarmupTimer === null) return;
+    clearTimeout(issueCacheWarmupTimer);
+    issueCacheWarmupTimer = null;
+  }
+
+  function scheduleIssueCacheWarmup(path: string) {
+    clearIssueCacheWarmupTimer();
+    issueCacheWarmupProjectPath = path;
+    issueCacheWarmupTimer = setTimeout(() => {
+      issueCacheWarmupTimer = null;
+      const targetPath = issueCacheWarmupProjectPath;
+      if (!targetPath || projectPath !== targetPath) return;
+
+      void (async () => {
+        try {
+          const { invoke } = await import("$lib/tauriInvoke");
+          await invoke("sync_issue_cache", {
+            projectPath: targetPath,
+            mode: "diff",
+          });
+        } catch (error) {
+          console.error("Failed to warm issue cache in background:", error);
+        }
+      })();
+    }, ISSUE_CACHE_WARMUP_DELAY_MS);
   }
 
   async function openProjectAndApplyCurrentWindow(
@@ -1490,13 +1460,6 @@
     showAgentLaunch = true;
   }
 
-  function handleSidebarResize(nextWidthPx: number) {
-    const next = clampSidebarWidth(nextWidthPx);
-    if (next === sidebarWidthPx) return;
-    sidebarWidthPx = next;
-    persistSidebarWidth(next);
-  }
-
   function ensureWorkspaceTab(tab: Tab) {
     if (tabs.some((candidate) => candidate.id === tab.id || candidate.type === tab.type)) {
       return;
@@ -1576,12 +1539,6 @@
     selectedCanvasWorktreePath =
       sessionTab.worktreePath ?? resolveCanvasWorktreePath(sessionTab.branchName);
     openAgentCanvasTab();
-  }
-
-  function handleSidebarModeChange(next: SidebarMode) {
-    if (sidebarMode === next) return;
-    sidebarMode = next;
-    persistSidebarMode(next);
   }
 
   function handleBranchActivate(branch: BranchInfo) {
@@ -1732,7 +1689,7 @@
   }
 
   function handleBranchDisplayNameChanged() {
-    sidebarRefreshKey++;
+    worktreeInventoryRefreshKey++;
     if (!projectPath) return;
     void refreshAgentTabLabelsForProject(projectPath);
   }
@@ -2126,7 +2083,7 @@
 
     // Fallback: if the event API is not available, trigger a best-effort refresh.
     if (!worktreesEventAvailable) {
-      sidebarRefreshKey++;
+      worktreeInventoryRefreshKey++;
     }
   }
 
@@ -2306,7 +2263,7 @@
     }
     // If no session exists yet, move the user to Branch Browser and refresh its source view.
     openBranchBrowserTab();
-    sidebarRefreshKey++;
+    worktreeInventoryRefreshKey++;
   }
 
   function openIssueSpecTab(payload: ProjectModeSpecIssuePayload) {
@@ -3407,7 +3364,7 @@
 <CleanupModal
   open={showCleanupModal}
   preselectedBranch={cleanupPreselectedBranch}
-  refreshKey={sidebarRefreshKey}
+  refreshKey={worktreeInventoryRefreshKey}
   projectPath={projectPath ?? ""}
   {agentTabBranches}
   onClose={() => (showCleanupModal = false)}

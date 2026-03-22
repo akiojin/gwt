@@ -116,6 +116,26 @@ export async function installTauriMock(
         return value as InvokeArgs;
       }
 
+      async function resolveMockResponse(
+        response: unknown,
+      ): Promise<unknown> {
+        if (
+          response &&
+          typeof response === "object" &&
+          "__delayMs" in response &&
+          "value" in response
+        ) {
+          const delayMs = Number(
+            (response as { __delayMs?: unknown }).__delayMs ?? 0,
+          );
+          if (Number.isFinite(delayMs) && delayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+          return (response as { value: unknown }).value;
+        }
+        return response;
+      }
+
       function isEnterOnly(data: unknown): boolean {
         if (!Array.isArray(data)) return false;
         if (data.length === 1) return data[0] === 13 || data[0] === 10;
@@ -396,10 +416,10 @@ export async function installTauriMock(
           runtimeCommandResponses &&
           Object.prototype.hasOwnProperty.call(runtimeCommandResponses, cmd)
         ) {
-          return runtimeCommandResponses[cmd];
+          return resolveMockResponse(runtimeCommandResponses[cmd]);
         }
         if (Object.prototype.hasOwnProperty.call(commandResponses, cmd)) {
-          return commandResponses[cmd];
+          return resolveMockResponse(commandResponses[cmd]);
         }
 
         switch (cmd) {
