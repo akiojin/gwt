@@ -36,6 +36,7 @@
   let sessionCards = $derived(
     tabs.filter((tab) => tab.type === "agent" || tab.type === "terminal"),
   );
+  let worktreeDetailsOpen = $state(false);
 </script>
 
 <div class="agent-canvas">
@@ -48,7 +49,12 @@
   </div>
 
   <div class="canvas-grid">
-    <section class="canvas-card worktree-card" data-testid="agent-canvas-worktree-card">
+    <button
+      type="button"
+      class="canvas-card worktree-card"
+      data-testid="agent-canvas-worktree-card"
+      onclick={() => (worktreeDetailsOpen = true)}
+    >
       <div class="card-header">
         <span class="card-kind">Worktree</span>
         <span class="card-title">{currentBranch || "Project Root"}</span>
@@ -56,7 +62,7 @@
       <p class="card-copy">
         Worktree cards will become the parent nodes for agent and terminal sessions.
       </p>
-    </section>
+    </button>
 
     <section class="canvas-card assistant-card" data-testid="agent-canvas-assistant-card">
       <div class="card-header">
@@ -110,6 +116,53 @@
       </button>
     {/each}
   </div>
+
+  {#if worktreeDetailsOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="worktree-overlay"
+      data-testid="agent-canvas-worktree-overlay"
+      onclick={() => (worktreeDetailsOpen = false)}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="worktree-dialog"
+        data-testid="agent-canvas-worktree-dialog"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        onclick={(event) => event.stopPropagation()}
+      >
+        <div class="card-header">
+          <span class="card-kind">Worktree</span>
+          <span class="card-title">{currentBranch || "Project Root"}</span>
+        </div>
+        <div class="dialog-body">
+          <div class="detail-row">
+            <span class="detail-label">Project</span>
+            <span class="detail-value">{projectPath}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">Branch</span>
+            <span class="detail-value">{currentBranch || "Project Root"}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">Sessions</span>
+            <span class="detail-value">{sessionCards.length}</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="dialog-close"
+          onclick={() => (worktreeDetailsOpen = false)}
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -170,6 +223,10 @@
 
   .worktree-card {
     grid-column: 1;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    font: inherit;
   }
 
   .assistant-card {
@@ -259,6 +316,57 @@
     margin: 0;
     padding: 14px;
     color: var(--text-secondary);
+  }
+
+  .worktree-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.46);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+  }
+
+  .worktree-dialog {
+    width: min(560px, calc(100vw - 32px));
+    border-radius: 18px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-secondary) 85%, var(--bg-primary));
+    box-shadow: 0 22px 44px rgba(0, 0, 0, 0.24);
+  }
+
+  .dialog-body {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .detail-row {
+    display: grid;
+    gap: 4px;
+  }
+
+  .detail-label {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .detail-value {
+    word-break: break-all;
+  }
+
+  .dialog-close {
+    margin: 0 16px 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 8px 14px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
   }
 
   .session-placeholder {
