@@ -5,6 +5,7 @@ import {
   branchFeature,
   branchMain,
   defaultRecentProject,
+  waitForInvokeCommand,
   openRecentProject,
   setMockCommandResponses,
 } from "./support/helpers";
@@ -123,14 +124,7 @@ test("Branch Browser can focus an existing worktree and create a remote one into
     list_worktrees: [existingWorktree],
   });
   await openRecentProject(page);
-  await expect(
-    page.locator('[data-testid^="agent-canvas-worktree-card-"]', {
-      hasText: branchFeature.name,
-    }),
-  ).toBeVisible();
-  await page
-    .locator('[data-tab-id="branchBrowser"]')
-    .evaluate((node) => (node as HTMLElement).click());
+  await waitForInvokeCommand(page, "list_branch_inventory");
   const visibleBrowser = page.locator('[data-testid="branch-browser-panel"]:visible');
   await expect(visibleBrowser).toBeVisible();
   await expect(page.locator(".branch-row", { hasText: branchFeature.name })).toBeVisible();
@@ -200,14 +194,8 @@ test("Agent Canvas keeps compact detail visible and exposes zoom controls", asyn
   });
 
   await openRecentProject(page);
-  await expect(
-    page.locator('[data-testid^="agent-canvas-worktree-card-"]', {
-      hasText: branchFeature.name,
-    }),
-  ).toBeVisible();
-  await page
-    .locator('[data-tab-id="branchBrowser"]')
-    .evaluate((node) => (node as HTMLElement).click());
+  await waitForInvokeCommand(page, "list_branch_inventory");
+  await expect(page.locator('[data-testid="branch-browser-panel"]:visible')).toBeVisible();
   await page.locator(".branch-row", { hasText: branchFeature.name }).click();
   await page.getByRole("button", { name: "Focus Worktree" }).click();
   await page

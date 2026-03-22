@@ -362,6 +362,7 @@ export async function installTauriMock(
 
       async function invoke(cmd: string, rawArgs?: unknown): Promise<unknown> {
         const args = normalizeArgs(rawArgs);
+        invokeLog.push({ cmd, args });
         const runtimeCommandResponses = (
           window as unknown as {
             __GWT_MOCK_COMMAND_RESPONSES__?: Record<string, unknown>;
@@ -400,7 +401,6 @@ export async function installTauriMock(
         if (Object.prototype.hasOwnProperty.call(commandResponses, cmd)) {
           return commandResponses[cmd];
         }
-        invokeLog.push({ cmd, args });
 
         switch (cmd) {
           case "detect_agents":

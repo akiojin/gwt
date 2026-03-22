@@ -303,6 +303,7 @@
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
+  let projectHydrationToken = 0;
   const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
   const AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS = 1200;
 
@@ -368,6 +369,11 @@
           initialQuery: branchBrowserState.query,
           selectedBranchName: branchBrowserState.selectedBranchName,
           onStateChange: (state) => {
+            const unchanged =
+              branchBrowserState.filter === state.filter &&
+              branchBrowserState.query === state.query &&
+              branchBrowserState.selectedBranchName === state.selectedBranchName;
+            if (unchanged) return;
             branchBrowserState = state;
           },
           selectedBranch,
@@ -1396,8 +1402,9 @@
 
   function handleOpenedProjectPath(path: string) {
     projectPath = path;
-    fetchCurrentBranch();
-    void refreshCanvasWorktrees(path);
+    const hydrationToken = ++projectHydrationToken;
+    void fetchCurrentBranch(path, hydrationToken);
+    void refreshCanvasWorktrees(path, hydrationToken);
     void updateWindowSession(path);
   }
 
@@ -1632,13 +1639,17 @@
     }
   }
 
-  async function fetchCurrentBranch() {
-    if (!projectPath) return;
+  async function fetchCurrentBranch(
+    targetProjectPath = projectPath,
+    hydrationToken = projectHydrationToken,
+  ) {
+    if (!targetProjectPath) return;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const branch = await invoke<BranchInfo | null>("get_current_branch", {
-        projectPath,
+        projectPath: targetProjectPath,
       });
+      if (hydrationToken !== projectHydrationToken) return;
       if (branch) {
         currentBranch = branch.name;
         if (!selectedCanvasWorktreeBranch) {
@@ -1654,14 +1665,17 @@
     }
   }
 
-  async function refreshCanvasWorktrees(targetProjectPath = projectPath) {
+  async function refreshCanvasWorktrees(
+    targetProjectPath = projectPath,
+    hydrationToken = projectHydrationToken,
+  ) {
     if (!targetProjectPath) return;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
         projectPath: targetProjectPath,
       });
-      if (targetProjectPath !== projectPath) return;
+      if (hydrationToken !== projectHydrationToken) return;
       canvasWorktrees = worktrees;
       if (!selectedCanvasWorktreeBranch) {
         const selectedWorktree =
@@ -3014,6 +3028,14 @@
     branchBrowserState = DEFAULT_BRANCH_BROWSER_STATE;
     const target = projectPath;
     triggerRestoreProjectAgentTabs(target);
+  });
+
+  $effect(() => {
+    const target = projectPath;
+    if (!target) return;
+    const hydrationToken = projectHydrationToken;
+    void fetchCurrentBranch(target, hydrationToken);
+    void refreshCanvasWorktrees(target, hydrationToken);
   });
 
   // Persist tabs per project (best-effort).

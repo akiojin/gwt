@@ -134,4 +134,53 @@ describe("AgentCanvasPanel", () => {
     expect(onViewportChange).toHaveBeenCalled();
     expect(onSelectedCardChange).toHaveBeenCalledWith(`worktree:${worktree.path}`);
   });
+
+  it("keeps worktree-session edges visible after zoom and card drag", async () => {
+    const rendered = render(AgentCanvasPanel, {
+      props: {
+        projectPath: "/tmp/project",
+        currentBranch: "feature/canvas",
+        tabs: [
+          {
+            id: "agent-1",
+            label: "Agent One",
+            type: "agent",
+            paneId: "pane-1",
+            branchName: "feature/canvas",
+            worktreePath: worktree.path,
+          },
+        ],
+        worktrees: [worktree],
+      },
+    });
+
+    const edge = rendered.getByTestId("agent-canvas-edge-session-agent-1");
+    expect(edge).toBeTruthy();
+
+    await fireEvent.click(rendered.getByLabelText("Zoom in"));
+    const board = rendered.getByTestId("agent-canvas-board");
+    const worktreeCard = rendered.container.querySelector(
+      '[data-testid^="agent-canvas-worktree-card-"]',
+    ) as HTMLElement;
+    const dragHandle = worktreeCard.querySelector(".card-drag-handle") as HTMLElement;
+
+    await fireEvent.pointerDown(dragHandle, {
+      button: 0,
+      pointerId: 11,
+      clientX: 120,
+      clientY: 120,
+    });
+    await fireEvent.pointerMove(board, {
+      pointerId: 11,
+      clientX: 210,
+      clientY: 180,
+    });
+    await fireEvent.pointerUp(board, {
+      pointerId: 11,
+      clientX: 210,
+      clientY: 180,
+    });
+
+    expect(rendered.getByTestId("agent-canvas-edge-session-agent-1")).toBeTruthy();
+  });
 });

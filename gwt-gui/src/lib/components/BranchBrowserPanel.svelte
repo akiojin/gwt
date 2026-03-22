@@ -24,6 +24,8 @@
   let errorMessage: string | null = $state(null);
   let remotePrimaryNames = $state(new Set<string>());
   let requestToken = 0;
+  let lastHydrationKey = $state("");
+  let lastStateEmitKey = $state("");
 
   const filters: SidebarFilterType[] = ["Local", "Remote", "All"];
 
@@ -129,10 +131,13 @@
   });
 
   $effect(() => {
+    const nextKey = JSON.stringify([
+      config.initialFilter ?? "Local",
+      config.initialQuery ?? "",
+    ]);
+    if (nextKey === lastHydrationKey) return;
+    lastHydrationKey = nextKey;
     activeFilter = config.initialFilter ?? "Local";
-  });
-
-  $effect(() => {
     searchQuery = config.initialQuery ?? "";
   });
 
@@ -145,6 +150,9 @@
         config.selectedBranchName?.trim() ??
         null,
     };
+    const nextKey = JSON.stringify(nextState);
+    if (nextKey === lastStateEmitKey) return;
+    lastStateEmitKey = nextKey;
     config.onStateChange?.(nextState);
   });
 </script>
