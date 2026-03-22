@@ -469,6 +469,12 @@ impl Settings {
 
     fn load_from_path(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::logging::log_incident(
+                "config",
+                "load",
+                Some("CONFIG_LOAD_FAILED"),
+                &format!("path={}: {}", path.display(), e),
+            );
             error!(
                 category = "config",
                 path = %path.display(),
@@ -483,6 +489,12 @@ impl Settings {
         toml::from_str::<ConfigToml>(&content)
             .map(Into::into)
             .map_err(|e| {
+                crate::logging::log_incident(
+                    "config",
+                    "load",
+                    Some("CONFIG_PARSE_FAILED"),
+                    &format!("path={}: {}", path.display(), e),
+                );
                 error!(
                     category = "config",
                     path = %path.display(),
@@ -689,6 +701,12 @@ impl Settings {
             toml::to_string_pretty(&LocalConfigToml::from(persisted))
         }
         .map_err(|e| {
+            crate::logging::log_incident(
+                "config",
+                "save",
+                Some("CONFIG_SERIALIZE_FAILED"),
+                &format!("path={}: {}", path.display(), e),
+            );
             error!(
                 category = "config",
                 path = %path.display(),

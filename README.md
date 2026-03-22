@@ -186,6 +186,16 @@ Voice input uses Qwen3-ASR via a local Python runtime.
 - `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
 - `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
 
+### Logging and profiling
+
+gwt writes two separate output streams:
+
+- **Normal logs** (`gwt.jsonl.*`) — JSON Lines for operational tracking and issue reports. Stored under `~/.gwt/logs/<workspace>/`.
+- **Profiling** (`profile.json`) — Chrome Trace format for performance analysis. Enable in **Settings > Profiling**.
+
+The Report Dialog's **Application Logs** section collects normal logs only; profiling output is never included.
+For details see [#1758](https://github.com/akiojin/gwt/issues/1758).
+
 ## License
 
 MIT

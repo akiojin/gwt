@@ -195,11 +195,19 @@ pub async fn get_system_info(app_handle: AppHandle) -> SystemInfoResponse {
         get_system_info_impl(&state)
     })
     .await
-    .unwrap_or_else(|_| SystemInfoResponse {
-        cpu_usage_percent: 0.0,
-        memory_used_bytes: 0,
-        memory_total_bytes: 0,
-        gpus: Vec::new(),
+    .unwrap_or_else(|e| {
+        gwt_core::logging::log_incident(
+            "system",
+            "get_system_info",
+            Some("SYSTEM_INFO_TASK_FAILED"),
+            &e.to_string(),
+        );
+        SystemInfoResponse {
+            cpu_usage_percent: 0.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            gpus: Vec::new(),
+        }
     });
     let elapsed = started.elapsed();
     if elapsed > GET_SYSTEM_INFO_WARN_THRESHOLD {

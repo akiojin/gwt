@@ -13,6 +13,7 @@ use super::{
     backup::create_backup, config::MigrationConfig, error::MigrationError, state::MigrationState,
     validator::validate_migration,
 };
+use crate::logging::{log_flow_start, log_flow_success};
 
 /// Information about a worktree being migrated
 #[derive(Debug, Clone)]
@@ -49,6 +50,7 @@ pub fn execute_migration(
     config: &MigrationConfig,
     progress: Option<MigrationProgress>,
 ) -> Result<(), MigrationError> {
+    log_flow_start("migration", "execute_migration");
     let report_progress = |state: MigrationState| {
         if let Some(ref cb) = progress {
             cb(state);
@@ -61,11 +63,21 @@ pub fn execute_migration(
     let validation = validate_migration(config)?;
     info!("Phase 1 complete: Validation passed");
     if !validation.passed {
-        return Err(validation.errors.into_iter().next().unwrap_or(
-            MigrationError::ValidationFailed {
-                reason: "Unknown validation error".to_string(),
-            },
-        ));
+        let err =
+            validation
+                .errors
+                .into_iter()
+                .next()
+                .unwrap_or(MigrationError::ValidationFailed {
+                    reason: "Unknown validation error".to_string(),
+                });
+        crate::logging::log_incident(
+            "migration",
+            "execute_migration",
+            Some("MIGRATION_VALIDATION_FAILED"),
+            &err.to_string(),
+        );
+        return Err(err);
     }
 
     // Phase 2: Backup
@@ -194,6 +206,7 @@ pub fn execute_migration(
 
     report_progress(MigrationState::Completed);
     info!("Migration completed successfully");
+    log_flow_success("migration", "execute_migration");
     Ok(())
 }
 
@@ -673,12 +686,26 @@ fn create_bare_repository(config: &MigrationConfig) -> Result<(), MigrationError
             .args(["clone", "--bare", "--", &url])
             .arg(&bare_path)
             .output()
-            .map_err(|e| MigrationError::BareRepoCreationFailed {
-                reason: format!("Failed to clone bare: {}", e),
+            .map_err(|e| {
+                crate::logging::log_incident(
+                    "migration",
+                    "create_bare_repository",
+                    Some("MIGRATION_BARE_CLONE_SPAWN_FAILED"),
+                    &e.to_string(),
+                );
+                MigrationError::BareRepoCreationFailed {
+                    reason: format!("Failed to clone bare: {}", e),
+                }
             })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            crate::logging::log_incident(
+                "migration",
+                "create_bare_repository",
+                Some("MIGRATION_BARE_CLONE_FAILED"),
+                &stderr,
+            );
             return Err(MigrationError::BareRepoCreationFailed {
                 reason: format!("git clone --bare failed: {}", stderr),
             });
@@ -936,13 +963,27 @@ fn migrate_dirty_worktree(
         .arg(&wt_info.branch)
         .current_dir(&bare_path)
         .output()
-        .map_err(|e| MigrationError::WorktreeMigrationFailed {
-            branch: wt_info.branch.clone(),
-            reason: format!("Failed to add worktree: {}", e),
+        .map_err(|e| {
+            crate::logging::log_incident(
+                "migration",
+                "migrate_dirty_worktree",
+                Some("MIGRATION_WORKTREE_ADD_SPAWN_FAILED"),
+                &format!("branch={}: {}", wt_info.branch, e),
+            );
+            MigrationError::WorktreeMigrationFailed {
+                branch: wt_info.branch.clone(),
+                reason: format!("Failed to add worktree: {}", e),
+            }
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        crate::logging::log_incident(
+            "migration",
+            "migrate_dirty_worktree",
+            Some("MIGRATION_WORKTREE_ADD_FAILED"),
+            &format!("branch={}: {}", wt_info.branch, stderr),
+        );
         return Err(MigrationError::WorktreeMigrationFailed {
             branch: wt_info.branch.clone(),
             reason: format!("git worktree add failed: {}", stderr),
@@ -1003,13 +1044,27 @@ fn migrate_clean_worktree(
         .arg(&wt_info.branch)
         .current_dir(&bare_path)
         .output()
-        .map_err(|e| MigrationError::WorktreeMigrationFailed {
-            branch: wt_info.branch.clone(),
-            reason: format!("Failed to add worktree: {}", e),
+        .map_err(|e| {
+            crate::logging::log_incident(
+                "migration",
+                "migrate_clean_worktree",
+                Some("MIGRATION_WORKTREE_ADD_SPAWN_FAILED"),
+                &format!("branch={}: {}", wt_info.branch, e),
+            );
+            MigrationError::WorktreeMigrationFailed {
+                branch: wt_info.branch.clone(),
+                reason: format!("Failed to add worktree: {}", e),
+            }
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        crate::logging::log_incident(
+            "migration",
+            "migrate_clean_worktree",
+            Some("MIGRATION_WORKTREE_ADD_FAILED"),
+            &format!("branch={}: {}", wt_info.branch, stderr),
+        );
         return Err(MigrationError::WorktreeMigrationFailed {
             branch: wt_info.branch.clone(),
             reason: format!("git worktree add failed: {}", stderr),

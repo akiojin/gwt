@@ -180,6 +180,16 @@ scripts/voice-eval.sh
 - `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
 - `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
 
+### ログとプロファイリング
+
+gwt は 2 種類の出力を分離して管理します。
+
+- **通常ログ** (`gwt.jsonl.*`) — JSON Lines 形式の運用ログ。Issue report に使用。`~/.gwt/logs/<workspace>/` に保存
+- **プロファイリング** (`profile.json`) — Chrome Trace 形式の性能分析用。**Settings > Profiling** で有効化
+
+Report Dialog の **Application Logs** は通常ログのみを収集し、プロファイリング出力は含みません。
+詳細は [#1758](https://github.com/akiojin/gwt/issues/1758) を参照してください。
+
 ## ライセンス
 
 MIT
