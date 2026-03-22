@@ -44,6 +44,13 @@ pub struct BranchInfo {
     pub last_tool_usage: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterializeWorktreeResult {
+    pub worktree: crate::commands::cleanup::WorktreeInfo,
+    pub created: bool,
+}
+
 impl From<Branch> for BranchInfo {
     fn from(b: Branch) -> Self {
         let divergence_status = b.divergence_status().to_string();
@@ -214,6 +221,58 @@ fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str
         return rest;
     }
     branch
+}
+
+fn materialize_worktree_ref_impl(
+    project_path: &str,
+    branch_ref: &str,
+    state: &AppState,
+) -> Result<MaterializeWorktreeResult, String> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+    let remotes = Remote::list(&repo_path).unwrap_or_default();
+    let normalized_branch = strip_known_remote_prefix(branch_ref, &remotes).to_string();
+
+    let mut existing = crate::commands::cleanup::list_worktrees_impl(project_path, state)?
+        .into_iter()
+        .filter(|info| {
+            info.branch == normalized_branch || info.branch == branch_ref
+        })
+        .collect::<Vec<_>>();
+
+    if existing.len() > 1 {
+        return Err(format!(
+            "Multiple worktrees already exist for branch '{}'; resolve the ambiguity before focusing.",
+            normalized_branch
+        ));
+    }
+
+    if let Some(worktree) = existing.pop() {
+        return Ok(MaterializeWorktreeResult {
+            worktree,
+            created: false,
+        });
+    }
+
+    let created = manager
+        .create_for_branch(branch_ref)
+        .map_err(|e| e.to_string())?;
+
+    let worktree = crate::commands::cleanup::list_worktrees_impl(project_path, state)?
+        .into_iter()
+        .find(|info| info.path == created.path.to_string_lossy())
+        .ok_or_else(|| {
+            format!(
+                "Worktree was created for '{}' but could not be resolved in the refreshed listing.",
+                branch_ref
+            )
+        })?;
+
+    Ok(MaterializeWorktreeResult {
+        worktree,
+        created: true,
+    })
 }
 
 fn build_last_tool_usage_map(repo_path: &Path) -> HashMap<String, String> {
@@ -760,6 +819,33 @@ pub async fn list_remote_branches(
     })?
 }
 
+#[instrument(skip_all, fields(command = "materialize_worktree_ref", project_path, branch_ref))]
+#[tauri::command]
+pub async fn materialize_worktree_ref(
+    project_path: String,
+    branch_ref: String,
+    app_handle: AppHandle,
+) -> Result<MaterializeWorktreeResult, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_panic_guard(
+            "materializing worktree ref",
+            "materialize_worktree_ref",
+            || {
+                let state = app_handle.state::<AppState>();
+                materialize_worktree_ref_impl(&project_path, &branch_ref, &state)
+                    .map_err(|e| StructuredError::internal(&e, "materialize_worktree_ref"))
+            },
+        )
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Unexpected error while materializing worktree ref: {e}"),
+            "materialize_worktree_ref",
+        )
+    })?
+}
+
 /// Get the current branch
 #[instrument(skip_all, fields(command = "get_current_branch", project_path))]
 #[tauri::command]
@@ -939,6 +1025,33 @@ mod tests {
 
         let out = list_remote_branches_impl(&project_path, &state).expect("listing should work");
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_materialize_worktree_ref_impl_reuses_existing_worktree() {
+        let repo = TempDir::new().expect("temp dir");
+        init_git_repo(repo.path());
+        let branch = "feature/browser-open";
+        let create_branch = command("git")
+            .args(["branch", branch])
+            .current_dir(repo.path())
+            .output()
+            .expect("git branch should run");
+        assert!(create_branch.status.success(), "git branch failed");
+
+        let project_path = repo.path().to_string_lossy().to_string();
+        let state = AppState::new();
+
+        let first =
+            materialize_worktree_ref_impl(&project_path, branch, &state).expect("first create");
+        assert!(first.created);
+        assert_eq!(first.worktree.branch, branch);
+
+        let second =
+            materialize_worktree_ref_impl(&project_path, branch, &state).expect("reuse existing");
+        assert!(!second.created);
+        assert_eq!(second.worktree.branch, branch);
+        assert_eq!(second.worktree.path, first.worktree.path);
     }
 
     // --- display_name tests ---

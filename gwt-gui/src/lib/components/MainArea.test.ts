@@ -197,7 +197,9 @@ describe("MainArea", () => {
     const rendered = renderMainArea({ tabs, layout });
 
     expect(rendered.container.querySelector('[data-testid="agent-canvas-assistant-card"]')).toBeTruthy();
-    expect(rendered.container.querySelector('[data-testid="agent-canvas-worktree-card"]')).toBeTruthy();
+    expect(
+      rendered.container.querySelector('[data-testid^="agent-canvas-worktree-card-"]'),
+    ).toBeTruthy();
   });
 
   it("emits tab select with group id", async () => {

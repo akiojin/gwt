@@ -4,6 +4,7 @@
     GitHubIssueInfo,
     LaunchAgentRequest,
     Tab,
+    WorktreeInfo,
   } from "../types";
   import type {
     TabDropPosition,
@@ -34,6 +35,9 @@
     branchBrowserConfig = undefined,
     currentBranch = "",
     selectedCanvasSessionTabId = null,
+    canvasWorktrees = [],
+    selectedCanvasWorktreeBranch = null,
+    onCanvasWorktreeSelect = () => {},
     disableSplit = false,
     onCanvasSessionSelect = () => {},
     draggedTabId = null,
@@ -71,6 +75,9 @@
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
     selectedCanvasSessionTabId?: string | null;
+    canvasWorktrees?: WorktreeInfo[];
+    selectedCanvasWorktreeBranch?: string | null;
+    onCanvasWorktreeSelect?: (branchName: string) => void;
     disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
     draggedTabId?: string | null;
@@ -415,6 +422,9 @@
                 {projectPath}
                 {currentBranch}
                 tabs={canvasSessionTabs}
+                worktrees={canvasWorktrees}
+                selectedWorktreeBranch={selectedCanvasWorktreeBranch}
+                onWorktreeSelect={onCanvasWorktreeSelect}
                 selectedSessionTabId={selectedCanvasSessionTabId}
                 onSessionSelect={onCanvasSessionSelect}
                 onOpenSettings={onOpenSettings ?? (() => {})}

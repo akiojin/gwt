@@ -19,7 +19,11 @@ describe("AgentCanvasPanel", () => {
     });
 
     expect(rendered.queryByTestId("agent-canvas-worktree-dialog")).toBeNull();
-    await fireEvent.click(rendered.getByTestId("agent-canvas-worktree-card"));
+    const worktreeCard = rendered.container.querySelector(
+      '[data-testid^="agent-canvas-worktree-card-"]',
+    ) as HTMLElement;
+    expect(worktreeCard).toBeTruthy();
+    await fireEvent.click(worktreeCard);
 
     const dialog = rendered.getByTestId("agent-canvas-worktree-dialog");
     expect(dialog.textContent).toContain("/tmp/project");

@@ -251,7 +251,10 @@ fn running_agent_branches(state: &AppState) -> HashSet<String> {
     branches
 }
 
-fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<WorktreeInfo>, String> {
+pub(crate) fn list_worktrees_impl(
+    project_path: &str,
+    state: &AppState,
+) -> Result<Vec<WorktreeInfo>, String> {
     let project_root = Path::new(project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
     let last_tool = build_last_tool_usage_map(&repo_path);

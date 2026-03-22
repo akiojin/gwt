@@ -30,6 +30,11 @@ export interface BranchInfo {
   last_tool_usage?: string | null;
 }
 
+export interface MaterializeWorktreeResult {
+  worktree: WorktreeInfo;
+  created: boolean;
+}
+
 export interface ProjectInfo {
   path: string;
   repo_name: string;

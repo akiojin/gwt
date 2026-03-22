@@ -1,6 +1,7 @@
 <script lang="ts">
   import type {
     BranchBrowserPanelConfig,
+    MaterializeWorktreeResult,
     Tab,
     BranchInfo,
     GitHubIssueInfo,
@@ -42,35 +43,15 @@
     buildRestoredProjectTabs,
     shouldRetryAgentTabRestore,
     type StoredProjectTab,
-    type StoredTabGroup,
-    type StoredTabLayoutNode,
     type StoredTerminalTab,
   } from "./lib/agentTabsPersistence";
   import {
     defaultAppTabs,
+    type TabDropPosition,
     reorderTabsByDrop,
     shouldAllowRestoredActiveTab,
   } from "./lib/appTabs";
   import { getNextTabId, getPreviousTabId } from "./lib/tabNavigation";
-  import {
-    addTabToActiveGroup,
-    canSplitTab,
-    createInitialTabLayout,
-    flattenTabIdsByLayout,
-    getGroupForTab,
-    moveTabToGroup,
-    normalizeTabLayoutState,
-    removeTabFromLayout,
-    reorderTabsInGroup,
-    resizeSplitNode,
-    setActiveGroup,
-    setActiveTabInGroup,
-    splitTabToGroupEdge,
-    type TabDropPosition,
-    type TabGroupState,
-    type TabLayoutNode,
-    type TabSplitDirection,
-  } from "./lib/tabLayout";
   import {
     runStartupUpdateCheck,
     STARTUP_UPDATE_INITIAL_DELAY_MS,
@@ -304,10 +285,6 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state(defaultAppTabs());
-  const initialTabLayout = createInitialTabLayout(defaultAppTabs(), "agentCanvas");
-  let layoutGroups: Record<string, TabGroupState> = $state(initialTabLayout.groups);
-  let layoutRoot: TabLayoutNode = $state(initialTabLayout.root);
-  let activeGroupId: string = $state(initialTabLayout.activeGroupId);
   let activeTabId: string = $state("agentCanvas");
   let lastWindowMenuTabsSignature: string | null = null;
   let lastWindowMenuActiveTabId: string | null = null;
@@ -340,6 +317,8 @@
     })(),
   );
   let selectedCanvasSessionTabId: string | null = $state(null);
+  let canvasWorktrees: WorktreeInfo[] = $state([]);
+  let selectedCanvasWorktreeBranch: string | null = $state(null);
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -404,62 +383,6 @@
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
   type AvailableUpdateState = Extract<UpdateState, { state: "available" }>;
-
-  function readTabLayoutState() {
-    return normalizeTabLayoutState({
-      groups: layoutGroups,
-      root: layoutRoot,
-      activeGroupId,
-    }, activeTabId);
-  }
-
-  function applyTabLayoutState(next: {
-    groups: Record<string, TabGroupState>;
-    root: TabLayoutNode;
-    activeGroupId: string;
-  }) {
-    const normalized = normalizeTabLayoutState(next, activeTabId);
-    layoutGroups = normalized.groups;
-    layoutRoot = normalized.root;
-    activeGroupId = normalized.activeGroupId;
-    const nextActiveTabId =
-      normalized.groups[normalized.activeGroupId]?.activeTabId ??
-      tabs.find((tab) => tab.id === activeTabId)?.id ??
-      tabs[0]?.id ??
-      "";
-    activeTabId = nextActiveTabId;
-  }
-
-  function activeGroupTabIds(): string[] {
-    return layoutGroups[activeGroupId]?.tabIds ?? [];
-  }
-
-  function buildStoredLayoutGroups(): StoredTabGroup[] {
-    return Object.values(layoutGroups).map((group) => ({
-      id: group.id,
-      tabIds: [...group.tabIds],
-      activeTabId: group.activeTabId,
-    }));
-  }
-
-  function buildStoredLayoutRoot(node: TabLayoutNode): StoredTabLayoutNode {
-    if (node.type === "group") {
-      return {
-        type: "group",
-        groupId: node.groupId,
-      };
-    }
-    return {
-      type: "split",
-      id: node.id,
-      axis: node.axis,
-      sizes: node.sizes,
-      children: [
-        buildStoredLayoutRoot(node.children[0]),
-        buildStoredLayoutRoot(node.children[1]),
-      ],
-    };
-  }
 
   function showToast(
     message: string,
@@ -894,12 +817,13 @@
             const p = (event as { payload?: unknown }).payload;
             if (p && typeof p === "object" && "project_path" in p) {
               const raw = (p as { project_path?: unknown }).project_path;
-              if (typeof raw === "string" && raw && raw !== projectPath) return;
-            }
+            if (typeof raw === "string" && raw && raw !== projectPath) return;
+          }
 
-            sidebarRefreshKey++;
-          },
-        );
+          sidebarRefreshKey++;
+          void refreshCanvasWorktrees(projectPath);
+        },
+      );
 
         if (cancelled) {
           unlistenFn();
@@ -1450,6 +1374,7 @@
   function handleOpenedProjectPath(path: string) {
     projectPath = path;
     fetchCurrentBranch();
+    void refreshCanvasWorktrees(path);
     void updateWindowSession(path);
   }
 
@@ -1489,6 +1414,33 @@
     selectedBranch = branch;
     if (branch.is_current) {
       currentBranch = branch.name;
+    }
+  }
+
+  async function focusOrCreateWorktreeFromBranch(branch: BranchInfo) {
+    if (!projectPath) return;
+    handleBranchSelect(branch);
+
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const result = await invoke<MaterializeWorktreeResult>(
+        "materialize_worktree_ref",
+        {
+          projectPath,
+          branchRef: branch.name,
+        },
+      );
+      await refreshCanvasWorktrees(projectPath);
+      selectedCanvasWorktreeBranch = result.worktree.branch;
+      openAgentCanvasTab();
+      showToast(
+        result.created
+          ? `Worktree created: ${result.worktree.branch}`
+          : `Worktree focused: ${result.worktree.branch}`,
+        5000,
+      );
+    } catch (err) {
+      showToast(`Failed to open worktree: ${toErrorMessage(err)}`, 8000);
     }
   }
 
@@ -1578,6 +1530,9 @@
     );
     if (!sessionTab) return;
     selectedCanvasSessionTabId = tabId;
+    if (sessionTab.branchName) {
+      selectedCanvasWorktreeBranch = sessionTab.branchName;
+    }
     openAgentCanvasTab();
   }
 
@@ -1588,8 +1543,7 @@
   }
 
   function handleBranchActivate(branch: BranchInfo) {
-    handleBranchSelect(branch);
-    requestAgentLaunch();
+    void focusOrCreateWorktreeFromBranch(branch);
   }
 
   function handleCleanupRequest(preSelectedBranch?: string) {
@@ -1610,6 +1564,9 @@
         label,
         type: "terminal",
         paneId,
+        ...(selectedCanvasWorktreeBranch
+          ? { branchName: selectedCanvasWorktreeBranch }
+          : {}),
         cwd: workingDir || undefined,
       };
       tabs = [...tabs, newTab];
@@ -1648,10 +1605,40 @@
       });
       if (branch) {
         currentBranch = branch.name;
+        if (!selectedCanvasWorktreeBranch) {
+          selectedCanvasWorktreeBranch = branch.name;
+        }
       }
     } catch (err) {
       console.error("Failed to fetch current branch:", err);
       currentBranch = "";
+    }
+  }
+
+  async function refreshCanvasWorktrees(targetProjectPath = projectPath) {
+    if (!targetProjectPath) return;
+    try {
+      const { invoke } = await import("$lib/tauriInvoke");
+      const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
+        projectPath: targetProjectPath,
+      });
+      if (targetProjectPath !== projectPath) return;
+      canvasWorktrees = worktrees;
+      if (!selectedCanvasWorktreeBranch) {
+        selectedCanvasWorktreeBranch =
+          worktrees.find((worktree) => worktree.is_current)?.branch ??
+          worktrees[0]?.branch ??
+          null;
+      } else if (
+        !worktrees.some((worktree) => worktree.branch === selectedCanvasWorktreeBranch)
+      ) {
+        selectedCanvasWorktreeBranch =
+          worktrees.find((worktree) => worktree.is_current)?.branch ??
+          worktrees[0]?.branch ??
+          null;
+      }
+    } catch (err) {
+      console.error("Failed to refresh canvas worktrees:", err);
     }
   }
 
@@ -1759,9 +1746,13 @@
         label,
         type: "terminal",
         paneId,
+        ...(selectedCanvasWorktreeBranch
+          ? { branchName: selectedCanvasWorktreeBranch }
+          : {}),
         cwd: workingDir || undefined,
       };
       tabs = [...tabs, newTab];
+      selectedCanvasSessionTabId = newTab.id;
       openAgentCanvasTab();
     } catch (err) {
       console.error("Failed to spawn new terminal:", err);
@@ -1827,6 +1818,9 @@
         label: "Docs Edit",
         type: "terminal",
         paneId,
+        ...(selectedCanvasWorktreeBranch
+          ? { branchName: selectedCanvasWorktreeBranch }
+          : {}),
         cwd: workingDir,
       };
       tabs = [...tabs, tab];
@@ -2127,7 +2121,7 @@
   }
 
   function handleTabSelect(groupId: string, tabId: string) {
-    activeGroupId = groupId;
+    void groupId;
     activeTabId = tabId;
     if (tabId === "agentCanvas" || tabId === "branchBrowser") {
       return;
@@ -2149,47 +2143,6 @@
     if (nextTabs !== tabs) {
       tabs = nextTabs;
     }
-  }
-
-  function handleTabMoveToGroup(
-    dragTabId: string,
-    targetGroupId: string,
-    overTabId: string | null = null,
-    position: TabDropPosition = "after",
-  ) {
-    const next = moveTabToGroup(
-      readTabLayoutState(),
-      dragTabId,
-      targetGroupId,
-      overTabId,
-      position,
-    );
-    applyTabLayoutState(next);
-  }
-
-  function handleTabSplitToGroupEdge(
-    dragTabId: string,
-    targetGroupId: string,
-    direction: TabSplitDirection,
-  ) {
-    if (!canSplitTab(readTabLayoutState(), dragTabId)) return;
-    const next = splitTabToGroupEdge(
-      readTabLayoutState(),
-      dragTabId,
-      targetGroupId,
-      direction,
-    );
-    applyTabLayoutState(next);
-  }
-
-  function handleGroupFocus(groupId: string) {
-    const next = setActiveGroup(readTabLayoutState(), groupId);
-    applyTabLayoutState(next);
-  }
-
-  function handleSplitResize(splitId: string, primaryFraction: number) {
-    const next = resizeSplitNode(readTabLayoutState(), splitId, primaryFraction);
-    applyTabLayoutState(next);
   }
 
   function openSettingsTab() {
@@ -2646,6 +2599,8 @@
           tabs = defaultAppTabs();
           activeTabId = "agentCanvas";
           selectedCanvasSessionTabId = null;
+          selectedCanvasWorktreeBranch = null;
+          canvasWorktrees = [];
           selectedBranch = null;
           currentBranch = "";
         }
@@ -2823,58 +2778,6 @@
 
   $effect(() => {
     void tabs;
-    void activeTabId;
-    void activeGroupId;
-    void layoutGroups;
-    void layoutRoot;
-
-    const shellTabs = tabs.filter((tab) => isShellTab(tab));
-    const knownTabIds = new Set(shellTabs.map((tab) => tab.id));
-    let next = readTabLayoutState();
-
-    for (const group of Object.values(next.groups)) {
-      for (const tabId of [...group.tabIds]) {
-        if (!knownTabIds.has(tabId)) {
-          next = removeTabFromLayout(next, tabId);
-        }
-      }
-    }
-
-    for (const tab of shellTabs) {
-      if (!getGroupForTab(next, tab.id)) {
-        next = addTabToActiveGroup(next, tab.id);
-      }
-    }
-
-    if (activeTabId && knownTabIds.has(activeTabId)) {
-      const owningGroup = getGroupForTab(next, activeTabId);
-      if (owningGroup) {
-        next = setActiveGroup(next, owningGroup.id);
-        next = setActiveTabInGroup(next, owningGroup.id, activeTabId);
-      }
-    }
-
-    if (
-      next.groups !== layoutGroups ||
-      next.root !== layoutRoot ||
-      next.activeGroupId !== activeGroupId
-    ) {
-      const normalized = normalizeTabLayoutState(next, activeTabId);
-      layoutGroups = normalized.groups;
-      layoutRoot = normalized.root;
-      activeGroupId = normalized.activeGroupId;
-      const nextActiveTab =
-        normalized.groups[normalized.activeGroupId]?.activeTabId ??
-        tabs[0]?.id ??
-        "";
-      if (nextActiveTab && nextActiveTab !== activeTabId) {
-        activeTabId = nextActiveTab;
-      }
-    }
-  });
-
-  $effect(() => {
-    void tabs;
     void syncWindowAgentTabsSnapshot();
   });
 
@@ -3000,21 +2903,6 @@
     tabs = mergedTabs;
     await refreshAgentTabLabelsForProject(targetProjectPath);
 
-    const restoredGroups: Record<string, TabGroupState> = Object.fromEntries(
-      restored.groups.map((group) => [
-        group.id,
-        {
-          id: group.id,
-          tabIds: [...group.tabIds],
-          activeTabId: group.activeTabId,
-        },
-      ]),
-    );
-    layoutGroups = restoredGroups;
-    layoutRoot = restored.root as TabLayoutNode;
-    activeGroupId =
-      restored.activeGroupId ?? restored.groups[0]?.id ?? activeGroupId;
-
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     selectedCanvasSessionTabId = restored.activeCanvasSessionTabId;
     if (allowOverrideActive) {
@@ -3061,17 +2949,11 @@
     void tabs;
     void activeTabId;
     void agentTabsHydratedProjectPath;
-    void layoutGroups;
-    void layoutRoot;
-    void activeGroupId;
 
     if (!projectPath) return;
     if (agentTabsHydratedProjectPath !== projectPath) return;
 
-    const orderedShellTabIds = flattenTabIdsByLayout(readTabLayoutState());
-    const orderedShellTabs = orderedShellTabIds
-      .map((tabId) => tabs.find((tab) => tab.id === tabId))
-      .filter((tab): tab is Tab => Boolean(tab));
+    const orderedShellTabs = getShellTabs();
     const seenShellIds = new Set(orderedShellTabs.map((tab) => tab.id));
     const fallbackOrderedTabs =
       orderedShellTabs.length > 0
@@ -3374,6 +3256,11 @@
         {voiceInputAvailable}
         {voiceInputAvailabilityReason}
         {voiceInputError}
+        canvasWorktrees={canvasWorktrees}
+        selectedCanvasWorktreeBranch={selectedCanvasWorktreeBranch}
+        onCanvasWorktreeSelect={(branchName) => {
+          selectedCanvasWorktreeBranch = branchName;
+        }}
       />
     </div>
     <StatusBar

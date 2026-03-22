@@ -8,6 +8,7 @@
     divergenceIndicator,
     getSafetyLevel,
     getSafetyTitle,
+    stripRemotePrefix,
     sortBranches,
     type SidebarFilterType,
   } from "./sidebarHelpers";
@@ -25,10 +26,86 @@
 
   const filters: SidebarFilterType[] = ["Local", "Remote", "All"];
 
+  type BranchBrowserEntry = {
+    key: string;
+    branch: BranchInfo;
+    hasLocal: boolean;
+    hasRemote: boolean;
+    worktree: WorktreeInfo | null;
+  };
+
+  function branchKey(name: string): string {
+    return name.trim().startsWith("origin/") ? stripRemotePrefix(name) : name.trim();
+  }
+
+  function buildEntries(
+    local: BranchInfo[],
+    remote: BranchInfo[],
+    worktrees: WorktreeInfo[],
+    filter: SidebarFilterType,
+  ): BranchBrowserEntry[] {
+    const worktreeByBranch = buildWorktreeMap(worktrees);
+
+    if (filter === "Local") {
+      return local.map((branch) => ({
+        key: branchKey(branch.name),
+        branch,
+        hasLocal: true,
+        hasRemote: false,
+        worktree: worktreeByBranch.get(branchKey(branch.name)) ?? null,
+      }));
+    }
+
+    if (filter === "Remote") {
+      return remote.map((branch) => ({
+        key: branchKey(branch.name),
+        branch,
+        hasLocal: false,
+        hasRemote: true,
+        worktree: worktreeByBranch.get(branchKey(branch.name)) ?? null,
+      }));
+    }
+
+    const merged = new Map<string, BranchBrowserEntry>();
+    for (const branch of local) {
+      const key = branchKey(branch.name);
+      merged.set(key, {
+        key,
+        branch,
+        hasLocal: true,
+        hasRemote: false,
+        worktree: worktreeByBranch.get(key) ?? null,
+      });
+    }
+    for (const branch of remote) {
+      const key = branchKey(branch.name);
+      const existing = merged.get(key);
+      if (existing) {
+        merged.set(key, {
+          ...existing,
+          hasRemote: true,
+        });
+      } else {
+        merged.set(key, {
+          key,
+          branch,
+          hasLocal: false,
+          hasRemote: true,
+          worktree: worktreeByBranch.get(key) ?? null,
+        });
+      }
+    }
+    return Array.from(merged.values());
+  }
+
+  let branchEntries = $state<BranchBrowserEntry[]>([]);
+
   let filteredBranches = $derived.by(() => {
     const q = searchQuery.trim().toLowerCase();
     return sortBranches(
-      branches.filter((branch) => {
+      branchEntries
+        .map((entry) => entry.branch)
+        .filter((branch) => {
         if (!q) return true;
         const haystack = `${branch.display_name ?? ""} ${branch.name}`.toLowerCase();
         return haystack.includes(q);
@@ -41,7 +118,17 @@
 
   let selectedWorktree = $derived.by(() => {
     const selectedBranchName = config.selectedBranch?.name?.trim() ?? "";
-    return selectedBranchName ? worktreeMap.get(selectedBranchName) ?? null : null;
+    if (!selectedBranchName) return null;
+    return (
+      worktreeMap.get(selectedBranchName) ??
+      worktreeMap.get(selectedBranchName.replace(/^origin\//, "")) ??
+      null
+    );
+  });
+  let selectedEntry = $derived.by(() => {
+    const selectedBranchName = config.selectedBranch?.name?.trim() ?? "";
+    const key = branchKey(selectedBranchName);
+    return branchEntries.find((entry) => entry.key === key) ?? null;
   });
 
   async function fetchBranches(path: string) {
@@ -50,48 +137,22 @@
     errorMessage = null;
 
     try {
-      if (activeFilter === "Local") {
-        const [local, worktrees] = await Promise.all([
-          invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path }),
-          invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }),
-        ]);
-        if (token !== requestToken) return;
-        branches = local;
-        remoteBranchNames = new Set();
-        worktreeMap = buildWorktreeMap(worktrees);
-      } else if (activeFilter === "Remote") {
-        const [remote, worktrees] = await Promise.all([
-          invoke<BranchInfo[]>("list_remote_branches", { projectPath: path }),
-          invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }),
-        ]);
-        if (token !== requestToken) return;
-        branches = remote;
-        remoteBranchNames = new Set(remote.map((branch) => branch.name.trim()));
-        worktreeMap = buildWorktreeMap(worktrees);
-      } else {
-        const [local, remote, worktrees] = await Promise.all([
-          invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path }),
-          invoke<BranchInfo[]>("list_remote_branches", { projectPath: path }),
-          invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }),
-        ]);
-        if (token !== requestToken) return;
-        const merged = new Map<string, BranchInfo>();
-        for (const branch of local) {
-          merged.set(branch.name, branch);
-        }
-        for (const branch of remote) {
-          if (merged.has(branch.name)) continue;
-          merged.set(branch.name, branch);
-        }
-        branches = Array.from(merged.values());
-        remoteBranchNames = new Set(remote.map((branch) => branch.name.trim()));
-        worktreeMap = buildWorktreeMap(worktrees);
-      }
+      const [local, remote, worktrees] = await Promise.all([
+        invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path }),
+        invoke<BranchInfo[]>("list_remote_branches", { projectPath: path }),
+        invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }),
+      ]);
+      if (token !== requestToken) return;
+      branches = activeFilter === "Local" ? local : activeFilter === "Remote" ? remote : local;
+      remoteBranchNames = new Set(remote.map((branch) => branchKey(branch.name)));
+      worktreeMap = buildWorktreeMap(worktrees);
+      branchEntries = buildEntries(local, remote, worktrees, activeFilter);
     } catch (error) {
       if (token !== requestToken) return;
       errorMessage =
         error instanceof Error ? error.message : String(error);
       branches = [];
+      branchEntries = [];
       remoteBranchNames = new Set();
       worktreeMap = new Map();
     } finally {
@@ -167,7 +228,7 @@
             <button
               type="button"
               class="branch-row"
-              class:selected={config.selectedBranch?.name === branch.name}
+              class:selected={selectedEntry?.key === branchKey(branch.name)}
               onclick={() => config.onBranchSelect(branch)}
               ondblclick={() => config.onBranchActivate?.(branch)}
             >
@@ -218,6 +279,29 @@
               <span class="detail-label">Worktree</span>
               <span class="detail-value mono">{selectedWorktree?.path ?? "Not materialized"}</span>
             </div>
+            <div class="detail-row">
+              <span class="detail-label">Coverage</span>
+              <span class="detail-value">
+                {#if selectedEntry?.hasLocal && selectedEntry?.hasRemote}
+                  Local + Remote
+                {:else if selectedEntry?.hasLocal}
+                  Local
+                {:else if selectedEntry?.hasRemote}
+                  Remote
+                {:else}
+                  Unknown
+                {/if}
+              </span>
+            </div>
+          </div>
+          <div class="detail-actions">
+            <button
+              type="button"
+              class="cleanup-btn"
+              onclick={() => config.onBranchActivate?.(config.selectedBranch!)}
+            >
+              {selectedWorktree ? "Focus Worktree" : "Create Worktree"}
+            </button>
           </div>
         </div>
       {:else}
@@ -424,6 +508,10 @@
     display: grid;
     gap: 12px;
     padding: 16px;
+  }
+
+  .detail-actions {
+    padding: 0 16px 16px;
   }
 
   .detail-row {

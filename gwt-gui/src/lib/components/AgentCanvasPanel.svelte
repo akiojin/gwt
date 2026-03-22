@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Tab } from "../types";
+  import type { Tab, WorktreeInfo } from "../types";
   import AssistantPanel from "./AssistantPanel.svelte";
   import TerminalView from "../terminal/TerminalView.svelte";
 
@@ -7,6 +7,9 @@
     projectPath,
     currentBranch = "",
     tabs,
+    worktrees = [],
+    selectedWorktreeBranch = null,
+    onWorktreeSelect = () => {},
     selectedSessionTabId = null,
     onSessionSelect = () => {},
     onOpenSettings,
@@ -21,6 +24,9 @@
     projectPath: string;
     currentBranch?: string;
     tabs: Tab[];
+    worktrees?: WorktreeInfo[];
+    selectedWorktreeBranch?: string | null;
+    onWorktreeSelect?: (branchName: string) => void;
     selectedSessionTabId?: string | null;
     onSessionSelect?: (tabId: string) => void;
     onOpenSettings?: () => void;
@@ -37,6 +43,53 @@
     tabs.filter((tab) => tab.type === "agent" || tab.type === "terminal"),
   );
   let worktreeDetailsOpen = $state(false);
+  let popupWorktreeBranch = $state<string | null>(null);
+  let canvasWorktrees = $derived(
+    worktrees.length > 0
+      ? worktrees
+      : [
+          {
+            path: projectPath,
+            branch: currentBranch || "Project Root",
+            commit: "",
+            status: "active",
+            is_main: false,
+            has_changes: false,
+            has_unpushed: false,
+            is_current: true,
+            is_protected: false,
+            is_agent_running: false,
+            agent_status: "unknown",
+            ahead: 0,
+            behind: 0,
+            is_gone: false,
+            last_tool_usage: null,
+            safety_level: "safe",
+          } satisfies WorktreeInfo,
+        ],
+  );
+  let popupWorktree = $derived(
+    popupWorktreeBranch
+      ? canvasWorktrees.find((worktree) => worktree.branch === popupWorktreeBranch) ?? null
+      : null,
+  );
+
+  function sessionBelongsToWorktree(tab: Tab, worktree: WorktreeInfo): boolean {
+    const worktreeBranch = (worktree.branch ?? "").trim();
+    const tabBranch = (tab.branchName ?? "").trim();
+    if (worktreeBranch && tabBranch) {
+      return worktreeBranch === tabBranch;
+    }
+    if (worktree.is_current && !tabBranch) {
+      return true;
+    }
+    return false;
+  }
+
+  function worktreeCardTestId(worktree: WorktreeInfo): string {
+    const raw = worktree.branch ?? "project-root";
+    return `agent-canvas-worktree-card-${raw.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+  }
 </script>
 
 <div class="agent-canvas">
@@ -45,25 +98,10 @@
       <h2>Agent Canvas</h2>
       <p>Canvas cards replace the old assistant and session tabs.</p>
     </div>
-    <div class="toolbar-chip">Cards: {sessionCards.length + 2}</div>
+    <div class="toolbar-chip">Cards: {sessionCards.length + canvasWorktrees.length + 1}</div>
   </div>
 
   <div class="canvas-grid">
-    <button
-      type="button"
-      class="canvas-card worktree-card"
-      data-testid="agent-canvas-worktree-card"
-      onclick={() => (worktreeDetailsOpen = true)}
-    >
-      <div class="card-header">
-        <span class="card-kind">Worktree</span>
-        <span class="card-title">{currentBranch || "Project Root"}</span>
-      </div>
-      <p class="card-copy">
-        Worktree cards will become the parent nodes for agent and terminal sessions.
-      </p>
-    </button>
-
     <section class="canvas-card assistant-card" data-testid="agent-canvas-assistant-card">
       <div class="card-header">
         <span class="card-kind">Assistant</span>
@@ -78,42 +116,66 @@
       </div>
     </section>
 
-    {#each sessionCards as tab (tab.id)}
+    {#each canvasWorktrees as worktree ((worktree.branch ?? worktree.path))}
       <button
-        class="canvas-card session-card"
-        class:agent-session={tab.type === "agent"}
-        class:terminal-session={tab.type === "terminal"}
-        class:selected={selectedSessionTabId === tab.id}
-        data-testid={`agent-canvas-session-${tab.id}`}
         type="button"
-        onclick={() => onSessionSelect(tab.id)}
+        class="canvas-card worktree-card"
+        class:selected={selectedWorktreeBranch === worktree.branch}
+        data-testid={worktreeCardTestId(worktree)}
+        onclick={() => {
+          if (worktree.branch) {
+            onWorktreeSelect(worktree.branch);
+            popupWorktreeBranch = worktree.branch;
+          }
+          worktreeDetailsOpen = true;
+        }}
       >
-        <span class="session-edge" aria-hidden="true"></span>
         <div class="card-header">
-          <span class="card-kind">{tab.type === "agent" ? "Agent" : "Terminal"}</span>
-          <span class="card-title">{tab.label}</span>
+          <span class="card-kind">Worktree</span>
+          <span class="card-title">{worktree.branch || "Project Root"}</span>
         </div>
-        <div class="card-body">
-          {#if tab.paneId}
-            <TerminalView
-              paneId={tab.paneId}
-              active={true}
-              agentId={tab.type === "agent" ? tab.agentId ?? null : null}
-              {voiceInputEnabled}
-              {voiceInputListening}
-              {voiceInputPreparing}
-              {voiceInputSupported}
-              {voiceInputAvailable}
-              {voiceInputAvailabilityReason}
-              {voiceInputError}
-            />
-          {:else}
-            <div class="session-placeholder">
-              {tab.type === "agent" ? "Agent starting..." : "Terminal starting..."}
-            </div>
-          {/if}
-        </div>
+        <p class="card-copy">
+          {worktree.path}
+        </p>
       </button>
+
+      {#each sessionCards.filter((tab) => sessionBelongsToWorktree(tab, worktree)) as tab (tab.id)}
+        <button
+          class="canvas-card session-card"
+          class:agent-session={tab.type === "agent"}
+          class:terminal-session={tab.type === "terminal"}
+          class:selected={selectedSessionTabId === tab.id}
+          data-testid={`agent-canvas-session-${tab.id}`}
+          type="button"
+          onclick={() => onSessionSelect(tab.id)}
+        >
+          <span class="session-edge" aria-hidden="true"></span>
+          <div class="card-header">
+            <span class="card-kind">{tab.type === "agent" ? "Agent" : "Terminal"}</span>
+            <span class="card-title">{tab.label}</span>
+          </div>
+          <div class="card-body">
+            {#if tab.paneId}
+              <TerminalView
+                paneId={tab.paneId}
+                active={true}
+                agentId={tab.type === "agent" ? tab.agentId ?? null : null}
+                {voiceInputEnabled}
+                {voiceInputListening}
+                {voiceInputPreparing}
+                {voiceInputSupported}
+                {voiceInputAvailable}
+                {voiceInputAvailabilityReason}
+                {voiceInputError}
+              />
+            {:else}
+              <div class="session-placeholder">
+                {tab.type === "agent" ? "Agent starting..." : "Terminal starting..."}
+              </div>
+            {/if}
+          </div>
+        </button>
+      {/each}
     {/each}
   </div>
 
@@ -137,7 +199,7 @@
       >
         <div class="card-header">
           <span class="card-kind">Worktree</span>
-          <span class="card-title">{currentBranch || "Project Root"}</span>
+          <span class="card-title">{popupWorktree?.branch || currentBranch || "Project Root"}</span>
         </div>
         <div class="dialog-body">
           <div class="detail-row">
@@ -146,11 +208,15 @@
           </div>
           <div class="detail-row">
             <span class="detail-label">Branch</span>
-            <span class="detail-value">{currentBranch || "Project Root"}</span>
+            <span class="detail-value">{popupWorktree?.branch || currentBranch || "Project Root"}</span>
           </div>
           <div class="detail-row">
             <span class="detail-label">Sessions</span>
-            <span class="detail-value">{sessionCards.length}</span>
+            <span class="detail-value">{sessionCards.filter((tab) => popupWorktree ? sessionBelongsToWorktree(tab, popupWorktree) : true).length}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">Worktree Path</span>
+            <span class="detail-value">{popupWorktree?.path || projectPath}</span>
           </div>
         </div>
         <button

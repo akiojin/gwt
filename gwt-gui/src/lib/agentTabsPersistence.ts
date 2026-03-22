@@ -29,6 +29,7 @@ export type StoredTerminalTab = {
   paneId: string;
   label: string;
   cwd?: string;
+  branchName?: string;
 };
 
 export type StoredStaticTab = {
@@ -196,11 +197,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     if (!paneId) return null;
     const label = typeof obj.label === "string" ? obj.label : "";
     const cwd = typeof obj.cwd === "string" ? obj.cwd : undefined;
+    const branchName = normalizeString(obj.branchName);
     return {
       type: "terminal",
       paneId,
       label,
       ...(cwd ? { cwd } : {}),
+      ...(branchName ? { branchName } : {}),
     };
   }
 
@@ -641,6 +644,7 @@ export function buildRestoredProjectTabs(
           type: "terminal",
           paneId: tab.paneId,
           ...(tab.cwd ? { cwd: tab.cwd } : {}),
+          ...(tab.branchName ? { branchName: tab.branchName } : {}),
         });
       } else {
         terminalTabsToRespawn.push(tab);

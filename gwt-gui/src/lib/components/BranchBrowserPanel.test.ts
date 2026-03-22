@@ -125,6 +125,35 @@ describe("BranchBrowserPanel", () => {
     });
   });
 
+  it("merges local and remote refs into one canonical entry in All mode", async () => {
+    const matchingRemote: BranchInfo = {
+      ...remoteBranch,
+      name: "origin/feature/local",
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_worktree_branches") return Promise.resolve([localBranch]);
+      if (command === "list_remote_branches") return Promise.resolve([matchingRemote]);
+      if (command === "list_worktrees") return Promise.resolve([worktree]);
+      return Promise.resolve([]);
+    });
+
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          selectedBranch: localBranch,
+        }),
+      },
+    });
+
+    await waitFor(() => expect(rendered.getByText("Local feature")).toBeTruthy());
+    await fireEvent.click(rendered.getByText("All"));
+
+    await waitFor(() =>
+      expect(rendered.getByText("Local + Remote")).toBeTruthy(),
+    );
+    expect(rendered.container.querySelectorAll(".branch-row")).toHaveLength(1);
+  });
+
   it("forwards branch selection to the host shell", async () => {
     const onBranchSelect = vi.fn();
     const rendered = render(BranchBrowserPanel, {
@@ -137,5 +166,45 @@ describe("BranchBrowserPanel", () => {
     await fireEvent.click(rendered.getByText("Local feature"));
 
     expect(onBranchSelect).toHaveBeenCalledWith(localBranch);
+  });
+
+  it("forwards open/focus worktree action for the selected branch", async () => {
+    const onBranchActivate = vi.fn();
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          selectedBranch: localBranch,
+          onBranchActivate,
+        }),
+      },
+    });
+
+    await waitFor(() =>
+      expect(rendered.getByRole("button", { name: "Focus Worktree" })).toBeTruthy(),
+    );
+    await fireEvent.click(rendered.getByRole("button", { name: "Focus Worktree" }));
+
+    expect(onBranchActivate).toHaveBeenCalledWith(localBranch);
+  });
+
+  it("shows create worktree when the selected branch has no materialized worktree", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_worktree_branches") return Promise.resolve([]);
+      if (command === "list_remote_branches") return Promise.resolve([remoteBranch]);
+      if (command === "list_worktrees") return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          selectedBranch: remoteBranch,
+        }),
+      },
+    });
+
+    await waitFor(() =>
+      expect(rendered.getByRole("button", { name: "Create Worktree" })).toBeTruthy(),
+    );
   });
 });
