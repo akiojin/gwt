@@ -192,8 +192,8 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-pr-fix",
     "gwt-pr",
     "gwt-pr-check",
-    "gwt-project-index",
-    "gwt-pty-communication",
+    "gwt-file-search",
+    "gwt-agent-dispatch",
     "gwt-spec-to-issue-migration",
 ];
 
@@ -361,19 +361,19 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-project-index/SKILL.md",
+        relative_path: "skills/gwt-file-search/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-project-index/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-file-search/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-pty-communication/SKILL.md",
+        relative_path: "skills/gwt-agent-dispatch/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pty-communication/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-agent-dispatch/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -539,19 +539,19 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-project-index.md",
+        relative_path: "commands/gwt-file-search.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-project-index.md"
+            "/../../plugins/gwt/commands/gwt-file-search.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-pty-communication.md",
+        relative_path: "commands/gwt-agent-dispatch.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-pty-communication.md"
+            "/../../plugins/gwt/commands/gwt-agent-dispatch.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -2379,7 +2379,7 @@ OPENAI_API_KEY = "legacy-key"
             temp.path()
                 .join(".codex")
                 .join("skills")
-                .join("gwt-project-index")
+                .join("gwt-file-search")
                 .join("SKILL.md"),
         )
         .unwrap();
