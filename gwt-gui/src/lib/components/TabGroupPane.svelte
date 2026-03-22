@@ -34,6 +34,7 @@
     branchBrowserConfig = undefined,
     currentBranch = "",
     selectedCanvasSessionTabId = null,
+    disableSplit = false,
     onCanvasSessionSelect = () => {},
     draggedTabId = null,
     dropTarget = null,
@@ -70,6 +71,7 @@
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
     selectedCanvasSessionTabId?: string | null;
+    disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
@@ -152,7 +154,7 @@
   }
 
   function canSplitCurrentGroup(): boolean {
-    return group.tabIds.length > 1;
+    return !disableSplit && group.tabIds.length > 1;
   }
 
   function handleSplitAction(
@@ -266,56 +268,58 @@
         {:else}
           <span class="tab-label">{tab.label}</span>
         {/if}
-        <details class="tab-actions">
-          <summary
-            class="tab-actions-toggle"
-            onpointerdown={(event) => event.stopPropagation()}
-          >
-            ⋯
-          </summary>
-          <div class="tab-actions-menu">
-            <button
-              type="button"
-              disabled={!canSplitCurrentGroup()}
-              onclick={(event) => {
-                event.stopPropagation();
-                handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "left");
-              }}
+        {#if !disableSplit}
+          <details class="tab-actions">
+            <summary
+              class="tab-actions-toggle"
+              onpointerdown={(event) => event.stopPropagation()}
             >
-              Split Left
-            </button>
-            <button
-              type="button"
-              disabled={!canSplitCurrentGroup()}
-              onclick={(event) => {
-                event.stopPropagation();
-                handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "right");
-              }}
-            >
-              Split Right
-            </button>
-            <button
-              type="button"
-              disabled={!canSplitCurrentGroup()}
-              onclick={(event) => {
-                event.stopPropagation();
-                handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "up");
-              }}
-            >
-              Split Up
-            </button>
-            <button
-              type="button"
-              disabled={!canSplitCurrentGroup()}
-              onclick={(event) => {
-                event.stopPropagation();
-                handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "down");
-              }}
-            >
-              Split Down
-            </button>
-          </div>
-        </details>
+              ⋯
+            </summary>
+            <div class="tab-actions-menu">
+              <button
+                type="button"
+                disabled={!canSplitCurrentGroup()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "left");
+                }}
+              >
+                Split Left
+              </button>
+              <button
+                type="button"
+                disabled={!canSplitCurrentGroup()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "right");
+                }}
+              >
+                Split Right
+              </button>
+              <button
+                type="button"
+                disabled={!canSplitCurrentGroup()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "up");
+                }}
+              >
+                Split Up
+              </button>
+              <button
+                type="button"
+                disabled={!canSplitCurrentGroup()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "down");
+                }}
+              >
+                Split Down
+              </button>
+            </div>
+          </details>
+        {/if}
         {#if !isPinnedTab(tab)}
           <button
             class="tab-close"
@@ -334,38 +338,40 @@
   </div>
 
   <div class="group-content" class:drag-active={draggedTabId !== null}>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="split-target split-target-top"
-      role="presentation"
-      class:active={isSplitTarget("up")}
-      ondragover={(event) => onSplitDragOver(group.id, "up", event)}
-      ondrop={(event) => onSplitDrop(group.id, "up", event)}
-    ></div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="split-target split-target-right"
-      role="presentation"
-      class:active={isSplitTarget("right")}
-      ondragover={(event) => onSplitDragOver(group.id, "right", event)}
-      ondrop={(event) => onSplitDrop(group.id, "right", event)}
-    ></div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="split-target split-target-bottom"
-      role="presentation"
-      class:active={isSplitTarget("down")}
-      ondragover={(event) => onSplitDragOver(group.id, "down", event)}
-      ondrop={(event) => onSplitDrop(group.id, "down", event)}
-    ></div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="split-target split-target-left"
-      role="presentation"
-      class:active={isSplitTarget("left")}
-      ondragover={(event) => onSplitDragOver(group.id, "left", event)}
-      ondrop={(event) => onSplitDrop(group.id, "left", event)}
-    ></div>
+    {#if !disableSplit}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="split-target split-target-top"
+        role="presentation"
+        class:active={isSplitTarget("up")}
+        ondragover={(event) => onSplitDragOver(group.id, "up", event)}
+        ondrop={(event) => onSplitDrop(group.id, "up", event)}
+      ></div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="split-target split-target-right"
+        role="presentation"
+        class:active={isSplitTarget("right")}
+        ondragover={(event) => onSplitDragOver(group.id, "right", event)}
+        ondrop={(event) => onSplitDrop(group.id, "right", event)}
+      ></div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="split-target split-target-bottom"
+        role="presentation"
+        class:active={isSplitTarget("down")}
+        ondragover={(event) => onSplitDragOver(group.id, "down", event)}
+        ondrop={(event) => onSplitDrop(group.id, "down", event)}
+      ></div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="split-target split-target-left"
+        role="presentation"
+        class:active={isSplitTarget("left")}
+        ondragover={(event) => onSplitDragOver(group.id, "left", event)}
+        ondrop={(event) => onSplitDrop(group.id, "left", event)}
+      ></div>
+    {/if}
 
     {#if visibleGroupTabs.length === 0}
       <div class="placeholder">

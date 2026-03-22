@@ -24,6 +24,7 @@
     branchBrowserConfig = undefined,
     currentBranch = "",
     selectedCanvasSessionTabId = null,
+    disableSplit = false,
     onCanvasSessionSelect = () => {},
     draggedTabId = null,
     dropTarget = null,
@@ -62,6 +63,7 @@
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
     selectedCanvasSessionTabId?: string | null;
+    disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
@@ -156,6 +158,7 @@
       {branchBrowserConfig}
       {currentBranch}
       {selectedCanvasSessionTabId}
+      {disableSplit}
       {onCanvasSessionSelect}
       {draggedTabId}
       {dropTarget}
@@ -202,6 +205,7 @@
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
+        {disableSplit}
         {onCanvasSessionSelect}
         {draggedTabId}
         {dropTarget}
@@ -249,6 +253,7 @@
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
+        {disableSplit}
         {onCanvasSessionSelect}
         {draggedTabId}
         {dropTarget}

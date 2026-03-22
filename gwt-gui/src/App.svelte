@@ -46,7 +46,11 @@
     type StoredTabLayoutNode,
     type StoredTerminalTab,
   } from "./lib/agentTabsPersistence";
-  import { defaultAppTabs, shouldAllowRestoredActiveTab } from "./lib/appTabs";
+  import {
+    defaultAppTabs,
+    reorderTabsByDrop,
+    shouldAllowRestoredActiveTab,
+  } from "./lib/appTabs";
   import { getNextTabId, getPreviousTabId } from "./lib/tabNavigation";
   import {
     addTabToActiveGroup,
@@ -2136,19 +2140,15 @@
   }
 
   function handleTabReorder(
-    groupId: string,
+    _groupId: string,
     dragTabId: string,
     overTabId: string,
     position: TabDropPosition,
   ) {
-    const next = reorderTabsInGroup(
-      readTabLayoutState(),
-      groupId,
-      dragTabId,
-      overTabId,
-      position,
-    );
-    applyTabLayoutState(next);
+    const nextTabs = reorderTabsByDrop(tabs, dragTabId, overTabId, position);
+    if (nextTabs !== tabs) {
+      tabs = nextTabs;
+    }
   }
 
   function handleTabMoveToGroup(
@@ -3010,12 +3010,10 @@
         },
       ]),
     );
-    applyTabLayoutState({
-      groups: restoredGroups,
-      root: restored.root as TabLayoutNode,
-      activeGroupId:
-        restored.activeGroupId ?? restored.groups[0]?.id ?? activeGroupId,
-    });
+    layoutGroups = restoredGroups;
+    layoutRoot = restored.root as TabLayoutNode;
+    activeGroupId =
+      restored.activeGroupId ?? restored.groups[0]?.id ?? activeGroupId;
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     selectedCanvasSessionTabId = restored.activeCanvasSessionTabId;
@@ -3137,9 +3135,6 @@
       tabs: storedTabs,
       activeTabId: storedActiveTabId,
       activeCanvasSessionTabId: selectedCanvasSessionTabId,
-      activeGroupId,
-      groups: buildStoredLayoutGroups(),
-      root: buildStoredLayoutRoot(layoutRoot),
     });
   });
 
@@ -3357,23 +3352,17 @@
     <div class="app-body">
       <MainArea
         {tabs}
-        groups={layoutGroups}
-        layoutRoot={layoutRoot}
-        {activeGroupId}
         projectPath={projectPath as string}
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
+        disableSplit={true}
         onCanvasSessionSelect={handleCanvasSessionSelect}
         onLaunchAgent={requestAgentLaunch}
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onTabReorder={handleTabReorder}
-        onTabMoveToGroup={handleTabMoveToGroup}
-        onTabSplitToGroupEdge={handleTabSplitToGroupEdge}
-        onSplitResize={handleSplitResize}
-        onGroupFocus={handleGroupFocus}
         onWorkOnIssue={handleWorkOnIssueFromTab}
         onSwitchToWorktree={handleSwitchToWorktreeFromTab}
         onIssueCountChange={handleIssueCountChange}

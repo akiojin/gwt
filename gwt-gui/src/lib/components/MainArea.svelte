@@ -28,6 +28,7 @@
     branchBrowserConfig = undefined,
     currentBranch = "",
     selectedCanvasSessionTabId = null,
+    disableSplit = false,
     onCanvasSessionSelect = () => {},
     onLaunchAgent,
     onQuickLaunch,
@@ -60,6 +61,7 @@
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
     selectedCanvasSessionTabId?: string | null;
+    disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
@@ -306,6 +308,7 @@
     {branchBrowserConfig}
     {currentBranch}
     {selectedCanvasSessionTabId}
+    {disableSplit}
     {onCanvasSessionSelect}
     {draggedTabId}
     {dropTarget}
