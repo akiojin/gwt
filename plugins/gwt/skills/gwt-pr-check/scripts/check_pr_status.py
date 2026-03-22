@@ -6,6 +6,7 @@ This script mirrors the gwt-pr-check skill rules:
 - allow new PR creation when only CLOSED unmerged PRs exist
 - when all PRs are merged, prefer origin/<head>..HEAD fallback if the merge
   commit is missing or not an ancestor of HEAD
+- require a real diff against origin/<base> before recommending CREATE_PR
 - emit a short human-readable summary by default
 """
 
@@ -131,6 +132,15 @@ def git_count(repo: Path, revspec: str) -> int | None:
         return None
 
 
+def compare_has_diff(repo: Path, base: str) -> bool | None:
+    proc = run(["git", "diff", "--quiet", f"origin/{base}...HEAD", "--"], repo)
+    if proc.returncode == 0:
+        return False
+    if proc.returncode == 1:
+        return True
+    return None
+
+
 def is_ancestor(repo: Path, ancestor: str) -> bool:
     proc = run(["git", "merge-base", "--is-ancestor", ancestor, "HEAD"], repo)
     return proc.returncode == 0
@@ -165,9 +175,9 @@ def format_result(result: Result, lang: str) -> str:
                 f">> CREATE PR — 最終マージ後に {result.new_commits} 件の新しい commit があります (#{result.pr_number})。",
                 f"   head: {result.head} -> base: {result.base}",
             ]
-        elif result.status == "ALL_MERGED_NO_NEW_COMMITS":
+        elif result.status == "ALL_MERGED_NO_PR_DIFF":
             lines = [
-                f"-- NO ACTION — すべての PR はマージ済みで、`{result.head}` に新しい commit はありません。"
+                f"-- NO ACTION — すべての PR はマージ済みで、`{result.head}` に PR 対象の差分はありません。"
             ]
         else:
             lines = [
@@ -274,6 +284,34 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
                 reason="Failed to count commits after merge commit",
             )
         if post_merge_commits > 0:
+            branch_diff = compare_has_diff(repo, base)
+            if branch_diff is None:
+                return Result(
+                    status="CHECK_FAILED",
+                    action="MANUAL_CHECK",
+                    summary="!! MANUAL CHECK — Could not determine PR status.",
+                    details=[
+                        f"   Reason: Could not compare HEAD against origin/{base}",
+                        f"   head: {head} -> base: {base}",
+                    ],
+                    dirty=dirty,
+                    head=head,
+                    base=base,
+                    reason=f"Could not compare HEAD against origin/{base}",
+                )
+            if not branch_diff:
+                return Result(
+                    status="ALL_MERGED_NO_PR_DIFF",
+                    action="NO_ACTION",
+                    summary=f"-- NO ACTION — All PRs merged, no PR-worthy diff on `{head}`.",
+                    details=[],
+                    dirty=dirty,
+                    head=head,
+                    base=base,
+                    pr_number=latest_merged["number"],
+                    new_commits=post_merge_commits,
+                    reason=f"No diff remains against origin/{base}",
+                )
             return Result(
                 status="ALL_MERGED_WITH_NEW_COMMITS",
                 action="CREATE_PR",
@@ -286,19 +324,49 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
                 new_commits=post_merge_commits,
             )
         return Result(
-            status="ALL_MERGED_NO_NEW_COMMITS",
+            status="ALL_MERGED_NO_PR_DIFF",
             action="NO_ACTION",
-            summary=f"-- NO ACTION — All PRs merged, no new commits on `{head}`.",
+            summary=f"-- NO ACTION — All PRs merged, no PR-worthy diff on `{head}`.",
             details=[],
             dirty=dirty,
             head=head,
             base=base,
             pr_number=latest_merged["number"],
             new_commits=0,
+            reason="No commits found after last merge",
         )
 
     upstream_commits = git_count(repo, f"origin/{head}..HEAD")
     if upstream_commits is not None and upstream_commits > 0:
+        branch_diff = compare_has_diff(repo, base)
+        if branch_diff is None:
+            return Result(
+                status="CHECK_FAILED",
+                action="MANUAL_CHECK",
+                summary="!! MANUAL CHECK — Could not determine PR status.",
+                details=[
+                    f"   Reason: Could not compare HEAD against origin/{base}",
+                    f"   head: {head} -> base: {base}",
+                ],
+                dirty=dirty,
+                head=head,
+                base=base,
+                reason=f"Could not compare HEAD against origin/{base}",
+            )
+        if not branch_diff:
+            return Result(
+                status="ALL_MERGED_NO_PR_DIFF",
+                action="NO_ACTION",
+                summary=f"-- NO ACTION — All PRs merged, no PR-worthy diff on `{head}`.",
+                details=[],
+                dirty=dirty,
+                head=head,
+                base=base,
+                pr_number=latest_merged["number"],
+                new_commits=upstream_commits,
+                reason=f"No diff remains against origin/{base}",
+                fallback_used=True,
+            )
         return Result(
             status="ALL_MERGED_WITH_NEW_COMMITS",
             action="CREATE_PR",
@@ -315,6 +383,35 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
     base_commits = git_count(repo, f"origin/{base}..HEAD")
     if base_commits is not None:
         if base_commits > 0:
+            branch_diff = compare_has_diff(repo, base)
+            if branch_diff is None:
+                return Result(
+                    status="CHECK_FAILED",
+                    action="MANUAL_CHECK",
+                    summary="!! MANUAL CHECK — Could not determine PR status.",
+                    details=[
+                        f"   Reason: Could not compare HEAD against origin/{base}",
+                        f"   head: {head} -> base: {base}",
+                    ],
+                    dirty=dirty,
+                    head=head,
+                    base=base,
+                    reason=f"Could not compare HEAD against origin/{base}",
+                )
+            if not branch_diff:
+                return Result(
+                    status="ALL_MERGED_NO_PR_DIFF",
+                    action="NO_ACTION",
+                    summary=f"-- NO ACTION — All PRs merged, no PR-worthy diff on `{head}`.",
+                    details=[],
+                    dirty=dirty,
+                    head=head,
+                    base=base,
+                    pr_number=latest_merged["number"],
+                    new_commits=base_commits,
+                    reason=f"No diff remains against origin/{base}",
+                    fallback_used=True,
+                )
             return Result(
                 status="ALL_MERGED_WITH_NEW_COMMITS",
                 action="CREATE_PR",
@@ -328,9 +425,9 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
                 fallback_used=True,
             )
         return Result(
-            status="ALL_MERGED_NO_NEW_COMMITS",
+            status="ALL_MERGED_NO_PR_DIFF",
             action="NO_ACTION",
-            summary=f"-- NO ACTION — All PRs merged, no new commits on `{head}`.",
+            summary=f"-- NO ACTION — All PRs merged, no PR-worthy diff on `{head}`.",
             details=[],
             dirty=dirty,
             head=head,
@@ -338,6 +435,7 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
             pr_number=latest_merged["number"],
             new_commits=0,
             fallback_used=True,
+            reason=f"No diff remains against origin/{base}",
         )
 
     return Result(
