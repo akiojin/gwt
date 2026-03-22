@@ -24,11 +24,13 @@ Create or update GitHub Pull Requests with the gh CLI using a detailed body temp
    - Primary lookup path:
      - `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100`
 5. **If no PR exists** → create a new PR.
-6. **If any PR exists and is NOT merged** (`mergedAt` is null) → push only and finish (do **not** create a new PR).
-   - This applies to OPEN or CLOSED (unmerged) PRs.
+6. **If any OPEN PR exists and is NOT merged** (`state == open` and `mergedAt` is null) → push only and finish (do **not** create a new PR).
+   - Only an OPEN PR blocks new PR creation.
+   - CLOSED and unmerged PRs do **not** block creating a new PR.
    - Only update title/body/labels if the user explicitly requests changes.
-7. **If all PRs for the head are merged** → check for post-merge commits (see below).
-8. **If multiple PRs exist for the head** → use the most recently updated PR for reporting, but the create vs push decision is based on `mergedAt`.
+7. **If no OPEN unmerged PR exists and at least one PR for the head is merged** → check for post-merge commits (see below).
+8. **If the only existing PRs are CLOSED and unmerged** → create a new PR.
+9. **If multiple PRs exist for the head** → use the most recently updated PR for reporting, but the create vs push decision is based on open-unmerged vs merged state.
 
 ## Post-merge commit check (critical)
 
@@ -150,8 +152,9 @@ Next
    - Use the REST pull-request list endpoint as the primary transport.
    - Use decision rules above to pick action.
    - Treat `merged_at` as the source of truth for "merged".
+   - Treat `state == open && merged_at == null` as the source of truth for "existing active PR".
 
-6. **If all PRs are merged, perform post-merge commit check**
+6. **If no OPEN unmerged PR exists and at least one PR is merged, perform post-merge commit check**
    - Get merge commit from the latest merged item returned by `GET /repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>`
    - If the merge commit is an ancestor of `HEAD`, count `git rev-list --count <merge_commit>..HEAD`
    - If the merge commit is missing or not an ancestor, count `git rev-list --count origin/<head>..HEAD` first
@@ -243,12 +246,16 @@ repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 owner="${repo_slug%%/*}"
 pr_json=$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")
 pr_count=$(echo "$pr_json" | jq 'length')
-unmerged_count=$(echo "$pr_json" | jq 'map(select(.merged_at == null)) | length')
+open_unmerged_count=$(echo "$pr_json" | jq 'map(select(.state == "open" and .merged_at == null)) | length')
+merged_count=$(echo "$pr_json" | jq 'map(select(.merged_at != null)) | length')
 
 if [ "$pr_count" -eq 0 ]; then
   action=create
-elif [ "$unmerged_count" -gt 0 ]; then
+elif [ "$open_unmerged_count" -gt 0 ]; then
   action=push_only
+elif [ "$merged_count" -eq 0 ]; then
+  # Only closed, unmerged PRs exist for this head. They do not block a new PR.
+  action=create
 else
   # All PRs are merged - check for post-merge commits
   merge_commit=$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')

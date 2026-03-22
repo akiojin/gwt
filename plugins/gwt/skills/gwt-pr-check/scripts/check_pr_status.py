@@ -2,7 +2,8 @@
 """Check GitHub PR status for the current branch.
 
 This script mirrors the gwt-pr-check skill rules:
-- detect unmerged PRs first
+- detect OPEN unmerged PRs first
+- allow new PR creation when only CLOSED unmerged PRs exist
 - when all PRs are merged, prefer origin/<head>..HEAD fallback if the merge
   commit is missing or not an ancestor of HEAD
 - emit a short human-readable summary by default
@@ -154,6 +155,11 @@ def format_result(result: Result, lang: str) -> str:
                 f"> PUSH ONLY — `{result.head}` の未マージ PR があります。",
                 f"   PR: #{result.pr_number} {result.pr_url}",
             ]
+        elif result.status == "CLOSED_UNMERGED_ONLY":
+            lines = [
+                f">> CREATE PR — `{result.head}` -> `{result.base}` に open PR はなく、closed の未マージ PR だけがあります。",
+                f"   Last closed PR: #{result.pr_number} {result.pr_url}",
+            ]
         elif result.status == "ALL_MERGED_WITH_NEW_COMMITS":
             lines = [
                 f">> CREATE PR — 最終マージ後に {result.new_commits} 件の新しい commit があります (#{result.pr_number})。",
@@ -193,9 +199,9 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
             reason="No PR found for head branch",
         )
 
-    unmerged = [pr for pr in prs if pr.get("mergedAt") is None]
-    if unmerged:
-        pr = latest_by(unmerged, "updatedAt") or unmerged[0]
+    open_unmerged = [pr for pr in prs if pr.get("state") == "open" and pr.get("mergedAt") is None]
+    if open_unmerged:
+        pr = latest_by(open_unmerged, "updatedAt") or open_unmerged[0]
         pr_url = pr.get("url")
         if not pr_url and pr.get("number"):
             pr_url = fetch_pull_request(repo, pr["number"]).get("html_url")
@@ -209,10 +215,32 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
             base=base,
             pr_number=pr["number"],
             pr_url=pr_url,
-            reason="At least one PR for the head branch is not merged",
+            reason="At least one OPEN PR for the head branch is not merged",
         )
 
-    latest_merged = latest_by(prs, "mergedAt")
+    merged = [pr for pr in prs if pr.get("mergedAt") is not None]
+    if not merged:
+        closed_unmerged = [
+            pr for pr in prs if pr.get("state") == "closed" and pr.get("mergedAt") is None
+        ]
+        pr = latest_by(closed_unmerged, "updatedAt") or (closed_unmerged[0] if closed_unmerged else None)
+        return Result(
+            status="CLOSED_UNMERGED_ONLY",
+            action="CREATE_PR",
+            summary=(
+                f">> CREATE PR — No open PR exists for `{head}` -> `{base}`; "
+                "only closed unmerged PRs were found."
+            ),
+            details=[f"   Last closed PR: #{pr['number']} {pr.get('url')}"] if pr else [],
+            dirty=dirty,
+            head=head,
+            base=base,
+            pr_number=pr.get("number") if pr else None,
+            pr_url=pr.get("url") if pr else None,
+            reason="Only closed, unmerged PRs exist for the head branch",
+        )
+
+    latest_merged = latest_by(merged, "mergedAt")
     if latest_merged is None:
         return Result(
             status="CHECK_FAILED",
