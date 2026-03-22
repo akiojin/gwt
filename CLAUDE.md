@@ -232,8 +232,6 @@
 
 Skills are located in `.claude/skills/<name>/SKILL.md`.
 Commands can be invoked as `/gwt:<command-name>`.
-Routing rule: if the user is registering new work and no GitHub Issue number or URL exists yet, use `gwt-issue-register` before any manual `gh issue create` or SPEC command.
-Never bypass `gwt-issue-register` for duplicate search or ISSUE vs SPEC selection.
 
 ### Issue & SPEC Management
 
@@ -244,7 +242,7 @@ Never bypass `gwt-issue-register` for duplicate search or ISSUE vs SPEC selectio
 | gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub gwt-spec Issues using vector embeddings. Use when searching for existing specs, finding related gwt-spec issues, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. |
 | gwt-spec-register | `/gwt:gwt-spec-register` | Create a new GitHub Issue-first SPEC container when no existing canonical SPEC fits. Seed the Issue body as an artifact index plus a `spec.md` comment, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
 | gwt-spec-clarify | `/gwt:gwt-spec-clarify` | Clarify an existing `gwt-spec` by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. Use directly or through `gwt-spec-ops`. |
-| gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`. |
+| gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*` planning artifacts for an existing `gwt-spec`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`. |
 | gwt-spec-tasks | `/gwt:gwt-spec-tasks` | Generate `tasks.md` for an existing `gwt-spec` from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. Use directly or through `gwt-spec-ops`. |
 | gwt-spec-analyze | `/gwt:gwt-spec-analyze` | Analyze a `gwt-spec` artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers. |
 | gwt-spec-ops | — | GitHub Issue-first SPEC orchestration. Use an existing or newly created `gwt-spec` issue to stabilize `spec.md`, `plan.md`, `tasks.md`, analysis gates, and then continue into implementation without stopping at normal handoff boundaries. |
