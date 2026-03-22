@@ -82,4 +82,40 @@ describe("startupProfiling", () => {
     expect(tracker.finishPhase(token, "fetch_current_branch")).toEqual([]);
     expect(tracker.activeToken()).toBeNull();
   });
+
+  it("marks total metric as failed when any phase fails", () => {
+    let perf = 0;
+    let wall = 1_000;
+    const tracker = createStartupProfilingTracker({
+      perfNow: () => perf,
+      wallNow: () => wall,
+      nextToken: () => "startup-1",
+    });
+
+    const token = tracker.start("open_project");
+
+    tracker.beginPhase(token, "fetch_current_branch");
+    perf = 10;
+    wall = 1_010;
+    tracker.finishPhase(token, "fetch_current_branch", false);
+
+    tracker.beginPhase(token, "refresh_canvas_worktrees");
+    perf = 25;
+    wall = 1_025;
+    tracker.finishPhase(token, "refresh_canvas_worktrees", true);
+
+    tracker.beginPhase(token, "restore_project_agent_tabs");
+    perf = 40;
+    wall = 1_040;
+    const metrics = tracker.finishPhase(token, "restore_project_agent_tabs", true);
+
+    expect(metrics).toHaveLength(2);
+    expect(metrics[0]).toEqual(expect.objectContaining({ success: true }));
+    expect(metrics[1]).toEqual(
+      expect.objectContaining({
+        name: "project_start.open_project.total",
+        success: false,
+      }),
+    );
+  });
 });

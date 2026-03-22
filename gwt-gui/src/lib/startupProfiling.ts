@@ -18,6 +18,7 @@ type PhaseState = {
   startedAtMs: number;
   startedPerf: number;
   finished: boolean;
+  success: boolean;
 };
 
 type RunState = {
@@ -95,6 +96,7 @@ export function createStartupProfilingTracker(clock?: Partial<Clock>) {
       startedAtMs: clocks.wallNow(),
       startedPerf: clocks.perfNow(),
       finished: false,
+      success: true,
     };
   }
 
@@ -111,10 +113,12 @@ export function createStartupProfilingTracker(clock?: Partial<Clock>) {
         startedAtMs: active.startedAtMs,
         startedPerf: active.startedPerf,
         finished: false,
+        success: true,
       };
     if (phaseState.finished) return [];
 
     phaseState.finished = true;
+    phaseState.success = success;
     active.phases[phase] = phaseState;
 
     const nowPerf = clocks.perfNow();
@@ -140,7 +144,7 @@ export function createStartupProfilingTracker(clock?: Partial<Clock>) {
       durationMs: nowPerf - active.startedPerf,
       timestamp: nowWall,
       startupToken: active.token,
-      success: REQUIRED_PHASES.every((required) => active?.phases[required]?.finished),
+      success: REQUIRED_PHASES.every((required) => active?.phases[required]?.success),
     });
     active = null;
     return metrics;
