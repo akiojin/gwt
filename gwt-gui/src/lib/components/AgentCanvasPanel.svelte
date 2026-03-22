@@ -41,12 +41,15 @@
 
   const CARD_WIDTH = 280;
   const CARD_HEIGHT = 164;
+  const SESSION_CARD_WIDTH = 540;
+  const SESSION_CARD_HEIGHT = 320;
   const BOARD_PADDING = 40;
   const BOARD_MIN_WIDTH = 1180;
   const BOARD_MIN_HEIGHT = 820;
   const MIN_ZOOM = 0.7;
   const MAX_ZOOM = 1.6;
   const ZOOM_STEP = 0.1;
+  const SESSION_VISIBILITY_MARGIN = 120;
 
   let {
     projectPath,
@@ -107,6 +110,7 @@
   let dragState = $state<PointerDragState | null>(null);
   let panState = $state<PointerPanState | null>(null);
   let boardEl = $state<HTMLDivElement | null>(null);
+  let boardViewport = $state({ left: 0, top: 0, right: 0, bottom: 0 });
   let lastSeedKey = $state("");
   let lastViewportEmitKey = $state("");
   let lastLayoutsEmitKey = $state("");
@@ -223,12 +227,32 @@
       next[card.id] = {
         x: BOARD_PADDING + CARD_WIDTH + 80 + sessionIndex * (CARD_WIDTH + 40),
         y: BOARD_PADDING + CARD_HEIGHT + 60 + baseRow * (CARD_HEIGHT + 28),
-        width: CARD_WIDTH,
-        height: CARD_HEIGHT,
+        width: SESSION_CARD_WIDTH,
+        height: SESSION_CARD_HEIGHT,
       };
     }
 
     return next;
+  }
+
+  function updateBoardViewport() {
+    const el = boardEl;
+    if (!el) return;
+    const left = (el.scrollLeft - viewport.x) / viewport.zoom;
+    const top = (el.scrollTop - viewport.y) / viewport.zoom;
+    const right = left + el.clientWidth / viewport.zoom;
+    const bottom = top + el.clientHeight / viewport.zoom;
+    boardViewport = { left, top, right, bottom };
+  }
+
+  function isLayoutVisible(layout: AgentCanvasCardLayout | undefined): boolean {
+    if (!layout) return false;
+    return !(
+      layout.x + layout.width < boardViewport.left - SESSION_VISIBILITY_MARGIN ||
+      layout.x > boardViewport.right + SESSION_VISIBILITY_MARGIN ||
+      layout.y + layout.height < boardViewport.top - SESSION_VISIBILITY_MARGIN ||
+      layout.y > boardViewport.bottom + SESSION_VISIBILITY_MARGIN
+    );
   }
 
   $effect(() => {
@@ -280,6 +304,7 @@
     if (key === lastViewportEmitKey) return;
     lastViewportEmitKey = key;
     onViewportChange(viewport);
+    updateBoardViewport();
   });
 
   $effect(() => {
@@ -339,6 +364,17 @@
     return { width, height };
   });
 
+  let liveSessionCardIds = $derived.by(() => {
+    const visible = new Set<string>();
+    for (const card of renderableCards) {
+      if (card.kind !== "agent" && card.kind !== "terminal") continue;
+      if (isLayoutVisible(cardLayouts[card.id])) {
+        visible.add(card.id);
+      }
+    }
+    return visible;
+  });
+
   let zoomPercent = $derived(Math.round(viewport.zoom * 100));
 
   function updateViewportZoom(nextZoom: number) {
@@ -367,7 +403,7 @@
       detailOverlayCardId = null;
     } else if ((card.kind === "agent" || card.kind === "terminal") && card.tab) {
       onSessionSelect(card.tab.id);
-      detailOverlayCardId = card.id;
+      detailOverlayCardId = null;
     } else if (card.kind === "assistant") {
       detailOverlayCardId = card.id;
     }
@@ -465,6 +501,22 @@
     const direction = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
     updateViewportZoom(viewport.zoom + direction);
   }
+
+  $effect(() => {
+    const el = boardEl;
+    if (!el) return;
+    updateBoardViewport();
+
+    const handleScroll = () => updateBoardViewport();
+    const observer = new ResizeObserver(() => updateBoardViewport());
+    observer.observe(el);
+    el.addEventListener("scroll", handleScroll, { passive: true });
+
+    return () => {
+      observer.disconnect();
+      el.removeEventListener("scroll", handleScroll);
+    };
+  });
 </script>
 
 <div class="agent-canvas">
@@ -565,18 +617,47 @@
             </div>
 
             <div class="card-body">
-              <p class="card-subtitle">{card.subtitle}</p>
-              <p class="card-copy">{card.detail}</p>
               {#if card.kind === "worktree" && card.worktree}
+                <p class="card-subtitle">{card.subtitle}</p>
+                <p class="card-copy">{card.detail}</p>
                 <div class="card-footer">
                   <span class="card-status">{card.worktree.safety_level}</span>
                   <span>{sessionsByWorktreeId.get(card.id)?.length ?? 0} sessions</span>
                 </div>
               {:else if card.kind === "agent" || card.kind === "terminal"}
-                <div class="card-footer">
-                  <span class="card-status">{card.kind === "agent" ? "Interactive" : "Shell"}</span>
-                  <span>{card.tab?.paneId ? "Open detail" : "Waiting for pane"}</span>
+                <div class="session-surface" data-testid={`agent-canvas-session-surface-${card.tab?.id ?? card.id}`}>
+                  {#if card.tab?.paneId && liveSessionCardIds.has(card.id)}
+                    <TerminalView
+                      paneId={card.tab.paneId}
+                      active={true}
+                      focusOnActivate={selectedCardId === card.id}
+                      showControls={selectedCardId === card.id}
+                      agentId={card.kind === "agent" ? card.tab.agentId ?? null : null}
+                      {voiceInputEnabled}
+                      {voiceInputListening}
+                      {voiceInputPreparing}
+                      {voiceInputSupported}
+                      {voiceInputAvailable}
+                      {voiceInputAvailabilityReason}
+                      {voiceInputError}
+                    />
+                  {:else if card.tab?.paneId}
+                    <div class="session-placeholder">
+                      Preview paused while this card is outside the active viewport.
+                    </div>
+                  {:else}
+                    <div class="session-placeholder">
+                      {card.kind === "agent" ? "Agent starting..." : "Terminal starting..."}
+                    </div>
+                  {/if}
                 </div>
+                <div class="card-footer session-footer">
+                  <span class="card-status">{card.kind === "agent" ? "Agent" : "Shell"}</span>
+                  <span>{card.subtitle}</span>
+                </div>
+              {:else}
+                <p class="card-subtitle">{card.subtitle}</p>
+                <p class="card-copy">{card.detail}</p>
               {/if}
             </div>
           </div>
@@ -629,25 +710,6 @@
               {projectPath}
               onOpenSettings={onOpenSettings ?? (() => {})}
             />
-          {:else if (overlayCard.kind === "agent" || overlayCard.kind === "terminal") && overlayCard.tab}
-            {#if overlayCard.tab.paneId}
-              <TerminalView
-                paneId={overlayCard.tab.paneId}
-                active={true}
-                agentId={overlayCard.kind === "agent" ? overlayCard.tab.agentId ?? null : null}
-                {voiceInputEnabled}
-                {voiceInputListening}
-                {voiceInputPreparing}
-                {voiceInputSupported}
-                {voiceInputAvailable}
-                {voiceInputAvailabilityReason}
-                {voiceInputError}
-              />
-            {:else}
-              <div class="detail-placeholder">
-                {overlayCard.kind === "agent" ? "Agent starting..." : "Terminal starting..."}
-              </div>
-            {/if}
           {/if}
         </div>
       </div>
@@ -919,6 +981,34 @@
     font-size: 0.8rem;
   }
 
+  .canvas-card.session-card .card-body {
+    padding: 0;
+    gap: 0;
+  }
+
+  .session-surface {
+    flex: 1;
+    min-height: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+  }
+
+  .session-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 18px;
+    color: var(--text-muted);
+    text-align: center;
+    line-height: 1.45;
+  }
+
+  .session-footer {
+    margin-top: 0;
+    padding: 10px 14px 12px;
+  }
+
   .card-status {
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1004,14 +1094,6 @@
   .detail-dialog-body {
     min-height: 0;
     flex: 1;
-  }
-
-  .detail-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-muted);
-    height: 100%;
   }
 
   .dialog-close-inline {

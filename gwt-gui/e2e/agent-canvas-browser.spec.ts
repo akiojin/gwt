@@ -5,6 +5,8 @@ import {
   branchFeature,
   branchMain,
   defaultRecentProject,
+  emitTauriEvent,
+  waitForMenuActionListener,
   waitForInvokeCommand,
   openRecentProject,
   setMockCommandResponses,
@@ -226,4 +228,45 @@ test("Agent Canvas keeps compact detail visible and exposes zoom controls", asyn
   await expect(zoomLabel).toHaveText("110%");
   await page.getByTestId("agent-canvas-assistant-card").click();
   await expect(page.getByTestId("agent-canvas-detail-overlay")).toBeVisible();
+});
+
+test("Agent Canvas renders terminal session content directly inside the card", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    window.localStorage.setItem(
+      "gwt.projectTabs.v2",
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/tmp/gwt-playwright": {
+            tabs: [
+              { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
+              { type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" },
+            ],
+            activeTabId: "agentCanvas",
+          },
+        },
+      }),
+    );
+  });
+
+  await setMockCommandResponses(page, {
+    list_worktree_branches: [branchFeature],
+    list_remote_branches: [],
+    list_worktrees: [existingWorktree],
+    terminal_ready: Array.from(new TextEncoder().encode("mock terminal output\n")),
+  });
+
+  await openRecentProject(page);
+  await waitForMenuActionListener(page);
+  await emitTauriEvent(page, "menu-action", { action: "new-terminal" });
+
+  const sessionSurface = page.getByTestId(
+    "agent-canvas-session-surface-terminal-mock-pane-1",
+  );
+  await expect(sessionSurface).toBeVisible();
+  await expect(page.getByText("mock terminal output")).toBeVisible();
+  await expect(page.locator('[data-testid="agent-canvas-detail-overlay"]')).toHaveCount(0);
 });

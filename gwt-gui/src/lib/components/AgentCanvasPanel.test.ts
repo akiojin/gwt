@@ -3,6 +3,14 @@ import { fireEvent, render } from "@testing-library/svelte";
 import AgentCanvasPanel from "./AgentCanvasPanel.svelte";
 import type { Tab, WorktreeInfo } from "../types";
 
+function installResizeObserverStub() {
+  (globalThis as any).ResizeObserver = class ResizeObserver {
+    observe = vi.fn();
+    disconnect = vi.fn();
+    constructor(_cb: () => void) {}
+  };
+}
+
 const worktree: WorktreeInfo = {
   path: "/tmp/project/.gwt/worktrees/feature-canvas",
   branch: "feature/canvas",
@@ -23,6 +31,8 @@ const worktree: WorktreeInfo = {
 };
 
 describe("AgentCanvasPanel", () => {
+  installResizeObserverStub();
+
   it("opens assistant detail in an overlay instead of a persistent side pane", async () => {
     const rendered = render(AgentCanvasPanel, {
       props: {
@@ -200,5 +210,41 @@ describe("AgentCanvasPanel", () => {
     });
 
     expect(rendered.getByTestId("agent-canvas-edge-session-agent-1")).toBeTruthy();
+  });
+
+  it("renders terminal content directly inside session cards instead of using an overlay", async () => {
+    const onSessionSelect = vi.fn();
+    const rendered = render(AgentCanvasPanel, {
+      props: {
+        projectPath: "/tmp/project",
+        currentBranch: "feature/canvas",
+        tabs: [
+          {
+            id: "terminal-1",
+            label: "Shell",
+            type: "terminal",
+            paneId: "pane-1",
+            branchName: "feature/canvas",
+            worktreePath: worktree.path,
+          },
+        ],
+        worktrees: [worktree],
+        onSessionSelect,
+      },
+    });
+
+    const sessionCard = rendered.getByTestId("agent-canvas-session-terminal-1");
+    expect(
+      rendered.getByTestId("agent-canvas-session-surface-terminal-1"),
+    ).toBeTruthy();
+    expect(rendered.queryByTestId("agent-canvas-detail-overlay")).toBeNull();
+
+    await fireEvent.click(sessionCard);
+
+    expect(onSessionSelect).toHaveBeenCalledWith("terminal-1");
+    expect(
+      rendered.getByTestId("agent-canvas-session-surface-terminal-1"),
+    ).toBeTruthy();
+    expect(rendered.queryByTestId("agent-canvas-detail-overlay")).toBeNull();
   });
 });
