@@ -31,6 +31,20 @@ Build installers locally (one command):
 pnpm run installer:macos
 ```
 
+Fast local app install for iterative testing (without waiting for a GitHub Release):
+
+```bash
+pnpm run install:local:macos
+```
+
+Reinstall the already-built local `.app` bundle without rebuilding:
+
+```bash
+pnpm run install:local:macos:skip-build
+```
+
+This installs the local build directly to `/Applications/gwt.app`.
+
 ### Windows
 
 Download `.msi` from GitHub Releases and run the installer.

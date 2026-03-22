@@ -61,6 +61,7 @@
     onResize,
     onOpenCiLog,
     onDisplayNameChanged,
+    embedded = false,
     widthPx = 260,
     minWidthPx = 220,
     maxWidthPx = 520,
@@ -86,6 +87,7 @@
     onResize?: (nextWidthPx: number) => void;
     onOpenCiLog?: (runId: number) => void;
     onDisplayNameChanged?: () => void;
+    embedded?: boolean;
     widthPx?: number;
     minWidthPx?: number;
     maxWidthPx?: number;
@@ -1505,6 +1507,7 @@
 
 <aside
   class="sidebar"
+  class:embedded={embedded}
   style="width: {clampedWidthPx}px; min-width: {clampedWidthPx}px;"
 >
   <div class="mode-toggle">
@@ -1722,13 +1725,15 @@
       </div>
     </div>
   {/if}
-  <button
-    type="button"
-    class="resize-handle"
-    aria-label="Resize sidebar"
-    onpointerdown={handleResizePointerDown}
-    onkeydown={handleResizeKeydown}
-  ></button>
+  {#if !embedded}
+    <button
+      type="button"
+      class="resize-handle"
+      aria-label="Resize sidebar"
+      onpointerdown={handleResizePointerDown}
+      onkeydown={handleResizeKeydown}
+    ></button>
+  {/if}
 </aside>
 
 <!-- Context menu (fixed position, outside sidebar overflow) -->
@@ -1778,6 +1783,12 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  .sidebar.embedded {
+    width: 100% !important;
+    min-width: 0 !important;
+    border-right: none;
   }
 
   .resize-handle {

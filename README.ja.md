@@ -29,6 +29,18 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 pnpm run installer:macos
 ```
 
+GitHub Release を待たずにローカルビルドを `/Applications/gwt.app` へ直接入れて素早く検証:
+
+```bash
+pnpm run install:local:macos
+```
+
+すでにビルド済みの `.app` を再ビルドせず入れ直す:
+
+```bash
+pnpm run install:local:macos:skip-build
+```
+
 ### Windows
 
 GitHub Releases から `.msi` をダウンロードして実行します。

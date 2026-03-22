@@ -1,5 +1,11 @@
 <script lang="ts">
-  import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
+  import type {
+    BranchBrowserPanelConfig,
+    GitHubIssueInfo,
+    LaunchAgentRequest,
+    Tab,
+    WorktreeInfo,
+  } from "../types";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -20,6 +26,14 @@
     activeTabId = undefined,
     selectedBranch: _selectedBranch = undefined,
     projectPath,
+    branchBrowserConfig = undefined,
+    currentBranch = "",
+    selectedCanvasSessionTabId = null,
+    canvasWorktrees = [],
+    selectedCanvasWorktreeBranch = null,
+    onCanvasWorktreeSelect = () => {},
+    disableSplit = false,
+    onCanvasSessionSelect = () => {},
     onLaunchAgent,
     onQuickLaunch,
     onTabSelect,
@@ -48,6 +62,14 @@
     activeTabId?: string | undefined;
     selectedBranch?: unknown;
     projectPath: string;
+    branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
+    currentBranch?: string;
+    selectedCanvasSessionTabId?: string | null;
+    canvasWorktrees?: WorktreeInfo[];
+    selectedCanvasWorktreeBranch?: string | null;
+    onCanvasWorktreeSelect?: (branchName: string) => void;
+    disableSplit?: boolean;
+    onCanvasSessionSelect?: (tabId: string) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect:
@@ -290,6 +312,14 @@
     {tabsById}
     activeGroupId={resolvedActiveGroupId}
     {projectPath}
+    {branchBrowserConfig}
+    {currentBranch}
+    {selectedCanvasSessionTabId}
+    {canvasWorktrees}
+    {selectedCanvasWorktreeBranch}
+    {onCanvasWorktreeSelect}
+    {disableSplit}
+    {onCanvasSessionSelect}
     {draggedTabId}
     {dropTarget}
     {onGroupFocus}
