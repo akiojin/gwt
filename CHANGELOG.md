@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [8.17.2] - 2026-03-20
+
+### Bug Fixes
+
+- **tauri:** Harden macOS startup migration (#1723)
+
 ## [8.17.1] - 2026-03-19
 
 ### Bug Fixes

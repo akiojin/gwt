@@ -239,7 +239,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 |-------|---------|-------------|
 | gwt-issue-register | `/gwt:gwt-issue-register` | Register new GitHub work items from a request. Search existing Issues and `gwt-spec` Issues first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or continue into the SPEC workflow. Use as the main entrypoint for new Issue/SPEC registration requests. |
 | gwt-issue-resolve | `/gwt:gwt-issue-resolve` | Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing gwt-spec issue, or promoted to a new spec issue, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration. |
-| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub gwt-spec Issues using vector embeddings. Use before creating or updating any spec issue. |
+| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub gwt-spec Issues using vector embeddings. Use when searching for existing specs, finding related gwt-spec issues, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. |
 | gwt-spec-register | `/gwt:gwt-spec-register` | Create a new GitHub Issue-first SPEC container when no existing canonical SPEC fits. Seed the Issue body as an artifact index plus a `spec.md` comment, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
 | gwt-spec-clarify | `/gwt:gwt-spec-clarify` | Clarify an existing `gwt-spec` by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. Use directly or through `gwt-spec-ops`. |
 | gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`. |
@@ -252,16 +252,16 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-pr | `/gwt:gwt-pr` | Create or update GitHub Pull Requests with the gh CLI, including deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches). |
-| gwt-pr-check | `/gwt:gwt-pr-check` | Check GitHub PR status with the gh CLI, including unmerged PR detection and post-merge new-commit detection for the current branch. |
-| gwt-pr-fix | `/gwt:gwt-pr-fix` | Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Autonomously fix high-confidence blockers, reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Ask the user only for ambiguous conflicts or design decisions. |
+| gwt-pr | `/gwt:gwt-pr` | Create or update GitHub Pull Requests with the gh CLI, preferring REST-first `gh api` flows for PR list/create/update/view while deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches). |
+| gwt-pr-check | `/gwt:gwt-pr-check` | Check GitHub PR status with the gh CLI using REST-first PR lookups, including unmerged PR detection and post-merge new-commit detection for the current branch. |
+| gwt-pr-fix | `/gwt:gwt-pr-fix` | Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Use REST-first transport for CI/reviews/comments, keep GraphQL only for unresolved review thread discovery and reply/resolve, autonomously fix high-confidence blockers, reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Ask the user only for ambiguous conflicts or design decisions. |
 
 ### Utilities
 
 | Skill | Command | Description |
 |-------|---------|-------------|
 | gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
-| gwt-agent-communication | `/gwt:gwt-agent-communication` | Agent↔Assistant consultation protocol for PM-mode orchestration. |
+| gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
 | gwt-spec-to-issue-migration | — | Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script. |
 
 ### Recommended Workflow

@@ -137,6 +137,8 @@ export interface SettingsData {
   default_base_branch: string;
   worktree_root: string;
   debug: boolean;
+  /** Enable frontend/backend profiling and Chrome Trace output. */
+  profiling: boolean;
   log_dir?: string | null;
   log_retention_days: number;
   agent_default?: string | null;
