@@ -3,9 +3,14 @@
     BranchBrowserPanelConfig,
     GitHubIssueInfo,
     LaunchAgentRequest,
+    BranchBrowserPanelState,
     Tab,
     WorktreeInfo,
   } from "../types";
+  import type {
+    AgentCanvasCardLayout,
+    AgentCanvasViewport,
+  } from "../agentCanvas";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -30,11 +35,18 @@
     branchBrowserConfig = undefined,
     currentBranch = "",
     selectedCanvasSessionTabId = null,
+    selectedCanvasCardId = null,
+    canvasViewport = undefined,
+    canvasCardLayouts = undefined,
     canvasWorktrees = [],
     selectedCanvasWorktreeBranch = null,
     onCanvasWorktreeSelect = () => {},
+    branchBrowserState = undefined,
     disableSplit = false,
     onCanvasSessionSelect = () => {},
+    onCanvasViewportChange = () => {},
+    onCanvasCardLayoutsChange = () => {},
+    onCanvasSelectedCardChange = () => {},
     onLaunchAgent,
     onQuickLaunch,
     onTabSelect,
@@ -66,11 +78,20 @@
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
     selectedCanvasSessionTabId?: string | null;
+    selectedCanvasCardId?: string | null;
+    canvasViewport?: AgentCanvasViewport | undefined;
+    canvasCardLayouts?: Record<string, AgentCanvasCardLayout> | undefined;
     canvasWorktrees?: WorktreeInfo[];
     selectedCanvasWorktreeBranch?: string | null;
     onCanvasWorktreeSelect?: (branchName: string) => void;
+    branchBrowserState?: BranchBrowserPanelState | undefined;
     disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
+    onCanvasViewportChange?: (viewport: AgentCanvasViewport) => void;
+    onCanvasCardLayoutsChange?: (
+      layouts: Record<string, AgentCanvasCardLayout>,
+    ) => void;
+    onCanvasSelectedCardChange?: (cardId: string | null) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect:
@@ -313,49 +334,58 @@
 
 <main class="main-area" class:drag-active={draggedTabId !== null}>
   {#if disableSplit && flatGroup}
-    <TabGroupPane
-      flatShell={true}
-      group={flatGroup}
-      {tabsById}
-      activeGroupId={resolvedActiveGroupId}
-      {projectPath}
-      {branchBrowserConfig}
-      {currentBranch}
-      {selectedCanvasSessionTabId}
-      {canvasWorktrees}
-      {selectedCanvasWorktreeBranch}
-      {onCanvasWorktreeSelect}
-      {disableSplit}
-      {onCanvasSessionSelect}
-      {draggedTabId}
-      {dropTarget}
-      {onGroupFocus}
-      {onLaunchAgent}
-      {onQuickLaunch}
-      {onWorkOnIssue}
-      {onSwitchToWorktree}
-      {onIssueCountChange}
-      {onOpenSettings}
-      {voiceInputEnabled}
-      {voiceInputListening}
-      {voiceInputPreparing}
-      {voiceInputSupported}
-      {voiceInputAvailable}
-      {voiceInputAvailabilityReason}
-      {voiceInputError}
-      onTabSelect={handleTabSelectForward}
-      onTabClose={onTabClose}
-      onTabSplitAction={handleTabSplitAction}
-      onTabDragStart={handleTabDragStart}
-      onTabDragEnd={handleTabDragEnd}
-      onTabDragOver={handleTabDragOver}
-      onTabDrop={handleTabDrop}
-      onGroupDragOver={handleGroupDragOver}
-      onGroupDrop={handleGroupDrop}
-      onSplitDragOver={handleSplitDragOver}
-      onSplitDrop={handleSplitDrop}
-      onSplitResize={onSplitResize}
-    />
+    {#key `${resolvedActiveGroupId}:${activeTabId}:${tabs.length}`}
+      <TabGroupPane
+        flatShell={true}
+        group={flatGroup}
+        {tabsById}
+        activeGroupId={resolvedActiveGroupId}
+        {projectPath}
+        {branchBrowserConfig}
+        {currentBranch}
+        {selectedCanvasSessionTabId}
+        {selectedCanvasCardId}
+        {canvasViewport}
+        {canvasCardLayouts}
+        {canvasWorktrees}
+        {selectedCanvasWorktreeBranch}
+        {onCanvasWorktreeSelect}
+        {branchBrowserState}
+        {disableSplit}
+        {onCanvasSessionSelect}
+        {onCanvasViewportChange}
+        {onCanvasCardLayoutsChange}
+        {onCanvasSelectedCardChange}
+        {draggedTabId}
+        {dropTarget}
+        {onGroupFocus}
+        {onLaunchAgent}
+        {onQuickLaunch}
+        {onWorkOnIssue}
+        {onSwitchToWorktree}
+        {onIssueCountChange}
+        {onOpenSettings}
+        {voiceInputEnabled}
+        {voiceInputListening}
+        {voiceInputPreparing}
+        {voiceInputSupported}
+        {voiceInputAvailable}
+        {voiceInputAvailabilityReason}
+        {voiceInputError}
+        onTabSelect={handleTabSelectForward}
+        onTabClose={onTabClose}
+        onTabSplitAction={handleTabSplitAction}
+        onTabDragStart={handleTabDragStart}
+        onTabDragEnd={handleTabDragEnd}
+        onTabDragOver={handleTabDragOver}
+        onTabDrop={handleTabDrop}
+        onGroupDragOver={handleGroupDragOver}
+        onGroupDrop={handleGroupDrop}
+        onSplitDragOver={handleSplitDragOver}
+        onSplitDrop={handleSplitDrop}
+        onSplitResize={onSplitResize}
+      />
+    {/key}
   {:else}
     <TabLayoutNodeView
       node={resolvedLayoutRoot}
@@ -366,11 +396,18 @@
       {branchBrowserConfig}
       {currentBranch}
       {selectedCanvasSessionTabId}
+      {selectedCanvasCardId}
+      {canvasViewport}
+      {canvasCardLayouts}
       {canvasWorktrees}
       {selectedCanvasWorktreeBranch}
       {onCanvasWorktreeSelect}
+      {branchBrowserState}
       {disableSplit}
       {onCanvasSessionSelect}
+      {onCanvasViewportChange}
+      {onCanvasCardLayoutsChange}
+      {onCanvasSelectedCardChange}
       {draggedTabId}
       {dropTarget}
       {onGroupFocus}

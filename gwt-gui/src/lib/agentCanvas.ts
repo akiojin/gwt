@@ -7,6 +7,19 @@ export type AgentCanvasViewport = {
   zoom: number;
 };
 
+export type AgentCanvasCardLayout = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type AgentCanvasPersistedState = {
+  viewport: AgentCanvasViewport;
+  cardLayouts: Record<string, AgentCanvasCardLayout>;
+  selectedCardId: string | null;
+};
+
 export type AgentCanvasWorktreeCard = {
   id: string;
   type: "worktree";

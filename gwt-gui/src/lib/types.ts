@@ -262,6 +262,10 @@ export interface BranchBrowserPanelConfig {
   agentTabBranches: string[];
   activeAgentTabBranch?: string | null;
   appLanguage: SettingsData["app_language"];
+  initialFilter?: "Local" | "Remote" | "All";
+  initialQuery?: string;
+  selectedBranchName?: string | null;
+  onStateChange?: (state: BranchBrowserPanelState) => void;
   onModeChange?: (next: "branch") => void;
   onResize?: (nextWidthPx: number) => void;
   onBranchSelect: (branch: BranchInfo) => void;
@@ -273,6 +277,12 @@ export interface BranchBrowserPanelConfig {
   onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
   onOpenCiLog?: (runId: number) => void;
   onDisplayNameChanged?: () => void;
+}
+
+export interface BranchBrowserPanelState {
+  filter: "Local" | "Remote" | "All";
+  query: string;
+  selectedBranchName: string | null;
 }
 
 export interface ToolSessionEntry {

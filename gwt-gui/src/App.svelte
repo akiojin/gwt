@@ -1,6 +1,7 @@
 <script lang="ts">
   import type {
     BranchBrowserPanelConfig,
+    BranchBrowserPanelState,
     MaterializeWorktreeResult,
     Tab,
     BranchInfo,
@@ -45,6 +46,10 @@
     type StoredProjectTab,
     type StoredTerminalTab,
   } from "./lib/agentTabsPersistence";
+  import {
+    createDefaultAgentCanvasViewport,
+    type AgentCanvasCardLayout,
+  } from "./lib/agentCanvas";
   import {
     defaultAppTabs,
     type TabDropPosition,
@@ -162,6 +167,11 @@
   const DEFAULT_TERMINAL_FONT_FAMILY =
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
   const DOCS_EDITOR_AUTO_CLOSE_POLL_MS = 1200;
+  const DEFAULT_BRANCH_BROWSER_STATE: BranchBrowserPanelState = {
+    filter: "Local",
+    query: "",
+    selectedBranchName: null,
+  };
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -317,9 +327,15 @@
     })(),
   );
   let selectedCanvasSessionTabId: string | null = $state(null);
+  let selectedCanvasCardId: string | null = $state(null);
+  let canvasViewport = $state(createDefaultAgentCanvasViewport());
+  let canvasCardLayouts = $state<Record<string, AgentCanvasCardLayout>>({});
   let canvasWorktrees: WorktreeInfo[] = $state([]);
   let selectedCanvasWorktreeBranch: string | null = $state(null);
   let selectedCanvasWorktreePath: string | null = $state(null);
+  let branchBrowserState = $state<BranchBrowserPanelState>(
+    DEFAULT_BRANCH_BROWSER_STATE,
+  );
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -348,6 +364,12 @@
           minWidthPx: MIN_SIDEBAR_WIDTH_PX,
           maxWidthPx: MAX_SIDEBAR_WIDTH_PX,
           mode: sidebarMode,
+          initialFilter: branchBrowserState.filter,
+          initialQuery: branchBrowserState.query,
+          selectedBranchName: branchBrowserState.selectedBranchName,
+          onStateChange: (state) => {
+            branchBrowserState = state;
+          },
           selectedBranch,
           currentBranch,
           agentTabBranches,
@@ -2859,6 +2881,10 @@
         agentTabsRestoreToken === token
       ) {
         agentTabsHydratedProjectPath = targetProjectPath;
+        canvasViewport = createDefaultAgentCanvasViewport();
+        canvasCardLayouts = {};
+        selectedCanvasCardId = null;
+        branchBrowserState = DEFAULT_BRANCH_BROWSER_STATE;
       }
       return;
     }
@@ -2932,6 +2958,11 @@
     await refreshAgentTabLabelsForProject(targetProjectPath);
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
+    canvasViewport =
+      restored.agentCanvas?.viewport ?? createDefaultAgentCanvasViewport();
+    canvasCardLayouts = restored.agentCanvas?.cardLayouts ?? {};
+    selectedCanvasCardId = restored.agentCanvas?.selectedCardId ?? null;
+    branchBrowserState = restored.branchBrowser ?? DEFAULT_BRANCH_BROWSER_STATE;
     selectedCanvasSessionTabId = restored.activeCanvasSessionTabId;
     const restoredCanvasSession =
       restored.activeCanvasSessionTabId
@@ -2977,6 +3008,10 @@
     }
 
     agentTabsHydratedProjectPath = null;
+    canvasViewport = createDefaultAgentCanvasViewport();
+    canvasCardLayouts = {};
+    selectedCanvasCardId = null;
+    branchBrowserState = DEFAULT_BRANCH_BROWSER_STATE;
     const target = projectPath;
     triggerRestoreProjectAgentTabs(target);
   });
@@ -3058,6 +3093,12 @@
       tabs: storedTabs,
       activeTabId: storedActiveTabId,
       activeCanvasSessionTabId: selectedCanvasSessionTabId,
+      agentCanvas: {
+        viewport: canvasViewport,
+        cardLayouts: canvasCardLayouts,
+        selectedCardId: selectedCanvasCardId,
+      },
+      branchBrowser: branchBrowserState,
     }, undefined, currentWindowLabel);
   });
 
@@ -3270,8 +3311,21 @@
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
+        {selectedCanvasCardId}
+        {canvasViewport}
+        {canvasCardLayouts}
         disableSplit={true}
+        branchBrowserState={branchBrowserState}
         onCanvasSessionSelect={handleCanvasSessionSelect}
+        onCanvasViewportChange={(next) => {
+          canvasViewport = next;
+        }}
+        onCanvasCardLayoutsChange={(next) => {
+          canvasCardLayouts = next;
+        }}
+        onCanvasSelectedCardChange={(next) => {
+          selectedCanvasCardId = next;
+        }}
         onLaunchAgent={requestAgentLaunch}
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}

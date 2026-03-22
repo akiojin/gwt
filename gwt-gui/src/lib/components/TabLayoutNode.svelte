@@ -1,11 +1,16 @@
 <script lang="ts">
   import type {
     BranchBrowserPanelConfig,
+    BranchBrowserPanelState,
     GitHubIssueInfo,
     LaunchAgentRequest,
     Tab,
     WorktreeInfo,
   } from "../types";
+  import type {
+    AgentCanvasCardLayout,
+    AgentCanvasViewport,
+  } from "../agentCanvas";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -25,11 +30,18 @@
     branchBrowserConfig = undefined,
     currentBranch = "",
     selectedCanvasSessionTabId = null,
+    selectedCanvasCardId = null,
+    canvasViewport = undefined,
+    canvasCardLayouts = undefined,
     canvasWorktrees = [],
     selectedCanvasWorktreeBranch = null,
     onCanvasWorktreeSelect = () => {},
+    branchBrowserState = undefined,
     disableSplit = false,
     onCanvasSessionSelect = () => {},
+    onCanvasViewportChange = () => {},
+    onCanvasCardLayoutsChange = () => {},
+    onCanvasSelectedCardChange = () => {},
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -67,11 +79,20 @@
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
     selectedCanvasSessionTabId?: string | null;
+    selectedCanvasCardId?: string | null;
+    canvasViewport?: AgentCanvasViewport | undefined;
+    canvasCardLayouts?: Record<string, AgentCanvasCardLayout> | undefined;
     canvasWorktrees?: WorktreeInfo[];
     selectedCanvasWorktreeBranch?: string | null;
     onCanvasWorktreeSelect?: (branchName: string) => void;
+    branchBrowserState?: BranchBrowserPanelState | undefined;
     disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
+    onCanvasViewportChange?: (viewport: AgentCanvasViewport) => void;
+    onCanvasCardLayoutsChange?: (
+      layouts: Record<string, AgentCanvasCardLayout>,
+    ) => void;
+    onCanvasSelectedCardChange?: (cardId: string | null) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -215,11 +236,18 @@
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
+        {selectedCanvasCardId}
+        {canvasViewport}
+        {canvasCardLayouts}
         {canvasWorktrees}
         {selectedCanvasWorktreeBranch}
         {onCanvasWorktreeSelect}
+        {branchBrowserState}
         {disableSplit}
         {onCanvasSessionSelect}
+        {onCanvasViewportChange}
+        {onCanvasCardLayoutsChange}
+        {onCanvasSelectedCardChange}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}
@@ -266,11 +294,18 @@
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
+        {selectedCanvasCardId}
+        {canvasViewport}
+        {canvasCardLayouts}
         {canvasWorktrees}
         {selectedCanvasWorktreeBranch}
         {onCanvasWorktreeSelect}
+        {branchBrowserState}
         {disableSplit}
         {onCanvasSessionSelect}
+        {onCanvasViewportChange}
+        {onCanvasCardLayoutsChange}
+        {onCanvasSelectedCardChange}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    type AgentCanvasCardLayout,
     buildAgentCanvasGraph,
     createDefaultAgentCanvasViewport,
     type AgentCanvasViewport,
@@ -9,13 +10,6 @@
   import TerminalView from "../terminal/TerminalView.svelte";
 
   type CanvasCardKind = "assistant" | "worktree" | "agent" | "terminal";
-
-  type CanvasLayout = {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  };
 
   type RenderableCanvasCard = {
     id: string;
@@ -63,6 +57,12 @@
     onWorktreeSelect = () => {},
     selectedSessionTabId = null,
     onSessionSelect = () => {},
+    persistedViewport = undefined,
+    persistedCardLayouts = undefined,
+    persistedSelectedCardId = null,
+    onViewportChange = () => {},
+    onCardLayoutsChange = () => {},
+    onSelectedCardChange = () => {},
     onOpenSettings,
     voiceInputEnabled = false,
     voiceInputListening = false,
@@ -80,6 +80,12 @@
     onWorktreeSelect?: (branchName: string) => void;
     selectedSessionTabId?: string | null;
     onSessionSelect?: (tabId: string) => void;
+    persistedViewport?: AgentCanvasViewport | undefined;
+    persistedCardLayouts?: Record<string, AgentCanvasCardLayout> | undefined;
+    persistedSelectedCardId?: string | null;
+    onViewportChange?: (viewport: AgentCanvasViewport) => void;
+    onCardLayoutsChange?: (layouts: Record<string, AgentCanvasCardLayout>) => void;
+    onSelectedCardChange?: (cardId: string | null) => void;
     onOpenSettings?: () => void;
     voiceInputEnabled?: boolean;
     voiceInputListening?: boolean;
@@ -95,11 +101,15 @@
   let popupWorktreeBranch = $state<string | null>(null);
   let worktreeDetailsOpen = $state(false);
   let viewport = $state<AgentCanvasViewport>(createDefaultAgentCanvasViewport());
-  let cardLayouts = $state<Record<string, CanvasLayout>>({});
+  let cardLayouts = $state<Record<string, AgentCanvasCardLayout>>({});
   let selectedCardId = $state<string>("assistant");
   let dragState = $state<PointerDragState | null>(null);
   let panState = $state<PointerPanState | null>(null);
   let boardEl = $state<HTMLDivElement | null>(null);
+  let lastSeedKey = $state("");
+  let lastViewportEmitKey = $state("");
+  let lastLayoutsEmitKey = $state("");
+  let lastSelectedEmitKey = $state("");
 
   function worktreeCardTestId(worktree: WorktreeInfo): string {
     const raw = worktree.branch ?? "project-root";
@@ -177,8 +187,8 @@
     return "assistant";
   }
 
-  function buildDefaultLayouts(cards: RenderableCanvasCard[]): Record<string, CanvasLayout> {
-    const next: Record<string, CanvasLayout> = {
+  function buildDefaultLayouts(cards: RenderableCanvasCard[]): Record<string, AgentCanvasCardLayout> {
+    const next: Record<string, AgentCanvasCardLayout> = {
       assistant: {
         x: BOARD_PADDING,
         y: BOARD_PADDING,
@@ -221,8 +231,23 @@
   }
 
   $effect(() => {
+    const seedKey = JSON.stringify([
+      projectPath,
+      persistedViewport ?? null,
+      persistedCardLayouts ?? null,
+      persistedSelectedCardId ?? null,
+    ]);
+    if (seedKey !== lastSeedKey) {
+      lastSeedKey = seedKey;
+      viewport = persistedViewport ?? createDefaultAgentCanvasViewport();
+      cardLayouts = persistedCardLayouts ? { ...persistedCardLayouts } : {};
+      if (persistedSelectedCardId) {
+        selectedCardId = persistedSelectedCardId;
+      }
+    }
+
     const defaults = buildDefaultLayouts(renderableCards);
-    const nextLayouts: Record<string, CanvasLayout> = {};
+    const nextLayouts: Record<string, AgentCanvasCardLayout> = {};
     let needsLayoutSync = Object.keys(cardLayouts).length !== renderableCards.length;
     for (const card of renderableCards) {
       const existing = cardLayouts[card.id];
@@ -247,6 +272,27 @@
     ) {
       selectedCardId = preferred;
     }
+  });
+
+  $effect(() => {
+    const key = JSON.stringify(viewport);
+    if (key === lastViewportEmitKey) return;
+    lastViewportEmitKey = key;
+    onViewportChange(viewport);
+  });
+
+  $effect(() => {
+    const key = JSON.stringify(cardLayouts);
+    if (key === lastLayoutsEmitKey) return;
+    lastLayoutsEmitKey = key;
+    onCardLayoutsChange(cardLayouts);
+  });
+
+  $effect(() => {
+    const key = selectedCardId || "";
+    if (key === lastSelectedEmitKey) return;
+    lastSelectedEmitKey = key;
+    onSelectedCardChange(selectedCardId || null);
   });
 
   let popupWorktree = $derived(

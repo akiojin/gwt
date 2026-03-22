@@ -1,3 +1,8 @@
+import type {
+  AgentCanvasCardLayout,
+  AgentCanvasPersistedState,
+  AgentCanvasViewport,
+} from "./agentCanvas";
 import type { Tab, TerminalInfo } from "./types";
 import { inferAgentId } from "./agentUtils";
 
@@ -56,6 +61,8 @@ export type StoredProjectTabs = {
   tabs: StoredProjectTab[];
   activeTabId: string | null;
   activeCanvasSessionTabId?: string | null;
+  agentCanvas?: AgentCanvasPersistedState;
+  branchBrowser?: StoredBranchBrowserState;
 };
 
 /**
@@ -65,8 +72,16 @@ export type BuildRestoredProjectTabsResult = {
   tabs: Tab[];
   activeTabId: string | null;
   activeCanvasSessionTabId: string | null;
+  agentCanvas?: AgentCanvasPersistedState;
+  branchBrowser?: StoredBranchBrowserState;
   terminalTabsToRespawn: StoredTerminalTab[];
   activeTerminalPaneIdToRespawn: string | null;
+};
+
+export type StoredBranchBrowserState = {
+  filter: "Local" | "Remote" | "All";
+  query: string;
+  selectedBranchName: string | null;
 };
 
 // Backward-compatible shape consumed by legacy App.svelte restore/persist flow.
@@ -150,6 +165,68 @@ function buildProjectStorageKey(
   const path = projectPath.trim();
   const label = normalizeString(windowLabel);
   return label ? `${path}::window=${label}` : path;
+}
+
+function sanitizeViewport(raw: unknown): AgentCanvasViewport {
+  if (!raw || typeof raw !== "object") {
+    return { x: 0, y: 0, zoom: 1 };
+  }
+  const obj = raw as Record<string, unknown>;
+  const x = Number(obj.x);
+  const y = Number(obj.y);
+  const zoom = Number(obj.zoom);
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+    zoom: Number.isFinite(zoom) && zoom > 0 ? zoom : 1,
+  };
+}
+
+function sanitizeCardLayouts(raw: unknown): Record<string, AgentCanvasCardLayout> {
+  if (!raw || typeof raw !== "object") return {};
+  const layouts: Record<string, AgentCanvasCardLayout> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object") continue;
+    const obj = value as Record<string, unknown>;
+    const x = Number(obj.x);
+    const y = Number(obj.y);
+    const width = Number(obj.width);
+    const height = Number(obj.height);
+    if (![x, y, width, height].every((n) => Number.isFinite(n))) continue;
+    layouts[key] = { x, y, width, height };
+  }
+  return layouts;
+}
+
+function sanitizeAgentCanvasState(raw: unknown): AgentCanvasPersistedState {
+  if (!raw || typeof raw !== "object") {
+    return {
+      viewport: { x: 0, y: 0, zoom: 1 },
+      cardLayouts: {},
+      selectedCardId: null,
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    viewport: sanitizeViewport(obj.viewport),
+    cardLayouts: sanitizeCardLayouts(obj.cardLayouts),
+    selectedCardId: normalizeString(obj.selectedCardId) || null,
+  };
+}
+
+function sanitizeBranchBrowserState(raw: unknown): StoredBranchBrowserState {
+  if (!raw || typeof raw !== "object") {
+    return { filter: "Local", query: "", selectedBranchName: null };
+  }
+  const obj = raw as Record<string, unknown>;
+  const filterRaw = normalizeString(obj.filter);
+  const filter =
+    filterRaw === "Remote" || filterRaw === "All" ? filterRaw : "Local";
+  return {
+    filter,
+    query: typeof obj.query === "string" ? obj.query : "",
+    selectedBranchName: normalizeString(obj.selectedBranchName) || null,
+  };
 }
 
 function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
@@ -290,6 +367,12 @@ function sanitizeProjectTabsEntry(rawEntry: unknown): StoredProjectTabs | null {
     tabs,
     activeTabId,
     ...(activeCanvasSessionTabId ? { activeCanvasSessionTabId } : {}),
+    ...("agentCanvas" in entry
+      ? { agentCanvas: sanitizeAgentCanvasState(entry.agentCanvas) }
+      : {}),
+    ...("branchBrowser" in entry
+      ? { branchBrowser: sanitizeBranchBrowserState(entry.branchBrowser) }
+      : {}),
   };
 }
 
@@ -600,6 +683,12 @@ export function buildRestoredProjectTabs(
     tabs: restoredTabs,
     activeTabId,
     activeCanvasSessionTabId,
+    ...("agentCanvas" in stored
+      ? { agentCanvas: sanitizeAgentCanvasState(stored.agentCanvas) }
+      : {}),
+    ...("branchBrowser" in stored
+      ? { branchBrowser: sanitizeBranchBrowserState(stored.branchBrowser) }
+      : {}),
     terminalTabsToRespawn,
     activeTerminalPaneIdToRespawn,
   };
@@ -667,6 +756,8 @@ export function persistStoredProjectAgentTabs(
       ...(existing?.activeCanvasSessionTabId
         ? { activeCanvasSessionTabId: existing.activeCanvasSessionTabId }
         : {}),
+      ...(existing?.agentCanvas ? { agentCanvas: existing.agentCanvas } : {}),
+      ...(existing?.branchBrowser ? { branchBrowser: existing.branchBrowser } : {}),
     },
     storage,
     windowLabel,

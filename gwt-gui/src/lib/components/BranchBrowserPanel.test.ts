@@ -267,4 +267,33 @@ describe("BranchBrowserPanel", () => {
     expect((button as HTMLButtonElement).disabled).toBe(true);
     expect(onBranchActivate).not.toHaveBeenCalled();
   });
+
+  it("hydrates and reports filter/query state for window-local persistence", async () => {
+    const onStateChange = vi.fn();
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          initialFilter: "Remote",
+          initialQuery: "remote",
+          selectedBranchName: "origin/feature/remote",
+          onStateChange,
+        }),
+      },
+    });
+
+    await waitFor(() =>
+      expect(rendered.getByDisplayValue("remote")).toBeTruthy(),
+    );
+    expect(rendered.getByRole("button", { name: "Remote" }).className).toContain("active");
+    await fireEvent.click(rendered.getByRole("button", { name: "All" }));
+    await fireEvent.input(rendered.getByPlaceholderText("Filter branches..."), {
+      target: { value: "feature" },
+    });
+
+    expect(onStateChange).toHaveBeenLastCalledWith({
+      filter: "All",
+      query: "feature",
+      selectedBranchName: "origin/feature/remote",
+    });
+  });
 });

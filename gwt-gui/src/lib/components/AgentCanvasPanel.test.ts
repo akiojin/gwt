@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render } from "@testing-library/svelte";
 import AgentCanvasPanel from "./AgentCanvasPanel.svelte";
 import type { Tab, WorktreeInfo } from "../types";
@@ -106,5 +106,32 @@ describe("AgentCanvasPanel", () => {
     });
 
     expect(worktreeCard.style.transform).toContain("translate(120px, 334px)");
+  });
+
+  it("emits persisted viewport and selected card changes", async () => {
+    const onViewportChange = vi.fn();
+    const onSelectedCardChange = vi.fn();
+    const rendered = render(AgentCanvasPanel, {
+      props: {
+        projectPath: "/tmp/project",
+        currentBranch: "feature/canvas",
+        tabs: [],
+        worktrees: [worktree],
+        persistedViewport: { x: 12, y: 18, zoom: 1.2 },
+        persistedSelectedCardId: `worktree:${worktree.path}`,
+        onViewportChange,
+        onSelectedCardChange,
+      },
+    });
+
+    const zoomLabel = rendered.getByTestId("agent-canvas-zoom-label");
+    expect(zoomLabel.textContent).toBe("120%");
+    const worktreeCard = rendered.container.querySelector(
+      '[data-testid^="agent-canvas-worktree-card-"]',
+    ) as HTMLElement;
+    expect(worktreeCard.className).toContain("selected");
+    await fireEvent.click(rendered.getByLabelText("Zoom out"));
+    expect(onViewportChange).toHaveBeenCalled();
+    expect(onSelectedCardChange).toHaveBeenCalledWith(`worktree:${worktree.path}`);
   });
 });

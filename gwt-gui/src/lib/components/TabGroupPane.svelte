@@ -1,11 +1,16 @@
 <script lang="ts">
   import type {
     BranchBrowserPanelConfig,
+    BranchBrowserPanelState,
     GitHubIssueInfo,
     LaunchAgentRequest,
     Tab,
     WorktreeInfo,
   } from "../types";
+  import type {
+    AgentCanvasCardLayout,
+    AgentCanvasViewport,
+  } from "../agentCanvas";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -36,11 +41,18 @@
     currentBranch = "",
     flatShell = false,
     selectedCanvasSessionTabId = null,
+    selectedCanvasCardId = null,
+    canvasViewport = undefined,
+    canvasCardLayouts = undefined,
     canvasWorktrees = [],
     selectedCanvasWorktreeBranch = null,
     onCanvasWorktreeSelect = () => {},
+    branchBrowserState = undefined,
     disableSplit = false,
     onCanvasSessionSelect = () => {},
+    onCanvasViewportChange = () => {},
+    onCanvasCardLayoutsChange = () => {},
+    onCanvasSelectedCardChange = () => {},
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -78,11 +90,20 @@
     currentBranch?: string;
     flatShell?: boolean;
     selectedCanvasSessionTabId?: string | null;
+    selectedCanvasCardId?: string | null;
+    canvasViewport?: AgentCanvasViewport | undefined;
+    canvasCardLayouts?: Record<string, AgentCanvasCardLayout> | undefined;
     canvasWorktrees?: WorktreeInfo[];
     selectedCanvasWorktreeBranch?: string | null;
     onCanvasWorktreeSelect?: (branchName: string) => void;
+    branchBrowserState?: BranchBrowserPanelState | undefined;
     disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
+    onCanvasViewportChange?: (viewport: AgentCanvasViewport) => void;
+    onCanvasCardLayoutsChange?: (
+      layouts: Record<string, AgentCanvasCardLayout>,
+    ) => void;
+    onCanvasSelectedCardChange?: (cardId: string | null) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -431,7 +452,13 @@
                 selectedWorktreeBranch={selectedCanvasWorktreeBranch}
                 onWorktreeSelect={onCanvasWorktreeSelect}
                 selectedSessionTabId={selectedCanvasSessionTabId}
+                persistedSelectedCardId={selectedCanvasCardId}
+                persistedViewport={canvasViewport}
+                persistedCardLayouts={canvasCardLayouts}
                 onSessionSelect={onCanvasSessionSelect}
+                onViewportChange={onCanvasViewportChange}
+                onCardLayoutsChange={onCanvasCardLayoutsChange}
+                onSelectedCardChange={onCanvasSelectedCardChange}
                 onOpenSettings={onOpenSettings ?? (() => {})}
                 {voiceInputEnabled}
                 {voiceInputListening}
@@ -442,7 +469,12 @@
                 {voiceInputError}
               />
             {:else if tab.type === "branchBrowser" && branchBrowserConfig}
-              <BranchBrowserPanel config={branchBrowserConfig} />
+              <BranchBrowserPanel config={{
+                ...branchBrowserConfig,
+                initialFilter: branchBrowserState?.filter,
+                initialQuery: branchBrowserState?.query,
+                selectedBranchName: branchBrowserState?.selectedBranchName ?? null,
+              }} />
             {:else if tab.type === "assistant"}
               <AssistantPanel
                 isActive={group.activeTabId === tab.id}

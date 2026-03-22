@@ -286,6 +286,18 @@ describe("agentTabsPersistence", () => {
       {
         tabs: [{ type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" }],
         activeTabId: "agentCanvas",
+        agentCanvas: {
+          viewport: { x: 10, y: 20, zoom: 1.1 },
+          cardLayouts: {
+            assistant: { x: 40, y: 40, width: 280, height: 164 },
+          },
+          selectedCardId: "assistant",
+        },
+        branchBrowser: {
+          filter: "Local",
+          query: "main",
+          selectedBranchName: "main",
+        },
       },
       store,
       "main",
@@ -295,6 +307,11 @@ describe("agentTabsPersistence", () => {
       {
         tabs: [{ type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" }],
         activeTabId: "branchBrowser",
+        branchBrowser: {
+          filter: "Remote",
+          query: "feature",
+          selectedBranchName: "origin/feature/demo",
+        },
       },
       store,
       "project-2",
@@ -303,10 +320,27 @@ describe("agentTabsPersistence", () => {
     expect(loadStoredProjectTabs("/repo", store, "main")).toEqual({
       tabs: [{ type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" }],
       activeTabId: "agentCanvas",
+      agentCanvas: {
+        viewport: { x: 10, y: 20, zoom: 1.1 },
+        cardLayouts: {
+          assistant: { x: 40, y: 40, width: 280, height: 164 },
+        },
+        selectedCardId: "assistant",
+      },
+      branchBrowser: {
+        filter: "Local",
+        query: "main",
+        selectedBranchName: "main",
+      },
     });
     expect(loadStoredProjectTabs("/repo", store, "project-2")).toEqual({
       tabs: [{ type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" }],
       activeTabId: "branchBrowser",
+      branchBrowser: {
+        filter: "Remote",
+        query: "feature",
+        selectedBranchName: "origin/feature/demo",
+      },
     });
   });
 
