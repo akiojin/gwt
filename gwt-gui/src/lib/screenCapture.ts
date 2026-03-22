@@ -129,9 +129,11 @@ export function collectScreenText(ctx: ScreenCaptureContext): string {
   }
 
   // Branch Browser / legacy Sidebar surface
-  const sidebar = document.querySelector(".sidebar");
-  if (sidebar) {
-    const sidebarText = getVisibleText(sidebar);
+  const browserSurface =
+    document.querySelector(".branch-browser-panel") ??
+    document.querySelector(".sidebar");
+  if (browserSurface) {
+    const sidebarText = getVisibleText(browserSurface);
     lines.push("");
     lines.push(
       ctx.activeTabType === "branchBrowser"
