@@ -4,3 +4,6 @@ set -e
 
 echo "Validating SKILL.md frontmatter..."
 pnpm lint:skills
+
+echo "Running commit-time UX E2E..."
+bash scripts/run-local-e2e-on-commit.sh
