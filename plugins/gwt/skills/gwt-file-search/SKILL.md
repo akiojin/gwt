@@ -1,5 +1,5 @@
 ---
-name: gwt-project-index
+name: gwt-file-search
 description: Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept.
 ---
 
