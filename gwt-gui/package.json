@@ -23,7 +23,7 @@
     "@tsconfig/svelte": "^5",
     "@types/dompurify": "^3.2.0",
     "@vitest/coverage-v8": "^4.0.18",
-    "jsdom": "^29.0.0",
+    "jsdom": "^29.0.1",
     "prettier": "^3.8.1",
     "prettier-plugin-svelte": "^3.5.1",
     "selenium-webdriver": "^4.38.0",
