@@ -1,11 +1,16 @@
 <script lang="ts">
   import type {
     BranchBrowserPanelConfig,
+    BranchBrowserPanelState,
     GitHubIssueInfo,
     LaunchAgentRequest,
     Tab,
     WorktreeInfo,
   } from "../types";
+  import type {
+    AgentCanvasCardLayout,
+    AgentCanvasViewport,
+  } from "../agentCanvas";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -34,12 +39,20 @@
     projectPath,
     branchBrowserConfig = undefined,
     currentBranch = "",
+    flatShell = false,
     selectedCanvasSessionTabId = null,
+    selectedCanvasCardId = null,
+    canvasViewport = undefined,
+    canvasCardLayouts = undefined,
     canvasWorktrees = [],
     selectedCanvasWorktreeBranch = null,
     onCanvasWorktreeSelect = () => {},
+    branchBrowserState = undefined,
     disableSplit = false,
     onCanvasSessionSelect = () => {},
+    onCanvasViewportChange = () => {},
+    onCanvasCardLayoutsChange = () => {},
+    onCanvasSelectedCardChange = () => {},
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -54,6 +67,7 @@
     onGroupDrop,
     onSplitDragOver,
     onSplitDrop,
+    onSplitResize = () => {},
     onLaunchAgent: _onLaunchAgent,
     onQuickLaunch: _onQuickLaunch,
     onWorkOnIssue,
@@ -74,12 +88,22 @@
     projectPath: string;
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
+    flatShell?: boolean;
     selectedCanvasSessionTabId?: string | null;
+    selectedCanvasCardId?: string | null;
+    canvasViewport?: AgentCanvasViewport | undefined;
+    canvasCardLayouts?: Record<string, AgentCanvasCardLayout> | undefined;
     canvasWorktrees?: WorktreeInfo[];
     selectedCanvasWorktreeBranch?: string | null;
     onCanvasWorktreeSelect?: (branchName: string) => void;
+    branchBrowserState?: BranchBrowserPanelState | undefined;
     disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
+    onCanvasViewportChange?: (viewport: AgentCanvasViewport) => void;
+    onCanvasCardLayoutsChange?: (
+      layouts: Record<string, AgentCanvasCardLayout>,
+    ) => void;
+    onCanvasSelectedCardChange?: (cardId: string | null) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -116,6 +140,7 @@
       direction: TabSplitDirection,
       event: DragEvent,
     ) => void;
+    onSplitResize?: (splitId: string, primaryFraction: number) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
@@ -202,6 +227,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="group-pane"
+  class:flat-shell={flatShell}
   role="group"
   class:active-group={isActiveGroup}
   onmousedown={() => onGroupFocus(group.id)}
@@ -426,7 +452,13 @@
                 selectedWorktreeBranch={selectedCanvasWorktreeBranch}
                 onWorktreeSelect={onCanvasWorktreeSelect}
                 selectedSessionTabId={selectedCanvasSessionTabId}
+                persistedSelectedCardId={selectedCanvasCardId}
+                persistedViewport={canvasViewport}
+                persistedCardLayouts={canvasCardLayouts}
                 onSessionSelect={onCanvasSessionSelect}
+                onViewportChange={onCanvasViewportChange}
+                onCardLayoutsChange={onCanvasCardLayoutsChange}
+                onSelectedCardChange={onCanvasSelectedCardChange}
                 onOpenSettings={onOpenSettings ?? (() => {})}
                 {voiceInputEnabled}
                 {voiceInputListening}
@@ -437,7 +469,12 @@
                 {voiceInputError}
               />
             {:else if tab.type === "branchBrowser" && branchBrowserConfig}
-              <BranchBrowserPanel config={branchBrowserConfig} />
+              <BranchBrowserPanel config={{
+                ...branchBrowserConfig,
+                initialFilter: branchBrowserState?.filter,
+                initialQuery: branchBrowserState?.query,
+                selectedBranchName: branchBrowserState?.selectedBranchName ?? null,
+              }} />
             {:else if tab.type === "assistant"}
               <AssistantPanel
                 isActive={group.activeTabId === tab.id}
@@ -485,6 +522,11 @@
 
   .group-pane.active-group {
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 36%, var(--border-color));
+  }
+
+  .group-pane.flat-shell,
+  .group-pane.flat-shell.active-group {
+    box-shadow: none;
   }
 
   .tab-bar {

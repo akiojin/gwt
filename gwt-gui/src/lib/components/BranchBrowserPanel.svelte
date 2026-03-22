@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "$lib/tauriInvoke";
-  import type { BranchBrowserPanelConfig, BranchInventoryEntry } from "../types";
+  import type {
+    BranchBrowserPanelConfig,
+    BranchBrowserPanelState,
+    BranchInfo,
+    BranchInventoryEntry,
+  } from "../types";
   import { branchInventoryKey } from "../branchInventory";
   import {
     divergenceClass,
@@ -19,6 +24,8 @@
   let errorMessage: string | null = $state(null);
   let remotePrimaryNames = $state(new Set<string>());
   let requestToken = 0;
+  let lastHydrationKey = $state("");
+  let lastStateEmitKey = $state("");
 
   const filters: SidebarFilterType[] = ["Local", "Remote", "All"];
 
@@ -60,10 +67,16 @@
   });
 
   let selectedEntry = $derived.by(() => {
-    const selectedBranchName = config.selectedBranch?.name?.trim() ?? "";
+    const selectedBranchName =
+      config.selectedBranch?.name?.trim() ??
+      config.selectedBranchName?.trim() ??
+      "";
     const key = branchInventoryKey(selectedBranchName);
     return branchEntries.find((entry) => entry.canonical_name === key) ?? null;
   });
+  let resolvedSelectedBranch = $derived<BranchInfo | null>(
+    config.selectedBranch ?? selectedEntry?.primary_branch ?? null,
+  );
 
   async function fetchBranches(path: string) {
     const token = ++requestToken;
@@ -115,6 +128,32 @@
     void refreshKey;
     if (!path) return;
     void fetchBranches(path);
+  });
+
+  $effect(() => {
+    const nextKey = JSON.stringify([
+      config.initialFilter ?? "Local",
+      config.initialQuery ?? "",
+    ]);
+    if (nextKey === lastHydrationKey) return;
+    lastHydrationKey = nextKey;
+    activeFilter = config.initialFilter ?? "Local";
+    searchQuery = config.initialQuery ?? "";
+  });
+
+  $effect(() => {
+    const nextState: BranchBrowserPanelState = {
+      filter: activeFilter,
+      query: searchQuery,
+      selectedBranchName:
+        config.selectedBranch?.name?.trim() ??
+        config.selectedBranchName?.trim() ??
+        null,
+    };
+    const nextKey = JSON.stringify(nextState);
+    if (nextKey === lastStateEmitKey) return;
+    lastStateEmitKey = nextKey;
+    config.onStateChange?.(nextState);
   });
 </script>
 
@@ -204,20 +243,20 @@
     </section>
 
     <section class="detail-panel" data-testid="branch-browser-detail">
-      {#if config.selectedBranch}
+      {#if resolvedSelectedBranch}
         <div class="detail-card">
           <div class="detail-header">
             <span class="detail-kind">Selected</span>
-            <span class="detail-title">{config.selectedBranch.display_name ?? config.selectedBranch.name}</span>
+            <span class="detail-title">{resolvedSelectedBranch.display_name ?? resolvedSelectedBranch.name}</span>
           </div>
           <div class="detail-grid">
             <div class="detail-row">
               <span class="detail-label">Branch</span>
-              <span class="detail-value mono">{config.selectedBranch.name}</span>
+              <span class="detail-value mono">{resolvedSelectedBranch.name}</span>
             </div>
             <div class="detail-row">
               <span class="detail-label">Commit</span>
-              <span class="detail-value mono">{config.selectedBranch.commit}</span>
+              <span class="detail-value mono">{resolvedSelectedBranch.commit}</span>
             </div>
             <div class="detail-row">
               <span class="detail-label">Worktree</span>
@@ -257,7 +296,7 @@
               disabled={selectedEntry?.resolution_action === "resolveAmbiguity"}
               onclick={() => {
                 if (selectedEntry?.resolution_action === "resolveAmbiguity") return;
-                config.onBranchActivate?.(config.selectedBranch!);
+                config.onBranchActivate?.(resolvedSelectedBranch!);
               }}
             >
               {selectedEntry ? actionLabel(selectedEntry) : "Create Worktree"}

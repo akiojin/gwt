@@ -286,6 +286,18 @@ describe("agentTabsPersistence", () => {
       {
         tabs: [{ type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" }],
         activeTabId: "agentCanvas",
+        agentCanvas: {
+          viewport: { x: 10, y: 20, zoom: 1.1 },
+          cardLayouts: {
+            assistant: { x: 40, y: 40, width: 280, height: 164 },
+          },
+          selectedCardId: "assistant",
+        },
+        branchBrowser: {
+          filter: "Local",
+          query: "main",
+          selectedBranchName: "main",
+        },
       },
       store,
       "main",
@@ -295,6 +307,11 @@ describe("agentTabsPersistence", () => {
       {
         tabs: [{ type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" }],
         activeTabId: "branchBrowser",
+        branchBrowser: {
+          filter: "Remote",
+          query: "feature",
+          selectedBranchName: "origin/feature/demo",
+        },
       },
       store,
       "project-2",
@@ -303,10 +320,27 @@ describe("agentTabsPersistence", () => {
     expect(loadStoredProjectTabs("/repo", store, "main")).toEqual({
       tabs: [{ type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" }],
       activeTabId: "agentCanvas",
+      agentCanvas: {
+        viewport: { x: 10, y: 20, zoom: 1.1 },
+        cardLayouts: {
+          assistant: { x: 40, y: 40, width: 280, height: 164 },
+        },
+        selectedCardId: "assistant",
+      },
+      branchBrowser: {
+        filter: "Local",
+        query: "main",
+        selectedBranchName: "main",
+      },
     });
     expect(loadStoredProjectTabs("/repo", store, "project-2")).toEqual({
       tabs: [{ type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" }],
       activeTabId: "branchBrowser",
+      branchBrowser: {
+        filter: "Remote",
+        query: "feature",
+        selectedBranchName: "origin/feature/demo",
+      },
     });
   });
 
@@ -524,7 +558,7 @@ describe("agentTabsPersistence", () => {
     expect(restored.activeTerminalPaneIdToRespawn).toBe("t-old");
   });
 
-  it("buildRestoredProjectTabs collapses corrupted split roots back to one visible group", () => {
+  it("buildRestoredProjectTabs ignores stale split metadata and restores flat shell tabs", () => {
     const restored = buildRestoredProjectTabs(
       {
         tabs: [
@@ -556,22 +590,17 @@ describe("agentTabsPersistence", () => {
             { type: "group", groupId: "missing-group" },
           ],
         },
-      },
+      } as any,
       [],
     );
 
-    expect(restored.groups).toEqual([
-      {
-        id: "group-a",
-        tabIds: ["settings", "agentCanvas", "branchBrowser", "issues"],
-        activeTabId: "issues",
-      },
+    expect(restored.tabs).toEqual([
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
+      { id: "settings", label: "Settings", type: "settings" },
+      { id: "issues", label: "Issues", type: "issues" },
     ]);
-    expect(restored.root).toEqual({
-      type: "group",
-      groupId: "group-a",
-    });
-    expect(restored.activeGroupId).toBe("group-a");
+    expect(restored.activeTabId).toBe("issues");
   });
 
   it("shouldRetryAgentTabRestore handles transient empty matches", () => {

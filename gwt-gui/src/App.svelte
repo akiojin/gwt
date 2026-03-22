@@ -1,6 +1,7 @@
 <script lang="ts">
   import type {
     BranchBrowserPanelConfig,
+    BranchBrowserPanelState,
     MaterializeWorktreeResult,
     Tab,
     BranchInfo,
@@ -45,6 +46,10 @@
     type StoredProjectTab,
     type StoredTerminalTab,
   } from "./lib/agentTabsPersistence";
+  import {
+    createDefaultAgentCanvasViewport,
+    type AgentCanvasCardLayout,
+  } from "./lib/agentCanvas";
   import {
     defaultAppTabs,
     type TabDropPosition,
@@ -162,6 +167,11 @@
   const DEFAULT_TERMINAL_FONT_FAMILY =
     '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
   const DOCS_EDITOR_AUTO_CLOSE_POLL_MS = 1200;
+  const DEFAULT_BRANCH_BROWSER_STATE: BranchBrowserPanelState = {
+    filter: "Local",
+    query: "",
+    selectedBranchName: null,
+  };
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -293,6 +303,7 @@
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
+  let projectHydrationToken = 0;
   const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
   const AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS = 1200;
 
@@ -317,9 +328,15 @@
     })(),
   );
   let selectedCanvasSessionTabId: string | null = $state(null);
+  let selectedCanvasCardId: string | null = $state(null);
+  let canvasViewport = $state(createDefaultAgentCanvasViewport());
+  let canvasCardLayouts = $state<Record<string, AgentCanvasCardLayout>>({});
   let canvasWorktrees: WorktreeInfo[] = $state([]);
   let selectedCanvasWorktreeBranch: string | null = $state(null);
   let selectedCanvasWorktreePath: string | null = $state(null);
+  let branchBrowserState = $state<BranchBrowserPanelState>(
+    DEFAULT_BRANCH_BROWSER_STATE,
+  );
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -348,6 +365,17 @@
           minWidthPx: MIN_SIDEBAR_WIDTH_PX,
           maxWidthPx: MAX_SIDEBAR_WIDTH_PX,
           mode: sidebarMode,
+          initialFilter: branchBrowserState.filter,
+          initialQuery: branchBrowserState.query,
+          selectedBranchName: branchBrowserState.selectedBranchName,
+          onStateChange: (state) => {
+            const unchanged =
+              branchBrowserState.filter === state.filter &&
+              branchBrowserState.query === state.query &&
+              branchBrowserState.selectedBranchName === state.selectedBranchName;
+            if (unchanged) return;
+            branchBrowserState = state;
+          },
           selectedBranch,
           currentBranch,
           agentTabBranches,
@@ -1374,8 +1402,9 @@
 
   function handleOpenedProjectPath(path: string) {
     projectPath = path;
-    fetchCurrentBranch();
-    void refreshCanvasWorktrees(path);
+    const hydrationToken = ++projectHydrationToken;
+    void fetchCurrentBranch(path, hydrationToken);
+    void refreshCanvasWorktrees(path, hydrationToken);
     void updateWindowSession(path);
   }
 
@@ -1610,13 +1639,17 @@
     }
   }
 
-  async function fetchCurrentBranch() {
-    if (!projectPath) return;
+  async function fetchCurrentBranch(
+    targetProjectPath = projectPath,
+    hydrationToken = projectHydrationToken,
+  ) {
+    if (!targetProjectPath) return;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const branch = await invoke<BranchInfo | null>("get_current_branch", {
-        projectPath,
+        projectPath: targetProjectPath,
       });
+      if (hydrationToken !== projectHydrationToken) return;
       if (branch) {
         currentBranch = branch.name;
         if (!selectedCanvasWorktreeBranch) {
@@ -1632,14 +1665,17 @@
     }
   }
 
-  async function refreshCanvasWorktrees(targetProjectPath = projectPath) {
+  async function refreshCanvasWorktrees(
+    targetProjectPath = projectPath,
+    hydrationToken = projectHydrationToken,
+  ) {
     if (!targetProjectPath) return;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
         projectPath: targetProjectPath,
       });
-      if (targetProjectPath !== projectPath) return;
+      if (hydrationToken !== projectHydrationToken) return;
       canvasWorktrees = worktrees;
       if (!selectedCanvasWorktreeBranch) {
         const selectedWorktree =
@@ -2859,6 +2895,10 @@
         agentTabsRestoreToken === token
       ) {
         agentTabsHydratedProjectPath = targetProjectPath;
+        canvasViewport = createDefaultAgentCanvasViewport();
+        canvasCardLayouts = {};
+        selectedCanvasCardId = null;
+        branchBrowserState = DEFAULT_BRANCH_BROWSER_STATE;
       }
       return;
     }
@@ -2932,6 +2972,11 @@
     await refreshAgentTabLabelsForProject(targetProjectPath);
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
+    canvasViewport =
+      restored.agentCanvas?.viewport ?? createDefaultAgentCanvasViewport();
+    canvasCardLayouts = restored.agentCanvas?.cardLayouts ?? {};
+    selectedCanvasCardId = restored.agentCanvas?.selectedCardId ?? null;
+    branchBrowserState = restored.branchBrowser ?? DEFAULT_BRANCH_BROWSER_STATE;
     selectedCanvasSessionTabId = restored.activeCanvasSessionTabId;
     const restoredCanvasSession =
       restored.activeCanvasSessionTabId
@@ -2977,8 +3022,20 @@
     }
 
     agentTabsHydratedProjectPath = null;
+    canvasViewport = createDefaultAgentCanvasViewport();
+    canvasCardLayouts = {};
+    selectedCanvasCardId = null;
+    branchBrowserState = DEFAULT_BRANCH_BROWSER_STATE;
     const target = projectPath;
     triggerRestoreProjectAgentTabs(target);
+  });
+
+  $effect(() => {
+    const target = projectPath;
+    if (!target) return;
+    const hydrationToken = projectHydrationToken;
+    void fetchCurrentBranch(target, hydrationToken);
+    void refreshCanvasWorktrees(target, hydrationToken);
   });
 
   // Persist tabs per project (best-effort).
@@ -3058,6 +3115,12 @@
       tabs: storedTabs,
       activeTabId: storedActiveTabId,
       activeCanvasSessionTabId: selectedCanvasSessionTabId,
+      agentCanvas: {
+        viewport: canvasViewport,
+        cardLayouts: canvasCardLayouts,
+        selectedCardId: selectedCanvasCardId,
+      },
+      branchBrowser: branchBrowserState,
     }, undefined, currentWindowLabel);
   });
 
@@ -3270,8 +3333,21 @@
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
+        {selectedCanvasCardId}
+        {canvasViewport}
+        {canvasCardLayouts}
         disableSplit={true}
+        branchBrowserState={branchBrowserState}
         onCanvasSessionSelect={handleCanvasSessionSelect}
+        onCanvasViewportChange={(next) => {
+          canvasViewport = next;
+        }}
+        onCanvasCardLayoutsChange={(next) => {
+          canvasCardLayouts = next;
+        }}
+        onCanvasSelectedCardChange={(next) => {
+          selectedCanvasCardId = next;
+        }}
         onLaunchAgent={requestAgentLaunch}
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}

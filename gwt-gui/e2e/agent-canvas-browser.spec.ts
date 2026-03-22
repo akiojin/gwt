@@ -5,6 +5,7 @@ import {
   branchFeature,
   branchMain,
   defaultRecentProject,
+  waitForInvokeCommand,
   openRecentProject,
   setMockCommandResponses,
 } from "./support/helpers";
@@ -123,6 +124,7 @@ test("Branch Browser can focus an existing worktree and create a remote one into
     list_worktrees: [existingWorktree],
   });
   await openRecentProject(page);
+  await waitForInvokeCommand(page, "list_branch_inventory");
   const visibleBrowser = page.locator('[data-testid="branch-browser-panel"]:visible');
   await expect(visibleBrowser).toBeVisible();
   await expect(page.locator(".branch-row", { hasText: branchFeature.name })).toBeVisible();
@@ -148,4 +150,66 @@ test("Branch Browser can focus an existing worktree and create a remote one into
       hasText: "feature/new-browser-flow",
     }),
   ).toBeVisible();
+});
+
+test("Agent Canvas keeps compact detail visible and exposes zoom controls", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    window.localStorage.setItem(
+      "gwt.projectTabs.v2",
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/tmp/gwt-playwright": {
+            tabs: [
+              { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
+              { type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" },
+            ],
+            activeTabId: "branchBrowser",
+          },
+        },
+      }),
+    );
+  });
+  await setMockCommandResponses(page, {
+    list_branch_inventory: [
+      {
+        id: branchFeature.name,
+        canonical_name: branchFeature.name,
+        primary_branch: branchFeature,
+        local_branch: branchFeature,
+        remote_branch: null,
+        has_local: true,
+        has_remote: false,
+        worktree: existingWorktree,
+        worktree_count: 1,
+        resolution_action: "focusExisting",
+      },
+    ],
+    list_worktree_branches: [branchFeature],
+    list_remote_branches: [],
+    list_worktrees: [existingWorktree],
+  });
+
+  await openRecentProject(page);
+  await waitForInvokeCommand(page, "list_branch_inventory");
+  await expect(page.locator('[data-testid="branch-browser-panel"]:visible')).toBeVisible();
+  await page.locator(".branch-row", { hasText: branchFeature.name }).click();
+  await page.getByRole("button", { name: "Focus Worktree" }).click();
+  await page
+    .locator('[data-tab-id="agentCanvas"]')
+    .evaluate((node) => (node as HTMLElement).click());
+
+  const zoomLabel = page.locator('[data-testid="agent-canvas-zoom-label"]');
+  const worktreeCard = page.locator('[data-testid^="agent-canvas-worktree-card-"]', {
+    hasText: branchFeature.name,
+  });
+  await expect(page.getByRole("heading", { name: "Agent Canvas" })).toBeVisible();
+  await expect(page.getByText("Loading assistant...")).toBeVisible();
+  await expect(worktreeCard).toBeVisible();
+
+  await page.getByLabel("Zoom in").click();
+  await expect(zoomLabel).toHaveText("110%");
 });
