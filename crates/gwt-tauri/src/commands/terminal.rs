@@ -6032,8 +6032,7 @@ pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> V
                 status,
             }
         })
-        .collect()
-    ;
+        .collect();
     let elapsed = started.elapsed();
     if elapsed > LIST_TERMINALS_WARN_THRESHOLD {
         warn!(
