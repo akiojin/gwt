@@ -6,6 +6,7 @@ import {
   branchDevelop,
   branchFeature,
   branchBehind,
+  captureUxSnapshot,
   openRecentProject,
   setMockCommandResponses,
   standardBranchResponses,
@@ -25,7 +26,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("displays branch list after opening project", async ({ page }) => {
+test("displays branch list after opening project", async ({ page }, testInfo) => {
   await page.goto("/");
   await setMockCommandResponses(page, standardBranchResponses());
   await openRecentProject(page);
@@ -44,6 +45,7 @@ test("displays branch list after opening project", async ({ page }) => {
   await expect(
     page.locator(".branch-name", { hasText: branchFeature.name }),
   ).toBeVisible();
+  await captureUxSnapshot(page, testInfo, "branch-browser-default-layout");
 });
 
 test("selects branch and shows branch-browser detail panel", async ({ page }) => {
@@ -135,7 +137,7 @@ test("shows divergence badge for behind branch", async ({ page }) => {
 
 test("materializes a worktree from Branch Browser into Agent Canvas", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await setMockCommandResponses(page, standardBranchResponses());
   await openRecentProject(page);
@@ -151,6 +153,7 @@ test("materializes a worktree from Branch Browser into Agent Canvas", async ({
   if (!cardBox) throw new Error("worktree card bounding box missing");
   expect(cardBox.width).toBeGreaterThan(240);
   expect(cardBox.height).toBeGreaterThan(150);
+  await captureUxSnapshot(page, testInfo, "branch-browser-materialized-worktree-card");
 });
 
 test("new terminal can be launched after worktree materialization", async ({

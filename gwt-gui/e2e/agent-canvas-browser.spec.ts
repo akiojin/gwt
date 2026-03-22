@@ -4,6 +4,7 @@ import {
   branchDevelop,
   branchFeature,
   branchMain,
+  captureUxSnapshot,
   defaultRecentProject,
   emitTauriEvent,
   waitForMenuActionListener,
@@ -41,7 +42,7 @@ test.beforeEach(async ({ page }) => {
 
 test("Branch Browser can focus an existing worktree and create a remote one into Agent Canvas", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await page.evaluate(() => {
     window.localStorage.setItem(
@@ -159,11 +160,12 @@ test("Branch Browser can focus an existing worktree and create a remote one into
       hasText: "feature/new-browser-flow",
     }),
   ).toBeVisible();
+  await captureUxSnapshot(page, testInfo, "branch-browser-to-canvas-flow");
 });
 
 test("Agent Canvas keeps compact detail visible and exposes zoom controls", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await page.evaluate(() => {
     window.localStorage.setItem(
@@ -228,11 +230,12 @@ test("Agent Canvas keeps compact detail visible and exposes zoom controls", asyn
   await expect(zoomLabel).toHaveText("110%");
   await page.getByTestId("agent-canvas-assistant-card").click();
   await expect(page.getByTestId("agent-canvas-detail-overlay")).toBeVisible();
+  await captureUxSnapshot(page, testInfo, "agent-canvas-overlay-detail");
 });
 
 test("Agent Canvas renders terminal session content directly inside the card", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await page.evaluate(() => {
     window.localStorage.setItem(
@@ -294,4 +297,5 @@ test("Agent Canvas renders terminal session content directly inside the card", a
     throw new Error("resized session surface box missing");
   }
   expect(resizedSurfaceBox.height).toBeGreaterThan(220);
+  await captureUxSnapshot(page, testInfo, "agent-canvas-terminal-session-card");
 });

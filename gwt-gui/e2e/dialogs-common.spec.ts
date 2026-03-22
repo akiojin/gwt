@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./support/tauri-mock";
 import {
+  captureUxSnapshot,
   defaultRecentProject,
   openRecentProject,
   waitForMenuActionListener,
@@ -18,7 +19,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("Bug Report dialog opens from menu action", async ({ page }) => {
+test("Bug Report dialog opens from menu action", async ({ page }, testInfo) => {
   await page.goto("/");
   await openRecentProject(page);
   await expectAgentCanvasVisible(page);
@@ -29,6 +30,7 @@ test("Bug Report dialog opens from menu action", async ({ page }) => {
   const reportDialog = page.locator(".report-dialog");
   await expect(reportDialog).toBeVisible();
   await expect(reportDialog.getByText("Bug Report")).toBeVisible();
+  await captureUxSnapshot(page, testInfo, "bug-report-dialog");
 });
 
 test("Bug Report dialog has title input", async ({ page }) => {
@@ -168,9 +170,7 @@ test("Feature Request dialog form has readable font sizes", async ({
 }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "suggest-feature" });

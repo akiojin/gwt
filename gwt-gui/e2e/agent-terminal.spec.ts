@@ -5,6 +5,7 @@ import {
   branchMain,
   branchDevelop,
   branchFeature,
+  captureUxSnapshot,
   openRecentProject,
   setMockCommandResponses,
   detectedAgents,
@@ -85,7 +86,7 @@ test("Launch Agent invokes start_launch_job", async ({ page }) => {
 
 test("agent session card appears inside Agent Canvas after launch", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await setMockCommandResponses(page, launchResponses());
   await openRecentProject(page);
@@ -107,6 +108,7 @@ test("agent session card appears inside Agent Canvas after launch", async ({
   if (!cardBox) throw new Error("agent session card bounding box missing");
   expect(cardBox.width).toBeGreaterThan(500);
   expect(cardBox.height).toBeGreaterThan(360);
+  await captureUxSnapshot(page, testInfo, "agent-session-card");
 });
 
 test("agent session card shows live terminal surface after launch", async ({
@@ -133,7 +135,7 @@ test("agent session card shows live terminal surface after launch", async ({
   expect(surfaceBox.height).toBeGreaterThan(260);
 });
 
-test("new terminal opens from menu action into Agent Canvas", async ({ page }) => {
+test("new terminal opens from menu action into Agent Canvas", async ({ page }, testInfo) => {
   await page.goto("/");
   await openRecentProject(page);
   await expectAgentCanvasVisible(page);
@@ -151,6 +153,7 @@ test("new terminal opens from menu action into Agent Canvas", async ({ page }) =
   if (!surfaceBox) throw new Error("terminal session surface bounding box missing");
   expect(surfaceBox.width).toBeGreaterThan(500);
   expect(surfaceBox.height).toBeGreaterThan(260);
+  await captureUxSnapshot(page, testInfo, "menu-terminal-session-card");
 });
 
 test("multiple terminal session cards can be opened", async ({ page }) => {

@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Page, TestInfo } from "@playwright/test";
 import { expect } from "@playwright/test";
 
 // ── Common branch fixtures ──
@@ -300,6 +300,18 @@ export async function openBranchBrowser(page: Page): Promise<void> {
 export async function expectAgentCanvasVisible(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Agent Canvas" })).toBeVisible();
   await expect(page.getByTestId("agent-canvas-board")).toBeVisible();
+}
+
+export async function captureUxSnapshot(
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+): Promise<void> {
+  const safeName = name.replace(/[^a-zA-Z0-9_-]+/g, "-");
+  await page.screenshot({
+    path: testInfo.outputPath(`${safeName}.png`),
+    fullPage: true,
+  });
 }
 
 export async function selectBranchInBrowser(

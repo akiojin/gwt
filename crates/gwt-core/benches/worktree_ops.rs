@@ -36,11 +36,60 @@ fn create_test_repo() -> TempDir {
     temp
 }
 
+fn create_test_repo_with_worktrees() -> TempDir {
+    let temp = create_test_repo();
+    let repo_path = temp.path();
+
+    for branch in ["feature/bench-a", "feature/bench-b", "feature/bench-c"] {
+        gwt_core::process::git_command()
+            .args(["branch", branch])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        let worktree_path = repo_path
+            .join(".worktrees")
+            .join(branch.replace('/', "-"));
+        std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        gwt_core::process::git_command()
+            .args([
+                "worktree",
+                "add",
+                worktree_path.to_str().unwrap(),
+                branch,
+            ])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+    }
+
+    temp
+}
+
 fn worktree_list_benchmark(c: &mut Criterion) {
     let temp = create_test_repo();
     let manager = WorktreeManager::new(temp.path()).unwrap();
 
     c.bench_function("worktree_list", |b| b.iter(|| manager.list().unwrap()));
+}
+
+fn worktree_list_basic_benchmark(c: &mut Criterion) {
+    let temp = create_test_repo();
+    let manager = WorktreeManager::new(temp.path()).unwrap();
+
+    c.bench_function("worktree_list_basic", |b| {
+        b.iter(|| manager.list_basic().unwrap())
+    });
+}
+
+fn worktree_list_vs_basic_multi_worktree_benchmark(c: &mut Criterion) {
+    let temp = create_test_repo_with_worktrees();
+    let manager = WorktreeManager::new(temp.path()).unwrap();
+
+    c.bench_function("worktree_list_multi", |b| b.iter(|| manager.list().unwrap()));
+    c.bench_function("worktree_list_basic_multi", |b| {
+        b.iter(|| manager.list_basic().unwrap())
+    });
 }
 
 fn worktree_manager_new_benchmark(c: &mut Criterion) {
@@ -73,6 +122,8 @@ fn worktree_active_count_benchmark(c: &mut Criterion) {
 criterion_group!(
     benches,
     worktree_list_benchmark,
+    worktree_list_basic_benchmark,
+    worktree_list_vs_basic_multi_worktree_benchmark,
     worktree_manager_new_benchmark,
     worktree_get_by_branch_benchmark,
     worktree_active_count_benchmark,

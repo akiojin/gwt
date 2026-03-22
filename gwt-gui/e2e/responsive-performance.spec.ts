@@ -5,6 +5,7 @@ import {
   branchMain,
   branchDevelop,
   branchFeature,
+  captureUxSnapshot,
   openRecentProject,
   setMockCommandResponses,
   waitForInvokeCommand,
@@ -233,7 +234,7 @@ test("Open Project page renders quickly", async ({ page }) => {
 
 test("project open stays interactive while issue cache warmup runs in background", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await setMockCommandResponses(page, {
     sync_issue_cache: {
@@ -282,6 +283,7 @@ test("project open stays interactive while issue cache warmup runs in background
   await expect(page.getByRole("heading", { name: "Agent Canvas" })).toBeVisible();
   expect(duration).toBeLessThan(1_000);
   await waitForInvokeCommand(page, "sync_issue_cache");
+  await captureUxSnapshot(page, testInfo, "startup-interactive-cache-warmup");
 });
 
 test("viewport resize does not break layout", async ({ page }) => {
@@ -299,7 +301,7 @@ test("viewport resize does not break layout", async ({ page }) => {
 
 test("maximize-style resize stays interactive and does not refetch heavy data", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await setMockCommandResponses(page, {
     list_worktree_branches: [branchMain, branchDevelop, branchFeature],
@@ -334,4 +336,5 @@ test("maximize-style resize stays interactive and does not refetch heavy data", 
   await page.waitForTimeout(200);
   const afterCount = await countInvokeCommands(page, trackedCommands);
   expect(afterCount).toBe(beforeCount);
+  await captureUxSnapshot(page, testInfo, "maximize-layout-stability");
 });
