@@ -9,7 +9,7 @@ use gwt_core::{
     config::stats::Stats,
     system_info::{GpuDynamicInfo, GpuStaticInfo},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{instrument, warn};
 
@@ -327,10 +327,22 @@ pub fn heartbeat(state: tauri::State<'_, AppState>, app_handle: AppHandle) {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FrontendMetric {
-    pub command: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     pub duration_ms: f64,
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+    #[serde(default)]
+    pub startup_token: Option<String>,
+    #[serde(default)]
+    pub success: Option<bool>,
 }
 
 #[instrument(skip_all, fields(command = "report_frontend_metrics"))]
@@ -339,8 +351,13 @@ pub fn report_frontend_metrics(metrics: Vec<FrontendMetric>) {
     for m in &metrics {
         tracing::info!(
             target: "frontend",
-            command = %m.command,
+            kind = %m.kind.as_deref().unwrap_or("invoke"),
+            command = %m.command.as_deref().unwrap_or(""),
+            name = %m.name.as_deref().unwrap_or(""),
             duration_ms = m.duration_ms,
+            timestamp = m.timestamp.unwrap_or_default(),
+            startup_token = %m.startup_token.as_deref().unwrap_or(""),
+            success = m.success.unwrap_or(true),
             "Frontend invoke metric"
         );
     }
@@ -348,6 +365,8 @@ pub fn report_frontend_metrics(metrics: Vec<FrontendMetric>) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -472,5 +491,41 @@ mod tests {
         for value in ["0", "false", "FALSE", "no", "off", ""] {
             assert!(!parse_env_flag(Some(std::ffi::OsString::from(value))));
         }
+    }
+
+    #[test]
+    fn frontend_metric_accepts_legacy_invoke_shape() {
+        let metric: FrontendMetric = serde_json::from_value(json!({
+            "command": "open_project",
+            "durationMs": 12.5
+        }))
+        .expect("legacy invoke metric should deserialize");
+
+        assert_eq!(metric.command.as_deref(), Some("open_project"));
+        assert_eq!(metric.kind.as_deref(), None);
+        assert_eq!(metric.name.as_deref(), None);
+        assert_eq!(metric.duration_ms, 12.5);
+    }
+
+    #[test]
+    fn frontend_metric_accepts_startup_shape() {
+        let metric: FrontendMetric = serde_json::from_value(json!({
+            "kind": "startup",
+            "name": "project_start.open_project.total",
+            "durationMs": 432.1,
+            "timestamp": 1711111111u64,
+            "startupToken": "startup-1",
+            "success": true
+        }))
+        .expect("startup metric should deserialize");
+
+        assert_eq!(metric.kind.as_deref(), Some("startup"));
+        assert_eq!(
+            metric.name.as_deref(),
+            Some("project_start.open_project.total")
+        );
+        assert_eq!(metric.startup_token.as_deref(), Some("startup-1"));
+        assert_eq!(metric.success, Some(true));
+        assert_eq!(metric.duration_ms, 432.1);
     }
 }
