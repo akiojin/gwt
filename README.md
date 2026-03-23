@@ -188,13 +188,8 @@ Voice input uses Qwen3-ASR via a local Python runtime.
 
 ### Logging and profiling
 
-gwt writes two separate output streams:
-
-- **Normal logs** (`gwt.jsonl.*`) — JSON Lines for operational tracking and issue reports. Stored under `~/.gwt/logs/<workspace>/`.
-- **Profiling** (`profile.json`) — Chrome Trace format for performance analysis. Enable in **Settings > Profiling**.
-
-The Report Dialog's **Application Logs** section collects normal logs only; profiling output is never included.
-For details see [#1758](https://github.com/akiojin/gwt/issues/1758).
+Normal logs are stored as JSON Lines under `~/.gwt/logs/`. Performance profiling can be enabled in **Settings > Profiling**.
+See [#1758](https://github.com/akiojin/gwt/issues/1758) for the logging specification.
 
 ## License
 

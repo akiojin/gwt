@@ -641,7 +641,7 @@ pub fn create_project(
             "project",
             "create_project",
             Some("PROJECT_INVALID_REPO_URL"),
-            &format!("Invalid repository URL: {}", request.repo_url),
+            "invalid repo URL format",
         );
         log_flow_failure("project", "create_project", "Invalid repository URL");
         return Err(StructuredError::internal(
@@ -672,6 +672,17 @@ pub fn create_project(
     let repo_name = git::extract_repo_name(&request.repo_url);
     let target = parent.join(&repo_name);
     if target.exists() {
+        gwt_core::logging::log_incident(
+            "project",
+            "create_project",
+            Some("PROJECT_TARGET_DIR_EXISTS"),
+            &format!("Target directory already exists: {}", target.display()),
+        );
+        log_flow_failure(
+            "project",
+            "create_project",
+            "Target directory already exists",
+        );
         return Err(StructuredError::internal(
             &format!("Target directory already exists: {}", target.display()),
             "create_project",
@@ -809,7 +820,8 @@ pub fn create_project(
     }
 
     // Open the project root (FR-304)
-    // Note: open_project has its own flow logging
+    // Note: open_project has its own flow logging for the open_project flow
+    log_flow_success("project", "create_project");
     open_project(window, request.parent_dir, state)
 }
 

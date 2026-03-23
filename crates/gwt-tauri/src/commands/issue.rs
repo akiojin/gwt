@@ -420,6 +420,7 @@ fn fetch_github_issues_impl(
     } else if cache_enabled {
         if let Some(hit) = try_get_issue_cache(app_state, &repo_path, &repo_key, &cache_key, now_ms)
         {
+            log_flow_success("issue", "fetch_github_issues");
             return Ok(hit);
         }
     }
@@ -432,6 +433,7 @@ fn fetch_github_issues_impl(
             if let Some(hit) =
                 try_get_issue_cache(app_state, &repo_path, &repo_key, &cache_key, now_millis())
             {
+                log_flow_success("issue", "fetch_github_issues");
                 return Ok(hit);
             }
         }

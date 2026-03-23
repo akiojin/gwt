@@ -247,14 +247,24 @@ pub fn log_flow_failure(category: &str, event: &str, error_detail: &str) {
 
 /// Log an incident with full context for first-response triage.
 pub fn log_incident(category: &str, event: &str, error_code: Option<&str>, error_detail: &str) {
-    tracing::error!(
-        category = category,
-        event = event,
-        result = "failure",
-        workspace = "default",
-        error_code = error_code.unwrap_or(""),
-        error_detail = error_detail,
-    );
+    if let Some(code) = error_code {
+        tracing::error!(
+            category = category,
+            event = event,
+            result = "failure",
+            workspace = "default",
+            error_code = code,
+            error_detail = error_detail,
+        );
+    } else {
+        tracing::error!(
+            category = category,
+            event = event,
+            result = "failure",
+            workspace = "default",
+            error_detail = error_detail,
+        );
+    }
 }
 
 /// Initialize a lightweight tracing subscriber for tests.
