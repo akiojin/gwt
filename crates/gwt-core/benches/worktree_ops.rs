@@ -4,35 +4,29 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use gwt_core::worktree::WorktreeManager;
 use tempfile::TempDir;
 
+fn run_git_checked(repo_path: &std::path::Path, args: &[&str]) {
+    let output = gwt_core::process::git_command()
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .expect("git fixture command should spawn");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn create_test_repo() -> TempDir {
     let temp = TempDir::new().unwrap();
-    gwt_core::process::git_command()
-        .args(["init"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    gwt_core::process::git_command()
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    gwt_core::process::git_command()
-        .args(["config", "user.name", "Test User"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
+    run_git_checked(temp.path(), &["init"]);
+    run_git_checked(temp.path(), &["config", "user.email", "test@test.com"]);
+    run_git_checked(temp.path(), &["config", "user.name", "Test User"]);
     // Create initial commit
     std::fs::write(temp.path().join("README.md"), "# Test").unwrap();
-    gwt_core::process::git_command()
-        .args(["add", "."])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    gwt_core::process::git_command()
-        .args(["commit", "-m", "Initial commit"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
+    run_git_checked(temp.path(), &["add", "."]);
+    run_git_checked(temp.path(), &["commit", "-m", "Initial commit"]);
     temp
 }
 
@@ -41,26 +35,24 @@ fn create_test_repo_with_worktrees() -> TempDir {
     let repo_path = temp.path();
 
     for branch in ["feature/bench-a", "feature/bench-b", "feature/bench-c"] {
-        gwt_core::process::git_command()
-            .args(["branch", branch])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+        run_git_checked(repo_path, &["branch", branch]);
 
-        let worktree_path = repo_path
-            .join(".worktrees")
-            .join(branch.replace('/', "-"));
+        let worktree_path = repo_path.join(".worktrees").join(branch.replace('/', "-"));
         std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
-        gwt_core::process::git_command()
-            .args([
-                "worktree",
-                "add",
-                worktree_path.to_str().unwrap(),
-                branch,
-            ])
+        let output = gwt_core::process::git_command()
+            .arg("worktree")
+            .arg("add")
+            .arg(worktree_path.to_string_lossy().into_owned())
+            .arg(branch)
             .current_dir(repo_path)
             .output()
-            .unwrap();
+            .expect("git worktree add should spawn");
+        assert!(
+            output.status.success(),
+            "git worktree add failed for {}: {}",
+            branch,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     temp
@@ -86,7 +78,9 @@ fn worktree_list_vs_basic_multi_worktree_benchmark(c: &mut Criterion) {
     let temp = create_test_repo_with_worktrees();
     let manager = WorktreeManager::new(temp.path()).unwrap();
 
-    c.bench_function("worktree_list_multi", |b| b.iter(|| manager.list().unwrap()));
+    c.bench_function("worktree_list_multi", |b| {
+        b.iter(|| manager.list().unwrap())
+    });
     c.bench_function("worktree_list_basic_multi", |b| {
         b.iter(|| manager.list_basic().unwrap())
     });

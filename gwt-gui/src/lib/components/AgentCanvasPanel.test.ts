@@ -1,15 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { fireEvent, render } from "@testing-library/svelte";
 import AgentCanvasPanel from "./AgentCanvasPanel.svelte";
 import type { Tab, WorktreeInfo } from "../types";
-
-function installResizeObserverStub() {
-  (globalThis as any).ResizeObserver = class ResizeObserver {
-    observe = vi.fn();
-    disconnect = vi.fn();
-    constructor(_cb: () => void) {}
-  };
-}
 
 const worktree: WorktreeInfo = {
   path: "/tmp/project/.gwt/worktrees/feature-canvas",
@@ -31,8 +23,6 @@ const worktree: WorktreeInfo = {
 };
 
 describe("AgentCanvasPanel", () => {
-  installResizeObserverStub();
-
   it("opens assistant detail in an overlay instead of a persistent side pane", async () => {
     const rendered = render(AgentCanvasPanel, {
       props: {
@@ -114,7 +104,7 @@ describe("AgentCanvasPanel", () => {
       '[data-testid^="agent-canvas-worktree-card-"]',
     ) as HTMLElement;
     const dragHandle = worktreeCard.querySelector(".card-drag-handle") as HTMLElement;
-    expect(worktreeCard.style.transform).toContain("translate(40px, 264px)");
+    expect(worktreeCard.style.transform).toContain("translate(40px, 394px)");
 
     await fireEvent.pointerDown(dragHandle, {
       button: 0,
@@ -133,7 +123,7 @@ describe("AgentCanvasPanel", () => {
       clientY: 170,
     });
 
-    expect(worktreeCard.style.transform).toContain("translate(120px, 334px)");
+    expect(worktreeCard.style.transform).toContain("translate(120px, 464px)");
   });
 
   it("emits persisted viewport and selected card changes", async () => {

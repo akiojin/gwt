@@ -414,13 +414,19 @@ export async function installTauriMock(
           }
         }
         if (cmd === "list_worktree_branches") {
-          return mockLocalBranches;
+          return resolveMockResponse(
+            runtimeCommandResponses?.list_worktree_branches ?? commandResponses.list_worktree_branches ?? mockLocalBranches,
+          );
         }
         if (cmd === "list_remote_branches") {
-          return mockRemoteBranches;
+          return resolveMockResponse(
+            runtimeCommandResponses?.list_remote_branches ?? commandResponses.list_remote_branches ?? mockRemoteBranches,
+          );
         }
         if (cmd === "list_worktrees") {
-          return mockWorktrees;
+          return resolveMockResponse(
+            runtimeCommandResponses?.list_worktrees ?? commandResponses.list_worktrees ?? mockWorktrees,
+          );
         }
         if (
           runtimeCommandResponses &&
