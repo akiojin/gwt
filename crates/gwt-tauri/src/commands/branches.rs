@@ -827,8 +827,7 @@ fn list_branch_inventory_impl(
     let remotes = Remote::list(&repo_path).unwrap_or_default();
     let local = list_worktree_branches_impl(project_path, state)?;
     let remote = list_remote_branches_impl(project_path, state)?;
-    let worktrees = crate::commands::cleanup::list_worktrees_impl(project_path, state)
-        .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))?;
+    let worktrees = list_branch_inventory_worktrees_impl(project_path, state)?;
     Ok(build_branch_inventory_entries(
         local.infos,
         remote,
@@ -836,6 +835,16 @@ fn list_branch_inventory_impl(
         &remotes,
     ))
 }
+
+fn list_branch_inventory_worktrees_impl(
+    project_path: &str,
+    state: &AppState,
+) -> Result<Vec<crate::commands::cleanup::WorktreeInfo>, StructuredError> {
+    crate::commands::cleanup::list_worktrees_impl(project_path, state)
+        .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))
+}
+
+const LIST_BRANCH_INVENTORY_WARN_THRESHOLD_MS: u128 = 500;
 
 /// List all local branches in a repository
 #[instrument(skip_all, fields(command = "list_branches", project_path))]
@@ -881,13 +890,36 @@ pub fn list_branches(
 
 #[instrument(skip_all, fields(command = "list_branch_inventory", project_path))]
 #[tauri::command]
-pub fn list_branch_inventory(
+pub async fn list_branch_inventory(
     project_path: String,
-    state: State<AppState>,
+    app_handle: AppHandle,
 ) -> Result<Vec<BranchInventoryEntry>, StructuredError> {
-    with_panic_guard("listing branch inventory", "list_branch_inventory", || {
-        list_branch_inventory_impl(&project_path, &state)
+    let started = Instant::now();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        with_panic_guard("listing branch inventory", "list_branch_inventory", || {
+            list_branch_inventory_impl(&project_path, &state)
+        })
     })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Unexpected error while listing branch inventory: {e}"),
+            "list_branch_inventory",
+        )
+    })??;
+
+    let elapsed_ms = started.elapsed().as_millis();
+    if elapsed_ms > LIST_BRANCH_INVENTORY_WARN_THRESHOLD_MS {
+        warn!(
+            category = "branches",
+            elapsed_ms,
+            reason = "explicit-refresh",
+            "list_branch_inventory took longer than expected"
+        );
+    }
+
+    Ok(result)
 }
 
 /// List branches that currently have a local worktree (gwt "Local" view)

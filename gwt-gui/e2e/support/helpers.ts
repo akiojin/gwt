@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Page, TestInfo } from "@playwright/test";
 import { expect } from "@playwright/test";
 
 // ── Common branch fixtures ──
@@ -275,21 +275,167 @@ export async function openProjectAndSelectBranch(
   ).toBeVisible();
   await openRecentProject(page);
 
+  await openBranchBrowser(page);
+  const visibleBrowser = page.locator('[data-testid="branch-browser-panel"]:visible');
+  await expect(visibleBrowser).toBeVisible();
+
   const branchButton = page
-    .locator(".branch-item")
+    .locator(".branch-row:visible")
+    .filter({ hasText: branchName });
+  await expect(branchButton).toBeVisible();
+  await branchButton.evaluate((node) => (node as HTMLElement).click());
+
+  await expect(page.getByTestId("branch-browser-detail")).toContainText(
+    branchName,
+  );
+}
+
+export async function openBranchBrowser(page: Page): Promise<void> {
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const app = (
+          window as unknown as {
+            __GWT_E2E_APP__?: {
+              openBranchBrowserTab?: () => void;
+              forceActiveTabId?: (tabId: string) => void;
+              activateTab?: (tabId: string) => void;
+            };
+          }
+        ).__GWT_E2E_APP__;
+        return Boolean(app);
+      }),
+    )
+    .toBe(true);
+  const activatedByHook = await page.evaluate(() => {
+    const app = (
+      window as unknown as {
+        __GWT_E2E_APP__?: {
+          openBranchBrowserTab?: () => void;
+          forceActiveTabId?: (tabId: string) => void;
+          activateTab?: (tabId: string) => void;
+        };
+      }
+    ).__GWT_E2E_APP__;
+    if (app?.openBranchBrowserTab) {
+      app.openBranchBrowserTab();
+      return true;
+    }
+    if (app?.forceActiveTabId) {
+      app.forceActiveTabId("branchBrowser");
+      return true;
+    }
+    if (!app?.activateTab) return false;
+    app.activateTab("branchBrowser");
+    return true;
+  });
+  if (!activatedByHook) {
+    await page
+      .locator('[data-tab-id="branchBrowser"]')
+      .evaluate((node) => (node as HTMLElement).click());
+  }
+  await expect(
+    page.locator('[data-testid="branch-browser-panel"]:visible'),
+  ).toBeVisible();
+}
+
+export async function expectAgentCanvasVisible(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Agent Canvas" })).toBeVisible();
+  await expect(page.getByTestId("agent-canvas-board")).toBeVisible();
+}
+
+export async function captureUxSnapshot(
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+): Promise<void> {
+  const safeName = name.replace(/[^a-zA-Z0-9_-]+/g, "-");
+  await page.screenshot({
+    path: testInfo.outputPath(`${safeName}.png`),
+    fullPage: true,
+  });
+}
+
+export async function saveE2ECoverage(
+  page: Page,
+  testInfo: TestInfo,
+): Promise<void> {
+  const coverageEnabled = process.env.E2E_COVERAGE === "1";
+  const coverage = await page.evaluate(() => {
+    return (window as unknown as { __coverage__?: unknown }).__coverage__ ?? null;
+  });
+  if (!coverage) {
+    if (coverageEnabled) {
+      // Make missing browser coverage visible during commit-time coverage runs.
+      console.warn(
+        `[e2e-coverage] missing browser coverage for "${testInfo.title}" at ${page.url()}`,
+      );
+    }
+    return;
+  }
+
+  const fileName = `${testInfo.titlePath
+    .join("-")
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")}-${Date.now()}.json`;
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const nycDir = path.join(process.cwd(), ".nyc_output");
+  await fs.mkdir(nycDir, { recursive: true });
+  const outputPath = path.join(nycDir, fileName);
+  await fs.writeFile(
+    outputPath,
+    JSON.stringify(coverage),
+    "utf-8",
+  );
+  if (coverageEnabled) {
+    console.log(
+      `[e2e-coverage] wrote ${outputPath} (${Object.keys(coverage as Record<string, unknown>).length} files)`,
+    );
+  }
+}
+
+export async function selectBranchInBrowser(
+  page: Page,
+  branchName: string,
+): Promise<void> {
+  await openBranchBrowser(page);
+  const branchButton = page
+    .locator(".branch-row")
     .filter({ hasText: branchName });
   await expect(branchButton).toBeVisible();
   await branchButton.click();
+  await expect(page.getByTestId("branch-browser-detail")).toContainText(
+    branchName,
+  );
 }
 
 export async function openSettings(
   page: Page,
   commandResponses: Record<string, unknown>,
 ): Promise<void> {
-  await openProjectAndSelectBranch(page, branchFeature.name, commandResponses);
+  await setMockCommandResponses(page, commandResponses);
+  await expect(
+    page.getByRole("button", { name: "Open Project..." }),
+  ).toBeVisible();
+  await openRecentProject(page);
 
-  await waitForMenuActionListener(page);
-  await emitTauriEvent(page, "menu-action", { action: "open-settings" });
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __GWT_E2E_APP__?: {
+          openSettingsTab: () => void;
+          forceActiveTabId?: (tabId: string) => void;
+        };
+      }
+    ).__GWT_E2E_APP__?.openSettingsTab();
+    (
+      window as unknown as {
+        __GWT_E2E_APP__?: {
+          forceActiveTabId?: (tabId: string) => void;
+        };
+      }
+    ).__GWT_E2E_APP__?.forceActiveTabId?.("settings");
+  });
 
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
 }
