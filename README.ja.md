@@ -180,6 +180,11 @@ scripts/voice-eval.sh
 - `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
 - `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
 
+### ログとプロファイリング
+
+通常ログは `~/.gwt/logs/` 配下に JSON Lines 形式で保存されます。パフォーマンスプロファイリングは **Settings > Profiling** で有効化できます。
+ログ仕様の詳細は [#1758](https://github.com/akiojin/gwt/issues/1758) を参照してください。
+
 ## ライセンス
 
 MIT

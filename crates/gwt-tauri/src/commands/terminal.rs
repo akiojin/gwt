@@ -12,6 +12,7 @@ use std::{
 };
 
 use chrono::Utc;
+use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
 use gwt_core::{
     ai::SessionParser,
     config::{stats::Stats, AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings},
@@ -2233,8 +2234,15 @@ pub fn launch_terminal(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, StructuredError> {
+    log_flow_start("terminal", "launch_terminal");
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
+            gwt_core::logging::log_incident(
+                "terminal",
+                "launch_terminal",
+                Some("TERMINAL_NO_PROJECT"),
+                "No project opened",
+            );
             return Err(StructuredError::internal(
                 "No project opened",
                 "launch_terminal",
@@ -2243,10 +2251,24 @@ pub fn launch_terminal(
         PathBuf::from(p)
     };
 
-    let repo_path = resolve_repo_path_for_project_root(&project_root)
-        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))?;
-    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch)
-        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))?;
+    let repo_path = resolve_repo_path_for_project_root(&project_root).map_err(|e| {
+        gwt_core::logging::log_incident(
+            "terminal",
+            "launch_terminal",
+            Some("TERMINAL_REPO_RESOLVE_FAILED"),
+            &e,
+        );
+        StructuredError::internal(&e, "launch_terminal")
+    })?;
+    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch).map_err(|e| {
+        gwt_core::logging::log_incident(
+            "terminal",
+            "launch_terminal",
+            Some("TERMINAL_WORKTREE_RESOLVE_FAILED"),
+            &e,
+        );
+        StructuredError::internal(&e, "launch_terminal")
+    })?;
 
     let config = BuiltinLaunchConfig {
         command: agent_name.clone(),
@@ -2261,8 +2283,19 @@ pub fn launch_terminal(
         windows_force_utf8: cfg!(target_os = "windows"),
     };
 
-    launch_with_config(&repo_path, config, None, &state, app_handle)
-        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))
+    let result = launch_with_config(&repo_path, config, None, &state, app_handle).map_err(|e| {
+        gwt_core::logging::log_incident(
+            "terminal",
+            "launch_terminal",
+            Some("TERMINAL_LAUNCH_FAILED"),
+            &e,
+        );
+        StructuredError::internal(&e, "launch_terminal")
+    });
+    if result.is_ok() {
+        log_flow_success("terminal", "launch_terminal");
+    }
+    result
 }
 
 fn non_empty_env_var(key: &str) -> Option<String> {
@@ -5167,8 +5200,15 @@ pub fn launch_agent(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, StructuredError> {
+    log_flow_start("terminal", "launch_agent");
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
+            gwt_core::logging::log_incident(
+                "terminal",
+                "launch_agent",
+                Some("TERMINAL_NO_PROJECT"),
+                "No project opened",
+            );
             return Err(StructuredError::internal(
                 "No project opened",
                 "launch_agent",
@@ -5176,8 +5216,21 @@ pub fn launch_agent(
         };
         PathBuf::from(p)
     };
-    launch_agent_for_project_root(project_root, request, &state, app_handle, None, None)
-        .map_err(|e| StructuredError::internal(&e, "launch_agent"))
+    let result =
+        launch_agent_for_project_root(project_root, request, &state, app_handle, None, None)
+            .map_err(|e| {
+                gwt_core::logging::log_incident(
+                    "terminal",
+                    "launch_agent",
+                    Some("TERMINAL_AGENT_LAUNCH_FAILED"),
+                    &e,
+                );
+                StructuredError::internal(&e, "launch_agent")
+            });
+    if result.is_ok() {
+        log_flow_success("terminal", "launch_agent");
+    }
+    result
 }
 
 /// Start an async launch job with progress events (gwt-spec issue US15).
@@ -5191,6 +5244,12 @@ pub fn start_launch_job(
 ) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
+            gwt_core::logging::log_incident(
+                "terminal",
+                "start_launch_job",
+                Some("TERMINAL_NO_PROJECT"),
+                "No project opened",
+            );
             return Err(StructuredError::internal(
                 "No project opened",
                 "start_launch_job",
@@ -5972,7 +6031,9 @@ pub fn close_terminal(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<(), StructuredError> {
+    log_flow_start("terminal", "close_terminal");
     let mut manager = state.pane_manager.lock().map_err(|e| {
+        log_flow_failure("terminal", "close_terminal", &format!("Lock error: {}", e));
         StructuredError::internal(
             &format!("Failed to lock pane manager: {}", e),
             "close_terminal",
@@ -5984,6 +6045,11 @@ pub fn close_terminal(
         .iter()
         .position(|p| p.pane_id() == pane_id)
         .ok_or_else(|| {
+            log_flow_failure(
+                "terminal",
+                "close_terminal",
+                &format!("Pane not found: {}", pane_id),
+            );
             StructuredError::internal(&format!("Pane not found: {}", pane_id), "close_terminal")
         })?;
 
@@ -5994,6 +6060,7 @@ pub fn close_terminal(
             pane_id: pane_id.clone(),
         },
     );
+    log_flow_success("terminal", "close_terminal");
     Ok(())
 }
 

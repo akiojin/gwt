@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
 use gwt_core::{
     git::{self, get_spec_issue_detail, graphql, Branch, PrCache, WorkflowRunInfo},
     process::command as process_command,
@@ -197,15 +198,27 @@ pub async fn assistant_send_message(
     input: String,
     delivery_mode: Option<AssistantDeliveryMode>,
 ) -> Result<AssistantStateResponse, String> {
+    log_flow_start("assistant", "assistant_send_message");
     let window_label = window.label().to_string();
     let input = input.trim().to_string();
     if input.is_empty() {
+        log_flow_failure(
+            "assistant",
+            "assistant_send_message",
+            "Empty message rejected",
+        );
         return Err("Message cannot be empty".to_string());
     }
     let delivery_mode = delivery_mode.unwrap_or(AssistantDeliveryMode::Interrupt);
-    let project_path = state
-        .project_for_window(&window_label)
-        .ok_or_else(|| "No project opened. Open a project first.".to_string())?;
+    let project_path = state.project_for_window(&window_label).ok_or_else(|| {
+        gwt_core::logging::log_incident(
+            "assistant",
+            "assistant_send_message",
+            Some("ASSISTANT_NO_PROJECT"),
+            "No project opened",
+        );
+        "No project opened. Open a project first.".to_string()
+    })?;
 
     let runtime_before = state.assistant_runtime_snapshot(&window_label);
     if runtime_before.active_kind.is_some() && delivery_mode == AssistantDeliveryMode::Queue {
@@ -222,6 +235,7 @@ pub async fn assistant_send_message(
         let context = current_assistant_context(&state, &window_label);
         let runtime = state.assistant_runtime_snapshot(&window_label);
         let startup_status_message = current_startup_status_message(&state, &window_label);
+        log_flow_success("assistant", "assistant_send_message");
         return Ok(build_assistant_state_response(
             &engine,
             Some(window_label),
@@ -249,6 +263,7 @@ pub async fn assistant_send_message(
 
     let context = current_assistant_context(&state, &window_label);
     let runtime = state.assistant_runtime_snapshot(&window_label);
+    log_flow_success("assistant", "assistant_send_message");
     Ok(build_pending_user_send_state_response(
         &base_engine,
         &window_label,
@@ -264,10 +279,17 @@ pub async fn assistant_start(
     window: tauri::Window,
     state: tauri::State<'_, AppState>,
 ) -> Result<AssistantStateResponse, String> {
+    log_flow_start("assistant", "assistant_start");
     let window_label = window.label().to_string();
-    let project_path = state
-        .project_for_window(&window_label)
-        .ok_or_else(|| "No project opened. Open a project first.".to_string())?;
+    let project_path = state.project_for_window(&window_label).ok_or_else(|| {
+        gwt_core::logging::log_incident(
+            "assistant",
+            "assistant_start",
+            Some("ASSISTANT_NO_PROJECT"),
+            "No project opened",
+        );
+        "No project opened. Open a project first.".to_string()
+    })?;
 
     state.clear_assistant_session_for_window(&window_label);
     let session_generation = state.begin_assistant_session_for_window(&window_label);
@@ -323,6 +345,12 @@ pub async fn assistant_start(
         {
             Ok(fingerprint) => fingerprint,
             Err(err) => {
+                gwt_core::logging::log_incident(
+                    "assistant",
+                    "assistant_start",
+                    Some("ASSISTANT_REPO_INSPECTION_FAILED"),
+                    &err,
+                );
                 engine.apply_startup_failure_message(format!(
                     "Assistant started, but repository inspection failed: {err}"
                 ));
@@ -348,6 +376,12 @@ pub async fn assistant_start(
                 context
             }
             Err(err) => {
+                gwt_core::logging::log_incident(
+                    "assistant",
+                    "assistant_start",
+                    Some("ASSISTANT_CONTEXT_RESOLVE_FAILED"),
+                    &err,
+                );
                 let context = AssistantContext {
                     current_status: Some("blocked".to_string()),
                     blockers: vec![format!(
@@ -466,6 +500,12 @@ pub async fn assistant_start(
                 return;
             }
             Err(err) => {
+                gwt_core::logging::log_incident(
+                    "assistant",
+                    "assistant_start",
+                    Some("ASSISTANT_INITIAL_ANALYSIS_FAILED"),
+                    &err.to_string(),
+                );
                 engine.apply_startup_failure_message(format!(
                     "Assistant started, but the initial analysis failed: {err}"
                 ));
@@ -482,6 +522,7 @@ pub async fn assistant_start(
         );
     });
 
+    log_flow_success("assistant", "assistant_start");
     Ok(build_startup_inflight_state_response(
         window_label,
         "Inspecting repository state...".to_string(),
@@ -494,9 +535,11 @@ pub async fn assistant_stop(
     window: tauri::Window,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    log_flow_start("assistant", "assistant_stop");
     let window_label = window.label().to_string();
     state.clear_assistant_session_for_window(&window_label);
 
+    log_flow_success("assistant", "assistant_stop");
     Ok(())
 }
 
@@ -883,6 +926,12 @@ fn spawn_assistant_user_run(
             Ok(Some(_)) => {}
             Ok(None) => return,
             Err(err) => {
+                gwt_core::logging::log_incident(
+                    "assistant",
+                    "assistant_send_message",
+                    Some("ASSISTANT_REQUEST_FAILED"),
+                    &err.to_string(),
+                );
                 engine.push_visible_assistant_message(format!("Assistant request failed: {err}"));
             }
         }
