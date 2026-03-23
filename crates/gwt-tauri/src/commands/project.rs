@@ -1,23 +1,34 @@
 //! Project/repo management commands
 
-use crate::state::AppState;
-use gwt_core::config::{
-    repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
+use std::{
+    fs,
+    io::Read,
+    path::Path,
+    process::Stdio,
+    time::{Duration, Instant},
 };
-use gwt_core::git::{self, Branch};
-use gwt_core::migration::{
-    derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig, MigrationState,
+
+use gwt_core::{
+    config::{
+        repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
+    },
+    git::{self, Branch},
+    migration::{
+        derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig,
+        MigrationState,
+    },
+    StructuredError,
 };
-use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::process::Stdio;
-use std::{fs, io::Read};
-use tauri::Manager;
-use tauri::State;
-use tauri::{AppHandle, Emitter};
-use tracing::warn;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tracing::{instrument, warn};
 use uuid::Uuid;
+
+use gwt_core::logging::{log_flow_start, log_flow_success};
+
+use crate::state::AppState;
+
+const OPEN_PROJECT_WARN_THRESHOLD: Duration = Duration::from_millis(500);
 
 /// Serializable project info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +184,7 @@ fn dir_is_empty(path: &Path) -> bool {
 }
 
 /// Probe a path and return how the GUI should handle it.
+#[instrument(skip_all, fields(command = "probe_path"))]
 #[tauri::command]
 pub fn probe_path(path: String) -> ProbePathResult {
     let p = Path::new(&path);
@@ -238,25 +250,45 @@ pub fn probe_path(path: String) -> ProbePathResult {
 }
 
 /// Open a project (set project_path in AppState)
+#[instrument(skip_all, fields(command = "open_project", window_label = window.label()))]
 #[tauri::command]
 pub fn open_project(
     window: tauri::Window,
     path: String,
     state: State<AppState>,
 ) -> Result<OpenProjectResult, StructuredError> {
+    log_flow_start("project", "open_project");
+    let started = Instant::now();
     let p = Path::new(&path);
 
     if !p.exists() {
-        return Err(StructuredError::internal(
-            &format!("Path does not exist: {}", path),
+        let msg = format!("Path does not exist: {}", path);
+        gwt_core::logging::log_incident(
+            "project",
             "open_project",
-        ));
+            Some("PROJECT_PATH_NOT_FOUND"),
+            &msg,
+        );
+        return Err(StructuredError::internal(&msg, "open_project"));
     }
 
     let project_root = resolve_project_root(p);
-    let repo_path = resolve_repo_path_for_project_root(&project_root)
-        .map_err(|e| StructuredError::internal(&e, "open_project"))?;
+    let repo_path = resolve_repo_path_for_project_root(&project_root).map_err(|e| {
+        gwt_core::logging::log_incident(
+            "project",
+            "open_project",
+            Some("PROJECT_REPO_RESOLVE_FAILED"),
+            &e,
+        );
+        StructuredError::internal(&e, "open_project")
+    })?;
     if git::is_git_repo(&repo_path) && !git::is_bare_repository(&repo_path) {
+        gwt_core::logging::log_incident(
+            "project",
+            "open_project",
+            Some("PROJECT_MIGRATION_REQUIRED"),
+            "Normal repositories are not supported. Migration to bare gwt project required.",
+        );
         return Err(StructuredError::internal("Migration required: normal repositories are not supported. Please migrate to a bare gwt project.", "open_project"));
     }
     let project_root_str = project_root.to_string_lossy().to_string();
@@ -280,6 +312,11 @@ pub fn open_project(
     let current_window_label = window.label().to_string();
     let previous_project_path = state.project_for_window(&current_window_label);
     for _attempt in 0..2 {
+        let _claim_span = tracing::info_span!(
+            "project_open.claim_window",
+            window_label = %current_window_label
+        )
+        .entered();
         match state.claim_project_for_window_with_identity(
             &current_window_label,
             project_root_str.clone(),
@@ -290,17 +327,32 @@ pub fn open_project(
                     state.clear_assistant_session_for_window(&current_window_label);
                 }
                 state.push_window_focus(&current_window_label);
-                repair_project_skill_registration(&state, &project_root);
+                {
+                    let _span = tracing::info_span!(
+                        "project_open.skill_registration",
+                        project_path = %project_root_str
+                    )
+                    .entered();
+                    repair_project_skill_registration(&state, &project_root);
+                }
                 // Record to recent projects history
                 let _ = gwt_core::config::record_recent_project(&project_root_str);
 
-                let _ = crate::menu::rebuild_menu(window.app_handle());
+                {
+                    let _span = tracing::info_span!("project_open.rebuild_menu").entered();
+                    let _ = crate::menu::rebuild_menu(window.app_handle());
+                }
 
                 // Prefetch version history in background (gwt-spec issue FR-006)
                 {
                     let app_handle = window.app_handle().clone();
                     let prefetch_path = project_root_str.clone();
                     tauri::async_runtime::spawn_blocking(move || {
+                        let _span = tracing::info_span!(
+                            "project_open.prefetch_version_history",
+                            project_path = %prefetch_path
+                        )
+                        .entered();
                         crate::commands::version_history::prefetch_version_history_inner(
                             &prefetch_path,
                             &app_handle,
@@ -311,9 +363,81 @@ pub fn open_project(
                 // Build project structure index in background
                 {
                     let index_path = project_root_str.clone();
+                    let _span = tracing::info_span!(
+                        "project_open.spawn_background_index",
+                        project_path = %index_path
+                    )
+                    .entered();
                     crate::commands::project_index::spawn_background_index(index_path);
                 }
 
+                // #1714: Bootstrap issue linkage + auto full sync in background
+                {
+                    let sync_repo_path = repo_path.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let _span = tracing::info_span!(
+                            "project_open.issue_cache_bootstrap",
+                            repo_path = %sync_repo_path.display()
+                        )
+                        .entered();
+                        // Bootstrap linkage from branch names
+                        let mut link_store =
+                            gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(
+                                &sync_repo_path,
+                            );
+                        let output = gwt_core::process::git_command()
+                            .args(["branch", "--format=%(refname:short)"])
+                            .current_dir(&sync_repo_path)
+                            .output();
+                        if let Ok(output) = output {
+                            if output.status.success() {
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                let branches: Vec<String> = stdout
+                                    .lines()
+                                    .map(|l| l.trim().to_string())
+                                    .filter(|l| !l.is_empty())
+                                    .collect();
+                                link_store.bootstrap_from_branches(&branches);
+                                let _ = link_store.save(&sync_repo_path);
+                            }
+                        }
+
+                        // Auto full sync of issue exact cache
+                        let mut cache =
+                            gwt_core::git::issue_cache::IssueExactCache::load(&sync_repo_path);
+                        match cache.full_sync(&sync_repo_path) {
+                            Ok(result) => {
+                                let _ = cache.save(&sync_repo_path);
+                                tracing::info!(
+                                    category = "issue_cache",
+                                    updated = result.updated_count,
+                                    deleted = result.deleted_count,
+                                    duration_ms = result.duration_ms,
+                                    "Auto full sync completed on project open"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    category = "issue_cache",
+                                    error = %e,
+                                    "Auto full sync failed on project open (cache preserved)"
+                                );
+                            }
+                        }
+                    });
+                }
+
+                let elapsed = started.elapsed();
+                if elapsed > OPEN_PROJECT_WARN_THRESHOLD {
+                    warn!(
+                        category = "project_start",
+                        project_path = %project_root_str,
+                        elapsed_ms = elapsed.as_millis(),
+                        "open_project took longer than expected"
+                    );
+                }
+
+                log_flow_success("project", "open_project");
                 return Ok(OpenProjectResult {
                     info,
                     action: OpenProjectAction::Opened,
@@ -329,6 +453,7 @@ pub fn open_project(
                     let _ = existing_window.show();
                     let _ = existing_window.set_focus();
                     let _ = crate::menu::rebuild_menu(window.app_handle());
+                    log_flow_success("project", "open_project");
                     return Ok(OpenProjectResult {
                         info,
                         action: OpenProjectAction::FocusedExisting,
@@ -342,6 +467,12 @@ pub fn open_project(
         }
     }
 
+    gwt_core::logging::log_incident(
+        "project",
+        "open_project",
+        Some("PROJECT_STALE_WINDOW_STATE"),
+        "Failed to open project due to stale duplicate window state",
+    );
     Err(StructuredError::internal(
         "Failed to open project due to stale duplicate window state. Please retry.",
         "open_project",
@@ -349,6 +480,7 @@ pub fn open_project(
 }
 
 /// Get current project info from state
+#[instrument(skip_all, fields(command = "get_project_info", window_label = window.label()))]
 #[tauri::command]
 pub fn get_project_info(window: tauri::Window, state: State<AppState>) -> Option<ProjectInfo> {
     let path_str = state.project_for_window(window.label())?;
@@ -371,14 +503,18 @@ pub fn get_project_info(window: tauri::Window, state: State<AppState>) -> Option
 }
 
 /// Close the current window's project (clear window-scoped state)
+#[instrument(skip_all, fields(command = "close_project", window_label = window.label()))]
 #[tauri::command]
 pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<(), StructuredError> {
+    log_flow_start("project", "close_project");
     state.clear_project_for_window(window.label());
     let _ = crate::menu::rebuild_menu(window.app_handle());
+    log_flow_success("project", "close_project");
     Ok(())
 }
 
 /// Check if a path is a git repository
+#[instrument(skip_all, fields(command = "is_git_repo"))]
 #[tauri::command]
 pub fn is_git_repo(path: String) -> bool {
     git::is_git_repo(Path::new(&path))
@@ -481,6 +617,7 @@ fn extract_percent(s: &str) -> Option<u8> {
 
 /// Create a new project by bare-cloning a GitHub repository into `<parent>/<repo>.git`
 /// and then opening it (updating window-scoped project state).
+#[instrument(skip_all, fields(command = "create_project", window_label = window.label()))]
 #[tauri::command]
 pub fn create_project(
     window: tauri::Window,
@@ -488,7 +625,14 @@ pub fn create_project(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<OpenProjectResult, StructuredError> {
+    log_flow_start("project", "create_project");
     if !is_valid_github_repo_url(&request.repo_url) {
+        gwt_core::logging::log_incident(
+            "project",
+            "create_project",
+            Some("PROJECT_INVALID_REPO_URL"),
+            "invalid repo URL format",
+        );
         return Err(StructuredError::internal(
             "Invalid repository URL",
             "create_project",
@@ -497,19 +641,27 @@ pub fn create_project(
 
     let parent = std::path::PathBuf::from(&request.parent_dir);
     if !parent.exists() {
-        return Err(StructuredError::internal(
-            &format!("Parent directory does not exist: {}", request.parent_dir),
+        let msg = format!("Parent directory does not exist: {}", request.parent_dir);
+        gwt_core::logging::log_incident(
+            "project",
             "create_project",
-        ));
+            Some("PROJECT_PARENT_DIR_NOT_FOUND"),
+            &msg,
+        );
+        return Err(StructuredError::internal(&msg, "create_project"));
     }
 
     let repo_name = git::extract_repo_name(&request.repo_url);
     let target = parent.join(&repo_name);
     if target.exists() {
-        return Err(StructuredError::internal(
-            &format!("Target directory already exists: {}", target.display()),
+        let msg = format!("Target directory already exists: {}", target.display());
+        gwt_core::logging::log_incident(
+            "project",
             "create_project",
-        ));
+            Some("PROJECT_TARGET_DIR_EXISTS"),
+            &msg,
+        );
+        return Err(StructuredError::internal(&msg, "create_project"));
     }
 
     // Run `git clone --bare --progress` and stream progress via events.
@@ -532,6 +684,12 @@ pub fn create_project(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
+            gwt_core::logging::log_incident(
+                "project",
+                "create_project",
+                Some("PROJECT_GIT_CLONE_SPAWN_FAILED"),
+                &e.to_string(),
+            );
             StructuredError::internal(
                 &format!("Failed to execute git clone: {}", e),
                 "create_project",
@@ -581,6 +739,12 @@ pub fn create_project(
     flush_line(&mut line_buf);
 
     let status = child.wait().map_err(|e| {
+        gwt_core::logging::log_incident(
+            "project",
+            "create_project",
+            Some("PROJECT_GIT_CLONE_WAIT_FAILED"),
+            &e.to_string(),
+        );
         StructuredError::internal(
             &format!("Failed to wait for git clone: {}", e),
             "create_project",
@@ -605,11 +769,23 @@ pub fn create_project(
             .join("\n");
 
         if tail.trim().is_empty() {
+            gwt_core::logging::log_incident(
+                "project",
+                "create_project",
+                Some("PROJECT_GIT_CLONE_FAILED"),
+                "git clone failed with no stderr output",
+            );
             return Err(StructuredError::internal(
                 "git clone failed",
                 "create_project",
             ));
         }
+        gwt_core::logging::log_incident(
+            "project",
+            "create_project",
+            Some("PROJECT_GIT_CLONE_FAILED"),
+            tail.trim(),
+        );
         return Err(StructuredError::internal(
             &format!("git clone failed: {}", tail.trim()),
             "create_project",
@@ -617,6 +793,8 @@ pub fn create_project(
     }
 
     // Open the project root (FR-304)
+    // Note: open_project has its own flow logging for the open_project flow
+    log_flow_success("project", "create_project");
     open_project(window, request.parent_dir, state)
 }
 
@@ -658,6 +836,7 @@ fn encode_migration_state(state: &MigrationState) -> (String, Option<usize>, Opt
 }
 
 /// Start a bare migration job for a normal repository (gwt-spec issue US7).
+#[instrument(skip_all, fields(command = "start_migration_job", window_label = window.label()))]
 #[tauri::command]
 pub fn start_migration_job(
     window: tauri::Window,
@@ -665,22 +844,39 @@ pub fn start_migration_job(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, StructuredError> {
+    log_flow_start("migration", "start_migration_job");
     let selected = Path::new(&path);
     if !selected.exists() {
-        return Err(StructuredError::internal(
-            &format!("Path does not exist: {}", path),
+        let msg = format!("Path does not exist: {}", path);
+        gwt_core::logging::log_incident(
+            "migration",
             "start_migration_job",
-        ));
+            Some("MIGRATION_PATH_NOT_FOUND"),
+            &msg,
+        );
+        return Err(StructuredError::internal(&msg, "start_migration_job"));
     }
 
     let source_root = git::get_main_repo_root(selected);
     if !git::is_git_repo(&source_root) {
+        gwt_core::logging::log_incident(
+            "migration",
+            "start_migration_job",
+            Some("MIGRATION_NOT_GIT_REPO"),
+            "Not a git repository",
+        );
         return Err(StructuredError::internal(
             "Not a git repository",
             "start_migration_job",
         ));
     }
     if git::is_bare_repository(&source_root) {
+        gwt_core::logging::log_incident(
+            "migration",
+            "start_migration_job",
+            Some("MIGRATION_ALREADY_BARE"),
+            "Repository is already bare",
+        );
         return Err(StructuredError::internal(
             "Repository is already bare",
             "start_migration_job",
@@ -747,10 +943,12 @@ pub fn start_migration_job(
         let _ = app.emit("migration-finished", &finished);
     });
 
+    log_flow_success("migration", "start_migration_job");
     Ok(job_id)
 }
 
 /// Quit the app (used by forced migration refusal).
+#[instrument(skip_all, fields(command = "quit_app"))]
 #[tauri::command]
 pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), StructuredError> {
     crate::app::cleanup_pty_processes(&state);
@@ -760,6 +958,7 @@ pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), Str
 }
 
 /// Cancel the "Press ⌘Q again to quit" confirmation state.
+#[instrument(skip_all, fields(command = "cancel_quit_confirm"))]
 #[tauri::command]
 pub fn cancel_quit_confirm(state: State<AppState>) {
     state.cancel_quit_confirm();
@@ -767,9 +966,10 @@ pub fn cancel_quit_confirm(state: State<AppState>) {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::config::Settings;
+
     use super::*;
     use crate::state::AppState;
-    use gwt_core::config::Settings;
 
     fn init_test_git_dir(root: &Path) {
         std::fs::create_dir_all(root.join(".git").join("info")).unwrap();

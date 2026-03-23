@@ -5,12 +5,18 @@
 mod logger;
 mod reader;
 
-pub use logger::{init_logger, log_error_message, log_gwt_error, LogConfig};
+use std::path::Path;
+
+use chrono::{Duration, Utc};
+#[cfg(test)]
+pub use logger::init_test_tracing;
+pub use logger::{
+    init_logger, log_error_message, log_flow_failure, log_flow_start, log_flow_success,
+    log_gwt_error, log_incident, LogConfig, ProfilingGuard,
+};
 pub use reader::{LogEntry, LogReader};
 
 use crate::error::Result;
-use chrono::{Duration, Utc};
-use std::path::Path;
 
 /// Clean up old log files based on retention days
 pub fn cleanup_old_logs(log_dir: &Path, retention_days: u32) -> Result<usize> {
@@ -49,8 +55,9 @@ pub fn today_log_path(log_dir: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_cleanup_old_logs() {
@@ -96,6 +103,37 @@ mod tests {
     }
 
     #[test]
+    fn test_flow_log_entry_has_all_required_fields() {
+        let json = r#"{"timestamp":"2026-03-22T00:00:00Z","level":"INFO","fields":{"message":"flow_start","category":"project","event":"open_project","result":"start","workspace":"default"},"target":"gwt"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.category(), Some("project"));
+        assert_eq!(entry.event(), Some("open_project"));
+        assert_eq!(entry.result(), Some("start"));
+        assert_eq!(entry.workspace(), Some("default"));
+    }
+
+    #[test]
+    fn test_flow_failure_entry_includes_error_fields() {
+        let json = r#"{"timestamp":"2026-03-22T00:00:00Z","level":"WARN","fields":{"message":"flow_failure","category":"git","event":"push","result":"failure","workspace":"default","error_code":"GIT_PUSH_REJECTED","error_detail":"remote rejected"},"target":"gwt"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.result(), Some("failure"));
+        assert_eq!(entry.error_code(), Some("GIT_PUSH_REJECTED"));
+        assert_eq!(entry.error_detail(), Some("remote rejected"));
+    }
+
+    #[test]
+    fn test_flow_result_variants_all_parse() {
+        for result_value in ["start", "success", "failure", "progress"] {
+            let json = format!(
+                r#"{{"timestamp":"2026-03-22T00:00:00Z","level":"INFO","fields":{{"message":"test","category":"project","event":"open","result":"{}","workspace":"default"}},"target":"gwt"}}"#,
+                result_value
+            );
+            let entry: LogEntry = serde_json::from_str(&json).unwrap();
+            assert_eq!(entry.result(), Some(result_value));
+        }
+    }
+
+    #[test]
     fn test_log_category_field_preserved() {
         // Test that different category values are correctly parsed
         let categories = ["cli", "worktree", "git", "server"];
@@ -129,8 +167,7 @@ mod tests {
         std::fs::write(&log_file, initial_entries.join("\n") + "\n").unwrap();
 
         // Simulate append (like a new session would do)
-        use std::fs::OpenOptions;
-        use std::io::Write;
+        use std::{fs::OpenOptions, io::Write};
         let mut file = OpenOptions::new().append(true).open(&log_file).unwrap();
         writeln!(
             file,

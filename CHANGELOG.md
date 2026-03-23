@@ -1,6 +1,83 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [8.17.2] - 2026-03-20
+
+### Bug Fixes
+
+- **tauri:** Harden macOS startup migration (#1723)
+
+## [8.17.1] - 2026-03-19
+
+### Bug Fixes
+
+- **tauri:** Reset legacy macOS WebKit local storage (#1721)
+
+## [8.17.0] - 2026-03-19
+
+### Bug Fixes
+
+- **gui:** Stabilize sidebar visibility refresh test (#1715)
+- **issue-spec:** Preserve utf-8 in spec artifact comments (#1716)
+
+### Features
+
+- パフォーマンスプロファイリング基盤を追加 (#1705)
+- **assistant:** Transform assistant mode into project manager (#1706)
+- **skills:** Use REST-first transport for PR workflows (#1713)
+- **gui:** Add split tab group layout (#1717)
+- **issue:** Add worktree-issue linkage and local issue cache (#1714) (#1718)
+
+### Miscellaneous Tasks
+
+- **skills:** Remove stale gwt-fix-pr assets (#1707)
+
+### Refactor
+
+- **ai:** Send_with_retry統一・コンストラクタ追加・URL builder共通化 (#1708)
+
+### Testing
+
+- Profiling=true で profile.json 生成を確認するテスト追加 (#1705)
+
+## [8.16.0] - 2026-03-19
+
+### Bug Fixes
+
+- **spec:** リリースコマンドで gwt-spec Issue を自動クローズしない
+- アシスタントモニターのブロッキング処理を spawn_blocking に移動し UI フリーズを解消
+- **test:** MacOS の /var → /private/var シンボリックリンクによるテスト失敗を修正
+
+### Documentation
+
+- **spec:** Gwt-issue-search description を公式ガイド準拠に改善し CLAUDE.md に Worktree ルール追記
+- Gwt-issue-search の description を簡潔に更新
+
+### Features
+
+- **assistant:** Interrupt sends and queue tab replies (#1703)
+
+### Refactor
+
+- **ai:** Chat Completions API を削除し Responses API に完全移行
+
+## [8.15.0] - 2026-03-18
+
+### Bug Fixes
+
+- **launch:** Refresh codex models and docker git startup env (#1696)
+- **gui:** Align worktree labels and summary actions (#1698)
+- **gui:** Automate issue branch prefix fallback (#1699)
+- **spec:** Harden issue migration retries (#1701)
+
+### Features
+
+- **git:** Unify issue and spec search in git panel (#1694)
+- Refresh codex model catalog for issue 1489 (#1695)
+- **gui:** Unify issue search and assistant recovery (#1697)
+- **spec:** Adopt artifact-first issue workflow (#1700)
+
 ## [8.14.0] - 2026-03-18
 
 ### Features

@@ -83,6 +83,15 @@ export async function installTauriMock(
       let nextSpawnShellError = false;
       let lastSpawnedPaneId: string | null = null;
       let restoreLeaderAcquired = false;
+      let mockLocalBranches = Array.isArray(commandResponses.list_worktree_branches)
+        ? structuredClone(commandResponses.list_worktree_branches)
+        : [];
+      let mockRemoteBranches = Array.isArray(commandResponses.list_remote_branches)
+        ? structuredClone(commandResponses.list_remote_branches)
+        : [];
+      let mockWorktrees = Array.isArray(commandResponses.list_worktrees)
+        ? structuredClone(commandResponses.list_worktrees)
+        : [];
 
       let projectModeState: ProjectModeState = {
         messages: [],
@@ -137,6 +146,114 @@ export async function installTauriMock(
               ? "running"
               : `error: ${pane.errorMessage ?? "PTY stream error: mock failure"}`,
         }));
+      }
+
+      function branchInventoryKey(nameLike: unknown): string {
+        const name =
+          typeof nameLike === "string" && nameLike.trim()
+            ? nameLike.trim()
+            : "";
+        return name.startsWith("origin/") ? name.slice("origin/".length) : name;
+      }
+
+      function listBranchInventory() {
+        const entries = new Map<
+          string,
+          {
+            id: string;
+            canonical_name: string;
+            primary_branch: unknown;
+            local_branch: unknown | null;
+            remote_branch: unknown | null;
+            has_local: boolean;
+            has_remote: boolean;
+            worktree: unknown | null;
+            worktree_count: number;
+            resolution_action: "focusExisting" | "createWorktree" | "resolveAmbiguity";
+          }
+        >();
+
+        for (const branch of mockLocalBranches) {
+          const key = branchInventoryKey(branch?.name);
+          if (!key) continue;
+          entries.set(key, {
+            id: key,
+            canonical_name: key,
+            primary_branch: branch,
+            local_branch: branch,
+            remote_branch: null,
+            has_local: true,
+            has_remote: false,
+            worktree: null,
+            worktree_count: 0,
+            resolution_action: "createWorktree",
+          });
+        }
+
+        for (const branch of mockRemoteBranches) {
+          const key = branchInventoryKey(branch?.name);
+          if (!key) continue;
+          const existing = entries.get(key);
+          entries.set(key, {
+            id: key,
+            canonical_name: key,
+            primary_branch: existing?.primary_branch ?? branch,
+            local_branch: existing?.local_branch ?? null,
+            remote_branch: branch,
+            has_local: existing?.has_local ?? false,
+            has_remote: true,
+            worktree: existing?.worktree ?? null,
+            worktree_count: existing?.worktree_count ?? 0,
+            resolution_action: existing?.resolution_action ?? "createWorktree",
+          });
+        }
+
+        for (const worktree of mockWorktrees) {
+          const key = branchInventoryKey(worktree?.branch);
+          if (!key) continue;
+          const existing = entries.get(key);
+          const worktreeCount = (existing?.worktree_count ?? 0) + 1;
+          entries.set(key, {
+            id: key,
+            canonical_name: key,
+            primary_branch:
+              existing?.primary_branch ??
+              mockLocalBranches.find((branch) => branchInventoryKey(branch?.name) === key) ??
+              mockRemoteBranches.find((branch) => branchInventoryKey(branch?.name) === key) ??
+              {
+                name: key,
+                commit: worktree?.commit ?? "mock-created",
+                is_current: false,
+                is_agent_running: false,
+                agent_status: "unknown",
+                ahead: 0,
+                behind: 0,
+                divergence_status: "UpToDate",
+                commit_timestamp: null,
+                last_tool_usage: null,
+              },
+            local_branch:
+              existing?.local_branch ??
+              mockLocalBranches.find((branch) => branchInventoryKey(branch?.name) === key) ??
+              null,
+            remote_branch:
+              existing?.remote_branch ??
+              mockRemoteBranches.find((branch) => branchInventoryKey(branch?.name) === key) ??
+              null,
+            has_local:
+              existing?.has_local ??
+              mockLocalBranches.some((branch) => branchInventoryKey(branch?.name) === key),
+            has_remote:
+              existing?.has_remote ??
+              mockRemoteBranches.some((branch) => branchInventoryKey(branch?.name) === key),
+            worktree: worktreeCount === 1 ? worktree : null,
+            worktree_count: worktreeCount,
+            resolution_action:
+              worktreeCount > 1 ? "resolveAmbiguity" : "focusExisting",
+          });
+        }
+
+        return Array.from(entries.values());
       }
 
       function spawnShell(workingDirLike: unknown): string {
@@ -245,11 +362,36 @@ export async function installTauriMock(
 
       async function invoke(cmd: string, rawArgs?: unknown): Promise<unknown> {
         const args = normalizeArgs(rawArgs);
+        invokeLog.push({ cmd, args });
         const runtimeCommandResponses = (
           window as unknown as {
             __GWT_MOCK_COMMAND_RESPONSES__?: Record<string, unknown>;
           }
         ).__GWT_MOCK_COMMAND_RESPONSES__;
+        if (runtimeCommandResponses) {
+          if (Array.isArray(runtimeCommandResponses.list_worktree_branches)) {
+            mockLocalBranches = structuredClone(
+              runtimeCommandResponses.list_worktree_branches,
+            );
+          }
+          if (Array.isArray(runtimeCommandResponses.list_remote_branches)) {
+            mockRemoteBranches = structuredClone(
+              runtimeCommandResponses.list_remote_branches,
+            );
+          }
+          if (Array.isArray(runtimeCommandResponses.list_worktrees)) {
+            mockWorktrees = structuredClone(runtimeCommandResponses.list_worktrees);
+          }
+        }
+        if (cmd === "list_worktree_branches") {
+          return mockLocalBranches;
+        }
+        if (cmd === "list_remote_branches") {
+          return mockRemoteBranches;
+        }
+        if (cmd === "list_worktrees") {
+          return mockWorktrees;
+        }
         if (
           runtimeCommandResponses &&
           Object.prototype.hasOwnProperty.call(runtimeCommandResponses, cmd)
@@ -259,7 +401,6 @@ export async function installTauriMock(
         if (Object.prototype.hasOwnProperty.call(commandResponses, cmd)) {
           return commandResponses[cmd];
         }
-        invokeLog.push({ cmd, args });
 
         switch (cmd) {
           case "detect_agents":
@@ -347,9 +488,77 @@ export async function installTauriMock(
           case "close_project":
             return null;
           case "list_worktree_branches":
+            return mockLocalBranches;
+          case "list_branch_inventory":
+            return listBranchInventory();
           case "list_remote_branches":
+            return mockRemoteBranches;
+          case "list_branch_inventory": {
+            const byKey = new Map<string, Record<string, unknown>>();
+            const keyFor = (name: string) => name.replace(/^origin\//, "");
+
+            for (const branch of mockLocalBranches) {
+              const key = keyFor(String(branch?.name ?? ""));
+              if (!key) continue;
+              byKey.set(key, {
+                id: key,
+                canonical_name: key,
+                primary_branch: branch,
+                local_branch: branch,
+                remote_branch: null,
+                has_local: true,
+                has_remote: false,
+                worktree: null,
+                worktree_count: 0,
+                resolution_action: "createWorktree",
+              });
+            }
+
+            for (const branch of mockRemoteBranches) {
+              const key = keyFor(String(branch?.name ?? ""));
+              if (!key) continue;
+              const existing = byKey.get(key);
+              if (existing) {
+                existing.has_remote = true;
+                existing.remote_branch = branch;
+              } else {
+                byKey.set(key, {
+                  id: key,
+                  canonical_name: key,
+                  primary_branch: branch,
+                  local_branch: null,
+                  remote_branch: branch,
+                  has_local: false,
+                  has_remote: true,
+                  worktree: null,
+                  worktree_count: 0,
+                  resolution_action: "createWorktree",
+                });
+              }
+            }
+
+            for (const worktree of mockWorktrees) {
+              const key = keyFor(String(worktree?.branch ?? ""));
+              if (!key) continue;
+              const entry = byKey.get(key);
+              if (entry) {
+                const count =
+                  typeof entry.worktree_count === "number" ? entry.worktree_count : 0;
+                entry.worktree_count = count + 1;
+                if (count === 0) {
+                  entry.worktree = worktree;
+                  entry.resolution_action = "focusExisting";
+                } else {
+                  entry.worktree = null;
+                  entry.resolution_action = "resolveAmbiguity";
+                }
+              }
+            }
+
+            return Array.from(byKey.values());
+          }
           case "list_worktrees":
-            return [];
+            return mockWorktrees;
           case "list_terminals":
             return listTerminals();
           case "get_current_branch":
@@ -363,6 +572,65 @@ export async function installTauriMock(
               divergence_status: "UpToDate",
               last_tool_usage: null,
             };
+          case "materialize_worktree_ref": {
+            const branchRef =
+              typeof args.branchRef === "string" ? args.branchRef.trim() : "";
+            const normalizedBranch = branchRef.replace(/^origin\//, "");
+            const existing = mockWorktrees.find(
+              (worktree) => worktree?.branch === normalizedBranch,
+            );
+            if (existing) {
+              return { worktree: existing, created: false };
+            }
+
+            const created = {
+              path: `${projectPath}/.gwt/worktrees/${normalizedBranch.replace(/[^a-zA-Z0-9_-]+/g, "-")}`,
+              branch: normalizedBranch,
+              commit: "mock-created",
+              status: "active",
+              is_main: false,
+              has_changes: false,
+              has_unpushed: false,
+              is_current: false,
+              is_protected: false,
+              is_agent_running: false,
+              agent_status: "unknown",
+              ahead: 0,
+              behind: 0,
+              is_gone: false,
+              last_tool_usage: null,
+              safety_level: "safe",
+            };
+
+            mockWorktrees = [...mockWorktrees, created];
+            if (
+              !mockLocalBranches.some(
+                (branch) => branch?.name?.trim?.() === normalizedBranch,
+              )
+            ) {
+              mockLocalBranches = [
+                ...mockLocalBranches,
+                {
+                  name: normalizedBranch,
+                  commit: "mock-created",
+                  is_current: false,
+                  is_agent_running: false,
+                  ahead: 0,
+                  behind: 0,
+                  divergence_status: "UpToDate",
+                  last_tool_usage: null,
+                },
+              ];
+            }
+            if (runtimeCommandResponses) {
+              runtimeCommandResponses.list_worktrees = structuredClone(mockWorktrees);
+              runtimeCommandResponses.list_worktree_branches = structuredClone(
+                mockLocalBranches,
+              );
+            }
+
+            return { worktree: created, created: true };
+          }
           case "sync_window_agent_tabs":
             return null;
           case "start_launch_job":

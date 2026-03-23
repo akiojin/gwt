@@ -138,6 +138,42 @@ describe("agentTabsPersistence", () => {
     });
   });
 
+  it("loadStoredProjectTabs preserves worktreePath for canvas session tabs", () => {
+    store.setItem(
+      PROJECT_TABS_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/repo": {
+            tabs: [
+              {
+                type: "terminal",
+                paneId: "t1",
+                label: "Shell",
+                branchName: "feature/demo",
+                worktreePath: "/repo/.gwt/worktrees/feature-demo",
+              },
+            ],
+            activeTabId: "terminal-t1",
+          },
+        },
+      }),
+    );
+
+    expect(loadStoredProjectTabs("/repo", store)).toEqual({
+      tabs: [
+        {
+          type: "terminal",
+          paneId: "t1",
+          label: "Shell",
+          branchName: "feature/demo",
+          worktreePath: "/repo/.gwt/worktrees/feature-demo",
+        },
+      ],
+      activeTabId: "terminal-t1",
+    });
+  });
+
   it("loadStoredProjectTabs falls back to legacy v1 state with terminal support", () => {
     store.setItem(
       PROJECT_AGENT_TABS_STORAGE_KEY,
@@ -244,6 +280,70 @@ describe("agentTabsPersistence", () => {
     });
   });
 
+  it("persistStoredProjectTabs isolates state per window label when provided", () => {
+    persistStoredProjectTabs(
+      "/repo",
+      {
+        tabs: [{ type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" }],
+        activeTabId: "agentCanvas",
+        agentCanvas: {
+          viewport: { x: 10, y: 20, zoom: 1.1 },
+          cardLayouts: {
+            assistant: { x: 40, y: 40, width: 280, height: 164 },
+          },
+          selectedCardId: "assistant",
+        },
+        branchBrowser: {
+          filter: "Local",
+          query: "main",
+          selectedBranchName: "main",
+        },
+      },
+      store,
+      "main",
+    );
+    persistStoredProjectTabs(
+      "/repo",
+      {
+        tabs: [{ type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" }],
+        activeTabId: "branchBrowser",
+        branchBrowser: {
+          filter: "Remote",
+          query: "feature",
+          selectedBranchName: "origin/feature/demo",
+        },
+      },
+      store,
+      "project-2",
+    );
+
+    expect(loadStoredProjectTabs("/repo", store, "main")).toEqual({
+      tabs: [{ type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" }],
+      activeTabId: "agentCanvas",
+      agentCanvas: {
+        viewport: { x: 10, y: 20, zoom: 1.1 },
+        cardLayouts: {
+          assistant: { x: 40, y: 40, width: 280, height: 164 },
+        },
+        selectedCardId: "assistant",
+      },
+      branchBrowser: {
+        filter: "Local",
+        query: "main",
+        selectedBranchName: "main",
+      },
+    });
+    expect(loadStoredProjectTabs("/repo", store, "project-2")).toEqual({
+      tabs: [{ type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" }],
+      activeTabId: "branchBrowser",
+      branchBrowser: {
+        filter: "Remote",
+        query: "feature",
+        selectedBranchName: "origin/feature/demo",
+      },
+    });
+  });
+
   it("persistStoredProjectAgentTabs preserves non-agent tabs in existing entry", () => {
     persistStoredProjectTabs(
       "/repo",
@@ -270,7 +370,7 @@ describe("agentTabsPersistence", () => {
     const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded).toEqual({
       tabs: [
-        { type: "assistant", id: "assistant", label: "Assistant" },
+        { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
         { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
         { type: "agent", paneId: "new", label: "new-agent" },
       ],
@@ -327,7 +427,8 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "agent-p1",
@@ -361,12 +462,13 @@ describe("agentTabsPersistence", () => {
       [makeTerminal("p1"), makeTerminal("p2")],
     );
 
-    expect(restored.tabs.length).toBe(4);
+    expect(restored.tabs.length).toBe(5);
     expect(restored.activeTabId).toBe("settings");
     expect(restored.terminalTabsToRespawn).toEqual([]);
     expect(restored.activeTerminalPaneIdToRespawn).toBeNull();
     expect(restored.tabs).toEqual([
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       {
         id: "settings",
         label: "Settings",
@@ -401,7 +503,8 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       {
         id: "agent-p1",
         label: "one",
@@ -432,7 +535,8 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "assistant", label: "Assistant", type: "assistant" },
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
       {
         id: "agent-a-live",
         label: "feature-a",
@@ -452,6 +556,51 @@ describe("agentTabsPersistence", () => {
       },
     ]);
     expect(restored.activeTerminalPaneIdToRespawn).toBe("t-old");
+  });
+
+  it("buildRestoredProjectTabs ignores stale split metadata and restores flat shell tabs", () => {
+    const restored = buildRestoredProjectTabs(
+      {
+        tabs: [
+          { type: "assistant", id: "assistant", label: "Assistant" },
+          { type: "settings", id: "settings", label: "Settings" },
+          { type: "issues", id: "issues", label: "Issues" },
+        ],
+        activeTabId: "issues",
+        activeGroupId: "group-a",
+        groups: [
+          {
+            id: "group-a",
+            tabIds: ["assistant", "settings"],
+            activeTabId: "assistant",
+          },
+          {
+            id: "group-b",
+            tabIds: ["issues"],
+            activeTabId: "issues",
+          },
+        ],
+        root: {
+          type: "split",
+          id: "split-corrupt",
+          axis: "horizontal",
+          sizes: [0.5, 0.5],
+          children: [
+            { type: "group", groupId: "group-a" },
+            { type: "group", groupId: "missing-group" },
+          ],
+        },
+      } as any,
+      [],
+    );
+
+    expect(restored.tabs).toEqual([
+      { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+      { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
+      { id: "settings", label: "Settings", type: "settings" },
+      { id: "issues", label: "Issues", type: "issues" },
+    ]);
+    expect(restored.activeTabId).toBe("issues");
   });
 
   it("shouldRetryAgentTabRestore handles transient empty matches", () => {
@@ -727,7 +876,7 @@ describe("agentTabsPersistence", () => {
     );
     const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded!.tabs).toEqual([
-      { type: "assistant", id: "assistant", label: "Assistant" },
+      { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
       { type: "issues", id: "issues", label: "Issues" },
     ]);
   });
@@ -801,7 +950,7 @@ describe("agentTabsPersistence", () => {
       },
       [],
     );
-    expect(restored.activeTabId).toBe("assistant");
+    expect(restored.activeTabId).toBe("agentCanvas");
   });
 
   it("buildRestoredProjectTabs deduplicates tabs by key", () => {

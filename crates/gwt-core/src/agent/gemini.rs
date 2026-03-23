@@ -1,14 +1,20 @@
 //! Gemini CLI Integration
 
-use super::trait_agent::{AgentCapabilities, AgentInfo, AgentTrait, TaskResult};
-use super::{command_exists, get_command_version};
-use crate::error::{GwtError, Result};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tokio::process::Command;
+
+use super::{
+    command_exists, get_command_version,
+    trait_agent::{AgentCapabilities, AgentInfo, AgentTrait, TaskResult},
+};
+use crate::error::{GwtError, Result};
 
 /// Gemini CLI agent
 pub struct GeminiAgent {

@@ -1,12 +1,18 @@
 //! Tauri commands for error reporting and feature suggestions.
 
-use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
-use gwt_core::StructuredError;
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use gwt_core::{
+    terminal::scrollback::{strip_ansi, ScrollbackFile},
+    StructuredError,
+};
 use serde::Serialize;
-use std::collections::HashSet;
-use std::fs;
-use std::path::{Path, PathBuf};
 use tauri::State;
+use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,9 +105,15 @@ fn is_log_file_candidate(path: &Path) -> bool {
     name.ends_with(".jsonl") || name.contains(".jsonl.")
 }
 
-/// Read the last `max_lines` lines from the most recent log file.
+/// Read the last `max_lines` lines from the most recent **normal** log file.
+///
+/// Only `gwt.jsonl*` files are collected; profiling output (`profile.json`)
+/// is excluded by `is_log_file_candidate`.
+#[instrument(skip_all, fields(command = "read_recent_logs"))]
 #[tauri::command]
 pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredError> {
+    gwt_core::logging::log_flow_start("report", "read_recent_logs");
+
     let max = max_lines.unwrap_or(100) as usize;
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -110,18 +122,29 @@ pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredErro
     }
 
     let Some(latest_log_path) = select_most_recent_log(candidates) else {
+        gwt_core::logging::log_flow_success("report", "read_recent_logs");
         return Ok("(No log files found)".to_string());
     };
 
-    let content = fs::read_to_string(&latest_log_path)
-        .map_err(|e| StructuredError::internal(&e.to_string(), "read_recent_logs"))?;
+    // TODO(#1758): error_detail and extra fields in JSONL entries may contain
+    // absolute file paths (e.g. /Users/<name>/...) that reveal the local
+    // username. Frontend privacyMask covers API keys/tokens/passwords but does
+    // not yet redact home-directory paths. Consider adding a home-path
+    // masking pattern on the frontend or sanitising here before returning.
+    let content = fs::read_to_string(&latest_log_path).map_err(|e| {
+        gwt_core::logging::log_flow_failure("report", "read_recent_logs", &e.to_string());
+        StructuredError::internal(&e.to_string(), "read_recent_logs")
+    })?;
 
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(max);
+
+    gwt_core::logging::log_flow_success("report", "read_recent_logs");
     Ok(lines[start..].join("\n"))
 }
 
 /// Get basic system info for error reports.
+#[instrument(skip_all, fields(command = "get_report_system_info"))]
 #[tauri::command]
 pub fn get_report_system_info() -> ReportSystemInfo {
     ReportSystemInfo {
@@ -218,6 +241,7 @@ fn parse_owner_repo_from_remote(url: &str) -> Option<(String, String)> {
 }
 
 /// Detect the current working repository's owner/repo from git remote.
+#[instrument(skip_all, fields(command = "detect_report_target", project_path))]
 #[tauri::command]
 pub fn detect_report_target(project_path: String) -> Result<ReportTarget, StructuredError> {
     let output = gwt_core::process::command("git")
@@ -245,6 +269,7 @@ pub fn detect_report_target(project_path: String) -> Result<ReportTarget, Struct
 }
 
 /// Create a GitHub issue using the gh CLI.
+#[instrument(skip_all, fields(command = "create_github_issue"))]
 #[tauri::command]
 pub fn create_github_issue(
     owner: String,
@@ -298,6 +323,7 @@ const SCREEN_CAPTURE_MAX_BYTES: usize = 8192;
 ///
 /// Iterates over all active panes and captures their scrollback tail.
 /// ANSI escape sequences are stripped to produce plain text output.
+#[instrument(skip_all, fields(command = "capture_screen_text"))]
 #[tauri::command]
 pub fn capture_screen_text(
     state: State<'_, crate::state::AppState>,
@@ -346,11 +372,11 @@ pub fn capture_screen_text(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::collections::HashSet;
-    use std::thread;
-    use std::time::Duration;
+    use std::{collections::HashSet, thread, time::Duration};
+
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn parse_ssh_remote() {
@@ -432,6 +458,25 @@ mod tests {
     #[test]
     fn log_file_candidate_rejects_non_jsonl() {
         assert!(!is_log_file_candidate(Path::new("gwt.log")));
+    }
+
+    #[test]
+    fn log_file_candidate_rejects_profile_json() {
+        assert!(!is_log_file_candidate(Path::new("profile.json")));
+    }
+
+    #[test]
+    fn collect_log_candidates_excludes_profile_json() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path().join("default");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("gwt.jsonl.2026-03-22"), "log line\n").unwrap();
+        fs::write(ws.join("profile.json"), "trace data\n").unwrap();
+
+        let candidates = collect_log_candidates(temp.path());
+
+        assert_eq!(candidates.len(), 1, "profile.json must not be collected");
+        assert!(candidates[0].to_string_lossy().contains("gwt.jsonl"));
     }
 
     #[test]

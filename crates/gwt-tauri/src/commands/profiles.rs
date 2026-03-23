@@ -1,11 +1,14 @@
 //! Profiles (env + AI settings) management commands
 
-use gwt_core::ai::{format_error_for_display, AIClient, ModelInfo};
-use gwt_core::config::ProfilesConfig;
-use gwt_core::StructuredError;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+use gwt_core::{
+    ai::{format_error_for_display, AIClient, ModelInfo},
+    config::ProfilesConfig,
+    StructuredError,
+};
 use tauri::AppHandle;
-use tracing::error;
+use tracing::{error, instrument};
 
 fn with_panic_guard<T>(
     context: &str,
@@ -29,6 +32,7 @@ fn with_panic_guard<T>(
 }
 
 /// Get current profiles config (global: ~/.gwt/config.toml [profiles]).
+#[instrument(skip_all, fields(command = "get_profiles"))]
 #[tauri::command]
 pub fn get_profiles() -> Result<ProfilesConfig, StructuredError> {
     with_panic_guard("loading profiles", "get_profiles", || {
@@ -37,6 +41,7 @@ pub fn get_profiles() -> Result<ProfilesConfig, StructuredError> {
 }
 
 /// Save profiles config (writes into ~/.gwt/config.toml [profiles]).
+#[instrument(skip_all, fields(command = "save_profiles"))]
 #[tauri::command]
 pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<(), StructuredError> {
     with_panic_guard("saving profiles", "save_profiles", || {
@@ -49,6 +54,7 @@ pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<()
 }
 
 /// List AI models from a specific OpenAI-compatible endpoint (`GET /models`).
+#[instrument(skip_all, fields(command = "list_ai_models"))]
 #[tauri::command]
 pub fn list_ai_models(
     endpoint: String,
@@ -77,18 +83,22 @@ pub fn list_ai_models(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-    use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
+
     use tauri::{
         ipc::{CallbackFn, InvokeBody},
+        test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY},
         webview::InvokeRequest,
         WebviewWindowBuilder,
     };
+
+    use super::*;
 
     fn spawn_models_server(
         body: &'static str,

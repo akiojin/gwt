@@ -4,8 +4,10 @@
 //! other pane-to-pane communication. Falls back gracefully when
 //! socket creation fails (FR-065).
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::terminal::TerminalError;
 
@@ -165,8 +167,9 @@ impl Drop for IpcServer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     // --- Test 1: socket_path returns expected path ---
 

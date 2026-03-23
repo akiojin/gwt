@@ -1,10 +1,14 @@
 //! Repository operations
 
+use std::{
+    borrow::Cow,
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
+
+use tracing::{debug, error, info, instrument, warn};
+
 use crate::error::{GwtError, Result};
-use std::borrow::Cow;
-use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
-use tracing::{debug, error, info, warn};
 
 /// Strip the Windows extended-length path prefix (`\\?\` or `//?/`)
 /// that Git may produce in worktree/rev-parse output on Windows.
@@ -258,6 +262,7 @@ impl Repository {
     /// gix may have issues (e.g., WSL).
     ///
     /// Issue #774: Added fallback to external git commands for WSL compatibility.
+    #[instrument(skip_all)]
     pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
 
@@ -336,6 +341,12 @@ impl Repository {
             }
         }
 
+        crate::logging::log_incident(
+            "git",
+            "discover",
+            Some("GIT_REPO_NOT_FOUND"),
+            &format!("Repository not found: {}", path.display()),
+        );
         Err(GwtError::RepositoryNotFound {
             path: path.to_path_buf(),
         })
@@ -348,6 +359,7 @@ impl Repository {
     /// gix may have issues (e.g., WSL).
     ///
     /// Issue #774: Added fallback to external git commands for WSL compatibility.
+    #[instrument(skip_all)]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         match gix::open(path) {
@@ -406,6 +418,12 @@ impl Repository {
                 gix_repo: None,
             })
         } else {
+            crate::logging::log_incident(
+                "git",
+                "open",
+                Some("GIT_REPO_NOT_FOUND"),
+                &format!("Repository not found at: {}", path.display()),
+            );
             Err(GwtError::RepositoryNotFound {
                 path: path.to_path_buf(),
             })
@@ -456,6 +474,7 @@ impl Repository {
     }
 
     /// Check if there are uncommitted changes (staged or unstaged)
+    #[instrument(skip(self))]
     pub fn has_uncommitted_changes(&self) -> Result<bool> {
         // Use external git for reliability with worktrees
         let output = crate::process::command("git")
@@ -480,6 +499,7 @@ impl Repository {
     }
 
     /// Check if there are unpushed commits
+    #[instrument(skip(self))]
     pub fn has_unpushed_commits(&self) -> Result<bool> {
         let output = crate::process::command("git")
             .args(["log", "@{u}..", "--oneline"])
@@ -493,6 +513,7 @@ impl Repository {
     }
 
     /// Get the current HEAD reference name
+    #[instrument(skip(self))]
     pub fn head_name(&self) -> Result<Option<String>> {
         if let Some(repo) = self.gix_repo() {
             match repo.head_name() {
@@ -529,6 +550,7 @@ impl Repository {
     }
 
     /// Get the current HEAD commit SHA
+    #[instrument(skip(self))]
     pub fn head_commit(&self) -> Result<String> {
         if let Some(repo) = self.gix_repo() {
             match repo.head_id() {
@@ -633,48 +655,76 @@ impl Repository {
     }
 
     /// Pull with fast-forward only
+    #[instrument(skip(self))]
     pub fn pull_fast_forward(&self) -> Result<()> {
         let output = crate::process::command("git")
             .args(["pull", "--ff-only"])
             .current_dir(&self.root)
             .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "pull".to_string(),
-                details: e.to_string(),
+            .map_err(|e| {
+                crate::logging::log_incident(
+                    "git",
+                    "pull_fast_forward",
+                    Some("GIT_PULL_SPAWN_FAILED"),
+                    &e.to_string(),
+                );
+                GwtError::GitOperationFailed {
+                    operation: "pull".to_string(),
+                    details: e.to_string(),
+                }
             })?;
 
         if output.status.success() {
             Ok(())
         } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            crate::logging::log_incident(
+                "git",
+                "pull_fast_forward",
+                Some("GIT_PULL_FAILED"),
+                &stderr,
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "pull --ff-only".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: stderr,
             })
         }
     }
 
     /// Fetch all remotes
+    #[instrument(skip(self))]
     pub fn fetch_all(&self) -> Result<()> {
         let output = crate::process::command("git")
             .args(["fetch", "--all", "--prune"])
             .current_dir(&self.root)
             .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "fetch".to_string(),
-                details: e.to_string(),
+            .map_err(|e| {
+                crate::logging::log_incident(
+                    "git",
+                    "fetch_all",
+                    Some("GIT_FETCH_SPAWN_FAILED"),
+                    &e.to_string(),
+                );
+                GwtError::GitOperationFailed {
+                    operation: "fetch".to_string(),
+                    details: e.to_string(),
+                }
             })?;
 
         if output.status.success() {
             Ok(())
         } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            crate::logging::log_incident("git", "fetch_all", Some("GIT_FETCH_FAILED"), &stderr);
             Err(GwtError::GitOperationFailed {
                 operation: "fetch --all".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: stderr,
             })
         }
     }
 
     /// List all worktrees using git worktree list
+    #[instrument(skip(self))]
     pub fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
         let output = crate::process::command("git")
             .args(["worktree", "list", "--porcelain"])
@@ -741,6 +791,7 @@ impl Repository {
     }
 
     /// Create a new worktree
+    #[instrument(skip(self))]
     pub fn create_worktree(&self, path: &Path, branch: &str, new_branch: bool) -> Result<()> {
         debug!(
             category = "git",
@@ -801,6 +852,7 @@ impl Repository {
     }
 
     /// Remove a worktree
+    #[instrument(skip(self))]
     pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         debug!(
             category = "git",
@@ -870,12 +922,11 @@ impl Repository {
             return Ok(());
         }
 
-        error!(
-            category = "git",
-            operation = "worktree_remove",
-            path = %path.display(),
-            error = err_msg.as_str(),
-            "Failed to remove git worktree"
+        crate::logging::log_incident(
+            "git",
+            "remove_worktree",
+            Some("GIT_WORKTREE_REMOVE_FAILED"),
+            &err_msg,
         );
         Err(GwtError::GitOperationFailed {
             operation: "worktree remove".to_string(),
@@ -1168,8 +1219,9 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn is_valid_worktree_meta_dir_accepts_direct_child() {

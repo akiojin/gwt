@@ -1,36 +1,51 @@
 //! Terminal/PTY management commands for xterm.js integration
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::state::{AppState, PaneLaunchMeta, PaneRuntimeContext};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
 use chrono::Utc;
-use gwt_core::ai::SessionParser;
-use gwt_core::config::stats::Stats;
-use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
-use gwt_core::docker::{
-    compose_available, daemon_running, detect_docker_files, docker_available,
-    normalize_docker_compose_path, try_start_daemon, DevContainerConfig, DockerFileType,
-    DockerManager, PortAllocator,
+use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
+use gwt_core::{
+    ai::SessionParser,
+    config::{stats::Stats, AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings},
+    docker::{
+        compose_available, daemon_running, detect_docker_files, docker_available,
+        normalize_docker_compose_path, try_start_daemon, DevContainerConfig, DockerFileType,
+        DockerManager, PortAllocator,
+    },
+    git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote},
+    terminal::{
+        pane::PaneStatus,
+        runner::{
+            choose_fallback_runner, normalize_windows_command_path, resolve_command_path,
+            FallbackRunner,
+        },
+        scrollback::{strip_ansi, ScrollbackFile},
+        AgentColor, BuiltinLaunchConfig,
+    },
+    worktree::WorktreeManager,
+    StructuredError,
 };
-use gwt_core::git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote};
-use gwt_core::terminal::pane::PaneStatus;
-use gwt_core::terminal::runner::{
-    choose_fallback_runner, normalize_windows_command_path, resolve_command_path, FallbackRunner,
-};
-use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
-use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
-use serde::Deserialize;
-use serde::Serialize;
-use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tracing::{instrument, warn};
 use uuid::Uuid;
 use which::which;
+
+const LIST_TERMINALS_WARN_THRESHOLD: Duration = Duration::from_millis(150);
+
+use crate::{
+    commands::project::resolve_repo_path_for_project_root,
+    state::{AppState, PaneLaunchMeta, PaneRuntimeContext},
+};
 
 /// Terminal output event payload sent to the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -2210,6 +2225,7 @@ fn launch_with_wsl_pty_write(
 }
 
 /// Launch a new terminal pane with an agent
+#[instrument(skip_all, fields(command = "launch_terminal", window_label = window.label()))]
 #[tauri::command]
 pub fn launch_terminal(
     window: tauri::Window,
@@ -2218,8 +2234,15 @@ pub fn launch_terminal(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, StructuredError> {
+    log_flow_start("terminal", "launch_terminal");
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
+            gwt_core::logging::log_incident(
+                "terminal",
+                "launch_terminal",
+                Some("TERMINAL_NO_PROJECT"),
+                "No project opened",
+            );
             return Err(StructuredError::internal(
                 "No project opened",
                 "launch_terminal",
@@ -2228,10 +2251,24 @@ pub fn launch_terminal(
         PathBuf::from(p)
     };
 
-    let repo_path = resolve_repo_path_for_project_root(&project_root)
-        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))?;
-    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch)
-        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))?;
+    let repo_path = resolve_repo_path_for_project_root(&project_root).map_err(|e| {
+        gwt_core::logging::log_incident(
+            "terminal",
+            "launch_terminal",
+            Some("TERMINAL_REPO_RESOLVE_FAILED"),
+            &e,
+        );
+        StructuredError::internal(&e, "launch_terminal")
+    })?;
+    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch).map_err(|e| {
+        gwt_core::logging::log_incident(
+            "terminal",
+            "launch_terminal",
+            Some("TERMINAL_WORKTREE_RESOLVE_FAILED"),
+            &e,
+        );
+        StructuredError::internal(&e, "launch_terminal")
+    })?;
 
     let config = BuiltinLaunchConfig {
         command: agent_name.clone(),
@@ -2246,8 +2283,19 @@ pub fn launch_terminal(
         windows_force_utf8: cfg!(target_os = "windows"),
     };
 
-    launch_with_config(&repo_path, config, None, &state, app_handle)
-        .map_err(|e| StructuredError::internal(&e, "launch_terminal"))
+    let result = launch_with_config(&repo_path, config, None, &state, app_handle).map_err(|e| {
+        gwt_core::logging::log_incident(
+            "terminal",
+            "launch_terminal",
+            Some("TERMINAL_LAUNCH_FAILED"),
+            &e,
+        );
+        StructuredError::internal(&e, "launch_terminal")
+    });
+    if result.is_ok() {
+        log_flow_success("terminal", "launch_terminal");
+    }
+    result
 }
 
 fn non_empty_env_var(key: &str) -> Option<String> {
@@ -2350,6 +2398,7 @@ fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
 /// shell is used. When `shell` is omitted, Windows first consults
 /// `terminal.default_shell` in settings, then falls back to auto-resolution.
 /// On non-Windows platforms the parameter is silently ignored.
+#[instrument(skip_all, fields(command = "spawn_shell"))]
 #[tauri::command]
 pub fn spawn_shell(
     working_dir: Option<String>,
@@ -2447,12 +2496,11 @@ pub fn spawn_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::cell::Cell;
-    use std::ffi::OsString;
-    use std::path::Path;
-    use std::time::Duration;
+    use std::{cell::Cell, ffi::OsString, path::Path, time::Duration};
+
     use tempfile::TempDir;
+
+    use super::*;
 
     struct ScopedEnvVar {
         key: &'static str,
@@ -5144,6 +5192,7 @@ pub(crate) fn launch_agent_for_project_root(
 }
 
 /// Launch an agent with gwt semantics (worktree + profiles)
+#[instrument(skip_all, fields(command = "launch_agent", window_label = window.label()))]
 #[tauri::command]
 pub fn launch_agent(
     window: tauri::Window,
@@ -5151,8 +5200,15 @@ pub fn launch_agent(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, StructuredError> {
+    log_flow_start("terminal", "launch_agent");
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
+            gwt_core::logging::log_incident(
+                "terminal",
+                "launch_agent",
+                Some("TERMINAL_NO_PROJECT"),
+                "No project opened",
+            );
             return Err(StructuredError::internal(
                 "No project opened",
                 "launch_agent",
@@ -5160,11 +5216,25 @@ pub fn launch_agent(
         };
         PathBuf::from(p)
     };
-    launch_agent_for_project_root(project_root, request, &state, app_handle, None, None)
-        .map_err(|e| StructuredError::internal(&e, "launch_agent"))
+    let result =
+        launch_agent_for_project_root(project_root, request, &state, app_handle, None, None)
+            .map_err(|e| {
+                gwt_core::logging::log_incident(
+                    "terminal",
+                    "launch_agent",
+                    Some("TERMINAL_AGENT_LAUNCH_FAILED"),
+                    &e,
+                );
+                StructuredError::internal(&e, "launch_agent")
+            });
+    if result.is_ok() {
+        log_flow_success("terminal", "launch_agent");
+    }
+    result
 }
 
 /// Start an async launch job with progress events (gwt-spec issue US15).
+#[instrument(skip_all, fields(command = "start_launch_job", window_label = window.label()))]
 #[tauri::command]
 pub fn start_launch_job(
     window: tauri::Window,
@@ -5174,6 +5244,12 @@ pub fn start_launch_job(
 ) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
+            gwt_core::logging::log_incident(
+                "terminal",
+                "start_launch_job",
+                Some("TERMINAL_NO_PROJECT"),
+                "No project opened",
+            );
             return Err(StructuredError::internal(
                 "No project opened",
                 "start_launch_job",
@@ -5270,6 +5346,7 @@ pub fn start_launch_job(
 }
 
 /// Cancel a running launch job (best-effort).
+#[instrument(skip_all, fields(command = "cancel_launch_job", job_id))]
 #[tauri::command]
 pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), StructuredError> {
     let id = job_id.trim();
@@ -5299,6 +5376,7 @@ pub struct LaunchJobPollResult {
 
 /// Poll the state of a launch job.  Returns the final result when
 /// available so the frontend can recover even if Tauri events are lost.
+#[instrument(skip_all, fields(command = "poll_launch_job", job_id))]
 #[tauri::command]
 pub fn poll_launch_job(job_id: String, state: State<AppState>) -> LaunchJobPollResult {
     let id = job_id.trim();
@@ -5753,6 +5831,7 @@ const DEFAULT_SCROLLBACK_TAIL_BYTES: usize = 256 * 1024;
 const MAX_SCROLLBACK_TAIL_BYTES: usize = 1024 * 1024;
 
 /// Write data to a terminal pane
+#[instrument(skip_all, fields(command = "write_terminal", pane_id))]
 #[tauri::command]
 pub fn write_terminal(
     pane_id: String,
@@ -5897,6 +5976,7 @@ pub(crate) fn send_keys_broadcast_from_state(
 ///
 /// When `project_root` is provided, access is restricted to panes belonging
 /// to that project (multi-project isolation).
+#[instrument(skip_all, fields(command = "send_keys_to_pane", pane_id))]
 #[tauri::command]
 pub fn send_keys_to_pane(
     pane_id: String,
@@ -5910,6 +5990,7 @@ pub fn send_keys_to_pane(
 }
 
 /// Broadcast text to all running terminal panes. Returns number of panes sent.
+#[instrument(skip_all, fields(command = "send_keys_broadcast"))]
 #[tauri::command]
 pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize, StructuredError> {
     send_keys_broadcast_from_state(&state, &text)
@@ -5917,6 +5998,7 @@ pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize
 }
 
 /// Resize a terminal pane
+#[instrument(skip_all, fields(command = "resize_terminal", pane_id))]
 #[tauri::command]
 pub fn resize_terminal(
     pane_id: String,
@@ -5942,13 +6024,16 @@ pub fn resize_terminal(
 }
 
 /// Close a terminal pane
+#[instrument(skip_all, fields(command = "close_terminal", pane_id))]
 #[tauri::command]
 pub fn close_terminal(
     pane_id: String,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<(), StructuredError> {
+    log_flow_start("terminal", "close_terminal");
     let mut manager = state.pane_manager.lock().map_err(|e| {
+        log_flow_failure("terminal", "close_terminal", &format!("Lock error: {}", e));
         StructuredError::internal(
             &format!("Failed to lock pane manager: {}", e),
             "close_terminal",
@@ -5960,6 +6045,11 @@ pub fn close_terminal(
         .iter()
         .position(|p| p.pane_id() == pane_id)
         .ok_or_else(|| {
+            log_flow_failure(
+                "terminal",
+                "close_terminal",
+                &format!("Pane not found: {}", pane_id),
+            );
             StructuredError::internal(&format!("Pane not found: {}", pane_id), "close_terminal")
         })?;
 
@@ -5970,6 +6060,7 @@ pub fn close_terminal(
             pane_id: pane_id.clone(),
         },
     );
+    log_flow_success("terminal", "close_terminal");
     Ok(())
 }
 
@@ -5978,15 +6069,17 @@ pub fn close_terminal(
 /// When `project_root` is provided, only panes belonging to that project are
 /// returned (multi-project isolation). When omitted, all panes are listed
 /// (backwards-compatible).
+#[instrument(skip_all, fields(command = "list_terminals"))]
 #[tauri::command]
 pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> Vec<TerminalInfo> {
+    let started = Instant::now();
     let manager = match state.pane_manager.lock() {
         Ok(m) => m,
         Err(_) => return Vec::new(),
     };
 
     let project_filter = project_root.map(PathBuf::from);
-    manager
+    let terminals = manager
         .panes()
         .iter()
         .filter(|pane| match &project_filter {
@@ -6006,7 +6099,17 @@ pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> V
                 status,
             }
         })
-        .collect()
+        .collect();
+    let elapsed = started.elapsed();
+    if elapsed > LIST_TERMINALS_WARN_THRESHOLD {
+        warn!(
+            category = "project_start",
+            command = "list_terminals",
+            elapsed_ms = elapsed.as_millis(),
+            "list_terminals took longer than expected"
+        );
+    }
+    terminals
 }
 
 pub(crate) fn capture_scrollback_tail_from_state(
@@ -6158,6 +6261,7 @@ fn probe_terminal_ansi_from_state(
 }
 
 /// Probe a pane's scrollback tail for ANSI/SGR/color usage (diagnostics).
+#[instrument(skip_all, fields(command = "probe_terminal_ansi", pane_id))]
 #[tauri::command]
 pub fn probe_terminal_ansi(
     state: State<AppState>,
@@ -6171,6 +6275,7 @@ pub fn probe_terminal_ansi(
 ///
 /// When `project_root` is provided, access is restricted to panes belonging
 /// to that project (multi-project isolation).
+#[instrument(skip_all, fields(command = "capture_scrollback_tail", pane_id))]
 #[tauri::command]
 pub fn capture_scrollback_tail(
     state: State<AppState>,
@@ -6187,6 +6292,7 @@ pub fn capture_scrollback_tail(
 /// Signal that the frontend listener is ready and retrieve initial scrollback
 /// as raw bytes (ANSI sequences preserved).  After this call, `stream_pty_output`
 /// will start emitting `terminal-output` events for the pane.
+#[instrument(skip_all, fields(command = "terminal_ready", pane_id))]
 #[tauri::command]
 pub fn terminal_ready(
     state: State<AppState>,
@@ -6245,6 +6351,7 @@ fn os_env_source_to_string(
     }
 }
 
+#[instrument(skip_all, fields(command = "get_captured_environment"))]
 #[tauri::command]
 pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
     let mut entries: Vec<CapturedEnvEntry> = state
@@ -6266,6 +6373,7 @@ pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
     }
 }
 
+#[instrument(skip_all, fields(command = "is_os_env_ready"))]
 #[tauri::command]
 pub fn is_os_env_ready(state: State<AppState>) -> bool {
     state.is_os_env_ready()
@@ -6282,6 +6390,7 @@ pub struct ShellInfo {
 /// Return the list of available Windows shells.
 ///
 /// On non-Windows platforms this always returns an empty list.
+#[instrument(skip_all, fields(command = "get_available_shells"))]
 #[tauri::command]
 pub async fn get_available_shells() -> Result<Vec<ShellInfo>, StructuredError> {
     #[cfg(target_os = "windows")]
@@ -6378,6 +6487,7 @@ fn validate_clipboard_image_data(data: &[u8]) -> Result<(), StructuredError> {
 }
 
 /// Save clipboard image data to a temporary file and return the prompt path.
+#[instrument(skip_all, fields(command = "save_clipboard_image", pane_id))]
 #[tauri::command]
 pub fn save_clipboard_image(
     pane_id: String,
@@ -6414,8 +6524,9 @@ pub fn save_clipboard_image(
 
 #[cfg(test)]
 mod attachment_path_tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn create_staged_image_destination_places_files_under_launch_tmp_images() {

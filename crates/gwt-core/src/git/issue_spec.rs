@@ -1,13 +1,15 @@
 //! Issue-first spec operations for GitHub Issues.
 //!
-//! These helpers keep Spec/Plan/Tasks and related artifacts in a single
-//! GitHub Issue body as the canonical spec bundle.
+//! `doc:*`/`contract:*`/`checklist:*` artifact comments are preferred as the
+//! canonical source of truth, with Issue body sections retained as a fallback
+//! for legacy specs.
+
+use std::{collections::HashMap, path::Path};
 
 use super::gh_cli::run_gh_output_with_repair;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::path::Path;
+use serde_json::{json, Value};
+use uuid::Uuid;
 
 const SPEC_LABEL: &str = "gwt-spec";
 const PROJECT_FIELD_STATUS: &str = "Status";
@@ -23,6 +25,15 @@ const SECTION_CONTRACTS: &str = "Contracts";
 const SECTION_CHECKLISTS: &str = "Checklists";
 const SECTION_CHECKLIST_LEGACY: &str = "Checklist";
 const SECTION_ACCEPTANCE_CHECKLIST: &str = "Acceptance Checklist";
+const DOC_SPEC: &str = "spec.md";
+const DOC_PLAN: &str = "plan.md";
+const DOC_TASKS: &str = "tasks.md";
+const DOC_TDD: &str = "tdd.md";
+const DOC_RESEARCH: &str = "research.md";
+const DOC_DATA_MODEL: &str = "data-model.md";
+const DOC_QUICKSTART: &str = "quickstart.md";
+const CHECKLIST_TDD: &str = "tdd.md";
+const CHECKLIST_ACCEPTANCE: &str = "acceptance.md";
 
 const ARTIFACT_MARKER_PREFIX: &str = "<!-- GWT_SPEC_ARTIFACT:";
 const ARTIFACT_MARKER_SUFFIX: &str = " -->";
@@ -50,6 +61,7 @@ pub struct SpecIssueChecklist {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SpecIssueArtifactKind {
+    Doc,
     Contract,
     Checklist,
 }
@@ -57,6 +69,7 @@ pub enum SpecIssueArtifactKind {
 impl SpecIssueArtifactKind {
     fn token(self) -> &'static str {
         match self {
+            Self::Doc => "doc",
             Self::Contract => "contract",
             Self::Checklist => "checklist",
         }
@@ -64,6 +77,7 @@ impl SpecIssueArtifactKind {
 
     fn from_token(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "doc" => Some(Self::Doc),
             "contract" => Some(Self::Contract),
             "checklist" => Some(Self::Checklist),
             _ => None,
@@ -141,13 +155,13 @@ pub fn create_spec_issue(
         return Err("title is required".to_string());
     }
 
-    let checklist = SpecIssueChecklist::default();
-    let body = render_issue_body("#NEW", sections, &checklist);
+    let body = render_issue_index_body("#NEW", None);
 
     let number = gh_issue_create(repo_path, title, &body)?;
-    let body = render_issue_body(&format!("#{number}"), sections, &checklist);
+    let body = render_issue_index_body(&format!("#{number}"), None);
     gh_issue_edit(repo_path, number, title, &body)
         .map_err(|e| format!("Issue #{number} was created, but follow-up update failed: {e}"))?;
+    sync_spec_issue_artifacts(repo_path, number, sections, None)?;
     get_spec_issue_detail(repo_path, number)
         .map_err(|e| format!("Issue #{number} was created and updated, but fetch failed: {e}"))
 }
@@ -168,10 +182,11 @@ pub fn update_spec_issue(
 
     check_etag(expected_etag, &existing.etag)?;
 
-    let checklist = parse_acceptance_checklist_from_body(&existing.body);
-    let body = render_issue_body(&format!("#{issue_number}"), sections, &checklist);
+    let acceptance = load_acceptance_checklist(repo_path, issue_number, &existing.body)?;
+    let body = render_issue_index_body(&format!("#{issue_number}"), Some(&existing.body));
 
     gh_issue_edit(repo_path, issue_number, title, &body)?;
+    sync_spec_issue_artifacts(repo_path, issue_number, sections, Some(&acceptance))?;
     get_spec_issue_detail(repo_path, issue_number)
 }
 
@@ -197,13 +212,13 @@ pub fn get_spec_issue_detail(
     repo_path: &Path,
     issue_number: u64,
 ) -> Result<SpecIssueDetail, String> {
-    let issue_number = issue_number.to_string();
+    let issue_number_str = issue_number.to_string();
     let output = run_gh_output_with_repair(
         repo_path,
         [
             "issue",
             "view",
-            issue_number.as_str(),
+            issue_number_str.as_str(),
             "--json",
             "number,title,body,updatedAt,labels,url",
         ],
@@ -215,7 +230,14 @@ pub fn get_spec_issue_detail(
         return Err(format!("gh issue view failed: {}", stderr.trim()));
     }
 
-    parse_issue_detail_json(&String::from_utf8_lossy(&output.stdout))
+    let mut detail = parse_issue_detail_json(&String::from_utf8_lossy(&output.stdout))?;
+    let comments = fetch_issue_comments(repo_path, issue_number)?;
+    let artifacts = comments
+        .into_iter()
+        .filter_map(|comment| parse_artifact_comment(issue_number, comment))
+        .collect::<Vec<_>>();
+    detail.sections = resolve_sections_from_artifacts_and_body(&detail.body, &artifacts);
+    Ok(detail)
 }
 
 pub fn list_spec_issue_artifact_comments(
@@ -223,7 +245,7 @@ pub fn list_spec_issue_artifact_comments(
     issue_number: u64,
     kind: Option<SpecIssueArtifactKind>,
 ) -> Result<Vec<SpecIssueArtifactComment>, String> {
-    let (_, comments) = fetch_issue_node_and_comments(repo_path, issue_number)?;
+    let comments = fetch_issue_comments(repo_path, issue_number)?;
     let mut artifacts = comments
         .into_iter()
         .filter_map(|comment| parse_artifact_comment(issue_number, comment))
@@ -251,7 +273,7 @@ pub fn upsert_spec_issue_artifact_comment(
         return Err("content is required".to_string());
     }
 
-    let (issue_node_id, comments) = fetch_issue_node_and_comments(repo_path, issue_number)?;
+    let comments = fetch_issue_comments(repo_path, issue_number)?;
     let body = render_artifact_comment_body(kind, artifact_name, content);
     let existing = comments
         .into_iter()
@@ -263,7 +285,7 @@ pub fn upsert_spec_issue_artifact_comment(
         return update_issue_comment(repo_path, issue_number, &found.comment_id, &body);
     }
 
-    add_issue_comment(repo_path, issue_number, &issue_node_id, &body)
+    add_issue_comment(repo_path, issue_number, &body)
 }
 
 pub fn delete_spec_issue_artifact_comment(
@@ -277,7 +299,7 @@ pub fn delete_spec_issue_artifact_comment(
     if artifact_name.is_empty() {
         return Err("artifact_name is required".to_string());
     }
-    let (_, comments) = fetch_issue_node_and_comments(repo_path, issue_number)?;
+    let comments = fetch_issue_comments(repo_path, issue_number)?;
     let existing = comments
         .into_iter()
         .filter_map(|comment| parse_artifact_comment(issue_number, comment))
@@ -558,98 +580,139 @@ fn select_project_id_from_owner_projects(value: &Value, repo_slug: &str) -> Opti
     None
 }
 
-fn render_issue_body(
-    issue_ref: &str,
-    sections: &SpecIssueSections,
-    checklist: &SpecIssueChecklist,
-) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("<!-- GWT_SPEC_ID:{} -->\n\n", issue_ref));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_SPEC,
-        non_empty_or_todo(&sections.spec)
-    ));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_PLAN,
-        non_empty_or_todo(&sections.plan)
-    ));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_TASKS,
-        non_empty_or_todo(&sections.tasks)
-    ));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_TDD,
-        non_empty_or_todo(&sections.tdd)
-    ));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_RESEARCH,
-        non_empty_or_todo(&sections.research)
-    ));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_DATA_MODEL,
-        non_empty_or_todo(&sections.data_model)
-    ));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_QUICKSTART,
-        non_empty_or_todo(&sections.quickstart)
-    ));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_CONTRACTS,
-        non_empty_or_default(
-            &sections.contracts,
-            "Artifact files under `contracts/` are managed in issue comments with `contract:<name>` entries."
-        )
-    ));
-    out.push_str(&format!(
-        "## {}\n\n{}\n\n",
-        SECTION_CHECKLISTS,
-        non_empty_or_default(
-            &sections.checklists,
-            "Artifact files under `checklists/` are managed in issue comments with `checklist:<name>` entries."
-        )
-    ));
-    out.push_str(&format!("## {}\n\n", SECTION_ACCEPTANCE_CHECKLIST));
-    if checklist.items.is_empty() {
-        out.push_str("- [ ] Add acceptance checklist\n");
-    } else {
-        for item in &checklist.items {
-            if let Some(normalized) = normalize_acceptance_checklist_line(item) {
-                out.push_str(&normalized);
-                out.push('\n');
-                continue;
-            }
-            out.push_str("- [ ] ");
-            out.push_str(item.trim());
-            out.push('\n');
+fn render_issue_index_body(issue_ref: &str, existing_body: Option<&str>) -> String {
+    if let Some(existing_body) = existing_body {
+        if existing_body.contains("## Artifact Index") {
+            return replace_spec_id_marker(existing_body, issue_ref);
         }
     }
-    out
+
+    format!(
+        "<!-- GWT_SPEC_ID:{issue_ref} -->\n\n## Artifact Index\n\n- `doc:spec.md`\n- `doc:plan.md`\n- `doc:tasks.md`\n- `doc:research.md`\n- `doc:data-model.md`\n- `doc:quickstart.md`\n- `checklist:tdd.md`\n- `checklist:acceptance.md`\n- `contract:*`\n- `checklist:*`\n\n## Status\n\n- Phase: Draft\n- Clarification: Pending\n- Analysis: Pending\n\n## Links\n\n- Parent: ...\n- Related: ...\n- PRs: ...\n"
+    )
 }
 
-fn non_empty_or_todo(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        "_TODO_".to_string()
-    } else {
-        trimmed.to_string()
+fn replace_spec_id_marker(body: &str, issue_ref: &str) -> String {
+    let mut lines = body.lines();
+    let mut result = String::new();
+    if let Some(first) = lines.next() {
+        if first.trim_start().starts_with("<!-- GWT_SPEC_ID:") {
+            result.push_str(&format!("<!-- GWT_SPEC_ID:{issue_ref} -->"));
+        } else {
+            result.push_str(first);
+        }
     }
+    for line in lines {
+        result.push('\n');
+        result.push_str(line);
+    }
+    result
 }
 
-fn non_empty_or_default(value: &str, default_value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        default_value.to_string()
-    } else {
-        trimmed.to_string()
+fn load_acceptance_checklist(
+    repo_path: &Path,
+    issue_number: u64,
+    existing_body: &str,
+) -> Result<SpecIssueChecklist, String> {
+    let artifacts = list_spec_issue_artifact_comments(
+        repo_path,
+        issue_number,
+        Some(SpecIssueArtifactKind::Checklist),
+    )?;
+    if let Some(artifact) = artifacts.iter().find(|artifact| {
+        artifact
+            .artifact_name
+            .eq_ignore_ascii_case(CHECKLIST_ACCEPTANCE)
+    }) {
+        let items = artifact
+            .content
+            .lines()
+            .filter_map(normalize_acceptance_checklist_line)
+            .collect::<Vec<_>>();
+        return Ok(SpecIssueChecklist { items });
     }
+    Ok(parse_acceptance_checklist_from_body(existing_body))
+}
+
+fn sync_spec_issue_artifacts(
+    repo_path: &Path,
+    issue_number: u64,
+    sections: &SpecIssueSections,
+    acceptance_checklist: Option<&SpecIssueChecklist>,
+) -> Result<(), String> {
+    sync_doc_artifact(repo_path, issue_number, DOC_SPEC, &sections.spec)?;
+    sync_doc_artifact(repo_path, issue_number, DOC_PLAN, &sections.plan)?;
+    sync_doc_artifact(repo_path, issue_number, DOC_TASKS, &sections.tasks)?;
+    sync_doc_artifact(repo_path, issue_number, DOC_RESEARCH, &sections.research)?;
+    sync_doc_artifact(
+        repo_path,
+        issue_number,
+        DOC_DATA_MODEL,
+        &sections.data_model,
+    )?;
+    sync_doc_artifact(
+        repo_path,
+        issue_number,
+        DOC_QUICKSTART,
+        &sections.quickstart,
+    )?;
+    sync_checklist_artifact(repo_path, issue_number, CHECKLIST_TDD, &sections.tdd)?;
+
+    if let Some(checklist) = acceptance_checklist {
+        sync_checklist_artifact(
+            repo_path,
+            issue_number,
+            CHECKLIST_ACCEPTANCE,
+            &checklist.items.join("\n"),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn sync_doc_artifact(
+    repo_path: &Path,
+    issue_number: u64,
+    name: &str,
+    content: &str,
+) -> Result<(), String> {
+    sync_optional_artifact(
+        repo_path,
+        issue_number,
+        SpecIssueArtifactKind::Doc,
+        name,
+        content,
+    )
+}
+
+fn sync_checklist_artifact(
+    repo_path: &Path,
+    issue_number: u64,
+    name: &str,
+    content: &str,
+) -> Result<(), String> {
+    sync_optional_artifact(
+        repo_path,
+        issue_number,
+        SpecIssueArtifactKind::Checklist,
+        name,
+        content,
+    )
+}
+
+fn sync_optional_artifact(
+    repo_path: &Path,
+    issue_number: u64,
+    kind: SpecIssueArtifactKind,
+    name: &str,
+    content: &str,
+) -> Result<(), String> {
+    if content.trim().is_empty() {
+        let _ = delete_spec_issue_artifact_comment(repo_path, issue_number, kind, name, None)?;
+        return Ok(());
+    }
+    let _ = upsert_spec_issue_artifact_comment(repo_path, issue_number, kind, name, content, None)?;
+    Ok(())
 }
 
 fn check_etag(expected: Option<&str>, actual: &str) -> Result<(), String> {
@@ -719,48 +782,36 @@ struct IssueCommentNode {
     url: Option<String>,
 }
 
-fn fetch_issue_node_and_comments(
+fn fetch_issue_comments(
     repo_path: &Path,
     issue_number: u64,
-) -> Result<(String, Vec<IssueCommentNode>), String> {
-    let issue_number = issue_number.to_string();
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "issue",
-            "view",
-            issue_number.as_str(),
-            "--json",
-            "id,comments",
-        ],
-    )
-    .map_err(|e| format!("Failed to execute gh issue view comments: {e}"))?;
+) -> Result<Vec<IssueCommentNode>, String> {
+    // Spec issues keep artifact comments small in practice. If this expands to
+    // general issue discussions, this endpoint will need pagination.
+    let endpoint = format!(
+        "repos/{}/issues/{issue_number}/comments?per_page=100",
+        repo_name_with_owner(repo_path)?
+    );
+    let output = run_gh_output_with_repair(repo_path, ["api", endpoint.as_str()])
+        .map_err(|e| format!("Failed to execute gh api issue comments: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh issue view failed: {}", stderr.trim()));
+        return Err(format!("gh api issue comments failed: {}", stderr.trim()));
     }
-    let value: Value = serde_json::from_slice(&output.stdout)
+    let comments: Vec<Value> = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Invalid issue comments JSON: {e}"))?;
-    let issue_node_id = value
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| "Issue node id missing".to_string())?;
-    let comments = value
-        .get("comments")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(parse_issue_comment_node)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Ok((issue_node_id, comments))
+    Ok(comments
+        .iter()
+        .filter_map(parse_issue_comment_node)
+        .collect::<Vec<_>>())
 }
 
 fn parse_issue_comment_node(value: &Value) -> Option<IssueCommentNode> {
-    let id = value.get("id").and_then(Value::as_str)?.to_string();
+    let id = match value.get("id")? {
+        Value::String(v) => v.clone(),
+        Value::Number(v) => v.to_string(),
+        _ => return None,
+    };
     let body = value
         .get("body")
         .and_then(Value::as_str)
@@ -769,11 +820,17 @@ fn parse_issue_comment_node(value: &Value) -> Option<IssueCommentNode> {
     let updated_at = value
         .get("updatedAt")
         .and_then(Value::as_str)
+        .or_else(|| value.get("updated_at").and_then(Value::as_str))
         .or_else(|| value.get("lastEditedAt").and_then(Value::as_str))
         .or_else(|| value.get("createdAt").and_then(Value::as_str))
+        .or_else(|| value.get("created_at").and_then(Value::as_str))
         .unwrap_or_default()
         .to_string();
-    let url = value.get("url").and_then(Value::as_str).map(str::to_string);
+    let url = value
+        .get("url")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("html_url").and_then(Value::as_str))
+        .map(str::to_string);
     Some(IssueCommentNode {
         id,
         body,
@@ -864,41 +921,61 @@ fn render_artifact_comment_body(
     )
 }
 
-fn add_issue_comment(
+fn build_issue_comment_payload(body: &str) -> Value {
+    json!({ "body": body })
+}
+
+fn run_gh_api_with_json_input(
     repo_path: &Path,
-    issue_number: u64,
-    issue_node_id: &str,
-    body: &str,
-) -> Result<SpecIssueArtifactComment, String> {
-    let query = "mutation($subject:ID!, $body:String!){ addComment(input:{subjectId:$subject, body:$body}) { commentEdge { node { id body updatedAt url } } } }";
-    let output = run_gh_output_with_repair(
+    endpoint: &str,
+    method: &str,
+    payload: &Value,
+) -> Result<std::process::Output, String> {
+    let temp_path = std::env::temp_dir().join(format!("gwt-gh-api-{}.json", Uuid::new_v4()));
+    let json_bytes = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to encode gh api payload as JSON: {e}"))?;
+    std::fs::write(&temp_path, json_bytes)
+        .map_err(|e| format!("Failed to write temporary gh api payload file: {e}"))?;
+
+    let temp_path_str = temp_path.to_string_lossy().into_owned();
+    let result = run_gh_output_with_repair(
         repo_path,
         [
             "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("subject={issue_node_id}"),
-            "-F",
-            &format!("body={body}"),
+            endpoint,
+            "--method",
+            method,
+            "--input",
+            temp_path_str.as_str(),
         ],
-    )
-    .map_err(|e| format!("Failed to add issue artifact comment: {e}"))?;
+    );
+
+    let _ = std::fs::remove_file(&temp_path);
+    result.map_err(|e| format!("Failed to execute gh api {method} {endpoint}: {e}"))
+}
+
+fn add_issue_comment(
+    repo_path: &Path,
+    issue_number: u64,
+    body: &str,
+) -> Result<SpecIssueArtifactComment, String> {
+    let endpoint = format!(
+        "repos/{}/issues/{issue_number}/comments",
+        repo_name_with_owner(repo_path)?
+    );
+    let output = run_gh_api_with_json_input(
+        repo_path,
+        &endpoint,
+        "POST",
+        &build_issue_comment_payload(body),
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact add failed: {}", stderr.trim()));
     }
     let value: Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Invalid artifact add JSON: {e}"))?;
-    let node = value
-        .get("data")
-        .and_then(|v| v.get("addComment"))
-        .and_then(|v| v.get("commentEdge"))
-        .and_then(|v| v.get("node"))
-        .cloned()
-        .ok_or_else(|| "Added artifact comment payload missing".to_string())?;
-    let comment = parse_issue_comment_node(&node)
+    let comment = parse_issue_comment_node(&value)
         .ok_or_else(|| "Added artifact comment invalid".to_string())?;
     parse_artifact_comment(issue_number, comment)
         .ok_or_else(|| "Failed to parse added artifact comment".to_string())
@@ -910,53 +987,36 @@ fn update_issue_comment(
     comment_id: &str,
     body: &str,
 ) -> Result<SpecIssueArtifactComment, String> {
-    let query = "mutation($id:ID!, $body:String!){ updateIssueComment(input:{id:$id, body:$body}) { issueComment { id body updatedAt url } } }";
-    let output = run_gh_output_with_repair(
+    let endpoint = format!(
+        "repos/{}/issues/comments/{comment_id}",
+        repo_name_with_owner(repo_path)?
+    );
+    let output = run_gh_api_with_json_input(
         repo_path,
-        [
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("id={comment_id}"),
-            "-F",
-            &format!("body={body}"),
-        ],
-    )
-    .map_err(|e| format!("Failed to update issue artifact comment: {e}"))?;
+        &endpoint,
+        "PATCH",
+        &build_issue_comment_payload(body),
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact update failed: {}", stderr.trim()));
     }
     let value: Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Invalid artifact update JSON: {e}"))?;
-    let node = value
-        .get("data")
-        .and_then(|v| v.get("updateIssueComment"))
-        .and_then(|v| v.get("issueComment"))
-        .cloned()
-        .ok_or_else(|| "Updated artifact comment payload missing".to_string())?;
-    let comment = parse_issue_comment_node(&node)
+    let comment = parse_issue_comment_node(&value)
         .ok_or_else(|| "Updated artifact comment payload invalid".to_string())?;
     parse_artifact_comment(issue_number, comment)
         .ok_or_else(|| "Failed to parse updated artifact comment".to_string())
 }
 
 fn delete_issue_comment(repo_path: &Path, comment_id: &str) -> Result<(), String> {
-    let query = "mutation($id:ID!){ deleteIssueComment(input:{id:$id}) { clientMutationId } }";
-    let output = run_gh_output_with_repair(
-        repo_path,
-        [
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("id={comment_id}"),
-        ],
-    )
-    .map_err(|e| format!("Failed to delete issue artifact comment: {e}"))?;
+    let endpoint = format!(
+        "repos/{}/issues/comments/{comment_id}",
+        repo_name_with_owner(repo_path)?
+    );
+    let output =
+        run_gh_output_with_repair(repo_path, ["api", endpoint.as_str(), "--method", "DELETE"])
+            .map_err(|e| format!("Failed to delete issue artifact comment: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Issue artifact delete failed: {}", stderr.trim()));
@@ -1045,6 +1105,79 @@ fn parse_sections_from_body(body: &str) -> SpecIssueSections {
             .or_else(|| sections.get(SECTION_CHECKLIST_LEGACY))
             .cloned()
             .unwrap_or_default(),
+    }
+}
+
+fn resolve_sections_from_artifacts_and_body(
+    body: &str,
+    artifacts: &[SpecIssueArtifactComment],
+) -> SpecIssueSections {
+    let mut sections = parse_sections_from_body(body);
+    let mut contract_blocks = Vec::new();
+    let mut checklist_blocks = Vec::new();
+
+    let mut sorted_artifacts = artifacts.to_vec();
+    sorted_artifacts.sort_by(|a, b| {
+        a.kind
+            .token()
+            .cmp(b.kind.token())
+            .then_with(|| a.artifact_name.cmp(&b.artifact_name))
+    });
+
+    for artifact in sorted_artifacts {
+        match artifact.kind {
+            SpecIssueArtifactKind::Doc => match artifact.artifact_name.as_str() {
+                DOC_SPEC => sections.spec = artifact.content,
+                DOC_PLAN => sections.plan = artifact.content,
+                DOC_TASKS => sections.tasks = artifact.content,
+                DOC_TDD => sections.tdd = artifact.content,
+                DOC_RESEARCH => sections.research = artifact.content,
+                DOC_DATA_MODEL => sections.data_model = artifact.content,
+                DOC_QUICKSTART => sections.quickstart = artifact.content,
+                _ => {}
+            },
+            SpecIssueArtifactKind::Contract => {
+                contract_blocks.push(render_named_artifact_block(
+                    artifact.kind,
+                    &artifact.artifact_name,
+                    &artifact.content,
+                ));
+            }
+            SpecIssueArtifactKind::Checklist => {
+                if artifact.artifact_name.eq_ignore_ascii_case(CHECKLIST_TDD) {
+                    sections.tdd = artifact.content;
+                } else {
+                    checklist_blocks.push(render_named_artifact_block(
+                        artifact.kind,
+                        &artifact.artifact_name,
+                        &artifact.content,
+                    ));
+                }
+            }
+        }
+    }
+
+    if !contract_blocks.is_empty() {
+        sections.contracts = contract_blocks.join("\n\n");
+    }
+    if !checklist_blocks.is_empty() {
+        sections.checklists = checklist_blocks.join("\n\n");
+    }
+
+    sections
+}
+
+fn render_named_artifact_block(
+    kind: SpecIssueArtifactKind,
+    artifact_name: &str,
+    content: &str,
+) -> String {
+    let trimmed_name = artifact_name.trim();
+    let trimmed_content = content.trim();
+    if trimmed_content.is_empty() {
+        format!("### {}:{trimmed_name}", kind.token())
+    } else {
+        format!("### {}:{trimmed_name}\n\n{trimmed_content}", kind.token())
     }
 }
 
@@ -1384,7 +1517,11 @@ mod tests {
             vec!["- [x] done".to_string(), "- [ ] pending".to_string()]
         );
 
-        let rendered = render_issue_body("#1234", &SpecIssueSections::default(), &checklist);
+        let rendered = render_artifact_comment_body(
+            SpecIssueArtifactKind::Checklist,
+            CHECKLIST_ACCEPTANCE,
+            &checklist.items.join("\n"),
+        );
         assert!(rendered.contains("- [x] done"));
         assert!(rendered.contains("- [ ] pending"));
     }
@@ -1429,6 +1566,132 @@ mod tests {
         assert_eq!(parsed.kind, SpecIssueArtifactKind::Checklist);
         assert_eq!(parsed.artifact_name, "requirements.md");
         assert_eq!(parsed.content, "- [ ] item");
+    }
+
+    #[test]
+    fn parse_artifact_comment_doc_prefix() {
+        let body = "doc:spec.md\n\n# Spec";
+        let parsed = parse_artifact_header_and_content(body).expect("parse doc");
+        assert_eq!(parsed.kind, SpecIssueArtifactKind::Doc);
+        assert_eq!(parsed.artifact_name, "spec.md");
+        assert_eq!(parsed.content, "# Spec");
+    }
+
+    #[test]
+    fn render_artifact_comment_body_preserves_japanese_content() {
+        let body = render_artifact_comment_body(
+            SpecIssueArtifactKind::Doc,
+            "spec.md",
+            "# Feature Specification: パフォーマンスプロファイリング基盤\n\n日本語本文",
+        );
+        let parsed = parse_artifact_header_and_content(&body).expect("parse japanese body");
+        assert_eq!(parsed.artifact_name, "spec.md");
+        assert_eq!(
+            parsed.content,
+            "# Feature Specification: パフォーマンスプロファイリング基盤\n\n日本語本文"
+        );
+    }
+
+    #[test]
+    fn build_issue_comment_payload_round_trips_non_ascii_body() {
+        let payload = build_issue_comment_payload("日本語の artifact コメント本文");
+        let json = serde_json::to_string(&payload).expect("serialize payload");
+        let round_trip: Value = serde_json::from_str(&json).expect("parse payload");
+        assert_eq!(
+            round_trip.get("body").and_then(Value::as_str),
+            Some("日本語の artifact コメント本文")
+        );
+    }
+
+    #[test]
+    fn parse_issue_comment_node_supports_rest_shape() {
+        let value = json!({
+            "id": 12345,
+            "body": "<!-- GWT_SPEC_ARTIFACT:doc:spec.md -->\ndoc:spec.md\n\n日本語本文",
+            "updated_at": "2026-03-19T00:00:00Z",
+            "html_url": "https://github.com/akiojin/gwt/issues/1705#issuecomment-1"
+        });
+        let parsed = parse_issue_comment_node(&value).expect("parse rest comment");
+        assert_eq!(parsed.id, "12345");
+        assert_eq!(parsed.updated_at, "2026-03-19T00:00:00Z");
+        assert_eq!(
+            parsed.url.as_deref(),
+            Some("https://github.com/akiojin/gwt/issues/1705#issuecomment-1")
+        );
+        assert!(parsed.body.contains("日本語本文"));
+    }
+
+    #[test]
+    fn resolve_sections_prefers_doc_artifacts_over_body_sections() {
+        let body = "## Spec\n\nlegacy spec\n\n## Plan\n\nlegacy plan\n\n## Tasks\n\nlegacy tasks\n";
+        let artifacts = vec![
+            SpecIssueArtifactComment {
+                comment_id: "1".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Doc,
+                artifact_name: "spec.md".to_string(),
+                content: "artifact spec".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag1".to_string(),
+                url: None,
+            },
+            SpecIssueArtifactComment {
+                comment_id: "2".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Doc,
+                artifact_name: "plan.md".to_string(),
+                content: "artifact plan".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag2".to_string(),
+                url: None,
+            },
+            SpecIssueArtifactComment {
+                comment_id: "3".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Checklist,
+                artifact_name: "tdd.md".to_string(),
+                content: "artifact tdd".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag3".to_string(),
+                url: None,
+            },
+            SpecIssueArtifactComment {
+                comment_id: "4".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Contract,
+                artifact_name: "openapi.yaml".to_string(),
+                content: "openapi: 3.1.0".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag4".to_string(),
+                url: None,
+            },
+            SpecIssueArtifactComment {
+                comment_id: "5".to_string(),
+                issue_number: 42,
+                kind: SpecIssueArtifactKind::Checklist,
+                artifact_name: "acceptance.md".to_string(),
+                content: "- [ ] acceptance".to_string(),
+                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                etag: "etag5".to_string(),
+                url: None,
+            },
+        ];
+
+        let sections = resolve_sections_from_artifacts_and_body(body, &artifacts);
+        assert_eq!(sections.spec, "artifact spec");
+        assert_eq!(sections.plan, "artifact plan");
+        assert_eq!(sections.tasks, "legacy tasks");
+        assert_eq!(sections.tdd, "artifact tdd");
+        assert!(sections.contracts.contains("contract:openapi.yaml"));
+        assert!(sections.checklists.contains("checklist:acceptance.md"));
+    }
+
+    #[test]
+    fn resolve_sections_falls_back_to_body_when_doc_artifacts_are_missing() {
+        let body = "## Spec\n\nlegacy spec\n\n## Data Model\n\nlegacy model\n";
+        let sections = resolve_sections_from_artifacts_and_body(body, &[]);
+        assert_eq!(sections.spec, "legacy spec");
+        assert_eq!(sections.data_model, "legacy model");
     }
 
     #[test]

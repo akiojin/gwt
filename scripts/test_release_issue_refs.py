@@ -134,6 +134,124 @@ class ReleaseIssueRefsTests(unittest.TestCase):
         )
         self.assertEqual(["pr", "issue"], [ref.kind for ref in result.refs])
 
+    def test_gwt_spec_direct_issue_moved_to_reference_only(self) -> None:
+        """Direct issue ref with gwt-spec label moves to reference_only."""
+        runner = FakeRunner(
+            {
+                (
+                    "git",
+                    "log",
+                    "--pretty=%s",
+                    "--no-merges",
+                    "v8.14.0..HEAD",
+                ): "feat(spec): adopt artifact-first issue workflow (#1700)\n",
+                ("git", "log", "--merges", "--pretty=%s", "v8.14.0..HEAD"): "",
+                ("gh", "api", "repos/akiojin/gwt/issues/1700"): json.dumps(
+                    {"labels": [{"name": "gwt-spec"}, {"name": "enhancement"}]}
+                ),
+            }
+        )
+
+        result = release_issue_refs.collect_release_issue_refs(
+            "v8.14.0..HEAD",
+            repo_slug="akiojin/gwt",
+            runner=runner,
+        )
+
+        self.assertEqual([], result.auto_close_issues)
+        self.assertEqual([1700], result.reference_only_issues)
+        self.assertIn(
+            "gwt-spec issues moved to reference-only: #1700. "
+            "gwt-spec issues are never auto-closed by releases.",
+            result.warnings,
+        )
+
+    def test_gwt_spec_issue_via_pr_closing_moved_to_reference_only(self) -> None:
+        """PR body `Closes #N` where N has gwt-spec label moves N to reference_only."""
+        pr_body = dedent(
+            """\
+            ## Closing Issues
+
+            #1700
+
+            ## Related Issues / Links
+
+            None"""
+        )
+        runner = FakeRunner(
+            {
+                (
+                    "git",
+                    "log",
+                    "--pretty=%s",
+                    "--no-merges",
+                    "v8.14.0..HEAD",
+                ): "fix(spec): harden issue migration retries (#1701)\n",
+                ("git", "log", "--merges", "--pretty=%s", "v8.14.0..HEAD"): "",
+                ("gh", "api", "repos/akiojin/gwt/issues/1701"): json.dumps(
+                    {"pull_request": {"url": "https://example.com/pr/1701"}}
+                ),
+                (
+                    "gh",
+                    "pr",
+                    "view",
+                    "1701",
+                    "--repo",
+                    "akiojin/gwt",
+                    "--json",
+                    "body",
+                ): json.dumps({"body": pr_body}),
+                ("gh", "api", "repos/akiojin/gwt/issues/1700"): json.dumps(
+                    {"labels": [{"name": "gwt-spec"}]}
+                ),
+            }
+        )
+
+        result = release_issue_refs.collect_release_issue_refs(
+            "v8.14.0..HEAD",
+            repo_slug="akiojin/gwt",
+            runner=runner,
+        )
+
+        self.assertEqual([], result.auto_close_issues)
+        self.assertEqual([1700], result.reference_only_issues)
+        self.assertIn(
+            "gwt-spec issues moved to reference-only: #1700. "
+            "gwt-spec issues are never auto-closed by releases.",
+            result.warnings,
+        )
+
+    def test_non_gwt_spec_issue_stays_in_auto_close(self) -> None:
+        """Non-gwt-spec issue stays in auto_close."""
+        runner = FakeRunner(
+            {
+                (
+                    "git",
+                    "log",
+                    "--pretty=%s",
+                    "--no-merges",
+                    "v8.14.0..HEAD",
+                ): "fix: hook error (#1589)\n",
+                ("git", "log", "--merges", "--pretty=%s", "v8.14.0..HEAD"): "",
+                ("gh", "api", "repos/akiojin/gwt/issues/1589"): json.dumps(
+                    {"labels": [{"name": "bug"}]}
+                ),
+            }
+        )
+
+        result = release_issue_refs.collect_release_issue_refs(
+            "v8.14.0..HEAD",
+            repo_slug="akiojin/gwt",
+            runner=runner,
+        )
+
+        self.assertEqual([1589], result.auto_close_issues)
+        self.assertEqual([], result.reference_only_issues)
+        gwt_spec_warnings = [
+            w for w in result.warnings if "gwt-spec" in w
+        ]
+        self.assertEqual([], gwt_spec_warnings)
+
 
 if __name__ == "__main__":
     unittest.main()

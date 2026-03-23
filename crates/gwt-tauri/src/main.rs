@@ -9,6 +9,7 @@ mod assistant_engine;
 mod assistant_monitor;
 mod assistant_tools;
 mod commands;
+mod consultation;
 mod menu;
 mod pty_skills;
 mod session_watcher;
@@ -16,9 +17,15 @@ mod single_instance;
 mod state;
 mod tool_helpers;
 
+use std::{io::Read, sync::Arc};
+
+#[cfg(any(test, target_os = "macos"))]
+use std::path::{Path, PathBuf};
+
 use state::AppState;
-use std::io::Read;
-use std::sync::Arc;
+
+#[cfg(any(test, target_os = "macos"))]
+const LEGACY_WEBKIT_LOCAL_STORAGE_RESET_SENTINEL: &str = "webkit-localstorage-reset-issue-1720-v1";
 
 fn main() {
     // Self-update helper mode: do not start GUI, just execute requested update action.
@@ -31,6 +38,23 @@ fn main() {
     if handle_hook_cli() {
         return;
     }
+
+    // Initialize logging before anything else so all tracing output is captured.
+    let settings = gwt_core::config::Settings::load_global().unwrap_or_default();
+    let log_config = gwt_core::logging::LogConfig {
+        log_dir: settings.log_dir.clone().unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|h| h.join(".gwt").join("logs"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".gwt/logs"))
+        }),
+        workspace: "default".to_string(),
+        debug: settings.debug,
+        retention_days: settings.log_retention_days,
+        profiling: settings.profiling,
+    };
+    let _profiling_guard = gwt_core::logging::init_logger(&log_config);
+
+    gwt_core::logging::log_flow_start("startup", "app_init");
 
     let single_instance_guard = match crate::single_instance::try_acquire_single_instance() {
         Ok(crate::single_instance::AcquireOutcome::Acquired(guard)) => Arc::new(guard),
@@ -50,6 +74,9 @@ fn main() {
         }
     };
 
+    #[cfg(target_os = "macos")]
+    maybe_reset_legacy_webkit_local_storage();
+
     let app_state = AppState::new();
 
     let app = crate::app::build_app(
@@ -60,7 +87,125 @@ fn main() {
     .build(tauri::generate_context!())
     .expect("error while building tauri application");
 
+    gwt_core::logging::log_flow_success("startup", "app_init");
+
     app.run(crate::app::handle_run_event);
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_reset_legacy_webkit_local_storage() {
+    let Some(home_dir) = dirs::home_dir() else {
+        return;
+    };
+    match reset_legacy_webkit_local_storage(&home_dir) {
+        Ok(removed_targets) if !removed_targets.is_empty() => {
+            tracing::info!(
+                category = "startup_migration",
+                removed_targets = removed_targets.len(),
+                "Reset legacy WebKit LocalStorage to avoid startup crash"
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(
+                category = "startup_migration",
+                error = %err,
+                "Failed to reset legacy WebKit LocalStorage"
+            );
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn webkit_local_storage_reset_sentinel(home_dir: &Path) -> PathBuf {
+    home_dir
+        .join(".gwt")
+        .join("runtime")
+        .join(LEGACY_WEBKIT_LOCAL_STORAGE_RESET_SENTINEL)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn webkit_local_storage_targets(home_dir: &Path) -> Vec<PathBuf> {
+    let website_data_root = home_dir
+        .join("Library")
+        .join("WebKit")
+        .join("com.akiojin.gwt")
+        .join("WebsiteData");
+
+    let mut targets = Vec::new();
+    let top_level_local_storage = website_data_root.join("LocalStorage");
+    if top_level_local_storage.exists() {
+        targets.push(top_level_local_storage);
+    }
+
+    let default_root = website_data_root.join("Default");
+    let Ok(origin_dirs) = std::fs::read_dir(default_root) else {
+        targets.sort();
+        targets.dedup();
+        return targets;
+    };
+
+    for origin_dir in origin_dirs.flatten() {
+        let direct_local_storage = origin_dir.path().join("LocalStorage");
+        if direct_local_storage.exists() {
+            targets.push(direct_local_storage);
+        }
+        let Ok(origin_children) = std::fs::read_dir(origin_dir.path()) else {
+            continue;
+        };
+        for origin_child in origin_children.flatten() {
+            let origin_child_path = origin_child.path();
+            if origin_child_path.file_name().and_then(|name| name.to_str()) == Some("LocalStorage")
+            {
+                targets.push(origin_child_path);
+                continue;
+            }
+
+            let nested_local_storage = origin_child_path.join("LocalStorage");
+            if nested_local_storage.exists() {
+                targets.push(nested_local_storage);
+            }
+        }
+    }
+
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn reset_legacy_webkit_local_storage(home_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let sentinel = webkit_local_storage_reset_sentinel(home_dir);
+    if sentinel.exists() {
+        return Ok(Vec::new());
+    }
+
+    let targets = webkit_local_storage_targets(home_dir);
+    for target in &targets {
+        if target.is_dir() {
+            std::fs::remove_dir_all(target)
+                .map_err(|err| format!("failed to remove {}: {err}", target.display()))?;
+        } else if target.is_file() {
+            std::fs::remove_file(target)
+                .map_err(|err| format!("failed to remove {}: {err}", target.display()))?;
+        }
+    }
+
+    if let Some(parent) = sentinel.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    std::fs::write(
+        &sentinel,
+        format!(
+            "migration={}\npackage_version={}\n",
+            LEGACY_WEBKIT_LOCAL_STORAGE_RESET_SENTINEL,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .map_err(|err| format!("failed to write {}: {err}", sentinel.display()))?;
+
+    Ok(targets)
 }
 
 fn handle_hook_cli() -> bool {
@@ -235,5 +380,118 @@ fn maybe_run_internal_mode() -> bool {
             eprintln!("Unknown internal mode: {other}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn webkit_local_storage_targets_collects_top_level_and_nested_dirs() {
+        let temp = tempdir().unwrap();
+        let home = temp.path();
+        let top_level = home
+            .join("Library")
+            .join("WebKit")
+            .join("com.akiojin.gwt")
+            .join("WebsiteData")
+            .join("LocalStorage");
+        let nested = home
+            .join("Library")
+            .join("WebKit")
+            .join("com.akiojin.gwt")
+            .join("WebsiteData")
+            .join("Default")
+            .join("origin-a")
+            .join("site-a")
+            .join("LocalStorage");
+        std::fs::create_dir_all(&top_level).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let targets = webkit_local_storage_targets(home);
+
+        assert_eq!(targets.len(), 2);
+        assert!(targets.contains(&top_level));
+        assert!(targets.contains(&nested));
+    }
+
+    #[test]
+    fn webkit_local_storage_targets_collects_direct_origin_local_storage() {
+        let temp = tempdir().unwrap();
+        let home = temp.path();
+        let direct_origin_local_storage = home
+            .join("Library")
+            .join("WebKit")
+            .join("com.akiojin.gwt")
+            .join("WebsiteData")
+            .join("Default")
+            .join("origin-a")
+            .join("LocalStorage");
+        std::fs::create_dir_all(&direct_origin_local_storage).unwrap();
+
+        let targets = webkit_local_storage_targets(home);
+
+        assert_eq!(targets.len(), 1);
+        assert!(targets.contains(&direct_origin_local_storage));
+    }
+
+    #[test]
+    fn reset_legacy_webkit_local_storage_removes_targets_and_writes_sentinel() {
+        let temp = tempdir().unwrap();
+        let home = temp.path();
+        let top_level = home
+            .join("Library")
+            .join("WebKit")
+            .join("com.akiojin.gwt")
+            .join("WebsiteData")
+            .join("LocalStorage");
+        let nested = home
+            .join("Library")
+            .join("WebKit")
+            .join("com.akiojin.gwt")
+            .join("WebsiteData")
+            .join("Default")
+            .join("origin-a")
+            .join("site-a")
+            .join("LocalStorage");
+        std::fs::create_dir_all(&top_level).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(top_level.join("https___tauri.local_0.localstorage"), "").unwrap();
+        std::fs::write(nested.join("localstorage.sqlite3"), "legacy").unwrap();
+
+        let removed_targets = reset_legacy_webkit_local_storage(home).unwrap();
+        let sentinel = webkit_local_storage_reset_sentinel(home);
+
+        assert_eq!(removed_targets.len(), 2);
+        assert!(!top_level.exists());
+        assert!(!nested.exists());
+        assert!(sentinel.exists());
+
+        let sentinel_body = std::fs::read_to_string(sentinel).unwrap();
+        assert!(sentinel_body.contains(LEGACY_WEBKIT_LOCAL_STORAGE_RESET_SENTINEL));
+    }
+
+    #[test]
+    fn reset_legacy_webkit_local_storage_skips_when_sentinel_exists() {
+        let temp = tempdir().unwrap();
+        let home = temp.path();
+        let top_level = home
+            .join("Library")
+            .join("WebKit")
+            .join("com.akiojin.gwt")
+            .join("WebsiteData")
+            .join("LocalStorage");
+        std::fs::create_dir_all(&top_level).unwrap();
+
+        let sentinel = webkit_local_storage_reset_sentinel(home);
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, "already-migrated").unwrap();
+
+        let removed_targets = reset_legacy_webkit_local_storage(home).unwrap();
+
+        assert!(removed_targets.is_empty());
+        assert!(top_level.exists());
     }
 }

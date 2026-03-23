@@ -7,11 +7,10 @@
 // start_session_watcher() appears dead to the compiler.
 #![cfg_attr(test, allow(unused))]
 
+use std::{path::Path, sync::mpsc, time::Duration};
+
 use gwt_core::config::Session;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent, DebouncedEventKind};
-use std::path::Path;
-use std::sync::mpsc;
-use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tracing::{debug, warn};
 
@@ -94,9 +93,11 @@ fn has_relevant_session_change(events: &[DebouncedEvent]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
     use std::path::PathBuf;
+
+    use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
+
+    use super::*;
 
     fn make_event(path: &str, kind: DebouncedEventKind) -> DebouncedEvent {
         DebouncedEvent {

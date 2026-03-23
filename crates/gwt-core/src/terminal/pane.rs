@@ -1,15 +1,18 @@
 //! Terminal pane: integrates PTY and scrollback
 
-use std::collections::HashMap;
-use std::io::Write;
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
-use std::path::Path;
+use tracing::instrument;
 
-use super::pty::{PtyConfig, PtyHandle};
-use super::scrollback::ScrollbackFile;
-use super::AgentColor;
-use super::TerminalError;
+use super::{
+    pty::{PtyConfig, PtyHandle},
+    scrollback::ScrollbackFile,
+    AgentColor, TerminalError,
+};
 
 /// Status of a terminal pane's child process.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +63,7 @@ pub struct TerminalPane {
 
 impl TerminalPane {
     /// Create a new terminal pane from the given configuration.
+    #[instrument(skip_all)]
     pub fn new(config: PaneConfig) -> Result<Self, TerminalError> {
         let mut env_vars = config.env_vars;
         env_vars.insert("GWT_PANE_ID".to_string(), config.pane_id.clone());
@@ -114,6 +118,7 @@ impl TerminalPane {
     }
 
     /// Write input data to the PTY.
+    #[instrument(skip(self, data))]
     pub fn write_input(&mut self, data: &[u8]) -> Result<(), TerminalError> {
         if let Some(ref mut writer) = self.writer {
             writer
@@ -133,6 +138,7 @@ impl TerminalPane {
     }
 
     /// Resize the terminal pane (PTY only).
+    #[instrument(skip(self))]
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<(), TerminalError> {
         self.pty.resize(rows, cols)
     }
@@ -215,6 +221,7 @@ impl TerminalPane {
     }
 
     /// Kill the child process.
+    #[instrument(skip(self))]
     pub fn kill(&mut self) -> Result<(), TerminalError> {
         self.pty.kill()
     }
@@ -222,9 +229,9 @@ impl TerminalPane {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, time::Duration};
+
     use super::*;
-    use std::sync::mpsc;
-    use std::time::Duration;
 
     /// Helper: read from PTY reader in a separate thread with timeout.
     fn read_with_timeout(

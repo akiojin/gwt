@@ -1002,7 +1002,7 @@ describe("AgentLaunchForm", () => {
     expect(issueBranchCalls).toHaveLength(0);
   });
 
-  it("keeps Launch disabled in fromIssue mode until a prefix is selected", async () => {
+  it("applies feature/ fallback when AI classification is unavailable in fromIssue mode", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
         return [
@@ -1053,10 +1053,12 @@ describe("AgentLaunchForm", () => {
       return [];
     });
 
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+
     const rendered = await renderLaunchForm({
       projectPath: "/tmp/project",
       selectedBranch: "main",
-      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onLaunch,
       onClose: vi.fn(),
     });
 
@@ -1079,8 +1081,26 @@ describe("AgentLaunchForm", () => {
       expect(rendered.getByText("Auto-generated from issue #42")).toBeTruthy();
     });
 
+    const issueBranchField = rendered
+      .getByText("Auto-generated from issue #42")
+      .closest(".field") as HTMLElement;
+    expect(issueBranchField.querySelector("select")).toBeNull();
+    expect(issueBranchField.textContent).toContain("feature/");
+
     const launchButton = rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement;
-    expect(launchButton.disabled).toBe(true);
+    await waitFor(() => {
+      expect(launchButton.disabled).toBe(false);
+    });
+    await fireEvent.click(launchButton);
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.branch).toBe("feature/issue-42");
+    expect(request.createBranch).toEqual({ name: "feature/issue-42", base: "main" });
+    expect(request.issueNumber).toBe(42);
   });
 
   it("does not link or rollback issue branch before async launch job completion", async () => {
@@ -1163,9 +1183,10 @@ describe("AgentLaunchForm", () => {
     const issueBranchField = rendered
       .getByText("Auto-generated from issue #99")
       .closest(".field") as HTMLElement;
-    const issuePrefixSelect = issueBranchField.querySelector("select") as HTMLSelectElement;
+    const issuePrefixSelect = issueBranchField.querySelector("select");
     const issueBranchInput = issueBranchField.querySelector("input[readonly]") as HTMLInputElement;
-    expect(issuePrefixSelect.value).toBe("bugfix/");
+    expect(issuePrefixSelect).toBeNull();
+    expect(issueBranchField.textContent).toContain("bugfix/");
     expect(issueBranchInput.value).toBe("issue-99");
 
     const launchButton = rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement;

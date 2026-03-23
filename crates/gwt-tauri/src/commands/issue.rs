@@ -1,31 +1,42 @@
 //! GitHub Issue commands (gwt-spec issue)
 
-use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::state::{AppState, IssueListCacheEntry};
-use gwt_core::ai::{
-    classify_issue_prefix as core_classify_issue_prefix, format_error_for_display, AIClient,
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use gwt_core::config::ProfilesConfig;
-use gwt_core::git::{
-    create_linked_branch, fetch_issue_detail, fetch_issues_with_options, find_branch_for_issue,
-    find_branches_for_issues, get_spec_issue_detail, is_gh_cli_authenticated, is_gh_cli_available,
-    search_issues_with_query,
+
+use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
+use gwt_core::{
+    ai::{classify_issue_prefix as core_classify_issue_prefix, format_error_for_display, AIClient},
+    config::ProfilesConfig,
+    git::{
+        create_linked_branch, fetch_issue_detail, fetch_issues_with_options, find_branch_for_issue,
+        find_branches_for_issues, is_gh_cli_authenticated, is_gh_cli_available,
+        search_issues_with_query,
+    },
+    worktree::WorktreeManager,
+    StructuredError,
 };
-use gwt_core::worktree::WorktreeManager;
-use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
+use tracing::instrument;
+
+use crate::{
+    commands::project::resolve_repo_path_for_project_root,
+    state::{AppState, IssueListCacheEntry},
+};
 
 const ISSUE_LIST_CACHE_TTL_MS: i64 = 120_000;
 const ISSUE_LIST_CACHE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const ISSUE_LIST_INFLIGHT_WAIT_MS: u64 = 5_000;
 const GH_STATUS_OS_ENV_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+static ISSUE_CACHE_PERSIST_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueCategory {
@@ -199,6 +210,19 @@ fn issue_cache_key(
         "page={page}&per_page={per_page}&state={state}&category={}&include_body={include_body}",
         category.as_str()
     )
+}
+
+fn issue_cache_persist_lock(repo_path: &Path) -> Arc<Mutex<()>> {
+    let key = dunce::canonicalize(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let locks = ISSUE_CACHE_PERSIST_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = locks.lock().unwrap();
+    guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 fn decode_cached_issue_response(entry: &IssueListCacheEntry) -> Option<FetchIssuesResponse> {
@@ -375,9 +399,12 @@ fn fetch_github_issues_impl(
     force_refresh: Option<bool>,
     app_state: &AppState,
 ) -> Result<FetchIssuesResponse, StructuredError> {
+    log_flow_start("issue", "fetch_github_issues");
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "fetch_github_issues"))?;
+    let repo_path = resolve_repo_path_for_project_root(project_root).map_err(|e| {
+        log_flow_failure("issue", "fetch_github_issues", &e);
+        StructuredError::internal(&e, "fetch_github_issues")
+    })?;
     let state = state.unwrap_or_else(|| "open".to_string());
     let category = parse_issue_category(category);
     let include_body = include_body.unwrap_or(false);
@@ -393,6 +420,7 @@ fn fetch_github_issues_impl(
     } else if cache_enabled {
         if let Some(hit) = try_get_issue_cache(app_state, &repo_path, &repo_key, &cache_key, now_ms)
         {
+            log_flow_success("issue", "fetch_github_issues");
             return Ok(hit);
         }
     }
@@ -405,6 +433,7 @@ fn fetch_github_issues_impl(
             if let Some(hit) =
                 try_get_issue_cache(app_state, &repo_path, &repo_key, &cache_key, now_millis())
             {
+                log_flow_success("issue", "fetch_github_issues");
                 return Ok(hit);
             }
         }
@@ -436,9 +465,13 @@ fn fetch_github_issues_impl(
                     now_millis(),
                 );
             }
+            log_flow_success("issue", "fetch_github_issues");
             Ok(response)
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            log_flow_failure("issue", "fetch_github_issues", &err.message);
+            Err(err)
+        }
     };
 
     if cache_enabled && fetch_owner {
@@ -449,6 +482,7 @@ fn fetch_github_issues_impl(
 }
 
 /// Fetch GitHub issues with pagination (FR-010)
+#[instrument(skip_all, fields(command = "fetch_github_issues", project_path))]
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_github_issues(
@@ -495,6 +529,10 @@ fn fetch_github_issue_detail_impl(
 }
 
 /// Fetch a single GitHub issue detail
+#[instrument(
+    skip_all,
+    fields(command = "fetch_github_issue_detail", project_path, issue_number)
+)]
 #[tauri::command]
 pub async fn fetch_github_issue_detail(
     project_path: String,
@@ -560,39 +598,70 @@ fn extract_issue_number_from_branch(branch: &str) -> Option<u64> {
     None
 }
 
+#[cfg(test)]
 fn is_issue_not_found_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("could not resolve to an issue")
         || (lower.contains("issue with the number") && lower.contains("(repository.issue)"))
 }
 
-/// Fetch issue linked to branch naming pattern (`issue-<number>`) – blocking impl
+/// Fetch issue linked to branch naming pattern (`issue-<number>`) – blocking impl.
+///
+/// Cache-first: checks local linkage store → exact cache before online fetch
+/// (#1714 FR-004).
 fn fetch_branch_linked_issue_impl(
     project_path: String,
     branch: String,
 ) -> Result<Option<BranchLinkedIssueInfo>, StructuredError> {
-    let Some(issue_number) = extract_issue_number_from_branch(&branch) else {
+    // Try local linkage store first, then branch name parse
+    let issue_number = {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "fetch_branch_linked_issue"))?;
+        let link_store = gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        if let Some(link) = link_store.get_link(&branch) {
+            Some(link.issue_number)
+        } else {
+            extract_issue_number_from_branch(&branch)
+        }
+    };
+
+    let Some(issue_number) = issue_number else {
         return Ok(None);
     };
 
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "fetch_branch_linked_issue"))?;
+    let cache_lock = issue_cache_persist_lock(&repo_path);
+    let _cache_guard = cache_lock.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Issue cache lock poisoned: {e}"),
+            "fetch_branch_linked_issue",
+        )
+    })?;
 
-    match get_spec_issue_detail(&repo_path, issue_number) {
-        Ok(detail) => Ok(Some(BranchLinkedIssueInfo {
-            number: detail.number,
-            title: detail.title,
-            updated_at: detail.updated_at,
-            labels: detail.labels,
-            url: detail.url,
-        })),
-        Err(err) if is_issue_not_found_error(&err) => Ok(None),
-        Err(err) => Err(StructuredError::internal(&err, "fetch_branch_linked_issue")),
+    // Try exact cache first (#1714 FR-004)
+    let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
+    if let Some(entry) = cache.resolve(&repo_path, issue_number) {
+        let _ = cache.save(&repo_path);
+        return Ok(Some(BranchLinkedIssueInfo {
+            number: entry.number,
+            title: entry.title,
+            updated_at: entry.updated_at,
+            labels: entry.labels,
+            url: entry.url,
+        }));
     }
+    let _ = cache.save(&repo_path);
+    Ok(None)
 }
 
 /// Fetch issue linked to branch naming pattern (`issue-<number>`).
+#[instrument(
+    skip_all,
+    fields(command = "fetch_branch_linked_issue", project_path, branch)
+)]
 #[tauri::command]
 pub async fn fetch_branch_linked_issue(
     project_path: String,
@@ -607,6 +676,165 @@ pub async fn fetch_branch_linked_issue(
             &format!("Task join failed: {e}"),
             "fetch_branch_linked_issue",
         )
+    })?
+}
+
+// ── #1714: Issue cache sync commands ──
+
+/// Sync issue cache (diff or full). (#1714 FR-008, FR-009)
+#[tauri::command]
+pub async fn sync_issue_cache(
+    project_path: String,
+    mode: String,
+) -> Result<gwt_core::git::issue_cache::SyncResult, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "sync_issue_cache"))?;
+        let cache_lock = issue_cache_persist_lock(&repo_path);
+        let _cache_guard = cache_lock.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Issue cache lock poisoned: {e}"),
+                "sync_issue_cache",
+            )
+        })?;
+
+        let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
+        let result = match mode.as_str() {
+            "full" => cache.full_sync(&repo_path),
+            _ => cache.diff_sync(&repo_path),
+        }
+        .map_err(|e| StructuredError::internal(&e, "sync_issue_cache"))?;
+
+        cache
+            .save(&repo_path)
+            .map_err(|e| StructuredError::internal(&e, "sync_issue_cache"))?;
+
+        Ok(result)
+    })
+    .await
+    .map_err(|e| StructuredError::internal(&format!("Task join failed: {e}"), "sync_issue_cache"))?
+}
+
+/// Get issue cache sync status. (#1714 FR-010)
+#[tauri::command]
+pub async fn get_issue_cache_sync_status(
+    project_path: String,
+) -> Result<gwt_core::git::issue_cache::IssueCacheSyncState, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "get_issue_cache_sync_status"))?;
+
+        let cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
+        Ok(cache.sync_state)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Task join failed: {e}"),
+            "get_issue_cache_sync_status",
+        )
+    })?
+}
+
+/// Resolve worktree issue via linkage + exact cache. (#1714 FR-004)
+#[tauri::command]
+pub async fn resolve_worktree_issue(
+    project_path: String,
+    branch: String,
+) -> Result<Option<BranchLinkedIssueInfo>, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "resolve_worktree_issue"))?;
+
+        // 1. Check linkage store
+        let link_store = gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        let issue_number = link_store
+            .get_link(&branch)
+            .map(|link| link.issue_number)
+            .or_else(|| gwt_core::git::issue_linkage::extract_issue_number(&branch));
+
+        let Some(issue_number) = issue_number else {
+            return Ok(None);
+        };
+        let cache_lock = issue_cache_persist_lock(&repo_path);
+        let _cache_guard = cache_lock.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Issue cache lock poisoned: {e}"),
+                "resolve_worktree_issue",
+            )
+        })?;
+
+        // 2. Resolve from exact cache (with online fallback)
+        let mut cache = gwt_core::git::issue_cache::IssueExactCache::load(&repo_path);
+        let entry = cache.resolve(&repo_path, issue_number);
+        let _ = cache.save(&repo_path);
+
+        Ok(entry.map(|e| BranchLinkedIssueInfo {
+            number: e.number,
+            title: e.title,
+            updated_at: e.updated_at,
+            labels: e.labels,
+            url: e.url,
+        }))
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(&format!("Task join failed: {e}"), "resolve_worktree_issue")
+    })?
+}
+
+/// Bootstrap worktree-issue linkage for all branches. (#1714 FR-007)
+#[tauri::command]
+pub async fn bootstrap_issue_linkage(project_path: String) -> Result<u32, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "bootstrap_issue_linkage"))?;
+
+        let mut link_store = gwt_core::git::issue_linkage::WorktreeIssueLinkStore::load(&repo_path);
+        let before = link_store.links.len();
+
+        // Get local branch names
+        let output = gwt_core::process::git_command()
+            .args(["branch", "--format=%(refname:short)"])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| {
+                StructuredError::internal(
+                    &format!("Failed to list branches: {e}"),
+                    "bootstrap_issue_linkage",
+                )
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(StructuredError::internal(
+                &format!("Failed to list branches: {}", stderr.trim()),
+                "bootstrap_issue_linkage",
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let branches: Vec<String> = stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        link_store.bootstrap_from_branches(&branches);
+
+        link_store
+            .save(&repo_path)
+            .map_err(|e| StructuredError::internal(&e, "bootstrap_issue_linkage"))?;
+
+        let added = link_store.links.len() - before;
+        Ok(added as u32)
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(&format!("Task join failed: {e}"), "bootstrap_issue_linkage")
     })?
 }
 
@@ -633,6 +861,7 @@ where
     }
 }
 
+#[instrument(skip_all, fields(command = "check_gh_cli_status"))]
 #[tauri::command]
 pub fn check_gh_cli_status(
     state: State<AppState>,
@@ -646,6 +875,10 @@ pub fn check_gh_cli_status(
 }
 
 /// Find an existing branch for a given issue (FR-012)
+#[instrument(
+    skip_all,
+    fields(command = "find_existing_issue_branch", project_path, issue_number)
+)]
 #[tauri::command]
 pub fn find_existing_issue_branch(
     project_path: String,
@@ -683,6 +916,10 @@ fn find_existing_issue_branches_bulk_impl(
 }
 
 /// Bulk lookup of existing issue branches for list rendering.
+#[instrument(
+    skip_all,
+    fields(command = "find_existing_issue_branches_bulk", project_path)
+)]
 #[tauri::command]
 pub async fn find_existing_issue_branches_bulk(
     project_path: String,
@@ -701,6 +938,15 @@ pub async fn find_existing_issue_branches_bulk(
 }
 
 /// Link a branch to a GitHub issue via `gh issue develop` (FR-013)
+#[instrument(
+    skip_all,
+    fields(
+        command = "link_branch_to_issue",
+        project_path,
+        issue_number,
+        branch_name
+    )
+)]
 #[tauri::command]
 pub fn link_branch_to_issue(
     project_path: String,
@@ -718,6 +964,10 @@ pub fn link_branch_to_issue(
 /// Rollback an issue-linked branch (FR-014)
 ///
 /// Deletes local branch and optionally the remote branch.
+#[instrument(
+    skip_all,
+    fields(command = "rollback_issue_branch", project_path, branch_name)
+)]
 #[tauri::command]
 pub fn rollback_issue_branch(
     project_path: String,
@@ -788,6 +1038,7 @@ pub struct ClassifyResult {
 }
 
 /// Classify a GitHub issue into a branch prefix using AI.
+#[instrument(skip_all, fields(command = "classify_issue_branch_prefix"))]
 #[tauri::command]
 pub fn classify_issue_branch_prefix(
     title: String,

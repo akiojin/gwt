@@ -1,6 +1,6 @@
 ---
-name: gwt-fix-pr
-description: Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Create fix plans and implement after user approval. Reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Notify reviewers after fixes.
+name: gwt-pr-fix
+description: Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Use REST-first transport for CI/reviews/comments, keep GraphQL only for unresolved review thread discovery and reply/resolve, autonomously fix high-confidence blockers, reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Ask the user only for ambiguous conflicts or design decisions.
 metadata:
   short-description: Fix failing GitHub PRs comprehensively
 ---
@@ -18,11 +18,15 @@ Use gh to inspect PRs for:
 - Change Requests from reviewers
 - Unresolved review threads
 
-Then propose a fix plan, implement after explicit approval, **reply to every reviewer comment** (with action taken or reason for not addressing), resolve all threads, and notify reviewers.
+REST-first boundary:
 
-- Depends on the `plan` skill for drafting and approving the fix plan.
+- PR resolution, CI/check reads, reviews, review comments, and issue comments: REST-first
+- Unresolved review thread discovery: GraphQL-only for now
+- Review thread reply / resolve: GraphQL-only for now
 
-Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), then run `gh auth status` with escalated permissions (include workflow/repo scopes) so `gh` commands succeed.
+Then inspect, fix, **reply to every reviewer comment** (with action taken or reason for not addressing), resolve all threads, and notify reviewers.
+
+Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), but allow direct `GH_TOKEN` / `GITHUB_TOKEN` REST auth when available instead of blocking only on `gh auth status`.
 
 ## Comment Response Policy
 
@@ -91,31 +95,31 @@ Next
 
 ```bash
 # Inspect all (CI, conflicts, reviews) - default mode
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" --repo "." --pr "<number>"
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>"
 
 # CI checks only
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks
 
 # Conflicts only
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode conflicts
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode conflicts
 
 # Reviews only (Change Requests + Unresolved Threads)
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode reviews
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode reviews
 
 # JSON output
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --json
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --json
 
 # Required checks only (if gh supports --required)
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks --required-only
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks --required-only
 
 # Reply to all unresolved threads and resolve them
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --reply-and-resolve '[
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --reply-and-resolve '[
   {"threadId":"PRRT_xxx123","body":"Fixed: refactored the method as suggested."},
   {"threadId":"PRRT_xxx456","body":"Not addressed: this is intentional because the API requires this format."}
 ]'
 
 # Add a comment to notify reviewers
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --add-comment "Fixed all issues. Please re-review."
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --add-comment "Fixed all issues. Please re-review."
 ```
 
 ## Workflow
@@ -125,7 +129,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" -
    - If unauthenticated, ask the user to log in before proceeding.
 
 2. **Resolve the PR.**
-   - Prefer the current branch PR: `gh pr view --json number,url`.
+   - Prefer the current branch PR through a REST head-branch lookup.
    - If the user provides a PR number or URL, use that directly.
 
 3. **Inspect based on mode:**
@@ -133,19 +137,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" -
    **Conflicts Mode (`--mode conflicts`):**
    - Check `mergeable` and `mergeStateStatus` fields.
    - If `CONFLICTING` or `DIRTY`, report conflict details.
-   - If `BEHIND`, report that the base branch advanced and an Update Branch is required.
-   - Suggest resolution steps: fetch base branch, merge/rebase, resolve conflicts.
+   - If `BEHIND`, report that the base branch advanced and a base-branch merge is required.
+   - Default resolution path is `git fetch origin <base> && git merge origin/<base>`.
+   - Do not recommend rebase for gwt PR maintenance.
 
    **Reviews Mode (`--mode reviews`):**
    - Fetch reviews with `CHANGES_REQUESTED` state.
-   - Fetch unresolved review threads using GraphQL.
-   - Fetch ALL reviewer comments (review summaries, inline review comments, issue comments) without truncation.
+   - Fetch ALL reviewer comments (review summaries, inline review comments, issue comments) without truncation through REST.
+   - Fetch unresolved review threads using GraphQL only.
    - Display reviewer, comment body (full text), file path, and line number.
    - Decide if reviewer feedback requires action (any change request, unresolved thread, or reviewer comment).
 
    **Checks Mode (`--mode checks`):**
-   - Run bundled script to inspect failing CI checks.
-   - Add `--required-only` to limit output to required checks when supported.
+   - Run bundled script to inspect failing CI checks through REST check-runs.
+   - Add `--required-only` to limit output when a reliable required-only source is available; otherwise report that all checks are being shown.
    - Fetch GitHub Actions logs and extract failure snippets.
    - For external checks (Buildkite, etc.), report URL only.
 
@@ -197,16 +202,16 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" -
    **Auto-fix judgment:**
 
    - **Auto-fix: Yes** — CI-FAILURE code fixes, reviewer instructions that the LLM can address with high confidence
-   - **Auto-fix: No (needs confirmation)** — CONFLICT resolution (merge/rebase), low-confidence reviewer instructions, changes requiring design decisions
+   - **Auto-fix: No (needs confirmation)** — merge conflicts you cannot resolve with high confidence, low-confidence reviewer instructions, changes requiring design decisions
 
    **Each CHANGE-REQUEST and each UNRESOLVED-THREAD is a separate B-item.** Do not combine multiple threads or requests into one item.
 
 5. **Decide execution path.**
-   - If ALL blocking items have `Auto-fix: Yes` → display Diagnosis Report, skip plan, proceed directly to step 6.
-   - If ANY blocking item has `Auto-fix: No` → create a plan referencing B-item IDs (e.g., "Fix B1: ...", "Fix B3: ...") and request user approval for `Auto-fix: No` items before proceeding.
+   - If ALL blocking items have `Auto-fix: Yes` → display Diagnosis Report and proceed directly to step 6.
+   - If ANY blocking item has `Auto-fix: No` → create a concise plan referencing B-item IDs and ask the user only about those ambiguous items before proceeding.
 
 6. **Implement fixes.**
-   - Apply the approved fixes, summarize diffs/tests.
+   - Apply the fixes, summarize diffs/tests.
    - After applying fixes, commit changes and push to the PR branch.
    - Verify push succeeded before proceeding to step 7.
    - **After implementing fixes, proceed to step 7 to reply and resolve ALL threads.**
@@ -222,11 +227,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" -
    - The script validates completeness and rejects the operation if any thread is missing a reply.
    - Requires `Repository Permissions > Contents: Read and Write`.
    - Resolve threads at this point (after code fix is pushed). Do not wait for CI completion to resolve threads.
+   - GraphQL remains only for unresolved review threads and thread reply/resolve in this workflow; if GitHub rate-limits those mutations, back off and retry instead of fabricating a REST replacement.
 
 8. **Notify reviewers (mandatory).**
-   - With `--add-comment "message"`, post a comment to the PR.
+   - With `--add-comment "message"`, post a comment to the PR through REST first.
    - Include a summary of what was fixed (list each B-item and the action taken).
    - This step is not optional — always notify reviewers after fixes are applied.
+   - If the REST comment path fails unexpectedly, fall back to `gh pr comment`.
 
 9. **Verify fix (mandatory — do not skip).**
    - Re-run the inspection script with `--mode all` (regardless of initial mode).
@@ -250,14 +257,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-fix-pr/scripts/inspect_pr_checks.py" -
 
 ### BRANCH-BEHIND
 
-- Default strategy: `git fetch origin <base> && git merge origin/<base>`
+- Default strategy: `git fetch origin <base> && git merge origin/<base> && git push`
+- This is automatic when the merge is clean.
 - If merge results in conflicts, switch to CONFLICT handling below.
 
 ### CONFLICT
 
-- LLM attempts to resolve conflicts after user confirmation.
-- Present conflict summary (affected files, conflict markers) and proposed resolution to the user.
-- Execute resolution only after user approves.
+- First inspect the conflicting files and reason about the behavioral impact of each side; do not resolve by mechanically taking one side.
+- If the correct merge is clear and low-risk, resolve it, run the relevant checks, and push.
+- If the correct merge is not clear, present the conflict summary and ask the user before proceeding.
 
 ## Bundled Resources
 
@@ -352,6 +360,9 @@ Use `--reply-and-resolve` to reply to every unresolved thread and resolve them.
 ### Reviewer Notification
 
 Use `--add-comment "message"` to post a summary comment to the PR after fixes.
+
+- Primary path: `POST /repos/<owner>/<repo>/issues/<pr_number>/comments`
+- `gh pr comment` is fallback-only
 
 ## Output Examples
 

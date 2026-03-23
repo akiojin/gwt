@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-search
-description: Semantic search over GitHub gwt-spec Issues using vector embeddings. Use before creating or updating any spec issue.
+description: Semantic search over GitHub gwt-spec Issues using vector embeddings. Use when searching for existing specs, finding related gwt-spec issues, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve.
 ---
 
 # Issue Search
@@ -81,4 +81,4 @@ Then search Issues semantically:
 - Issue index must be updated manually (via GUI "Update Index" button or `index-issues` action)
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
-- For file search, use `gwt-project-index` instead
+- For file search, use `gwt-file-search` instead

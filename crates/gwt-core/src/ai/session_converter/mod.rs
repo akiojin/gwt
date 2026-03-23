@@ -3,8 +3,9 @@
 //! This module provides the ability to convert parsed sessions from one agent format
 //! to another, enabling session continuity when switching between different AI agents.
 
-use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
 
 use super::session_parser::{AgentType, ParsedSession};
 

@@ -1,10 +1,12 @@
 //! Migration backup and restore (gwt-spec issue T804-T805, FR-202)
 
-use super::MigrationError;
 use std::path::{Path, PathBuf};
+
 #[cfg(not(windows))]
 use tracing::warn;
 use tracing::{debug, info};
+
+use super::MigrationError;
 
 /// Information about a created backup
 #[derive(Debug, Clone)]
@@ -260,8 +262,9 @@ fn copy_permissions(src: &Path, dst: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_create_and_restore_backup() {

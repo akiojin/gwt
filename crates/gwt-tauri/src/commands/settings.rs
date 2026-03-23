@@ -1,12 +1,17 @@
 //! Settings management commands
 
-use gwt_core::config::{Settings, SkillRegistrationPreferences};
-use gwt_core::GwtError;
-use gwt_core::StructuredError;
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::PathBuf,
+};
+
+use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
+use gwt_core::{
+    config::{Settings, SkillRegistrationPreferences},
+    GwtError, StructuredError,
+};
 use serde::{Deserialize, Serialize};
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
-use tracing::error;
+use tracing::{error, instrument};
 
 fn with_panic_guard<T>(
     context: &str,
@@ -99,6 +104,8 @@ pub struct SettingsData {
     pub voice_input: VoiceInputSettingsData,
     #[serde(default)]
     pub default_shell: Option<String>,
+    #[serde(default)]
+    pub profiling: bool,
 }
 
 fn default_app_language() -> String {
@@ -184,6 +191,7 @@ impl From<&Settings> for SettingsData {
                 model: s.voice_input.model.clone(),
             },
             default_shell: s.terminal.default_shell.clone(),
+            profiling: s.profiling,
         }
     }
 }
@@ -230,6 +238,7 @@ impl SettingsData {
             .as_ref()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+        s.profiling = self.profiling;
         Ok(())
     }
 
@@ -296,29 +305,58 @@ fn normalize_voice_input(value: &VoiceInputSettingsData) -> Result<NormalizedVoi
 }
 
 /// Get current settings
+#[instrument(skip_all, fields(command = "get_settings"))]
 #[tauri::command]
 pub fn get_settings() -> Result<SettingsData, StructuredError> {
-    with_panic_guard("loading settings", "get_settings", || {
-        let settings = Settings::load_global()
-            .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?;
+    log_flow_start("config", "get_settings");
+    let result = with_panic_guard("loading settings", "get_settings", || {
+        let settings = Settings::load_global().map_err(|e| {
+            gwt_core::logging::log_incident(
+                "config",
+                "get_settings",
+                Some("CONFIG_LOAD_FAILED"),
+                &e.to_string(),
+            );
+            StructuredError::from_gwt_error(&e, "get_settings")
+        })?;
         Ok(SettingsData::from(&settings))
-    })
+    });
+    match &result {
+        Ok(_) => log_flow_success("config", "get_settings"),
+        Err(e) => log_flow_failure("config", "get_settings", &e.message),
+    }
+    result
 }
 
 /// Save settings
+#[instrument(skip_all, fields(command = "save_settings"))]
 #[tauri::command]
 pub fn save_settings(settings: SettingsData) -> Result<(), StructuredError> {
-    with_panic_guard("saving settings", "save_settings", || {
+    log_flow_start("config", "save_settings");
+    let result = with_panic_guard("saving settings", "save_settings", || {
         Settings::update_global(|core_settings| {
             settings
                 .apply_to_settings(core_settings)
                 .map_err(|e| GwtError::ConfigWriteError { reason: e })?;
             Ok(())
         })
-        .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
+        .map_err(|e| {
+            gwt_core::logging::log_incident(
+                "config",
+                "save_settings",
+                Some("CONFIG_SAVE_FAILED"),
+                &e.to_string(),
+            );
+            StructuredError::from_gwt_error(&e, "save_settings")
+        })?;
 
         Ok(())
-    })
+    });
+    match &result {
+        Ok(_) => log_flow_success("config", "save_settings"),
+        Err(e) => log_flow_failure("config", "save_settings", &e.message),
+    }
+    result
 }
 
 #[cfg(test)]
@@ -331,6 +369,8 @@ mod tests {
         core.appearance.ui_font_size = 16;
         core.appearance.terminal_font_size = 20;
         core.app_language = "ja".to_string();
+        core.debug = true;
+        core.profiling = true;
         core.voice_input.enabled = true;
         core.voice_input.engine = "qwen3-asr".to_string();
         core.voice_input.language = "ja".to_string();
@@ -343,6 +383,8 @@ mod tests {
         assert_eq!(data.ui_font_family, default_ui_font_family());
         assert_eq!(data.terminal_font_family, default_terminal_font_family());
         assert_eq!(data.app_language, "ja");
+        assert!(data.debug);
+        assert!(data.profiling);
         assert!(data.voice_input.enabled);
         assert_eq!(data.voice_input.engine, "qwen3-asr");
         assert_eq!(data.voice_input.language, "ja");
@@ -354,6 +396,8 @@ mod tests {
         assert_eq!(back.appearance.ui_font_size, 16);
         assert_eq!(back.appearance.terminal_font_size, 20);
         assert_eq!(back.app_language, "ja");
+        assert!(back.debug);
+        assert!(back.profiling);
         assert!(back.voice_input.enabled);
         assert_eq!(back.voice_input.engine, "qwen3-asr");
         assert_eq!(back.voice_input.language, "ja");
@@ -385,6 +429,30 @@ mod tests {
         data.default_shell = Some("   ".to_string());
         let back = data.to_settings().unwrap();
         assert!(back.terminal.default_shell.is_none());
+    }
+
+    #[test]
+    fn test_profiling_flag_round_trips_on_save() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.debug = false;
+        data.profiling = true;
+
+        let back = data.to_settings().unwrap();
+        assert!(!back.debug);
+        assert!(back.profiling);
+    }
+
+    #[test]
+    fn test_existing_profiling_state_stays_independent_from_debug() {
+        let core = Settings {
+            debug: false,
+            profiling: true,
+            ..Settings::default()
+        };
+
+        let data = SettingsData::from(&core);
+        assert!(!data.debug);
+        assert!(data.profiling);
     }
 
     #[test]

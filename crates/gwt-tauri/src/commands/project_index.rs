@@ -1,15 +1,19 @@
 //! Project structure index commands backed by ChromaDB (Python runtime).
 
-use crate::commands::project::{resolve_project_root, resolve_repo_path_for_project_root};
+use std::{
+    collections::HashMap,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+};
+
 use gwt_core::process::command_os;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use tracing::warn;
+use tracing::{instrument, warn};
 use uuid::Uuid;
+
+use crate::commands::project::{resolve_project_root, resolve_repo_path_for_project_root};
 
 const CHROMA_VENV_DIR: &str = "chroma-venv";
 const CHROMA_RUNTIME_PIP_DEPS: &[&str] = &["chromadb"];
@@ -802,6 +806,7 @@ fn run_files_action_with_crash_recovery(
 // Tauri commands
 // ---------------------------------------------------------------------------
 
+#[instrument(skip_all, fields(command = "ensure_index_runtime"))]
 #[tauri::command]
 pub async fn ensure_index_runtime() -> Result<IndexRuntimeSetupResult, String> {
     tokio::task::spawn_blocking(ensure_chroma_runtime_sync)
@@ -809,6 +814,7 @@ pub async fn ensure_index_runtime() -> Result<IndexRuntimeSetupResult, String> {
         .map_err(|e| format!("Index runtime setup task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "index_project_cmd", project_root))]
 #[tauri::command]
 pub async fn index_project_cmd(project_root: String) -> Result<IndexProjectResult, String> {
     tokio::task::spawn_blocking(move || {
@@ -822,6 +828,7 @@ pub async fn index_project_cmd(project_root: String) -> Result<IndexProjectResul
     .map_err(|e| format!("Index project task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "search_project_index_cmd", project_root))]
 #[tauri::command]
 pub async fn search_project_index_cmd(
     project_root: String,
@@ -837,6 +844,7 @@ pub async fn search_project_index_cmd(
     .map_err(|e| format!("Search project index task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "get_index_status_cmd", project_root))]
 #[tauri::command]
 pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusResult, String> {
     tokio::task::spawn_blocking(move || {
@@ -851,6 +859,7 @@ pub async fn get_index_status_cmd(project_root: String) -> Result<IndexStatusRes
     .map_err(|e| format!("Get index status task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "index_github_issues_cmd", project_root))]
 #[tauri::command]
 pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssuesResult, String> {
     tokio::task::spawn_blocking(move || {
@@ -870,6 +879,7 @@ pub async fn index_github_issues_cmd(project_root: String) -> Result<IndexIssues
     .map_err(|e| format!("Index GitHub issues task failed: {e}"))?
 }
 
+#[instrument(skip_all, fields(command = "search_github_issues_cmd", project_root))]
 #[tauri::command]
 pub async fn search_github_issues_cmd(
     project_root: String,
@@ -893,6 +903,12 @@ pub async fn search_github_issues_cmd(
 /// Build index for a project in the background. Non-fatal on errors.
 pub fn spawn_background_index(project_root: String) {
     tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let _span = tracing::info_span!(
+            "startup.spawn_background_index",
+            project_root = %project_root
+        )
+        .entered();
         // 1. Ensure runtime
         if let Err(e) = ensure_chroma_runtime_sync() {
             warn!(
@@ -910,6 +926,7 @@ pub fn spawn_background_index(project_root: String) {
                     category = "project_index",
                     files_indexed = resp.files_indexed.unwrap_or(0),
                     duration_ms = resp.duration_ms.unwrap_or(0),
+                    elapsed_ms = started.elapsed().as_millis(),
                     "Project index built successfully"
                 );
             }
@@ -926,9 +943,11 @@ pub fn spawn_background_index(project_root: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     fn managed_chroma_python() -> Option<PathBuf> {
         let venv_dir = chroma_venv_dir().ok()?;
@@ -958,7 +977,9 @@ mod tests {
 
     fn init_repo_with_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempdir().expect("create tempdir");
-        let repo = temp.path().join("repo");
+        let canonical_temp =
+            dunce::canonicalize(temp.path()).unwrap_or_else(|_| temp.path().to_path_buf());
+        let repo = canonical_temp.join("repo");
         fs::create_dir_all(&repo).expect("create repo dir");
 
         let output = command_os("git")
@@ -1012,7 +1033,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let worktree = temp.path().join(".worktrees").join("feature");
+        let worktree = canonical_temp.join(".worktrees").join("feature");
         let output = command_os("git")
             .current_dir(&repo)
             .args(["worktree", "add", "-b", "feature"])

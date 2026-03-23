@@ -2,11 +2,14 @@
 //!
 //! Reads and writes session history from/to TOML files under `~/.gwt/sessions/`.
 
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use tracing::debug;
 
 /// Tool session entry from TypeScript format (FR-069, FR-070, gwt-spec issue).
@@ -595,9 +598,10 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_session_path_generation() {

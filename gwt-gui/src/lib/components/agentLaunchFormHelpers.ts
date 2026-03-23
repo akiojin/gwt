@@ -231,8 +231,8 @@ export function isStaleIssueClassifyRequest(
 export function classifyIssuePrefix(
   result: ClassifyResult,
   validPrefixes: readonly BranchPrefix[],
-): BranchPrefix | "" {
-  if (result.status !== "ok" || !result.prefix) return "";
+): BranchPrefix {
+  if (result.status !== "ok" || !result.prefix) return "feature/";
   const prefix = `${result.prefix}/` as BranchPrefix;
-  return validPrefixes.includes(prefix) ? prefix : "";
+  return validPrefixes.includes(prefix) ? prefix : "feature/";
 }

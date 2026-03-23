@@ -17,18 +17,20 @@ Use this command to inspect PR status for the current branch with the gh CLI.
 ## Steps
 
 1. Load `skills/gwt-pr-check/SKILL.md` and follow the workflow.
-2. Run `python3 ".codex/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "."`.
-3. Ensure `gh auth status` succeeds before running PR checks.
-4. When all PRs for the head are merged, validate merge commit ancestry before counting post-merge commits.
-5. If the merge commit is missing or not an ancestor of `HEAD`, compare `origin/<head>..HEAD` before any base-branch fallback.
-6. If both upstream and base comparisons fail, return `MANUAL CHECK` instead of inferring `CREATE PR`.
-7. Return the human-readable summary from the script:
+2. Run `python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "."`.
+3. Prefer the REST pull-request list endpoint as the primary transport for PR discovery.
+4. Ensure `gh auth status` succeeds before running PR checks, or continue with token-backed REST auth when `GH_TOKEN` / `GITHUB_TOKEN` is already provided.
+5. When all PRs for the head are merged, validate merge commit ancestry before counting post-merge commits.
+6. If any post-merge count is greater than `0`, verify `git diff --quiet origin/<base>...HEAD --` before recommending `CREATE PR`.
+7. If the merge commit is missing or not an ancestor of `HEAD`, compare `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO ACTION`.
+8. If both upstream and base comparisons fail, return `MANUAL CHECK` instead of inferring `CREATE PR`.
+9. Return the human-readable summary from the script:
    - Result
    - Recommended next step
    - Why
    - Context and key evidence
-8. Append JSON only if the user explicitly asks for machine-readable output.
-9. Do not push or create/edit PRs in this command.
+10. Append JSON only if the user explicitly asks for machine-readable output.
+11. Do not push or create/edit PRs in this command.
 
 ## Examples
 
