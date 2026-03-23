@@ -202,13 +202,7 @@ pub async fn assistant_send_message(
     let window_label = window.label().to_string();
     let input = input.trim().to_string();
     if input.is_empty() {
-        tracing::warn!(
-            category = "assistant",
-            event = "assistant_send_message",
-            result = "failure",
-            error_code = "ASSISTANT_EMPTY_MESSAGE",
-            "Empty message rejected",
-        );
+        log_flow_failure("assistant", "assistant_send_message", "Empty message rejected");
         return Err("Message cannot be empty".to_string());
     }
     let delivery_mode = delivery_mode.unwrap_or(AssistantDeliveryMode::Interrupt);
@@ -290,7 +284,6 @@ pub async fn assistant_start(
             Some("ASSISTANT_NO_PROJECT"),
             "No project opened",
         );
-        log_flow_failure("assistant", "assistant_start", "No project opened");
         "No project opened. Open a project first.".to_string()
     })?;
 

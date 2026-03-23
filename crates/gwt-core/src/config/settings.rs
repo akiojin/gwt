@@ -13,7 +13,7 @@ use serde::{
     de::{self, Deserializer},
     Deserialize, Serialize,
 };
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, info, instrument};
 
 use super::{
     agent_config::AgentConfig,
@@ -475,12 +475,6 @@ impl Settings {
                 Some("CONFIG_LOAD_FAILED"),
                 &format!("path={}: {}", path.display(), e),
             );
-            error!(
-                category = "config",
-                path = %path.display(),
-                error = %e,
-                "Failed to read config file"
-            );
             GwtError::ConfigParseError {
                 reason: e.to_string(),
             }
@@ -494,12 +488,6 @@ impl Settings {
                     "load",
                     Some("CONFIG_PARSE_FAILED"),
                     &format!("path={}: {}", path.display(), e),
-                );
-                error!(
-                    category = "config",
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to parse config"
                 );
                 GwtError::ConfigParseError {
                     reason: e.to_string(),
@@ -706,12 +694,6 @@ impl Settings {
                 "save",
                 Some("CONFIG_SERIALIZE_FAILED"),
                 &format!("path={}: {}", path.display(), e),
-            );
-            error!(
-                category = "config",
-                path = %path.display(),
-                error = %e,
-                "Failed to serialize settings"
             );
             GwtError::ConfigWriteError {
                 reason: e.to_string(),

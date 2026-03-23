@@ -928,13 +928,6 @@ impl Repository {
             Some("GIT_WORKTREE_REMOVE_FAILED"),
             &err_msg,
         );
-        error!(
-            category = "git",
-            operation = "worktree_remove",
-            path = %path.display(),
-            error = err_msg.as_str(),
-            "Failed to remove git worktree"
-        );
         Err(GwtError::GitOperationFailed {
             operation: "worktree remove".to_string(),
             details: err_msg,

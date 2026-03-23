@@ -796,12 +796,6 @@ impl DockerManager {
                 Some("DOCKER_COMPOSE_UP_FAILED"),
                 &stderr,
             );
-            warn!(
-                category = "docker",
-                container = %self.container_name,
-                error = %stderr,
-                "Docker compose up failed"
-            );
             return Err(GwtError::DockerStartFailed {
                 reason: stderr.to_string(),
             });
@@ -867,13 +861,6 @@ impl DockerManager {
                 Some("DOCKER_COMPOSE_DOWN_FAILED"),
                 &stderr,
             );
-            warn!(
-                category = "docker",
-                container = %self.container_name,
-                error = %stderr,
-                "Docker compose down failed"
-            );
-            log_flow_failure("docker", "stop_container", &stderr);
             return Err(GwtError::Docker(format!(
                 "Docker compose down failed: {}",
                 stderr
@@ -1233,12 +1220,6 @@ impl DockerManager {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             crate::logging::log_incident("docker", "rebuild", Some("DOCKER_BUILD_FAILED"), &stderr);
-            warn!(
-                category = "docker",
-                container = %self.container_name,
-                error = %stderr,
-                "Docker compose build failed"
-            );
             return Err(GwtError::DockerBuildFailed {
                 reason: stderr.to_string(),
             });
@@ -1320,13 +1301,6 @@ impl DockerManager {
                 "run_in_service",
                 Some("DOCKER_EXEC_FAILED"),
                 &detail,
-            );
-            warn!(
-                category = "docker",
-                service = %service,
-                command = %command,
-                exit_code = ?status.code(),
-                "Command in container failed"
             );
             return Err(GwtError::Docker(detail));
         }

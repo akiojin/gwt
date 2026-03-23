@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
-use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
+use gwt_core::logging::{log_flow_start, log_flow_success};
 
 use crate::state::AppState;
 
@@ -262,21 +262,14 @@ pub fn open_project(
     let p = Path::new(&path);
 
     if !p.exists() {
+        let msg = format!("Path does not exist: {}", path);
         gwt_core::logging::log_incident(
             "project",
             "open_project",
             Some("PROJECT_PATH_NOT_FOUND"),
-            &format!("Path does not exist: {}", path),
+            &msg,
         );
-        log_flow_failure(
-            "project",
-            "open_project",
-            &format!("Path does not exist: {}", path),
-        );
-        return Err(StructuredError::internal(
-            &format!("Path does not exist: {}", path),
-            "open_project",
-        ));
+        return Err(StructuredError::internal(&msg, "open_project"));
     }
 
     let project_root = resolve_project_root(p);
@@ -287,7 +280,6 @@ pub fn open_project(
             Some("PROJECT_REPO_RESOLVE_FAILED"),
             &e,
         );
-        log_flow_failure("project", "open_project", &e);
         StructuredError::internal(&e, "open_project")
     })?;
     if git::is_git_repo(&repo_path) && !git::is_bare_repository(&repo_path) {
@@ -297,7 +289,6 @@ pub fn open_project(
             Some("PROJECT_MIGRATION_REQUIRED"),
             "Normal repositories are not supported. Migration to bare gwt project required.",
         );
-        log_flow_failure("project", "open_project", "Migration required");
         return Err(StructuredError::internal("Migration required: normal repositories are not supported. Please migrate to a bare gwt project.", "open_project"));
     }
     let project_root_str = project_root.to_string_lossy().to_string();
@@ -482,7 +473,6 @@ pub fn open_project(
         Some("PROJECT_STALE_WINDOW_STATE"),
         "Failed to open project due to stale duplicate window state",
     );
-    log_flow_failure("project", "open_project", "Stale duplicate window state");
     Err(StructuredError::internal(
         "Failed to open project due to stale duplicate window state. Please retry.",
         "open_project",
@@ -643,7 +633,6 @@ pub fn create_project(
             Some("PROJECT_INVALID_REPO_URL"),
             "invalid repo URL format",
         );
-        log_flow_failure("project", "create_project", "Invalid repository URL");
         return Err(StructuredError::internal(
             "Invalid repository URL",
             "create_project",
@@ -652,41 +641,27 @@ pub fn create_project(
 
     let parent = std::path::PathBuf::from(&request.parent_dir);
     if !parent.exists() {
+        let msg = format!("Parent directory does not exist: {}", request.parent_dir);
         gwt_core::logging::log_incident(
             "project",
             "create_project",
             Some("PROJECT_PARENT_DIR_NOT_FOUND"),
-            &format!("Parent directory does not exist: {}", request.parent_dir),
+            &msg,
         );
-        log_flow_failure(
-            "project",
-            "create_project",
-            "Parent directory does not exist",
-        );
-        return Err(StructuredError::internal(
-            &format!("Parent directory does not exist: {}", request.parent_dir),
-            "create_project",
-        ));
+        return Err(StructuredError::internal(&msg, "create_project"));
     }
 
     let repo_name = git::extract_repo_name(&request.repo_url);
     let target = parent.join(&repo_name);
     if target.exists() {
+        let msg = format!("Target directory already exists: {}", target.display());
         gwt_core::logging::log_incident(
             "project",
             "create_project",
             Some("PROJECT_TARGET_DIR_EXISTS"),
-            &format!("Target directory already exists: {}", target.display()),
+            &msg,
         );
-        log_flow_failure(
-            "project",
-            "create_project",
-            "Target directory already exists",
-        );
-        return Err(StructuredError::internal(
-            &format!("Target directory already exists: {}", target.display()),
-            "create_project",
-        ));
+        return Err(StructuredError::internal(&msg, "create_project"));
     }
 
     // Run `git clone --bare --progress` and stream progress via events.
@@ -800,7 +775,6 @@ pub fn create_project(
                 Some("PROJECT_GIT_CLONE_FAILED"),
                 "git clone failed with no stderr output",
             );
-            log_flow_failure("project", "create_project", "git clone failed");
             return Err(StructuredError::internal(
                 "git clone failed",
                 "create_project",
@@ -812,7 +786,6 @@ pub fn create_project(
             Some("PROJECT_GIT_CLONE_FAILED"),
             tail.trim(),
         );
-        log_flow_failure("project", "create_project", tail.trim());
         return Err(StructuredError::internal(
             &format!("git clone failed: {}", tail.trim()),
             "create_project",
@@ -874,17 +847,14 @@ pub fn start_migration_job(
     log_flow_start("migration", "start_migration_job");
     let selected = Path::new(&path);
     if !selected.exists() {
+        let msg = format!("Path does not exist: {}", path);
         gwt_core::logging::log_incident(
             "migration",
             "start_migration_job",
             Some("MIGRATION_PATH_NOT_FOUND"),
-            &format!("Path does not exist: {}", path),
+            &msg,
         );
-        log_flow_failure("migration", "start_migration_job", "Path does not exist");
-        return Err(StructuredError::internal(
-            &format!("Path does not exist: {}", path),
-            "start_migration_job",
-        ));
+        return Err(StructuredError::internal(&msg, "start_migration_job"));
     }
 
     let source_root = git::get_main_repo_root(selected);
@@ -895,7 +865,6 @@ pub fn start_migration_job(
             Some("MIGRATION_NOT_GIT_REPO"),
             "Not a git repository",
         );
-        log_flow_failure("migration", "start_migration_job", "Not a git repository");
         return Err(StructuredError::internal(
             "Not a git repository",
             "start_migration_job",
@@ -906,11 +875,6 @@ pub fn start_migration_job(
             "migration",
             "start_migration_job",
             Some("MIGRATION_ALREADY_BARE"),
-            "Repository is already bare",
-        );
-        log_flow_failure(
-            "migration",
-            "start_migration_job",
             "Repository is already bare",
         );
         return Err(StructuredError::internal(
