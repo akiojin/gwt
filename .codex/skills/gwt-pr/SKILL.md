@@ -27,7 +27,7 @@ Create or update GitHub Pull Requests with the gh CLI using a detailed body temp
 6. **If any PR exists and is NOT merged** (`mergedAt` is null) → push only and finish (do **not** create a new PR).
    - This applies to OPEN or CLOSED (unmerged) PRs.
    - Only update title/body/labels if the user explicitly requests changes.
-7. **If all PRs for the head are merged** → check for post-merge commits and effective file diff (see below).
+7. **If all PRs for the head are merged** → check for post-merge commits (see below).
 8. **If multiple PRs exist for the head** → use the most recently updated PR for reporting, but the create vs push decision is based on `mergedAt`.
 
 ## Post-merge commit check (critical)
@@ -42,15 +42,10 @@ When all PRs for the head branch are merged, you **must** check whether there ar
    - `git rev-list --count origin/<head>..HEAD`
 5. **If the upstream comparison returns `0` or fails**, compare against the base branch:
    - `git rev-list --count origin/<base>..HEAD`
-6. **Effective-diff guard (mandatory):**
-   - If any comparison suggests `> 0` commits, verify the branch still has a real file diff:
-     - `git diff --quiet origin/<base>...HEAD --`
-   - If the diff is empty → report "No effective changes since merge" and finish
-7. **Decision**:
-   - If the selected count is greater than 0 **and** the base diff is non-empty → create a new PR
+6. **Decision**:
+   - If the selected count is greater than 0 → create a new PR
    - If both upstream and base comparisons report `0` → report "No new changes since merge" and finish
-   - If commit counts are positive but `origin/<base>...HEAD` is empty → report "No effective changes since merge" and finish
-   - If both fallback comparisons fail, or the effective-diff check fails → stop and report `MANUAL CHECK`
+   - If both fallback comparisons fail → stop and report `MANUAL CHECK`
 
 ### Why this matters
 
@@ -58,8 +53,6 @@ When all PRs for the head branch are merged, you **must** check whether there ar
   - Without this check, the changes would be lost or require manual intervention
 - **Scenario B**: PR merged → user says "create PR" without new changes → would create empty/duplicate PR
   - This check prevents unnecessary PR creation
-- **Scenario C**: same branch reused after squash merge → commit history remains, but `develop` already contains the effective file changes
-  - Without a base-diff guard, the workflow creates empty PRs with 0 changed files
 
 ## PR title rules (must follow)
 
@@ -165,10 +158,8 @@ Next
    - If the upstream count is `0`, still count `git rev-list --count origin/<base>..HEAD` before concluding `NO_ACTION`
    - Only if both fallback comparisons fail, stop with `MANUAL CHECK`
    - If the selected count is 0 → finish with message "No new changes since merge"
-   - If the selected count is >0, verify `git diff --quiet origin/<base>...HEAD --`
-   - If the base diff is empty → finish with message "No effective changes since merge"
-   - If the selected count is >0 and the base diff is non-empty → proceed to create new PR
-   - If neither comparison is usable, or the base diff check fails unexpectedly → stop with `MANUAL CHECK`
+   - If the selected count is >0 → proceed to create new PR
+   - If neither comparison is usable → stop with `MANUAL CHECK`
 
 7. **Ensure the head branch is pushed**
    - If no upstream: `git push -u origin <head>`
@@ -270,13 +261,8 @@ else
 
   if [ -n "$new_commits" ]; then
     if [ "$new_commits" -gt 0 ]; then
-      if git diff --quiet "origin/$base...HEAD" -- 2>/dev/null; then
-        echo "No effective file changes against origin/$base - nothing to do"
-        action=none
-      else
-        echo "Found $new_commits commit(s) after merge - creating new PR"
-        action=create
-      fi
+      echo "Found $new_commits commit(s) after merge - creating new PR"
+      action=create
     else
       echo "No new commits since merge - nothing to do"
       action=none
@@ -285,25 +271,15 @@ else
     upstream_commits=$(git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo "")
 
     if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
-      if git diff --quiet "origin/$base...HEAD" -- 2>/dev/null; then
-        echo "No effective file changes against origin/$base - nothing to do"
-        action=none
-      else
-        echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
-        action=create
-      fi
+      echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
+      action=create
     else
       fallback_commits=$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "")
 
       if [ -n "$fallback_commits" ]; then
         if [ "$fallback_commits" -gt 0 ]; then
-          if git diff --quiet "origin/$base...HEAD" -- 2>/dev/null; then
-            echo "No effective file changes against origin/$base - nothing to do"
-            action=none
-          else
-            echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base - creating new PR"
-            action=create
-          fi
+          echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base - creating new PR"
+          action=create
         else
           echo "No commits ahead of origin/$head or origin/$base - nothing to do"
           action=none

@@ -42,32 +42,17 @@ This skill is **check-only**:
      - `git merge-base --is-ancestor <merge_commit> HEAD`
    - If merge commit is ancestor of `HEAD`, count commits after merge:
      - `git rev-list --count <merge_commit>..HEAD`
-   - If count > 0, validate that `HEAD` still has an effective file diff against the base branch:
-     - `git diff --quiet origin/<base>...HEAD --`
-   - If count > 0 **and** the base diff is non-empty -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR`
-   - If count > 0 **and** the base diff is empty -> `ALL_MERGED_NO_EFFECTIVE_CHANGES` + `NO_ACTION`
+   - If count > 0 -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR`
    - If count == 0 -> `ALL_MERGED_NO_NEW_COMMITS` + `NO_ACTION`
 7. Fallback when merge commit SHA is missing or not an ancestor of `HEAD`:
    - First compare against branch upstream (preferred):
      - `git rev-list --count origin/<head>..HEAD`
-   - Count > 0 requires the same effective-diff guard:
-     - `git diff --quiet origin/<base>...HEAD --`
-   - Count > 0 **and** base diff non-empty -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR` (fallback)
-   - Count > 0 **and** base diff empty -> `ALL_MERGED_NO_EFFECTIVE_CHANGES` + `NO_ACTION`
+   - Count > 0 -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR` (fallback)
    - If upstream count is `0`, still compare against base:
      - `git rev-list --count origin/<base>..HEAD`
-   - Base count > 0 requires the same effective-diff guard:
-     - `git diff --quiet origin/<base>...HEAD --`
-   - Base count > 0 **and** base diff non-empty -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR` (fallback)
-   - Base count > 0 **and** base diff empty -> `ALL_MERGED_NO_EFFECTIVE_CHANGES` + `NO_ACTION`
+   - Base count > 0 -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR` (fallback)
    - Base count == 0 -> `ALL_MERGED_NO_NEW_COMMITS` + `NO_ACTION`
    - If both comparisons fail -> `CHECK_FAILED` + `MANUAL_CHECK`
-
-### Empty-PR guard
-
-Commit counts alone are not enough when the same branch is reused after a squash merge.
-If `origin/<base>...HEAD` has **no file diff**, the correct result is `NO_ACTION` even when
-history still contains post-merge commits.
 
 ## Output contract
 
@@ -81,7 +66,6 @@ Recommended status values:
 - `NO_PR`
 - `UNMERGED_PR_EXISTS`
 - `ALL_MERGED_WITH_NEW_COMMITS`
-- `ALL_MERGED_NO_EFFECTIVE_CHANGES`
 - `ALL_MERGED_NO_NEW_COMMITS`
 - `CHECK_FAILED`
 
@@ -128,8 +112,6 @@ Per-status format:
 
 - **ALL_MERGED_NO_NEW_COMMITS**:
   `-- NO ACTION — All PRs merged, no new commits on <head>.`
-- **ALL_MERGED_NO_EFFECTIVE_CHANGES**:
-  `-- NO ACTION — All PRs merged, no effective diff on <head>.`
 - **CHECK_FAILED** (2 lines):
 
   ```text
@@ -151,7 +133,6 @@ Append the following line **only** when the worktree is dirty:
 | `NO_PR` | `>>` | `CREATE PR` | No PR exists |
 | `UNMERGED_PR_EXISTS` | `>` | `PUSH ONLY` | Unmerged PR open |
 | `ALL_MERGED_WITH_NEW_COMMITS` | `>>` | `CREATE PR` | N new commit(s) |
-| `ALL_MERGED_NO_EFFECTIVE_CHANGES` | `--` | `NO ACTION` | No effective diff |
 | `ALL_MERGED_NO_NEW_COMMITS` | `--` | `NO ACTION` | All PRs merged |
 | `CHECK_FAILED` | `!!` | `MANUAL CHECK` | Could not determine |
 
@@ -181,12 +162,6 @@ Append the following line **only** when the worktree is dirty:
 
 ```text
 -- NO ACTION — All PRs merged, no new commits on `feature/my-branch`.
-```
-
-**ALL_MERGED_NO_EFFECTIVE_CHANGES:**
-
-```text
--- NO ACTION — All PRs merged, no effective diff on `feature/my-branch`.
 ```
 
 **CHECK_FAILED:**
@@ -219,10 +194,9 @@ Append the following line **only** when the worktree is dirty:
 4. Prefer the REST pull-request list endpoint over `gh pr list` when checking branch PR state.
 5. List PRs for head branch and classify using rules above.
 6. When all PRs are merged, validate merge commit ancestry before counting commits.
-7. If any commit-count path suggests `CREATE_PR`, verify `git diff --quiet origin/<base>...HEAD --` before creating an empty PR.
-8. If merge commit is not usable, fallback to `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO_ACTION`.
-9. Print human-readable result using the default template.
-10. Append JSON only if the user explicitly asks for machine-readable output.
+7. If merge commit is not usable, fallback to `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO_ACTION`.
+8. Print human-readable result using the default template.
+9. Append JSON only if the user explicitly asks for machine-readable output.
 
 ## Quick start
 
@@ -279,15 +253,9 @@ else
 
   if [ -n "$new_commits" ]; then
     if [ "$new_commits" -gt 0 ]; then
-      if git diff --quiet "origin/$base...HEAD" -- 2>/dev/null; then
-        status="ALL_MERGED_NO_EFFECTIVE_CHANGES"
-        action="NO_ACTION"
-        reason="No effective diff against origin/$base"
-      else
-        status="ALL_MERGED_WITH_NEW_COMMITS"
-        action="CREATE_PR"
-        reason="$new_commits commits found after last merge"
-      fi
+      status="ALL_MERGED_WITH_NEW_COMMITS"
+      action="CREATE_PR"
+      reason="$new_commits commits found after last merge"
     else
       status="ALL_MERGED_NO_NEW_COMMITS"
       action="NO_ACTION"
@@ -302,26 +270,14 @@ else
     )"
 
     if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
-      if git diff --quiet "origin/$base...HEAD" -- 2>/dev/null; then
-        status="ALL_MERGED_NO_EFFECTIVE_CHANGES"
-        action="NO_ACTION"
-        reason="Fallback check found no effective diff against origin/$base"
-      else
-        status="ALL_MERGED_WITH_NEW_COMMITS"
-        action="CREATE_PR"
-        reason="Fallback check found commits ahead of origin/$head"
-      fi
+      status="ALL_MERGED_WITH_NEW_COMMITS"
+      action="CREATE_PR"
+      reason="Fallback check found commits ahead of origin/$head"
     elif [ -n "$fallback_commits" ]; then
       if [ "$fallback_commits" -gt 0 ]; then
-        if git diff --quiet "origin/$base...HEAD" -- 2>/dev/null; then
-          status="ALL_MERGED_NO_EFFECTIVE_CHANGES"
-          action="NO_ACTION"
-          reason="Fallback check found no effective diff against origin/$base"
-        else
-          status="ALL_MERGED_WITH_NEW_COMMITS"
-          action="CREATE_PR"
-          reason="Fallback check found commits ahead of origin/$base"
-        fi
+        status="ALL_MERGED_WITH_NEW_COMMITS"
+        action="CREATE_PR"
+        reason="Fallback check found commits ahead of origin/$base"
       else
         status="ALL_MERGED_NO_NEW_COMMITS"
         action="NO_ACTION"
@@ -360,9 +316,6 @@ case "$status" in
     n="${new_commits:-$upstream_commits}"
     echo ">> CREATE PR — $n new commit(s) after last merge (#$latest_merged_pr)."
     echo "   head: $head -> base: $base"
-    ;;
-  ALL_MERGED_NO_EFFECTIVE_CHANGES)
-    echo "-- NO ACTION — All PRs merged, no effective diff on \`$head\`."
     ;;
   ALL_MERGED_NO_NEW_COMMITS)
     echo "-- NO ACTION — All PRs merged, no new commits on \`$head\`."

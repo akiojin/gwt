@@ -33,7 +33,6 @@ class Result:
     pr_url: str | None = None
     new_commits: int | None = None
     fallback_used: bool = False
-    effective_diff_checked: bool = False
 
 
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -129,15 +128,6 @@ def git_count(repo: Path, revspec: str) -> int | None:
         return int(proc.stdout.strip())
     except ValueError:
         return None
-
-
-def has_effective_diff_against_base(repo: Path, base: str) -> bool | None:
-    proc = run(["git", "diff", "--quiet", f"origin/{base}...HEAD", "--"], repo)
-    if proc.returncode == 0:
-        return False
-    if proc.returncode == 1:
-        return True
-    return None
 
 
 def is_ancestor(repo: Path, ancestor: str) -> bool:
@@ -256,35 +246,6 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
                 reason="Failed to count commits after merge commit",
             )
         if post_merge_commits > 0:
-            has_diff = has_effective_diff_against_base(repo, base)
-            if has_diff is None:
-                return Result(
-                    status="CHECK_FAILED",
-                    action="MANUAL_CHECK",
-                    summary="!! MANUAL CHECK — Could not determine PR status.",
-                    details=[
-                        "   Reason: Commit count suggested changes but effective diff check failed",
-                        f"   head: {head} -> base: {base}",
-                    ],
-                    dirty=dirty,
-                    head=head,
-                    base=base,
-                    reason="Commit count suggested changes but effective diff check failed",
-                    pr_number=latest_merged["number"],
-                )
-            if not has_diff:
-                return Result(
-                    status="ALL_MERGED_NO_EFFECTIVE_CHANGES",
-                    action="NO_ACTION",
-                    summary=f"-- NO ACTION — All PRs merged, no effective diff on `{head}`.",
-                    details=[],
-                    dirty=dirty,
-                    head=head,
-                    base=base,
-                    pr_number=latest_merged["number"],
-                    new_commits=post_merge_commits,
-                    effective_diff_checked=True,
-                )
             return Result(
                 status="ALL_MERGED_WITH_NEW_COMMITS",
                 action="CREATE_PR",
@@ -295,7 +256,6 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
                 base=base,
                 pr_number=latest_merged["number"],
                 new_commits=post_merge_commits,
-                effective_diff_checked=True,
             )
         return Result(
             status="ALL_MERGED_NO_NEW_COMMITS",
@@ -311,36 +271,6 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
 
     upstream_commits = git_count(repo, f"origin/{head}..HEAD")
     if upstream_commits is not None and upstream_commits > 0:
-        has_diff = has_effective_diff_against_base(repo, base)
-        if has_diff is None:
-            return Result(
-                status="CHECK_FAILED",
-                action="MANUAL_CHECK",
-                summary="!! MANUAL CHECK — Could not determine PR status.",
-                details=[
-                    "   Reason: Fallback commit count suggested changes but effective diff check failed",
-                    f"   head: {head} -> base: {base}",
-                ],
-                dirty=dirty,
-                head=head,
-                base=base,
-                reason="Fallback commit count suggested changes but effective diff check failed",
-                pr_number=latest_merged["number"],
-            )
-        if not has_diff:
-            return Result(
-                status="ALL_MERGED_NO_EFFECTIVE_CHANGES",
-                action="NO_ACTION",
-                summary=f"-- NO ACTION — All PRs merged, no effective diff on `{head}`.",
-                details=[],
-                dirty=dirty,
-                head=head,
-                base=base,
-                pr_number=latest_merged["number"],
-                new_commits=upstream_commits,
-                fallback_used=True,
-                effective_diff_checked=True,
-            )
         return Result(
             status="ALL_MERGED_WITH_NEW_COMMITS",
             action="CREATE_PR",
@@ -352,42 +282,11 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
             pr_number=latest_merged["number"],
             new_commits=upstream_commits,
             fallback_used=True,
-            effective_diff_checked=True,
         )
 
     base_commits = git_count(repo, f"origin/{base}..HEAD")
     if base_commits is not None:
         if base_commits > 0:
-            has_diff = has_effective_diff_against_base(repo, base)
-            if has_diff is None:
-                return Result(
-                    status="CHECK_FAILED",
-                    action="MANUAL_CHECK",
-                    summary="!! MANUAL CHECK — Could not determine PR status.",
-                    details=[
-                        "   Reason: Base comparison suggested changes but effective diff check failed",
-                        f"   head: {head} -> base: {base}",
-                    ],
-                    dirty=dirty,
-                    head=head,
-                    base=base,
-                    reason="Base comparison suggested changes but effective diff check failed",
-                    pr_number=latest_merged["number"],
-                )
-            if not has_diff:
-                return Result(
-                    status="ALL_MERGED_NO_EFFECTIVE_CHANGES",
-                    action="NO_ACTION",
-                    summary=f"-- NO ACTION — All PRs merged, no effective diff on `{head}`.",
-                    details=[],
-                    dirty=dirty,
-                    head=head,
-                    base=base,
-                    pr_number=latest_merged["number"],
-                    new_commits=base_commits,
-                    fallback_used=True,
-                    effective_diff_checked=True,
-                )
             return Result(
                 status="ALL_MERGED_WITH_NEW_COMMITS",
                 action="CREATE_PR",
@@ -399,7 +298,6 @@ def build_result(repo: Path, base: str, head: str, dirty: bool) -> Result:
                 pr_number=latest_merged["number"],
                 new_commits=base_commits,
                 fallback_used=True,
-                effective_diff_checked=True,
             )
         return Result(
             status="ALL_MERGED_NO_NEW_COMMITS",
