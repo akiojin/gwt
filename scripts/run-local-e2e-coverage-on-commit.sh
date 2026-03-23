@@ -5,7 +5,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GUI_DIR="$ROOT_DIR/gwt-gui"
 
-# Keep commit-time E2E focused on the current shell/UX-critical flows.
 SUITES=(
   "e2e/agent-canvas-browser.spec.ts"
   "e2e/agent-terminal.spec.ts"
@@ -25,18 +24,29 @@ SUITES=(
   "e2e/windows-shell-selection.spec.ts"
 )
 
-run_playwright() {
+run_playwright_coverage() {
   local mode="$1"
-  shift
 
-  echo "Running commit-time E2E in ${mode} mode..."
+  echo "Running commit-time E2E coverage in ${mode} mode..."
   (
     cd "$GUI_DIR"
+    rm -rf .nyc_output e2e/.nyc_output coverage-e2e
+    mkdir -p .nyc_output
     if [ "$mode" = "headed" ]; then
-      pnpm exec playwright test "${SUITES[@]}" --project=chromium --headed --workers=1
+      E2E_COVERAGE=1 pnpm exec playwright test "${SUITES[@]}" --project=chromium --headed --workers=1
     else
-      pnpm exec playwright test "${SUITES[@]}" --project=chromium
+      E2E_COVERAGE=1 pnpm exec playwright test "${SUITES[@]}" --project=chromium
     fi
+    if ! python3 - <<'EOF'
+from pathlib import Path
+raise SystemExit(0 if any(Path(".nyc_output").glob("*.json")) else 1)
+EOF
+    then
+      echo "E2E coverage run did not produce any .nyc_output JSON files." >&2
+      exit 1
+    fi
+    pnpm exec nyc report --nycrc-path .nycrc.e2e.json
+    node ../scripts/check-e2e-coverage-threshold.mjs
   )
 }
 
@@ -46,15 +56,14 @@ if [ -n "${CI:-}" ]; then
   headed_possible=0
 fi
 
-# Linux/X11/Wayland environments without a display cannot run headed.
 if [ "$(uname -s)" = "Linux" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
   headed_possible=0
 fi
 
 if [ "$headed_possible" -eq 1 ]; then
-  run_playwright headed
+  run_playwright_coverage headed
   exit 0
 fi
 
-echo "Headed Playwright unavailable in this environment; using headless mode."
-run_playwright headless
+echo "Headed Playwright coverage unavailable in this environment; using headless mode."
+run_playwright_coverage headless

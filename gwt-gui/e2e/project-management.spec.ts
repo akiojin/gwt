@@ -13,6 +13,7 @@ import {
   standardBranchResponses,
   expectAgentCanvasVisible,
   openBranchBrowser,
+  saveE2ECoverage,
 } from "./support/helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -21,6 +22,10 @@ test.beforeEach(async ({ page }) => {
       get_recent_projects: [defaultRecentProject],
     },
   });
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
 });
 
 test("displays Open Project and New Project buttons on launch", async ({

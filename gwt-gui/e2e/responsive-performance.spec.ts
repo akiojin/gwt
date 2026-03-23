@@ -7,6 +7,7 @@ import {
   branchFeature,
   captureUxSnapshot,
   openRecentProject,
+  saveE2ECoverage,
   setMockCommandResponses,
   waitForInvokeCommand,
 } from "./support/helpers";
@@ -48,6 +49,10 @@ test.beforeEach(async ({ page }) => {
       }),
     );
   });
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
 });
 
 test("app renders correctly at small viewport", async ({ page }) => {

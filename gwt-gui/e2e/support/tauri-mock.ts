@@ -122,6 +122,16 @@ export async function installTauriMock(
         if (
           response &&
           typeof response === "object" &&
+          "__error" in response
+        ) {
+          const message = String(
+            (response as { __error?: unknown }).__error ?? "Mock command failed",
+          );
+          throw new Error(message);
+        }
+        if (
+          response &&
+          typeof response === "object" &&
           "__delayMs" in response &&
           "value" in response
         ) {

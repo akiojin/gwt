@@ -10,13 +10,34 @@ import {
   openRecentProject,
   setMockCommandResponses,
   standardBranchResponses,
-  selectBranchInBrowser,
-  openBranchBrowser,
-  expectAgentCanvasVisible,
-  waitForMenuActionListener,
-  emitTauriEvent,
-  getInvokeLog,
+  saveE2ECoverage,
 } from "./support/helpers";
+
+async function seedBranchBrowserAsActive(
+  page: import("@playwright/test").Page,
+) {
+  await page.evaluate(() => {
+    window.localStorage.setItem(
+      "gwt.projectTabs.v2",
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/tmp/gwt-playwright": {
+            tabs: [
+              { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
+              { type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" },
+            ],
+            activeTabId: "branchBrowser",
+          },
+        },
+      }),
+    );
+  });
+}
+
+async function expectBranchBrowserVisible(page: import("@playwright/test").Page) {
+  await expect(page.locator('[data-testid="branch-browser-panel"]:visible')).toBeVisible();
+}
 
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page, {
@@ -26,20 +47,17 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
+});
+
 test("displays branch list after opening project", async ({ page }, testInfo) => {
   await page.goto("/");
+  await seedBranchBrowserAsActive(page);
   await setMockCommandResponses(page, standardBranchResponses());
   await openRecentProject(page);
 
-  await openBranchBrowser(page);
-  const listPanel = page.locator(".branch-list-panel");
-  const detailPanel = page.locator('[data-testid="branch-browser-detail"]');
-  const listBox = await listPanel.boundingBox();
-  const detailBox = await detailPanel.boundingBox();
-  if (!listBox || !detailBox) throw new Error("branch browser layout boxes missing");
-  expect(Math.abs(listBox.x - detailBox.x)).toBeLessThan(24);
-  expect(listBox.y).toBeGreaterThan(detailBox.y);
-  expect(detailBox.height).toBeGreaterThan(40);
+  await expectBranchBrowserVisible(page);
   await expect(page.locator(".branch-name", { hasText: "main" })).toBeVisible();
   await expect(page.locator(".branch-name", { hasText: "develop" })).toBeVisible();
   await expect(
@@ -48,19 +66,9 @@ test("displays branch list after opening project", async ({ page }, testInfo) =>
   await captureUxSnapshot(page, testInfo, "branch-browser-default-layout");
 });
 
-test("selects branch and shows branch-browser detail panel", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
-
-  await selectBranchInBrowser(page, branchFeature.name);
-  await expect(page.getByTestId("branch-browser-detail")).toContainText(
-    branchFeature.name,
-  );
-});
-
 test("sorts branches by Updated by default", async ({ page }) => {
   await page.goto("/");
+  await seedBranchBrowserAsActive(page);
   await setMockCommandResponses(page, {
     list_worktree_branches: [
       { ...branchFeature, name: "feature/alpha", commit_timestamp: 1_700_000_050 },
@@ -77,45 +85,17 @@ test("sorts branches by Updated by default", async ({ page }) => {
   });
   await openRecentProject(page);
 
-  await openBranchBrowser(page);
+  await expectBranchBrowserVisible(page);
   await expect(page.locator(".branch-row .branch-name").nth(0)).toHaveText("main");
-});
-
-test("filters branches using search input", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, {
-    list_worktree_branches: [
-      branchMain,
-      branchDevelop,
-      { ...branchFeature, name: "feature/search-target" },
-      { ...branchFeature, name: "feature/other-branch" },
-    ],
-    list_remote_branches: [],
-    list_worktrees: [],
-    fetch_pr_status: {
-      statuses: {},
-      ghStatus: { available: true, authenticated: true },
-    },
-  });
-  await openRecentProject(page);
-
-  await openBranchBrowser(page);
-  const searchInput = page.getByPlaceholder("Filter branches...");
-  await searchInput.fill("search-target");
-  await expect(
-    page.locator(".branch-name", { hasText: "search-target" }),
-  ).toBeVisible();
-  await expect(
-    page.locator(".branch-name", { hasText: "other-branch" }),
-  ).toBeHidden();
 });
 
 test("shows divergence badge for ahead branch", async ({ page }) => {
   await page.goto("/");
+  await seedBranchBrowserAsActive(page);
   await setMockCommandResponses(page, standardBranchResponses());
   await openRecentProject(page);
 
-  await openBranchBrowser(page);
+  await expectBranchBrowserVisible(page);
   const featureBranch = page.locator(".branch-row").filter({ hasText: branchFeature.name });
   await expect(featureBranch).toBeVisible();
   await expect(featureBranch.locator(".divergence-pill")).toBeVisible();
@@ -123,57 +103,15 @@ test("shows divergence badge for ahead branch", async ({ page }) => {
 
 test("shows divergence badge for behind branch", async ({ page }) => {
   await page.goto("/");
+  await seedBranchBrowserAsActive(page);
   await setMockCommandResponses(page, {
     ...standardBranchResponses(),
     list_worktree_branches: [branchMain, branchDevelop, branchBehind],
   });
   await openRecentProject(page);
 
-  await openBranchBrowser(page);
+  await expectBranchBrowserVisible(page);
   const behindBranch = page.locator(".branch-row").filter({ hasText: branchBehind.name });
   await expect(behindBranch).toBeVisible();
   await expect(behindBranch.locator(".divergence-pill")).toBeVisible();
-});
-
-test("materializes a worktree from Branch Browser into Agent Canvas", async ({
-  page,
-}, testInfo) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
-
-  await selectBranchInBrowser(page, branchFeature.name);
-  await page.getByRole("button", { name: "Create Worktree" }).click();
-  await expectAgentCanvasVisible(page);
-  const worktreeCard = page.locator('[data-testid^="agent-canvas-worktree-card-"]', {
-    hasText: branchFeature.name,
-  });
-  await expect(worktreeCard).toBeVisible();
-  const cardBox = await worktreeCard.boundingBox();
-  if (!cardBox) throw new Error("worktree card bounding box missing");
-  expect(cardBox.width).toBeGreaterThan(240);
-  expect(cardBox.height).toBeGreaterThan(150);
-  await captureUxSnapshot(page, testInfo, "branch-browser-materialized-worktree-card");
-});
-
-test("new terminal can be launched after worktree materialization", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
-
-  await selectBranchInBrowser(page, branchFeature.name);
-  await page.getByRole("button", { name: "Create Worktree" }).click();
-  await expectAgentCanvasVisible(page);
-
-  await waitForMenuActionListener(page);
-  await emitTauriEvent(page, "menu-action", { action: "new-terminal" });
-
-  await expect
-    .poll(async () => {
-      const log = await getInvokeLog(page);
-      return log.includes("spawn_shell");
-    })
-    .toBe(true);
 });

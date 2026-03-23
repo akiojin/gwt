@@ -51,7 +51,9 @@ require_contains "$COMMIT_MSG" 'bunx --package @commitlint/cli commitlint --edit
 
 if [ -f "$PRE_COMMIT" ]; then
   require_contains "$PRE_COMMIT" "pnpm lint:skills"
+  require_contains "$PRE_COMMIT" "bash scripts/run-local-backend-tests-on-commit.sh"
   require_contains "$PRE_COMMIT" "bash scripts/run-local-e2e-on-commit.sh"
+  require_contains "$PRE_COMMIT" "bash scripts/run-local-e2e-coverage-on-commit.sh"
   require_not_contains "$PRE_COMMIT" "cargo clippy --all-targets --all-features -- -D warnings"
   require_not_contains "$PRE_COMMIT" "cargo fmt --all -- --check"
   require_not_contains "$PRE_COMMIT" "markdownlint-cli"
