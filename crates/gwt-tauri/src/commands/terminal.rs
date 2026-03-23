@@ -2243,7 +2243,6 @@ pub fn launch_terminal(
                 Some("TERMINAL_NO_PROJECT"),
                 "No project opened",
             );
-            log_flow_failure("terminal", "launch_terminal", "No project opened");
             return Err(StructuredError::internal(
                 "No project opened",
                 "launch_terminal",
@@ -2259,7 +2258,6 @@ pub fn launch_terminal(
             Some("TERMINAL_REPO_RESOLVE_FAILED"),
             &e,
         );
-        log_flow_failure("terminal", "launch_terminal", &e);
         StructuredError::internal(&e, "launch_terminal")
     })?;
     let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch).map_err(|e| {
@@ -2269,7 +2267,6 @@ pub fn launch_terminal(
             Some("TERMINAL_WORKTREE_RESOLVE_FAILED"),
             &e,
         );
-        log_flow_failure("terminal", "launch_terminal", &e);
         StructuredError::internal(&e, "launch_terminal")
     })?;
 
@@ -2293,7 +2290,6 @@ pub fn launch_terminal(
             Some("TERMINAL_LAUNCH_FAILED"),
             &e,
         );
-        log_flow_failure("terminal", "launch_terminal", &e);
         StructuredError::internal(&e, "launch_terminal")
     });
     if result.is_ok() {
@@ -5213,7 +5209,6 @@ pub fn launch_agent(
                 Some("TERMINAL_NO_PROJECT"),
                 "No project opened",
             );
-            log_flow_failure("terminal", "launch_agent", "No project opened");
             return Err(StructuredError::internal(
                 "No project opened",
                 "launch_agent",
@@ -5230,7 +5225,6 @@ pub fn launch_agent(
                     Some("TERMINAL_AGENT_LAUNCH_FAILED"),
                     &e,
                 );
-                log_flow_failure("terminal", "launch_agent", &e);
                 StructuredError::internal(&e, "launch_agent")
             });
     if result.is_ok() {

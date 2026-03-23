@@ -66,7 +66,6 @@ impl WorktreeManager {
     /// List all worktrees
     #[instrument(skip(self))]
     pub fn list(&self) -> Result<Vec<Worktree>> {
-        log_flow_start("worktree", "list_worktrees");
         let git_worktrees = self.repo.list_worktrees()?;
         let mut worktrees = Vec::with_capacity(git_worktrees.len());
 
@@ -93,7 +92,6 @@ impl WorktreeManager {
             worktrees.push(wt);
         }
 
-        log_flow_success("worktree", "list_worktrees");
         Ok(worktrees)
     }
 
@@ -692,11 +690,6 @@ impl WorktreeManager {
                 Some("WORKTREE_BRANCH_ALREADY_EXISTS"),
                 &format!("Branch already exists: {}", branch_name),
             );
-            error!(
-                category = "worktree",
-                branch = branch_name,
-                "Branch already exists"
-            );
             return Err(GwtError::BranchAlreadyExists {
                 name: branch_name.to_string(),
             });
@@ -923,11 +916,6 @@ impl WorktreeManager {
                     Some("WORKTREE_PROTECTED_BRANCH"),
                     &format!("Attempted to remove protected branch worktree: {}", branch),
                 );
-                warn!(
-                    category = "worktree",
-                    branch = branch.as_str(),
-                    "Attempted to remove protected branch worktree"
-                );
                 return Err(GwtError::ProtectedBranch {
                     branch: branch.clone(),
                 });
@@ -941,11 +929,6 @@ impl WorktreeManager {
                 "remove",
                 Some("WORKTREE_UNCOMMITTED_CHANGES"),
                 &format!("Worktree has uncommitted changes: {}", path.display()),
-            );
-            warn!(
-                category = "worktree",
-                path = %path.display(),
-                "Attempted to remove worktree with uncommitted changes"
             );
             return Err(GwtError::UncommittedChanges);
         }
