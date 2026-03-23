@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-plan
-description: "Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`."
+description: "Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `.gwt/memory/constitution.md`. Use directly or through `gwt-spec-ops`."
 ---
 
 # gwt SPEC Plan
@@ -15,7 +15,7 @@ Use this skill to translate a clarified `spec.md` into implementation-ready plan
 ## Required inputs
 
 - `spec.md` artifact from the target `gwt-spec`
-- Repo-level constitution: `memory/constitution.md`
+- Repo-level constitution: `.gwt/memory/constitution.md`
 
 ## Required outputs
 
@@ -41,7 +41,7 @@ Create or update these artifacts as issue comments:
 ## Workflow
 
 1. **Read the source artifacts.**
-   - Load `spec.md` and `memory/constitution.md`.
+   - Load `spec.md` and `.gwt/memory/constitution.md`.
    - Refuse to continue only when `spec.md` is missing or a user decision still blocks planning.
 
 2. **Establish technical context.**
@@ -49,7 +49,7 @@ Create or update these artifacts as issue comments:
    - Record assumptions explicitly.
 
 3. **Run the constitution check.**
-   - Evaluate the work against `memory/constitution.md`.
+   - Evaluate the work against `.gwt/memory/constitution.md`.
    - If a rule is violated, either redesign or record the reason in `Complexity Tracking`.
 
 4. **Produce supporting artifacts.**

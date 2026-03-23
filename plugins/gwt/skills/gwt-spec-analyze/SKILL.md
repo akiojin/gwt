@@ -16,7 +16,7 @@ Use this skill as the final gate before implementation starts.
 - `doc:spec.md`
 - `doc:plan.md`
 - `doc:tasks.md`
-- `memory/constitution.md`
+- `.gwt/memory/constitution.md`
 
 Optional but validated when present:
 
