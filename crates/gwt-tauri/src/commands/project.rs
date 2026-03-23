@@ -384,7 +384,7 @@ pub fn open_project(
                             "project_open.index_warmup",
                             project_path = %project_root_for_index
                         );
-                        let _ = span.in_scope(|| {
+                        span.in_scope(|| {
                             tracing::info!("starting background project index warmup");
                         });
                         let _ = crate::commands::project_index::index_project_cmd(
