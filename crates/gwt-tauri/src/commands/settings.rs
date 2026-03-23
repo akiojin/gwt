@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
 };
 
+use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
 use gwt_core::{
     config::{Settings, SkillRegistrationPreferences},
     GwtError, StructuredError,
@@ -307,28 +308,55 @@ fn normalize_voice_input(value: &VoiceInputSettingsData) -> Result<NormalizedVoi
 #[instrument(skip_all, fields(command = "get_settings"))]
 #[tauri::command]
 pub fn get_settings() -> Result<SettingsData, StructuredError> {
-    with_panic_guard("loading settings", "get_settings", || {
-        let settings = Settings::load_global()
-            .map_err(|e| StructuredError::from_gwt_error(&e, "get_settings"))?;
+    log_flow_start("config", "get_settings");
+    let result = with_panic_guard("loading settings", "get_settings", || {
+        let settings = Settings::load_global().map_err(|e| {
+            gwt_core::logging::log_incident(
+                "config",
+                "get_settings",
+                Some("CONFIG_LOAD_FAILED"),
+                &e.to_string(),
+            );
+            StructuredError::from_gwt_error(&e, "get_settings")
+        })?;
         Ok(SettingsData::from(&settings))
-    })
+    });
+    match &result {
+        Ok(_) => log_flow_success("config", "get_settings"),
+        Err(e) => log_flow_failure("config", "get_settings", &e.message),
+    }
+    result
 }
 
 /// Save settings
 #[instrument(skip_all, fields(command = "save_settings"))]
 #[tauri::command]
 pub fn save_settings(settings: SettingsData) -> Result<(), StructuredError> {
-    with_panic_guard("saving settings", "save_settings", || {
+    log_flow_start("config", "save_settings");
+    let result = with_panic_guard("saving settings", "save_settings", || {
         Settings::update_global(|core_settings| {
             settings
                 .apply_to_settings(core_settings)
                 .map_err(|e| GwtError::ConfigWriteError { reason: e })?;
             Ok(())
         })
-        .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
+        .map_err(|e| {
+            gwt_core::logging::log_incident(
+                "config",
+                "save_settings",
+                Some("CONFIG_SAVE_FAILED"),
+                &e.to_string(),
+            );
+            StructuredError::from_gwt_error(&e, "save_settings")
+        })?;
 
         Ok(())
-    })
+    });
+    match &result {
+        Ok(_) => log_flow_success("config", "save_settings"),
+        Err(e) => log_flow_failure("config", "save_settings", &e.message),
+    }
+    result
 }
 
 #[cfg(test)]

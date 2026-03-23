@@ -19,7 +19,10 @@ use super::{
     detector::DockerFileType,
     port::PortAllocator,
 };
-use crate::{GwtError, Result};
+use crate::{
+    logging::{log_flow_failure, log_flow_start, log_flow_success},
+    GwtError, Result,
+};
 
 fn extract_port_envs_from_compose(content: &str) -> Vec<(String, u16)> {
     extract_port_envs_from_compose_filtered(content, None)
@@ -742,7 +745,13 @@ impl DockerManager {
     /// Runs `docker compose up -d` in the worktree directory.
     #[instrument(skip(self))]
     pub fn start(&self) -> Result<ContainerInfo> {
-        self.start_internal()
+        log_flow_start("docker", "start_container");
+        let result = self.start_internal();
+        match &result {
+            Ok(_) => log_flow_success("docker", "start_container"),
+            Err(e) => log_flow_failure("docker", "start_container", &e.to_string()),
+        }
+        result
     }
 
     /// Start the Docker container with automatic retry on transient failures
@@ -769,12 +778,24 @@ impl DockerManager {
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .envs(&env_vars);
 
-        let output = command
-            .output()
-            .map_err(|e| GwtError::Docker(format!("Failed to run docker compose: {}", e)))?;
+        let output = command.output().map_err(|e| {
+            crate::logging::log_incident(
+                "docker",
+                "start",
+                Some("DOCKER_COMPOSE_UP_SPAWN_FAILED"),
+                &e.to_string(),
+            );
+            GwtError::Docker(format!("Failed to run docker compose: {}", e))
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            crate::logging::log_incident(
+                "docker",
+                "start",
+                Some("DOCKER_COMPOSE_UP_FAILED"),
+                &stderr,
+            );
             warn!(
                 category = "docker",
                 container = %self.container_name,
@@ -814,6 +835,7 @@ impl DockerManager {
     /// Runs `docker compose down` in the worktree directory.
     #[instrument(skip(self))]
     pub fn stop(&self) -> Result<()> {
+        log_flow_start("docker", "stop_container");
         info!(
             category = "docker",
             container = %self.container_name,
@@ -827,16 +849,31 @@ impl DockerManager {
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .envs(&env_vars)
             .output()
-            .map_err(|e| GwtError::Docker(format!("Failed to run docker compose down: {}", e)))?;
+            .map_err(|e| {
+                crate::logging::log_incident(
+                    "docker",
+                    "stop",
+                    Some("DOCKER_COMPOSE_DOWN_SPAWN_FAILED"),
+                    &e.to_string(),
+                );
+                GwtError::Docker(format!("Failed to run docker compose down: {}", e))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            crate::logging::log_incident(
+                "docker",
+                "stop",
+                Some("DOCKER_COMPOSE_DOWN_FAILED"),
+                &stderr,
+            );
             warn!(
                 category = "docker",
                 container = %self.container_name,
                 error = %stderr,
                 "Docker compose down failed"
             );
+            log_flow_failure("docker", "stop_container", &stderr);
             return Err(GwtError::Docker(format!(
                 "Docker compose down failed: {}",
                 stderr
@@ -849,6 +886,7 @@ impl DockerManager {
             "Docker compose down succeeded"
         );
 
+        log_flow_success("docker", "stop_container");
         Ok(())
     }
 
@@ -1182,10 +1220,19 @@ impl DockerManager {
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .envs(&env_vars)
             .output()
-            .map_err(|e| GwtError::Docker(format!("Failed to run docker compose build: {}", e)))?;
+            .map_err(|e| {
+                crate::logging::log_incident(
+                    "docker",
+                    "rebuild",
+                    Some("DOCKER_BUILD_SPAWN_FAILED"),
+                    &e.to_string(),
+                );
+                GwtError::Docker(format!("Failed to run docker compose build: {}", e))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            crate::logging::log_incident("docker", "rebuild", Some("DOCKER_BUILD_FAILED"), &stderr);
             warn!(
                 category = "docker",
                 container = %self.container_name,
@@ -1252,11 +1299,28 @@ impl DockerManager {
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .envs(&env_vars);
 
-        let status = cmd
-            .status()
-            .map_err(|e| GwtError::Docker(format!("Failed to run docker compose exec: {}", e)))?;
+        let status = cmd.status().map_err(|e| {
+            crate::logging::log_incident(
+                "docker",
+                "run_in_service",
+                Some("DOCKER_EXEC_SPAWN_FAILED"),
+                &e.to_string(),
+            );
+            GwtError::Docker(format!("Failed to run docker compose exec: {}", e))
+        })?;
 
         if !status.success() {
+            let detail = format!(
+                "Command '{}' failed with exit code {:?}",
+                command,
+                status.code()
+            );
+            crate::logging::log_incident(
+                "docker",
+                "run_in_service",
+                Some("DOCKER_EXEC_FAILED"),
+                &detail,
+            );
             warn!(
                 category = "docker",
                 service = %service,
@@ -1264,11 +1328,7 @@ impl DockerManager {
                 exit_code = ?status.code(),
                 "Command in container failed"
             );
-            return Err(GwtError::Docker(format!(
-                "Command '{}' failed with exit code {:?}",
-                command,
-                status.code()
-            )));
+            return Err(GwtError::Docker(detail));
         }
 
         debug!(

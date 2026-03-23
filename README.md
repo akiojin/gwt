@@ -186,6 +186,11 @@ Voice input uses Qwen3-ASR via a local Python runtime.
 - `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
 - `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
 
+### Logging and profiling
+
+Normal logs are stored as JSON Lines under `~/.gwt/logs/`. Performance profiling can be enabled in **Settings > Profiling**.
+See [#1758](https://github.com/akiojin/gwt/issues/1758) for the logging specification.
+
 ## License
 
 MIT

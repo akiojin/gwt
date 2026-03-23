@@ -54,6 +54,8 @@ fn main() {
     };
     let _profiling_guard = gwt_core::logging::init_logger(&log_config);
 
+    gwt_core::logging::log_flow_start("startup", "app_init");
+
     let single_instance_guard = match crate::single_instance::try_acquire_single_instance() {
         Ok(crate::single_instance::AcquireOutcome::Acquired(guard)) => Arc::new(guard),
         Ok(crate::single_instance::AcquireOutcome::AlreadyRunning(running)) => {
@@ -84,6 +86,8 @@ fn main() {
     )
     .build(tauri::generate_context!())
     .expect("error while building tauri application");
+
+    gwt_core::logging::log_flow_success("startup", "app_init");
 
     app.run(crate::app::handle_run_event);
 }

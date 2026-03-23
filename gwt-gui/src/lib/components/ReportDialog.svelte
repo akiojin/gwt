@@ -195,6 +195,10 @@
     }
   });
 
+  // Application Logs: collects only normal logs (gwt.jsonl*) via the backend
+  // read_recent_logs command. Profiling output (profile.json) is excluded at
+  // the backend candidate-selection level. Privacy masking is applied by
+  // collectRecentLogs before the text reaches this component.
   $effect(() => {
     if (open && includeLogs && !logsText && !logsUnavailable) {
       collectRecentLogs().then((text) => {
