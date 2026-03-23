@@ -384,7 +384,8 @@
 
   function beginPan(event: PointerEvent) {
     if (event.button !== 0) return;
-    if (event.target !== event.currentTarget) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('.canvas-card')) return;
     panState = {
       pointerId: event.pointerId,
       startX: event.clientX,
