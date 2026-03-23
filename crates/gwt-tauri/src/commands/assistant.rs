@@ -202,7 +202,11 @@ pub async fn assistant_send_message(
     let window_label = window.label().to_string();
     let input = input.trim().to_string();
     if input.is_empty() {
-        log_flow_failure("assistant", "assistant_send_message", "Empty message rejected");
+        log_flow_failure(
+            "assistant",
+            "assistant_send_message",
+            "Empty message rejected",
+        );
         return Err("Message cannot be empty".to_string());
     }
     let delivery_mode = delivery_mode.unwrap_or(AssistantDeliveryMode::Interrupt);
