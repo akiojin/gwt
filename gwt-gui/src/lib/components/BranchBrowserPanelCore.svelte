@@ -161,6 +161,17 @@
   });
 
   $effect(() => {
+    const canonicalName = selectedEntry?.canonical_name ?? "";
+    if (!canonicalName) {
+      selectedDetail = null;
+      return;
+    }
+    if (selectedDetail?.canonical_name === canonicalName) return;
+    selectedDetail = null;
+    detailErrorMessage = null;
+  });
+
+  $effect(() => {
     const path = config.projectPath;
     const refreshKey = config.refreshKey;
     const snapshotKey = buildFetchRequestKeyRuntime(path, refreshKey);

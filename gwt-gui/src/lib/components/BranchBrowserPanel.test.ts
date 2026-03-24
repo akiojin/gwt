@@ -305,6 +305,45 @@ describe("BranchBrowserPanel", () => {
     expect(countListCalls()).toBe(1);
   });
 
+  it("clears stale selected detail immediately when switching selected branch", async () => {
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "list_branch_inventory") {
+        return Promise.resolve([localEntry, remoteEntry]);
+      }
+      if (command === "get_branch_inventory_detail") {
+        return Promise.resolve(
+          args?.canonicalName === remoteEntry.canonical_name ? remoteDetail : localDetail,
+        );
+      }
+      return Promise.resolve([]);
+    });
+
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          selectedBranch: localBranch,
+        }),
+      },
+    });
+
+    await waitFor(() =>
+      expect(rendered.container.querySelector(".detail-title")?.textContent).toBe(
+        "Local feature",
+      ),
+    );
+
+    await rendered.rerender({
+      config: createConfig({
+        selectedBranch: remoteBranch,
+        refreshKey: 0,
+      }),
+    });
+
+    expect(rendered.getByTestId("branch-browser-detail").textContent).not.toContain(
+      "Local feature",
+    );
+  });
+
   it("forwards open/focus worktree action for the selected branch", async () => {
     const onBranchActivate = vi.fn();
     const rendered = render(BranchBrowserPanel, {
