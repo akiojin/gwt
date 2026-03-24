@@ -41,7 +41,7 @@ impl LocalSpecPhase {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "draft" => Some(Self::Draft),
             "ready" => Some(Self::Ready),

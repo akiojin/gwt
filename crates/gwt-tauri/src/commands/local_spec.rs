@@ -316,7 +316,7 @@ pub fn update_local_spec_phase_cmd(
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "update_local_spec_phase_cmd"))?;
-    let phase = LocalSpecPhase::from_str(&phase)
+    let phase = LocalSpecPhase::parse(&phase)
         .ok_or_else(|| StructuredError::internal(&format!("Invalid phase: {phase}"), "update_local_spec_phase_cmd"))?;
     update_local_spec_phase(&repo_path, spec_id.trim(), phase)
         .map_err(|e| StructuredError::internal(&e, "update_local_spec_phase_cmd"))
