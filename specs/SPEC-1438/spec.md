@@ -20,7 +20,7 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 
 ### Managed gwt skills
 
-- `gwt-pty-communication`
+- `gwt-agent-dispatch`
 - `gwt-project-index`
 - `gwt-issue-spec-ops`
 - `gwt-pr`
