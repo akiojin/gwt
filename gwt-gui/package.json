@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "test:e2e:coverage": "E2E_COVERAGE=1 playwright test && nyc report --nycrc-path .nycrc.e2e.json && node ../scripts/check-e2e-coverage-threshold.mjs",
     "test:e2e:tauri:windows": "node --test ./e2e-tauri/*.test.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri"
@@ -24,6 +25,7 @@
     "@types/dompurify": "^3.2.0",
     "@vitest/coverage-v8": "^4.0.18",
     "jsdom": "^29.0.1",
+    "nyc": "^18.0.0",
     "prettier": "^3.8.1",
     "prettier-plugin-svelte": "^3.5.1",
     "selenium-webdriver": "^4.38.0",
@@ -31,6 +33,7 @@
     "svelte-check": "^4",
     "typescript": "^5",
     "vite": "^6",
+    "vite-plugin-istanbul": "^8.0.0",
     "vitest": "^4.0.18"
   },
   "dependencies": {

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installTauriMock } from "./support/tauri-mock";
+import { captureUxSnapshot, saveE2ECoverage } from "./support/helpers";
 
 const defaultRecentProject = {
   path: "/tmp/gwt-playwright",
@@ -227,9 +228,13 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
+});
+
 test("launches with selected Windows shell from Launch Agent form", async ({
   page,
-}) => {
+}, testInfo) => {
   await openProjectAndSelectBranch(page, {
     list_worktree_branches: [branchMain, branchDevelop, branchFeature],
     list_remote_branches: [],
@@ -265,6 +270,7 @@ test("launches with selected Windows shell from Launch Agent form", async ({
 
   expect(request).not.toBeNull();
   expect(request?.terminalShell).toBe("wsl");
+  await captureUxSnapshot(page, testInfo, "windows-shell-launch-dialog");
 });
 
 test("disables shell selection in Docker mode and does not send terminalShell", async ({
@@ -321,7 +327,7 @@ test("disables shell selection in Docker mode and does not send terminalShell", 
 
 test("saves Settings Terminal default shell via Terminal tab", async ({
   page,
-}) => {
+}, testInfo) => {
   await openProjectAndSelectBranch(page, {
     list_worktree_branches: [branchMain, branchDevelop, branchFeature],
     list_remote_branches: [],
@@ -370,6 +376,7 @@ test("saves Settings Terminal default shell via Terminal tab", async ({
 
   expect(savedSettings).not.toBeNull();
   expect(savedSettings?.default_shell).toBe("wsl");
+  await captureUxSnapshot(page, testInfo, "windows-shell-settings-terminal");
 });
 
 test("saves UI and terminal font families from General and Terminal tabs", async ({

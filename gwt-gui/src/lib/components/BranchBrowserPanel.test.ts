@@ -90,10 +90,6 @@ function createConfig(overrides: Partial<BranchBrowserPanelConfig> = {}): Branch
   return {
     projectPath: "/tmp/project",
     refreshKey: 0,
-    widthPx: 260,
-    minWidthPx: 220,
-    maxWidthPx: 520,
-    mode: "branch",
     currentBranch: "feature/local",
     agentTabBranches: [],
     activeAgentTabBranch: null,
@@ -151,6 +147,9 @@ describe("BranchBrowserPanel", () => {
     await waitFor(() =>
       expect(rendered.getByText("origin/feature/remote")).toBeTruthy(),
     );
+    expect(rendered.getByTestId("branch-browser-detail").textContent).not.toContain(
+        "origin/feature/remote",
+    );
   });
 
   it("merges local and remote refs into one canonical entry in All mode", async () => {
@@ -196,6 +195,33 @@ describe("BranchBrowserPanel", () => {
     await fireEvent.click(rendered.getByText("Local feature"));
 
     expect(onBranchSelect).toHaveBeenCalledWith(localBranch);
+  });
+
+  it("does not refetch when non-refresh config props change", async () => {
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          selectedBranch: localBranch,
+        }),
+      },
+    });
+
+    await waitFor(() => expect(rendered.getByText("Local feature")).toBeTruthy());
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+
+    await rendered.rerender({
+      config: createConfig({
+        selectedBranch: remoteBranch,
+        refreshKey: 0,
+      }),
+    });
+
+    await waitFor(() =>
+      expect(rendered.getByTestId("branch-browser-detail").textContent).toContain(
+        "origin/feature/remote",
+      ),
+    );
+    expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 
   it("forwards open/focus worktree action for the selected branch", async () => {

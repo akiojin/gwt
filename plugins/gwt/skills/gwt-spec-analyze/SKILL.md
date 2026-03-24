@@ -18,7 +18,7 @@ This skill is a **pre-implementation readiness gate only**. It does not certify 
 - `doc:spec.md`
 - `doc:plan.md`
 - `doc:tasks.md`
-- `memory/constitution.md`
+- `.gwt/memory/constitution.md`
 
 Optional but validated when present:
 
