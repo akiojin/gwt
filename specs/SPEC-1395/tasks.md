@@ -7,6 +7,6 @@
 - [ ] T007 [U] [US3] `gwt-project-index` SKILL.md 更新
 - [ ] T008 [U] [US4] `gwt-issue-spec-ops` SKILL.md 更新
 - [ ] T009 [U] [US4] `gwt-spec-to-issue-migration` SKILL.md 更新
-- [ ] T010 [U] [US1] `gwt-pty-communication` SKILL.md 更新
+- [ ] T010 [U] [US1] `gwt-agent-dispatch` SKILL.md 更新
 - [ ] T011 [S] `.codex/skills/gwt-spec-to-issue-migration/` 削除
 - [ ] T012 [FIN] `cargo test` + `cargo clippy` + markdownlint 検証
