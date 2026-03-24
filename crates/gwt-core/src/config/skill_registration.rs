@@ -2567,6 +2567,7 @@ OPENAI_API_KEY = "legacy-key"
         .unwrap();
         assert!(spec_register_skill.contains("local SPEC directory"));
         assert!(spec_register_skill.contains("gwt-issue-search"));
+        assert!(spec_register_skill.contains("metadata.json"));
         assert!(spec_register_skill.contains("gwt-spec-ops"));
 
         let spec_clarify_skill = std::fs::read_to_string(

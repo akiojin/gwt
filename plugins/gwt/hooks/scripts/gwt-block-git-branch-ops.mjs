@@ -58,9 +58,13 @@ for (const segment of segments) {
     //   git checkout --ours -- <file>
     //   git checkout HEAD -- <file>
     //   git checkout <ref> -- <file>  (explicit -- separator)
-    const isFileCheckout =
-      /\bcheckout\b.*\s--(theirs|ours)\b/.test(segment) ||
-      /\bcheckout\b.*\s--\s/.test(segment);
+    // Allow only explicit file-level checkout with -- separator,
+    // but reject broad targets like "." or bare directory paths.
+    const hasExplicitSeparator = /\bcheckout\b.*\s--\s/.test(segment);
+    const hasConflictFlag = /\bcheckout\b.*\s--(theirs|ours)\b/.test(segment);
+    // Block "-- ." and "-- *" which restore entire trees
+    const hasBroadTarget = /\s--\s+[.*]/.test(segment);
+    const isFileCheckout = (hasConflictFlag || hasExplicitSeparator) && !hasBroadTarget;
     if (!isFileCheckout) {
       block(
         "\u{1F6AB} Branch switching commands (checkout/switch) are not allowed",

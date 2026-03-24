@@ -13,6 +13,7 @@ use gwt_core::{
         repair_skill_registration_with_settings_at_project_root, Settings, SkillRegistrationStatus,
     },
     git::{self, Branch},
+    logging::{log_flow_start, log_flow_success},
     migration::{
         derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig,
         MigrationState,
@@ -23,8 +24,6 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{instrument, warn};
 use uuid::Uuid;
-
-use gwt_core::logging::{log_flow_start, log_flow_success};
 
 use crate::state::AppState;
 

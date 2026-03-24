@@ -77,7 +77,7 @@
 - worktree tile が `gone` になっても child agent/terminal session がまだ生きている場合、worktree tile は stale/gone projection で残し、child close 後に整理する
 - live terminal mount は viewport 外 tile で止めても、tile geometry / relation edge / selection state を失ってはならない
 - restore payload に split-tab group metadata が残っていても、shell 正本は flat top-level tabs + canvas/browser state を優先する
-- Cmd+`` ` `` / Ctrl+`` ` `` は canvas focus や xterm focus に奪われず window navigation として機能しなければならない
+- ``Cmd+\`` / ``Ctrl+\`` は canvas focus や xterm focus に奪われず window navigation として機能しなければならない
 
 ## Functional Requirements
 
@@ -92,7 +92,7 @@
 - **FR-009**: canvas interaction は自由配置、パン、ズームを提供しなければならない
 - **FR-010**: live terminal rendering は viewport 内 tile に限定して良いが、tile 自体は canvas state に常に存在しなければならない
 - **FR-011**: shell state は window-local に保存・復元されなければならない
-- **FR-012**: Cmd+`` ` `` / Ctrl+`` ` `` による window cycling は維持されなければならない
+- **FR-012**: ``Cmd+\`` / ``Ctrl+\`` による window cycling は維持されなければならない
 - **FR-013**: split-tab group tree は shell 正本から除去されなければならない
 - **FR-014**: old agent/terminal tab persistence は canonical canvas tile model に migrate されなければならない
 - **FR-015**: すべての top-level tab content は window 全体を使う単一 surface として表示されなければならない

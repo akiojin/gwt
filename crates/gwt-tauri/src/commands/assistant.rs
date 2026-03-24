@@ -3,9 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
 use gwt_core::{
     git::{self, get_spec_issue_detail, graphql, Branch, PrCache, WorkflowRunInfo},
+    logging::{log_flow_failure, log_flow_start, log_flow_success},
     process::command as process_command,
     terminal::pane::PaneStatus,
     worktree::WorktreeManager,

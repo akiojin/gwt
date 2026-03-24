@@ -17,10 +17,9 @@ mod single_instance;
 mod state;
 mod tool_helpers;
 
-use std::{io::Read, sync::Arc};
-
 #[cfg(any(test, target_os = "macos"))]
 use std::path::{Path, PathBuf};
+use std::{io::Read, sync::Arc};
 
 use state::AppState;
 
@@ -385,8 +384,9 @@ fn maybe_run_internal_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn webkit_local_storage_targets_collects_top_level_and_nested_dirs() {
