@@ -2354,9 +2354,8 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(!gemini_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
-        assert!(gemini_skill_content.contains(
-            ".gemini/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
-        ));
+        assert!(gemini_skill_content
+            .contains(".gemini/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py"));
     }
 
     #[test]
@@ -2506,7 +2505,7 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(issue_register_skill.contains("Search existing Issues and `gwt-spec` Issues first"));
+        assert!(issue_register_skill.contains("Search existing Issues and SPECs first"));
         assert!(issue_register_skill.contains("gwt-issue-search"));
         assert!(issue_register_skill.contains("gwt-spec-register"));
         assert!(issue_register_skill.contains("gwt-issue-resolve"));
@@ -2566,11 +2565,9 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_register_skill.contains("Issue-first SPEC container"));
+        assert!(spec_register_skill.contains("local SPEC directory"));
         assert!(spec_register_skill.contains("gwt-issue-search"));
-        assert!(spec_register_skill.contains("GWT_SPEC_ARTIFACT:doc:spec.md"));
         assert!(spec_register_skill.contains("gwt-spec-ops"));
-        assert!(spec_register_skill.contains("repos/<owner>/<repo>/issues"));
 
         let spec_clarify_skill = std::fs::read_to_string(
             temp.path()
