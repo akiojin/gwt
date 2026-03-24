@@ -4,11 +4,17 @@
   let {
     selectedBranch,
     selectedEntry,
+    worktreePath = null,
+    detailLoading = false,
+    detailErrorMessage = null,
     actionLabel,
     onactivate,
   }: {
     selectedBranch: BranchInfo | null;
     selectedEntry: BranchInventoryEntry | null;
+    worktreePath?: string | null;
+    detailLoading?: boolean;
+    detailErrorMessage?: string | null;
     actionLabel: string;
     onactivate: () => void;
   } = $props();
@@ -31,7 +37,7 @@
       </div>
       <div class="detail-row">
         <span class="detail-label">Worktree</span>
-        <span class="detail-value mono">{selectedEntry?.worktree?.path ?? "Not materialized"}</span>
+        <span class="detail-value mono">{worktreePath ?? "Not materialized"}</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Coverage</span>
@@ -60,6 +66,11 @@
         </span>
       </div>
     </div>
+    {#if detailLoading}
+      <div class="state-msg inline">Refreshing detail…</div>
+    {:else if detailErrorMessage}
+      <div class="state-msg error inline">{detailErrorMessage}</div>
+    {/if}
     <div class="detail-actions">
       <button
         type="button"
@@ -147,5 +158,13 @@
   .state-msg {
     padding: 16px;
     color: var(--text-muted);
+  }
+
+  .state-msg.inline {
+    padding-top: 0;
+  }
+
+  .state-msg.error {
+    color: var(--red);
   }
 </style>

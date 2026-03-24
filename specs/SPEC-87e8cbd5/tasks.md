@@ -1,0 +1,8 @@
+- [x] T001 [F] [US1] Add Rust tests for startup status response shape, cache fingerprint/cache round-trip, and read-only startup tools.
+- [x] T002 [F] [US1] Add/update frontend tests so startup pending state shows the detailed status message instead of only a generic loading state.
+- [x] T003 [F] [US2] Implement project-local startup analysis cache read/write plus cache fingerprint generation.
+- [x] T004 [F] [US1] Emit startup progress messages while analysis is inspecting repo state, checking cache, using cache, or running LLM analysis.
+- [x] T005 [F] [US2] Restrict startup analysis to read-only tool definitions only.
+- [x] T006 [FIN] [US1] Run targeted verification and reflect the result in the spec.
+- [x] T007 [F] [US4] Render assistant transcript content through MarkdownRenderer when the message is assistant text.
+- [x] T008 [FIN] [US4] Add/update frontend tests proving markdown output is rendered as markdown instead of plain text.

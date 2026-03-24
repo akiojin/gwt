@@ -1,0 +1,7 @@
+- [x] #1579 is clearly the workflow/registration canonical spec
+- [x] #1327 is clearly the storage/API canonical spec
+- [x] #1354 is clearly the viewer/detail canonical spec
+- [x] #1643 is clearly the search canonical spec
+- [x] migration scope includes local specs and body-canonical issues
+- [x] #1579 explicitly states REST-first / GraphQL-only-where-needed for embedded GitHub skills
+- [x] `gwt-pr`, `gwt-pr-check`, and `gwt-pr-fix` transport boundaries are explicit and non-overlapping

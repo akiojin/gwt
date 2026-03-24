@@ -1,0 +1,6 @@
+- [x] Files / Issues / Recovery / Skill-first discovery が 1 つの Project Index spec に集約されている
+- [x] `gwt-project-index` が Issue/SPEC 検索用途を明示している
+- [x] spec 統合要求時に `gwt-project-index` を先に使う要件が入っている
+- [x] crashing persisted DB recovery の要件が明文化されている
+- [x] `#1427` の恒久要件が統合済みである
+- [x] issues collection recovery と local asset ignore 責務分離が本文へ反映済みである
