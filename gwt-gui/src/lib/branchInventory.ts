@@ -1,4 +1,9 @@
-import type { BranchInfo, BranchInventoryEntry, BranchInventoryResolutionAction, WorktreeInfo } from "./types";
+import type {
+  BranchInfo,
+  BranchInventoryResolutionAction,
+  BranchInventorySnapshotEntry,
+  WorktreeInfo,
+} from "./types";
 import type { SidebarFilterType } from "./components/sidebarHelpers";
 import { stripRemotePrefix } from "./components/sidebarHelpers";
 
@@ -12,7 +17,7 @@ function buildInventoryEntry(
   localBranch: BranchInfo | null,
   remoteBranch: BranchInfo | null,
   worktrees: WorktreeInfo[],
-): BranchInventoryEntry {
+): BranchInventorySnapshotEntry {
   const worktree = worktrees[0] ?? null;
   const worktreeCount = worktrees.length;
   let resolutionAction: BranchInventoryResolutionAction = "createWorktree";
@@ -41,7 +46,7 @@ function buildInventoryEntry(
     remote_branch: remoteBranch,
     has_local: Boolean(localBranch),
     has_remote: Boolean(remoteBranch),
-    worktree,
+    worktree_path: worktree?.path ?? null,
     worktree_count: worktreeCount,
     resolution_action: resolutionAction,
   };
@@ -52,7 +57,7 @@ export function buildBranchInventoryEntries(
   remote: BranchInfo[],
   worktrees: WorktreeInfo[],
   filter: SidebarFilterType,
-): BranchInventoryEntry[] {
+): BranchInventorySnapshotEntry[] {
   const localByKey = new Map(local.map((branch) => [branchInventoryKey(branch.name), branch]));
   const remoteByKey = new Map(remote.map((branch) => [branchInventoryKey(branch.name), branch]));
   const worktreesByKey = new Map<string, WorktreeInfo[]>();
@@ -100,6 +105,8 @@ export function buildBranchInventoryEntries(
   );
 }
 
-export function resolveBranchInventoryAction(entry: BranchInventoryEntry): BranchInventoryResolutionAction {
+export function resolveBranchInventoryAction(
+  entry: BranchInventorySnapshotEntry,
+): BranchInventoryResolutionAction {
   return entry.resolution_action;
 }

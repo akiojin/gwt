@@ -35,7 +35,7 @@ export type BranchInventoryResolutionAction =
   | "createWorktree"
   | "resolveAmbiguity";
 
-export interface BranchInventoryEntry {
+export interface BranchInventorySnapshotEntry {
   id: string;
   canonical_name: string;
   primary_branch: BranchInfo;
@@ -43,10 +43,14 @@ export interface BranchInventoryEntry {
   remote_branch?: BranchInfo | null;
   has_local: boolean;
   has_remote: boolean;
-  worktree?: WorktreeInfo | null;
+  worktree_path?: string | null;
   worktree_count: number;
   resolution_action: BranchInventoryResolutionAction;
 }
+
+export interface BranchInventoryDetail extends BranchInventorySnapshotEntry {}
+
+export type BranchInventoryEntry = BranchInventorySnapshotEntry;
 
 export interface MaterializeWorktreeResult {
   worktree: WorktreeInfo;

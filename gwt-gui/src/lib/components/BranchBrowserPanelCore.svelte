@@ -4,7 +4,8 @@
     BranchBrowserPanelConfig,
     BranchBrowserPanelState,
     BranchInfo,
-    BranchInventoryEntry,
+    BranchInventoryDetail,
+    BranchInventorySnapshotEntry,
   } from "../types";
   import {
     actionLabelRuntime,
@@ -13,13 +14,11 @@
     buildFilteredBranchEntriesRuntime,
     buildHydrationKeyRuntime,
     buildRemotePrimaryNamesRuntime,
-    resolveSelectedBranchRuntime,
     resolveSelectedEntryRuntime,
   } from "../branchBrowserRuntime";
   import {
     divergenceClass,
     divergenceIndicator,
-    safetyTitleForLevel,
     type SidebarFilterType,
   } from "./sidebarHelpers";
   import BranchBrowserDetailCard from "./BranchBrowserDetailCard.svelte";
@@ -31,15 +30,22 @@
   let searchQuery = $state("");
   let loading = $state(true);
   let errorMessage: string | null = $state(null);
+  let detailLoading = $state(false);
+  let detailErrorMessage: string | null = $state(null);
   let remotePrimaryNames = $state(new Set<string>());
   let requestToken = 0;
+  let detailRequestToken = 0;
   let lastFetchRequestKey = $state("");
   let lastHydrationKey = $state("");
   let lastStateEmitKey = $state("");
+  let lastDetailKey = $state("");
+  let loadedSnapshotKey = $state("");
+  let lastDetailRefreshKey = $state<number | null>(null);
 
   const filters: SidebarFilterType[] = ["Local", "Remote", "All"];
 
-  let branchEntries = $state<BranchInventoryEntry[]>([]);
+  let branchEntries = $state<BranchInventorySnapshotEntry[]>([]);
+  let selectedDetail = $state<BranchInventoryDetail | null>(null);
 
   let filteredEntries = $derived.by(() => {
     return buildFilteredBranchEntriesRuntime({
@@ -57,28 +63,49 @@
     });
   });
   let resolvedSelectedBranch = $derived<BranchInfo | null>(
-    resolveSelectedBranchRuntime({
-      config,
-      selectedEntry,
-    }),
+    selectedDetail?.primary_branch ??
+      config.selectedBranch ??
+      selectedEntry?.primary_branch ??
+      null,
   );
 
-  async function fetchBranches(path: string) {
+  function mergeDetail(detail: BranchInventoryDetail) {
+    branchEntries = branchEntries.map((entry) =>
+      entry.canonical_name === detail.canonical_name
+        ? {
+            ...entry,
+            primary_branch: detail.primary_branch,
+            local_branch: detail.local_branch,
+            remote_branch: detail.remote_branch,
+            worktree_path: detail.worktree_path ?? entry.worktree_path ?? null,
+            worktree_count: detail.worktree_count,
+            resolution_action: detail.resolution_action,
+            has_local: detail.has_local,
+            has_remote: detail.has_remote,
+          }
+        : entry,
+    );
+  }
+
+  async function fetchBranches(path: string, refreshKey: number) {
     const token = ++requestToken;
     loading = true;
     errorMessage = null;
 
     try {
-      const entries = await invoke<BranchInventoryEntry[]>("list_branch_inventory", {
+      const entries = await invoke<BranchInventorySnapshotEntry[]>("list_branch_inventory", {
         projectPath: path,
+        refreshKey,
       });
       if (token !== requestToken) return;
       branchEntries = entries;
+      loadedSnapshotKey = `${path}::${refreshKey}`;
       remotePrimaryNames = buildRemotePrimaryNamesRuntime(entries);
     } catch (error) {
       if (token !== requestToken) return;
       errorMessage = error instanceof Error ? error.message : String(error);
       branchEntries = [];
+      loadedSnapshotKey = "";
       remotePrimaryNames = new Set();
     } finally {
       if (token === requestToken) {
@@ -87,15 +114,82 @@
     }
   }
 
+  async function fetchBranchDetail(
+    path: string,
+    canonicalName: string,
+    forceRefresh = false,
+    refreshKey?: number,
+  ) {
+    const token = ++detailRequestToken;
+    detailLoading = true;
+    detailErrorMessage = null;
+    if (forceRefresh) {
+      selectedDetail = null;
+    }
+
+    try {
+      const detail = await invoke<BranchInventoryDetail>("get_branch_inventory_detail", {
+        projectPath: path,
+        canonicalName,
+        forceRefresh,
+      });
+      if (token !== detailRequestToken) return;
+      selectedDetail = detail;
+      mergeDetail(detail);
+      if (typeof refreshKey === "number") {
+        lastDetailRefreshKey = refreshKey;
+      }
+    } catch (error) {
+      if (token !== detailRequestToken) return;
+      selectedDetail = null;
+      detailErrorMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (token === detailRequestToken) {
+        detailLoading = false;
+      }
+    }
+  }
+
   $effect(() => {
     const path = config.projectPath;
     const refreshKey = config.refreshKey;
-    void refreshKey;
     if (!path) return;
     const nextFetchRequestKey = buildFetchRequestKeyRuntime(path, refreshKey);
     if (nextFetchRequestKey === lastFetchRequestKey) return;
     lastFetchRequestKey = nextFetchRequestKey;
-    void fetchBranches(path);
+    void fetchBranches(path, refreshKey);
+  });
+
+  $effect(() => {
+    const canonicalName = selectedEntry?.canonical_name ?? "";
+    if (!canonicalName) {
+      selectedDetail = null;
+      return;
+    }
+    if (selectedDetail?.canonical_name === canonicalName) return;
+    selectedDetail = null;
+    detailErrorMessage = null;
+  });
+
+  $effect(() => {
+    const path = config.projectPath;
+    const refreshKey = config.refreshKey;
+    const snapshotKey = buildFetchRequestKeyRuntime(path, refreshKey);
+    const canonicalName = selectedEntry?.canonical_name ?? "";
+    const detailKey = `${snapshotKey}::${canonicalName}`;
+    if (!path || !canonicalName) {
+      lastDetailKey = "";
+      selectedDetail = null;
+      detailLoading = false;
+      detailErrorMessage = null;
+      return;
+    }
+    if (loadedSnapshotKey !== snapshotKey) return;
+    if (detailKey === lastDetailKey) return;
+    const forceRefresh =
+      lastDetailRefreshKey !== null && lastDetailRefreshKey !== refreshKey;
+    lastDetailKey = detailKey;
+    void fetchBranchDetail(path, canonicalName, forceRefresh, refreshKey);
   });
 
   $effect(() => {
@@ -160,6 +254,9 @@
       <BranchBrowserDetailCard
         selectedBranch={resolvedSelectedBranch}
         {selectedEntry}
+        worktreePath={selectedDetail?.worktree_path ?? selectedEntry?.worktree_path ?? null}
+        {detailLoading}
+        {detailErrorMessage}
         actionLabel={selectedEntry ? actionLabelRuntime(selectedEntry) : "Create Worktree"}
         onactivate={() => {
           if (selectedEntry?.resolution_action === "resolveAmbiguity") return;
