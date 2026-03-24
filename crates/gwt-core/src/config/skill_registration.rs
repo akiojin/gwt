@@ -2354,9 +2354,8 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(!gemini_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
-        assert!(gemini_skill_content.contains(
-            ".gemini/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
-        ));
+        assert!(gemini_skill_content
+            .contains(".gemini/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py"));
     }
 
     #[test]
@@ -2506,7 +2505,7 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(issue_register_skill.contains("Search existing Issues and `gwt-spec` Issues first"));
+        assert!(issue_register_skill.contains("Search existing Issues and SPECs first"));
         assert!(issue_register_skill.contains("gwt-issue-search"));
         assert!(issue_register_skill.contains("gwt-spec-register"));
         assert!(issue_register_skill.contains("gwt-issue-resolve"));
