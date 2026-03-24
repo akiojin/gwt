@@ -1,0 +1,3 @@
+- Pty.Net の NuGet→Unity 導入方法（OpenUPM or NuGetForUnity）の検証が必要
+- IPtyAdapter アダプタ層の具体的インターフェース設計は実装時に確定
+- 現行リポジトリの実装・テストとの差異を実装前に確認すること

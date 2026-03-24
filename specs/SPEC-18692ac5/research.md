@@ -1,0 +1,3 @@
+- `crates/gwt-tauri/src/commands/assistant.rs` の session startup は engine insert のみで initial analysis を実行しなかった
+- `AssistantEngine` には user-triggered `handle_user_message` はあるが、session start 用の startup flow がなかった
+- transcript serializer は system/tool messages を非表示にするため、startup analysis prompt を hidden system message として積める
