@@ -51,12 +51,22 @@ for (const segment of segments) {
 
   if (!/^git\b/.test(segment)) continue;
 
-  // checkout/switch: unconditional block
+  // checkout/switch: block branch switching but allow file-level operations
   if (/\b(checkout|switch)\b/.test(segment)) {
-    block(
-      "\u{1F6AB} Branch switching commands (checkout/switch) are not allowed",
-      `Worktree is designed to complete work on the launched branch. Branch operations such as git checkout and git switch cannot be executed.\n\nBlocked command: ${command}`
-    );
+    // Allow file-level checkout used for conflict resolution and file restore:
+    //   git checkout --theirs -- <file>
+    //   git checkout --ours -- <file>
+    //   git checkout HEAD -- <file>
+    //   git checkout <ref> -- <file>  (explicit -- separator)
+    const isFileCheckout =
+      /\bcheckout\b.*\s--(theirs|ours)\b/.test(segment) ||
+      /\bcheckout\b.*\s--\s/.test(segment);
+    if (!isFileCheckout) {
+      block(
+        "\u{1F6AB} Branch switching commands (checkout/switch) are not allowed",
+        `Worktree is designed to complete work on the launched branch. Branch operations such as git checkout and git switch cannot be executed.\n\nBlocked command: ${command}`
+      );
+    }
   }
 
   // branch subcommand: only read-only allowed
