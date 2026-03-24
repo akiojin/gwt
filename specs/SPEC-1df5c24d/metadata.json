@@ -1,8 +1,0 @@
-{
-  "id": "1df5c24d",
-  "title": "fix: AssistantPanel IME確定Enterでメッセージが誤送信される",
-  "status": "closed",
-  "phase": "draft",
-  "created_at": "2026-03-17T06:26:40Z",
-  "updated_at": "2026-03-18T14:48:02Z"
-}

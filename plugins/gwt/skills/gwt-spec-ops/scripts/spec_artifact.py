@@ -7,7 +7,7 @@ import argparse
 import json
 import subprocess
 import sys
-import uuid
+import glob
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +40,22 @@ def parse_args() -> argparse.Namespace:
     action.add_argument("--close", action="store_true")
 
     return parser.parse_args()
+
+
+def next_spec_id(git_root: Path) -> str:
+    """Generate the next sequential SPEC ID."""
+    specs = git_root / "specs"
+    max_id = 0
+    if specs.exists():
+        for entry in specs.iterdir():
+            name = entry.name
+            if name.startswith("SPEC-") and entry.is_dir():
+                try:
+                    num = int(name[5:])
+                    max_id = max(max_id, num)
+                except ValueError:
+                    pass
+    return str(max_id + 1)
 
 
 def find_git_root(start: Path) -> Path:
@@ -124,7 +140,7 @@ def cmd_create(git_root: Path, title: str | None, as_json: bool) -> int:
         print("--title is required with --create", file=sys.stderr)
         return 1
 
-    spec_id = uuid.uuid4().hex[:8]
+    spec_id = next_spec_id(git_root)
     d = spec_dir(git_root, spec_id)
     d.mkdir(parents=True, exist_ok=True)
 

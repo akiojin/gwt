@@ -90,7 +90,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
 ### Local SPEC directory format
 
 ```text
-specs/SPEC-{uuid8}/
+specs/SPEC-{N}/
   metadata.json  # {"id","title","status","phase","created_at","updated_at"}
   spec.md        # Main specification content
 ```
