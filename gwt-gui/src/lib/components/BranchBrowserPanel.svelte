@@ -1,17 +1,16 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { invoke } from "$lib/tauriInvoke";
   import type {
     BranchBrowserPanelConfig,
     BranchBrowserPanelState,
     BranchInfo,
-    BranchInventoryEntry,
+    BranchInventoryDetail,
+    BranchInventorySnapshotEntry,
   } from "../types";
   import { branchInventoryKey } from "../branchInventory";
   import {
     divergenceClass,
     divergenceIndicator,
-    safetyTitleForLevel,
     sortBranches,
     type SidebarFilterType,
   } from "./sidebarHelpers";
@@ -22,17 +21,22 @@
   let searchQuery = $state("");
   let loading = $state(true);
   let errorMessage: string | null = $state(null);
+  let detailLoading = $state(false);
+  let detailErrorMessage: string | null = $state(null);
   let remotePrimaryNames = $state(new Set<string>());
   let requestToken = 0;
+  let detailRequestToken = 0;
   let lastHydrationKey = $state("");
   let lastStateEmitKey = $state("");
+  let lastDetailKey = $state("");
 
   const filters: SidebarFilterType[] = ["Local", "Remote", "All"];
 
-  let branchEntries = $state<BranchInventoryEntry[]>([]);
+  let branchEntries = $state<BranchInventorySnapshotEntry[]>([]);
+  let selectedDetail = $state<BranchInventoryDetail | null>(null);
 
   function matchesFilter(
-    entry: BranchInventoryEntry,
+    entry: BranchInventorySnapshotEntry,
     filter: SidebarFilterType,
   ): boolean {
     if (filter === "Local") return entry.has_local;
@@ -75,17 +79,39 @@
     return branchEntries.find((entry) => entry.canonical_name === key) ?? null;
   });
   let resolvedSelectedBranch = $derived<BranchInfo | null>(
-    config.selectedBranch ?? selectedEntry?.primary_branch ?? null,
+    selectedDetail?.primary_branch ??
+      config.selectedBranch ??
+      selectedEntry?.primary_branch ??
+      null,
   );
 
-  async function fetchBranches(path: string) {
+  function mergeDetail(detail: BranchInventoryDetail) {
+    branchEntries = branchEntries.map((entry) =>
+      entry.canonical_name === detail.canonical_name
+        ? {
+            ...entry,
+            primary_branch: detail.primary_branch,
+            local_branch: detail.local_branch,
+            remote_branch: detail.remote_branch,
+            worktree_path: detail.worktree_path ?? entry.worktree_path ?? null,
+            worktree_count: detail.worktree_count,
+            resolution_action: detail.resolution_action,
+            has_local: detail.has_local,
+            has_remote: detail.has_remote,
+          }
+        : entry,
+    );
+  }
+
+  async function fetchBranches(path: string, refreshKey: number) {
     const token = ++requestToken;
     loading = true;
     errorMessage = null;
 
     try {
-      const entries = await invoke<BranchInventoryEntry[]>("list_branch_inventory", {
+      const entries = await invoke<BranchInventorySnapshotEntry[]>("list_branch_inventory", {
         projectPath: path,
+        refreshKey,
       });
       if (token !== requestToken) return;
       branchEntries = entries;
@@ -106,7 +132,39 @@
     }
   }
 
-  function actionLabel(entry: BranchInventoryEntry): string {
+  async function fetchBranchDetail(
+    path: string,
+    canonicalName: string,
+    forceRefresh = false,
+  ) {
+    const token = ++detailRequestToken;
+    detailLoading = true;
+    detailErrorMessage = null;
+    if (forceRefresh) {
+      selectedDetail = null;
+    }
+
+    try {
+      const detail = await invoke<BranchInventoryDetail>("get_branch_inventory_detail", {
+        projectPath: path,
+        canonicalName,
+        forceRefresh,
+      });
+      if (token !== detailRequestToken) return;
+      selectedDetail = detail;
+      mergeDetail(detail);
+    } catch (error) {
+      if (token !== detailRequestToken) return;
+      selectedDetail = null;
+      detailErrorMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (token === detailRequestToken) {
+        detailLoading = false;
+      }
+    }
+  }
+
+  function actionLabel(entry: BranchInventorySnapshotEntry): string {
     switch (entry.resolution_action) {
       case "focusExisting":
         return "Focus Worktree";
@@ -117,17 +175,28 @@
     }
   }
 
-  onMount(() => {
-    if (!config.projectPath) return;
-    void fetchBranches(config.projectPath);
+  $effect(() => {
+    const path = config.projectPath;
+    const refreshKey = config.refreshKey;
+    if (!path) return;
+    void fetchBranches(path, refreshKey);
   });
 
   $effect(() => {
     const path = config.projectPath;
     const refreshKey = config.refreshKey;
-    void refreshKey;
-    if (!path) return;
-    void fetchBranches(path);
+    const canonicalName = selectedEntry?.canonical_name ?? "";
+    const detailKey = `${path}::${canonicalName}::${refreshKey}`;
+    if (!path || !canonicalName) {
+      lastDetailKey = "";
+      selectedDetail = null;
+      detailLoading = false;
+      detailErrorMessage = null;
+      return;
+    }
+    if (detailKey === lastDetailKey) return;
+    lastDetailKey = detailKey;
+    void fetchBranchDetail(path, canonicalName, false);
   });
 
   $effect(() => {
@@ -212,7 +281,7 @@
             </div>
             <div class="detail-row">
               <span class="detail-label">Worktree</span>
-              <span class="detail-value mono">{selectedEntry?.worktree?.path ?? "Not materialized"}</span>
+              <span class="detail-value mono">{selectedDetail?.worktree_path ?? selectedEntry?.worktree_path ?? "Not materialized"}</span>
             </div>
             <div class="detail-row">
               <span class="detail-label">Coverage</span>
@@ -241,6 +310,11 @@
               </span>
             </div>
           </div>
+          {#if detailLoading}
+            <div class="state-msg inline">Refreshing detail…</div>
+          {:else if detailErrorMessage}
+            <div class="state-msg error inline">{detailErrorMessage}</div>
+          {/if}
           <div class="detail-actions">
             <button
               type="button"
@@ -283,17 +357,11 @@
                 <span class="branch-name">{entry.primary_branch.display_name ?? entry.primary_branch.name}</span>
                 {#if entry.primary_branch.display_name && entry.primary_branch.display_name !== entry.primary_branch.name}
                   <span class="branch-sub">{entry.primary_branch.name}</span>
+                {:else}
+                  <span class="branch-sub">{entry.primary_branch.name}</span>
                 {/if}
               </div>
               <div class="branch-meta">
-                {#if entry.worktree?.safety_level}
-                  <span
-                    class={`safety-pill ${entry.worktree.safety_level}`}
-                    title={safetyTitleForLevel(entry.worktree.safety_level)}
-                  >
-                    {entry.worktree.safety_level}
-                  </span>
-                {/if}
                 {#if divergenceIndicator(entry.primary_branch)}
                   <span
                     class={`divergence-pill ${divergenceClass(entry.primary_branch.divergence_status)}`}
@@ -518,6 +586,10 @@
   }
 
   .detail-actions {
+    padding: 0 16px 16px;
+  }
+
+  .state-msg.inline {
     padding: 0 16px 16px;
   }
 

@@ -734,6 +734,7 @@ pub fn build_app(
             crate::commands::branches::list_worktree_branches,
             crate::commands::branches::list_remote_branches,
             crate::commands::branches::list_branch_inventory,
+            crate::commands::branches::get_branch_inventory_detail,
             crate::commands::branches::materialize_worktree_ref,
             crate::commands::branches::get_current_branch,
             crate::commands::project::open_project,

@@ -4,7 +4,8 @@ import BranchBrowserPanel from "./BranchBrowserPanel.svelte";
 import type {
   BranchBrowserPanelConfig,
   BranchInfo,
-  BranchInventoryEntry,
+  BranchInventoryDetail,
+  BranchInventorySnapshotEntry,
   WorktreeInfo,
 } from "../types";
 
@@ -16,7 +17,7 @@ vi.mock("$lib/tauriInvoke", () => ({
 
 const localBranch: BranchInfo = {
   name: "feature/local",
-  display_name: "Local feature",
+  display_name: null,
   commit: "abc1234",
   is_current: false,
   is_agent_running: false,
@@ -30,6 +31,7 @@ const localBranch: BranchInfo = {
 
 const remoteBranch: BranchInfo = {
   name: "origin/feature/remote",
+  display_name: null,
   commit: "def5678",
   is_current: false,
   is_agent_running: false,
@@ -60,7 +62,7 @@ const worktree: WorktreeInfo = {
   safety_level: "warning",
 };
 
-const localEntry: BranchInventoryEntry = {
+const localEntry: BranchInventorySnapshotEntry = {
   id: "feature/local",
   canonical_name: "feature/local",
   primary_branch: localBranch,
@@ -68,12 +70,12 @@ const localEntry: BranchInventoryEntry = {
   remote_branch: null,
   has_local: true,
   has_remote: false,
-  worktree,
+  worktree_path: worktree.path,
   worktree_count: 1,
   resolution_action: "focusExisting",
 };
 
-const remoteEntry: BranchInventoryEntry = {
+const remoteEntry: BranchInventorySnapshotEntry = {
   id: "feature/remote",
   canonical_name: "feature/remote",
   primary_branch: remoteBranch,
@@ -81,9 +83,39 @@ const remoteEntry: BranchInventoryEntry = {
   remote_branch: remoteBranch,
   has_local: false,
   has_remote: true,
-  worktree: null,
+  worktree_path: null,
   worktree_count: 0,
   resolution_action: "createWorktree",
+};
+
+const localDetail: BranchInventoryDetail = {
+  ...localEntry,
+  primary_branch: {
+    ...localBranch,
+    display_name: "Local feature",
+    last_tool_usage: "codex@latest",
+  },
+  local_branch: {
+    ...localBranch,
+    display_name: "Local feature",
+    last_tool_usage: "codex@latest",
+  },
+  remote_branch: null,
+  worktree_path: worktree.path,
+};
+
+const remoteDetail: BranchInventoryDetail = {
+  ...remoteEntry,
+  primary_branch: {
+    ...remoteBranch,
+    display_name: "Remote feature",
+  },
+  local_branch: null,
+  remote_branch: {
+    ...remoteBranch,
+    display_name: "Remote feature",
+  },
+  worktree_path: null,
 };
 
 function createConfig(overrides: Partial<BranchBrowserPanelConfig> = {}): BranchBrowserPanelConfig {
@@ -110,6 +142,9 @@ describe("BranchBrowserPanel", () => {
       if (command === "list_branch_inventory") {
         return Promise.resolve([localEntry, remoteEntry]);
       }
+      if (command === "get_branch_inventory_detail") {
+        return Promise.resolve(localDetail);
+      }
       return Promise.resolve([]);
     });
   });
@@ -118,20 +153,38 @@ describe("BranchBrowserPanel", () => {
     cleanup();
   });
 
-  it("loads Local branches by default and renders branch details", async () => {
+  it("loads a minimal snapshot first, then hydrates selected branch detail", async () => {
     const onBranchSelect = vi.fn();
     const rendered = render(BranchBrowserPanel, {
       props: {
         config: createConfig({
-          selectedBranch: localBranch,
+          selectedBranchName: localEntry.canonical_name,
           onBranchSelect,
         }),
       },
     });
 
-    await waitFor(() => expect(rendered.getByText("Local feature")).toBeTruthy());
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("list_branch_inventory", {
+        projectPath: "/tmp/project",
+        refreshKey: 0,
+      }),
+    );
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("get_branch_inventory_detail", {
+        projectPath: "/tmp/project",
+        canonicalName: localEntry.canonical_name,
+        forceRefresh: false,
+      }),
+    );
+    await waitFor(() =>
+      expect(rendered.container.querySelector(".detail-title")?.textContent).toBe(
+        "Local feature",
+      ),
+    );
     expect(invokeMock).toHaveBeenCalledWith("list_branch_inventory", {
       projectPath: "/tmp/project",
+      refreshKey: 0,
     });
     expect(rendered.getByTestId("branch-browser-detail").textContent).toContain(
       "/tmp/project/.gwt/worktrees/feature-local",
@@ -145,16 +198,20 @@ describe("BranchBrowserPanel", () => {
       },
     });
 
-    await waitFor(() => expect(rendered.getByText("Local feature")).toBeTruthy());
+    await waitFor(() =>
+      expect(rendered.container.querySelector(".branch-row")).toBeTruthy(),
+    );
     await fireEvent.click(rendered.getByText("Remote"));
 
     await waitFor(() =>
-      expect(rendered.getByText("origin/feature/remote")).toBeTruthy(),
+      expect(rendered.container.querySelector(".branch-row")?.textContent).toContain(
+        "origin/feature/remote",
+      ),
     );
   });
 
   it("merges local and remote refs into one canonical entry in All mode", async () => {
-    const mergedEntry: BranchInventoryEntry = {
+    const mergedEntry: BranchInventorySnapshotEntry = {
       ...localEntry,
       has_remote: true,
       remote_branch: {
@@ -170,17 +227,17 @@ describe("BranchBrowserPanel", () => {
     const rendered = render(BranchBrowserPanel, {
       props: {
         config: createConfig({
-          selectedBranch: localBranch,
+          selectedBranchName: mergedEntry.canonical_name,
         }),
       },
     });
 
-    await waitFor(() => expect(rendered.getByText("Local feature")).toBeTruthy());
+    await waitFor(() =>
+      expect(rendered.container.querySelector(".branch-row")).toBeTruthy(),
+    );
     await fireEvent.click(rendered.getByText("All"));
 
-    await waitFor(() =>
-      expect(rendered.getByText("Local + Remote")).toBeTruthy(),
-    );
+    await waitFor(() => expect(rendered.getByText("Local + Remote")).toBeTruthy());
     expect(rendered.container.querySelectorAll(".branch-row")).toHaveLength(1);
   });
 
@@ -192,8 +249,12 @@ describe("BranchBrowserPanel", () => {
       },
     });
 
-    await waitFor(() => expect(rendered.getByText("Local feature")).toBeTruthy());
-    await fireEvent.click(rendered.getByText("Local feature"));
+    await waitFor(() =>
+      expect(rendered.container.querySelector(".branch-row")).toBeTruthy(),
+    );
+    await fireEvent.click(
+      rendered.container.querySelector(".branch-row") as HTMLButtonElement,
+    );
 
     expect(onBranchSelect).toHaveBeenCalledWith(localBranch);
   });
@@ -203,7 +264,7 @@ describe("BranchBrowserPanel", () => {
     const rendered = render(BranchBrowserPanel, {
       props: {
         config: createConfig({
-          selectedBranch: localBranch,
+          selectedBranchName: localEntry.canonical_name,
           onBranchActivate,
         }),
       },
@@ -214,19 +275,20 @@ describe("BranchBrowserPanel", () => {
     );
     await fireEvent.click(rendered.getByRole("button", { name: "Focus Worktree" }));
 
-    expect(onBranchActivate).toHaveBeenCalledWith(localBranch);
+    expect(onBranchActivate).toHaveBeenCalledWith(localDetail.primary_branch);
   });
 
   it("shows create worktree when the selected branch has no materialized worktree", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "list_branch_inventory") return Promise.resolve([remoteEntry]);
+      if (command === "get_branch_inventory_detail") return Promise.resolve(remoteDetail);
       return Promise.resolve([]);
     });
 
     const rendered = render(BranchBrowserPanel, {
       props: {
         config: createConfig({
-          selectedBranch: remoteBranch,
+          selectedBranchName: remoteEntry.canonical_name,
         }),
       },
     });
@@ -242,7 +304,7 @@ describe("BranchBrowserPanel", () => {
         return Promise.resolve([
           {
             ...localEntry,
-            worktree: null,
+            worktree_path: null,
             worktree_count: 2,
             resolution_action: "resolveAmbiguity" as const,
           },
@@ -255,7 +317,7 @@ describe("BranchBrowserPanel", () => {
     const rendered = render(BranchBrowserPanel, {
       props: {
         config: createConfig({
-          selectedBranch: localBranch,
+          selectedBranchName: localEntry.canonical_name,
           onBranchActivate,
         }),
       },
@@ -295,5 +357,37 @@ describe("BranchBrowserPanel", () => {
       query: "feature",
       selectedBranchName: "origin/feature/remote",
     });
+  });
+
+  it("re-fetches snapshot with refreshKey and rehydrates detail", async () => {
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          refreshKey: 0,
+          selectedBranchName: localEntry.canonical_name,
+        }),
+      },
+    });
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("list_branch_inventory", {
+        projectPath: "/tmp/project",
+        refreshKey: 0,
+      }),
+    );
+
+    await rendered.rerender({
+      config: createConfig({
+        refreshKey: 1,
+        selectedBranchName: localEntry.canonical_name,
+      }),
+    });
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("list_branch_inventory", {
+        projectPath: "/tmp/project",
+        refreshKey: 1,
+      }),
+    );
   });
 });
