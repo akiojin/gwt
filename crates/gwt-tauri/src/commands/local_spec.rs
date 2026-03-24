@@ -6,9 +6,9 @@ use gwt_core::{
     git::{
         close_local_spec, create_local_spec, delete_local_spec_artifact, get_local_spec_detail,
         list_local_spec_artifacts, list_local_specs, search_local_specs, update_local_spec,
-        update_local_spec_phase, upsert_local_spec, upsert_local_spec_artifact,
-        LocalSpecArtifact, LocalSpecDetail, LocalSpecMetadata, LocalSpecPhase,
-        SpecIssueArtifactKind, SpecIssueSections,
+        update_local_spec_phase, upsert_local_spec, upsert_local_spec_artifact, LocalSpecArtifact,
+        LocalSpecDetail, LocalSpecMetadata, LocalSpecPhase, SpecIssueArtifactKind,
+        SpecIssueSections,
     },
     StructuredError,
 };
@@ -188,7 +188,10 @@ pub fn upsert_local_spec_cmd(
     Ok(detail.into())
 }
 
-#[instrument(skip_all, fields(command = "get_local_spec_detail_cmd", project_path, spec_id))]
+#[instrument(
+    skip_all,
+    fields(command = "get_local_spec_detail_cmd", project_path, spec_id)
+)]
 #[tauri::command]
 pub fn get_local_spec_detail_cmd(
     project_path: String,
@@ -202,7 +205,10 @@ pub fn get_local_spec_detail_cmd(
     Ok(detail.into())
 }
 
-#[instrument(skip_all, fields(command = "upsert_local_spec_artifact_cmd", project_path))]
+#[instrument(
+    skip_all,
+    fields(command = "upsert_local_spec_artifact_cmd", project_path)
+)]
 #[tauri::command]
 pub fn upsert_local_spec_artifact_cmd(
     project_path: String,
@@ -227,7 +233,10 @@ pub fn upsert_local_spec_artifact_cmd(
     Ok(artifact.into())
 }
 
-#[instrument(skip_all, fields(command = "list_local_spec_artifacts_cmd", project_path))]
+#[instrument(
+    skip_all,
+    fields(command = "list_local_spec_artifacts_cmd", project_path)
+)]
 #[tauri::command]
 pub fn list_local_spec_artifacts_cmd(
     project_path: String,
@@ -249,7 +258,10 @@ pub fn list_local_spec_artifacts_cmd(
     Ok(artifacts.into_iter().map(Into::into).collect())
 }
 
-#[instrument(skip_all, fields(command = "delete_local_spec_artifact_cmd", project_path))]
+#[instrument(
+    skip_all,
+    fields(command = "delete_local_spec_artifact_cmd", project_path)
+)]
 #[tauri::command]
 pub fn delete_local_spec_artifact_cmd(
     project_path: String,
@@ -266,12 +278,12 @@ pub fn delete_local_spec_artifact_cmd(
         .map_err(|e| StructuredError::internal(&e, "delete_local_spec_artifact_cmd"))
 }
 
-#[instrument(skip_all, fields(command = "close_local_spec_cmd", project_path, spec_id))]
+#[instrument(
+    skip_all,
+    fields(command = "close_local_spec_cmd", project_path, spec_id)
+)]
 #[tauri::command]
-pub fn close_local_spec_cmd(
-    project_path: String,
-    spec_id: String,
-) -> Result<(), StructuredError> {
+pub fn close_local_spec_cmd(project_path: String, spec_id: String) -> Result<(), StructuredError> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "close_local_spec_cmd"))?;
