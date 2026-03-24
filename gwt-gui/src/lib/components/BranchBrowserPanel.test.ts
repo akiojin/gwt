@@ -360,6 +360,26 @@ describe("BranchBrowserPanel", () => {
   });
 
   it("re-fetches snapshot with refreshKey and rehydrates detail", async () => {
+    const refreshedDetail: BranchInventoryDetail = {
+      ...localDetail,
+      primary_branch: {
+        ...localDetail.primary_branch,
+        display_name: "Local feature refreshed",
+      },
+      local_branch: {
+        ...localDetail.local_branch!,
+        display_name: "Local feature refreshed",
+      },
+      worktree_path: "/tmp/project/.gwt/worktrees/feature-local-refreshed",
+    };
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "list_branch_inventory") return Promise.resolve([localEntry, remoteEntry]);
+      if (command === "get_branch_inventory_detail") {
+        return Promise.resolve(args?.forceRefresh ? refreshedDetail : localDetail);
+      }
+      return Promise.resolve([]);
+    });
+
     const rendered = render(BranchBrowserPanel, {
       props: {
         config: createConfig({
@@ -384,10 +404,25 @@ describe("BranchBrowserPanel", () => {
     });
 
     await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("get_branch_inventory_detail", {
+        projectPath: "/tmp/project",
+        canonicalName: localEntry.canonical_name,
+        forceRefresh: true,
+      }),
+    );
+    await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("list_branch_inventory", {
         projectPath: "/tmp/project",
         refreshKey: 1,
       }),
+    );
+    await waitFor(() =>
+      expect(rendered.container.querySelector(".detail-title")?.textContent).toBe(
+        "Local feature refreshed",
+      ),
+    );
+    expect(rendered.getByTestId("branch-browser-detail").textContent).toContain(
+      "/tmp/project/.gwt/worktrees/feature-local-refreshed",
     );
   });
 });

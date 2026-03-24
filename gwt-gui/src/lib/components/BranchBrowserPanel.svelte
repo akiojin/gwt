@@ -29,6 +29,8 @@
   let lastHydrationKey = $state("");
   let lastStateEmitKey = $state("");
   let lastDetailKey = $state("");
+  let loadedSnapshotKey = $state("");
+  let lastDetailRefreshKey = $state<number | null>(null);
 
   const filters: SidebarFilterType[] = ["Local", "Remote", "All"];
 
@@ -115,6 +117,7 @@
       });
       if (token !== requestToken) return;
       branchEntries = entries;
+      loadedSnapshotKey = `${path}::${refreshKey}`;
       remotePrimaryNames = new Set(
         entries
           .filter((entry) => !entry.has_local && entry.has_remote)
@@ -124,6 +127,7 @@
       if (token !== requestToken) return;
       errorMessage = error instanceof Error ? error.message : String(error);
       branchEntries = [];
+      loadedSnapshotKey = "";
       remotePrimaryNames = new Set();
     } finally {
       if (token === requestToken) {
@@ -136,6 +140,7 @@
     path: string,
     canonicalName: string,
     forceRefresh = false,
+    refreshKey?: number,
   ) {
     const token = ++detailRequestToken;
     detailLoading = true;
@@ -153,6 +158,9 @@
       if (token !== detailRequestToken) return;
       selectedDetail = detail;
       mergeDetail(detail);
+      if (typeof refreshKey === "number") {
+        lastDetailRefreshKey = refreshKey;
+      }
     } catch (error) {
       if (token !== detailRequestToken) return;
       selectedDetail = null;
@@ -185,6 +193,7 @@
   $effect(() => {
     const path = config.projectPath;
     const refreshKey = config.refreshKey;
+    const snapshotKey = `${path}::${refreshKey}`;
     const canonicalName = selectedEntry?.canonical_name ?? "";
     const detailKey = `${path}::${canonicalName}::${refreshKey}`;
     if (!path || !canonicalName) {
@@ -194,9 +203,12 @@
       detailErrorMessage = null;
       return;
     }
+    if (loadedSnapshotKey !== snapshotKey) return;
     if (detailKey === lastDetailKey) return;
+    const forceRefresh =
+      lastDetailRefreshKey !== null && lastDetailRefreshKey !== refreshKey;
     lastDetailKey = detailKey;
-    void fetchBranchDetail(path, canonicalName, false);
+    void fetchBranchDetail(path, canonicalName, forceRefresh, refreshKey);
   });
 
   $effect(() => {

@@ -595,6 +595,66 @@ fn build_issue_display_name_map(
     })
 }
 
+fn build_cached_issue_display_name_map(
+    branch_names: &[String],
+    repo_path: &Path,
+    state: &AppState,
+) -> HashMap<String, String> {
+    let cached_titles = build_cached_issue_title_map(state, repo_path);
+    build_issue_display_name_map_with(branch_names.iter(), |issue_number| {
+        cached_titles
+            .get(&issue_number)
+            .cloned()
+            .map(|title| (issue_number, title))
+            .ok_or_else(|| format!("Issue #{issue_number} not found in cache"))
+    })
+}
+
+fn build_session_display_name_map(repo_path: &Path) -> HashMap<String, String> {
+    let manager = match WorktreeManager::new(repo_path) {
+        Ok(manager) => manager,
+        Err(_) => return HashMap::new(),
+    };
+    let worktrees = match manager.list_basic() {
+        Ok(worktrees) => worktrees,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut names = HashMap::new();
+    for worktree in worktrees {
+        let Some(branch_name) = worktree.branch else {
+            continue;
+        };
+        let Some(session) = Session::load_for_worktree(&worktree.path) else {
+            continue;
+        };
+        let Some(display_name) = session
+            .display_name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        names.insert(branch_name, display_name);
+    }
+    names
+}
+
+fn apply_snapshot_display_name(
+    info: &mut BranchInfo,
+    branch_key: &str,
+    session_display_names: &HashMap<String, String>,
+    issue_display_names: &HashMap<String, String>,
+) {
+    if let Some(display_name) = session_display_names.get(branch_key) {
+        info.display_name = Some(display_name.clone());
+        return;
+    }
+    if let Some(display_name) = resolve_auto_display_name(branch_key, issue_display_names, None) {
+        info.display_name = Some(display_name);
+    }
+}
+
 fn branch_inventory_detail_names(
     entry: &BranchInventorySnapshotEntry,
     remotes: &[Remote],
@@ -1067,7 +1127,7 @@ fn list_branch_inventory_worktrees_impl(
         .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?;
     Ok(worktrees
         .into_iter()
-        .filter(|worktree| !worktree.is_main && worktree.is_active())
+        .filter(|worktree| worktree.is_active())
         .filter_map(|worktree| {
             let branch = worktree.branch?;
             Some(BranchInventoryWorktree {
@@ -1101,9 +1161,35 @@ fn list_branch_inventory_impl(
 
     let result = (|| {
         let remotes = Remote::list(&repo_path).unwrap_or_default();
-        let local = list_local_inventory_branches_impl(project_path)?;
-        let remote = list_remote_inventory_branches_impl(project_path)?;
+        let mut local = list_local_inventory_branches_impl(project_path)?;
+        let mut remote = list_remote_inventory_branches_impl(project_path)?;
         let worktrees = list_branch_inventory_worktrees_impl(project_path)?;
+        let session_display_names = build_session_display_name_map(&repo_path);
+        let branch_names = local
+            .iter()
+            .chain(remote.iter())
+            .map(|branch| branch_inventory_key(&branch.name, &remotes))
+            .collect::<Vec<_>>();
+        let issue_display_names =
+            build_cached_issue_display_name_map(&branch_names, &repo_path, state);
+        for info in &mut local {
+            let branch_key = branch_inventory_key(&info.name, &remotes);
+            apply_snapshot_display_name(
+                info,
+                &branch_key,
+                &session_display_names,
+                &issue_display_names,
+            );
+        }
+        for info in &mut remote {
+            let branch_key = branch_inventory_key(&info.name, &remotes);
+            apply_snapshot_display_name(
+                info,
+                &branch_key,
+                &session_display_names,
+                &issue_display_names,
+            );
+        }
         let entries = build_branch_inventory_snapshot_entries(local, remote, worktrees, &remotes);
         put_branch_inventory_snapshot_cache(state, &repo_key, refresh_key, &entries);
         Ok(entries)
@@ -1540,6 +1626,22 @@ mod tests {
     }
 
     #[test]
+    fn test_list_branch_inventory_worktrees_impl_includes_main_checkout() {
+        let repo = TempDir::new().expect("temp dir");
+        init_git_repo(repo.path());
+        let project_path = repo.path().to_string_lossy().to_string();
+
+        let out =
+            list_branch_inventory_worktrees_impl(&project_path).expect("listing should work");
+
+        assert_eq!(out.len(), 1);
+        let actual = std::fs::canonicalize(&out[0].path).expect("actual path should exist");
+        let expected = std::fs::canonicalize(&project_path).expect("project path should exist");
+        assert_eq!(actual, expected);
+        assert!(!out[0].branch.trim().is_empty());
+    }
+
+    #[test]
     fn test_materialize_worktree_ref_impl_reuses_existing_worktree() {
         let repo = TempDir::new().expect("temp dir");
         init_git_repo(repo.path());
@@ -1641,6 +1743,36 @@ mod tests {
             entry.resolution_action,
             BranchInventoryResolutionAction::ResolveAmbiguity
         );
+    }
+
+    #[test]
+    fn test_apply_snapshot_display_name_prefers_session_name_then_cached_issue() {
+        let mut info = make_branch_info("feature/issue-1644");
+        let session_display_names = HashMap::from([(
+            "feature/issue-1644".to_string(),
+            "Custom Display Name".to_string(),
+        )]);
+        let issue_display_names = HashMap::from([(
+            "feature/issue-1644".to_string(),
+            "#1644 Worktree管理".to_string(),
+        )]);
+
+        apply_snapshot_display_name(
+            &mut info,
+            "feature/issue-1644",
+            &session_display_names,
+            &issue_display_names,
+        );
+        assert_eq!(info.display_name.as_deref(), Some("Custom Display Name"));
+
+        let mut issue_only = make_branch_info("feature/issue-1644");
+        apply_snapshot_display_name(
+            &mut issue_only,
+            "feature/issue-1644",
+            &HashMap::new(),
+            &issue_display_names,
+        );
+        assert_eq!(issue_only.display_name.as_deref(), Some("#1644 Worktree管理"));
     }
 
     // --- display_name tests ---
