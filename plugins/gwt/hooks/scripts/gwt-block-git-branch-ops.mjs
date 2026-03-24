@@ -14,6 +14,11 @@ function isReadOnlyGitBranch(branchArgs) {
   return readOnlyFlags.test(trimmed);
 }
 
+// Pre-compiled regexes for file-level checkout detection (used inside the loop)
+const RE_CHECKOUT_EXPLICIT_SEP = /\bcheckout\b.*\s--\s/;
+const RE_CHECKOUT_CONFLICT_FLAG = /\bcheckout\b.*\s--(theirs|ours)\b/;
+const RE_CHECKOUT_BROAD_TARGET = /\s--\s+[.*]/;
+
 function splitCommandSegments(command) {
   return command
     .replace(/\|&/g, "\n")
@@ -52,18 +57,12 @@ for (const segment of segments) {
   if (!/^git\b/.test(segment)) continue;
 
   // checkout/switch: block branch switching but allow file-level operations
+  // Allowed: git checkout --theirs/--ours -- <file>, git checkout <ref> -- <file>
+  // Blocked: git checkout <branch>, git checkout -- . , git checkout -- *
   if (/\b(checkout|switch)\b/.test(segment)) {
-    // Allow file-level checkout used for conflict resolution and file restore:
-    //   git checkout --theirs -- <file>
-    //   git checkout --ours -- <file>
-    //   git checkout HEAD -- <file>
-    //   git checkout <ref> -- <file>  (explicit -- separator)
-    // Allow only explicit file-level checkout with -- separator,
-    // but reject broad targets like "." or bare directory paths.
-    const hasExplicitSeparator = /\bcheckout\b.*\s--\s/.test(segment);
-    const hasConflictFlag = /\bcheckout\b.*\s--(theirs|ours)\b/.test(segment);
-    // Block "-- ." and "-- *" which restore entire trees
-    const hasBroadTarget = /\s--\s+[.*]/.test(segment);
+    const hasExplicitSeparator = RE_CHECKOUT_EXPLICIT_SEP.test(segment);
+    const hasConflictFlag = RE_CHECKOUT_CONFLICT_FLAG.test(segment);
+    const hasBroadTarget = RE_CHECKOUT_BROAD_TARGET.test(segment);
     const isFileCheckout = (hasConflictFlag || hasExplicitSeparator) && !hasBroadTarget;
     if (!isFileCheckout) {
       block(
