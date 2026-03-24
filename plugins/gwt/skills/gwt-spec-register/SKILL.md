@@ -30,7 +30,7 @@ Do not create a new SPEC when an existing canonical SPEC clearly owns the scope.
 
 ## SPEC ID and directory
 
-- SPEC ID = UUID8 string (e.g., `SPEC-a1b2c3d4`)
+- SPEC ID = sequential number (e.g., `SPEC-1776`)
 - SPECs are stored as local directories under `specs/SPEC-{id}/`
 
 ## Title convention

@@ -1,8 +1,0 @@
-{
-  "id": "4495a68f",
-  "title": "バグ修正仕様: From Issue の Branch Exists 誤判定（stale remote-tracking ref）",
-  "status": "closed",
-  "phase": "draft",
-  "created_at": "2026-02-27T10:28:35Z",
-  "updated_at": "2026-03-16T07:18:56Z"
-}

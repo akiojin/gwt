@@ -34,7 +34,7 @@
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
 - **完了報告前のセルフチェックリスト（必須）:**
-  - [ ] 対象の SPEC（`specs/SPEC-{UUID8}/`）が最新状態に更新されているか
+  - [ ] 対象の SPEC（`specs/SPEC-{N}/`）が最新状態に更新されているか
   - [ ] 全テスト通過・lint / 型チェック成功
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
@@ -47,7 +47,7 @@
 
 #### 1. 仕様策定（feat / fix / refactor 対象）
 
-- 新機能・バグ修正・リファクタリングの実装前に、ローカル SPEC（`specs/SPEC-{UUID8}/`）を作成する。UUID8 = SPEC ID
+- 新機能・バグ修正・リファクタリングの実装前に、ローカル SPEC（`specs/SPEC-{N}/`）を作成する。N = 連番 SPEC ID
 - SPEC ディレクトリ内の `spec.md` に最低限以下を含める:
   - ユーザーシナリオとテスト（受け入れシナリオ）
   - 機能要件（FR-\*）
@@ -56,7 +56,7 @@
 - 新規 SPEC を作成した場合、現在のブランチでは実装に入らず、SPEC に基づく別ブランチ（Worktree）で実装する
 - 現在のコンバセーションでは SPEC 登録までで完了とする
 - 通常の GitHub Issue から開始する場合は、Issue 分析ワークフローにより直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
-- 新規 SPEC を明示的に作成する場合は SPEC 登録ワークフローでローカル `specs/SPEC-{UUID8}/` ディレクトリを作成する
+- 新規 SPEC を明示的に作成する場合は SPEC 登録ワークフローでローカル `specs/SPEC-{N}/` ディレクトリを作成する
 - 対象の SPEC が確定した後は SPEC 管理ワークフローに従って spec.md/plan.md/tasks.md を更新し、実装進行を管理する
 - 仕様策定時のユーザーインタビューでは以下を遵守する:
   - 表面的・ありきたりな質問を避け、技術実装・UX・トレードオフに踏み込んだ質問をする
@@ -160,7 +160,7 @@
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
-- 仕様・要件は `specs/SPEC-{UUID8}/` のローカルファイルに記載する。`metadata.json` の status で管理
+- 仕様・要件は `specs/SPEC-{N}/` のローカルファイルに記載する。`metadata.json` の status で管理
 
 ### README.md / README.ja.md に必ず記載する内容
 
@@ -169,7 +169,7 @@
 - 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`pnpm test`, E2Eなど）
 - 配布情報: リリース/バイナリ資産の取得先、バージョン取得方法
 - 代表的な画面操作: よく使う画面遷移や一般的なトラブル時の案内（再現しやすく簡潔）
-- 変更が設計判断を必要とする場合の案内: 重要仕様の所在（`specs/SPEC-{UUID8}/` ディレクトリへの参照）
+- 変更が設計判断を必要とする場合の案内: 重要仕様の所在（`specs/SPEC-{N}/` ディレクトリへの参照）
 - `CLAUDE.md` の運用ルールや内部実装ガイドは README に入れない
 - 英語版/日本語版の内容は同等レベルを保つ（順序・見出しは対応させる）
 
@@ -224,7 +224,7 @@
 │   │   ├── lib/terminal/    # xterm.jsラッパー
 │   │   └── lib/types.ts     # TypeScript型定義
 │   └── package.json
-├── specs/              # ローカル SPEC 管理（SPEC-{UUID8}/）
+├── specs/              # ローカル SPEC 管理（SPEC-{N}/）
 │   └── SPEC-*/         # 各 SPEC のアーティファクト（spec.md, plan.md, tasks.md 等）
 └── package.json        # Tauri開発用スクリプト
 ```
@@ -242,7 +242,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 | gwt-issue-register | `/gwt:gwt-issue-register` | Register new GitHub work items. Search existing Issues and local SPECs first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or escalate to a local SPEC. Use as the main entrypoint for new Issue/SPEC registration requests. |
 | gwt-issue-resolve | `/gwt:gwt-issue-resolve` | Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly or promoted to a local SPEC, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration. |
 | gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub Issues and local SPECs. Use when searching for existing specs, finding related issues, or checking for duplicate specs. |
-| gwt-spec-register | `/gwt:gwt-spec-register` | Create a new local SPEC directory (`specs/SPEC-{UUID8}/`) when no existing canonical SPEC fits. Seed `metadata.json` and `spec.md`, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
+| gwt-spec-register | `/gwt:gwt-spec-register` | Create a new local SPEC directory (`specs/SPEC-{N}/`) when no existing canonical SPEC fits. Seed `metadata.json` and `spec.md`, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
 | gwt-spec-clarify | `/gwt:gwt-spec-clarify` | Clarify an existing local SPEC by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. |
 | gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate planning artifacts for an existing local SPEC: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. |
 | gwt-spec-tasks | `/gwt:gwt-spec-tasks` | Generate `tasks.md` for an existing local SPEC from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. |
@@ -264,7 +264,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 |-------|---------|-------------|
 | gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
 | gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
-| gwt-spec-to-issue-migration | — | Reverse-migrate GitHub Issue specs to local `specs/SPEC-{UUID8}/` directories using the bundled reverse migration script. |
+| gwt-spec-to-issue-migration | — | Reverse-migrate GitHub Issue specs to local `specs/SPEC-{N}/` directories using the bundled reverse migration script. |
 
 ### Recommended Workflow
 

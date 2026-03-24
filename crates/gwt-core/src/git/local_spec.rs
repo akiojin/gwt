@@ -11,7 +11,6 @@ use std::{
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // Re-export shared types from issue_spec (kept for backward compatibility)
 pub use super::issue_spec::{SpecIssueArtifactKind, SpecIssueChecklist, SpecIssueSections};
@@ -117,8 +116,24 @@ fn artifact_file_path(repo_path: &Path, spec_id: &str, kind: SpecIssueArtifactKi
     }
 }
 
-fn generate_spec_id() -> String {
-    Uuid::new_v4().to_string().replace('-', "")[..8].to_string()
+/// Generate the next sequential SPEC ID by finding the max existing ID + 1.
+fn generate_spec_id(repo_path: &Path) -> String {
+    let dir = specs_dir(repo_path);
+    let max_id = fs::read_dir(&dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.strip_prefix("SPEC-")
+                        .and_then(|s| s.parse::<u64>().ok())
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    (max_id + 1).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +245,7 @@ pub fn create_local_spec(
         return Err("title is required".to_string());
     }
 
-    let spec_id = generate_spec_id();
+    let spec_id = generate_spec_id(repo_path);
     let dir = spec_dir(repo_path, &spec_id);
     fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create SPEC directory: {e}"))?;
@@ -548,8 +563,7 @@ mod tests {
         assert_eq!(detail.title, "Test SPEC");
         assert_eq!(detail.status, "open");
         assert_eq!(detail.phase, "draft");
-        assert!(!detail.id.is_empty());
-        assert_eq!(detail.id.len(), 8);
+        assert_eq!(detail.id, "1");
         assert!(detail.sections.spec.contains("Test Spec"));
         assert!(detail.sections.plan.contains("Plan content"));
     }
