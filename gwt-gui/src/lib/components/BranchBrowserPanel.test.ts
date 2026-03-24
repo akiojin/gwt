@@ -122,10 +122,6 @@ function createConfig(overrides: Partial<BranchBrowserPanelConfig> = {}): Branch
   return {
     projectPath: "/tmp/project",
     refreshKey: 0,
-    widthPx: 260,
-    minWidthPx: 220,
-    maxWidthPx: 520,
-    mode: "branch",
     currentBranch: "feature/local",
     agentTabBranches: [],
     activeAgentTabBranch: null,
@@ -208,6 +204,9 @@ describe("BranchBrowserPanel", () => {
         "origin/feature/remote",
       ),
     );
+    expect(rendered.getByTestId("branch-browser-detail").textContent).not.toContain(
+        "origin/feature/remote",
+    );
   });
 
   it("merges local and remote refs into one canonical entry in All mode", async () => {
@@ -257,6 +256,53 @@ describe("BranchBrowserPanel", () => {
     );
 
     expect(onBranchSelect).toHaveBeenCalledWith(localBranch);
+  });
+
+  it("does not refetch when non-refresh config props change", async () => {
+    const countListCalls = () =>
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "list_branch_inventory",
+      ).length;
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "list_branch_inventory") {
+        return Promise.resolve([localEntry, remoteEntry]);
+      }
+      if (command === "get_branch_inventory_detail") {
+        return Promise.resolve(
+          args?.canonicalName === remoteEntry.canonical_name ? remoteDetail : localDetail,
+        );
+      }
+      return Promise.resolve([]);
+    });
+
+    const rendered = render(BranchBrowserPanel, {
+      props: {
+        config: createConfig({
+          selectedBranch: localBranch,
+        }),
+      },
+    });
+
+    await waitFor(() =>
+      expect(rendered.container.querySelector(".detail-title")?.textContent).toBe(
+        "Local feature",
+      ),
+    );
+    expect(countListCalls()).toBe(1);
+
+    await rendered.rerender({
+      config: createConfig({
+        selectedBranch: remoteBranch,
+        refreshKey: 0,
+      }),
+    });
+
+    await waitFor(() =>
+      expect(rendered.getByTestId("branch-browser-detail").textContent).toContain(
+        "origin/feature/remote",
+      ),
+    );
+    expect(countListCalls()).toBe(1);
   });
 
   it("forwards open/focus worktree action for the selected branch", async () => {

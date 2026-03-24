@@ -343,35 +343,8 @@ pub fn open_project(
                     let _ = crate::menu::rebuild_menu(window.app_handle());
                 }
 
-                // Prefetch version history in background (gwt-spec issue FR-006)
-                {
-                    let app_handle = window.app_handle().clone();
-                    let prefetch_path = project_root_str.clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let _span = tracing::info_span!(
-                            "project_open.prefetch_version_history",
-                            project_path = %prefetch_path
-                        )
-                        .entered();
-                        crate::commands::version_history::prefetch_version_history_inner(
-                            &prefetch_path,
-                            &app_handle,
-                        );
-                    });
-                }
-
-                // Build project structure index in background
-                {
-                    let index_path = project_root_str.clone();
-                    let _span = tracing::info_span!(
-                        "project_open.spawn_background_index",
-                        project_path = %index_path
-                    )
-                    .entered();
-                    crate::commands::project_index::spawn_background_index(index_path);
-                }
-
-                // #1714: Bootstrap issue linkage + auto full sync in background
+                // #1714: Bootstrap issue linkage in the background. Keep project-open
+                // interactive; cache sync and other heavyweight warmups run later.
                 {
                     let sync_repo_path = repo_path.clone();
                     tauri::async_runtime::spawn_blocking(move || {
@@ -401,29 +374,23 @@ pub fn open_project(
                                 let _ = link_store.save(&sync_repo_path);
                             }
                         }
+                    });
+                }
 
-                        // Auto full sync of issue exact cache
-                        let mut cache =
-                            gwt_core::git::issue_cache::IssueExactCache::load(&sync_repo_path);
-                        match cache.full_sync(&sync_repo_path) {
-                            Ok(result) => {
-                                let _ = cache.save(&sync_repo_path);
-                                tracing::info!(
-                                    category = "issue_cache",
-                                    updated = result.updated_count,
-                                    deleted = result.deleted_count,
-                                    duration_ms = result.duration_ms,
-                                    "Auto full sync completed on project open"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    category = "issue_cache",
-                                    error = %e,
-                                    "Auto full sync failed on project open (cache preserved)"
-                                );
-                            }
-                        }
+                {
+                    let project_root_for_index = project_root_str.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let span = tracing::info_span!(
+                            "project_open.index_warmup",
+                            project_path = %project_root_for_index
+                        );
+                        span.in_scope(|| {
+                            tracing::info!("starting background project index warmup");
+                        });
+                        let _ = crate::commands::project_index::index_project_cmd(
+                            project_root_for_index,
+                        )
+                        .await;
                     });
                 }
 

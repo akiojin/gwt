@@ -900,47 +900,6 @@ pub async fn search_github_issues_cmd(
     .map_err(|e| format!("Search GitHub issues task failed: {e}"))?
 }
 
-/// Build index for a project in the background. Non-fatal on errors.
-pub fn spawn_background_index(project_root: String) {
-    tauri::async_runtime::spawn_blocking(move || {
-        let started = std::time::Instant::now();
-        let _span = tracing::info_span!(
-            "startup.spawn_background_index",
-            project_root = %project_root
-        )
-        .entered();
-        // 1. Ensure runtime
-        if let Err(e) = ensure_chroma_runtime_sync() {
-            warn!(
-                category = "project_index",
-                error = %e,
-                "Failed to ensure chroma runtime for project index"
-            );
-            return;
-        }
-
-        // 2. Build index
-        match run_files_action_with_crash_recovery("index", &project_root, None, None) {
-            Ok(resp) => {
-                tracing::info!(
-                    category = "project_index",
-                    files_indexed = resp.files_indexed.unwrap_or(0),
-                    duration_ms = resp.duration_ms.unwrap_or(0),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "Project index built successfully"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    category = "project_index",
-                    error = %e,
-                    "Failed to build project index"
-                );
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;

@@ -257,10 +257,6 @@ export interface Tab {
 export interface BranchBrowserPanelConfig {
   projectPath: string;
   refreshKey: number;
-  widthPx: number;
-  minWidthPx: number;
-  maxWidthPx: number;
-  mode: "branch";
   selectedBranch?: BranchInfo | null;
   currentBranch: string;
   agentTabBranches: string[];
@@ -270,8 +266,6 @@ export interface BranchBrowserPanelConfig {
   initialQuery?: string;
   selectedBranchName?: string | null;
   onStateChange?: (state: BranchBrowserPanelState) => void;
-  onModeChange?: (next: "branch") => void;
-  onResize?: (nextWidthPx: number) => void;
   onBranchSelect: (branch: BranchInfo) => void;
   onBranchActivate?: (branch: BranchInfo) => void;
   onCleanupRequest?: (preSelectedBranch?: string) => void;

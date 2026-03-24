@@ -398,7 +398,9 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
     },
 ];
 
-const PROJECT_ROOT_ASSETS: &[ManagedAsset] = &[ManagedAsset {
+const PROJECT_LOCAL_MANAGED_ASSET_ROOT: &str = ".gwt";
+
+const PROJECT_LOCAL_MANAGED_ASSETS: &[ManagedAsset] = &[ManagedAsset {
     relative_path: "memory/constitution.md",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -627,13 +629,13 @@ const PROJECT_ROOT_REQUIRED_MESSAGE: &str =
 const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER: &str = "# BEGIN gwt managed local assets";
 const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER: &str = "# END gwt managed local assets";
 const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
+    "/.gwt/",
     "/.codex/skills/gwt-*/",
     "/.gemini/skills/gwt-*/",
     "/.claude/skills/gwt-*/",
     "/.claude/commands/gwt-*.md",
     "/.claude/hooks/scripts/gwt-*.mjs",
     "/.claude/settings.local.json",
-    "/memory/constitution.md",
 ];
 const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".gwt/",
@@ -749,9 +751,9 @@ fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
         SkillAgentType::Gemini => project_asset_missing_items(".gemini"),
     };
     items.extend(
-        PROJECT_ROOT_ASSETS
+        PROJECT_LOCAL_MANAGED_ASSETS
             .iter()
-            .map(|asset| asset.relative_path.to_string()),
+            .map(|asset| project_local_managed_asset_display_path(asset.relative_path)),
     );
     items
 }
@@ -794,6 +796,27 @@ fn agent_root_for(agent: SkillAgentType, project_root: Option<&Path>) -> Option<
     Some(project_root.join(agent_root_name(agent)))
 }
 
+fn project_local_managed_assets_root(project_root: &Path) -> PathBuf {
+    project_root.join(PROJECT_LOCAL_MANAGED_ASSET_ROOT)
+}
+
+fn project_local_managed_asset_path(project_root: &Path, relative_path: &str) -> PathBuf {
+    project_local_managed_assets_root(project_root).join(relative_path)
+}
+
+fn legacy_project_local_managed_asset_path(project_root: &Path, relative_path: &str) -> PathBuf {
+    project_root.join(relative_path)
+}
+
+fn project_local_managed_asset_display_path(relative_path: &str) -> String {
+    format!("{PROJECT_LOCAL_MANAGED_ASSET_ROOT}/{relative_path}")
+}
+
+fn project_local_managed_asset_exists(project_root: &Path, relative_path: &str) -> bool {
+    project_local_managed_asset_path(project_root, relative_path).exists()
+        || legacy_project_local_managed_asset_path(project_root, relative_path).exists()
+}
+
 fn claude_root_for(project_root: Option<&Path>) -> Option<PathBuf> {
     project_root.map(|root| root.join(".claude"))
 }
@@ -805,7 +828,7 @@ fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
 #[cfg(test)]
 fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
     write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")?;
-    write_managed_assets(root, PROJECT_ROOT_ASSETS.iter(), ".")
+    register_project_local_managed_assets(root)
 }
 
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
@@ -824,6 +847,16 @@ fn all_claude_assets() -> impl Iterator<Item = &'static ManagedAsset> {
         .iter()
         .chain(CLAUDE_HOOK_ASSETS.iter())
         .chain(PROJECT_SKILL_ASSETS.iter())
+}
+
+fn register_project_local_managed_assets(project_root: &Path) -> Result<(), GwtError> {
+    let root = project_local_managed_assets_root(project_root);
+    write_managed_assets(
+        &root,
+        PROJECT_LOCAL_MANAGED_ASSETS.iter(),
+        PROJECT_LOCAL_MANAGED_ASSET_ROOT,
+    )?;
+    cleanup_legacy_project_local_managed_assets(project_root)
 }
 
 fn write_managed_assets<'a>(
@@ -868,6 +901,72 @@ fn cleanup_legacy_managed_assets(root: &Path) -> Result<(), GwtError> {
                 ),
             })?;
         }
+    }
+
+    Ok(())
+}
+
+fn cleanup_legacy_project_local_managed_assets(project_root: &Path) -> Result<(), GwtError> {
+    for asset in PROJECT_LOCAL_MANAGED_ASSETS {
+        let legacy_path =
+            legacy_project_local_managed_asset_path(project_root, asset.relative_path);
+        remove_legacy_project_local_managed_asset(project_root, &legacy_path)?;
+    }
+
+    Ok(())
+}
+
+fn remove_legacy_project_local_managed_asset(
+    project_root: &Path,
+    legacy_path: &Path,
+) -> Result<(), GwtError> {
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+
+    if legacy_path.is_dir() {
+        std::fs::remove_dir_all(legacy_path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove legacy project-local managed asset {}: {}",
+                legacy_path.display(),
+                e
+            ),
+        })?;
+    } else {
+        std::fs::remove_file(legacy_path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove legacy project-local managed asset {}: {}",
+                legacy_path.display(),
+                e
+            ),
+        })?;
+    }
+
+    let mut current = legacy_path.parent();
+    while let Some(dir) = current {
+        if dir == project_root {
+            break;
+        }
+
+        let mut entries = std::fs::read_dir(dir).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to inspect legacy project-local managed asset directory {}: {}",
+                dir.display(),
+                e
+            ),
+        })?;
+        if entries.next().is_some() {
+            break;
+        }
+
+        std::fs::remove_dir(dir).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove empty legacy project-local managed asset directory {}: {}",
+                dir.display(),
+                e
+            ),
+        })?;
+        current = dir.parent();
     }
 
     Ok(())
@@ -1508,7 +1607,7 @@ pub fn register_agent_skills_with_settings_at_project_root(
         });
     };
 
-    write_managed_assets(project_root, PROJECT_ROOT_ASSETS.iter(), ".")?;
+    register_project_local_managed_assets(project_root)?;
 
     match agent {
         SkillAgentType::Claude => register_claude_assets_at(project_root),
@@ -1530,7 +1629,7 @@ pub fn register_all_skills_with_settings_at_project_root(
 ) -> Result<(), GwtError> {
     if let Some(project_root) = project_root {
         ensure_project_local_exclude_rules(project_root)?;
-        write_managed_assets(project_root, PROJECT_ROOT_ASSETS.iter(), ".")?;
+        register_project_local_managed_assets(project_root)?;
     }
 
     let mut failures = Vec::new();
@@ -1600,10 +1699,11 @@ fn status_for(
             ));
         }
     }
-    for asset in PROJECT_ROOT_ASSETS {
-        let asset_path = project_root.join(asset.relative_path);
-        if !asset_path.exists() {
-            missing.push(asset.relative_path.to_string());
+    for asset in PROJECT_LOCAL_MANAGED_ASSETS {
+        if !project_local_managed_asset_exists(project_root, asset.relative_path) {
+            missing.push(project_local_managed_asset_display_path(
+                asset.relative_path,
+            ));
         }
     }
 
@@ -1657,10 +1757,11 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         }
     }
     if let Some(project_root) = project_root {
-        for asset in PROJECT_ROOT_ASSETS {
-            let asset_path = project_root.join(asset.relative_path);
-            if !asset_path.exists() {
-                missing_items.push(asset.relative_path.to_string());
+        for asset in PROJECT_LOCAL_MANAGED_ASSETS {
+            if !project_local_managed_asset_exists(project_root, asset.relative_path) {
+                missing_items.push(project_local_managed_asset_display_path(
+                    asset.relative_path,
+                ));
             }
         }
     }
@@ -1781,6 +1882,14 @@ mod tests {
         std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
     }
 
+    fn project_local_constitution_path(root: &Path) -> PathBuf {
+        root.join(".gwt").join("memory").join("constitution.md")
+    }
+
+    fn legacy_constitution_path(root: &Path) -> PathBuf {
+        root.join("memory").join("constitution.md")
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = crate::process::command("git")
             .args(args)
@@ -1841,7 +1950,7 @@ mod tests {
             .join("scripts")
             .join("spec_artifact.py")
             .exists());
-        assert!(tmp.path().join("memory").join("constitution.md").exists());
+        assert!(project_local_constitution_path(tmp.path()).exists());
     }
 
     #[test]
@@ -2045,7 +2154,7 @@ mod tests {
             .join("scripts")
             .join("spec_artifact.py")
             .exists());
-        assert!(temp.path().join("memory").join("constitution.md").exists());
+        assert!(project_local_constitution_path(temp.path()).exists());
         assert!(temp
             .path()
             .join(".gemini")
@@ -2098,6 +2207,7 @@ mod tests {
         assert!(exclude.contains("/.claude/commands/gwt-*.md"));
         assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.mjs"));
         assert!(exclude.contains("/.claude/settings.local.json"));
+        assert!(exclude.contains("/.gwt/"));
     }
 
     #[test]
@@ -2454,7 +2564,7 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_plan_skill.contains("memory/constitution.md"));
+        assert!(spec_plan_skill.contains(".gwt/memory/constitution.md"));
         assert!(spec_plan_skill.contains("Constitution Check"));
         assert!(spec_plan_skill.contains("gwt-spec-tasks"));
 
@@ -2549,7 +2659,7 @@ OPENAI_API_KEY = "legacy-key"
                 .join("gwt-spec-plan.md"),
         )
         .unwrap();
-        assert!(spec_plan_command.contains("memory/constitution.md"));
+        assert!(spec_plan_command.contains(".gwt/memory/constitution.md"));
         assert!(spec_plan_command.contains("gwt-spec-tasks"));
         assert!(spec_plan_command.contains("gwt-spec-ops"));
 
@@ -2742,7 +2852,7 @@ OPENAI_API_KEY = "legacy-key"
             .join("scripts")
             .join("gwt-forward-hook.mjs")
             .exists());
-        assert!(temp.path().join("memory").join("constitution.md").exists());
+        assert!(project_local_constitution_path(temp.path()).exists());
 
         let settings_content =
             std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
@@ -2838,6 +2948,47 @@ OPENAI_API_KEY = "legacy-key"
     }
 
     #[test]
+    fn registration_migrates_legacy_project_local_asset_to_gwt_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        init_test_git_dir(temp.path());
+
+        let legacy_path = legacy_constitution_path(temp.path());
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "legacy constitution").unwrap();
+
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+
+        assert!(project_local_constitution_path(temp.path()).exists());
+        assert!(!legacy_path.exists());
+        assert!(!temp.path().join("memory").exists());
+    }
+
+    #[test]
+    fn status_accepts_legacy_project_local_asset_during_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        let legacy_path = legacy_constitution_path(temp.path());
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "legacy constitution").unwrap();
+
+        let status = get_skill_registration_status_with_settings_at_project_root(
+            &settings,
+            Some(temp.path()),
+        );
+
+        let codex = status
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == "codex")
+            .unwrap();
+        assert!(!codex
+            .missing_skills
+            .contains(&".gwt/memory/constitution.md".to_string()));
+    }
+
+    #[test]
     fn exclude_rules_are_added_idempotently() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
@@ -2884,6 +3035,7 @@ OPENAI_API_KEY = "legacy-key"
 # custom rule
 custom-pattern
 /.codex/skills/gwt-*/**
+/memory/constitution.md
 # BEGIN gwt managed local assets
 /.claude/skills/gwt-*/
 # END gwt managed local assets
@@ -2899,6 +3051,7 @@ another-pattern
         assert!(exclude.contains("custom-pattern"));
         assert!(exclude.contains("another-pattern"));
         assert!(!exclude.contains("/.codex/skills/gwt-*/**"));
+        assert!(!exclude.contains("/memory/constitution.md"));
         assert_eq!(
             exclude
                 .lines()

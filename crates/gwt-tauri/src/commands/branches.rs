@@ -1243,6 +1243,8 @@ fn get_branch_inventory_detail_impl(
     Ok(detail)
 }
 
+const LIST_BRANCH_INVENTORY_WARN_THRESHOLD_MS: u128 = 500;
+
 /// List all local branches in a repository
 #[instrument(skip_all, fields(command = "list_branches", project_path))]
 #[tauri::command]
@@ -1292,7 +1294,8 @@ pub async fn list_branch_inventory(
     refresh_key: Option<u64>,
     app_handle: AppHandle,
 ) -> Result<Vec<BranchInventorySnapshotEntry>, StructuredError> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let started = Instant::now();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
         with_panic_guard("listing branch inventory", "list_branch_inventory", || {
             list_branch_inventory_impl(&project_path, refresh_key.unwrap_or(0), &state)
@@ -1304,7 +1307,19 @@ pub async fn list_branch_inventory(
             &format!("Unexpected error while listing branch inventory: {e}"),
             "list_branch_inventory",
         )
-    })?
+    })??;
+
+    let elapsed_ms = started.elapsed().as_millis();
+    if elapsed_ms > LIST_BRANCH_INVENTORY_WARN_THRESHOLD_MS {
+        warn!(
+            category = "branches",
+            elapsed_ms,
+            reason = "explicit-refresh",
+            "list_branch_inventory took longer than expected"
+        );
+    }
+
+    Ok(result)
 }
 
 #[instrument(skip_all, fields(command = "get_branch_inventory_detail", project_path, canonical_name))]
