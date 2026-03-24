@@ -3,10 +3,12 @@
 //! Maps branch names to GitHub issue numbers with source tracking.
 //! See gwt-spec #1714.
 
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use sha2::{Digest, Sha256};
 

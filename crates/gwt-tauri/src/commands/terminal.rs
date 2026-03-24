@@ -12,7 +12,6 @@ use std::{
 };
 
 use chrono::Utc;
-use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
 use gwt_core::{
     ai::SessionParser,
     config::{stats::Stats, AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings},
@@ -22,6 +21,7 @@ use gwt_core::{
         DockerManager, PortAllocator,
     },
     git::{create_or_verify_linked_branch, IssueLinkedBranchStatus, Remote},
+    logging::{log_flow_failure, log_flow_start, log_flow_success},
     terminal::{
         pane::PaneStatus,
         runner::{

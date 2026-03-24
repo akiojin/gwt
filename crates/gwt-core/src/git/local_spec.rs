@@ -594,8 +594,9 @@ impl LocalSpecArtifact {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn setup() -> TempDir {
         TempDir::new().unwrap()

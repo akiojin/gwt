@@ -5,9 +5,9 @@ use std::{
     path::PathBuf,
 };
 
-use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
 use gwt_core::{
     config::{Settings, SkillRegistrationPreferences},
+    logging::{log_flow_failure, log_flow_start, log_flow_success},
     GwtError, StructuredError,
 };
 use serde::{Deserialize, Serialize};
