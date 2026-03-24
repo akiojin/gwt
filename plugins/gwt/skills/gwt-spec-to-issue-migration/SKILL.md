@@ -73,7 +73,7 @@ Note: `migration-report.json` is deleted automatically after a fully successful 
 ## Expected Behavior
 
 - Fetches `gwt-spec` Issues and their artifact comments via `gh` CLI
-- Creates local `specs/SPEC-{uuid8}/` directories for each migrated Issue
+- Creates local `specs/SPEC-{N}/` directories for each migrated Issue
 - Populates `metadata.json` with Issue metadata (title, status, phase)
 - Extracts `doc:*` artifacts from Issue comments into local files (`spec.md`, `plan.md`, `tasks.md`, etc.)
 - Extracts `contract:*` and `checklist:*` artifacts into `contracts/` and `checklists/` subdirectories
@@ -84,7 +84,7 @@ Note: `migration-report.json` is deleted automatically after a fully successful 
 ## Target directory structure
 
 ```text
-specs/SPEC-{uuid8}/
+specs/SPEC-{N}/
   metadata.json
   spec.md
   plan.md
