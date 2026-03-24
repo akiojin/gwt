@@ -45,7 +45,7 @@
 - [x] T601 Run targeted shell/component tests for flat tabs + canvas/browser state against the corrected shell model
 - [x] T602 Run e2e coverage for Branch Browser -> worktree -> agent/terminal tile flows including tile interaction
 - [x] T603 Re-run multi-window restore verification with the new shell model
-- [x] T604 Verify `Cmd+\`` / `Ctrl+\`` still performs window cycling when canvas or terminal focus is active after remediation
+- [x] T604 Verify Cmd+`` ` `` / Ctrl+`` ` `` still performs window cycling when canvas or terminal focus is active after remediation
 - [x] T605 Add regression coverage that all top-level tabs occupy the full window without persistent side-by-side detail panes
 
 ## Phase 7: Performance and responsiveness
