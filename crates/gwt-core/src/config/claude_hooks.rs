@@ -133,7 +133,7 @@ fn is_gwt_hook_command(command: &str) -> bool {
 fn is_gwt_node_hook_command(command: &str) -> bool {
     let trimmed = command.trim();
     trimmed.starts_with("node .claude/hooks/scripts/gwt-")
-        || trimmed.starts_with("node \"") && trimmed.contains("/.claude/hooks/scripts/gwt-")
+        || (trimmed.starts_with("node \"") && trimmed.contains("/.claude/hooks/scripts/gwt-"))
 }
 
 /// Claude Code settings.local.json structure (partial)
