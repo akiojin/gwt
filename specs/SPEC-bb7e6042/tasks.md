@@ -1,0 +1,32 @@
+- [ ] T001 [S] [US-1] `IAgentService` インターフェース定義
+- [ ] T002 [S] [US-1] `ISessionService` インターフェース定義
+- [ ] T003 [S] [US-1] データ型定義（AgentStatusValue, Session, AgentConfig, PaneLaunchMeta, LaunchAgentRequest, AgentInfo, BranchSessionSummary）
+- [ ] T004 [S] [US-7] `JobType` enum 定義（FrontendDeveloper, BackendDeveloper, DevOpsEngineer, QAEngineer, General）
+- [ ] T005 [F] [US-1] エージェント検出実装（PATH 検索・バージョン取得）+ テスト
+- [ ] T006 [F] [US-1] エージェント設定管理実装 + テスト
+- [x] T007 [F] [US-2] **Process ベースの** PTY プロセス管理基盤実装（起動・入出力ストリーム・終了検出）— **#1540 で実装済み**
+- [ ] T008 [U] [US-11] PTY ライフサイクル管理実装（アプリ終了時の確認ダイアログ + 全プロセス graceful 停止）+ テスト
+- [x] T009 [U] [US-10] エージェント起動フロー実装（`AgentService.HireAgentAsync` — 手動起動のみ）
+- [ ] T010 [U] [US-6] 雇用メタファー UI 実装（Hire/Fire ボタン・ラベル・通知メッセージ）+ テスト
+- [ ] T011 [U] [US-7] ジョブタイプ選択 UI 実装（初期は General のみ）+ テスト
+- [ ] T012 [U] [US-1] キャラクタースプライトシステム実装（エージェント種別 × ジョブタイプのスプライトマッピング）
+- [ ] T013 [U] [US-8] 空席デスク表示実装（Worktree あり + エージェントなし = デスクのみ表示）+ テスト
+- [ ] T014 [U] [US-8] 空席デスクのクリック → エージェント雇用 UI 表示実装 + テスト
+- [ ] T015 [U] [US-10] Launch Job 非同期管理（進捗・キャンセル）実装 + テスト
+- [ ] T016 [U] [US-4] ステータスリアルタイム追跡実装 + テスト
+- [ ] T017 [U] [US-5] セッション永続化（JSON 読み書き）実装 + テスト
+- [ ] T018 [U] [US-5] セッション復元（リジューム）実装 + テスト
+- [ ] T019 [U] [US-1] ブランチセッションサマリー管理実装 + テスト
+- [ ] T020 [U] [US-3] Lead 委任自動起動実装 + テスト
+- [x] T021 [U] [US-10] 手動 Launch Agent 機能実装（`AgentService.HireAgentAsync` + `TerminalOverlayPanel`）
+- [x] T022 [U] [US-2] ターミナルペイン管理実装（`TerminalPaneManager` + `TerminalPaneState`）
+- [x] T023 [U] [US-2] ターミナルオーバーレイパネル実装（`TerminalOverlayPanel` — VContainer 手動解決 + 自動シェル起動）
+- [x] T024 [U] [US-2] UIManager 実装（`OpenTerminal`/`ToggleTerminal` + F1 ショートカット）
+- [ ] T025 [U] [US-1] Skills 管理（instruction docs チェック・修復）実装 + テスト
+- [ ] T026 [U] [US-1] agents.toml 互換（ClaudeAgentConfig C# 移植）実装 + テスト
+- [ ] T027 [U] [US-1] Claude Code hooks 連携実装（双方向通信）+ テスト
+- [ ] T028 [U] [US-1] スキル埋め込み（project-scoped skill registration）実装 + テスト
+- [ ] T029 [U] [US-1] gwt スキル露出仕組み実装 + テスト
+- [ ] T030 [U] [US-9] DevContainer 対応実装（エージェントプロセスのコンテナ内実行）+ テスト
+- [x] T031 [FIN] [US-1] VContainer DI 登録（IAgentService — AgentManager は Singleton ライフタイム）
+- [ ] T032 [FIN] [US-1] 統合テスト（実エージェントでの E2E）

@@ -1,0 +1,4 @@
+- [ ] `doc:*` artifact-backed spec issues are readable through the backend detail API
+- [ ] legacy body-canonical spec issues remain readable
+- [ ] `doc`, `contract`, and `checklist` artifacts share the same CRUD family
+- [ ] migration scope covers both local specs and old issue-body bundles

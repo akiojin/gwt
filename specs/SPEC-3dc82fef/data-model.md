@@ -1,0 +1,61 @@
+### Core engine
+- `TerminalEmulator`
+  - ANSI escape sequence parser
+  - `Buffer: TerminalBuffer`
+  - `Write(data)`
+  - `Resize(rows, cols)`
+  - `BufferChanged: event Action`
+  - `TitleChanged: event Action`
+- `TerminalBuffer`
+  - 可視領域 + scrollback 管理
+  - `Rows`, `Cols`
+  - `ScrollbackLines`
+  - `GetCell(row, col)`
+  - `GetScrollbackLine(index)`
+- `TerminalCell`
+  - `Character: char`
+  - `ForegroundColor: byte`
+  - `BackgroundColor: byte`
+  - `Bold: bool`
+  - `Italic: bool`
+  - `Underline: bool`
+
+### Adapter / rendering
+- `XtermSharpTerminalAdapter`
+  - `Feed(data)`
+  - `ProcessPendingData()`
+  - `Resize(rows, cols)`
+  - `GetBuffer()`
+  - `BufferChanged`
+  - `TitleChanged`
+- `TerminalRichTextBuilder`
+  - `BuildRichText(adapter, scrollOffset, visibleRows) -> string`
+  - `MapAnsiColor(byte) -> Color`
+  - `AppendEscaped(StringBuilder, char)`
+- `TerminalRenderer` (MonoBehaviour)
+  - `_terminalText: TextMeshProUGUI`
+  - `_scrollRect: ScrollRect`
+  - `_visibleRows: int`
+  - `_boundPane: TerminalPaneState`
+  - `_scrollOffset: int`
+  - `_dirty: bool`
+  - **`_textPool: List`（仮想スクロール用TMPオブジェクトプール）**
+  - **`_marginRows: int = 50`（上下マージン行数）**
+
+### Input / pane management
+- `TerminalInputField`
+  - `_inputField: TMP_InputField`
+  - `_activePtySessionId: string`
+  - `OnInputSubmitted`
+- `TerminalPaneState`
+  - `PaneId: string`
+  - `AgentSessionId: string`
+  - `PtySessionId: string`
+  - `Terminal: XtermSharpTerminalAdapter`
+  - `Status: PaneStatus`
+- `ITerminalPaneManager`
+  - `PaneCount`
+  - `ActiveIndex`
+  - `ActivePane`
+  - pane add/remove/select APIs
+  - `OnPaneAdded`, `OnPaneRemoved`, `OnActiveIndexChanged`

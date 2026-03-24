@@ -12,6 +12,7 @@ mod issue;
 pub mod issue_cache;
 pub mod issue_linkage;
 mod issue_spec;
+pub mod local_spec;
 mod pullrequest;
 mod remote;
 mod repository;
@@ -36,6 +37,12 @@ pub use issue::{
     is_gh_cli_available, parse_gh_issues_json, resolve_repo_slug, search_issues_with_query,
     FetchIssuesResult, GitHubAssignee, GitHubIssue, GitHubLabel, GitHubMilestone,
     IssueLinkedBranchStatus,
+};
+pub use local_spec::{
+    close_local_spec, create_local_spec, delete_local_spec_artifact, get_local_spec_detail,
+    list_local_spec_artifacts, list_local_specs, search_local_specs, update_local_spec,
+    update_local_spec_phase, upsert_local_spec, upsert_local_spec_artifact, LocalSpecArtifact,
+    LocalSpecDetail, LocalSpecMetadata, LocalSpecPhase,
 };
 pub use issue_spec::{
     append_contract_comment, close_spec_issue, create_spec_issue,

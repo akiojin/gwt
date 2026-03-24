@@ -3,7 +3,6 @@
   import {
     divergenceClass,
     divergenceIndicator,
-    safetyTitleForLevel,
   } from "./sidebarHelpers";
 
   let {
@@ -44,17 +43,11 @@
           <span class="branch-name">{entry.primary_branch.display_name ?? entry.primary_branch.name}</span>
           {#if entry.primary_branch.display_name && entry.primary_branch.display_name !== entry.primary_branch.name}
             <span class="branch-sub">{entry.primary_branch.name}</span>
+          {:else}
+            <span class="branch-sub">{entry.primary_branch.name}</span>
           {/if}
         </div>
         <div class="branch-meta">
-          {#if entry.worktree?.safety_level}
-            <span
-              class={`safety-pill ${entry.worktree.safety_level}`}
-              title={safetyTitleForLevel(entry.worktree.safety_level)}
-            >
-              {entry.worktree.safety_level}
-            </span>
-          {/if}
           {#if divergenceIndicator(entry.primary_branch)}
             <span
               class={`divergence-pill ${divergenceClass(entry.primary_branch.divergence_status)}`}
@@ -123,25 +116,11 @@
     gap: 8px;
   }
 
-  .safety-pill,
   .divergence-pill {
     border-radius: 999px;
     padding: 4px 10px;
     font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-  }
-
-  .safety-pill.safe {
-    background: color-mix(in srgb, var(--green) 16%, transparent);
-  }
-
-  .safety-pill.warning {
-    background: color-mix(in srgb, var(--yellow) 16%, transparent);
-  }
-
-  .safety-pill.danger,
-  .safety-pill.disabled {
-    background: color-mix(in srgb, var(--red) 16%, transparent);
   }
 </style>

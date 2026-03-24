@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-analyze
-description: Analyze a `gwt-spec` artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers.
+description: Analyze a SPEC artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers.
 ---
 
 # gwt SPEC Analyze
@@ -15,17 +15,17 @@ This skill is a **pre-implementation readiness gate only**. It does not certify 
 
 ## Required artifact set
 
-- `doc:spec.md`
-- `doc:plan.md`
-- `doc:tasks.md`
-- `.gwt/memory/constitution.md`
+- `spec.md`
+- `plan.md`
+- `tasks.md`
+- `memory/constitution.md`
 
 Optional but validated when present:
 
-- `doc:research.md`
-- `doc:data-model.md`
-- `doc:quickstart.md`
-- `contract:*`
+- `research.md`
+- `data-model.md`
+- `quickstart.md`
+- `contracts/*`
 
 ## Mandatory checks
 
@@ -50,7 +50,7 @@ Optional but validated when present:
 ## Required output
 
 ```text
-## Analysis Report: #<number>
+## Analysis Report: SPEC-<id>
 
 Status: CLEAR | AUTO-FIXABLE | NEEDS-DECISION
 
@@ -75,11 +75,11 @@ Next:
 - `CLEAR` means the artifact set is ready for execution.
 - `CLEAR` does **not** mean the SPEC may be marked complete.
 - Completion requires a post-implementation reconciliation pass in `gwt-spec-implement` against:
-  - `doc:spec.md`
-  - `doc:tasks.md`
-  - `checklist:acceptance.md`
-  - `checklist:tdd.md`
-  - latest progress comments
+  - `spec.md`
+  - `tasks.md`
+  - `checklists/acceptance.md`
+  - `checklists/tdd.md`
+  - latest progress files
   - executed verification evidence
 
 ## Operations
@@ -87,6 +87,6 @@ Next:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
-  --issue "<number>" \
+  --spec "<id>" \
   --list
 ```

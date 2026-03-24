@@ -1,0 +1,5 @@
+- `gwt-issue-spec-ops` の skill 実体は repo に存在する: [plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md](https://github.com/akiojin/gwt/blob/develop/plugins/gwt/skills/gwt-issue-spec-ops/SKILL.md)
+- `gwt-issue-spec-ops` command も存在する: [plugins/gwt/commands/gwt-issue-spec-ops.md](https://github.com/akiojin/gwt/blob/develop/plugins/gwt/commands/gwt-issue-spec-ops.md)
+- managed skill registration にも含まれている: [crates/gwt-core/src/config/skill_registration.rs](https://github.com/akiojin/gwt/blob/develop/crates/gwt-core/src/config/skill_registration.rs)
+- それにもかかわらず、実セッションの available skills 一覧には露出していなかった
+- `CLAUDE.md` では GitHub Issue-first の SPEC 運用が必須になっている: [CLAUDE.md](https://github.com/akiojin/gwt/blob/develop/CLAUDE.md)

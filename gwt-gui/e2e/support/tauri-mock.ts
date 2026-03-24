@@ -197,7 +197,7 @@ export async function installTauriMock(
             remote_branch: unknown | null;
             has_local: boolean;
             has_remote: boolean;
-            worktree: unknown | null;
+            worktree_path: string | null;
             worktree_count: number;
             resolution_action: "focusExisting" | "createWorktree" | "resolveAmbiguity";
           }
@@ -214,7 +214,7 @@ export async function installTauriMock(
             remote_branch: null,
             has_local: true,
             has_remote: false,
-            worktree: null,
+            worktree_path: null,
             worktree_count: 0,
             resolution_action: "createWorktree",
           });
@@ -232,7 +232,7 @@ export async function installTauriMock(
             remote_branch: branch,
             has_local: existing?.has_local ?? false,
             has_remote: true,
-            worktree: existing?.worktree ?? null,
+            worktree_path: existing?.worktree_path ?? null,
             worktree_count: existing?.worktree_count ?? 0,
             resolution_action: existing?.resolution_action ?? "createWorktree",
           });
@@ -276,7 +276,10 @@ export async function installTauriMock(
             has_remote:
               existing?.has_remote ??
               mockRemoteBranches.some((branch) => branchInventoryKey(branch?.name) === key),
-            worktree: worktreeCount === 1 ? worktree : null,
+            worktree_path:
+              worktreeCount === 1 && typeof worktree?.path === "string"
+                ? worktree.path
+                : null,
             worktree_count: worktreeCount,
             resolution_action:
               worktreeCount > 1 ? "resolveAmbiguity" : "focusExisting",
@@ -284,6 +287,17 @@ export async function installTauriMock(
         }
 
         return Array.from(entries.values());
+      }
+
+      function getBranchInventoryDetail(canonicalNameLike: unknown) {
+        const canonicalName =
+          typeof canonicalNameLike === "string" ? canonicalNameLike.trim() : "";
+        if (!canonicalName) return null;
+        return (
+          listBranchInventory().find(
+            (entry) => entry.canonical_name === canonicalName,
+          ) ?? null
+        );
       }
 
       function spawnShell(workingDirLike: unknown): string {
@@ -527,72 +541,10 @@ export async function installTauriMock(
             return mockLocalBranches;
           case "list_branch_inventory":
             return listBranchInventory();
+          case "get_branch_inventory_detail":
+            return getBranchInventoryDetail(args.canonicalName);
           case "list_remote_branches":
             return mockRemoteBranches;
-          case "list_branch_inventory": {
-            const byKey = new Map<string, Record<string, unknown>>();
-            const keyFor = (name: string) => name.replace(/^origin\//, "");
-
-            for (const branch of mockLocalBranches) {
-              const key = keyFor(String(branch?.name ?? ""));
-              if (!key) continue;
-              byKey.set(key, {
-                id: key,
-                canonical_name: key,
-                primary_branch: branch,
-                local_branch: branch,
-                remote_branch: null,
-                has_local: true,
-                has_remote: false,
-                worktree: null,
-                worktree_count: 0,
-                resolution_action: "createWorktree",
-              });
-            }
-
-            for (const branch of mockRemoteBranches) {
-              const key = keyFor(String(branch?.name ?? ""));
-              if (!key) continue;
-              const existing = byKey.get(key);
-              if (existing) {
-                existing.has_remote = true;
-                existing.remote_branch = branch;
-              } else {
-                byKey.set(key, {
-                  id: key,
-                  canonical_name: key,
-                  primary_branch: branch,
-                  local_branch: null,
-                  remote_branch: branch,
-                  has_local: false,
-                  has_remote: true,
-                  worktree: null,
-                  worktree_count: 0,
-                  resolution_action: "createWorktree",
-                });
-              }
-            }
-
-            for (const worktree of mockWorktrees) {
-              const key = keyFor(String(worktree?.branch ?? ""));
-              if (!key) continue;
-              const entry = byKey.get(key);
-              if (entry) {
-                const count =
-                  typeof entry.worktree_count === "number" ? entry.worktree_count : 0;
-                entry.worktree_count = count + 1;
-                if (count === 0) {
-                  entry.worktree = worktree;
-                  entry.resolution_action = "focusExisting";
-                } else {
-                  entry.worktree = null;
-                  entry.resolution_action = "resolveAmbiguity";
-                }
-              }
-            }
-
-            return Array.from(byKey.values());
-          }
           case "list_worktrees":
             return mockWorktrees;
           case "list_terminals":
