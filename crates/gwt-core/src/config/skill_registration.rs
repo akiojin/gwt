@@ -2565,11 +2565,10 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_register_skill.contains("Issue-first SPEC container"));
+        assert!(spec_register_skill.contains("local SPEC directory"));
         assert!(spec_register_skill.contains("gwt-issue-search"));
-        assert!(spec_register_skill.contains("GWT_SPEC_ARTIFACT:doc:spec.md"));
+        assert!(spec_register_skill.contains("metadata.json"));
         assert!(spec_register_skill.contains("gwt-spec-ops"));
-        assert!(spec_register_skill.contains("repos/<owner>/<repo>/issues"));
 
         let spec_clarify_skill = std::fs::read_to_string(
             temp.path()

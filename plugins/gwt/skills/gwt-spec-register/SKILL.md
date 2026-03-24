@@ -35,7 +35,7 @@ Do not create a new SPEC when an existing canonical SPEC clearly owns the scope.
 
 ## Title convention
 
-All SPECs must use the `gwt-spec: ` prefix:
+All SPECs must use the `gwt-spec:` prefix:
 
 ```text
 gwt-spec: <concise English description>
