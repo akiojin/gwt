@@ -34,7 +34,7 @@
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
 - **完了報告前のセルフチェックリスト（必須）:**
-  - [ ] 対象の `gwt-spec` Issue が最新状態に更新されているか
+  - [ ] 対象の SPEC（`specs/SPEC-{UUID8}/`）が最新状態に更新されているか
   - [ ] 全テスト通過・lint / 型チェック成功
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
@@ -47,21 +47,21 @@
 
 #### 1. 仕様策定（feat / fix / refactor 対象）
 
-- 新機能・バグ修正・リファクタリングの実装前に、GitHub Issue（`gwt-spec` ラベル）を作成する。Issue 番号 = SPEC ID
-- Issue body のセクション構造に従い、最低限以下を含める:
+- 新機能・バグ修正・リファクタリングの実装前に、ローカル SPEC（`specs/SPEC-{UUID8}/`）を作成する。UUID8 = SPEC ID
+- SPEC ディレクトリ内の `spec.md` に最低限以下を含める:
   - ユーザーシナリオとテスト（受け入れシナリオ）
-  - 機能要件（FR-*）
+  - 機能要件（FR-\*）
   - 成功基準
-- Issue body の `## Plan`、`## Tasks` セクションも策定してから実装に入る
+- `plan.md`、`tasks.md` も策定してから実装に入る
 - 新規 SPEC を作成した場合、現在のブランチでは実装に入らず、SPEC に基づく別ブランチ（Worktree）で実装する
-- 現在のコンバセーションでは Issue/SPEC 登録までで完了とする
+- 現在のコンバセーションでは SPEC 登録までで完了とする
 - 通常の GitHub Issue から開始する場合は、Issue 分析ワークフローにより直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
-- 新規 SPEC を明示的に起票する場合は SPEC 登録ワークフローで `gwt-spec` Issue を作成する
-- 対象の `gwt-spec` Issue が確定した後は SPEC 管理ワークフローに従って Spec/Plan/Tasks を更新し、実装進行を管理する
+- 新規 SPEC を明示的に作成する場合は SPEC 登録ワークフローでローカル `specs/SPEC-{UUID8}/` ディレクトリを作成する
+- 対象の SPEC が確定した後は SPEC 管理ワークフローに従って spec.md/plan.md/tasks.md を更新し、実装進行を管理する
 - 仕様策定時のユーザーインタビューでは以下を遵守する:
   - 表面的・ありきたりな質問を避け、技術実装・UX・トレードオフに踏み込んだ質問をする
   - 1回で終わらず、仕様が十分に詰まるまで継続的にインタビューする
-  - 既存の `gwt-spec` Issue が存在しないか必ず確認してから、新規作成・更新を判断する
+  - 既存の SPEC が `specs/` 配下に存在しないか必ず確認してから、新規作成・更新を判断する
 
 #### 2. TDD（テストファースト）
 
@@ -109,7 +109,7 @@
 - 作業（タスク）は、忖度なしで進める
 - **エージェントはユーザーからの明示的な指示なく新規ブランチの作成・削除を行ってはならない。Worktreeは起動ブランチで作業を完結する設計。**
 - 「進めて」等の承認指示は、承認済みタスクを自律的に完了まで進める指示である。不要な中間確認を挟まず、完了まで一気に進める
-- **変更規模の大小に関わらず `feat` / `fix` / `refactor` は仕様策定（`gwt-spec` Issue）・TDD を省略しない。** 「軽微だから省略」は禁止。適用除外は `docs:` / `chore:` / typo修正 / CLAUDE.md更新のみ
+- **変更規模の大小に関わらず `feat` / `fix` / `refactor` は仕様策定（ローカル SPEC）・TDD を省略しない。** 「軽微だから省略」は禁止。適用除外は `docs:` / `chore:` / typo修正 / CLAUDE.md更新のみ
 
 ### コミットメッセージポリシー
 
@@ -160,7 +160,7 @@
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
-- 仕様・要件は GitHub Issue（`gwt-spec` ラベル）に記載する。Issue の close で管理
+- 仕様・要件は `specs/SPEC-{UUID8}/` のローカルファイルに記載する。`metadata.json` の status で管理
 
 ### README.md / README.ja.md に必ず記載する内容
 
@@ -169,7 +169,7 @@
 - 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`pnpm test`, E2Eなど）
 - 配布情報: リリース/バイナリ資産の取得先、バージョン取得方法
 - 代表的な画面操作: よく使う画面遷移や一般的なトラブル時の案内（再現しやすく簡潔）
-- 変更が設計判断を必要とする場合の案内: 重要仕様の所在（GitHub Issue `gwt-spec` ラベルへの参照）
+- 変更が設計判断を必要とする場合の案内: 重要仕様の所在（`specs/SPEC-{UUID8}/` ディレクトリへの参照）
 - `CLAUDE.md` の運用ルールや内部実装ガイドは README に入れない
 - 英語版/日本語版の内容は同等レベルを保つ（順序・見出しは対応させる）
 
@@ -224,6 +224,8 @@
 │   │   ├── lib/terminal/    # xterm.jsラッパー
 │   │   └── lib/types.ts     # TypeScript型定義
 │   └── package.json
+├── specs/              # ローカル SPEC 管理（SPEC-{UUID8}/）
+│   └── SPEC-*/         # 各 SPEC のアーティファクト（spec.md, plan.md, tasks.md 等）
 └── package.json        # Tauri開発用スクリプト
 ```
 
@@ -237,24 +239,24 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-issue-register | `/gwt:gwt-issue-register` | Register new GitHub work items from a request. Search existing Issues and `gwt-spec` Issues first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or continue into the SPEC workflow. Use as the main entrypoint for new Issue/SPEC registration requests. |
-| gwt-issue-resolve | `/gwt:gwt-issue-resolve` | Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing gwt-spec issue, or promoted to a new spec issue, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration. |
-| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub gwt-spec Issues using vector embeddings. Use when searching for existing specs, finding related gwt-spec issues, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. |
-| gwt-spec-register | `/gwt:gwt-spec-register` | Create a new GitHub Issue-first SPEC container when no existing canonical SPEC fits. Seed the Issue body as an artifact index plus a `spec.md` comment, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
-| gwt-spec-clarify | `/gwt:gwt-spec-clarify` | Clarify an existing `gwt-spec` by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. Use directly or through `gwt-spec-ops`. |
-| gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`. |
-| gwt-spec-tasks | `/gwt:gwt-spec-tasks` | Generate `tasks.md` for an existing `gwt-spec` from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. Use directly or through `gwt-spec-ops`. |
-| gwt-spec-analyze | `/gwt:gwt-spec-analyze` | Analyze a `gwt-spec` artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers. |
-| gwt-spec-ops | — | GitHub Issue-first SPEC orchestration. Use an existing or newly created `gwt-spec` issue to stabilize `spec.md`, `plan.md`, `tasks.md`, analysis gates, and then continue into implementation without stopping at normal handoff boundaries. |
-| gwt-spec-implement | `/gwt:gwt-spec-implement` | Implement an existing `gwt-spec` end-to-end from `tasks.md`. Execute test-first tasks, update progress artifacts, and keep PR work moving until the SPEC is done. |
+| gwt-issue-register | `/gwt:gwt-issue-register` | Register new GitHub work items. Search existing Issues and local SPECs first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or escalate to a local SPEC. Use as the main entrypoint for new Issue/SPEC registration requests. |
+| gwt-issue-resolve | `/gwt:gwt-issue-resolve` | Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly or promoted to a local SPEC, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration. |
+| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub Issues and local SPECs. Use when searching for existing specs, finding related issues, or checking for duplicate specs. |
+| gwt-spec-register | `/gwt:gwt-spec-register` | Create a new local SPEC directory (`specs/SPEC-{UUID8}/`) when no existing canonical SPEC fits. Seed `metadata.json` and `spec.md`, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
+| gwt-spec-clarify | `/gwt:gwt-spec-clarify` | Clarify an existing local SPEC by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. |
+| gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate planning artifacts for an existing local SPEC: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. |
+| gwt-spec-tasks | `/gwt:gwt-spec-tasks` | Generate `tasks.md` for an existing local SPEC from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. |
+| gwt-spec-analyze | `/gwt:gwt-spec-analyze` | Analyze a local SPEC artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation. |
+| gwt-spec-ops | — | Local SPEC orchestration. Use an existing or newly created SPEC to stabilize `spec.md`, `plan.md`, `tasks.md`, analysis gates, and then continue into implementation without stopping at normal handoff boundaries. |
+| gwt-spec-implement | `/gwt:gwt-spec-implement` | Implement an existing local SPEC end-to-end from `tasks.md`. Execute test-first tasks, update progress artifacts, and keep PR work moving until the SPEC is done. |
 
 ### PR Management
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-pr | `/gwt:gwt-pr` | Create or update GitHub Pull Requests with the gh CLI, preferring REST-first `gh api` flows for PR list/create/update/view while deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches). |
-| gwt-pr-check | `/gwt:gwt-pr-check` | Check GitHub PR status with the gh CLI using REST-first PR lookups, including unmerged PR detection and post-merge new-commit detection for the current branch. |
-| gwt-pr-fix | `/gwt:gwt-pr-fix` | Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Use REST-first transport for CI/reviews/comments, keep GraphQL only for unresolved review thread discovery and reply/resolve, autonomously fix high-confidence blockers, reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Ask the user only for ambiguous conflicts or design decisions. |
+| gwt-pr | `/gwt:gwt-pr` | Create or update GitHub Pull Requests with the gh CLI, including deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches). |
+| gwt-pr-check | `/gwt:gwt-pr-check` | Check GitHub PR status with the gh CLI, including unmerged PR detection and post-merge new-commit detection for the current branch. |
+| gwt-pr-fix | `/gwt:gwt-pr-fix` | Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Autonomously fix high-confidence blockers, reply to ALL reviewer comments with action taken or reason for not addressing, then resolve threads. Ask the user only for ambiguous conflicts or design decisions. |
 
 ### Utilities
 
@@ -262,7 +264,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 |-------|---------|-------------|
 | gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
 | gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
-| gwt-spec-to-issue-migration | — | Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script. |
+| gwt-spec-to-issue-migration | — | Reverse-migrate GitHub Issue specs to local `specs/SPEC-{UUID8}/` directories using the bundled reverse migration script. |
 
 ### Recommended Workflow
 

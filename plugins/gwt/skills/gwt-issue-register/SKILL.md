@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-register
-description: Register new GitHub work items from a request. Search existing Issues and `gwt-spec` Issues first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or continue into the SPEC workflow. Use as the main entrypoint for new Issue/SPEC registration requests.
+description: Register new GitHub work items from a request. Search existing Issues and SPECs first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or continue into the SPEC workflow. Use as the main entrypoint for new Issue/SPEC registration requests.
 ---
 
 # gwt Issue Register
@@ -16,7 +16,7 @@ Hard routing rule:
 - Do not call `gh issue create` manually and do not jump to `gwt-spec-register` before this skill completes duplicate search and ISSUE vs SPEC selection.
 
 - If the user already has an Issue number or URL, use `gwt-issue-resolve`.
-- If the target `gwt-spec` issue is already known, use `gwt-spec-ops`.
+- If the target SPEC is already known, use `gwt-spec-ops`.
 - If this skill determines that a new SPEC is required, create it through
   `gwt-spec-register`, then continue through `gwt-spec-ops`.
 - Do not create both a plain Issue and a SPEC for the same request.
@@ -30,7 +30,7 @@ Required behavior:
 1. Ensure `gh auth status` is valid before any `index-issues` call.
 2. Update the Issues index if needed.
 3. Run at least 2 semantic Issue queries derived from the request.
-4. Search for both plain Issues and `gwt-spec` Issues.
+4. Search for both plain Issues and existing SPECs (via `spec_artifact.py --repo . --list-all`).
 5. Reuse a clear existing destination instead of creating a duplicate.
 
 Do not skip duplicate search because the request "sounds new".
@@ -38,7 +38,7 @@ Do not skip duplicate search because the request "sounds new".
 ## Duplicate handling
 
 - If an open plain Issue clearly matches, switch to `gwt-issue-resolve` and continue there.
-- If an open `gwt-spec` clearly owns the scope, switch to `gwt-spec-ops` and continue there.
+- If an existing SPEC clearly owns the scope, switch to `gwt-spec-ops` and continue there.
 - If the search returns plausible candidates but no single clear owner, stop and present the top 1-3 candidates instead of creating a new item.
 - Do not create a fresh Issue "just in case" when the duplicate check is inconclusive.
 
@@ -52,7 +52,7 @@ Create a plain GitHub Issue when the request is primarily one of these:
 - question or investigation request
 - narrowly scoped enhancement that does not need new product behavior to be specified first
 
-Create a new SPEC when the request includes any of these:
+Create a new local SPEC directory when the request includes any of these:
 
 - multiple user scenarios or acceptance criteria
 - new or changed product behavior that must be defined first
@@ -60,7 +60,7 @@ Create a new SPEC when the request includes any of these:
 - cross-cutting or multi-subsystem changes
 - non-trivial technical or product tradeoffs
 
-When the need for a SPEC is clear, do not create a plain Issue first. Create the SPEC and continue through `gwt-spec-ops`.
+When the need for a SPEC is clear, do not create a plain Issue first. Create the SPEC through `gwt-spec-register` and continue through `gwt-spec-ops`.
 
 ## Title rules for plain Issues
 
@@ -108,7 +108,8 @@ Before creating anything, report the decision in this structure:
 **Action:** <specific next step>
 
 ### Candidates
-- #<number> <title> [issue|gwt-spec] - <why it matches>
+- #<number> <title> [issue] - <why it matches>
+- SPEC-<id> <title> [spec] - <why it matches>
 ````
 
 Use `CLEAN` only when the duplicate search found no credible owner.
@@ -125,17 +126,18 @@ Use `CLEAN` only when the duplicate search found no credible owner.
 
 3. **Search for an existing destination.**
    - Use `gwt-issue-search` with at least 2 semantic queries.
-   - Prefer open Issues and active canonical `gwt-spec` Issues.
+   - Also search local `specs/` directory via `spec_artifact.py --repo . --list-all`.
+   - Prefer open Issues and active canonical SPECs.
 
 4. **Reuse duplicates or existing owners.**
    - If a clear open Issue already tracks the request, do not create a new item.
-   - If a clear `gwt-spec` already owns the scope, do not create a new item.
+   - If a clear SPEC already owns the scope, do not create a new item.
    - Report the result with `Chosen Path: EXISTING` and continue with the owning workflow.
 
 5. **Choose plain Issue or new SPEC.**
    - Use the decision rules above.
    - Plain Issue: create directly with `gh issue create`.
-   - New SPEC: create through `gwt-spec-register`, then continue through `gwt-spec-ops`.
+   - New SPEC: create through `gwt-spec-register` (local directory), then continue through `gwt-spec-ops`.
 
 6. **Create the plain Issue when needed.**
    - Use the required title rule and issue body structure.
