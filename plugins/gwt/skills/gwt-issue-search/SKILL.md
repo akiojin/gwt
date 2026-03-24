@@ -81,4 +81,4 @@ Then search Issues semantically:
 - Issue index must be updated manually (via GUI "Update Index" button or `index-issues` action)
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
-- For file search, use `gwt-project-index` instead
+- For file search, use `gwt-file-search` instead

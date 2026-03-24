@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-plan
-description: "Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `.gwt/memory/constitution.md`. Use directly or through `gwt-spec-ops`."
+description: "Generate `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*` planning artifacts for an existing `gwt-spec`, including a constitution check against `.gwt/memory/constitution.md`. Use directly or through `gwt-spec-ops`."
 ---
 
 # gwt SPEC Plan

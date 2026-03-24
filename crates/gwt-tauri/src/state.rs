@@ -205,6 +205,8 @@ pub struct AppState {
         Mutex<HashMap<String, crate::assistant_monitor::AssistantMonitorHandle>>,
     /// Last heartbeat timestamp from the frontend (freeze detection).
     pub last_heartbeat: Mutex<Option<Instant>>,
+    /// Whether the frontend watchdog task has already been armed.
+    pub heartbeat_watchdog_started: AtomicBool,
 }
 
 impl AppState {
@@ -253,6 +255,7 @@ impl AppState {
             assistant_runtime: Mutex::new(HashMap::new()),
             assistant_monitor_handle: Mutex::new(HashMap::new()),
             last_heartbeat: Mutex::new(None),
+            heartbeat_watchdog_started: AtomicBool::new(false),
         }
     }
 
