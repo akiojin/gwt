@@ -78,28 +78,28 @@ Planning is complete only when:
 ## Operations
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \
   --artifact "doc:plan.md" \
   --body-file /tmp/plan.md
 
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \
   --artifact "doc:research.md" \
   --body-file /tmp/research.md
 
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \
   --artifact "doc:data-model.md" \
   --body-file /tmp/data-model.md
 
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \

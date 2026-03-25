@@ -95,31 +95,31 @@ Next
 
 ```bash
 # Inspect all (CI, conflicts, reviews) - default mode
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>"
+python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>"
 
 # CI checks only
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks
+python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks
 
 # Conflicts only
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode conflicts
+python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode conflicts
 
 # Reviews only (Change Requests + Unresolved Threads)
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode reviews
+python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode reviews
 
 # JSON output
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --json
+python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --json
 
 # Required checks only (if gh supports --required)
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks --required-only
+python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks --required-only
 
 # Reply to all unresolved threads and resolve them
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --reply-and-resolve '[
+python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --reply-and-resolve '[
   {"threadId":"PRRT_xxx123","body":"Fixed: refactored the method as suggested."},
   {"threadId":"PRRT_xxx456","body":"Not addressed: this is intentional because the API requires this format."}
 ]'
 
 # Add a comment to notify reviewers
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --add-comment "Fixed all issues. Please re-review."
+python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --add-comment "Fixed all issues. Please re-review."
 ```
 
 ## Workflow

@@ -18,6 +18,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=../../.claude/skills");
     println!("cargo:rerun-if-changed=../../.claude/commands");
+    println!("cargo:rerun-if-changed=../../.claude/hooks/scripts");
 
     let mut entries = Vec::new();
 

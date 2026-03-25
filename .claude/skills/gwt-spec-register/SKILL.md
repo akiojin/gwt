@@ -136,7 +136,7 @@ After directory creation, create `specs/SPEC-{id}/spec.md` with this minimum str
 Artifact files should be managed with the shared helper:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \
@@ -147,7 +147,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
 ### Create new SPEC
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --create \
   --title "gwt-spec: ..."
@@ -190,7 +190,7 @@ cat <<'EOF' >/tmp/spec.md
 - SC-001 ...
 EOF
 
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \

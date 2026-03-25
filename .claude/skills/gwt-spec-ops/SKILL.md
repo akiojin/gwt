@@ -86,7 +86,7 @@ The `metadata.json` file tracks SPEC status and phase:
 Use the shared helper to list, read, and upsert artifact files:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --list
@@ -97,7 +97,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
 ### Read SPEC metadata
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --get \
@@ -107,7 +107,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
 ### Update artifact
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \
@@ -118,7 +118,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
 ### List all SPECs
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --list-all
 ```
@@ -126,7 +126,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
 ### Close SPEC
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --close
@@ -135,7 +135,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
 ### Add quality checklist
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \
@@ -253,7 +253,7 @@ Generate quality checklists for:
 Add checklists to the SPEC directory through the shared helper:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \

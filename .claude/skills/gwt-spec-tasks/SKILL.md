@@ -72,7 +72,7 @@ Each task must include:
 ## Operations
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \

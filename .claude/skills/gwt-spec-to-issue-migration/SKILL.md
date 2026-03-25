@@ -15,8 +15,8 @@ Use this skill for spec migrations from GitHub Issues to local directories:
 Migrate Issue-based specs to local `specs/SPEC-{id}/` directories, then retire the Issue as the source of truth for spec artifacts.
 
 This skill uses:
-- `${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py`
-- `${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py`
+- `.claude/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py`
+- `.claude/skills/gwt-spec-ops/scripts/spec_artifact.py`
 
 ## Preconditions
 
@@ -39,25 +39,25 @@ This skill uses:
 ### Dry-run
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py" --dry-run
+python3 ".claude/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py" --dry-run
 ```
 
 ### Dry-run with specific issues
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py" --dry-run --issues "42,55,78"
+python3 ".claude/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py" --dry-run --issues "42,55,78"
 ```
 
 ### Execute migration
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py"
+python3 ".claude/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py"
 ```
 
 ### Verify migrated SPECs
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --list-all
 ```

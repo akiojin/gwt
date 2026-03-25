@@ -112,16 +112,16 @@ Post updates at least when starting work, after meaningful progress, and when bl
 
 ```bash
 # Inspect issue (text output)
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." --issue "<number>"
+python3 ".claude/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." --issue "<number>"
 
 # Inspect issue by URL
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." --issue "https://github.com/org/repo/issues/123"
+python3 ".claude/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." --issue "https://github.com/org/repo/issues/123"
 
 # With focus area
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." --issue "<number>" --focus "src/lib"
+python3 ".claude/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." --issue "<number>" --focus "src/lib"
 
 # JSON output
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." --issue "<number>" --json
+python3 ".claude/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." --issue "<number>" --json
 ```
 
 ## Workflow

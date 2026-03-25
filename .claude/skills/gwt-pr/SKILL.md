@@ -181,7 +181,7 @@ Next
 
 9. **Build PR body from template**
    - Read the template from the gwt-pr skill path (not the current project path):
-     - `PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"`
+     - `PR_BODY_TEMPLATE=".claude/skills/gwt-pr/references/pr-body-template.md"`
    - Read `${PR_BODY_TEMPLATE}` and fill all required placeholders.
    - Derive missing sections from the diff, linked Issues/SPECs, and executed tests before asking the user.
    - **If a conditional section does not apply, remove the entire section.**
@@ -211,7 +211,7 @@ Next
 ```bash
 head=$(git rev-parse --abbrev-ref HEAD)
 base=develop
-PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"
+PR_BODY_TEMPLATE=".claude/skills/gwt-pr/references/pr-body-template.md"
 
 base_compare_has_diff() {
   git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
@@ -371,4 +371,4 @@ esac
 
 ## References
 
-- `${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md`: PR body template
+- `.claude/skills/gwt-pr/references/pr-body-template.md`: PR body template

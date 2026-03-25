@@ -124,7 +124,7 @@ Next: `gwt-spec-ops` -> `gwt-spec-plan` | ask follow-up clarification
 ### Read current `spec.md`
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --get \
@@ -134,7 +134,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
 ### Update `spec.md`
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --upsert \

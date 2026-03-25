@@ -228,13 +228,13 @@ Append the following line **only** when the worktree is dirty:
 
 ```bash
 # Human-readable output
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "."
+python3 ".claude/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "."
 
 # Explicit base branch
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "." --base develop
+python3 ".claude/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "." --base develop
 
 # Append machine-readable JSON after the summary
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "." --json
+python3 ".claude/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "." --json
 ```
 
 ## Command snippet (bash)
