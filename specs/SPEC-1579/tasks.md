@@ -54,10 +54,10 @@ doc:tasks.md
 
 ## Phase: Skill Canonical Path Migration (plugins/gwt/ → .claude/)
 
-- [ ] T058 `plugins/gwt/skills/*` → `.claude/skills/*` 正本移行
-- [ ] T059 `plugins/gwt/commands/*` → `.claude/commands/*` 正本移行
-- [ ] T060 `skill_registration.rs` / `build.rs` の `include_str!()` パスを `.claude/` に変更
-- [ ] T061 `plugins/gwt/` ディレクトリ削除
+- [x] T058 `plugins/gwt/skills/*` → `.claude/skills/*` 正本移行
+- [x] T059 `plugins/gwt/commands/*` → `.claude/commands/*` 正本移行
+- [x] T060 `skill_registration.rs` / `build.rs` の `include_str!()` パスを `.claude/` に変更
+- [x] T061 `plugins/gwt/` ディレクトリ削除
 
 ## Phase: Local File-based Storage/API (from SPEC-1327)
 
