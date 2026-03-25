@@ -41,7 +41,7 @@ impl LocalSpecPhase {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "draft" => Some(Self::Draft),
             "ready" => Some(Self::Ready),
@@ -107,7 +107,12 @@ fn metadata_path(repo_path: &Path, spec_id: &str) -> PathBuf {
     spec_dir(repo_path, spec_id).join("metadata.json")
 }
 
-fn artifact_file_path(repo_path: &Path, spec_id: &str, kind: SpecIssueArtifactKind, name: &str) -> PathBuf {
+fn artifact_file_path(
+    repo_path: &Path,
+    spec_id: &str,
+    kind: SpecIssueArtifactKind,
+    name: &str,
+) -> PathBuf {
     let base = spec_dir(repo_path, spec_id);
     match kind {
         SpecIssueArtifactKind::Doc => base.join(name),
@@ -148,7 +153,11 @@ fn read_metadata(repo_path: &Path, spec_id: &str) -> Result<LocalSpecMetadata, S
         .map_err(|e| format!("Failed to parse metadata for SPEC-{spec_id}: {e}"))
 }
 
-fn write_metadata(repo_path: &Path, spec_id: &str, metadata: &LocalSpecMetadata) -> Result<(), String> {
+fn write_metadata(
+    repo_path: &Path,
+    spec_id: &str,
+    metadata: &LocalSpecMetadata,
+) -> Result<(), String> {
     let path = metadata_path(repo_path, spec_id);
     let content = serde_json::to_string_pretty(metadata)
         .map_err(|e| format!("Failed to serialize metadata: {e}"))?;
@@ -166,7 +175,12 @@ fn touch_updated_at(repo_path: &Path, spec_id: &str) -> Result<(), String> {
 // Artifact I/O
 // ---------------------------------------------------------------------------
 
-fn read_artifact_content(repo_path: &Path, spec_id: &str, kind: SpecIssueArtifactKind, name: &str) -> String {
+fn read_artifact_content(
+    repo_path: &Path,
+    spec_id: &str,
+    kind: SpecIssueArtifactKind,
+    name: &str,
+) -> String {
     let path = artifact_file_path(repo_path, spec_id, kind, name);
     fs::read_to_string(&path).unwrap_or_default()
 }
@@ -198,17 +212,41 @@ fn read_all_sections(repo_path: &Path, spec_id: &str) -> SpecIssueSections {
         spec: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "spec.md"),
         plan: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "plan.md"),
         tasks: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "tasks.md"),
-        tdd: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Checklist, "tdd.md"),
-        research: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "research.md"),
-        data_model: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "data-model.md"),
-        quickstart: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "quickstart.md"),
+        tdd: read_artifact_content(
+            repo_path,
+            spec_id,
+            SpecIssueArtifactKind::Checklist,
+            "tdd.md",
+        ),
+        research: read_artifact_content(
+            repo_path,
+            spec_id,
+            SpecIssueArtifactKind::Doc,
+            "research.md",
+        ),
+        data_model: read_artifact_content(
+            repo_path,
+            spec_id,
+            SpecIssueArtifactKind::Doc,
+            "data-model.md",
+        ),
+        quickstart: read_artifact_content(
+            repo_path,
+            spec_id,
+            SpecIssueArtifactKind::Doc,
+            "quickstart.md",
+        ),
         contracts: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Contract, ""),
         checklists: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Checklist, ""),
     }
 }
 
 /// Write sections to local files. Only writes non-empty sections.
-fn write_sections(repo_path: &Path, spec_id: &str, sections: &SpecIssueSections) -> Result<(), String> {
+fn write_sections(
+    repo_path: &Path,
+    spec_id: &str,
+    sections: &SpecIssueSections,
+) -> Result<(), String> {
     let doc = SpecIssueArtifactKind::Doc;
     let checklist = SpecIssueArtifactKind::Checklist;
 
@@ -247,8 +285,7 @@ pub fn create_local_spec(
 
     let spec_id = generate_spec_id(repo_path);
     let dir = spec_dir(repo_path, &spec_id);
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create SPEC directory: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create SPEC directory: {e}"))?;
 
     let now = Utc::now().to_rfc3339();
     let metadata = LocalSpecMetadata {
@@ -299,10 +336,7 @@ pub fn upsert_local_spec(
 }
 
 /// Get full detail of a local SPEC.
-pub fn get_local_spec_detail(
-    repo_path: &Path,
-    spec_id: &str,
-) -> Result<LocalSpecDetail, String> {
+pub fn get_local_spec_detail(repo_path: &Path, spec_id: &str) -> Result<LocalSpecDetail, String> {
     let metadata = read_metadata(repo_path, spec_id)?;
     let sections = read_all_sections(repo_path, spec_id);
 
@@ -332,7 +366,14 @@ pub fn list_local_spec_artifacts(
 
     // Collect doc artifacts (root-level .md files)
     if kind.is_none() || kind == Some(SpecIssueArtifactKind::Doc) {
-        let doc_files = ["spec.md", "plan.md", "tasks.md", "research.md", "data-model.md", "quickstart.md"];
+        let doc_files = [
+            "spec.md",
+            "plan.md",
+            "tasks.md",
+            "research.md",
+            "data-model.md",
+            "quickstart.md",
+        ];
         for name in &doc_files {
             let path = dir.join(name);
             if path.exists() {
@@ -353,12 +394,24 @@ pub fn list_local_spec_artifacts(
 
     // Collect contract artifacts
     if kind.is_none() || kind == Some(SpecIssueArtifactKind::Contract) {
-        collect_subdir_artifacts(&dir, "contracts", SpecIssueArtifactKind::Contract, spec_id, &mut artifacts);
+        collect_subdir_artifacts(
+            &dir,
+            "contracts",
+            SpecIssueArtifactKind::Contract,
+            spec_id,
+            &mut artifacts,
+        );
     }
 
     // Collect checklist artifacts
     if kind.is_none() || kind == Some(SpecIssueArtifactKind::Checklist) {
-        collect_subdir_artifacts(&dir, "checklists", SpecIssueArtifactKind::Checklist, spec_id, &mut artifacts);
+        collect_subdir_artifacts(
+            &dir,
+            "checklists",
+            SpecIssueArtifactKind::Checklist,
+            spec_id,
+            &mut artifacts,
+        );
     }
 
     artifacts.sort_by(|a, b| {
@@ -443,8 +496,7 @@ pub fn list_local_specs(repo_path: &Path) -> Result<Vec<LocalSpecMetadata>, Stri
     }
 
     let mut specs = Vec::new();
-    let entries = fs::read_dir(&dir)
-        .map_err(|e| format!("Failed to read specs directory: {e}"))?;
+    let entries = fs::read_dir(&dir).map_err(|e| format!("Failed to read specs directory: {e}"))?;
 
     for entry in entries {
         let entry = entry.map_err(|e| format!("Failed to read directory entry: {e}"))?;
@@ -475,7 +527,8 @@ pub fn search_local_specs(repo_path: &Path, query: &str) -> Result<Vec<LocalSpec
                 return true;
             }
             // Also search in spec.md content
-            let content = read_artifact_content(repo_path, &meta.id, SpecIssueArtifactKind::Doc, "spec.md");
+            let content =
+                read_artifact_content(repo_path, &meta.id, SpecIssueArtifactKind::Doc, "spec.md");
             content.to_lowercase().contains(&query_lower)
         })
         .collect();
@@ -596,8 +649,14 @@ mod tests {
         let tmp = setup();
         let repo = tmp.path();
 
-        let s1 = SpecIssueSections { spec: "Spec 1".to_string(), ..Default::default() };
-        let s2 = SpecIssueSections { spec: "Spec 2".to_string(), ..Default::default() };
+        let s1 = SpecIssueSections {
+            spec: "Spec 1".to_string(),
+            ..Default::default()
+        };
+        let s2 = SpecIssueSections {
+            spec: "Spec 2".to_string(),
+            ..Default::default()
+        };
 
         create_local_spec(repo, "First", &s1).unwrap();
         create_local_spec(repo, "Second", &s2).unwrap();
@@ -615,20 +674,33 @@ mod tests {
         let created = create_local_spec(repo, "Test", &sections).unwrap();
 
         let artifact = upsert_local_spec_artifact(
-            repo, &created.id,
-            SpecIssueArtifactKind::Contract, "api.yaml",
+            repo,
+            &created.id,
+            SpecIssueArtifactKind::Contract,
+            "api.yaml",
             "openapi: 3.0\ninfo:\n  title: Test",
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(artifact.artifact_name, "api.yaml");
 
-        let artifacts = list_local_spec_artifacts(repo, &created.id, Some(SpecIssueArtifactKind::Contract)).unwrap();
+        let artifacts =
+            list_local_spec_artifacts(repo, &created.id, Some(SpecIssueArtifactKind::Contract))
+                .unwrap();
         assert_eq!(artifacts.len(), 1);
 
-        let deleted = delete_local_spec_artifact(repo, &created.id, SpecIssueArtifactKind::Contract, "api.yaml").unwrap();
+        let deleted = delete_local_spec_artifact(
+            repo,
+            &created.id,
+            SpecIssueArtifactKind::Contract,
+            "api.yaml",
+        )
+        .unwrap();
         assert!(deleted);
 
-        let artifacts = list_local_spec_artifacts(repo, &created.id, Some(SpecIssueArtifactKind::Contract)).unwrap();
+        let artifacts =
+            list_local_spec_artifacts(repo, &created.id, Some(SpecIssueArtifactKind::Contract))
+                .unwrap();
         assert_eq!(artifacts.len(), 0);
     }
 
@@ -652,8 +724,14 @@ mod tests {
         let tmp = setup();
         let repo = tmp.path();
 
-        let s1 = SpecIssueSections { spec: "Authentication flow".to_string(), ..Default::default() };
-        let s2 = SpecIssueSections { spec: "Database migration".to_string(), ..Default::default() };
+        let s1 = SpecIssueSections {
+            spec: "Authentication flow".to_string(),
+            ..Default::default()
+        };
+        let s2 = SpecIssueSections {
+            spec: "Database migration".to_string(),
+            ..Default::default()
+        };
 
         create_local_spec(repo, "Auth Feature", &s1).unwrap();
         create_local_spec(repo, "DB Migration", &s2).unwrap();
