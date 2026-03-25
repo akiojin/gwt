@@ -1215,7 +1215,7 @@ test("list terminals returns focus to Agent Canvas with the active terminal sess
   ).toBeVisible();
 });
 
-test("new terminal failure keeps Agent Canvas stable without adding a session card", async ({
+test("new terminal failure keeps Agent Canvas stable without adding a session tile", async ({
   page,
 }) => {
   await page.goto("/");
@@ -1891,9 +1891,9 @@ test("focus-agent-tab dynamic action returns to the selected terminal session", 
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "new-terminal" });
-  const terminalCard = page.locator('[data-testid^="agent-canvas-session-terminal-"]').first();
-  await expect(terminalCard).toBeVisible();
-  const tabId = await terminalCard.getAttribute("data-testid");
+  const terminalTile = page.locator('[data-testid^="agent-canvas-session-terminal-"]').first();
+  await expect(terminalTile).toBeVisible();
+  const tabId = await terminalTile.getAttribute("data-testid");
   const terminalTabId = tabId?.replace("agent-canvas-session-", "");
   if (!terminalTabId) throw new Error("terminal tab id missing");
 
@@ -1904,7 +1904,7 @@ test("focus-agent-tab dynamic action returns to the selected terminal session", 
     action: `focus-agent-tab::${terminalTabId}`,
   });
   await expect(page.locator('[data-tab-id="agentCanvas"]')).toHaveClass(/active/);
-  await expect(terminalCard).toBeVisible();
+  await expect(terminalTile).toBeVisible();
 });
 
 test("edit copy and paste dispatch terminal edit actions for the active terminal", async ({
@@ -2468,7 +2468,7 @@ test("worktrees-changed event for another project is ignored", async ({
     project_path: "/tmp/other-project",
   });
   await expect(
-    page.locator('[data-testid="agent-canvas-worktree-card-feature-foreign"]'),
+    page.locator('[data-testid="agent-canvas-worktree-tile-feature-foreign"]'),
   ).toBeHidden();
 });
 
@@ -2725,9 +2725,9 @@ test("E2E hook can select an existing canvas terminal session", async ({ page })
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "new-terminal" });
-  const sessionCard = page.locator('[data-testid^="agent-canvas-session-terminal-"]').first();
-  await expect(sessionCard).toBeVisible();
-  const tabId = await sessionCard.getAttribute("data-testid");
+  const sessionTile = page.locator('[data-testid^="agent-canvas-session-terminal-"]').first();
+  await expect(sessionTile).toBeVisible();
+  const tabId = await sessionTile.getAttribute("data-testid");
   const terminalTabId = tabId?.replace("agent-canvas-session-", "");
   if (!terminalTabId) throw new Error("terminal tab id missing");
 
@@ -2742,7 +2742,7 @@ test("E2E hook can select an existing canvas terminal session", async ({ page })
   }, terminalTabId);
 
   await expect(page.locator('[data-tab-id="agentCanvas"]')).toHaveClass(/active/);
-  await expect(sessionCard).toBeVisible();
+  await expect(sessionTile).toBeVisible();
 });
 
 test("E2E hook can open docs editor terminal", async ({ page }) => {
@@ -2956,7 +2956,7 @@ test("worktrees-changed event refreshes canvas worktrees for the active project"
     project_path: "/tmp/gwt-playwright",
   });
   await expect(
-    page.locator('[data-testid="agent-canvas-worktree-card-feature-added"]'),
+    page.locator('[data-testid="agent-canvas-worktree-tile-feature-added"]'),
   ).toBeVisible();
 });
 

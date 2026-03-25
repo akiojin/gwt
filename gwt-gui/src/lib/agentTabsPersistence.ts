@@ -1,5 +1,5 @@
 import type {
-  AgentCanvasCardLayout,
+  AgentCanvasTileLayout,
   AgentCanvasPersistedState,
   AgentCanvasViewport,
 } from "./agentCanvas";
@@ -182,9 +182,9 @@ function sanitizeViewport(raw: unknown): AgentCanvasViewport {
   };
 }
 
-function sanitizeCardLayouts(raw: unknown): Record<string, AgentCanvasCardLayout> {
+function sanitizeTileLayouts(raw: unknown): Record<string, AgentCanvasTileLayout> {
   if (!raw || typeof raw !== "object") return {};
-  const layouts: Record<string, AgentCanvasCardLayout> = {};
+  const layouts: Record<string, AgentCanvasTileLayout> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!value || typeof value !== "object") continue;
     const obj = value as Record<string, unknown>;
@@ -202,15 +202,15 @@ function sanitizeAgentCanvasState(raw: unknown): AgentCanvasPersistedState {
   if (!raw || typeof raw !== "object") {
     return {
       viewport: { x: 0, y: 0, zoom: 1 },
-      cardLayouts: {},
-      selectedCardId: null,
+      tileLayouts: {},
+      selectedTileId: null,
     };
   }
   const obj = raw as Record<string, unknown>;
   return {
     viewport: sanitizeViewport(obj.viewport),
-    cardLayouts: sanitizeCardLayouts(obj.cardLayouts),
-    selectedCardId: normalizeString(obj.selectedCardId) || null,
+    tileLayouts: sanitizeTileLayouts(obj.tileLayouts ?? obj.cardLayouts),
+    selectedTileId: normalizeString(obj.selectedTileId ?? obj.selectedCardId) || null,
   };
 }
 

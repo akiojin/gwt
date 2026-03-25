@@ -8,7 +8,7 @@
     WorktreeInfo,
   } from "../types";
   import type {
-    AgentCanvasCardLayout,
+    AgentCanvasTileLayout,
     AgentCanvasViewport,
   } from "../agentCanvas";
   import type {
@@ -41,9 +41,9 @@
     currentBranch = "",
     flatShell = false,
     selectedCanvasSessionTabId = null,
-    selectedCanvasCardId = null,
+    selectedCanvasTileId = null,
     canvasViewport = undefined,
-    canvasCardLayouts = undefined,
+    canvasTileLayouts = undefined,
     canvasWorktrees = [],
     selectedCanvasWorktreeBranch = null,
     onCanvasWorktreeSelect = () => {},
@@ -51,8 +51,8 @@
     disableSplit = false,
     onCanvasSessionSelect = () => {},
     onCanvasViewportChange = () => {},
-    onCanvasCardLayoutsChange = () => {},
-    onCanvasSelectedCardChange = () => {},
+    onCanvasTileLayoutsChange = () => {},
+    onCanvasSelectedTileChange = () => {},
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -90,9 +90,9 @@
     currentBranch?: string;
     flatShell?: boolean;
     selectedCanvasSessionTabId?: string | null;
-    selectedCanvasCardId?: string | null;
+    selectedCanvasTileId?: string | null;
     canvasViewport?: AgentCanvasViewport | undefined;
-    canvasCardLayouts?: Record<string, AgentCanvasCardLayout> | undefined;
+    canvasTileLayouts?: Record<string, AgentCanvasTileLayout> | undefined;
     canvasWorktrees?: WorktreeInfo[];
     selectedCanvasWorktreeBranch?: string | null;
     onCanvasWorktreeSelect?: (branchName: string) => void;
@@ -100,10 +100,10 @@
     disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
     onCanvasViewportChange?: (viewport: AgentCanvasViewport) => void;
-    onCanvasCardLayoutsChange?: (
-      layouts: Record<string, AgentCanvasCardLayout>,
+    onCanvasTileLayoutsChange?: (
+      layouts: Record<string, AgentCanvasTileLayout>,
     ) => void;
-    onCanvasSelectedCardChange?: (cardId: string | null) => void;
+    onCanvasSelectedTileChange?: (tileId: string | null) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -452,13 +452,13 @@
                 selectedWorktreeBranch={selectedCanvasWorktreeBranch}
                 onWorktreeSelect={onCanvasWorktreeSelect}
                 selectedSessionTabId={selectedCanvasSessionTabId}
-                persistedSelectedCardId={selectedCanvasCardId}
+                persistedSelectedTileId={selectedCanvasTileId}
                 persistedViewport={canvasViewport}
-                persistedCardLayouts={canvasCardLayouts}
+                persistedTileLayouts={canvasTileLayouts}
                 onSessionSelect={onCanvasSessionSelect}
                 onViewportChange={onCanvasViewportChange}
-                onCardLayoutsChange={onCanvasCardLayoutsChange}
-                onSelectedCardChange={onCanvasSelectedCardChange}
+                onTileLayoutsChange={onCanvasTileLayoutsChange}
+                onSelectedTileChange={onCanvasSelectedTileChange}
                 onOpenSettings={onOpenSettings ?? (() => {})}
                 {voiceInputEnabled}
                 {voiceInputListening}

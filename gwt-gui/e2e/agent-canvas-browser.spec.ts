@@ -159,7 +159,7 @@ test("Branch Browser can focus an existing worktree into Agent Canvas", async ({
   await focusWorktreeButton.dispatchEvent("click");
 
   await expect(
-    page.locator('[data-testid="agent-canvas-worktree-card-feature-workflow-demo"]'),
+    page.locator('[data-testid="agent-canvas-worktree-tile-feature-workflow-demo"]'),
   ).toHaveCount(1);
   await captureUxSnapshot(page, testInfo, "branch-browser-to-canvas-flow");
 });
@@ -210,19 +210,19 @@ test("Agent Canvas keeps compact detail visible and exposes zoom controls", asyn
   await expectAgentCanvasVisible(page);
 
   const zoomLabel = page.locator('[data-testid="agent-canvas-zoom-label"]:visible');
-  const worktreeCard = page.locator('[data-testid^="agent-canvas-worktree-card-"]:visible', {
+  const worktreeTile = page.locator('[data-testid^="agent-canvas-worktree-tile-"]:visible', {
     hasText: branchFeature.name,
   });
   await expect(page.locator('[data-testid="agent-canvas-detail-overlay"]')).toHaveCount(0);
-  await expect(worktreeCard).toBeVisible();
+  await expect(worktreeTile).toBeVisible();
   await expect(page.getByTestId("agent-canvas-zoom-controls")).toBeVisible();
-  await expect(page.getByTestId("agent-canvas-assistant-card")).toBeVisible();
+  await expect(page.getByTestId("agent-canvas-assistant-tile")).toBeVisible();
 
   await expect(zoomLabel).toHaveText("100%");
   await captureUxSnapshot(page, testInfo, "agent-canvas-ux-board");
 });
 
-test("Agent Canvas renders terminal session content directly inside the card", async ({
+test("Agent Canvas renders terminal session content directly inside the tile", async ({
   page,
 }, testInfo) => {
   await page.goto("/");
@@ -257,12 +257,12 @@ test("Agent Canvas renders terminal session content directly inside the card", a
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "new-terminal" });
 
-  const sessionCard = page.locator('[data-testid^="agent-canvas-session-terminal-"]:visible').first();
+  const sessionTile = page.locator('[data-testid^="agent-canvas-session-terminal-"]:visible').first();
   const sessionSurface = page.locator(
     '[data-testid^="agent-canvas-session-surface-terminal-"]:visible',
   ).first();
-  await expect(sessionCard).toBeVisible();
+  await expect(sessionTile).toBeVisible();
   await expect(sessionSurface).toBeVisible();
   await expect(page.locator('[data-testid="agent-canvas-detail-overlay"]')).toHaveCount(0);
-  await captureUxSnapshot(page, testInfo, "agent-canvas-terminal-session-card");
+  await captureUxSnapshot(page, testInfo, "agent-canvas-terminal-session-tile");
 });
