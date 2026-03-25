@@ -12,7 +12,7 @@ gwt は複数プロジェクトを同時に開ける設計だが、以下の3箇
 
 **ChromaDB 分離の欠如:**
 
-- `gwt-project-index` スキルが `--db-path .gwt/index`（相対パス）を使用
+- `gwt-project-search` スキルが `--db-path .gwt/index`（相対パス）を使用
 - スキル側の記述のみの問題
 
 **GitHub Issue 分離の欠如:**
@@ -33,7 +33,7 @@ gwt は複数プロジェクトを同時に開ける設計だが、以下の3箇
 - FR-003: `list_terminals` Tauri コマンドにプロジェクトフィルタを適用
 - FR-004: `send_keys_to_pane`、`capture_scrollback_tail` でペーンのプロジェクト所属を検証
 - FR-005: MCP ハンドラでも同様のプロジェクトフィルタを適用
-- FR-006: `gwt-project-index` スキルで `$GWT_PROJECT_ROOT` を使った絶対パスを使用
+- FR-006: `gwt-project-search` スキルで `$GWT_PROJECT_ROOT` を使った絶対パスを使用
 - FR-007: `gwt-issue-spec-ops` スキルで CWD 前提を明文化
 - FR-008: 各スキルに `## Environment` セクションを追加
 

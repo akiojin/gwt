@@ -11,7 +11,7 @@
 
 | ファイル | 変更 |
 |---|---|
-| `plugins/gwt-integration/skills/gwt-project-index/SKILL.md` | `--db-path` を `$GWT_PROJECT_ROOT` 使用に変更 |
+| `plugins/gwt-integration/skills/gwt-project-search/SKILL.md` | `--db-path` を `$GWT_PROJECT_ROOT` 使用に変更 |
 | `plugins/gwt-integration/skills/gwt-issue-spec-ops/SKILL.md` | `## Requirements` に CWD/リポジトリ前提を追記 |
 | `plugins/gwt-integration/skills/gwt-spec-to-issue-migration/SKILL.md` | Preconditions に `$GWT_PROJECT_ROOT` 推奨追記 |
 | `plugins/gwt/skills/gwt-agent-dispatch/SKILL.md` | `## Environment` セクション追加 |

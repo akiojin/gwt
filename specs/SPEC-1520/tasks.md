@@ -1,4 +1,4 @@
-- [x] T001 [S] Project Index 関連 spec / issue を `gwt-project-index` の files/index 観点で再確認する
+- [x] T001 [S] Project Index 関連 spec / issue を `gwt-project-search` の files/index 観点で再確認する
 - [x] T002 [S] `#1427` から files collection の恒久要件を抽出し、この spec へ転記する
 - [x] T003 [S] `#1519` の persisted DB recovery 要件をこの spec へ転記する
 - [x] T004 [F] Files index / recovery の責務境界を本文に固定する

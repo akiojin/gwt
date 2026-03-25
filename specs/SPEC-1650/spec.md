@@ -27,7 +27,7 @@ Assistant Mode連携（変更とIssueの関連付け）は #1636 FR-10 でカバ
 - インデックスの永続化
 
 **FR-03: スキル責務分離**
-- ファイル検索スキル（gwt-project-index）とIssue検索スキル（gwt-issue-search）を分離
+- ファイル検索スキル（gwt-project-search）とIssue検索スキル（gwt-issue-search）を分離
 - 4つの呼び出し側スキルはIssue検索のみ使用しており、ファイル検索の不要なコンテキスト注入を排除
 - バックエンド（Rust/Python/GUI）は変更不要。スキル/コマンドMarkdownとRust登録コードのみ変更
 

@@ -1,4 +1,4 @@
 - [x] ベクトル検索エンジン
 - [x] ファイルインデックス化
 - [x] インデックス管理
-- [x] スキル責務分離: gwt-project-index（ファイル検索）+ gwt-issue-search（Issue検索）
+- [x] スキル責務分離: gwt-project-search（ファイル検索）+ gwt-issue-search（Issue検索）

@@ -1,11 +1,12 @@
 ---
-name: gwt-file-search
+name: gwt-project-search
 description: Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept.
 ---
 
 # Project Structure Index
 
 gwt maintains a vector search index of all project files using ChromaDB embeddings.
+The index is automatically updated when source files change (via file system watcher).
 
 ## File search command
 
@@ -45,7 +46,8 @@ JSON object with ranked results:
 
 ## Notes
 
-- File index is auto-generated when the project is opened in gwt
+- File index is automatically maintained by the file system watcher (changes trigger re-indexing)
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
+- For SPEC search, use `gwt-spec-search` instead
 - For Issue search, use `gwt-issue-search` instead

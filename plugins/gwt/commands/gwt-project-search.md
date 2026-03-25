@@ -1,22 +1,22 @@
 ---
-description: Semantic search over project source files using the gwt-file-search skill
+description: Semantic search over project source files using the gwt-project-search skill
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
-# GWT File Search Command
+# GWT Project Search Command
 
-Use this command to run semantic search against the project file index.
+Use this command to run semantic search against the project structure index.
 
 ## Usage
 
 ```text
-/gwt:gwt-file-search [query]
+/gwt:gwt-project-search [query]
 ```
 
 ## Steps
 
-1. Load `skills/gwt-file-search/SKILL.md` and follow the workflow.
+1. Load `skills/gwt-project-search/SKILL.md` and follow the workflow.
 2. If index status is unknown, check index health before searching.
 3. Run semantic search and return top results with short rationale:
    - path
@@ -28,9 +28,9 @@ Use this command to run semantic search against the project file index.
 ## Examples
 
 ```text
-/gwt:gwt-file-search where branch naming is built
+/gwt:gwt-project-search where branch naming is built
 ```
 
 ```text
-/gwt:gwt-file-search project mode pty orchestration
+/gwt:gwt-project-search project mode pty orchestration
 ```

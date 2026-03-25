@@ -1,7 +1,7 @@
 - `#1427` は files/issues collection 名の refactor spec
 - `#1395` は project-scoped ChromaDB 分離を含むが、Project Index 全体仕様ではない
-- `#1438` は `gwt-project-index` / `gwt-issue-spec-ops` を canonical spec 導線として明記している
-- `#1487` は `gwt-project-index` が available skills に露出し、SPEC/Issue 検索に使われるべきことを定義している
+- `#1438` は `gwt-project-search` / `gwt-issue-spec-ops` を canonical spec 導線として明記している
+- `#1487` は `gwt-project-search` が available skills に露出し、SPEC/Issue 検索に使われるべきことを定義している
 - `#1488` は `gwt-issue-spec-ops` が spec 作成時に repo 固有 skill として使われるべきことを定義している
 - `#1519` では persisted Chroma DB が `files` collection の `count()` で `SIGSEGV` する failure mode が確認され、copy した crash DB に対する recovery harness が必要になった
 - local agent asset の shared `info/exclude` 管理と Claude local-only delivery の責務は `#1438` に集約し、`project_root/.gwt/index` 自体はその ignore 対象に含めない

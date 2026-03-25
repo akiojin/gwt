@@ -879,6 +879,8 @@ pub fn build_app(
             crate::commands::project_index::get_index_status_cmd,
             crate::commands::project_index::index_github_issues_cmd,
             crate::commands::project_index::search_github_issues_cmd,
+            crate::commands::project_index::index_local_specs_cmd,
+            crate::commands::project_index::search_local_specs_semantic_cmd,
             crate::commands::assistant::assistant_get_state,
             crate::commands::assistant::assistant_send_message,
             crate::commands::assistant::assistant_start,

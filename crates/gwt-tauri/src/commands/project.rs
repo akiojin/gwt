@@ -376,21 +376,17 @@ pub fn open_project(
                     });
                 }
 
+                // Start file-system watcher for specs/ (replaces unconditional
+                // index-on-open — re-indexing now happens only on change).
                 {
-                    let project_root_for_index = project_root_str.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let span = tracing::info_span!(
-                            "project_open.index_warmup",
-                            project_path = %project_root_for_index
+                    let pr = project_root_str.clone();
+                    if let Err(e) = crate::index_watcher::start_index_watcher(pr) {
+                        tracing::warn!(
+                            category = "project_open",
+                            error = %e,
+                            "Failed to start index watcher"
                         );
-                        span.in_scope(|| {
-                            tracing::info!("starting background project index warmup");
-                        });
-                        let _ = crate::commands::project_index::index_project_cmd(
-                            project_root_for_index,
-                        )
-                        .await;
-                    });
+                    }
                 }
 
                 let elapsed = started.elapsed();

@@ -1,3 +1,3 @@
-実装完了済み。gwt-project-index スキルとして提供中。
+実装完了済み。gwt-project-search スキルとして提供中。
 
 ---

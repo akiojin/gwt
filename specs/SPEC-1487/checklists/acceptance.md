@@ -1,3 +1,3 @@
-- [ ] `gwt-project-index` が available skills に露出する
-- [ ] SPEC 検索要求で `gwt-project-index` が使われる
+- [ ] `gwt-project-search` が available skills に露出する
+- [ ] SPEC 検索要求で `gwt-project-search` が使われる
 - [ ] スキル説明と実装 CLI が一致する

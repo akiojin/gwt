@@ -4,7 +4,7 @@
 - [ ] T004 [U] [US1] `list_terminals` にプロジェクトフィルタ適用
 - [ ] T005 [U] [US2] `send_keys_to_pane`/`capture_scrollback_tail` にプロジェクト検証追加
 - [ ] T006 [U] [US1,US2] MCP ハンドラにプロジェクトフィルタ追加
-- [ ] T007 [U] [US3] `gwt-project-index` SKILL.md 更新
+- [ ] T007 [U] [US3] `gwt-project-search` SKILL.md 更新
 - [ ] T008 [U] [US4] `gwt-issue-spec-ops` SKILL.md 更新
 - [ ] T009 [U] [US4] `gwt-spec-to-issue-migration` SKILL.md 更新
 - [ ] T010 [U] [US1] `gwt-agent-dispatch` SKILL.md 更新

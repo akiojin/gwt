@@ -43,6 +43,10 @@ struct ChromaRunnerResponse {
     #[serde(default)]
     issue_results: Option<Vec<GitHubIssueSearchResult>>,
     #[serde(default)]
+    specs_indexed: Option<u64>,
+    #[serde(default)]
+    spec_results: Option<Vec<LocalSpecSearchResult>>,
+    #[serde(default)]
     indexed: Option<bool>,
     #[serde(default)]
     total_files: Option<u64>,
@@ -98,6 +102,24 @@ pub struct GitHubIssueSearchResult {
 #[serde(rename_all = "camelCase")]
 pub struct IndexIssuesResult {
     pub issues_indexed: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSpecSearchResult {
+    pub spec_id: String,
+    pub title: String,
+    pub status: String,
+    pub phase: String,
+    pub dir_name: String,
+    pub distance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexSpecsResult {
+    pub specs_indexed: u64,
     pub duration_ms: u64,
 }
 
@@ -898,6 +920,47 @@ pub async fn search_github_issues_cmd(
     })
     .await
     .map_err(|e| format!("Search GitHub issues task failed: {e}"))?
+}
+
+#[instrument(skip_all, fields(command = "index_local_specs_cmd", project_root))]
+#[tauri::command]
+pub async fn index_local_specs_cmd(project_root: String) -> Result<IndexSpecsResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let resp = run_project_index_action_with_crash_recovery(
+            "index-specs",
+            &project_root,
+            None,
+            None,
+            None,
+        )?;
+        Ok(IndexSpecsResult {
+            specs_indexed: resp.specs_indexed.unwrap_or(0),
+            duration_ms: resp.duration_ms.unwrap_or(0),
+        })
+    })
+    .await
+    .map_err(|e| format!("Index local specs task failed: {e}"))?
+}
+
+#[instrument(skip_all, fields(command = "search_local_specs_semantic_cmd", project_root))]
+#[tauri::command]
+pub async fn search_local_specs_semantic_cmd(
+    project_root: String,
+    query: String,
+    n_results: Option<u32>,
+) -> Result<Vec<LocalSpecSearchResult>, String> {
+    tokio::task::spawn_blocking(move || {
+        let resp = run_project_index_action_with_crash_recovery(
+            "search-specs",
+            &project_root,
+            None,
+            Some(&query),
+            n_results,
+        )?;
+        Ok(resp.spec_results.unwrap_or_default())
+    })
+    .await
+    .map_err(|e| format!("Search local specs task failed: {e}"))?
 }
 
 #[cfg(test)]

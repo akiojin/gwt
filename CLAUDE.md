@@ -262,7 +262,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
+| gwt-project-search | `/gwt:gwt-project-search` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
 | gwt-agent-dispatch | `/gwt:gwt-agent-dispatch` | PTY-based instruction dispatch from Assistant to Agent panes. Send commands, capture output, and manage Agent lifecycle. |
 | gwt-spec-to-issue-migration | — | Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script. |
 

@@ -2,7 +2,7 @@
 
 | ID | テスト | 対応FR |
 |----|--------|--------|
-| T-001 | managed skills から `gwt-project-index` が session available skills に含まれることを検証 | FR-001, FR-003 |
+| T-001 | managed skills から `gwt-project-search` が session available skills に含まれることを検証 | FR-001, FR-003 |
 | T-002 | skill description に SPEC / Issue 検索用途が含まれることを検証 | FR-002 |
 | T-003 | index 不在時の復旧案内またはコマンド引数が実装と一致することを検証 | FR-004 |
 
