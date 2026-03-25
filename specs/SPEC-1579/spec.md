@@ -491,7 +491,7 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 - **操作**: `send_keys_to_pane`、`send_keys_broadcast`、`capture_scrollback_tail`、`list_terminals`、`close_terminal`
 - **停止条件**: なし（命令ディスパッチは即時完了）
 
-### gwt-file-search
+### gwt-project-search
 
 - **概要**: ChromaDB ベクトル埋め込みを使用したプロジェクトソースファイルのセマンティック検索。機能・バグ・概念に関連するファイルの発見に使用する。
 - **トリガー条件**: タスク開始時のファイル調査、バグ調査時の関連ファイル特定、機能追加時の既存実装検索、アーキテクチャ理解。
@@ -504,3 +504,69 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 - **依存スキル**: なし（独立実行）
 - **操作**: `chroma_index_runner.py --action search`
 - **停止条件**: なし（検索は即時完了）
+
+### gwt-spec-search
+
+- **概要**: ChromaDB ベクトル埋め込みを使用したローカル SPEC ファイル（`specs/SPEC-{N}/`）のセマンティック検索。既存スペックの発見・重複チェック・スコープ所有者の特定に使用する。
+- **トリガー条件**: SPEC 新規作成前の重複チェック、関連仕様の検索、スコープ所有者の特定。`gwt-spec-register`、`gwt-spec-ops`、`gwt-issue-register`、`gwt-issue-resolve` の必須プリフライト。
+- **ワークフロー**:
+  1. `chroma_index_runner.py --action search-specs` でセマンティッククエリを実行
+  2. `specs/` 配下の SPEC メタデータとコンテンツを検索対象とする
+  3. 結果は spec_id, title, status, phase, relevance を含む
+- **入力/出力**: 入力: 検索クエリ。出力: 関連 SPEC 一覧（ID・タイトル・ステータス・関連度）
+- **依存スキル**: なし（独立実行）
+- **操作**: `chroma_index_runner.py --action search-specs`
+- **停止条件**: なし（検索は即時完了）
+
+## Custom Slash Commands
+
+カスタムスラッシュコマンド（`.claude/commands/gwt-*.md`）は、各スキルへのエントリポイントとして機能する。ユーザーが `/gwt:<command-name>` で呼び出すと、対応するコマンドファイルが読み込まれ、SKILL.md のワークフローに従って処理が実行される。
+
+### コマンドファイルの構造
+
+各コマンドファイルは YAML frontmatter + Markdown body で構成される:
+
+```yaml
+---
+description: コマンドの説明（Claude のスキル一覧に表示される）
+author: akiojin
+allowed-tools: Read, Glob, Grep, Bash
+---
+```
+
+- **description**: Claude がコマンドの用途を判断するために使用。スキルの description と補完的な内容。
+- **allowed-tools**: コマンド実行時に許可されるツール。
+- **body**: `## Steps` セクションで SKILL.md の読み込みとワークフローの手順を記述。
+
+### コマンドとスキルの対応
+
+| コマンド | 対応スキル | 概要 |
+|---------|-----------|------|
+| `/gwt:gwt-issue-register` | gwt-issue-register | 新規作業の登録 |
+| `/gwt:gwt-issue-resolve` | gwt-issue-resolve | 既存 Issue の解決 |
+| `/gwt:gwt-issue-search` | gwt-issue-search | Issue のセマンティック検索 |
+| `/gwt:gwt-spec-register` | gwt-spec-register | 新規 SPEC の作成 |
+| `/gwt:gwt-spec-clarify` | gwt-spec-clarify | SPEC の曖昧箇所の明確化 |
+| `/gwt:gwt-spec-plan` | gwt-spec-plan | 計画アーティファクト生成 |
+| `/gwt:gwt-spec-tasks` | gwt-spec-tasks | tasks.md 生成 |
+| `/gwt:gwt-spec-analyze` | gwt-spec-analyze | SPEC 完全性チェック |
+| `/gwt:gwt-spec-implement` | gwt-spec-implement | SPEC の実装 |
+| `/gwt:gwt-spec-search` | gwt-spec-search | ローカル SPEC 検索 |
+| `/gwt:gwt-pr` | gwt-pr | PR 作成・更新 |
+| `/gwt:gwt-pr-check` | gwt-pr-check | PR ステータス確認 |
+| `/gwt:gwt-pr-fix` | gwt-pr-fix | CI/レビュー修正 |
+| `/gwt:gwt-project-search` | gwt-project-search | プロジェクトファイル検索 |
+| `/gwt:gwt-agent-dispatch` | gwt-agent-dispatch | Agent ペインへの命令ディスパッチ |
+
+### コマンドの配置
+
+- **正本**: `.claude/commands/gwt-*.md`（git 追跡対象）
+- **埋め込み**: `skill_registration.rs` の `CLAUDE_COMMAND_ASSETS` で `include_str!()` によりバイナリに埋め込み
+- **展開先**: gwt がプロジェクトに登録する際に `.claude/commands/` に書き出し
+
+### コマンドの設計原則
+
+1. **スキルへの委譲**: コマンドは SKILL.md のワークフローを呼び出すエントリポイントであり、ビジネスロジックは SKILL.md に記述する。
+2. **Step 1 は常に SKILL.md 読み込み**: `Load .claude/skills/<name>/SKILL.md and follow the workflow.`
+3. **ツール制限**: `allowed-tools` で実行可能なツールを制限（通常は `Read, Glob, Grep, Bash`）。
+4. **gwt-spec-ops にはコマンドなし**: オーケストレーションスキルは他のスキルから呼び出されるため、直接のスラッシュコマンドを持たない。

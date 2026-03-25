@@ -1,5 +1,5 @@
 ---
-description: Create a new Issue-first SPEC container when no existing canonical SPEC fits, seed `spec.md`, then continue into SPEC orchestration unless register-only was requested.
+description: Create a new local SPEC directory when no existing canonical SPEC fits, seed spec.md, then continue into SPEC orchestration unless register-only was requested.
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
