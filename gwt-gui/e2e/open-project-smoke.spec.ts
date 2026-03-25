@@ -35,7 +35,7 @@ async function materializeWorktree(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "Create Worktree" }).click();
   await expectAgentCanvasVisible(page);
   await expect(
-    page.locator('[data-testid="agent-canvas-worktree-card-feature-workflow-demo"]'),
+    page.locator('[data-testid="agent-canvas-worktree-tile-feature-workflow-demo"]'),
   ).toBeVisible();
 }
 
@@ -93,10 +93,10 @@ test("materializes a worktree from Branch Browser into Agent Canvas", async ({
   await openRecentProject(page);
 
   await materializeWorktree(page);
-  await captureUxSnapshot(page, testInfo, "open-project-smoke-worktree-card");
+  await captureUxSnapshot(page, testInfo, "open-project-smoke-worktree-tile");
 });
 
-test("launches an agent into a live session card after worktree creation", async ({
+test("launches an agent into a live session tile after worktree creation", async ({
   page,
 }, testInfo) => {
   await page.goto("/");
@@ -124,7 +124,7 @@ test("launches an agent into a live session card after worktree creation", async
   await captureUxSnapshot(page, testInfo, "open-project-smoke-agent-session");
 });
 
-test("opens a terminal session card and keeps the surface readable", async ({
+test("opens a terminal session tile and keeps the surface readable", async ({
   page,
 }, testInfo) => {
   await page.goto("/");
@@ -134,18 +134,18 @@ test("opens a terminal session card and keeps the surface readable", async ({
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "new-terminal" });
 
-  const terminalCard = page.locator('[data-testid^="agent-canvas-session-terminal-"]').first();
+  const terminalTile = page.locator('[data-testid^="agent-canvas-session-terminal-"]').first();
   const terminalSurface = page.locator(
     '[data-testid^="agent-canvas-session-surface-terminal-"]',
   ).first();
-  await expect(terminalCard).toBeVisible();
+  await expect(terminalTile).toBeVisible();
   await expect(terminalSurface).toBeVisible();
 
   const box = await terminalSurface.boundingBox();
   if (!box) throw new Error("terminal surface bounding box missing");
   expect(box.width).toBeGreaterThan(500);
   expect(box.height).toBeGreaterThan(260);
-  await captureUxSnapshot(page, testInfo, "open-project-smoke-terminal-card");
+  await captureUxSnapshot(page, testInfo, "open-project-smoke-terminal-tile");
 });
 
 test("opens report dialog from the current shell and keeps it readable", async ({

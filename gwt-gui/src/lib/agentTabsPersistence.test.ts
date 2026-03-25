@@ -288,10 +288,10 @@ describe("agentTabsPersistence", () => {
         activeTabId: "agentCanvas",
         agentCanvas: {
           viewport: { x: 10, y: 20, zoom: 1.1 },
-          cardLayouts: {
+          tileLayouts: {
             assistant: { x: 40, y: 40, width: 280, height: 164 },
           },
-          selectedCardId: "assistant",
+          selectedTileId: "assistant",
         },
         branchBrowser: {
           filter: "Local",
@@ -322,10 +322,10 @@ describe("agentTabsPersistence", () => {
       activeTabId: "agentCanvas",
       agentCanvas: {
         viewport: { x: 10, y: 20, zoom: 1.1 },
-        cardLayouts: {
+        tileLayouts: {
           assistant: { x: 40, y: 40, width: 280, height: 164 },
         },
-        selectedCardId: "assistant",
+        selectedTileId: "assistant",
       },
       branchBrowser: {
         filter: "Local",

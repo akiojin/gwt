@@ -34,14 +34,14 @@ describe("AgentCanvasPanel", () => {
     });
 
     expect(rendered.queryByTestId("agent-canvas-detail-overlay")).toBeNull();
-    await fireEvent.click(rendered.getByTestId("agent-canvas-assistant-card"));
+    await fireEvent.click(rendered.getByTestId("agent-canvas-assistant-tile"));
     expect(rendered.getByTestId("agent-canvas-detail-overlay")).toBeTruthy();
     expect(rendered.getByTestId("agent-canvas-detail-dialog").textContent).toContain(
       "Assistant",
     );
   });
 
-  it("opens worktree details from the worktree card", async () => {
+  it("opens worktree details from the worktree tile", async () => {
     const tabs: Tab[] = [
       {
         id: "agent-1",
@@ -69,11 +69,11 @@ describe("AgentCanvasPanel", () => {
     });
 
     expect(rendered.queryByTestId("agent-canvas-worktree-dialog")).toBeNull();
-    const worktreeCard = rendered.container.querySelector(
-      '[data-testid^="agent-canvas-worktree-card-"]',
+    const worktreeTile = rendered.container.querySelector(
+      '[data-testid^="agent-canvas-worktree-tile-"]',
     ) as HTMLElement;
-    expect(worktreeCard).toBeTruthy();
-    await fireEvent.click(worktreeCard);
+    expect(worktreeTile).toBeTruthy();
+    await fireEvent.click(worktreeTile);
 
     const dialog = rendered.getByTestId("agent-canvas-worktree-dialog");
     expect(dialog.textContent).toContain("/tmp/project");
@@ -82,7 +82,7 @@ describe("AgentCanvasPanel", () => {
     expect(rendered.getByTestId("agent-canvas-edge-session-agent-1")).toBeTruthy();
   });
 
-  it("updates zoom controls and drags cards on the board", async () => {
+  it("updates zoom controls and drags tiles on the board", async () => {
     const rendered = render(AgentCanvasPanel, {
       props: {
         projectPath: "/tmp/project",
@@ -100,11 +100,11 @@ describe("AgentCanvasPanel", () => {
     expect(zoomLabel.textContent).toBe("100%");
 
     const board = rendered.getByTestId("agent-canvas-board");
-    const worktreeCard = rendered.container.querySelector(
-      '[data-testid^="agent-canvas-worktree-card-"]',
+    const worktreeTile = rendered.container.querySelector(
+      '[data-testid^="agent-canvas-worktree-tile-"]',
     ) as HTMLElement;
-    const dragHandle = worktreeCard.querySelector(".card-drag-handle") as HTMLElement;
-    expect(worktreeCard.style.transform).toContain("translate(40px, 394px)");
+    const dragHandle = worktreeTile.querySelector(".tile-drag-handle") as HTMLElement;
+    expect(worktreeTile.style.transform).toContain("translate(40px, 394px)");
 
     await fireEvent.pointerDown(dragHandle, {
       button: 0,
@@ -123,12 +123,12 @@ describe("AgentCanvasPanel", () => {
       clientY: 170,
     });
 
-    expect(worktreeCard.style.transform).toContain("translate(120px, 464px)");
+    expect(worktreeTile.style.transform).toContain("translate(120px, 464px)");
   });
 
-  it("emits persisted viewport and selected card changes", async () => {
+  it("emits persisted viewport and selected tile changes", async () => {
     const onViewportChange = vi.fn();
-    const onSelectedCardChange = vi.fn();
+    const onSelectedTileChange = vi.fn();
     const rendered = render(AgentCanvasPanel, {
       props: {
         projectPath: "/tmp/project",
@@ -136,24 +136,24 @@ describe("AgentCanvasPanel", () => {
         tabs: [],
         worktrees: [worktree],
         persistedViewport: { x: 12, y: 18, zoom: 1.2 },
-        persistedSelectedCardId: `worktree:${worktree.path}`,
+        persistedSelectedTileId: `worktree:${worktree.path}`,
         onViewportChange,
-        onSelectedCardChange,
+        onSelectedTileChange,
       },
     });
 
     const zoomLabel = rendered.getByTestId("agent-canvas-zoom-label");
     expect(zoomLabel.textContent).toBe("120%");
-    const worktreeCard = rendered.container.querySelector(
-      '[data-testid^="agent-canvas-worktree-card-"]',
+    const worktreeTile = rendered.container.querySelector(
+      '[data-testid^="agent-canvas-worktree-tile-"]',
     ) as HTMLElement;
-    expect(worktreeCard.className).toContain("selected");
+    expect(worktreeTile.className).toContain("selected");
     await fireEvent.click(rendered.getByLabelText("Zoom out"));
     expect(onViewportChange).toHaveBeenCalled();
-    expect(onSelectedCardChange).toHaveBeenCalledWith(`worktree:${worktree.path}`);
+    expect(onSelectedTileChange).toHaveBeenCalledWith(`worktree:${worktree.path}`);
   });
 
-  it("keeps worktree-session edges visible after zoom and card drag", async () => {
+  it("keeps worktree-session edges visible after zoom and tile drag", async () => {
     const rendered = render(AgentCanvasPanel, {
       props: {
         projectPath: "/tmp/project",
@@ -177,10 +177,10 @@ describe("AgentCanvasPanel", () => {
 
     await fireEvent.click(rendered.getByLabelText("Zoom in"));
     const board = rendered.getByTestId("agent-canvas-board");
-    const worktreeCard = rendered.container.querySelector(
-      '[data-testid^="agent-canvas-worktree-card-"]',
+    const worktreeTile = rendered.container.querySelector(
+      '[data-testid^="agent-canvas-worktree-tile-"]',
     ) as HTMLElement;
-    const dragHandle = worktreeCard.querySelector(".card-drag-handle") as HTMLElement;
+    const dragHandle = worktreeTile.querySelector(".tile-drag-handle") as HTMLElement;
 
     await fireEvent.pointerDown(dragHandle, {
       button: 0,
@@ -202,7 +202,7 @@ describe("AgentCanvasPanel", () => {
     expect(rendered.getByTestId("agent-canvas-edge-session-agent-1")).toBeTruthy();
   });
 
-  it("renders terminal content directly inside session cards instead of using an overlay", async () => {
+  it("renders terminal content directly inside session tiles instead of using an overlay", async () => {
     const onSessionSelect = vi.fn();
     const rendered = render(AgentCanvasPanel, {
       props: {
@@ -223,13 +223,13 @@ describe("AgentCanvasPanel", () => {
       },
     });
 
-    const sessionCard = rendered.getByTestId("agent-canvas-session-terminal-1");
+    const sessionTile = rendered.getByTestId("agent-canvas-session-terminal-1");
     expect(
       rendered.getByTestId("agent-canvas-session-surface-terminal-1"),
     ).toBeTruthy();
     expect(rendered.queryByTestId("agent-canvas-detail-overlay")).toBeNull();
 
-    await fireEvent.click(sessionCard);
+    await fireEvent.click(sessionTile);
 
     expect(onSessionSelect).toHaveBeenCalledWith("terminal-1");
     expect(

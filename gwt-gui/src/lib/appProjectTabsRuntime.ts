@@ -13,7 +13,7 @@ import type {
   StartupFrontendMetric,
   StartupProfilePhase,
 } from "./startupProfiling";
-import type { AgentCanvasCardLayout, AgentCanvasViewport } from "./agentCanvas";
+import type { AgentCanvasTileLayout, AgentCanvasViewport } from "./agentCanvas";
 import type { Tab, TerminalInfo } from "./types";
 
 export function getAgentTabRestoreDelayMs(
@@ -94,8 +94,8 @@ export function buildStoredProjectTabsSnapshot(args: {
   activeTabId: string;
   selectedCanvasSessionTabId: string | null;
   canvasViewport: AgentCanvasViewport;
-  canvasCardLayouts: Record<string, AgentCanvasCardLayout>;
-  selectedCanvasCardId: string | null;
+  canvasTileLayouts: Record<string, AgentCanvasTileLayout>;
+  selectedCanvasTileId: string | null;
   branchBrowserState: StoredBranchBrowserState;
 }): StoredProjectTabs {
   const orderedShellTabs = args.tabs.filter((tab) => isPersistedShellTab(tab));
@@ -165,8 +165,8 @@ export function buildStoredProjectTabsSnapshot(args: {
     activeCanvasSessionTabId: args.selectedCanvasSessionTabId,
     agentCanvas: {
       viewport: args.canvasViewport,
-      cardLayouts: args.canvasCardLayouts,
-      selectedCardId: args.selectedCanvasCardId,
+      tileLayouts: args.canvasTileLayouts,
+      selectedTileId: args.selectedCanvasTileId,
     },
     branchBrowser: args.branchBrowserState,
   };
@@ -252,8 +252,8 @@ export async function restoreProjectTabsRuntime(args: {
   onHydrated: (projectPath: string) => void;
   setTabs: (tabs: Tab[]) => void;
   setCanvasViewport: (viewport: ReturnType<typeof createDefaultAgentCanvasViewport>) => void;
-  setCanvasCardLayouts: (layouts: Record<string, unknown>) => void;
-  setSelectedCanvasCardId: (cardId: string | null) => void;
+  setCanvasTileLayouts: (layouts: Record<string, unknown>) => void;
+  setSelectedCanvasTileId: (tileId: string | null) => void;
   setBranchBrowserState: (state: StoredBranchBrowserState) => void;
   setSelectedCanvasSessionTabId: (tabId: string | null) => void;
   setSelectedCanvasWorktreeBranch: (branchName: string | null) => void;
@@ -270,8 +270,8 @@ export async function restoreProjectTabsRuntime(args: {
     ) {
       args.onHydrated(args.targetProjectPath);
       args.setCanvasViewport(createDefaultAgentCanvasViewport());
-      args.setCanvasCardLayouts({});
-      args.setSelectedCanvasCardId(null);
+      args.setCanvasTileLayouts({});
+      args.setSelectedCanvasTileId(null);
       args.setBranchBrowserState(args.defaultBranchBrowserState);
     }
     success = true;
@@ -365,8 +365,8 @@ export async function restoreProjectTabsRuntime(args: {
   args.setCanvasViewport(
     restored.agentCanvas?.viewport ?? createDefaultAgentCanvasViewport(),
   );
-  args.setCanvasCardLayouts(restored.agentCanvas?.cardLayouts ?? {});
-  args.setSelectedCanvasCardId(restored.agentCanvas?.selectedCardId ?? null);
+  args.setCanvasTileLayouts(restored.agentCanvas?.tileLayouts ?? {});
+  args.setSelectedCanvasTileId(restored.agentCanvas?.selectedTileId ?? null);
   args.setBranchBrowserState(
     restored.branchBrowser ?? args.defaultBranchBrowserState,
   );
