@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    type AgentCanvasCardLayout,
+    type AgentCanvasTileLayout,
     buildAgentCanvasGraph,
     createDefaultAgentCanvasViewport,
     type AgentCanvasViewport,
@@ -9,30 +9,30 @@
     buildBoardViewportRuntime,
     buildDefaultLayoutsRuntime,
     buildEdgeLinesRuntime,
-    buildLiveSessionCardIdsRuntime,
+    buildLiveSessionTileIdsRuntime,
     buildSurfaceBoundsRuntime,
     isLayoutVisibleRuntime,
-    preferredSelectedCardIdRuntime,
+    preferredSelectedTileIdRuntime,
   } from "../agentCanvasRuntime";
   import type { Tab, WorktreeInfo } from "../types";
   import AssistantPanel from "./AssistantPanel.svelte";
   import TerminalView from "../terminal/TerminalView.svelte";
 
-  type CanvasCardKind = "assistant" | "worktree" | "agent" | "terminal";
+  type CanvasTileKind = "assistant" | "worktree" | "agent" | "terminal";
 
-  type RenderableCanvasCard = {
+  type RenderableCanvasTile = {
     id: string;
-    kind: CanvasCardKind;
+    kind: CanvasTileKind;
     title: string;
     subtitle: string;
     detail: string;
     worktree?: WorktreeInfo;
     tab?: Tab;
-    worktreeCardId?: string | null;
+    worktreeTileId?: string | null;
   };
 
   type PointerDragState = {
-    cardId: string;
+    tileId: string;
     pointerId: number;
     startX: number;
     startY: number;
@@ -48,8 +48,8 @@
     originY: number;
   };
 
-  const CARD_WIDTH = 280;
-  const CARD_HEIGHT = 164;
+  const TILE_WIDTH = 280;
+  const TILE_HEIGHT = 164;
   const BOARD_PADDING = 40;
   const MIN_ZOOM = 0.7;
   const MAX_ZOOM = 1.6;
@@ -65,11 +65,11 @@
     selectedSessionTabId = null,
     onSessionSelect = () => {},
     persistedViewport = undefined,
-    persistedCardLayouts = undefined,
-    persistedSelectedCardId = null,
+    persistedTileLayouts = undefined,
+    persistedSelectedTileId = null,
     onViewportChange = () => {},
-    onCardLayoutsChange = () => {},
-    onSelectedCardChange = () => {},
+    onTileLayoutsChange = () => {},
+    onSelectedTileChange = () => {},
     onOpenSettings,
     voiceInputEnabled = false,
     voiceInputListening = false,
@@ -88,11 +88,11 @@
     selectedSessionTabId?: string | null;
     onSessionSelect?: (tabId: string) => void;
     persistedViewport?: AgentCanvasViewport | undefined;
-    persistedCardLayouts?: Record<string, AgentCanvasCardLayout> | undefined;
-    persistedSelectedCardId?: string | null;
+    persistedTileLayouts?: Record<string, AgentCanvasTileLayout> | undefined;
+    persistedSelectedTileId?: string | null;
     onViewportChange?: (viewport: AgentCanvasViewport) => void;
-    onCardLayoutsChange?: (layouts: Record<string, AgentCanvasCardLayout>) => void;
-    onSelectedCardChange?: (cardId: string | null) => void;
+    onTileLayoutsChange?: (layouts: Record<string, AgentCanvasTileLayout>) => void;
+    onSelectedTileChange?: (tileId: string | null) => void;
     onOpenSettings?: () => void;
     voiceInputEnabled?: boolean;
     voiceInputListening?: boolean;
@@ -107,10 +107,10 @@
   let canvasWorktrees = $derived(graph.worktrees);
   let popupWorktreeBranch = $state<string | null>(null);
   let worktreeDetailsOpen = $state(false);
-  let detailOverlayCardId = $state<string | null>(null);
+  let detailOverlayTileId = $state<string | null>(null);
   let viewport = $state<AgentCanvasViewport>(createDefaultAgentCanvasViewport());
-  let cardLayouts = $state<Record<string, AgentCanvasCardLayout>>({});
-  let selectedCardId = $state<string>("assistant");
+  let tileLayouts = $state<Record<string, AgentCanvasTileLayout>>({});
+  let selectedTileId = $state<string>("assistant");
   let dragState = $state<PointerDragState | null>(null);
   let panState = $state<PointerPanState | null>(null);
   let boardEl = $state<HTMLDivElement | null>(null);
@@ -120,81 +120,81 @@
   let lastLayoutsEmitKey = $state("");
   let lastSelectedEmitKey = $state("");
 
-  function worktreeCardTestId(worktree: WorktreeInfo): string {
+  function worktreeTileTestId(worktree: WorktreeInfo): string {
     const raw = worktree.branch ?? "project-root";
-    return `agent-canvas-worktree-card-${raw.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+    return `agent-canvas-worktree-tile-${raw.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
   }
 
-  function edgeTestId(cardId: string): string {
-    return `agent-canvas-edge-${cardId.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+  function edgeTestId(tileId: string): string {
+    return `agent-canvas-edge-${tileId.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
   }
 
   let sessionsByWorktreeId = $derived.by(() => {
-    const mapped = new Map<string, (typeof graph.sessionCards)>();
-    for (const card of graph.sessionCards) {
-      if (!card.worktreeCardId) continue;
-      const existing = mapped.get(card.worktreeCardId) ?? [];
-      mapped.set(card.worktreeCardId, [...existing, card]);
+    const mapped = new Map<string, (typeof graph.sessionTiles)>();
+    for (const tile of graph.sessionTiles) {
+      if (!tile.worktreeTileId) continue;
+      const existing = mapped.get(tile.worktreeTileId) ?? [];
+      mapped.set(tile.worktreeTileId, [...existing, tile]);
     }
     return mapped;
   });
 
-  let renderableCards = $derived.by<RenderableCanvasCard[]>(() => {
-    const cards: RenderableCanvasCard[] = [
+  let renderableTiles = $derived.by<RenderableCanvasTile[]>(() => {
+    const tiles: RenderableCanvasTile[] = [
       {
         id: "assistant",
         kind: "assistant",
         title: "Assistant",
         subtitle: "Workspace assistant",
-        detail: "Click cards to open focused detail without splitting the workspace.",
+        detail: "Click tiles to open focused detail without splitting the workspace.",
       },
     ];
 
-    for (const worktreeCard of graph.worktreeCards) {
-      const sessionCount = sessionsByWorktreeId.get(worktreeCard.id)?.length ?? 0;
-      cards.push({
-        id: worktreeCard.id,
+    for (const worktreeTile of graph.worktreeTiles) {
+      const sessionCount = sessionsByWorktreeId.get(worktreeTile.id)?.length ?? 0;
+      tiles.push({
+        id: worktreeTile.id,
         kind: "worktree",
-        title: worktreeCard.worktree.branch || "Project Root",
+        title: worktreeTile.worktree.branch || "Project Root",
         subtitle: sessionCount === 1 ? "1 linked session" : `${sessionCount} linked sessions`,
-        detail: worktreeCard.worktree.path,
-        worktree: worktreeCard.worktree,
+        detail: worktreeTile.worktree.path,
+        worktree: worktreeTile.worktree,
       });
     }
 
-    for (const sessionCard of graph.sessionCards) {
-      cards.push({
-        id: sessionCard.id,
-        kind: sessionCard.type,
-        title: sessionCard.tab.label,
-        subtitle: sessionCard.type === "agent" ? "Agent session" : "Terminal session",
+    for (const sessionTile of graph.sessionTiles) {
+      tiles.push({
+        id: sessionTile.id,
+        kind: sessionTile.type,
+        title: sessionTile.tab.label,
+        subtitle: sessionTile.type === "agent" ? "Agent session" : "Terminal session",
         detail:
-          sessionCard.tab.branchName ||
-          sessionCard.tab.worktreePath ||
-          sessionCard.tab.cwd ||
+          sessionTile.tab.branchName ||
+          sessionTile.tab.worktreePath ||
+          sessionTile.tab.cwd ||
           "No branch context",
-        tab: sessionCard.tab,
-        worktreeCardId: sessionCard.worktreeCardId,
+        tab: sessionTile.tab,
+        worktreeTileId: sessionTile.worktreeTileId,
       });
     }
 
-    return cards;
+    return tiles;
   });
 
   function clampZoom(value: number): number {
     return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value));
   }
 
-  function preferredSelectedCardId(): string {
-    return preferredSelectedCardIdRuntime({
+  function preferredSelectedTileId(): string {
+    return preferredSelectedTileIdRuntime({
       selectedSessionTabId,
       selectedWorktreeBranch,
-      worktreeCards: graph.worktreeCards,
+      worktreeTiles: graph.worktreeTiles,
     });
   }
 
-  function buildDefaultLayouts(cards: RenderableCanvasCard[]): Record<string, AgentCanvasCardLayout> {
-    return buildDefaultLayoutsRuntime(cards);
+  function buildDefaultLayouts(tiles: RenderableCanvasTile[]): Record<string, AgentCanvasTileLayout> {
+    return buildDefaultLayoutsRuntime(tiles);
   }
 
   function updateBoardViewport() {
@@ -209,7 +209,7 @@
     });
   }
 
-  function isLayoutVisible(layout: AgentCanvasCardLayout | undefined): boolean {
+  function isLayoutVisible(layout: AgentCanvasTileLayout | undefined): boolean {
     return isLayoutVisibleRuntime(layout, boardViewport);
   }
 
@@ -217,43 +217,43 @@
     const seedKey = JSON.stringify([
       projectPath,
       persistedViewport ?? null,
-      persistedCardLayouts ?? null,
-      persistedSelectedCardId ?? null,
+      persistedTileLayouts ?? null,
+      persistedSelectedTileId ?? null,
     ]);
     if (seedKey !== lastSeedKey) {
       lastSeedKey = seedKey;
       viewport = persistedViewport ?? createDefaultAgentCanvasViewport();
-      cardLayouts = persistedCardLayouts ? { ...persistedCardLayouts } : {};
-      if (persistedSelectedCardId) {
-        selectedCardId = persistedSelectedCardId;
+      tileLayouts = persistedTileLayouts ? { ...persistedTileLayouts } : {};
+      if (persistedSelectedTileId) {
+        selectedTileId = persistedSelectedTileId;
       }
     }
 
-    const defaults = buildDefaultLayouts(renderableCards);
-    const nextLayouts: Record<string, AgentCanvasCardLayout> = {};
-    let needsLayoutSync = Object.keys(cardLayouts).length !== renderableCards.length;
-    for (const card of renderableCards) {
-      const existing = cardLayouts[card.id];
+    const defaults = buildDefaultLayouts(renderableTiles);
+    const nextLayouts: Record<string, AgentCanvasTileLayout> = {};
+    let needsLayoutSync = Object.keys(tileLayouts).length !== renderableTiles.length;
+    for (const tile of renderableTiles) {
+      const existing = tileLayouts[tile.id];
       if (!existing) needsLayoutSync = true;
-      nextLayouts[card.id] = existing ?? defaults[card.id];
+      nextLayouts[tile.id] = existing ?? defaults[tile.id];
     }
     if (needsLayoutSync) {
-      cardLayouts = nextLayouts;
+      tileLayouts = nextLayouts;
     }
 
-    const preferred = preferredSelectedCardId();
+    const preferred = preferredSelectedTileId();
     const fallbackSelected =
-      preferred in nextLayouts ? preferred : renderableCards[0]?.id ?? "assistant";
-    if (!(selectedCardId in nextLayouts)) {
-      if (selectedCardId !== fallbackSelected) {
-        selectedCardId = fallbackSelected;
+      preferred in nextLayouts ? preferred : renderableTiles[0]?.id ?? "assistant";
+    if (!(selectedTileId in nextLayouts)) {
+      if (selectedTileId !== fallbackSelected) {
+        selectedTileId = fallbackSelected;
       }
     } else if (
       selectedSessionTabId &&
       preferred in nextLayouts &&
-      selectedCardId !== preferred
+      selectedTileId !== preferred
     ) {
-      selectedCardId = preferred;
+      selectedTileId = preferred;
     }
   });
 
@@ -266,17 +266,17 @@
   });
 
   $effect(() => {
-    const key = JSON.stringify(cardLayouts);
+    const key = JSON.stringify(tileLayouts);
     if (key === lastLayoutsEmitKey) return;
     lastLayoutsEmitKey = key;
-    onCardLayoutsChange(cardLayouts);
+    onTileLayoutsChange(tileLayouts);
   });
 
   $effect(() => {
-    const key = selectedCardId || "";
+    const key = selectedTileId || "";
     if (key === lastSelectedEmitKey) return;
     lastSelectedEmitKey = key;
-    onSelectedCardChange(selectedCardId || null);
+    onSelectedTileChange(selectedTileId || null);
   });
 
   let popupWorktree = $derived(
@@ -285,26 +285,26 @@
       : null,
   );
 
-  let overlayCard = $derived.by(
+  let overlayTile = $derived.by(
     () =>
-      detailOverlayCardId
-        ? renderableCards.find((card) => card.id === detailOverlayCardId) ?? null
+      detailOverlayTileId
+        ? renderableTiles.find((tile) => tile.id === detailOverlayTileId) ?? null
         : null,
   );
 
   let edgeLines = $derived.by(() =>
     buildEdgeLinesRuntime({
       edges: graph.edges,
-      cardLayouts,
+      tileLayouts,
     }),
   );
 
-  let surfaceBounds = $derived.by(() => buildSurfaceBoundsRuntime(cardLayouts));
+  let surfaceBounds = $derived.by(() => buildSurfaceBoundsRuntime(tileLayouts));
 
-  let liveSessionCardIds = $derived.by(() =>
-    buildLiveSessionCardIdsRuntime({
-      renderableCards,
-      cardLayouts,
+  let liveSessionTileIds = $derived.by(() =>
+    buildLiveSessionTileIdsRuntime({
+      renderableTiles,
+      tileLayouts,
       boardViewport,
     }),
   );
@@ -330,49 +330,49 @@
     viewport = createDefaultAgentCanvasViewport();
   }
 
-  function selectCard(card: RenderableCanvasCard) {
-    selectedCardId = card.id;
-    if (card.kind === "worktree" && card.worktree?.branch) {
-      onWorktreeSelect(card.worktree.branch);
-      detailOverlayCardId = null;
-    } else if ((card.kind === "agent" || card.kind === "terminal") && card.tab) {
-      onSessionSelect(card.tab.id);
-      detailOverlayCardId = null;
-    } else if (card.kind === "assistant") {
-      detailOverlayCardId = card.id;
+  function selectTile(tile: RenderableCanvasTile) {
+    selectedTileId = tile.id;
+    if (tile.kind === "worktree" && tile.worktree?.branch) {
+      onWorktreeSelect(tile.worktree.branch);
+      detailOverlayTileId = null;
+    } else if ((tile.kind === "agent" || tile.kind === "terminal") && tile.tab) {
+      onSessionSelect(tile.tab.id);
+      detailOverlayTileId = null;
+    } else if (tile.kind === "assistant") {
+      detailOverlayTileId = tile.id;
     }
   }
 
-  function activateWorktreeCard(worktree: WorktreeInfo) {
+  function activateWorktreeTile(worktree: WorktreeInfo) {
     if (worktree.branch) {
       onWorktreeSelect(worktree.branch);
       popupWorktreeBranch = worktree.branch;
     }
-    const cardId = `worktree:${worktree.path}`;
-    selectedCardId = cardId;
-    detailOverlayCardId = null;
+    const tileId = `worktree:${worktree.path}`;
+    selectedTileId = tileId;
+    detailOverlayTileId = null;
     worktreeDetailsOpen = true;
   }
 
-  function handleCardKeydown(card: RenderableCanvasCard, event: KeyboardEvent) {
+  function handleTileKeydown(tile: RenderableCanvasTile, event: KeyboardEvent) {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
-    if (card.kind === "worktree" && card.worktree) {
-      activateWorktreeCard(card.worktree);
+    if (tile.kind === "worktree" && tile.worktree) {
+      activateWorktreeTile(tile.worktree);
       return;
     }
-    selectCard(card);
+    selectTile(tile);
   }
 
-  function beginCardDrag(cardId: string, event: PointerEvent) {
+  function beginTileDrag(tileId: string, event: PointerEvent) {
     if (event.button !== 0) return;
-    const layout = cardLayouts[cardId];
+    const layout = tileLayouts[tileId];
     if (!layout) return;
     event.preventDefault();
     event.stopPropagation();
-    selectedCardId = cardId;
+    selectedTileId = tileId;
     dragState = {
-      cardId,
+      tileId,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
@@ -385,7 +385,7 @@
   function beginPan(event: PointerEvent) {
     if (event.button !== 0) return;
     const target = event.target as HTMLElement;
-    if (target.closest('.canvas-card')) return;
+    if (target.closest('.canvas-tile')) return;
     panState = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -400,11 +400,11 @@
     if (dragState && event.pointerId === dragState.pointerId) {
       const dx = (event.clientX - dragState.startX) / viewport.zoom;
       const dy = (event.clientY - dragState.startY) / viewport.zoom;
-      const current = cardLayouts[dragState.cardId];
+      const current = tileLayouts[dragState.tileId];
       if (!current) return;
-      cardLayouts = {
-        ...cardLayouts,
-        [dragState.cardId]: {
+      tileLayouts = {
+        ...tileLayouts,
+        [dragState.tileId]: {
           ...current,
           x: Math.max(BOARD_PADDING, dragState.originX + dx),
           y: Math.max(BOARD_PADDING, dragState.originY + dy),
@@ -458,10 +458,10 @@
   <div class="canvas-toolbar">
     <div>
       <h2>Agent Canvas</h2>
-      <p>Drag cards on the board and open focused detail in a popup without splitting the workspace.</p>
+      <p>Drag tiles on the board and open focused detail in a popup without splitting the workspace.</p>
     </div>
     <div class="toolbar-group">
-      <div class="toolbar-chip">Cards: {renderableCards.length}</div>
+      <div class="toolbar-chip">Tiles: {renderableTiles.length}</div>
       <div class="zoom-controls" data-testid="agent-canvas-zoom-controls">
         <button type="button" class="zoom-btn" onclick={zoomOut} aria-label="Zoom out">-</button>
         <button type="button" class="zoom-btn ghost" onclick={resetViewport}>
@@ -502,72 +502,72 @@
               x2={edge.x2}
               y2={edge.y2}
               class="edge-line"
-              data-testid={edgeTestId(edge.targetCardId)}
+              data-testid={edgeTestId(edge.targetTileId)}
             ></line>
           {/each}
         </svg>
 
-        {#each renderableCards as card (card.id)}
+        {#each renderableTiles as tile (tile.id)}
           <div
-            class="canvas-card"
-            class:selected={selectedCardId === card.id}
-            class:assistant-card={card.kind === "assistant"}
-            class:worktree-card={card.kind === "worktree"}
-            class:session-card={card.kind === "agent" || card.kind === "terminal"}
+            class="canvas-tile"
+            class:selected={selectedTileId === tile.id}
+            class:assistant-tile={tile.kind === "assistant"}
+            class:worktree-tile={tile.kind === "worktree"}
+            class:session-tile={tile.kind === "agent" || tile.kind === "terminal"}
             role="button"
             tabindex="0"
             data-testid={
-              card.kind === "assistant"
-                ? "agent-canvas-assistant-card"
-                : card.kind === "worktree" && card.worktree
-                  ? worktreeCardTestId(card.worktree)
-                  : card.tab
-                    ? `agent-canvas-session-${card.tab.id}`
-                    : `agent-canvas-card-${card.id}`
+              tile.kind === "assistant"
+                ? "agent-canvas-assistant-tile"
+                : tile.kind === "worktree" && tile.worktree
+                  ? worktreeTileTestId(tile.worktree)
+                  : tile.tab
+                    ? `agent-canvas-session-${tile.tab.id}`
+                    : `agent-canvas-tile-${tile.id}`
             }
-            style={`transform: translate(${cardLayouts[card.id]?.x ?? 0}px, ${cardLayouts[card.id]?.y ?? 0}px); width:${cardLayouts[card.id]?.width ?? CARD_WIDTH}px; height:${cardLayouts[card.id]?.height ?? CARD_HEIGHT}px;`}
+            style={`transform: translate(${tileLayouts[tile.id]?.x ?? 0}px, ${tileLayouts[tile.id]?.y ?? 0}px); width:${tileLayouts[tile.id]?.width ?? TILE_WIDTH}px; height:${tileLayouts[tile.id]?.height ?? TILE_HEIGHT}px;`}
             onclick={() => {
-              if (card.kind === "worktree" && card.worktree) {
-                activateWorktreeCard(card.worktree);
+              if (tile.kind === "worktree" && tile.worktree) {
+                activateWorktreeTile(tile.worktree);
               } else {
-                selectCard(card);
+                selectTile(tile);
               }
             }}
-            onkeydown={(event) => handleCardKeydown(card, event)}
+            onkeydown={(event) => handleTileKeydown(tile, event)}
           >
-            <div class="card-header">
-              <div class="card-heading">
-                <span class="card-kind">{card.kind === "agent" ? "Agent" : card.kind === "terminal" ? "Terminal" : card.kind === "worktree" ? "Worktree" : "Assistant"}</span>
-                <span class="card-title">{card.title}</span>
+            <div class="tile-header">
+              <div class="tile-heading">
+                <span class="tile-kind">{tile.kind === "agent" ? "Agent" : tile.kind === "terminal" ? "Terminal" : tile.kind === "worktree" ? "Worktree" : "Assistant"}</span>
+                <span class="tile-title">{tile.title}</span>
               </div>
               <button
                 type="button"
-                class="card-drag-handle"
-                aria-label="Drag card"
-                onpointerdown={(event) => beginCardDrag(card.id, event)}
+                class="tile-drag-handle"
+                aria-label="Drag tile"
+                onpointerdown={(event) => beginTileDrag(tile.id, event)}
                 onclick={(event) => event.stopPropagation()}
               >
                 ::
               </button>
             </div>
 
-            <div class="card-body">
-              {#if card.kind === "worktree" && card.worktree}
-                <p class="card-subtitle">{card.subtitle}</p>
-                <p class="card-copy">{card.detail}</p>
-                <div class="card-footer">
-                  <span class="card-status">{card.worktree.safety_level}</span>
-                  <span>{sessionsByWorktreeId.get(card.id)?.length ?? 0} sessions</span>
+            <div class="tile-body">
+              {#if tile.kind === "worktree" && tile.worktree}
+                <p class="tile-subtitle">{tile.subtitle}</p>
+                <p class="tile-copy">{tile.detail}</p>
+                <div class="tile-footer">
+                  <span class="tile-status">{tile.worktree.safety_level}</span>
+                  <span>{sessionsByWorktreeId.get(tile.id)?.length ?? 0} sessions</span>
                 </div>
-              {:else if card.kind === "agent" || card.kind === "terminal"}
-                <div class="session-surface" data-testid={`agent-canvas-session-surface-${card.tab?.id ?? card.id}`}>
-                  {#if card.tab?.paneId && liveSessionCardIds.has(card.id)}
+              {:else if tile.kind === "agent" || tile.kind === "terminal"}
+                <div class="session-surface" data-testid={`agent-canvas-session-surface-${tile.tab?.id ?? tile.id}`}>
+                  {#if tile.tab?.paneId && liveSessionTileIds.has(tile.id)}
                     <TerminalView
-                      paneId={card.tab.paneId}
+                      paneId={tile.tab.paneId}
                       active={true}
-                      focusOnActivate={selectedCardId === card.id}
-                      showControls={selectedCardId === card.id}
-                      agentId={card.kind === "agent" ? card.tab.agentId ?? null : null}
+                      focusOnActivate={selectedTileId === tile.id}
+                      showControls={selectedTileId === tile.id}
+                      agentId={tile.kind === "agent" ? tile.tab.agentId ?? null : null}
                       {voiceInputEnabled}
                       {voiceInputListening}
                       {voiceInputPreparing}
@@ -576,23 +576,23 @@
                       {voiceInputAvailabilityReason}
                       {voiceInputError}
                     />
-                  {:else if card.tab?.paneId}
+                  {:else if tile.tab?.paneId}
                     <div class="session-placeholder">
-                      Preview paused while this card is outside the active viewport.
+                      Preview paused while this tile is outside the active viewport.
                     </div>
                   {:else}
                     <div class="session-placeholder">
-                      {card.kind === "agent" ? "Agent starting..." : "Terminal starting..."}
+                      {tile.kind === "agent" ? "Agent starting..." : "Terminal starting..."}
                     </div>
                   {/if}
                 </div>
-                <div class="card-footer session-footer">
-                  <span class="card-status">{card.kind === "agent" ? "Agent" : "Shell"}</span>
-                  <span>{card.subtitle}</span>
+                <div class="tile-footer session-footer">
+                  <span class="tile-status">{tile.kind === "agent" ? "Agent" : "Shell"}</span>
+                  <span>{tile.subtitle}</span>
                 </div>
               {:else}
-                <p class="card-subtitle">{card.subtitle}</p>
-                <p class="card-copy">{card.detail}</p>
+                <p class="tile-subtitle">{tile.subtitle}</p>
+                <p class="tile-copy">{tile.detail}</p>
               {/if}
             </div>
           </div>
@@ -601,13 +601,13 @@
     </div>
   </section>
 
-  {#if overlayCard}
+  {#if overlayTile}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="detail-overlay"
       data-testid="agent-canvas-detail-overlay"
-      onclick={() => (detailOverlayCardId = null)}
+      onclick={() => (detailOverlayTileId = null)}
     >
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -620,26 +620,26 @@
         onclick={(event) => event.stopPropagation()}
       >
         <div class="dialog-header">
-          <span class="card-kind">
-            {overlayCard.kind === "assistant"
+          <span class="tile-kind">
+            {overlayTile.kind === "assistant"
               ? "Assistant"
-              : overlayCard.kind === "worktree"
+              : overlayTile.kind === "worktree"
                 ? "Worktree"
-                : overlayCard.kind === "agent"
+                : overlayTile.kind === "agent"
                   ? "Agent"
                   : "Terminal"}
           </span>
-          <span class="card-title">{overlayCard.title}</span>
+          <span class="tile-title">{overlayTile.title}</span>
           <button
             type="button"
             class="dialog-close-inline"
-            onclick={() => (detailOverlayCardId = null)}
+            onclick={() => (detailOverlayTileId = null)}
           >
             Close
           </button>
         </div>
         <div class="detail-dialog-body">
-          {#if overlayCard.kind === "assistant"}
+          {#if overlayTile.kind === "assistant"}
             <AssistantPanel
               isActive={true}
               {projectPath}
@@ -670,8 +670,8 @@
         onclick={(event) => event.stopPropagation()}
       >
         <div class="dialog-header">
-          <span class="card-kind">Worktree</span>
-          <span class="card-title">{popupWorktree?.branch || currentBranch || "Project Root"}</span>
+          <span class="tile-kind">Worktree</span>
+          <span class="tile-title">{popupWorktree?.branch || currentBranch || "Project Root"}</span>
         </div>
         <div class="dialog-body">
           <div class="detail-row">
@@ -684,7 +684,7 @@
           </div>
           <div class="detail-row">
             <span class="detail-label">Sessions</span>
-            <span class="detail-value">{graph.sessionCards.filter((card) => popupWorktree ? card.worktreeCardId === `worktree:${popupWorktree.path}` : true).length}</span>
+            <span class="detail-value">{graph.sessionTiles.filter((tile) => popupWorktree ? tile.worktreeTileId === `worktree:${popupWorktree.path}` : true).length}</span>
           </div>
           <div class="detail-row">
             <span class="detail-label">Worktree Path</span>
@@ -716,9 +716,9 @@
   .canvas-toolbar,
   .toolbar-group,
   .zoom-controls,
-  .card-header,
-  .card-heading,
-  .card-footer,
+  .tile-header,
+  .tile-heading,
+  .tile-footer,
   .dialog-header {
     display: flex;
     align-items: center;
@@ -813,7 +813,7 @@
     stroke-linecap: round;
   }
 
-  .canvas-card {
+  .canvas-tile {
     position: absolute;
     display: flex;
     flex-direction: column;
@@ -826,14 +826,14 @@
     outline: none;
   }
 
-  .canvas-card.selected {
+  .canvas-tile.selected {
     border-color: color-mix(in srgb, var(--accent) 58%, var(--border-color));
     box-shadow:
       0 14px 28px rgba(0, 0, 0, 0.18),
       0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent);
   }
 
-  .card-header,
+  .tile-header,
   .dialog-header {
     justify-content: space-between;
     gap: 12px;
@@ -842,13 +842,13 @@
     background: color-mix(in srgb, var(--bg-primary) 68%, transparent);
   }
 
-  .card-heading {
+  .tile-heading {
     gap: 10px;
     min-width: 0;
     flex: 1;
   }
 
-  .card-kind {
+  .tile-kind {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -862,7 +862,7 @@
     letter-spacing: 0.05em;
   }
 
-  .card-title {
+  .tile-title {
     font-weight: 600;
     min-width: 0;
     overflow: hidden;
@@ -870,7 +870,7 @@
     white-space: nowrap;
   }
 
-  .card-drag-handle {
+  .tile-drag-handle {
     border: none;
     background: transparent;
     color: var(--text-muted);
@@ -879,11 +879,11 @@
     letter-spacing: 0.08em;
   }
 
-  .card-drag-handle:active {
+  .tile-drag-handle:active {
     cursor: grabbing;
   }
 
-  .card-body {
+  .tile-body {
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -892,23 +892,23 @@
     flex: 1;
   }
 
-  .card-subtitle,
-  .card-copy {
+  .tile-subtitle,
+  .tile-copy {
     margin: 0;
   }
 
-  .card-subtitle {
+  .tile-subtitle {
     color: var(--text-secondary);
     font-size: 0.9rem;
   }
 
-  .card-copy {
+  .tile-copy {
     color: var(--text-muted);
     overflow-wrap: anywhere;
     line-height: 1.45;
   }
 
-  .card-footer {
+  .tile-footer {
     margin-top: auto;
     justify-content: space-between;
     gap: 10px;
@@ -916,7 +916,7 @@
     font-size: 0.8rem;
   }
 
-  .canvas-card.session-card .card-body {
+  .canvas-tile.session-tile .tile-body {
     padding: 0;
     gap: 0;
   }
@@ -945,7 +945,7 @@
     padding: 10px 14px 12px;
   }
 
-  .card-status {
+  .tile-status {
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }

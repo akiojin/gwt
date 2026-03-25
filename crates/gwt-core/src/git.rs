@@ -38,12 +38,6 @@ pub use issue::{
     FetchIssuesResult, GitHubAssignee, GitHubIssue, GitHubLabel, GitHubMilestone,
     IssueLinkedBranchStatus,
 };
-pub use local_spec::{
-    close_local_spec, create_local_spec, delete_local_spec_artifact, get_local_spec_detail,
-    list_local_spec_artifacts, list_local_specs, search_local_specs, update_local_spec,
-    update_local_spec_phase, upsert_local_spec, upsert_local_spec_artifact, LocalSpecArtifact,
-    LocalSpecDetail, LocalSpecMetadata, LocalSpecPhase,
-};
 pub use issue_spec::{
     append_contract_comment, close_spec_issue, create_spec_issue,
     delete_spec_issue_artifact_comment, get_spec_issue_detail, list_spec_issue_artifact_comments,
@@ -51,6 +45,12 @@ pub use issue_spec::{
     upsert_spec_issue_artifact_comment, ProjectSyncResult, SpecIssueArtifactComment,
     SpecIssueArtifactKind, SpecIssueChecklist, SpecIssueDetail, SpecIssueSections,
     SpecProjectPhase,
+};
+pub use local_spec::{
+    close_local_spec, create_local_spec, delete_local_spec_artifact, get_local_spec_detail,
+    list_local_spec_artifacts, list_local_specs, search_local_specs, update_local_spec,
+    update_local_spec_phase, upsert_local_spec, upsert_local_spec_artifact, LocalSpecArtifact,
+    LocalSpecDetail, LocalSpecMetadata, LocalSpecPhase,
 };
 pub use pullrequest::{
     PrCache, PrListItem, PrStatusCache, PrStatusInfo, PullRequest, ReviewComment, ReviewInfo,

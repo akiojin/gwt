@@ -223,16 +223,16 @@ describe("MainArea", () => {
     expect(rendered.container.querySelector('[data-testid="agent-canvas-session-agent-1"]')).toBeTruthy();
   });
 
-  it("shows a worktree card and assistant card inside Agent Canvas", () => {
+  it("shows a worktree tile and assistant tile inside Agent Canvas", () => {
     const tabs: Tab[] = [
       { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
     ];
     const layout = createInitialTabLayout(tabs, "agentCanvas");
     const rendered = renderMainArea({ tabs, layout });
 
-    expect(rendered.container.querySelector('[data-testid="agent-canvas-assistant-card"]')).toBeTruthy();
+    expect(rendered.container.querySelector('[data-testid="agent-canvas-assistant-tile"]')).toBeTruthy();
     expect(
-      rendered.container.querySelector('[data-testid^="agent-canvas-worktree-card-"]'),
+      rendered.container.querySelector('[data-testid^="agent-canvas-worktree-tile-"]'),
     ).toBeTruthy();
   });
 

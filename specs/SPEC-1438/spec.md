@@ -20,7 +20,7 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 
 ### Managed gwt skills
 
-- `gwt-pty-communication`
+- `gwt-agent-dispatch`
 - `gwt-project-index`
 - `gwt-issue-spec-ops`
 - `gwt-pr`
@@ -28,6 +28,7 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 - `gwt-fix-pr`
 - `gwt-fix-issue`
 - `gwt-spec-to-issue-migration`
+- `gwt-sync-base`
 
 ### Bundled assets
 
@@ -35,6 +36,7 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 - `gwt-fix-pr` は `inspect_pr_checks.py` と `LICENSE.txt` を skill bundle に含める。
 - `gwt-fix-issue` は `inspect_issue.py` を skill bundle に含める。
 - `gwt-spec-to-issue-migration` は migration script を skill bundle に含め、target project 上で自己完結して動作する。
+- `gwt-sync-base` は SKILL.md のみ（補助 asset なし）。
 
 ### Claude hook source of truth
 
@@ -76,6 +78,12 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 | FR-SPEC-002 | sidebar の spec task 表示は最新の `gwt-spec` GitHub Issue を参照する |
 | FR-SPEC-003 | repository scanner / prompt builder は local `specs/` を source of truth として扱わない |
 | FR-SPEC-004 | spec の探索・更新は GitHub Issue-first とし、`gwt-project-index` / `gwt-issue-spec-ops` を導線にする |
+| FR-SYNC-001 | `gwt-sync-base` は現在のブランチのベースブランチ（`develop`, `main`, `master` 等）を自動検出し、`git fetch origin <base> && git merge origin/<base> && git push` を実行するスキルとする |
+| FR-SYNC-002 | ベースブランチの検出は、PR のベースブランチ、リポジトリのデフォルトブランチ、ブランチ命名規則等から判定する |
+| FR-SYNC-003 | `gwt-sync-base` は「最新にして」「ベースをマージ」「sync base」「update from base」「ベースと同期」等のキーワードでトリガーされる |
+| FR-SYNC-004 | `gwt-sync-base` はマージコンフリクト発生時に自動解決せず、ユーザーに報告して停止する |
+| FR-SYNC-005 | `gwt-sync-base` は rebase や force-push を使用しない。常に merge を使用する |
+| FR-SYNC-006 | `gwt-sync-base` はブランチの作成・切り替えを行わない |
 
 ### Acceptance scenarios
 
@@ -87,6 +95,9 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 | US4 | gwt repo に local `specs/` が存在しない状態で sidebar を開く | 最新の `gwt-spec` Issue の `## Tasks` から task が表示される |
 | US5 | 別プロジェクトで local `specs/SPEC-*` が残っている | `gwt-spec-to-issue-migration` で Issue-first へ移行できる |
 | US6 | registration / repair を実行する | generated な `.claude` / `.codex` / `.gemini` 配下の `gwt-*` asset が shared `info/exclude` により untracked noise にならない |
+| US7 | ユーザーが「最新にして」と指示する | `gwt-sync-base` がベースブランチを自動検出し、fetch → merge → push を実行して最新コミットが現在のブランチに取り込まれる |
+| US8 | ベースブランチとのマージでコンフリクトが発生する | `gwt-sync-base` がコンフリクトを報告し、ユーザーに解決を委ねる |
+| US9 | 現在のブランチが既にベースブランチと同期済み | `gwt-sync-base` が「Already up to date」を報告し、push をスキップする |
 
 ### Success criteria
 

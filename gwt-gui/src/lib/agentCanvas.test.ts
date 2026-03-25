@@ -53,12 +53,12 @@ describe("agentCanvas", () => {
       featureWorktree,
     ]);
 
-    expect(graph.sessionCards[0].worktreeCardId).toBe(`worktree:${featureWorktree.path}`);
+    expect(graph.sessionTiles[0].worktreeTileId).toBe(`worktree:${featureWorktree.path}`);
     expect(graph.edges).toEqual([
       {
         id: `worktree:${featureWorktree.path}->session:agent-pane-1`,
-        sourceCardId: `worktree:${featureWorktree.path}`,
-        targetCardId: "session:agent-pane-1",
+        sourceTileId: `worktree:${featureWorktree.path}`,
+        targetTileId: "session:agent-pane-1",
       },
     ]);
   });
@@ -75,7 +75,7 @@ describe("agentCanvas", () => {
 
     const graph = buildAgentCanvasGraph("/tmp/project", "main", tabs, [mainWorktree]);
 
-    expect(graph.sessionCards[0].worktreeCardId).toBe(`worktree:${mainWorktree.path}`);
+    expect(graph.sessionTiles[0].worktreeTileId).toBe(`worktree:${mainWorktree.path}`);
   });
 
   it("builds a default viewport-backed canvas state", () => {
@@ -88,7 +88,7 @@ describe("agentCanvas", () => {
     );
 
     expect(state.viewport).toEqual({ x: 0, y: 0, zoom: 1 });
-    expect(state.cards.map((card) => card.id)).toContain("assistant");
-    expect(state.cards.map((card) => card.id)).toContain(`worktree:${mainWorktree.path}`);
+    expect(state.tiles.map((tile) => tile.id)).toContain("assistant");
+    expect(state.tiles.map((tile) => tile.id)).toContain(`worktree:${mainWorktree.path}`);
   });
 });

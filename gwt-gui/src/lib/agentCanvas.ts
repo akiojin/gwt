@@ -1,13 +1,13 @@
 import type { Tab, WorktreeInfo } from "./types";
 
-export type AgentCanvasCardType = "assistant" | "worktree" | "agent" | "terminal";
+export type AgentCanvasTileType = "assistant" | "worktree" | "agent" | "terminal";
 export type AgentCanvasViewport = {
   x: number;
   y: number;
   zoom: number;
 };
 
-export type AgentCanvasCardLayout = {
+export type AgentCanvasTileLayout = {
   x: number;
   y: number;
   width: number;
@@ -16,32 +16,32 @@ export type AgentCanvasCardLayout = {
 
 export type AgentCanvasPersistedState = {
   viewport: AgentCanvasViewport;
-  cardLayouts: Record<string, AgentCanvasCardLayout>;
-  selectedCardId: string | null;
+  tileLayouts: Record<string, AgentCanvasTileLayout>;
+  selectedTileId: string | null;
 };
 
-export type AgentCanvasWorktreeCard = {
+export type AgentCanvasWorktreeTile = {
   id: string;
   type: "worktree";
   worktree: WorktreeInfo;
 };
 
-export type AgentCanvasSessionCard = {
+export type AgentCanvasSessionTile = {
   id: string;
   type: "agent" | "terminal";
   tab: Tab;
-  worktreeCardId: string | null;
+  worktreeTileId: string | null;
 };
 
 export type AgentCanvasEdge = {
   id: string;
-  sourceCardId: string;
-  targetCardId: string;
+  sourceTileId: string;
+  targetTileId: string;
 };
 
-export type AgentCanvasCard =
-  | AgentCanvasWorktreeCard
-  | AgentCanvasSessionCard
+export type AgentCanvasTile =
+  | AgentCanvasWorktreeTile
+  | AgentCanvasSessionTile
   | {
       id: "assistant";
       type: "assistant";
@@ -49,14 +49,14 @@ export type AgentCanvasCard =
 
 export type AgentCanvasGraph = {
   worktrees: WorktreeInfo[];
-  worktreeCards: AgentCanvasWorktreeCard[];
-  sessionCards: AgentCanvasSessionCard[];
+  worktreeTiles: AgentCanvasWorktreeTile[];
+  sessionTiles: AgentCanvasSessionTile[];
   edges: AgentCanvasEdge[];
 };
 
 export type AgentCanvasState = {
   viewport: AgentCanvasViewport;
-  cards: AgentCanvasCard[];
+  tiles: AgentCanvasTile[];
   edges: AgentCanvasEdge[];
   graph: AgentCanvasGraph;
 };
@@ -97,7 +97,7 @@ export function buildAgentCanvasGraph(
   worktrees: WorktreeInfo[],
 ): AgentCanvasGraph {
   const normalizedWorktrees = worktrees.length > 0 ? worktrees : [fallbackWorktree(projectPath, currentBranch)];
-  const worktreeCards = normalizedWorktrees.map((worktree) => ({
+  const worktreeTiles = normalizedWorktrees.map((worktree) => ({
     id: `worktree:${worktree.path}`,
     type: "worktree" as const,
     worktree,
@@ -112,7 +112,7 @@ export function buildAgentCanvasGraph(
     (tab): tab is Tab & { type: "agent" | "terminal" } =>
       tab.type === "agent" || tab.type === "terminal",
   );
-  const sessionCards = sessionTabs.map((tab) => {
+  const sessionTiles = sessionTabs.map((tab) => {
     const matchedWorktree =
       (tab.worktreePath ? worktreeByPath.get(tab.worktreePath) : null) ??
       (tab.branchName ? worktreeByBranch.get(tab.branchName.trim()) : null) ??
@@ -121,22 +121,22 @@ export function buildAgentCanvasGraph(
       id: `session:${tab.id}`,
       type: tab.type,
       tab,
-      worktreeCardId: matchedWorktree ? `worktree:${matchedWorktree.path}` : null,
-    } satisfies AgentCanvasSessionCard;
+      worktreeTileId: matchedWorktree ? `worktree:${matchedWorktree.path}` : null,
+    } satisfies AgentCanvasSessionTile;
   });
 
-  const edges = sessionCards
-    .filter((card) => card.worktreeCardId !== null)
-    .map((card) => ({
-      id: `${card.worktreeCardId!}->${card.id}`,
-      sourceCardId: card.worktreeCardId!,
-      targetCardId: card.id,
+  const edges = sessionTiles
+    .filter((tile) => tile.worktreeTileId !== null)
+    .map((tile) => ({
+      id: `${tile.worktreeTileId!}->${tile.id}`,
+      sourceTileId: tile.worktreeTileId!,
+      targetTileId: tile.id,
     }));
 
   return {
     worktrees: normalizedWorktrees,
-    worktreeCards,
-    sessionCards,
+    worktreeTiles,
+    sessionTiles,
     edges,
   };
 }
@@ -151,10 +151,10 @@ export function buildAgentCanvasState(
   const graph = buildAgentCanvasGraph(projectPath, currentBranch, tabs, worktrees);
   return {
     viewport,
-    cards: [
+    tiles: [
       { id: "assistant", type: "assistant" },
-      ...graph.worktreeCards,
-      ...graph.sessionCards,
+      ...graph.worktreeTiles,
+      ...graph.sessionTiles,
     ],
     edges: graph.edges,
     graph,

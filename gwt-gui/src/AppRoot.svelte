@@ -47,7 +47,7 @@
   } from "./lib/agentTabsPersistence";
   import {
     createDefaultAgentCanvasViewport,
-    type AgentCanvasCardLayout,
+    type AgentCanvasTileLayout,
   } from "./lib/agentCanvas";
   import {
     defaultAppTabs,
@@ -334,9 +334,9 @@
     })(),
   );
   let selectedCanvasSessionTabId: string | null = $state(null);
-  let selectedCanvasCardId: string | null = $state(null);
+  let selectedCanvasTileId: string | null = $state(null);
   let canvasViewport = $state(createDefaultAgentCanvasViewport());
-  let canvasCardLayouts = $state<Record<string, AgentCanvasCardLayout>>({});
+  let canvasTileLayouts = $state<Record<string, AgentCanvasTileLayout>>({});
   let canvasWorktrees: WorktreeInfo[] = $state([]);
   let selectedCanvasWorktreeBranch: string | null = $state(null);
   let selectedCanvasWorktreePath: string | null = $state(null);
@@ -2271,11 +2271,11 @@
       setCanvasViewport: (value) => {
         canvasViewport = value;
       },
-      setCanvasCardLayouts: (value) => {
-        canvasCardLayouts = value as typeof canvasCardLayouts;
+      setCanvasTileLayouts: (value) => {
+        canvasTileLayouts = value as typeof canvasTileLayouts;
       },
-      setSelectedCanvasCardId: (value) => {
-        selectedCanvasCardId = value;
+      setSelectedCanvasTileId: (value) => {
+        selectedCanvasTileId = value;
       },
       setBranchBrowserState: (value) => {
         branchBrowserState = value;
@@ -2309,8 +2309,8 @@
 
     agentTabsHydratedProjectPath = null;
     canvasViewport = createDefaultAgentCanvasViewport();
-    canvasCardLayouts = {};
-    selectedCanvasCardId = null;
+    canvasTileLayouts = {};
+    selectedCanvasTileId = null;
     branchBrowserState = DEFAULT_BRANCH_BROWSER_STATE;
     const target = projectPath;
     triggerRestoreProjectAgentTabs(target, activeStartupProfileToken);
@@ -2341,8 +2341,8 @@
         activeTabId,
         selectedCanvasSessionTabId,
         canvasViewport,
-        canvasCardLayouts,
-        selectedCanvasCardId,
+        canvasTileLayouts,
+        selectedCanvasTileId,
         branchBrowserState,
       }),
       undefined,
@@ -2641,20 +2641,20 @@
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
-        {selectedCanvasCardId}
+        {selectedCanvasTileId}
         {canvasViewport}
-        {canvasCardLayouts}
+        {canvasTileLayouts}
         disableSplit={true}
         branchBrowserState={branchBrowserState}
         onCanvasSessionSelect={handleCanvasSessionSelect}
         onCanvasViewportChange={(next) => {
           canvasViewport = next;
         }}
-        onCanvasCardLayoutsChange={(next) => {
-          canvasCardLayouts = next;
+        onCanvasTileLayoutsChange={(next) => {
+          canvasTileLayouts = next;
         }}
-        onCanvasSelectedCardChange={(next) => {
-          selectedCanvasCardId = next;
+        onCanvasSelectedTileChange={(next) => {
+          selectedCanvasTileId = next;
         }}
         onLaunchAgent={requestAgentLaunch}
         onQuickLaunch={handleAgentLaunch}

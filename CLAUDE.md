@@ -239,16 +239,16 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-issue-register | `/gwt:gwt-issue-register` | Register new GitHub work items. Search existing Issues and local SPECs first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or escalate to a local SPEC. Use as the main entrypoint for new Issue/SPEC registration requests. |
-| gwt-issue-resolve | `/gwt:gwt-issue-resolve` | Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly or promoted to a local SPEC, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration. |
-| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub Issues and local SPECs. Use when searching for existing specs, finding related issues, or checking for duplicate specs. |
-| gwt-spec-register | `/gwt:gwt-spec-register` | Create a new local SPEC directory (`specs/SPEC-{N}/`) when no existing canonical SPEC fits. Seed `metadata.json` and `spec.md`, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
-| gwt-spec-clarify | `/gwt:gwt-spec-clarify` | Clarify an existing local SPEC by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. |
-| gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate planning artifacts for an existing local SPEC: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. |
-| gwt-spec-tasks | `/gwt:gwt-spec-tasks` | Generate `tasks.md` for an existing local SPEC from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. |
-| gwt-spec-analyze | `/gwt:gwt-spec-analyze` | Analyze a local SPEC artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation. |
-| gwt-spec-ops | — | Local SPEC orchestration. Use an existing or newly created SPEC to stabilize `spec.md`, `plan.md`, `tasks.md`, analysis gates, and then continue into implementation without stopping at normal handoff boundaries. |
-| gwt-spec-implement | `/gwt:gwt-spec-implement` | Implement an existing local SPEC end-to-end from `tasks.md`. Execute test-first tasks, update progress artifacts, and keep PR work moving until the SPEC is done. |
+| gwt-issue-register | `/gwt:gwt-issue-register` | Register new GitHub work items from a request. Search existing Issues and `gwt-spec` Issues first, reuse a clear existing owner when possible, otherwise create a plain GitHub Issue or continue into the SPEC workflow. Use as the main entrypoint for new Issue/SPEC registration requests. |
+| gwt-issue-resolve | `/gwt:gwt-issue-resolve` | Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing gwt-spec issue, or promoted to a new spec issue, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration. |
+| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub gwt-spec Issues using vector embeddings. Use when searching for existing specs, finding related gwt-spec issues, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. |
+| gwt-spec-register | `/gwt:gwt-spec-register` | Create a new GitHub Issue-first SPEC container when no existing canonical SPEC fits. Seed the Issue body as an artifact index plus a `spec.md` comment, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. |
+| gwt-spec-clarify | `/gwt:gwt-spec-clarify` | Clarify an existing `gwt-spec` by resolving `[NEEDS CLARIFICATION]` markers, tightening user stories, and locking acceptance scenarios before planning. Use directly or through `gwt-spec-ops`. |
+| gwt-spec-plan | `/gwt:gwt-spec-plan` | Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`. |
+| gwt-spec-tasks | `/gwt:gwt-spec-tasks` | Generate `tasks.md` for an existing `gwt-spec` from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. Use directly or through `gwt-spec-ops`. |
+| gwt-spec-analyze | `/gwt:gwt-spec-analyze` | Analyze a `gwt-spec` artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers. |
+| gwt-spec-ops | — | GitHub Issue-first SPEC orchestration. Use an existing or newly created `gwt-spec` issue to stabilize `spec.md`, `plan.md`, `tasks.md`, analysis gates, and then continue into implementation without stopping at normal handoff boundaries. |
+| gwt-spec-implement | `/gwt:gwt-spec-implement` | Implement an existing `gwt-spec` end-to-end from `tasks.md`. Execute test-first tasks, update progress artifacts, and keep PR work moving until the SPEC is done. |
 
 ### PR Management
 
@@ -263,8 +263,8 @@ Commands can be invoked as `/gwt:<command-name>`.
 | Skill | Command | Description |
 |-------|---------|-------------|
 | gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
-| gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
-| gwt-spec-to-issue-migration | — | Reverse-migrate GitHub Issue specs to local `specs/SPEC-{N}/` directories using the bundled reverse migration script. |
+| gwt-agent-dispatch | `/gwt:gwt-agent-dispatch` | PTY-based instruction dispatch from Assistant to Agent panes. Send commands, capture output, and manage Agent lifecycle. |
+| gwt-spec-to-issue-migration | — | Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script. |
 
 ### Recommended Workflow
 

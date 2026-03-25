@@ -9,7 +9,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use gwt_core::logging::{log_flow_failure, log_flow_start, log_flow_success};
 use gwt_core::{
     ai::{classify_issue_prefix as core_classify_issue_prefix, format_error_for_display, AIClient},
     config::ProfilesConfig,
@@ -18,6 +17,7 @@ use gwt_core::{
         find_branches_for_issues, is_gh_cli_authenticated, is_gh_cli_available,
         search_issues_with_query,
     },
+    logging::{log_flow_failure, log_flow_start, log_flow_success},
     worktree::WorktreeManager,
     StructuredError,
 };

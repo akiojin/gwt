@@ -479,7 +479,7 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 ### gwt-agent-dispatch
 
 - **概要**: PTY ベースの Agent ペインへの命令ディスパッチ。Assistant から Agent ペインへのコマンド送信、出力キャプチャ、Agent ライフサイクル管理を行う。
-- **トリガー条件**: Project Mode オーケストレーション（Lead/Coordinator/Developer）で Agent ペインへの命令送信が必要な場合。
+- **トリガー条件**: Project Mode オーケストレーションで Agent ペインへの命令送信が必要な場合。
 - **ワークフロー**:
   1. `list_terminals` でアクティブな Agent ペイン ID を取得
   2. `capture_scrollback_tail` でフォローアップ前に Agent の出力を読み取り

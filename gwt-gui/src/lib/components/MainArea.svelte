@@ -8,7 +8,7 @@
     WorktreeInfo,
   } from "../types";
   import type {
-    AgentCanvasCardLayout,
+    AgentCanvasTileLayout,
     AgentCanvasViewport,
   } from "../agentCanvas";
   import type {
@@ -35,9 +35,9 @@
     branchBrowserConfig = undefined,
     currentBranch = "",
     selectedCanvasSessionTabId = null,
-    selectedCanvasCardId = null,
+    selectedCanvasTileId = null,
     canvasViewport = undefined,
-    canvasCardLayouts = undefined,
+    canvasTileLayouts = undefined,
     canvasWorktrees = [],
     selectedCanvasWorktreeBranch = null,
     onCanvasWorktreeSelect = () => {},
@@ -45,8 +45,8 @@
     disableSplit = false,
     onCanvasSessionSelect = () => {},
     onCanvasViewportChange = () => {},
-    onCanvasCardLayoutsChange = () => {},
-    onCanvasSelectedCardChange = () => {},
+    onCanvasTileLayoutsChange = () => {},
+    onCanvasSelectedTileChange = () => {},
     onLaunchAgent,
     onQuickLaunch,
     onTabSelect,
@@ -78,9 +78,9 @@
     branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
     currentBranch?: string;
     selectedCanvasSessionTabId?: string | null;
-    selectedCanvasCardId?: string | null;
+    selectedCanvasTileId?: string | null;
     canvasViewport?: AgentCanvasViewport | undefined;
-    canvasCardLayouts?: Record<string, AgentCanvasCardLayout> | undefined;
+    canvasTileLayouts?: Record<string, AgentCanvasTileLayout> | undefined;
     canvasWorktrees?: WorktreeInfo[];
     selectedCanvasWorktreeBranch?: string | null;
     onCanvasWorktreeSelect?: (branchName: string) => void;
@@ -88,10 +88,10 @@
     disableSplit?: boolean;
     onCanvasSessionSelect?: (tabId: string) => void;
     onCanvasViewportChange?: (viewport: AgentCanvasViewport) => void;
-    onCanvasCardLayoutsChange?: (
-      layouts: Record<string, AgentCanvasCardLayout>,
+    onCanvasTileLayoutsChange?: (
+      layouts: Record<string, AgentCanvasTileLayout>,
     ) => void;
-    onCanvasSelectedCardChange?: (cardId: string | null) => void;
+    onCanvasSelectedTileChange?: (tileId: string | null) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect:
@@ -344,9 +344,9 @@
         {branchBrowserConfig}
         {currentBranch}
         {selectedCanvasSessionTabId}
-        {selectedCanvasCardId}
+        {selectedCanvasTileId}
         {canvasViewport}
-        {canvasCardLayouts}
+        {canvasTileLayouts}
         {canvasWorktrees}
         {selectedCanvasWorktreeBranch}
         {onCanvasWorktreeSelect}
@@ -354,8 +354,8 @@
         {disableSplit}
         {onCanvasSessionSelect}
         {onCanvasViewportChange}
-        {onCanvasCardLayoutsChange}
-        {onCanvasSelectedCardChange}
+        {onCanvasTileLayoutsChange}
+        {onCanvasSelectedTileChange}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}
@@ -396,9 +396,9 @@
       {branchBrowserConfig}
       {currentBranch}
       {selectedCanvasSessionTabId}
-      {selectedCanvasCardId}
+      {selectedCanvasTileId}
       {canvasViewport}
-      {canvasCardLayouts}
+      {canvasTileLayouts}
       {canvasWorktrees}
       {selectedCanvasWorktreeBranch}
       {onCanvasWorktreeSelect}
@@ -406,8 +406,8 @@
       {disableSplit}
       {onCanvasSessionSelect}
       {onCanvasViewportChange}
-      {onCanvasCardLayoutsChange}
-      {onCanvasSelectedCardChange}
+      {onCanvasTileLayoutsChange}
+      {onCanvasSelectedTileChange}
       {draggedTabId}
       {dropTarget}
       {onGroupFocus}

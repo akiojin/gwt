@@ -411,11 +411,22 @@ const PROJECT_LOCAL_MANAGED_ASSETS: &[ManagedAsset] = &[ManagedAsset {
 }];
 
 const LEGACY_MANAGED_GWT_HOOK_COMMANDS: &[&str] = &[
+    // v1: gwt binary direct invocation
     "gwt hook UserPromptSubmit",
     "gwt hook PreToolUse",
     "gwt hook PostToolUse",
     "gwt hook Notification",
     "gwt hook Stop",
+    // v2: relative-path node scripts (broken when CWD != project root, #1771)
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit",
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs PreToolUse",
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs PostToolUse",
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs Notification",
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs Stop",
+    "node .claude/hooks/scripts/gwt-block-git-branch-ops.mjs",
+    "node .claude/hooks/scripts/gwt-block-cd-command.mjs",
+    "node .claude/hooks/scripts/gwt-block-file-ops.mjs",
+    "node .claude/hooks/scripts/gwt-block-git-dir-override.mjs",
 ];
 
 const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
@@ -1200,6 +1211,23 @@ fn rewrite_project_asset_content(content: &str, root_name: &str) -> String {
         .replace("`skills/", &format!("`{root_name}/skills/"))
 }
 
+/// Build a fully-quoted hook command that resolves the git repository root at
+/// runtime via `git rev-parse --show-toplevel`.  This makes hook commands
+/// independent of the current working directory and portable across Docker,
+/// worktrees, and any environment where the CWD may differ from the project
+/// root.
+///
+/// `script` is the basename (e.g. `"gwt-forward-hook.mjs"`).
+/// `args` are appended after the quoted path (e.g. `"Stop"`); pass `""` for none.
+fn hook_script_command(script: &str, args: &str) -> String {
+    let base = "node \"$(git rev-parse --show-toplevel)/.claude/hooks/scripts/";
+    if args.is_empty() {
+        format!("{base}{script}\"")
+    } else {
+        format!("{base}{script}\" {args}")
+    }
+}
+
 fn managed_hooks_definition() -> Value {
     serde_json::json!({
         "hooks": {
@@ -1207,7 +1235,7 @@ fn managed_hooks_definition() -> Value {
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
+                    "command": hook_script_command("gwt-forward-hook.mjs", "UserPromptSubmit")
                 }]
             }],
             "PreToolUse": [
@@ -1215,7 +1243,7 @@ fn managed_hooks_definition() -> Value {
                     "matcher": "*",
                     "hooks": [{
                         "type": "command",
-                        "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PreToolUse"
+                        "command": hook_script_command("gwt-forward-hook.mjs", "PreToolUse")
                     }]
                 },
                 {
@@ -1223,19 +1251,19 @@ fn managed_hooks_definition() -> Value {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "node .claude/hooks/scripts/gwt-block-git-branch-ops.mjs"
+                            "command": hook_script_command("gwt-block-git-branch-ops.mjs", "")
                         },
                         {
                             "type": "command",
-                            "command": "node .claude/hooks/scripts/gwt-block-cd-command.mjs"
+                            "command": hook_script_command("gwt-block-cd-command.mjs", "")
                         },
                         {
                             "type": "command",
-                            "command": "node .claude/hooks/scripts/gwt-block-file-ops.mjs"
+                            "command": hook_script_command("gwt-block-file-ops.mjs", "")
                         },
                         {
                             "type": "command",
-                            "command": "node .claude/hooks/scripts/gwt-block-git-dir-override.mjs"
+                            "command": hook_script_command("gwt-block-git-dir-override.mjs", "")
                         }
                     ]
                 }
@@ -1244,21 +1272,21 @@ fn managed_hooks_definition() -> Value {
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PostToolUse"
+                    "command": hook_script_command("gwt-forward-hook.mjs", "PostToolUse")
                 }]
             }],
             "Notification": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs Notification"
+                    "command": hook_script_command("gwt-forward-hook.mjs", "Notification")
                 }]
             }],
             "Stop": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs Stop"
+                    "command": hook_script_command("gwt-forward-hook.mjs", "Stop")
                 }]
             }]
         }
@@ -1967,13 +1995,10 @@ mod tests {
 
     #[test]
     fn managed_hook_detection_uses_exact_template_commands() {
-        let managed_hook_commands =
-            vec!["node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()];
+        let sample_cmd = hook_script_command("gwt-forward-hook.mjs", "UserPromptSubmit");
+        let managed_hook_commands = vec![sample_cmd.clone()];
 
-        assert!(is_managed_hook_command(
-            "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit",
-            &managed_hook_commands
-        ));
+        assert!(is_managed_hook_command(&sample_cmd, &managed_hook_commands));
         assert!(!is_managed_hook_command(
             "echo gwt hook UserPromptSubmit",
             &managed_hook_commands
@@ -2000,8 +2025,10 @@ mod tests {
 
     #[test]
     fn prune_managed_hook_entries_preserves_user_hook_that_mentions_gwt_hook() {
-        let managed_hook_commands =
-            vec!["node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()];
+        let managed_hook_commands = vec![hook_script_command(
+            "gwt-forward-hook.mjs",
+            "UserPromptSubmit",
+        )];
         let mut value = serde_json::json!(["echo gwt hook UserPromptSubmit"]);
 
         prune_managed_hook_entries(&mut value, &managed_hook_commands);
@@ -2327,9 +2354,8 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(!gemini_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
-        assert!(gemini_skill_content.contains(
-            ".gemini/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
-        ));
+        assert!(gemini_skill_content
+            .contains(".gemini/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py"));
     }
 
     #[test]
@@ -2479,7 +2505,7 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(issue_register_skill.contains("Search existing Issues and `gwt-spec` Issues first"));
+        assert!(issue_register_skill.contains("Search existing Issues and SPECs first"));
         assert!(issue_register_skill.contains("gwt-issue-search"));
         assert!(issue_register_skill.contains("gwt-spec-register"));
         assert!(issue_register_skill.contains("gwt-issue-resolve"));
@@ -2539,11 +2565,10 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_register_skill.contains("Issue-first SPEC container"));
+        assert!(spec_register_skill.contains("local SPEC directory"));
         assert!(spec_register_skill.contains("gwt-issue-search"));
-        assert!(spec_register_skill.contains("GWT_SPEC_ARTIFACT:doc:spec.md"));
+        assert!(spec_register_skill.contains("metadata.json"));
         assert!(spec_register_skill.contains("gwt-spec-ops"));
-        assert!(spec_register_skill.contains("repos/<owner>/<repo>/issues"));
 
         let spec_clarify_skill = std::fs::read_to_string(
             temp.path()
