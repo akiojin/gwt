@@ -8,18 +8,16 @@ fn main() {
     let skills_dir = PathBuf::from(&manifest_dir)
         .join("..")
         .join("..")
-        .join("plugins")
-        .join("gwt")
+        .join(".claude")
         .join("skills");
     let commands_dir = PathBuf::from(&manifest_dir)
         .join("..")
         .join("..")
-        .join("plugins")
-        .join("gwt")
+        .join(".claude")
         .join("commands");
 
-    println!("cargo:rerun-if-changed=../../plugins/gwt/skills");
-    println!("cargo:rerun-if-changed=../../plugins/gwt/commands");
+    println!("cargo:rerun-if-changed=../../.claude/skills");
+    println!("cargo:rerun-if-changed=../../.claude/commands");
 
     let mut entries = Vec::new();
 
