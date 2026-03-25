@@ -1,7 +1,7 @@
 <!-- GWT_SPEC_ARTIFACT:doc:spec.md -->
 doc:spec.md
 
-# Feature Specification: Embedded SPEC workflow, registration redesign, and GitHub transport policy
+# Feature Specification: gwt-spec system — workflow, storage/API, and completion gate
 
 ## Background
 
@@ -11,7 +11,9 @@ doc:spec.md
 - This redesign makes workflow ownership explicit: `gwt-spec-ops` owns artifact stabilization, `gwt-spec-implement` owns execution, and PR skills auto-handle routine merge/fix loops.
 - GitHub-backed skills currently lean too heavily on `gh pr list` / GraphQL paths for PR metadata and review inspection, which creates avoidable failures when REST token access still works or when GraphQL quotas are exhausted.
 - The current runtime can contain helper skills that exist on disk but are not present in the user-visible skill catalog. User-facing workflow guidance must not point directly at hidden skills.
-- Storage/API canonical behavior lives in #1327. Issue-tab detail rendering lives in #1354. This issue owns the embedded workflow, routing, autonomy policy, registration contract, and GitHub transport policy for embedded skills.
+- The older storage design treated the GitHub Issue body as the canonical spec bundle with `Spec/Plan/Tasks/TDD/...` sections embedded directly in the body. The embedded skill workflow is now restructured around artifact-first storage where `doc:*`, `contract:*`, and `checklist:*` issue comments hold the real content and the Issue body is only an index.
+- The current workflow only defined a pre-implementation `CLEAR` gate. #1654 exposed a missing completion gate: `tasks.md` and progress comments were marked complete while the implementation still diverged from `doc:spec.md`, `checklist:acceptance.md`, and `checklist:tdd.md`.
+- This spec is the single canonical reference for the gwt-spec system: embedded workflow, storage/API, artifact CRUD, completion gate, registration contract, and GitHub transport policy. Issue-tab detail rendering lives in #1354.
 
 ## User Stories
 
@@ -79,6 +81,72 @@ As a maintainer, I want GitHub-backed embedded skills to prefer REST for metadat
 4. Given unresolved review thread discovery or thread reply/resolve is required, when REST does not provide a practical equivalent, then GraphQL remains allowed for those thread-specific operations only.
 5. Given direct token-based REST auth succeeds while `gh auth status` or GraphQL paths fail, when a REST-first skill runs, then it may proceed using REST auth without treating `gh auth status` as a hard blocker.
 
+### User Story 7 - Persist spec artifacts without relying on a monolithic body (Priority: P0)
+
+As a developer, I want the spec system to store `spec.md`, `plan.md`, `tasks.md`, and supporting docs as first-class artifact comments rather than a giant Issue body.
+
+**Acceptance Scenarios**
+
+1. Given a new `gwt-spec` Issue, when it is created or updated, then the Issue body may be index-only and the canonical content lives in `doc:*` comments.
+2. Given a `gwt-spec` Issue with `doc:*` comments, when backend detail APIs are called, then they reconstruct `SpecIssueSections` from those artifacts.
+
+### User Story 8 - Keep legacy issues readable during migration (Priority: P0)
+
+As a developer, I want legacy body-canonical spec issues to continue working while the system migrates to artifact-first storage.
+
+**Acceptance Scenarios**
+
+1. Given a legacy `gwt-spec` Issue with body sections only, when detail APIs are called, then the same sections are returned.
+2. Given a mixed issue with both body sections and `doc:*` comments, when detail APIs are called, then `doc:*` comments take precedence and body sections act as fallback.
+
+### User Story 9 - Manage document artifacts through the same CRUD layer (Priority: P0)
+
+As a developer or agent, I want `doc:*`, `contract:*`, and `checklist:*` artifacts to use the same list/get/upsert/delete model.
+
+**Acceptance Scenarios**
+
+1. Given an artifact key `doc:plan.md`, when it is upserted, then the system stores it as a comment artifact with stable retrieval metadata.
+2. Given an artifact key `contract:openapi.yaml` or `checklist:tdd.md`, when it is listed, then it is returned through the same API family.
+
+### User Story 10 - Support migration tooling for old formats (Priority: P1)
+
+As a maintainer, I want migration tooling to handle both local legacy specs and old Issue-body bundles.
+
+**Acceptance Scenarios**
+
+1. Given local `specs/SPEC-*`, when migration runs, then it can create Issue-first artifacts.
+2. Given an existing body-canonical `gwt-spec` Issue, when migration or repair runs, then it can split the body into `doc:*` and `checklist:*` artifact comments.
+
+### User Story 11 - Implementation completion must be evidence-backed (Priority: P0)
+
+As a maintainer, I want a SPEC to be marked complete only after tasks, acceptance, TDD, progress, and verification all agree.
+
+**Acceptance Scenarios**
+
+1. Given `doc:tasks.md` is all `[x]`, when completion is declared, then `checklist:acceptance.md` and `checklist:tdd.md` must also reflect the same completion state.
+2. Given implementation still violates `doc:spec.md`, when someone tries to mark the SPEC done, then the workflow must route back to `gwt-spec-ops` instead of allowing completion.
+3. Given a progress comment says `implementation is complete`, when the completion gate has not passed, then the workflow must treat that comment as invalid and require correction.
+
+### User Story 12 - The workflow must distinguish preflight from exit gates (Priority: P0)
+
+As an implementer, I want `gwt-spec-analyze` to stay a preflight check while a separate mandatory completion audit governs exit.
+
+**Acceptance Scenarios**
+
+1. Given a `CLEAR` analysis result, when implementation starts, then `gwt-spec-implement` may execute but cannot use that same `CLEAR` as the final completion proof.
+2. Given implementation has finished, when the exit audit runs, then it must compare code and verification evidence against `doc:spec.md`, `doc:tasks.md`, and `checklist:*` artifacts.
+3. Given the exit audit finds divergence, when completion is blocked, then the next step is `gwt-spec-ops` for artifact repair or task rollback.
+
+### User Story 13 - Acceptance and TDD artifacts must stay machine-usable (Priority: P1)
+
+As a workflow maintainer, I want checklist artifacts to be structured and current so they can participate in the completion gate.
+
+**Acceptance Scenarios**
+
+1. Given `checklist:tdd.md` exists, when the workflow reads it, then it must be in a clear, current, non-corrupted format.
+2. Given acceptance scenarios exist in `doc:spec.md`, when `doc:tasks.md` is generated or updated, then verification tasks must map back to them.
+3. Given a checklist artifact is stale or malformed, when the workflow reaches completion, then the SPEC cannot be marked done.
+
 ## Edge Cases
 
 - New SPEC registration succeeds but no `doc:spec.md` is created.
@@ -91,6 +159,14 @@ As a maintainer, I want GitHub-backed embedded skills to prefer REST for metadat
 - REST requests hit primary or secondary rate limits and require bounded retry/backoff.
 - GraphQL is unavailable but review-thread-specific operations are requested.
 - A helper skill exists on disk but is absent from the user-visible skill catalog.
+- A spec issue has no `doc:*` comments and only body sections.
+- A spec issue has partial `doc:*` coverage (for example `doc:spec.md` exists but `doc:plan.md` does not).
+- Artifact comments use marker format or legacy prefix format.
+- Consumers request only contract/checklist artifacts while `doc:*` artifacts also exist.
+- `doc:tasks.md` is all complete but one or more acceptance items remain unchecked.
+- Progress comments contain outdated `Done` statements after requirements changed.
+- A spec issue inherited corrupted or partial `checklist:tdd.md` content from earlier migrations.
+- An implementation is partially correct and needs task rollback rather than a brand-new spec.
 
 ## Functional Requirements
 
@@ -101,7 +177,7 @@ As a maintainer, I want GitHub-backed embedded skills to prefer REST for metadat
 - **FR-005**: `gwt-spec-implement` must own execution after `CLEAR`, including test-first task execution, progress updates, and PR handoff.
 - **FR-006**: `gwt-pr` and `gwt-pr-fix` must auto-merge `origin/<base>` using merge, not rebase, when the merge is behaviorally clear.
 - **FR-007**: PR and SPEC skills must ask the user only for ambiguous conflicts, unresolved product decisions, missing auth, or risky destructive migration scope.
-- **FR-008**: This spec must declare #1327 as storage/API canonical and #1354 as Issue detail/viewer canonical.
+- **FR-008**: This spec is the single canonical reference for gwt-spec workflow, storage/API, and completion gate. #1354 remains the Issue detail/viewer canonical.
 - **FR-009**: Migration is part of the redesign scope and must cover both local legacy specs and old body-canonical GitHub spec issues.
 - **FR-010**: The repo-level constitution (`memory/constitution.md`) must remain part of the planning gate.
 - **FR-011**: GitHub-backed embedded skills must prefer REST for PR/Issue metadata, PR create/update, CI/check reads, reviews, review comments, and comment operations where GitHub REST provides practical coverage.
@@ -110,6 +186,19 @@ As a maintainer, I want GitHub-backed embedded skills to prefer REST for metadat
 - **FR-014**: REST-first GitHub skills must treat PR discovery, PR create/update, commit status, check-runs, reviews, review comments, and PR issue comments as REST-capable paths in both documentation and implementation planning.
 - **FR-015**: When REST or GraphQL rate limits are hit, embedded GitHub skills must document bounded retry/backoff behavior and must not claim that REST is unlimited.
 - **FR-016**: User-facing workflow guidance must reference only visible skills directly; if an internal helper skill such as `gwt-spec-plan` is not visible in the current user-facing catalog, the documented next step must route through its visible owner skill instead.
+- **FR-017**: `SpecIssueArtifactKind` must support `doc`, `contract`, and `checklist` artifact families.
+- **FR-018**: `get_spec_issue_detail()` must reconstruct `SpecIssueSections` from `doc:*` artifacts first and body sections second.
+- **FR-019**: `SpecIssueDetail.sections` must remain the stable frontend-facing aggregate shape.
+- **FR-020**: `list_spec_issue_artifact_comments` and related CRUD APIs must support `doc:*` artifacts alongside existing contract/checklist artifacts.
+- **FR-021**: Legacy body-canonical `gwt-spec` Issues must remain readable until migration is complete.
+- **FR-022**: The canonical body format for new `gwt-spec` Issues must be an artifact index plus status/links, not a full bundle dump.
+- **FR-023**: Migration tooling must cover both `specs/SPEC-* -> Issue-first` and `body-canonical issue -> artifact-first issue` flows.
+- **FR-024**: `gwt-spec-analyze` must be documented as a pre-implementation readiness gate only.
+- **FR-025**: `gwt-spec-implement` must include a mandatory post-implementation completion gate before tasks or progress can declare completion.
+- **FR-026**: The completion gate must reconcile `doc:spec.md`, `doc:tasks.md`, `checklist:acceptance.md`, `checklist:tdd.md`, progress comments, and executed verification.
+- **FR-027**: If reconciliation fails, the workflow must route back to `gwt-spec-ops` and must not leave the SPEC in a completed state.
+- **FR-028**: TDD and acceptance checklists must remain structured, readable, and current enough to support the completion gate.
+- **FR-029**: Completion comments such as `implementation is complete` must be treated as workflow outputs that require evidence, not as source-of-truth on their own.
 
 ## Non-Functional Requirements
 
@@ -118,17 +207,31 @@ As a maintainer, I want GitHub-backed embedded skills to prefer REST for metadat
 - **NFR-003**: Autonomy improvements must preserve high-confidence conflict handling rather than mechanically taking one side.
 - **NFR-004**: Migration scope must be documented before implementation proceeds further.
 - **NFR-005**: Embedded GitHub skill guidance must accurately state that REST and GraphQL both have rate limits, and that REST-first is chosen for transport suitability rather than because REST is unlimited.
+- **NFR-006**: Artifact-first migration must not require a breaking frontend payload change.
+- **NFR-007**: Existing closed SPEC issues remain readable without manual repair.
+- **NFR-008**: Rust/Tauri regression tests must cover artifact-first, legacy, and mixed-mode issues.
+- **NFR-009**: Completion-gate rules must stay aligned across skill docs, command docs, and issue artifact conventions.
+- **NFR-010**: The workflow must prefer rollback of false completion state over silently broadening the SPEC.
+- **NFR-011**: The completion audit must be specific enough that a future implementer does not need to invent exit criteria.
 
 ## Success Criteria
 
 - **SC-001**: Embedded skills describe one ordered artifact-first workflow from registration through analysis and implementation.
-- **SC-002**: Ownership is explicit: #1579 workflow, #1327 storage/API, #1354 viewer, #1643 search.
+- **SC-002**: Ownership is explicit: #1579 workflow/storage/API/completion, #1354 viewer, #1643 search.
 - **SC-003**: `gwt-spec-implement` exists as the implementation owner and `gwt-spec-ops` no longer stops at normal handoff boundaries.
 - **SC-004**: `gwt-pr` and `gwt-pr-fix` auto-handle routine base merges and high-confidence PR fixes while escalating only ambiguous cases.
 - **SC-005**: Migration is explicitly in scope for both local specs and body-canonical issues.
 - **SC-006**: #1579 clearly defines a REST-first / GraphQL-only-where-needed transport policy for embedded GitHub skills.
 - **SC-007**: The spec explicitly names the REST-first responsibility split across `gwt-pr`, `gwt-pr-check`, and `gwt-pr-fix` so implementation can proceed without transport ambiguity.
 - **SC-008**: Planning-ready next-step guidance does not point users at hidden helper skills.
+- **SC-009**: The backend can read index-only spec issues backed by `doc:*` comments.
+- **SC-010**: The backend can still read legacy body-canonical spec issues.
+- **SC-011**: Artifact CRUD supports `doc`, `contract`, and `checklist` consistently.
+- **SC-012**: Migration scope explicitly covers old local specs and old body-canonical issues.
+- **SC-013**: The workflow distinguishes `pre-implementation CLEAR` from `post-implementation completion`.
+- **SC-014**: A SPEC cannot be marked complete while acceptance/TDD/task/progress artifacts disagree.
+- **SC-015**: Corrupted or stale checklist artifacts are identified as blockers rather than ignored.
+- **SC-016**: #1654 can be remediated under the new completion rules without inventing a second shell spec.
 
 ## Individual Skill Specifications
 

@@ -1,8 +1,8 @@
 {
   "id": "1579",
-  "title": "gwt-spec: 埋め込みスキルシステム（AI エージェントスキル・コマンド・フック）",
+  "title": "gwt-spec: ワークフロー・ストレージ/API・完了ゲート統合仕様",
   "status": "open",
   "phase": "ready",
   "created_at": "2026-03-10T11:58:05Z",
-  "updated_at": "2026-03-24T00:56:54Z"
+  "updated_at": "2026-03-25T00:00:00Z"
 }

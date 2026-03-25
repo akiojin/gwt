@@ -4,7 +4,7 @@ doc:tasks.md
 ## Phase 1: Workflow Canonicalization
 
 - [x] T001 Confirm #1579 as the canonical workflow/registration spec.
-- [x] T002 Keep #1327, #1354, and #1643 linked with explicit ownership boundaries.
+- [x] T002 Keep #1354 and #1643 linked with explicit ownership boundaries (storage/API and completion gate are now part of #1579).
 - [x] T003 Redefine stop conditions so clear owners and auto-fixable gaps continue without user intervention.
 
 ## Phase 2: Skill and Command Execution Ownership
@@ -51,3 +51,33 @@ doc:tasks.md
 - [x] T031 gwt-pr-fix: CI/review/conflict 修正スキル実装
 - [x] T032 gwt-agent-dispatch: PTY ベース Agent ディスパッチスキル実装
 - [x] T033 gwt-file-search: セマンティックファイル検索スキル実装
+
+## Phase: Artifact-first Storage/API (from SPEC-1327)
+
+- [ ] T034 Add RED tests for `doc:*` artifact parsing and mixed-mode precedence.
+- [ ] T035 Add `Doc` to `SpecIssueArtifactKind`.
+- [ ] T036 Reconstruct `SpecIssueDetail.sections` from `doc:*` artifacts first.
+- [ ] T037 Preserve body-section fallback for legacy issues.
+- [ ] T038 Extend Tauri `issue_spec` command serialization for `doc` artifacts.
+- [ ] T039 Verify builtin/MCP/tooling paths can reason about `doc`, `contract`, and `checklist` together.
+- [ ] T040 Extend migration scope to support body-canonical issue -> artifact-first issue conversion.
+- [ ] T041 Keep local `specs/SPEC-*` migration as a supported path.
+- [ ] T042 Run targeted Rust and Tauri tests for artifact-first and legacy spec bundles.
+
+## Phase: Completion Gate (from SPEC-1730)
+
+- [ ] T043 Define explicit post-implementation completion-gate semantics for `gwt-spec-*`.
+- [ ] T044 Define rollback rules for false completion state in issue artifacts and progress comments.
+- [ ] T045 Update `gwt-spec-ops` to require completion-gate reconciliation before final done state.
+- [ ] T046 Update `gwt-spec-analyze` docs so `CLEAR` is scoped to pre-implementation readiness only.
+- [ ] T047 Update `gwt-spec-implement` docs to require post-implementation artifact/code reconciliation.
+- [ ] T048 Update `plugins/gwt/commands/gwt-spec-*.md` to match the new exit rules.
+- [ ] T049 Define valid `checklist:tdd.md` structure for workflow-owned specs.
+- [ ] T050 Add validation expectations for stale or malformed checklist artifacts.
+- [ ] T051 Document how acceptance scenarios map back to verification tasks and completion claims.
+- [ ] T052 Re-open #1654 completion state under the new gate.
+- [ ] T053 Repair `#1654` task/checklist/progress consistency before declaring completion again.
+- [ ] T054 Use #1654 as the first acceptance case for the new completion-gate workflow.
+- [ ] T055 Verify skill docs and command docs describe the same owner and exit behavior.
+- [ ] T056 Verify malformed or stale checklist artifacts are treated as blockers.
+- [ ] T057 Verify #1654 cannot return to done state until artifacts and implementation agree.
