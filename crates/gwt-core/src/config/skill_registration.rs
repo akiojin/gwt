@@ -1218,6 +1218,7 @@ fn rewrite_project_asset_content(content: &str, root_name: &str) -> String {
     content
         .replace("${CLAUDE_PLUGIN_ROOT}", root_name)
         .replace("$CLAUDE_PLUGIN_ROOT", root_name)
+        .replace(".claude/skills/", &format!("{root_name}/skills/"))
         .replace("`skills/", &format!("`{root_name}/skills/"))
 }
 
@@ -2544,7 +2545,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(issue_search_skill.contains("Issues search first"));
-        assert!(issue_search_skill.contains("spec integration"));
+        assert!(issue_search_skill.contains("canonical existing issue"));
         assert!(issue_search_skill.contains("search-issues"));
 
         let issue_spec_skill = std::fs::read_to_string(
@@ -2674,7 +2675,8 @@ OPENAI_API_KEY = "legacy-key"
                 .join("gwt-spec-register.md"),
         )
         .unwrap();
-        assert!(spec_register_command.contains("seed `doc:spec.md`"));
+        assert!(spec_register_command.contains("seed `spec.md`"));
+        assert!(spec_register_command.contains("specs/SPEC-{id}/"));
         assert!(spec_register_command.contains("gwt-issue-search"));
         assert!(spec_register_command.contains("gwt-issue-register"));
         assert!(spec_register_command.contains("gwt-spec-ops"));
