@@ -249,9 +249,9 @@
 
 <style>
   .git-section {
-    margin-top: 16px;
+    margin-top: var(--space-4);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     background: var(--bg-secondary);
     overflow: hidden;
   }
@@ -275,7 +275,7 @@
   .git-header-left {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: var(--space-2);
     min-width: 0;
   }
 
@@ -307,7 +307,7 @@
   .refresh-btn {
     background: none;
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--text-muted);
     font-size: 11px;
     font-family: monospace;
@@ -326,10 +326,10 @@
   }
 
   .git-error {
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: 12px;
   }
@@ -337,13 +337,13 @@
   .git-loading {
     font-size: 12px;
     color: var(--text-muted);
-    padding: 8px 0;
+    padding: var(--space-2) 0;
   }
 
   .base-branch-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     margin-bottom: 10px;
   }
 
@@ -356,11 +356,11 @@
   .base-select {
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font-size: 12px;
     font-family: monospace;
-    padding: 3px 8px;
+    padding: 3px var(--space-2);
     cursor: pointer;
   }
 
@@ -373,7 +373,7 @@
     display: flex;
     gap: 2px;
     border-bottom: 1px solid var(--border-color);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
   }
 
   .git-tab-btn {
