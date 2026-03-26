@@ -87,7 +87,7 @@
 <style>
   .quit-confirm-toast {
     position: fixed;
-    top: 16px;
+    top: var(--space-4);
     left: 50%;
     transform: translateX(-50%);
     z-index: var(--z-quit-toast);
@@ -96,9 +96,9 @@
     border: 1px solid var(--border-color, #45475a);
     font-family: var(--ui-font-family, system-ui, -apple-system, sans-serif);
     font-size: var(--ui-font-md, 12px);
-    padding: 8px 20px;
-    border-radius: 8px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    padding: var(--space-2) 20px;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
     pointer-events: none;
     user-select: none;
   }
@@ -110,7 +110,7 @@
   @keyframes fadeIn {
     from {
       opacity: 0;
-      transform: translateX(-50%) translateY(-8px);
+      transform: translateX(-50%) translateY(calc(-1 * var(--space-2)));
     }
     to {
       opacity: 1;
