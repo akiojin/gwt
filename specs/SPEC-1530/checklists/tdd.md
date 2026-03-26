@@ -1,0 +1,5 @@
+- T-001: `parse_pr_statuses_json` returns `Closed` when the same branch has one `closed/unmerged` PR and one merged PR.
+- T-002: `parse_pr_statuses_json` returns `Open` when the same branch has one open PR and one merged PR.
+- T-003: `parse_pr_statuses_json` returns `Merged` when all PRs for the branch are merged.
+- T-004: `compute_safety_level(false, false, false, false, false, true, Some(PrStatus::Closed)) == SafetyLevel::Warning`.
+- T-005: Cleanup modal treats `closed` PR status as warning when `deleteRemote` is enabled.

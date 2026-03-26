@@ -2,7 +2,9 @@ import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./support/tauri-mock";
 import {
   defaultRecentProject,
+  expectAgentCanvasVisible,
   openRecentProject,
+  saveE2ECoverage,
   waitForMenuActionListener,
   emitTauriEvent,
   waitForInvokeCommand,
@@ -14,6 +16,10 @@ test.beforeEach(async ({ page }) => {
       get_recent_projects: [defaultRecentProject],
     },
   });
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
 });
 
 test("StatusBar shows project path", async ({ page }) => {
@@ -45,9 +51,7 @@ test("StatusBar shows terminal count when terminals open", async ({
 }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   await waitForMenuActionListener(page);
   await emitTauriEvent(page, "menu-action", { action: "new-terminal" });

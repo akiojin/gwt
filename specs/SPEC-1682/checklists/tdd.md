@@ -1,0 +1,4 @@
+- RED: add tests that fail unless startup pending state carries a concrete progress message, startup cache hit avoids a new LLM call, and the startup tool set excludes mutating tools.
+- GREEN: implement startup cache orchestration and read-only startup analysis until the targeted suite passes.
+- RED: add a frontend test that fails unless assistant markdown is rendered with heading/list elements.
+- VERIFY: run targeted Rust tests and `pnpm test src/lib/components/AssistantPanel.test.ts` for the pending-state UI.

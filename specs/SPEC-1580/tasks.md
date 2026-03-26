@@ -1,0 +1,12 @@
+- [x] T001 [S] 対象アセットの分類ルールを確定する
+- [x] T002 [F] Editor テストを追加して RED を確認する
+- [x] T003 [F] sprite sheet / atlas 生成 Editor スクリプトを実装する
+- [x] T004 [U] [US1] character / background 用 atlas を生成する
+- [x] T005 [FIN] Unity コンパイル状態と Editor テストを確認する
+- [ ] T006 [F] [US1] Modern Office root 定数と IsSpriteCandidateAsset を Office パスに拡張する
+- [ ] T007 [F] [US1] Office 家具 singles (32×48) のインポーター設定テスト追加・実装
+- [ ] T008 [F] [US3] UI_16x16 / emotes のグリッドスライステスト追加・実装
+- [ ] T009 [F] [US2] キャラクタースプライトシート (896×656) スライステスト追加・実装
+- [ ] T010 [F] [US4] CharacterAnimationPipeline 新規作成 (AnimationClip + AnimatorController 生成)
+- [ ] T011 [U] [US5] Office / UI SpriteAtlas 定義追加
+- [ ] T012 [FIN] Unity コンパイル・テスト全パス確認

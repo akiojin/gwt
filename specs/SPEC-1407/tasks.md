@@ -1,0 +1,4 @@
+- [x] T001 [F] テスト修正: MERGED PR テストのアサーションを更新（TDD RED 確認）
+- [x] T002 [U] `latestBranchPrBranch` state 変数追加・全代入箇所の同期更新
+- [x] T003 [U] `resolvedPrNumber` のロジック変更（state → ブランチ名一致）
+- [x] T004 [FIN] 全テスト pass・型チェック検証
