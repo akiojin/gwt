@@ -1,3 +1,5 @@
+import { isBrowserDevMode } from "./tauriMock";
+
 const ALLOWED_EXTERNAL_SCHEMES = new Set(["http:", "https:"]);
 
 function normalizeToAbsoluteUrl(raw: string): string | null {
@@ -23,6 +25,9 @@ export function isAllowedExternalHttpUrl(raw: string): boolean {
 }
 
 async function tryOpenWithTauriShell(url: string): Promise<boolean> {
+  if (isBrowserDevMode()) {
+    return false;
+  }
   try {
     const { open } = await import("@tauri-apps/plugin-shell");
     await open(url);
