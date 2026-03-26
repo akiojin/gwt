@@ -282,6 +282,7 @@ describe("applyAppearanceSettingsRuntime", () => {
       default_base_branch: "main",
       worktree_root: "/tmp",
       debug: false,
+      profiling: false,
       log_retention_days: 7,
       agent_auto_install_deps: false,
       docker_force_host: false,
