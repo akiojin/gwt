@@ -1,0 +1,29 @@
+- [ ] FR-001: LLMによるタスク計画生成が動作する
+- [ ] FR-002: JSON抽出がマークダウンコードフェンス・生テキスト両方に対応する
+- [ ] FR-003: 重複TaskIdが自動リナンバーされる
+- [ ] FR-004: WorktreeStrategy未指定時にデフォルト値newが設定される
+- [ ] FR-005: RefinePlanAsyncでPlanIdが維持される
+- [ ] FR-006: ProcessUserCommandAsyncがLLMタスク計画を呼び出す
+- [ ] FR-007: ApprovePlanAsyncでdraft→approved遷移する
+- [ ] FR-008: 依存関係グラフに基づくタスク順序制御が動作する
+- [ ] FR-009: newタスクごとにワークツリーが作成される
+- [ ] FR-010: sharedタスクが同一ワークツリーを再利用する
+- [ ] FR-011: 適切なエージェントが雇用される
+- [ ] FR-012: タスク開始時にrunningステータスが設定される
+- [ ] FR-013: 失敗タスクのカスケード処理が動作する
+- [ ] FR-014: AgentOutputBufferが容量制限付きで動作する
+- [ ] FR-015: LLM評価による完了/失敗判定が動作する
+- [ ] FR-016: フォールバックキーワード判定が動作する
+- [ ] FR-017: タスク完了後にPRが自動作成される
+- [ ] FR-018: Mergeable判定が正しく動作する
+- [ ] FR-019: マージ後にワークツリーが削除される
+- [ ] FR-020: 進捗サマリーの集計が正しい
+- [ ] FR-021: OnProgressChangedイベントが発火する
+- [ ] FR-022: CancelPlanAsyncで全タスクがfailedになる
+- [ ] FR-023: PTY出力停止30秒でwaiting_input推定が動作する
+- [ ] FR-024: SPEC Issue生成ツールが動作する
+- [ ] FR-025: force push/rebase禁止ガードが動作する
+- [ ] Related tests are green
+- [ ] Regression risk and remaining limitations are documented
+
+---

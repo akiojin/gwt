@@ -1,0 +1,7 @@
+- [x] assistant message の改行が保持される
+- [x] user message の改行が保持される
+- [x] 推論中インジケーターが表示される
+- [x] 既存の IME/Enter 送信テストを壊さない
+- [x] `ArrowUp` で user input 履歴を遡れる
+- [x] `ArrowDown` で draft を復元できる
+- [x] コンポーネントテスト追加・通過

@@ -1,0 +1,3 @@
+- atlas 設定単位: `name`, `outputPath`, `packableFolderPaths`
+- sprite sheet 判定単位: `assetPath`, `cellSize`, `sourceWidth`, `sourceHeight`, `isSheet`
+- character animation: `characterName`, `spriteSheetPath`, `animationRows[]`, `frameCount`, `frameRate`

@@ -1,0 +1,5 @@
+- [x] T001 AI settings persistence location を `config.toml` profile data に固定する
+- [x] T002 canonical profile shape を `profiles.<name>.ai` に固定する
+- [x] T003 runtime consumption points が canonical shape のみを参照することを spec に反映する
+- [x] T004 sidecar / legacy schema 非対応を spec に反映する
+- [x] T005 API key 再読込と model listing の regression test 要件を反映する

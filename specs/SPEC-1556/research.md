@@ -1,0 +1,3 @@
+- Current repo implementation and existing tests must be compared against this spec before changes land.
+- Dependency / plugin / asset constraints specific to `機能仕様: データマイグレーション (Rust版 → Unity版 自動移行)` should be captured here as they are validated.
+- Any divergence between the issue body and the current code should be recorded here before implementation.

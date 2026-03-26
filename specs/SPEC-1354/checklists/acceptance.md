@@ -1,0 +1,4 @@
+- [ ] index-only body + `doc:*` artifact spec issues render correctly in Issue detail view
+- [ ] legacy body-canonical spec issues still render correctly
+- [ ] `IssueSpecPanel` / `IssueListPanel` tests cover both paths
+- [ ] #1643 references #1354 for detail-view behavior instead of owning it

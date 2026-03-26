@@ -153,7 +153,10 @@ describe("OpenProject", () => {
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("probe_path", { path: "/home/user/project" });
-      expect(onOpen).toHaveBeenCalledWith("/home/user/project");
+      expect(onOpen).toHaveBeenCalledWith(
+        "/home/user/project",
+        expect.any(String),
+      );
     });
   });
 

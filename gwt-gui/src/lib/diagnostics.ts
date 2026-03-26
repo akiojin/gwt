@@ -21,6 +21,7 @@ export async function collectSystemInfo(): Promise<string> {
   }
 }
 
+/** Collect recent application logs via the backend, with privacy masking applied. */
 export async function collectRecentLogs(maxLines = 50): Promise<string> {
   try {
     const logs = await invoke<string>("read_recent_logs", { maxLines });
