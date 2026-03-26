@@ -52,17 +52,24 @@ doc:tasks.md
 - [x] T032 gwt-agent-dispatch: PTY ベース Agent ディスパッチスキル実装
 - [x] T033 gwt-file-search: セマンティックファイル検索スキル実装
 
-## Phase: Artifact-first Storage/API (from SPEC-1327)
+## Phase: Skill Canonical Path Migration (plugins/gwt/ → .claude/)
 
-- [ ] T034 Add RED tests for `doc:*` artifact parsing and mixed-mode precedence.
+- [x] T058 `plugins/gwt/skills/*` → `.claude/skills/*` 正本移行
+- [x] T059 `plugins/gwt/commands/*` → `.claude/commands/*` 正本移行
+- [x] T060 `skill_registration.rs` / `build.rs` の `include_str!()` パスを `.claude/` に変更
+- [x] T061 `plugins/gwt/` ディレクトリ削除
+
+## Phase: Local File-based Storage/API (from SPEC-1327)
+
+- [ ] T034 Add RED tests for local SPEC file parsing and mixed-mode precedence (local files vs Issue body).
 - [ ] T035 Add `Doc` to `SpecIssueArtifactKind`.
-- [ ] T036 Reconstruct `SpecIssueDetail.sections` from `doc:*` artifacts first.
-- [ ] T037 Preserve body-section fallback for legacy issues.
-- [ ] T038 Extend Tauri `issue_spec` command serialization for `doc` artifacts.
+- [ ] T036 Reconstruct `SpecIssueDetail.sections` from local `specs/SPEC-{N}/` files first, Issue body second.
+- [ ] T037 Preserve Issue body-section fallback for legacy Issue-based specs.
+- [ ] T038 Extend Tauri `issue_spec` command serialization for local file-based `doc` artifacts.
 - [ ] T039 Verify builtin/MCP/tooling paths can reason about `doc`, `contract`, and `checklist` together.
-- [ ] T040 Extend migration scope to support body-canonical issue -> artifact-first issue conversion.
-- [ ] T041 Keep local `specs/SPEC-*` migration as a supported path.
-- [ ] T042 Run targeted Rust and Tauri tests for artifact-first and legacy spec bundles.
+- [ ] T040 Extend migration scope to support `Issue-based spec -> local specs/SPEC-{N}/` conversion.
+- [ ] T041 Keep `Issue -> local SPEC directory` migration as the primary supported path.
+- [ ] T042 Run targeted Rust and Tauri tests for local file-based and legacy Issue-based spec bundles.
 
 ## Phase: Completion Gate (from SPEC-1730)
 
@@ -71,7 +78,7 @@ doc:tasks.md
 - [ ] T045 Update `gwt-spec-ops` to require completion-gate reconciliation before final done state.
 - [ ] T046 Update `gwt-spec-analyze` docs so `CLEAR` is scoped to pre-implementation readiness only.
 - [ ] T047 Update `gwt-spec-implement` docs to require post-implementation artifact/code reconciliation.
-- [ ] T048 Update `plugins/gwt/commands/gwt-spec-*.md` to match the new exit rules.
+- [ ] T048 Update `.claude/commands/gwt-spec-*.md` to match the new exit rules.
 - [ ] T049 Define valid `checklist:tdd.md` structure for workflow-owned specs.
 - [ ] T050 Add validation expectations for stale or malformed checklist artifacts.
 - [ ] T051 Document how acceptance scenarios map back to verification tasks and completion claims.

@@ -40,6 +40,7 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 | US-7 | マネージドブロックのマーカーが不正（入れ子、終端なし等）の場合、エラーを返しサイレントに壊さない | P0 |
 | US-8 | Claude Code の `settings.local.json` に gwt 管理のフック定義が自動登録される | P0 |
 | US-9 | `.claude/settings.json` や `~/.claude/settings.json` が存在しても、gwt はそれらを参照・改変せず `.claude/settings.local.json` だけを使う | P0 |
+| US-10 | Claude hook が repo ルート以外の CWD（例: `gwt-gui/`、Docker/DevContainer 内の workspace）から起動されても、同じプロジェクト配下の `.claude/hooks/scripts/` を解決できる | P0 |
 
 ### US-1 詳細
 
@@ -86,6 +87,8 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 | FR-012 | `.claude/settings.local.json` のフック登録も冪等で、既存の非 gwt フック設定を破壊しない | US-8 |
 | FR-013 | UNIX 環境ではスクリプトファイル（`.sh`）に実行権限（0o755）を付与する | US-1 |
 | FR-014 | register 時に `.claude/settings.json` と `~/.claude/settings.json` を参照・改変しない | US-9 |
+| FR-015 | Claude Code の gwt 管理 hook コマンドは CWD 非依存でなければならず、repo ルートを実行時に解決して `.claude/hooks/scripts/` を参照する | US-10 |
+| FR-016 | Docker / DevContainer では、コンテナ内で Git worktree と `git` コマンドが利用可能な限り、mount 先の絶対パスに依存せず同じ hook 定義で動作しなければならない | US-10 |
 
 ### 除外パターン一覧
 
@@ -132,5 +135,7 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 | SC-009 | `.claude/settings.local.json` にフック定義が登録される | ユニットテスト: settings.local.json の内容検証 |
 | SC-010 | UNIX でスクリプトファイルに実行権限が付与される | ユニットテスト: パーミッション検証 |
 | SC-011 | `.claude/settings.json` や `~/.claude/settings.json` が存在しても、登録結果が `.claude/settings.local.json` のみで決まること | ユニットテスト: legacy settings.json を置いても無視されることを検証 |
+| SC-012 | repo ルート以外の CWD でも `.claude/settings.local.json` の hook コマンドが同じプロジェクトの script を解決できる | ユニットテスト: 生成コマンドに `git rev-parse --show-toplevel` が含まれることを検証 |
+| SC-013 | Docker / DevContainer 内でも Git worktree が見えていれば同じ hook 定義で動作する | 手動確認: コンテナ内で `git rev-parse --show-toplevel` と hook 解決を確認 |
 
 ---
