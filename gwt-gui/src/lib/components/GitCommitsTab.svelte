@@ -155,21 +155,21 @@
 
 <style>
   .commits-tab {
-    padding: 8px 0;
+    padding: var(--space-2) 0;
   }
 
   .commits-loading,
   .commits-empty {
     font-size: 12px;
     color: var(--text-muted);
-    padding: 8px 0;
+    padding: var(--space-2) 0;
   }
 
   .commits-error {
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: 12px;
   }
@@ -184,8 +184,8 @@
     display: flex;
     align-items: baseline;
     gap: 10px;
-    padding: 5px 8px;
-    border-radius: 4px;
+    padding: 5px var(--space-2);
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
@@ -220,8 +220,8 @@
   }
 
   .show-more-btn {
-    margin-top: 8px;
-    padding: 6px 16px;
+    margin-top: var(--space-2);
+    padding: 6px var(--space-4);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
     border-radius: 6px;
