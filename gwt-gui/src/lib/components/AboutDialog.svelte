@@ -261,9 +261,9 @@
   .about-dialog {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 24px 32px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6) var(--space-8);
+    box-shadow: var(--shadow-xl);
     min-width: 420px;
     max-width: 600px;
     max-height: 80vh;
@@ -273,10 +273,10 @@
 
   .tab-bar {
     display: flex;
-    gap: 4px;
-    margin-bottom: 16px;
+    gap: var(--space-1);
+    margin-bottom: var(--space-4);
     border-bottom: 1px solid var(--border-color);
-    padding-bottom: 8px;
+    padding-bottom: var(--space-2);
   }
 
   .tab-btn {
@@ -317,7 +317,7 @@
     font-size: 24px;
     font-weight: 700;
     color: var(--accent);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
   }
 
   .general-tab p {
@@ -328,33 +328,33 @@
   .about-edition {
     color: var(--text-muted);
     font-size: var(--ui-font-sm);
-    margin-top: 4px;
+    margin-top: var(--space-1);
   }
 
   .about-version {
     color: var(--text-muted);
     font-size: var(--ui-font-sm);
-    margin-top: 4px;
-    margin-bottom: 16px;
+    margin-top: var(--space-1);
+    margin-bottom: var(--space-4);
   }
 
   .agent-list {
     text-align: left;
     border-top: 1px solid var(--border-color);
-    padding-top: 12px;
-    margin-top: 8px;
+    padding-top: var(--space-3);
+    margin-top: var(--space-2);
   }
 
   .agent-list h3 {
     font-size: var(--ui-font-sm);
     color: var(--text-muted);
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2);
   }
 
   .agent-row {
     display: flex;
     justify-content: space-between;
-    padding: 4px 0;
+    padding: var(--space-1) 0;
     font-size: var(--ui-font-sm);
   }
 
@@ -371,16 +371,16 @@
   .system-tab {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-4);
   }
 
   .sys-section {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 10px 12px;
+    gap: var(--space-1);
+    padding: 10px var(--space-3);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     background: var(--bg-primary);
   }
 
@@ -423,20 +423,20 @@
   .statistics-tab {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-3);
   }
 
   .stats-muted {
     color: var(--text-muted);
     font-size: var(--ui-font-md);
     text-align: center;
-    padding: 24px 0;
+    padding: var(--space-6) 0;
   }
 
   .stats-filter {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     font-size: var(--ui-font-sm);
     color: var(--text-secondary);
   }
@@ -448,7 +448,7 @@
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--ui-font-sm);
-    padding: 4px 8px;
+    padding: var(--space-1) var(--space-2);
     flex: 1;
   }
 
@@ -460,14 +460,14 @@
 
   .stats-table th {
     text-align: left;
-    padding: 6px 8px;
+    padding: 6px var(--space-2);
     border-bottom: 1px solid var(--border-color);
     color: var(--text-muted);
     font-weight: 600;
   }
 
   .stats-table td {
-    padding: 6px 8px;
+    padding: 6px var(--space-2);
     border-bottom: 1px solid var(--border-color);
     color: var(--text-primary);
   }
@@ -480,9 +480,9 @@
   .stats-wt {
     display: flex;
     justify-content: space-between;
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     background: var(--bg-primary);
     font-size: var(--ui-font-sm);
     color: var(--text-secondary);
@@ -495,8 +495,8 @@
 
   /* Close button */
   .about-close {
-    margin-top: 16px;
-    padding: 6px 20px;
+    margin-top: var(--space-4);
+    padding: 6px var(--space-5);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
     border-radius: 6px;
