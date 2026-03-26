@@ -97,7 +97,7 @@ export function setupOsEnvFallbackListenerEffect(args: {
   let cancelled = false;
   (async () => {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlistenFn = await listen<string>("os-env-fallback", (event) => {
         args.showToast(
           `Shell environment not loaded: ${event.payload}. Using process environment.`,
@@ -155,7 +155,7 @@ export function setupAppUpdateStateListenerEffect(args: {
   let cancelled = false;
   (async () => {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlistenFn = await listen<UpdateState>("app-update-state", (event) => {
         const state = event.payload;
         if (state.state !== "available") return;
@@ -210,7 +210,7 @@ export function setupWorktreesChangedListenerEffect(args: {
   let cancelled = false;
   (async () => {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlistenFn = await listen<unknown>("worktrees-changed", (event) => {
         const projectPath = args.getProjectPath();
         if (!projectPath) return;
@@ -245,7 +245,7 @@ export function setupWindowWillHideListenerEffect(args: {
   let cancelled = false;
   (async () => {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlistenFn = await listen("window-will-hide", async () => {
         await args.onHide();
       });
@@ -272,7 +272,7 @@ export function setupTerminalClosedListenerEffect(args: {
   let cancelled = false;
   (async () => {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlistenFn = await listen<{ pane_id: string }>("terminal-closed", (event) => {
         args.removeTabLocal(`agent-${event.payload.pane_id}`);
         args.removeTabLocal(`terminal-${event.payload.pane_id}`);
@@ -300,7 +300,7 @@ export function setupTerminalCwdChangedListenerEffect(args: {
   let cancelled = false;
   (async () => {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlistenFn = await listen<{ pane_id: string; cwd: string }>(
         "terminal-cwd-changed",
         (event) => {
@@ -334,7 +334,7 @@ export function setupLaunchProgressListenerEffect(args: {
   let cancelled = false;
   (async () => {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlistenFn = await listen<LaunchProgressPayload>("launch-progress", (event) => {
         const payload = event.payload;
         const launchJobId = args.getLaunchJobId();
@@ -383,7 +383,7 @@ export function setupLaunchFinishedListenerEffect(args: {
   let cancelled = false;
   (async () => {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlistenFn = await listen<LaunchFinishedPayload>("launch-finished", (event) => {
         const payload = event.payload;
         const launchJobId = args.getLaunchJobId();

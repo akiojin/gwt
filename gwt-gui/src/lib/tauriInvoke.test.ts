@@ -7,6 +7,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => tauriInvokeMock(...args),
 }));
 
+// Force non-mock mode so the real Tauri invoke path is exercised.
+vi.mock("./tauriMock", () => ({
+  isBrowserDevMode: () => false,
+  getMockResponse: () => null,
+  createMockListen: () => async () => () => {},
+}));
+
 describe("tauriInvoke", () => {
   beforeEach(() => {
     tauriInvokeMock.mockReset();

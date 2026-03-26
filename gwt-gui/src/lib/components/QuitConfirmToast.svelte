@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
-  import { invoke } from "$lib/tauriInvoke";
+  import { invoke, listen } from "$lib/tauriInvoke";
 
   let visible = $state(false);
   let timer: ReturnType<typeof setTimeout> | null = null;

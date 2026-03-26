@@ -1,7 +1,31 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { errorBus, type StructuredError } from "./errorBus";
 import { isProfilingEnabled, recordInvokeMetric } from "./profiling.svelte";
+import { isBrowserDevMode, getMockResponse } from "./tauriMock";
+
+// --- Browser dev mode detection -----------------------------------------
+
+const IS_MOCK = isBrowserDevMode();
+
+// --- Lazy Tauri imports (only resolved when Tauri runtime is present) ---
+
+let tauriInvokeFn: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null =
+  null;
+type ListenFn = (event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void>;
+let tauriListenFn: ListenFn | null = null;
+
+async function ensureTauriInvoke() {
+  if (tauriInvokeFn) return tauriInvokeFn;
+  const mod = await import("@tauri-apps/api/core");
+  tauriInvokeFn = mod.invoke;
+  return tauriInvokeFn;
+}
+
+async function ensureTauriListen(): Promise<ListenFn> {
+  if (tauriListenFn) return tauriListenFn;
+  const mod = await import("@tauri-apps/api/event");
+  tauriListenFn = mod.listen as unknown as ListenFn;
+  return tauriListenFn;
+}
 
 // --- HTTP IPC -----------------------------------------------------------
 
@@ -16,15 +40,14 @@ const HTTP_COMMANDS = new Set([
 let httpIpcPort: number | null = null;
 let httpPortPromise: Promise<number> | null = null;
 
-/** Resolve the HTTP IPC port (cached after first successful fetch). */
 function resolveHttpPort(): Promise<number> {
   if (httpIpcPort !== null) return Promise.resolve(httpIpcPort);
   if (httpPortPromise) return httpPortPromise;
 
   httpPortPromise = (async () => {
-    // Try the Tauri command first (available immediately if setup has run).
     try {
-      const port = await tauriInvoke<number>("get_http_ipc_port");
+      const inv = await ensureTauriInvoke();
+      const port = (await inv("get_http_ipc_port")) as number;
       if (port > 0) {
         httpIpcPort = port;
         return port;
@@ -33,11 +56,11 @@ function resolveHttpPort(): Promise<number> {
       // Server may not be ready yet; fall through to event.
     }
 
-    // Wait for the ipc-server-ready event as fallback.
+    const listenFn = await ensureTauriListen();
     return new Promise<number>((resolve) => {
-      const unlisten = listen<number>("ipc-server-ready", (event) => {
-        httpIpcPort = event.payload;
-        resolve(event.payload);
+      const unlisten = listenFn("ipc-server-ready", (event) => {
+        httpIpcPort = event.payload as number;
+        resolve(event.payload as number);
         unlisten.then((fn) => fn());
       });
     });
@@ -46,10 +69,7 @@ function resolveHttpPort(): Promise<number> {
   return httpPortPromise;
 }
 
-async function httpInvoke<T>(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<T> {
+async function httpInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const port = await resolveHttpPort();
   const url = `http://127.0.0.1:${port}/ipc/${command}`;
   const res = await fetch(url, {
@@ -66,18 +86,13 @@ async function httpInvoke<T>(
 
 // --- Structured error parsing -------------------------------------------
 
-function parseStructuredError(
-  err: unknown,
-  command: string,
-): StructuredError {
-  // Tauri v2 returns the serialized StructuredError when the command fails
+function parseStructuredError(err: unknown, command: string): StructuredError {
   if (err && typeof err === "object") {
     const obj = err as Record<string, unknown>;
     if (typeof obj.severity === "string" && typeof obj.code === "string") {
       return obj as unknown as StructuredError;
     }
   }
-  // Fallback for plain string errors (legacy or non-migrated commands)
   const message =
     typeof err === "string"
       ? err
@@ -95,19 +110,26 @@ function parseStructuredError(
   };
 }
 
-// --- Public invoke -------------------------------------------------------
+// --- Public API ----------------------------------------------------------
 
-export async function invoke<T>(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<T> {
+export async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  // Browser dev mode: return mock data immediately
+  if (IS_MOCK) {
+    await new Promise((r) => setTimeout(r, 50)); // Simulate async
+    return getMockResponse<T>(command);
+  }
+
   const useHttp = HTTP_COMMANDS.has(command);
   const profiling = isProfilingEnabled();
   const start = profiling ? performance.now() : 0;
   try {
-    const result = useHttp
-      ? await httpInvoke<T>(command, args)
-      : await tauriInvoke<T>(command, args);
+    let result: T;
+    if (useHttp) {
+      result = await httpInvoke<T>(command, args);
+    } else {
+      const inv = await ensureTauriInvoke();
+      result = (await inv(command, args)) as T;
+    }
     if (profiling) {
       recordInvokeMetric({
         command,
@@ -132,4 +154,19 @@ export async function invoke<T>(
     errorBus.emit(structured);
     throw structured;
   }
+}
+
+/**
+ * Re-export a `listen` function that works in both Tauri and browser dev mode.
+ * In browser dev mode, returns a no-op unlisten function.
+ */
+export async function listen<T>(
+  event: string,
+  handler: (event: { payload: T }) => void,
+): Promise<() => void> {
+  if (IS_MOCK) {
+    return () => {};
+  }
+  const listenFn = await ensureTauriListen();
+  return listenFn(event, handler as (event: { payload: unknown }) => void);
 }
