@@ -10,6 +10,7 @@ mod assistant_monitor;
 mod assistant_tools;
 mod commands;
 mod consultation;
+mod http_server;
 mod index_watcher;
 mod menu;
 mod pty_skills;
