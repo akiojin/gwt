@@ -704,8 +704,8 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    padding: 16px 18px 18px;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-5) var(--space-5);
     min-height: 0;
     background:
       radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 10%, transparent), transparent 28%),
@@ -726,7 +726,7 @@
 
   .canvas-toolbar {
     justify-content: space-between;
-    gap: 16px;
+    gap: var(--space-4);
   }
 
   .canvas-toolbar h2 {
@@ -735,34 +735,36 @@
   }
 
   .canvas-toolbar p {
-    margin: 4px 0 0;
+    margin: var(--space-1) 0 0;
     color: var(--text-muted);
   }
 
   .toolbar-group {
-    gap: 10px;
+    gap: var(--space-3);
   }
 
   .toolbar-chip {
     border: 1px solid var(--border-color);
-    border-radius: 999px;
-    padding: 6px 10px;
+    border-radius: var(--radius-full);
+    padding: var(--space-2) var(--space-3);
     color: var(--text-secondary);
     background: color-mix(in srgb, var(--bg-secondary) 75%, transparent);
+    transition: background var(--transition-fast);
   }
 
   .zoom-controls {
-    gap: 6px;
+    gap: var(--space-2);
   }
 
   .zoom-btn {
     min-width: 36px;
     height: 32px;
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     border: 1px solid var(--border-color);
     background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
     color: var(--text-primary);
     cursor: pointer;
+    transition: background var(--transition-fast);
   }
 
   .zoom-btn.ghost {
@@ -772,11 +774,11 @@
   .canvas-board-panel {
     flex: 1;
     min-height: 0;
-    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-    border-radius: 18px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl);
     overflow: hidden;
     background: color-mix(in srgb, var(--bg-secondary) 78%, var(--bg-primary));
-    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.16);
+    box-shadow: var(--shadow-lg);
   }
 
   .canvas-board {
@@ -788,7 +790,7 @@
       linear-gradient(90deg, color-mix(in srgb, var(--border-color) 18%, transparent) 1px, transparent 1px),
       linear-gradient(color-mix(in srgb, var(--border-color) 18%, transparent) 1px, transparent 1px),
       linear-gradient(180deg, color-mix(in srgb, var(--bg-primary) 94%, transparent), var(--bg-primary));
-    background-size: 40px 40px, 40px 40px, auto;
+    background-size: var(--space-10) var(--space-10), var(--space-10) var(--space-10), auto;
   }
 
   .canvas-board:active {
@@ -818,32 +820,33 @@
     display: flex;
     flex-direction: column;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: color-mix(in srgb, var(--bg-secondary) 84%, var(--bg-primary));
-    border-radius: 18px;
-    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.18);
+    background: var(--bg-elevated);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
     cursor: pointer;
     outline: none;
+    transition: border-color var(--transition-normal), box-shadow var(--transition-normal);
   }
 
   .canvas-tile.selected {
     border-color: color-mix(in srgb, var(--accent) 58%, var(--border-color));
     box-shadow:
-      0 14px 28px rgba(0, 0, 0, 0.18),
+      var(--shadow-lg),
       0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent);
   }
 
   .tile-header,
   .dialog-header {
     justify-content: space-between;
-    gap: 12px;
-    padding: 12px 14px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border-subtle);
     background: color-mix(in srgb, var(--bg-primary) 68%, transparent);
   }
 
   .tile-heading {
-    gap: 10px;
+    gap: var(--space-3);
     min-width: 0;
     flex: 1;
   }
@@ -853,8 +856,8 @@
     align-items: center;
     justify-content: center;
     min-width: 76px;
-    padding: 4px 8px;
-    border-radius: 999px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-full);
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--text-secondary);
     font-size: 0.75rem;
@@ -877,6 +880,7 @@
     cursor: grab;
     font-family: monospace;
     letter-spacing: 0.08em;
+    transition: color var(--transition-fast);
   }
 
   .tile-drag-handle:active {
@@ -886,8 +890,8 @@
   .tile-body {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 14px;
+    gap: var(--space-3);
+    padding: var(--space-4);
     min-height: 0;
     flex: 1;
   }
@@ -911,7 +915,7 @@
   .tile-footer {
     margin-top: auto;
     justify-content: space-between;
-    gap: 10px;
+    gap: var(--space-3);
     color: var(--text-secondary);
     font-size: 0.8rem;
   }
@@ -924,7 +928,7 @@
   .session-surface {
     flex: 1;
     min-height: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    border-bottom: 1px solid var(--border-subtle);
     background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
     min-width: 0;
   }
@@ -934,7 +938,7 @@
     align-items: center;
     justify-content: center;
     height: 100%;
-    padding: 18px;
+    padding: var(--space-5);
     color: var(--text-muted);
     text-align: center;
     line-height: 1.45;
@@ -942,7 +946,7 @@
 
   .session-footer {
     margin-top: 0;
-    padding: 10px 14px 12px;
+    padding: var(--space-3) var(--space-4);
   }
 
   .tile-status {
@@ -953,12 +957,12 @@
   .detail-dialog-body,
   .dialog-body {
     display: grid;
-    gap: 12px;
+    gap: var(--space-3);
   }
 
   .detail-row {
     display: grid;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .detail-label {
@@ -975,36 +979,15 @@
   .dialog-close {
     width: fit-content;
     border: 1px solid var(--border-color);
-    border-radius: 999px;
-    padding: 8px 14px;
+    border-radius: var(--radius-full);
+    padding: var(--space-2) var(--space-4);
     background: transparent;
     color: var(--text-primary);
     cursor: pointer;
+    transition: background var(--transition-fast);
   }
 
-  .worktree-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.46);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 20;
-  }
-
-  .worktree-dialog {
-    width: min(560px, calc(100vw - 32px));
-    border-radius: 18px;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: color-mix(in srgb, var(--bg-secondary) 85%, var(--bg-primary));
-    box-shadow: 0 22px 44px rgba(0, 0, 0, 0.24);
-  }
-
-  .dialog-close {
-    margin: 0 16px 16px;
-  }
-
+  .worktree-overlay,
   .detail-overlay {
     position: fixed;
     inset: 0;
@@ -1015,14 +998,27 @@
     z-index: 20;
   }
 
-  .detail-dialog {
-    width: min(1100px, calc(100vw - 48px));
-    height: min(760px, calc(100vh - 48px));
-    border-radius: 18px;
+  .worktree-dialog {
+    width: min(560px, calc(100vw - var(--space-8)));
+    border-radius: var(--radius-xl);
     overflow: hidden;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     background: color-mix(in srgb, var(--bg-secondary) 85%, var(--bg-primary));
-    box-shadow: 0 22px 44px rgba(0, 0, 0, 0.24);
+    box-shadow: var(--shadow-xl);
+  }
+
+  .dialog-close {
+    margin: 0 var(--space-4) var(--space-4);
+  }
+
+  .detail-dialog {
+    width: min(1100px, calc(100vw - 48px));
+    height: min(760px, calc(100vh - 48px));
+    border-radius: var(--radius-xl);
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-secondary) 85%, var(--bg-primary));
+    box-shadow: var(--shadow-xl);
     display: flex;
     flex-direction: column;
   }
@@ -1034,17 +1030,18 @@
 
   .dialog-close-inline {
     border: 1px solid var(--border-color);
-    border-radius: 999px;
-    padding: 6px 12px;
+    border-radius: var(--radius-full);
+    padding: var(--space-2) var(--space-3);
     background: transparent;
     color: var(--text-primary);
     cursor: pointer;
+    transition: background var(--transition-fast);
   }
 
   @media (max-width: 1200px) {
     .detail-dialog {
-      width: calc(100vw - 24px);
-      height: calc(100vh - 24px);
+      width: calc(100vw - var(--space-6));
+      height: calc(100vh - var(--space-6));
     }
   }
 </style>
