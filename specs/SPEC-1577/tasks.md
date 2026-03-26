@@ -1,0 +1,20 @@
+- [ ] T001 [S] [US-1] `AssistantToolDefinition` / `AssistantToolHandler` / `AssistantToolRegistry` trait 設計
+- [ ] T002 [S] [US-1] ツール実行パイプライン共通基盤（バリデーション → 権限チェック → 実行 → 結果構造化）
+- [ ] T003 [S] [US-1] Responses API の tools 形式に基づく JSON Schema ベースのツール定義生成
+- [ ] T004 [F] [US-1] コード参照ツール実装（`codebase_read_file`, `codebase_search`, `codebase_list_dir`, `codebase_get_symbols`）
+- [ ] T005 [F] [US-3] Git 操作ツール実装（`git_worktree_create`, `git_worktree_remove`, `git_push`, `git_status`, `git_diff`, `git_log`, `git_worktree_list`）
+- [ ] T006 [F] [US-4] GitHub 連携ツール実装（`github_read_issue`, `github_create_issue`, `github_update_issue`, `github_list_issues`, `github_close_issue`, `github_create_pr`, `github_get_pr_status`, `github_merge_pr`）
+- [ ] T007 [F] [US-1] Agent 管理ツール実装（`agent_hire`, `agent_fire`, `agent_assign_task`, `agent_get_status`, `agent_list`）
+- [ ] T008 [F] [US-5] PTY 監視ツール実装（`pty_send_keys`, `pty_capture_scrollback`, `pty_get_output_since`）
+- [ ] T009 [F] [US-2] SPEC 管理ツール実装（`spec_start_interview`, `spec_generate_section`, `spec_create_issue`, `spec_update_issue`, `spec_check_consistency`, `spec_list`）
+- [ ] T010 [F] [US-6] セッション管理ツール実装（`session_save`, `session_restore`, `session_list`）
+- [ ] T011 [F] [US-6] ユーザー対話ツール実装（`assistant_propose_action`, `assistant_ask_question`, `assistant_notify`）
+- [ ] T012 [U] [US-6] destructive 操作の権限チェック + ユーザー承認フロー統合
+- [ ] T013 [U] [US-2] SPEC 生成フロー E2E 統合（インタビュー → セクション生成 → Issue 作成）
+- [ ] T014 [U] [US-7] SPEC 整合性チェックフロー統合（全既存 SPEC 取得 → 重複/矛盾検出）
+- [ ] T015 [FIN] Tauri 状態管理登録
+- [ ] T016 [FIN] ツール実行ログ記録
+- [ ] T017 [FIN] ユニットテスト（全ツールカテゴリ）
+- [ ] T018 [FIN] 統合テスト（LLM モックによるツール呼び出しチェーン）
+
+---

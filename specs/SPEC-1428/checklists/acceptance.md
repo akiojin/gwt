@@ -1,0 +1,4 @@
+- [ ] `should_fallback_to_manual_worktree_removal("...does not exist")` returns `true`
+- [ ] `is_missing_worktree_error(GitOperationFailed { "worktree remove", "...does not exist" })` returns `true`
+- [ ] 既存テストが全て PASS
+- [ ] clippy / fmt 検証 PASS

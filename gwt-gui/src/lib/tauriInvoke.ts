@@ -44,8 +44,10 @@ export async function invoke<T>(
     if (profiling) {
       recordInvokeMetric({
         command,
+        name: `invoke.${command}`,
         durationMs: performance.now() - start,
         timestamp: Date.now(),
+        success: true,
       });
     }
     return result;
@@ -53,8 +55,10 @@ export async function invoke<T>(
     if (profiling) {
       recordInvokeMetric({
         command,
+        name: `invoke.${command}`,
         durationMs: performance.now() - start,
         timestamp: Date.now(),
+        success: false,
       });
     }
     const structured = parseStructuredError(err, command);

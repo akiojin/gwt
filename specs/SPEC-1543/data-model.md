@@ -1,0 +1,62 @@
+### Core service
+- `IGitService`
+  - worktree, branch, commit, diff, stash, cleanup, tag 系 API を提供
+- `GitCommandRunner`
+  - `RunAsync(args, workingDir, ct, timeoutMs) -> (stdout, stderr, exitCode)`
+- `GitService`
+  - `GitCommandRunner` を注入し、CLI 出力を parse して model 化
+
+### Models
+- `Worktree`
+  - `Path`
+  - `Branch`
+  - `Commit`
+  - `Status`
+  - `IsMain`
+  - `HasChanges`
+  - `HasUnpushed`
+- `BranchInfo`
+  - `Name`
+  - `Commit`
+  - `Upstream`
+  - `TrackingStatus`
+  - `IsRemote`
+- `CommitEntry`
+  - `Hash`
+  - `Message`
+- `ChangeSummary`
+  - `StagedFiles`
+  - `UnstagedFiles`
+  - `Files: List`
+- `FileStatusEntry`
+  - `IndexStatus`
+  - `WorktreeStatus`
+  - `FilePath`
+- `ChangeStats`
+  - `FilesChanged`
+  - `Insertions`
+  - `Deletions`
+  - `HasUncommitted`
+  - `HasUnpushed`
+- `BranchMeta`
+  - `Upstream`
+  - `Ahead`
+  - `Behind`
+- `StashEntry`
+  - `Index`
+  - `Message`
+- `CleanupCandidate`
+  - `Path`
+  - `Branch`
+  - `Reason`
+- `RepoType`
+  - `NonRepo`, `Empty`, `Normal`, `Worktree`, `Bare`
+
+### Parser helpers
+- `ParseWorktreeList`
+- `ParseBranchList`
+- `ParseCommitLog`
+- `ParseShortStat`
+- `ParseStatusPorcelain`
+- `ParseChangeSummary`
+- `ParseStashList`
