@@ -1,0 +1,4 @@
+- [x] `~/.gwt/config.toml` が app settings の唯一の正本として文書化されている
+- [x] `<project>/.gwt/project.toml` の責務が最小 Git 補助メタデータに限定されている
+- [x] retired sidecar 設定ファイルが仕様上サポート外になっている
+- [x] `profiles.<name>` の flat shape が canonical として定義されている

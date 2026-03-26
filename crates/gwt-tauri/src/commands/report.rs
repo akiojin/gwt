@@ -105,10 +105,15 @@ fn is_log_file_candidate(path: &Path) -> bool {
     name.ends_with(".jsonl") || name.contains(".jsonl.")
 }
 
-/// Read the last `max_lines` lines from the most recent log file.
+/// Read the last `max_lines` lines from the most recent **normal** log file.
+///
+/// Only `gwt.jsonl*` files are collected; profiling output (`profile.json`)
+/// is excluded by `is_log_file_candidate`.
 #[instrument(skip_all, fields(command = "read_recent_logs"))]
 #[tauri::command]
 pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredError> {
+    gwt_core::logging::log_flow_start("report", "read_recent_logs");
+
     let max = max_lines.unwrap_or(100) as usize;
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -117,14 +122,24 @@ pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredErro
     }
 
     let Some(latest_log_path) = select_most_recent_log(candidates) else {
+        gwt_core::logging::log_flow_success("report", "read_recent_logs");
         return Ok("(No log files found)".to_string());
     };
 
-    let content = fs::read_to_string(&latest_log_path)
-        .map_err(|e| StructuredError::internal(&e.to_string(), "read_recent_logs"))?;
+    // TODO(#1758): error_detail and extra fields in JSONL entries may contain
+    // absolute file paths (e.g. /Users/<name>/...) that reveal the local
+    // username. Frontend privacyMask covers API keys/tokens/passwords but does
+    // not yet redact home-directory paths. Consider adding a home-path
+    // masking pattern on the frontend or sanitising here before returning.
+    let content = fs::read_to_string(&latest_log_path).map_err(|e| {
+        gwt_core::logging::log_flow_failure("report", "read_recent_logs", &e.to_string());
+        StructuredError::internal(&e.to_string(), "read_recent_logs")
+    })?;
 
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(max);
+
+    gwt_core::logging::log_flow_success("report", "read_recent_logs");
     Ok(lines[start..].join("\n"))
 }
 
@@ -443,6 +458,25 @@ mod tests {
     #[test]
     fn log_file_candidate_rejects_non_jsonl() {
         assert!(!is_log_file_candidate(Path::new("gwt.log")));
+    }
+
+    #[test]
+    fn log_file_candidate_rejects_profile_json() {
+        assert!(!is_log_file_candidate(Path::new("profile.json")));
+    }
+
+    #[test]
+    fn collect_log_candidates_excludes_profile_json() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path().join("default");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("gwt.jsonl.2026-03-22"), "log line\n").unwrap();
+        fs::write(ws.join("profile.json"), "trace data\n").unwrap();
+
+        let candidates = collect_log_candidates(temp.path());
+
+        assert_eq!(candidates.len(), 1, "profile.json must not be collected");
+        assert!(candidates[0].to_string_lossy().contains("gwt.jsonl"));
     }
 
     #[test]

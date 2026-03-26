@@ -1,0 +1,3 @@
+- RED: add tests that fail unless startup analysis injects a hidden system prompt and results in a visible assistant message without exposing the internal prompt.
+- GREEN: implement the startup analysis flow and wire it into session startup.
+- VERIFY: run targeted Rust tests and the existing AssistantPanel frontend test file if needed.

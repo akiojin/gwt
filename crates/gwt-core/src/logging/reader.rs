@@ -16,9 +16,24 @@ pub struct LogFields {
     /// Log message
     #[serde(default)]
     pub message: String,
-    /// Category field
+    /// Subsystem category (e.g. "project", "git", "docker")
     #[serde(default)]
     pub category: Option<String>,
+    /// Operation or state transition name
+    #[serde(default)]
+    pub event: Option<String>,
+    /// Flow result: "start", "success", "failure", "progress"
+    #[serde(default)]
+    pub result: Option<String>,
+    /// Workspace name
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Typed error code
+    #[serde(default)]
+    pub error_code: Option<String>,
+    /// Triage detail for failures
+    #[serde(default)]
+    pub error_detail: Option<String>,
     /// Additional fields
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -51,6 +66,31 @@ impl LogEntry {
     /// Get the category if present
     pub fn category(&self) -> Option<&str> {
         self.fields.category.as_deref()
+    }
+
+    /// Get the event name if present
+    pub fn event(&self) -> Option<&str> {
+        self.fields.event.as_deref()
+    }
+
+    /// Get the flow result if present
+    pub fn result(&self) -> Option<&str> {
+        self.fields.result.as_deref()
+    }
+
+    /// Get the workspace if present
+    pub fn workspace(&self) -> Option<&str> {
+        self.fields.workspace.as_deref()
+    }
+
+    /// Get the error code if present
+    pub fn error_code(&self) -> Option<&str> {
+        self.fields.error_code.as_deref()
+    }
+
+    /// Get the error detail if present
+    pub fn error_detail(&self) -> Option<&str> {
+        self.fields.error_detail.as_deref()
     }
 }
 
