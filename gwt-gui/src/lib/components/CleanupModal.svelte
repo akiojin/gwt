@@ -366,7 +366,7 @@
       onClose();
 
       // Listen for cleanup-completed to show results
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriInvoke");
       const unlisten = await listen<{ results: CleanupResult[] }>(
         "cleanup-completed",
         (event) => {
@@ -800,7 +800,7 @@
   }
 
   .dialog-header h2 {
-    font-size: 15px;
+    font-size: var(--ui-font-lg);
     font-weight: 600;
     color: var(--text-primary);
   }
@@ -810,10 +810,11 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 20px;
+    font-size: var(--ui-font-xl);
     padding: 4px 8px;
     border-radius: 4px;
     line-height: 1;
+    transition: color 0.15s, background 0.15s;
   }
 
   .close-btn:hover {
@@ -841,7 +842,7 @@
     background: rgba(255, 0, 0, 0.08);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-sm);
     line-height: 1.4;
   }
 
@@ -858,10 +859,11 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-sm);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
   }
 
   .toolbar-btn:hover {
@@ -870,7 +872,7 @@
   }
 
   .toolbar-count {
-    font-size: 12px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
   }
 
@@ -894,7 +896,7 @@
     border-radius: 9px;
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
-    transition: background 0.15s;
+    transition: background 0.15s, border-color 0.15s;
   }
 
   .toggle-switch.toggle-on {
@@ -910,7 +912,7 @@
     height: 12px;
     border-radius: 50%;
     background: var(--text-primary);
-    transition: left 0.15s;
+    transition: left 0.15s ease;
   }
 
   .toggle-on .toggle-knob {
@@ -918,7 +920,7 @@
   }
 
   .toggle-text {
-    font-size: 11px;
+    font-size: var(--ui-font-xs);
     color: var(--text-secondary);
   }
 
@@ -929,14 +931,14 @@
   .wt-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--ui-font-sm);
   }
 
   .wt-table th {
     text-align: left;
     padding: 6px 8px;
     color: var(--text-muted);
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -1012,13 +1014,13 @@
   }
 
   .mono {
-    font-family: monospace;
+    font-family: var(--font-mono);
   }
 
   .marker {
     display: inline-block;
-    font-family: monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--ui-font-xs);
     font-weight: 700;
     padding: 0 3px;
     border-radius: 3px;
@@ -1035,19 +1037,19 @@
 
   .sync-ahead {
     color: var(--green);
-    font-family: monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--ui-font-xs);
     margin-right: 4px;
   }
 
   .sync-behind {
     color: var(--yellow);
-    font-family: monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--ui-font-xs);
   }
 
   .gone-badge {
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
     padding: 1px 6px;
     border-radius: 999px;
     background: rgba(243, 139, 168, 0.15);
@@ -1056,7 +1058,7 @@
   }
 
   .gone-badge-emphasized {
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
     padding: 1px 6px;
     border-radius: 999px;
     background: rgba(243, 139, 168, 0.35);
@@ -1066,7 +1068,7 @@
   }
 
   .pr-badge {
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
     padding: 1px 6px;
     border-radius: 999px;
     border: 1px solid;
@@ -1086,7 +1088,7 @@
   }
 
   .pr-spinner {
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
     animation: pr-spin 1s ease-in-out infinite;
   }
@@ -1131,8 +1133,8 @@
 
   .agent-fallback {
     display: none;
-    font-size: 11px;
-    font-family: monospace;
+    font-size: var(--ui-font-xs);
+    font-family: var(--font-mono);
     color: var(--cyan);
   }
 
@@ -1148,8 +1150,8 @@
   }
 
   .tool-label {
-    font-size: 10px;
-    font-family: monospace;
+    font-size: var(--ui-font-xs);
+    font-family: var(--font-mono);
     color: var(--text-muted);
   }
 
@@ -1165,10 +1167,11 @@
     padding: 8px 16px;
     border: none;
     border-radius: 6px;
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
+    transition: background 0.15s, opacity 0.15s;
   }
 
   .btn-cancel {
@@ -1213,14 +1216,14 @@
   }
 
   .confirm-dialog h3 {
-    font-size: 15px;
+    font-size: var(--ui-font-lg);
     font-weight: 600;
     color: var(--red);
     margin-bottom: 10px;
   }
 
   .confirm-dialog p {
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     color: var(--text-secondary);
     line-height: 1.5;
     margin-bottom: 18px;
@@ -1233,7 +1236,7 @@
   }
 
   .failure-summary {
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     color: var(--text-secondary);
     margin-bottom: 4px;
   }
@@ -1255,7 +1258,7 @@
   }
 
   .failure-error {
-    font-size: 11px;
+    font-size: var(--ui-font-xs);
     color: var(--red);
     line-height: 1.4;
   }
@@ -1267,7 +1270,7 @@
   }
 
   .result-summary {
-    font-size: 12px;
+    font-size: var(--ui-font-sm);
     color: var(--text-secondary);
     margin: 0;
   }
@@ -1288,7 +1291,7 @@
   }
 
   .result-detail {
-    font-size: 11px;
+    font-size: var(--ui-font-xs);
     color: var(--text-secondary);
     line-height: 1.4;
   }
