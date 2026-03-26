@@ -31,6 +31,20 @@ Build installers locally (one command):
 pnpm run installer:macos
 ```
 
+Fast local app install for iterative testing (without waiting for a GitHub Release):
+
+```bash
+pnpm run install:local:macos
+```
+
+Reinstall the already-built local `.app` bundle without rebuilding:
+
+```bash
+pnpm run install:local:macos:skip-build
+```
+
+This installs the local build directly to `/Applications/gwt.app`.
+
 ### Windows
 
 Download `.msi` from GitHub Releases and run the installer.
@@ -171,6 +185,11 @@ Voice input uses Qwen3-ASR via a local Python runtime.
 
 - `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
 - `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
+
+### Logging and profiling
+
+Normal logs are stored as JSON Lines under `~/.gwt/logs/`. Performance profiling can be enabled in **Settings > Profiling**.
+See [#1758](https://github.com/akiojin/gwt/issues/1758) for the logging specification.
 
 ## License
 

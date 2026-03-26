@@ -1,4 +1,6 @@
-import type { UnlistenFn, Event } from "@tauri-apps/api/event";
+export type UnlistenFn = () => void;
+
+type TauriEvent<T> = { payload: T };
 
 export interface MenuActionPayload {
   action: string;
@@ -34,7 +36,7 @@ export async function setupMenuActionListener(
       .getCurrentWebviewWindow()
       .listen<MenuActionPayload>(
         "menu-action",
-        (event: Event<MenuActionPayload>) => {
+        (event: TauriEvent<MenuActionPayload>) => {
           handler(event.payload.action);
         },
       );

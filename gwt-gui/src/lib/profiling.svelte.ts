@@ -1,11 +1,11 @@
 /**
  * Profiling state store (Svelte 5 runes).
  *
- * Manages profiling on/off, invoke round-trip ring buffer,
+ * Manages profiling on/off, frontend metric buffering,
  * heartbeat interval, and freeze-detected event listener.
  */
 
-import { invoke } from "./tauriInvoke";
+import { invoke, listen } from "./tauriInvoke";
 
 // ---------------------------------------------------------------------------
 // State
@@ -21,21 +21,46 @@ export function isProfilingEnabled(): boolean {
 // Invoke metric ring buffer
 // ---------------------------------------------------------------------------
 
-export interface InvokeMetric {
-  command: string;
+export type FrontendMetricKind = "invoke" | "startup";
+
+export interface FrontendMetric {
+  kind?: FrontendMetricKind;
+  command?: string;
+  name?: string;
   durationMs: number;
   timestamp: number;
+  startupToken?: string;
+  success?: boolean;
 }
 
 const RING_BUFFER_MAX = 100;
-let metrics: InvokeMetric[] = $state([]);
+let metrics: FrontendMetric[] = $state([]);
+let pendingMetrics: FrontendMetric[] = [];
+let profilingBootstrapping = true;
 
-export function recordInvokeMetric(metric: InvokeMetric): void {
-  if (!profilingEnabled) return;
+function pushMetric(metric: FrontendMetric): void {
   metrics.push(metric);
   if (metrics.length > RING_BUFFER_MAX) {
     metrics.splice(0, metrics.length - RING_BUFFER_MAX);
   }
+}
+
+export function recordFrontendMetric(metric: FrontendMetric): void {
+  if (profilingEnabled) {
+    pushMetric(metric);
+    return;
+  }
+  if (profilingBootstrapping) {
+    pendingMetrics.push(metric);
+  }
+}
+
+export function recordInvokeMetric(metric: FrontendMetric): void {
+  recordFrontendMetric({
+    kind: "invoke",
+    name: metric.name ?? (metric.command ? `invoke.${metric.command}` : "invoke.unknown"),
+    ...metric,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +108,6 @@ function stopMetricReporter(): void {
 async function startFreezeListener(): Promise<void> {
   if (freezeUnlisten) return;
   try {
-    const { listen } = await import("@tauri-apps/api/event");
     const unlisten = await listen<string>("freeze-detected", (event) => {
       console.warn("[profiling] freeze detected:", event.payload);
     });
@@ -111,11 +135,20 @@ export async function initProfiling(): Promise<void> {
   } catch {
     profilingEnabled = false;
   }
+  profilingBootstrapping = false;
 
   if (profilingEnabled) {
+    if (pendingMetrics.length > 0) {
+      const buffered = pendingMetrics.splice(0, pendingMetrics.length);
+      for (const metric of buffered) {
+        pushMetric(metric);
+      }
+    }
     startHeartbeat();
     startMetricReporter();
     await startFreezeListener();
+  } else {
+    pendingMetrics = [];
   }
 }
 
@@ -126,12 +159,20 @@ export function teardownProfiling(): void {
 }
 
 export function setProfilingEnabled(enabled: boolean): void {
+  profilingBootstrapping = false;
   profilingEnabled = enabled;
   if (enabled) {
+    if (pendingMetrics.length > 0) {
+      const buffered = pendingMetrics.splice(0, pendingMetrics.length);
+      for (const metric of buffered) {
+        pushMetric(metric);
+      }
+    }
     startHeartbeat();
     startMetricReporter();
     startFreezeListener();
   } else {
+    pendingMetrics = [];
     teardownProfiling();
   }
 }

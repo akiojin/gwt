@@ -8,13 +8,14 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { invoke } from "$lib/tauriInvoke";
   import MigrationModal from "./MigrationModal.svelte";
+  import { startupProfilingTracker } from "$lib/startupProfiling";
 
   interface RecentProject {
     path: string;
     lastOpened: string;
   }
 
-  let { onOpen }: { onOpen: (path: string) => void } = $props();
+  let { onOpen }: { onOpen: (path: string, startupToken?: string) => void } = $props();
 
   let recentProjects: RecentProject[] = $state([]);
   let opening: boolean = $state(false);
@@ -89,14 +90,18 @@
   async function openGwtProject(projectPath: string, fromRecent: boolean) {
     opening = true;
     errorMessage = null;
+    const startupToken = startupProfilingTracker.start("open_project");
     try {
       const result = await invoke<OpenProjectResult>("open_project", {
         path: projectPath,
       });
       if (result.action === "opened") {
-        onOpen(result.info.path);
+        onOpen(result.info.path, startupToken);
+      } else {
+        startupProfilingTracker.discard(startupToken);
       }
     } catch (err) {
+      startupProfilingTracker.discard(startupToken);
       errorMessage = normalizeOpenProjectError(toErrorMessage(err));
     } finally {
       opening = false;

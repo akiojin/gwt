@@ -1,0 +1,8 @@
+- [x] T001 [S] `#1433` Spec/Plan/Tasks/TDD を回帰修正版へ更新
+- [x] T002 [S] `SettingsPanel.test.ts` に回帰テストを追加して RED を確認
+- [x] T003 [U] `SettingsPanel.svelte` の API Key ボタンを SVG 実装へ変更
+- [x] T004 [U] API Key 入力の text/password 描画スタイルを調整
+- [x] T005 [FIN] `SettingsPanel.test.ts` 実行で GREEN 確認
+- [x] T006 [FIN] `svelte-check` 実行で型エラーなしを確認
+- [x] T007 [FIN] Issue の Tasks / Acceptance Checklist を更新
+- [x] T008 [FIN] API Key peek/copy の E2E シナリオを追加して実行確認

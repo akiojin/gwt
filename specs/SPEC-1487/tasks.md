@@ -1,0 +1,5 @@
+- [ ] T001 [S] `gwt-project-search` の surfacing 経路を調査し、脱落箇所を特定する
+- [ ] T002 [S] skill metadata / available skills 一覧の現状を再現するテストを追加して RED を確認する
+- [ ] T003 [U] `gwt-project-search` が Codex へ露出するよう実装を修正する
+- [ ] T004 [U] 必要なら `gwt-project-search` の説明文またはコマンド案内を実装に合わせて修正する
+- [ ] T005 [FIN] 回帰テストを GREEN にし、実セッションで `SPEC検索` 導線を確認する

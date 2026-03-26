@@ -1,0 +1,19 @@
+- [ ] T001 [S] [US-2] PixelMplus フォント導入 + TextMeshPro フォントアトラス最適化
+- [ ] T002 [F] [US-4] **仮想スクロール実装（P0）: 固定数TMPテキストオブジェクトプール + 可視行+上下50行マージン + スクロール位置に応じた内容差し替え**
+- [ ] T003 [U] [US-5] マウスドラッグによるテキスト選択・ハイライト表示 + Cmd+C / Ctrl+C でクリップボードコピー
+- [ ] T004 [U] [US-6] URL 検出・ハイライト実装
+- [ ] T005 [U] [US-8] リサイズ時の行列再計算 + PTY 通知連携
+- [ ] T006 [U] [US-7] フォント設定（PixelMplus デフォルト、サイズ可変 8-24px）
+- [ ] T007 [U] [US-11] 全ターミナルへのキーブロードキャスト実装
+- [ ] T008 [U] [US-12] ANSI 対応能力プローブ実装
+- [ ] T009 [U] [US-9] 代替画面バッファ対応（Phase 5 以降）
+- [ ] T010 [U] [US-10] マウスイベント対応（Phase 5 以降）
+- [x] T011 [S] [US-1] オーバーレイパネル表示実装（`TerminalOverlayPanel`）
+- [x] T012 [S] [US-1] 動的タブ管理実装（`TerminalTabBar`）
+- [x] T013 [F] [US-2] TextMeshPro ベースのターミナルレンダラー実装（`TerminalRichTextBuilder` + `TerminalRenderer`）
+- [x] T014 [F] [US-2] Catppuccin Mocha テーママッピング（`TerminalRichTextBuilder` に実装済み）
+- [x] T015 [F] [US-4] スクロール UI 実装（`ScrollRect` + `TerminalRenderer`）
+- [x] T016 [F] [US-1] キーボード入力実装（`TerminalInputField` + Input System Package）
+- [ ] T017 [FIN] [US-2] TerminalEmulator 統合テスト（EditMode）
+- [ ] T018 [FIN] [US-1] レンダラー PlayMode テスト
+- [ ] T019 [FIN] [US-2] パフォーマンス計測（大量出力シナリオ）
