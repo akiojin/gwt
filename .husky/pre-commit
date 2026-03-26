@@ -4,3 +4,9 @@ set -e
 
 echo "Validating SKILL.md frontmatter..."
 pnpm lint:skills
+
+echo "Running frontend type check (svelte-check)..."
+(cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json --fail-on-warnings false)
+
+echo "Running frontend unit tests..."
+(cd gwt-gui && pnpm test)
