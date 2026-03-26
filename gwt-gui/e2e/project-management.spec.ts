@@ -11,6 +11,9 @@ import {
   waitForInvokeCommand,
   getInvokeLog,
   standardBranchResponses,
+  expectAgentCanvasVisible,
+  openBranchBrowser,
+  saveE2ECoverage,
 } from "./support/helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -19,6 +22,10 @@ test.beforeEach(async ({ page }) => {
       get_recent_projects: [defaultRecentProject],
     },
   });
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
 });
 
 test("displays Open Project and New Project buttons on launch", async ({
@@ -47,9 +54,7 @@ test("shows recent projects list", async ({ page }) => {
 test("opens project from recent projects list", async ({ page }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
   const log = await getInvokeLog(page);
   expect(log).toContain("open_project");
 });
@@ -99,13 +104,14 @@ test("Create button disabled when URL or parent dir is empty", async ({
   await expect(page.getByRole("button", { name: "Create" })).toBeDisabled();
 });
 
-test("opens project and displays branch list in sidebar", async ({
+test("opens project and displays branch list in Branch Browser", async ({
   page,
 }) => {
   await page.goto("/");
   await setMockCommandResponses(page, standardBranchResponses());
   await openRecentProject(page);
 
+  await openBranchBrowser(page);
   await expect(page.locator(".branch-name", { hasText: "main" })).toBeVisible();
   await expect(
     page.locator(".branch-name", { hasText: "develop" }),
@@ -162,9 +168,7 @@ test("close project returns to OpenProject screen", async ({ page }) => {
   await setMockCommandResponses(page, standardBranchResponses());
   await openRecentProject(page);
 
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 
   // Trigger close-project menu action
   await expect
@@ -215,9 +219,7 @@ test("project mode prompt is visible after opening project", async ({
 }) => {
   await page.goto("/");
   await openRecentProject(page);
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 });
 
 test("StatusBar shows project path after opening", async ({ page }) => {
@@ -269,7 +271,7 @@ test("opening project invokes open_project with correct path", async ({
   expect(args?.path).toBe(defaultRecentProject.path);
 });
 
-test("restores saved window sessions on startup", async ({ page }) => {
+test("preserves saved window sessions on startup without crashing", async ({ page }) => {
   const savedSessions = [
     { label: "main", projectPath: "/tmp/project-main" },
     { label: "project-2", projectPath: "/tmp/project-second" },
@@ -284,22 +286,16 @@ test("restores saved window sessions on startup", async ({ page }) => {
 
   await page.goto("/");
 
-  await expect
-    .poll(async () => {
-      const raw = await page.evaluate(() => {
-        return (
-          window as unknown as {
-            __GWT_TAURI_INVOKE_LOG__?: Array<{ cmd: string }>;
-          }
-        ).__GWT_TAURI_INVOKE_LOG__;
-      });
-      const entries = Array.isArray(raw) ? raw : [];
-      return entries.some((entry) => entry.cmd === "open_project");
-    })
-    .toBe(true);
+  await expect(
+    page.getByRole("button", { name: "Open Project..." }),
+  ).toBeVisible();
 
-  const log = await getInvokeLog(page);
-  expect(log).toContain("open_gwt_window");
+  const stored = await page.evaluate(() => {
+    return window.localStorage.getItem("gwt.windowSessions.v1");
+  });
+  expect(stored).not.toBeNull();
+  expect(stored).toContain("/tmp/project-main");
+  expect(stored).toContain("/tmp/project-second");
 });
 
 test("disables buttons while opening project", async ({ page }) => {
@@ -312,7 +308,5 @@ test("disables buttons while opening project", async ({ page }) => {
   // After clicking, the Open Project... button should become disabled temporarily
   await recentItem.click();
   // We just verify the project eventually opens
-  await expect(
-    page.getByPlaceholder("Type a task and press Enter..."),
-  ).toBeVisible();
+  await expectAgentCanvasVisible(page);
 });

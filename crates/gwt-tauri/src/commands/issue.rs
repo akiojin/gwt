@@ -17,6 +17,7 @@ use gwt_core::{
         find_branches_for_issues, is_gh_cli_authenticated, is_gh_cli_available,
         search_issues_with_query,
     },
+    logging::{log_flow_failure, log_flow_start, log_flow_success},
     worktree::WorktreeManager,
     StructuredError,
 };
@@ -398,9 +399,12 @@ fn fetch_github_issues_impl(
     force_refresh: Option<bool>,
     app_state: &AppState,
 ) -> Result<FetchIssuesResponse, StructuredError> {
+    log_flow_start("issue", "fetch_github_issues");
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "fetch_github_issues"))?;
+    let repo_path = resolve_repo_path_for_project_root(project_root).map_err(|e| {
+        log_flow_failure("issue", "fetch_github_issues", &e);
+        StructuredError::internal(&e, "fetch_github_issues")
+    })?;
     let state = state.unwrap_or_else(|| "open".to_string());
     let category = parse_issue_category(category);
     let include_body = include_body.unwrap_or(false);
@@ -416,6 +420,7 @@ fn fetch_github_issues_impl(
     } else if cache_enabled {
         if let Some(hit) = try_get_issue_cache(app_state, &repo_path, &repo_key, &cache_key, now_ms)
         {
+            log_flow_success("issue", "fetch_github_issues");
             return Ok(hit);
         }
     }
@@ -428,6 +433,7 @@ fn fetch_github_issues_impl(
             if let Some(hit) =
                 try_get_issue_cache(app_state, &repo_path, &repo_key, &cache_key, now_millis())
             {
+                log_flow_success("issue", "fetch_github_issues");
                 return Ok(hit);
             }
         }
@@ -459,9 +465,13 @@ fn fetch_github_issues_impl(
                     now_millis(),
                 );
             }
+            log_flow_success("issue", "fetch_github_issues");
             Ok(response)
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            log_flow_failure("issue", "fetch_github_issues", &err.message);
+            Err(err)
+        }
     };
 
     if cache_enabled && fetch_owner {

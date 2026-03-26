@@ -1,4 +1,11 @@
-import { afterEach, beforeEach } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+
+globalThis.ResizeObserver = class ResizeObserver {
+  observe = vi.fn();
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+  constructor(_cb: ResizeObserverCallback) {}
+} as unknown as typeof ResizeObserver;
 
 let testStartTime: number;
 let testStartMemory: NodeJS.MemoryUsage;
