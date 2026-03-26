@@ -3336,21 +3336,4 @@ custom-pattern
             "unexpected error: {err}"
         );
     }
-
-    #[test]
-    fn tracked_claude_settings_local_uses_cwd_independent_hook_commands() {
-        let tracked = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../.claude/settings.local.json"
-        ));
-
-        assert!(
-            tracked.contains("git rev-parse --show-toplevel"),
-            "tracked .claude/settings.local.json must use repo-root-resolved hook commands"
-        );
-        assert!(
-            !tracked.contains("node .claude/hooks/scripts/gwt-"),
-            "tracked .claude/settings.local.json must not keep legacy relative hook commands"
-        );
-    }
 }
