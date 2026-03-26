@@ -14,7 +14,7 @@ jobs:
     name: Create Tag and Release
     runs-on: ubuntu-latest
     # Only run on release branch merges or manual trigger
-    # Supports: squash merge, merge commit, and workflow_dispatch
+    # Supports: merge commit and workflow_dispatch
     if: |
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.event.head_commit.message, 'chore(release):') ||
@@ -100,7 +100,7 @@ jobs:
         with:
           key: tauri-${{ matrix.platform }}
       # actions/setup-node's pnpm cache requires pnpm to be available.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 10.29.2
           run_install: false

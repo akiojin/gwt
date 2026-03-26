@@ -1,0 +1,3 @@
+- RED: `renders overlay actions with the visibility sizing contract` を追加し、初回実行で `ClipboardPaste` icon width `16` が期待値 `24` に一致しないことを確認した
+- GREEN: `TerminalView.svelte` の overlay contract を更新後、`pnpm exec vitest run src/lib/terminal/TerminalView.test.ts` が通過した
+- 回帰防止: test は icon size に加えて `gap`, `min-width`, `min-height`, `padding`, `pointer-events`, contrast token を source-level に固定する

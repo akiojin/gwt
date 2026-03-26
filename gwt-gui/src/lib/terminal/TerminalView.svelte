@@ -27,6 +27,8 @@
     voiceInputAvailable = false,
     voiceInputAvailabilityReason = null,
     voiceInputError = null,
+    focusOnActivate = true,
+    showControls = true,
     onReady,
   }: {
     paneId: string;
@@ -39,6 +41,8 @@
     voiceInputAvailable?: boolean;
     voiceInputAvailabilityReason?: string | null;
     voiceInputError?: string | null;
+    focusOnActivate?: boolean;
+    showControls?: boolean;
     onReady?: (paneId: string) => void;
   } = $props();
 
@@ -234,9 +238,11 @@
 
   $effect(() => {
     void active;
+    void focusOnActivate;
     void terminal;
 
     if (!active) return;
+    if (!focusOnActivate) return;
 
     const rootEl = containerEl;
     if (!rootEl) return;
@@ -266,6 +272,7 @@
 
   $effect(() => {
     void active;
+    void focusOnActivate;
     void terminal;
 
     if (active) return;
@@ -688,12 +695,16 @@
       focusTerminalIfNeeded(rootEl, true);
     };
     const handleWindowFocus = () => {
-      refocusTerminalOnReactivation(rootEl, true);
+      if (focusOnActivate) {
+        refocusTerminalOnReactivation(rootEl, true);
+      }
       scheduleFitAfterBufferFlush({ rootEl });
     };
     const handleVisibilityChange = () => {
       if (document.hidden) return;
-      refocusTerminalOnReactivation(rootEl);
+      if (focusOnActivate) {
+        refocusTerminalOnReactivation(rootEl);
+      }
       scheduleFitAfterBufferFlush({ rootEl });
     };
 
@@ -722,7 +733,9 @@
         unlistenTauriFocus = await getCurrentWindow().listen(
           "tauri://focus",
           () => {
-            refocusTerminalOnReactivation(rootEl, true);
+            if (focusOnActivate) {
+              refocusTerminalOnReactivation(rootEl, true);
+            }
             scheduleFitAfterBufferFlush({ rootEl });
           },
         );
@@ -1075,33 +1088,35 @@
     data-pane-id={paneId}
     bind:this={containerEl}
   ></div>
-  <div class="terminal-actions" aria-label="Terminal actions">
-    <button
-      class="terminal-action-btn"
-      type="button"
-      title={pasteButtonTitle()}
-      aria-label="Paste"
-      onclick={handlePasteImageClick}
-    >
-      <ClipboardPaste size={24} />
-    </button>
-    <button
-      class:active={voiceInputListening}
-      class:busy={voiceInputPreparing}
-      class:disabled={voiceButtonDisabled()}
-      class="terminal-action-btn"
-      disabled={voiceButtonDisabled()}
-      type="button"
-      title={voiceButtonTitle()}
-      aria-label="Voice"
-      onpointerdown={handleVoiceButtonPointerDown}
-      onpointerup={stopVoiceButtonPtt}
-      onpointercancel={stopVoiceButtonPtt}
-      onlostpointercapture={handleVoiceButtonLostPointerCapture}
-    >
-      <Mic size={24} />
-    </button>
-  </div>
+  {#if showControls}
+    <div class="terminal-actions" aria-label="Terminal actions">
+      <button
+        class="terminal-action-btn"
+        type="button"
+        title={pasteButtonTitle()}
+        aria-label="Paste"
+        onclick={handlePasteImageClick}
+      >
+        <ClipboardPaste size={24} />
+      </button>
+      <button
+        class:active={voiceInputListening}
+        class:busy={voiceInputPreparing}
+        class:disabled={voiceButtonDisabled()}
+        class="terminal-action-btn"
+        disabled={voiceButtonDisabled()}
+        type="button"
+        title={voiceButtonTitle()}
+        aria-label="Voice"
+        onpointerdown={handleVoiceButtonPointerDown}
+        onpointerup={stopVoiceButtonPtt}
+        onpointercancel={stopVoiceButtonPtt}
+        onlostpointercapture={handleVoiceButtonLostPointerCapture}
+      >
+        <Mic size={24} />
+      </button>
+    </div>
+  {/if}
 </div>
 
 <style>
