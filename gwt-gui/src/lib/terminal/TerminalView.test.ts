@@ -1790,6 +1790,28 @@ describe("TerminalView", () => {
     expect(result).toBe(false);
   });
 
+  it("passes Ctrl+Backquote through for native window cycling", async () => {
+    await renderTerminalView({ paneId: "pane-window-cycle", active: true });
+
+    await waitFor(() => {
+      expect(customKeyEventHandler).not.toBeNull();
+    });
+
+    const handler = customKeyEventHandler!;
+    const event = new KeyboardEvent("keydown", {
+      code: "Backquote",
+      key: "`",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    const preventDefaultMock = vi.spyOn(event, "preventDefault");
+
+    const result = handler(event);
+
+    expect(result).toBe(true);
+    expect(preventDefaultMock).not.toHaveBeenCalled();
+  });
+
   it("passes non-keydown events through", async () => {
     await renderTerminalView({ paneId: "pane-keyup", active: true });
 

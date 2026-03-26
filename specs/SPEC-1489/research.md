@@ -1,0 +1,11 @@
+- モデル選択 UI の実装箇所は `gwt-gui/src/lib/components/AgentLaunchForm.svelte`
+- Codex の既定モデルとモデル固有引数は `crates/gwt-core/src/agent/codex.rs` で管理される
+- 起動引数への橋渡しは `crates/gwt-tauri/src/commands/terminal.rs` で行う
+- 保存済みモデル選択は `gwt-gui/src/lib/agentLaunchDefaults.ts` の `modelByAgent` に agent ごとの文字列 ID として保存される
+- 2026-03-18 時点の Codex モデル要件は、`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`
+- Phase 3 実装で `AgentLaunchForm.svelte` の Codex モデル一覧へ `gpt-5.4-mini` を追加し、表示順を現行要件へ更新した
+- Claude Code の現行モデル選択肢は `opus`, `sonnet`, `haiku`, `opus[1m]`, `sonnet[1m]`, `opusplan`
+- Gemini の現行モデル選択肢は `gemini-3-pro-preview`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`
+- Copilot の現行モデル選択肢は `gpt-4.1`
+- 現在の実装変更対象は Codex モデル一覧のみであり、Claude Code / Gemini 側の実装変更は今回行わない。ただし今後の更新先は本 Issue に統合する
+- Fast mode の引数形式は `-c service_tier=fast` とし、`gpt-5.4` 選択時のみ UI に表示する

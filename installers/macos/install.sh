@@ -34,6 +34,19 @@ need_cmd() {
 copy_app_with_privilege() {
   local app_path="$1"
   local dest="/Applications/${APP_NAME}.app"
+  local dest_parent="/Applications"
+
+  if [[ ! -e "$dest" && -w "$dest_parent" ]]; then
+    info "Copying ${APP_NAME}.app to /Applications..."
+    /usr/bin/ditto "$app_path" "$dest"
+    return
+  fi
+
+  if [[ -d "$dest" && -w "$dest" ]]; then
+    info "Copying ${APP_NAME}.app to /Applications..."
+    /usr/bin/ditto "$app_path" "$dest"
+    return
+  fi
 
   # Remove existing installation
   if [[ -d "$dest" ]]; then

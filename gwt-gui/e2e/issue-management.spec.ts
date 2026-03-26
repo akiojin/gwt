@@ -1,223 +1,249 @@
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./support/tauri-mock";
 import {
+  captureUxSnapshot,
   defaultRecentProject,
-  branchMain,
-  branchDevelop,
-  branchFeature,
+  detectedAgents,
+  emitTauriEvent,
   openRecentProject,
-  setMockCommandResponses,
+  saveE2ECoverage,
+  settingsFixture,
+  profilesFixture,
   standardBranchResponses,
+  waitForMenuActionListener,
 } from "./support/helpers";
 
-const linkedIssueFixture = {
-  number: 101,
-  title: "Fix login flow",
-  source: "branch_name",
-  body: "Login flow is broken",
-  labels: [{ name: "bug", color: "d73a4a" }],
-  assignees: [{ login: "dev-1" }],
+const issuesFixture = [
+  {
+    number: 101,
+    title: "Fix login flow",
+    body: "Login flow is broken in the current shell.",
+    state: "open",
+    updatedAt: "2026-03-20T10:00:00.000Z",
+    htmlUrl: "https://github.com/example/gwt/issues/101",
+    labels: [{ name: "bug", color: "d73a4a" }],
+    assignees: [],
+    commentsCount: 2,
+  },
+  {
+    number: 202,
+    title: "Spec: Improve branch browser flow",
+    body: "Spec body",
+    state: "open",
+    updatedAt: "2026-03-21T10:00:00.000Z",
+    htmlUrl: "https://github.com/example/gwt/issues/202",
+    labels: [
+      { name: "gwt-spec", color: "0075ca" },
+      { name: "enhancement", color: "a2eeef" },
+    ],
+    assignees: [],
+    commentsCount: 0,
+  },
+];
+
+const issueDetailFixture = {
+  ...issuesFixture[0],
+  body: "## Investigation\n\nLogin flow is broken in the current shell and needs remediation.",
+  assignees: [
+    {
+      login: "dev-1",
+      avatarUrl: "https://example.invalid/dev-1.png",
+    },
+  ],
+  milestone: {
+    title: "Shell Stabilization",
+  },
 };
 
-test.beforeEach(async ({ page }) => {
+const specDetailFixture = {
+  ...issuesFixture[1],
+  body: "Spec detail body",
+};
+
+function issueResponses() {
+  return {
+    ...standardBranchResponses(),
+    get_startup_diagnostics: {
+      startupTrace: false,
+      disableTray: false,
+      disableLoginShellCapture: false,
+      disableHeartbeatWatchdog: false,
+      disableSessionWatcher: false,
+      disableStartupUpdateCheck: false,
+      disableProfiling: false,
+      disableTabRestore: false,
+      disableWindowSessionRestore: false,
+    },
+    check_gh_cli_status: { available: true, authenticated: true },
+    fetch_github_issues: {
+      issues: issuesFixture,
+      hasNextPage: false,
+    },
+    fetch_github_issue_detail: issueDetailFixture,
+    find_existing_issue_branches_bulk: [],
+    search_github_issue_catalog: [issuesFixture[1]],
+    search_github_issues_cmd: [
+      {
+        number: 202,
+        title: issuesFixture[1].title,
+        state: "open",
+        labels: ["gwt-spec", "enhancement"],
+        url: issuesFixture[1].htmlUrl,
+        distance: 0.12,
+      },
+    ],
+    index_github_issues_cmd: {
+      issuesIndexed: 12,
+      durationMs: 45,
+    },
+    detect_agents: detectedAgents,
+    list_agent_versions: {
+      agentId: "codex",
+      package: "codex",
+      tags: ["latest"],
+      versions: ["0.99.0"],
+      source: "cache",
+    },
+    get_settings: settingsFixture,
+    get_profiles: profilesFixture,
+  };
+}
+
+async function openIssuesWorkspace(page: import("@playwright/test").Page) {
+  await openRecentProject(page);
+  await page.evaluate((projectPath) => {
+    window.localStorage.setItem(
+      "gwt.projectTabs.v2",
+      JSON.stringify({
+        version: 3,
+        byProjectPath: {
+          [`${projectPath}::window=main`]: {
+            tabs: [
+              { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
+              { type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" },
+              { type: "issues", id: "issues", label: "Issues" },
+            ],
+            activeTabId: "issues",
+          },
+        },
+      }),
+    );
+  }, defaultRecentProject.path);
+
+  await page.reload();
+}
+
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
+});
+
+test("opens Issues as a top-level tab in the current shell", async ({
+  page,
+}, testInfo) => {
   await installTauriMock(page, {
     commandResponses: {
       get_recent_projects: [defaultRecentProject],
+      ...issueResponses(),
     },
   });
+  await page.goto("/");
+  await openIssuesWorkspace(page);
+
+  await expect(page.locator('[data-tab-id="issues"]')).toHaveClass(/active/);
+  await expect(page.getByRole("heading", { name: "Issues" })).toBeVisible();
+  await expect(page.locator(".ilp-issue-title", { hasText: "Fix login flow" })).toBeVisible();
+  await captureUxSnapshot(page, testInfo, "issues-top-level-tab");
 });
 
-test("Issue tab shows no linked issue message by default", async ({
+test("opens issue detail and renders metadata in the current shell", async ({
   page,
-}) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Issue", exact: true })
-    .click();
-
-  await expect(page.getByText("No linked issue")).toBeVisible();
-});
-
-test("Issue tab button exists in summary tabs", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await expect(
-    page
-      .locator(".summary-tabs")
-      .getByRole("button", { name: "Issue", exact: true }),
-  ).toBeVisible();
-});
-
-test("Issue tab shows linked issue when available", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, {
-    ...standardBranchResponses(),
-    fetch_branch_linked_issue: linkedIssueFixture,
+}, testInfo) => {
+  await installTauriMock(page, {
+    commandResponses: {
+      get_recent_projects: [defaultRecentProject],
+      ...issueResponses(),
+    },
   });
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Issue", exact: true })
-    .click();
-
-  await expect(page.getByText("Fix login flow")).toBeVisible();
+  await page.goto("/");
+  await openIssuesWorkspace(page);
+  await expect(page.locator('[data-tab-id="issues"]')).toHaveClass(/active/);
+  await page.locator(".ilp-issue-row", { hasText: "Fix login flow" }).click();
+  await expect(page.locator(".ilp-detail-title")).toContainText("Fix login flow");
+  await expect(page.locator(".ilp-detail-comments")).toContainText("2 comments");
+  await expect(page.locator(".ilp-detail-body")).toContainText("Investigation");
+  await captureUxSnapshot(page, testInfo, "issues-detail-view");
 });
 
-test("Issue tab shows issue number", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, {
-    ...standardBranchResponses(),
-    fetch_branch_linked_issue: linkedIssueFixture,
+test("issue detail can switch to an existing worktree", async ({ page }) => {
+  await installTauriMock(page, {
+    commandResponses: {
+      get_recent_projects: [defaultRecentProject],
+      ...issueResponses(),
+      find_existing_issue_branches_bulk: [
+        { issueNumber: 101, branchName: "feature/workflow-demo" },
+      ],
+    },
   });
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Issue", exact: true })
-    .click();
-
-  await expect(page.locator(".issue-panel .quick-subtitle")).toContainText(
-    "#101",
-  );
-});
-
-test("Issue tab becomes active when clicked", async ({ page }) => {
   await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
+  await openIssuesWorkspace(page);
+  await expect(page.locator('[data-tab-id="issues"]')).toHaveClass(/active/);
+  await page.locator(".ilp-issue-row", { hasText: "Fix login flow" }).click();
+  await page.getByRole("button", { name: "Switch to Worktree" }).click();
 
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  const issueBtn = page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Issue", exact: true });
-  await issueBtn.click();
-
-  await expect(issueBtn).toHaveClass(/active/);
+  await expect(page.locator('[data-tab-id="branchBrowser"]')).toHaveClass(/active/);
+  await expect(page.getByTestId("branch-browser-detail")).toContainText("feature/workflow-demo");
 });
 
-test("switching from Issue tab to Summary tab works", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Issue", exact: true })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Summary", exact: true })
-    .click();
-
-  await expect(
-    page
-      .locator(".summary-tabs")
-      .getByRole("button", { name: "Summary", exact: true }),
-  ).toHaveClass(/active/);
-});
-
-test("Docker tab exists in summary tabs", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await expect(
-    page
-      .locator(".summary-tabs")
-      .getByRole("button", { name: "Docker", exact: true }),
-  ).toBeVisible();
-});
-
-test("all summary tabs are visible for a selected branch", async ({
+test("issue detail launches the agent workflow when no worktree exists yet", async ({
   page,
 }) => {
+  await installTauriMock(page, {
+    commandResponses: {
+      get_recent_projects: [defaultRecentProject],
+      ...issueResponses(),
+    },
+  });
   await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
+  await openIssuesWorkspace(page);
+  await expect(page.locator('[data-tab-id="issues"]')).toHaveClass(/active/);
+  await page.locator(".ilp-issue-row", { hasText: "Fix login flow" }).click();
+  await page.getByRole("button", { name: "Work on this" }).click();
 
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  const tabs = page.locator(".summary-tabs");
-  await expect(
-    tabs.getByRole("button", { name: "Summary", exact: true }),
-  ).toBeVisible();
-  await expect(
-    tabs.getByRole("button", { name: "Git", exact: true }),
-  ).toBeVisible();
-  await expect(
-    tabs.getByRole("button", { name: "Issue", exact: true }),
-  ).toBeVisible();
-  await expect(
-    tabs.getByRole("button", { name: "PR", exact: true }),
-  ).toBeVisible();
-  await expect(
-    tabs.getByRole("button", { name: "Docker", exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Launch Agent" })).toBeVisible();
 });
 
-test("Issue tab shows 'No issue linked to this branch' message", async ({
+test("issue search and spec index refresh stay usable in the current shell", async ({
   page,
 }) => {
+  await installTauriMock(page, {
+    commandResponses: {
+      get_recent_projects: [defaultRecentProject],
+      ...issueResponses(),
+      fetch_github_issue_detail: specDetailFixture,
+    },
+  });
   await page.goto("/");
-  await setMockCommandResponses(page, standardBranchResponses());
-  await openRecentProject(page);
+  await openIssuesWorkspace(page);
+  await expect(page.locator('[data-tab-id="issues"]')).toHaveClass(/active/);
+  await page.locator(".ilp-search-input").fill("spec");
+  await expect(page.locator(".ilp-issue-title", { hasText: "Spec: Improve branch browser flow" })).toBeVisible();
 
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
+  await page.getByRole("button", { name: "Update Spec Index" }).click();
+  await expect(page.locator(".ilp-status")).toContainText("12 specs indexed");
+  await waitForInvokeCommand(page, "index_github_issues_cmd");
+});
 
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Issue", exact: true })
-    .click();
-
-  await expect(
-    page.getByText("No issue linked to this branch"),
-  ).toBeVisible();
+test("issue row label filter narrows the current shell list", async ({ page }) => {
+  await installTauriMock(page, {
+    commandResponses: {
+      get_recent_projects: [defaultRecentProject],
+      ...issueResponses(),
+    },
+  });
+  await page.goto("/");
+  await openIssuesWorkspace(page);
+  await expect(page.locator('[data-tab-id="issues"]')).toHaveClass(/active/);
+  await page.getByRole("button", { name: "bug" }).click();
+  await expect(page.locator(".ilp-issue-row")).toHaveCount(1);
+  await expect(page.locator(".ilp-issue-title")).toContainText("Fix login flow");
 });

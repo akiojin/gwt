@@ -4,4 +4,8 @@ dist
 playwright-report
 test-results
 coverage-report.json
+coverage-e2e
+.nyc_output
+e2e/.nyc_output
+merged-e2e-coverage.json
 pnpm-workspace.yaml
