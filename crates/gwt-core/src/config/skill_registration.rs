@@ -2232,6 +2232,8 @@ mod tests {
         let content = std::fs::read_to_string(settings_path).unwrap();
         assert!(content.contains("gwt-forward-hook.mjs"));
         assert!(content.contains("gwt-block-git-branch-ops.mjs"));
+        assert!(content.contains("git rev-parse --show-toplevel"));
+        assert!(!content.contains("node .claude/hooks/scripts/gwt-"));
         assert!(!content.contains("CLAUDE_PLUGIN_ROOT"));
 
         let exclude =
@@ -2892,6 +2894,8 @@ OPENAI_API_KEY = "legacy-key"
         let settings_content =
             std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
         assert!(settings_content.contains(super::super::claude_plugins::GWT_PLUGIN_FULL_NAME));
+        assert!(settings_content.contains("git rev-parse --show-toplevel"));
+        assert!(!settings_content.contains("node .claude/hooks/scripts/gwt-"));
 
         let status = status_for_claude(Some(temp.path()));
         assert!(status.registered);
@@ -3330,6 +3334,23 @@ custom-pattern
         assert!(
             err.to_string().contains("missing end marker"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tracked_claude_settings_local_uses_cwd_independent_hook_commands() {
+        let tracked = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.claude/settings.local.json"
+        ));
+
+        assert!(
+            tracked.contains("git rev-parse --show-toplevel"),
+            "tracked .claude/settings.local.json must use repo-root-resolved hook commands"
+        );
+        assert!(
+            !tracked.contains("node .claude/hooks/scripts/gwt-"),
+            "tracked .claude/settings.local.json must not keep legacy relative hook commands"
         );
     }
 }
