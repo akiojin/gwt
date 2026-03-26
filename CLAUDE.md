@@ -272,9 +272,9 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-project-search | `/gwt:gwt-project-search` | Semantic search over project source files using vector embeddings. Use when user says "search project files", "find related files", "which files handle X", or asks to locate source files related to a feature, bug, or concept. |
-| gwt-agent-dispatch | `/gwt:gwt-agent-dispatch` | PTY-based instruction dispatch from Assistant to Agent panes. Send commands, capture output, and manage Agent lifecycle. Use when user says "send to pane", "broadcast to agents", "check pane output", "dispatch to agent", or when managing multi-agent Project Mode sessions. |
-| gwt-spec-to-issue-migration | — | Migrate GitHub Issue-based specs to local SPEC directories. Supports reverse migration from gwt-spec Issues to local specs/SPEC-{id}/ directories. Use when user says "migrate specs", "convert issues to local specs", "move specs from issues", or asks to transform Issue-based specs into local SPEC directories. |
+| gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
+| gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
+| gwt-spec-to-issue-migration | — | Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script. |
 
 ### Recommended Workflow
 
