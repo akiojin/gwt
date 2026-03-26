@@ -168,7 +168,7 @@
     (async () => {
       voiceCapabilityLoading = true;
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
+        const { invoke } = await import("$lib/tauriInvoke");
         const capability = await invoke<{
           available: boolean;
           reason?: string | null;
@@ -215,7 +215,7 @@
     voiceRuntimeSettingUp = true;
     voiceSetupMessage = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("ensure_voice_runtime");
       voiceSetupMessage = "Voice runtime setup completed.";
       // Refresh capability status
@@ -1804,7 +1804,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 24px;
+    padding: var(--space-7) var(--space-9);
     border-bottom: 1px solid var(--border-color);
   }
 
@@ -1820,8 +1820,8 @@
     color: var(--text-muted);
     cursor: pointer;
     font-size: 20px;
-    padding: 4px 8px;
-    border-radius: 4px;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-sm);
     line-height: 1;
   }
 
@@ -1831,7 +1831,7 @@
   }
 
   .loading {
-    padding: 40px;
+    padding: var(--space-11);
     text-align: center;
     color: var(--text-muted);
   }
@@ -1847,7 +1847,7 @@
     display: flex;
     gap: 2px;
     border-bottom: 1px solid var(--border-color);
-    padding: 0 24px;
+    padding: 0 var(--space-9);
     flex-shrink: 0;
     min-width: 0;
     overflow-x: auto;
@@ -1856,7 +1856,7 @@
   }
 
   .settings-tab-btn {
-    padding: 10px 16px;
+    padding: var(--space-5) var(--space-7);
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
@@ -1879,18 +1879,18 @@
   .settings-tab-content {
     flex: 1;
     overflow-y: auto;
-    padding: 24px;
+    padding: var(--space-9);
   }
 
   .section-content {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding-top: 8px;
+    gap: var(--space-4);
+    padding-top: var(--space-4);
   }
 
   .settings-section {
-    margin-top: 8px;
+    margin-top: var(--space-4);
   }
 
   .settings-section:first-child {
@@ -1903,21 +1903,21 @@
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    padding-bottom: 8px;
+    padding-bottom: var(--space-4);
     border-bottom: 1px solid var(--border-color);
-    margin-bottom: 16px;
+    margin-bottom: var(--space-7);
   }
 
   .settings-section-body {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: var(--space-8);
   }
 
   .field {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
   .field label {
@@ -1929,10 +1929,10 @@
   .profile-header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding-bottom: 16px;
+    gap: var(--space-4);
+    padding-bottom: var(--space-7);
     border-bottom: 1px solid var(--border-color);
-    margin-bottom: 8px;
+    margin-bottom: var(--space-4);
   }
 
   .profile-select {
@@ -1958,10 +1958,10 @@
 
   .field input[type="number"],
   .field input[type="text"] {
-    padding: 8px 12px;
+    padding: var(--space-4) var(--space-6);
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-base);
     font-family: monospace;
@@ -1970,10 +1970,10 @@
   }
 
   .select {
-    padding: 8px 12px;
+    padding: var(--space-4) var(--space-6);
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-base);
     font-family: monospace;
@@ -1983,7 +1983,7 @@
 
   .row {
     display: flex;
-    gap: 8px;
+    gap: var(--space-4);
     align-items: center;
     flex-wrap: wrap;
   }
@@ -1991,25 +1991,25 @@
   .env-table {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 10px;
+    gap: var(--space-4);
+    padding: var(--space-5);
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     min-height: 96px;
   }
 
   .env-row {
     display: grid;
     grid-template-columns: 1fr 2fr auto;
-    gap: 8px;
+    gap: var(--space-4);
     align-items: center;
   }
 
   .env-empty {
     color: var(--text-muted);
     font-size: var(--ui-font-sm);
-    padding: 16px 0;
+    padding: var(--space-7) 0;
   }
 
   .env-key {
@@ -2021,10 +2021,10 @@
   .env-value,
   .env-key-input,
   .env-value-input {
-    padding: 6px 10px;
+    padding: var(--space-3) var(--space-5);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-md);
     font-family: monospace;
@@ -2035,19 +2035,19 @@
   .env-add-row {
     display: grid;
     grid-template-columns: 1fr 2fr auto;
-    gap: 8px;
+    gap: var(--space-4);
     align-items: center;
     max-width: 760px;
   }
 
   .ai-toggle {
     display: flex;
-    gap: 8px;
+    gap: var(--space-4);
     align-items: center;
-    padding: 8px 10px;
+    padding: var(--space-4) var(--space-5);
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     width: fit-content;
   }
 
@@ -2073,7 +2073,7 @@
   }
   .ai-apikey-actions {
     display: flex;
-    gap: 8px;
+    gap: var(--space-4);
     flex-shrink: 0;
   }
   .ai-apikey-actions.hidden {
@@ -2172,17 +2172,17 @@
   .branch-tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
   .branch-tag {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font-size: var(--ui-font-md);
     font-family: monospace;
     color: var(--text-primary);
@@ -2195,7 +2195,7 @@
     cursor: pointer;
     font-size: var(--ui-font-sm);
     font-family: monospace;
-    padding: 0 2px;
+    padding: 0 var(--space-1);
     line-height: 1;
   }
 
@@ -2205,16 +2205,16 @@
 
   .branch-input-row {
     display: flex;
-    gap: 6px;
+    gap: var(--space-3);
     max-width: 300px;
   }
 
   .branch-input-row input {
     flex: 1;
-    padding: 6px 10px;
+    padding: var(--space-3) var(--space-5);
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-md);
     font-family: monospace;
@@ -2229,8 +2229,8 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 8px;
-    padding: 16px 24px;
+    gap: var(--space-4);
+    padding: var(--space-7) var(--space-9);
     border-top: 1px solid var(--border-color);
   }
 
@@ -2241,18 +2241,18 @@
   }
 
   .btn {
-    padding: 8px 16px;
+    padding: var(--space-4) var(--space-7);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     font-size: var(--ui-font-base);
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
-    transition: background-color 0.15s;
+    transition: background-color var(--transition-fast);
   }
 
   .btn-add {
-    padding: 6px 12px;
+    padding: var(--space-3) var(--space-6);
     background: var(--bg-surface);
     color: var(--text-secondary);
     font-size: var(--ui-font-md);
@@ -2294,7 +2294,7 @@
     background: none;
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
-    padding: 6px 10px;
+    padding: var(--space-3) var(--space-5);
     font-size: var(--ui-font-md);
   }
 
@@ -2310,17 +2310,17 @@
   .font-size-control {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-3);
     max-width: 200px;
   }
 
   .font-size-control input[type="number"] {
     width: 60px;
     text-align: center;
-    padding: 6px 4px;
+    padding: var(--space-3) var(--space-2);
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-base);
     font-family: monospace;
@@ -2347,7 +2347,7 @@
     justify-content: center;
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-lg);
     font-family: monospace;
