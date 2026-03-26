@@ -32,8 +32,4 @@ jobs:
             echo "PERSONAL_ACCESS_TOKEN not provided, skipping auto-merge"
             exit 0
           fi
-          if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" = "develop" ]; then
-            gh pr merge "$PR_NUMBER" --auto --merge --repo "$REPO"
-          else
-            gh pr merge "$PR_NUMBER" --auto --squash --repo "$REPO"
-          fi
+          gh pr merge "$PR_NUMBER" --auto --merge --repo "$REPO"

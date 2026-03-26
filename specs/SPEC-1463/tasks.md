@@ -1,0 +1,8 @@
+- [x] T001 [S] `#1463` Spec/Plan/Tasks/TDD を作成しスコープを固定
+- [x] T002 [U] Codex 認証判定の Rust テストを追加して RED を確認
+- [x] T003 [U] Launch env 注入の Rust テストを追加して RED を確認
+- [x] T004 [U] 認証判定ロジックを `env + profile.ai.api_key` に実装
+- [x] T005 [U] Launch env の `OPENAI_API_KEY` フォールバック注入を実装
+- [x] T006 [U] Profiles API キー保存の E2E シナリオを追加
+- [x] T007 [FIN] Rust / GUI テストを実行して GREEN を確認
+- [x] T008 [FIN] Issue/PR のチェックリスト更新
