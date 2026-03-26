@@ -944,10 +944,10 @@
   .ilp-header {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding-bottom: 12px;
+    gap: var(--space-lg);
+    padding-bottom: var(--space-lg);
     border-bottom: 1px solid var(--border-color);
-    margin-bottom: 12px;
+    margin-bottom: var(--space-lg);
   }
 
   .ilp-header-top {
@@ -966,32 +966,32 @@
   .ilp-header-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-md);
   }
 
   .ilp-state-toggle {
     display: flex;
-    gap: 4px;
+    gap: var(--space-sm);
   }
 
   .ilp-category-toggle {
     display: flex;
-    gap: 4px;
+    gap: var(--space-sm);
   }
 
   .state-btn {
-    padding: 4px 12px;
+    padding: var(--space-sm) var(--space-lg);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-size: var(--ui-font-sm);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
     transition:
-      border-color 0.15s,
-      background 0.15s;
+      border-color var(--transition-fast),
+      background var(--transition-fast);
   }
 
   .state-btn:hover {
@@ -1010,15 +1010,15 @@
   }
 
   .ilp-refresh-btn {
-    padding: 4px 8px;
+    padding: var(--space-sm) var(--space-md);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-size: var(--ui-font-lg);
     cursor: pointer;
     font-family: inherit;
-    transition: border-color 0.15s;
+    transition: border-color var(--transition-fast);
   }
 
   .ilp-refresh-btn:hover {
@@ -1028,19 +1028,20 @@
 
   .ilp-search-row {
     display: flex;
-    gap: 8px;
+    gap: var(--space-md);
   }
 
   .ilp-search-input {
     flex: 1;
-    padding: 6px 10px;
+    padding: var(--space-md) var(--space-lg);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-md);
     font-family: inherit;
     outline: none;
+    transition: border-color var(--transition-fast);
   }
 
   .ilp-search-input:focus {
@@ -1048,16 +1049,19 @@
   }
 
   .ilp-index-btn {
-    padding: 6px 10px;
+    padding: var(--space-md) var(--space-lg);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-size: var(--ui-font-sm);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
     white-space: nowrap;
+    transition:
+      border-color var(--transition-fast),
+      color var(--transition-fast);
   }
 
   .ilp-index-btn:hover:not(:disabled) {
@@ -1080,21 +1084,21 @@
   .ilp-label-filters {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: var(--space-sm);
     align-items: center;
   }
 
   .ilp-label-chip {
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: var(--ui-font-xs, 11px);
+    padding: var(--space-xs) var(--space-md);
+    border-radius: var(--radius-xl);
+    font-size: var(--ui-font-xs);
     font-weight: 600;
     cursor: pointer;
     border: 2px solid transparent;
     font-family: inherit;
     transition:
-      border-color 0.15s,
-      opacity 0.15s;
+      border-color var(--transition-fast),
+      opacity var(--transition-fast);
   }
 
   .ilp-label-chip:hover {
@@ -1106,9 +1110,9 @@
   }
 
   .ilp-label-clear {
-    padding: 2px 8px;
-    border-radius: 6px;
-    font-size: var(--ui-font-xs, 11px);
+    padding: var(--space-xs) var(--space-md);
+    border-radius: var(--radius-md);
+    font-size: var(--ui-font-xs);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
     color: var(--text-muted);
@@ -1117,17 +1121,17 @@
   }
 
   .ilp-error {
-    padding: 12px;
+    padding: var(--space-lg);
     border: 1px solid rgba(255, 0, 0, 0.3);
     background: rgba(255, 0, 0, 0.06);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     color: var(--text-primary);
     font-size: var(--ui-font-md);
   }
 
   .ilp-loading,
   .ilp-empty {
-    padding: 24px;
+    padding: var(--space-2xl);
     text-align: center;
     color: var(--text-muted);
     font-size: var(--ui-font-md);
@@ -1143,11 +1147,11 @@
   .ilp-issue-row {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 10px 12px;
+    gap: var(--space-sm);
+    padding: var(--space-lg);
     border-bottom: 1px solid var(--border-color);
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background var(--transition-fast);
   }
 
   .ilp-issue-row:hover {
@@ -1157,11 +1161,11 @@
   .ilp-issue-main {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: var(--space-md);
   }
 
   .ilp-issue-number {
-    font-family: monospace;
+    font-family: var(--font-mono);
     font-weight: 600;
     color: var(--text-muted);
     flex: 0 0 auto;
@@ -1180,70 +1184,73 @@
   .ilp-issue-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-md);
     flex-wrap: wrap;
   }
 
   .ilp-issue-labels {
     display: flex;
-    gap: 4px;
+    gap: var(--space-sm);
     flex-wrap: wrap;
   }
 
   .ilp-issue-label {
-    font-size: var(--ui-font-xs, 11px);
-    padding: 1px 6px;
-    border-radius: 10px;
+    font-size: var(--ui-font-xs);
+    padding: 1px var(--space-md);
+    border-radius: var(--radius-pill);
     font-weight: 600;
     white-space: nowrap;
   }
 
   .ilp-issue-assignees {
     display: flex;
-    gap: 2px;
+    gap: var(--space-xs);
   }
 
   .ilp-avatar {
-    border-radius: 50%;
+    border-radius: var(--radius-circle);
     border: 1px solid var(--border-color);
   }
 
   .ilp-issue-milestone {
-    font-size: var(--ui-font-xs, 11px);
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
-    padding: 1px 6px;
-    border-radius: 4px;
+    padding: 1px var(--space-md);
+    border-radius: var(--radius-sm);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
   }
 
   .ilp-issue-comments {
-    font-size: var(--ui-font-xs, 11px);
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
   }
 
   .ilp-search-score {
-    font-size: var(--ui-font-xs, 11px);
+    font-size: var(--ui-font-xs);
     color: var(--accent);
     font-weight: 700;
   }
 
   .ilp-issue-updated {
-    font-size: var(--ui-font-xs, 11px);
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
     margin-left: auto;
   }
 
   .ilp-worktree-btn {
-    padding: 2px 6px;
+    padding: var(--space-xs) var(--space-md);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--text-secondary);
-    font-size: var(--ui-font-xs, 11px);
+    font-size: var(--ui-font-xs);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
+    transition:
+      border-color var(--transition-fast),
+      color var(--transition-fast);
   }
 
   .ilp-worktree-btn:hover {
@@ -1257,7 +1264,7 @@
   }
 
   .ilp-loading-more {
-    padding: 12px;
+    padding: var(--space-lg);
     text-align: center;
     color: var(--text-muted);
     font-size: var(--ui-font-sm);
@@ -1274,21 +1281,21 @@
   .ilp-detail-header {
     display: flex;
     align-items: center;
-    padding-bottom: 12px;
+    padding-bottom: var(--space-lg);
     border-bottom: 1px solid var(--border-color);
-    margin-bottom: 12px;
+    margin-bottom: var(--space-lg);
   }
 
   .ilp-back-btn {
-    padding: 6px 12px;
+    padding: var(--space-md) var(--space-lg);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-size: var(--ui-font-md);
     cursor: pointer;
     font-family: inherit;
-    transition: border-color 0.15s;
+    transition: border-color var(--transition-fast);
   }
 
   .ilp-back-btn:hover {
@@ -1299,13 +1306,13 @@
   .ilp-detail-content {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-xl);
   }
 
   .ilp-detail-title-row {
     display: flex;
     align-items: flex-start;
-    gap: 12px;
+    gap: var(--space-lg);
   }
 
   .ilp-detail-title {
@@ -1319,67 +1326,68 @@
 
   .ilp-detail-state {
     flex: 0 0 auto;
-    padding: 3px 10px;
-    border-radius: 16px;
+    padding: 3px var(--space-lg);
+    border-radius: var(--radius-pill);
     font-size: var(--ui-font-sm);
     font-weight: 700;
     text-transform: capitalize;
     background: rgba(46, 160, 67, 0.2);
-    color: #3fb950;
+    color: var(--green);
     border: 1px solid rgba(46, 160, 67, 0.3);
   }
 
   .ilp-detail-state.closed {
     background: rgba(139, 92, 246, 0.2);
-    color: #a78bfa;
+    color: var(--magenta);
     border: 1px solid rgba(139, 92, 246, 0.3);
   }
 
   .ilp-detail-meta {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-lg);
     flex-wrap: wrap;
     font-size: var(--ui-font-sm);
     color: var(--text-muted);
   }
 
   .ilp-detail-milestone {
-    padding: 1px 8px;
-    border-radius: 4px;
+    padding: 1px var(--space-md);
+    border-radius: var(--radius-sm);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
-    font-size: var(--ui-font-xs, 11px);
+    font-size: var(--ui-font-xs);
   }
 
   .ilp-detail-updated,
   .ilp-detail-comments {
-    font-size: var(--ui-font-xs, 11px);
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
   }
 
   .ilp-detail-body {
     border: 1px solid var(--border-color);
-    border-radius: 10px;
+    border-radius: var(--radius-lg);
     background: var(--bg-secondary);
-    padding: 16px;
+    padding: var(--space-xl);
+    box-shadow: var(--shadow-sm);
   }
 
   .ilp-detail-actions {
     display: flex;
-    gap: 8px;
-    padding-bottom: 8px;
+    gap: var(--space-md);
+    padding-bottom: var(--space-md);
   }
 
   .ilp-action-btn {
-    padding: 8px 16px;
+    padding: var(--space-md) var(--space-xl);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     font-size: var(--ui-font-md);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
-    transition: background 0.15s;
+    transition: background var(--transition-fast);
   }
 
   .ilp-action-work {
@@ -1392,7 +1400,7 @@
   }
 
   .ilp-action-switch {
-    background: var(--green, #a6e3a1);
+    background: var(--green);
     color: var(--bg-primary);
   }
 
