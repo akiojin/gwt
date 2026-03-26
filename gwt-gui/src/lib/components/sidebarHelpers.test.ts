@@ -6,7 +6,6 @@ import {
   branchSortTimestamp,
   buildFilterCacheKey,
   buildWorktreeMap,
-  clampSidebarWidth,
   compareBranches,
   decideRefreshFailureAction,
   divergenceClass,
@@ -210,15 +209,6 @@ describe("sidebarHelpers", () => {
     expect(toolUsageClass("open-code@1")).toBe("opencode");
     expect(toolUsageClass("other@1")).toBe("");
     expect(toolUsageClass(null)).toBe("");
-  });
-
-  it("clamps sidebar width with robust defaults", () => {
-    expect(clampSidebarWidth(350.7, 220, 520)).toBe(351);
-    expect(clampSidebarWidth(10, 220, 520)).toBe(220);
-    expect(clampSidebarWidth(999, 220, 520)).toBe(520);
-    expect(clampSidebarWidth(NaN, 220, 520)).toBe(220);
-    expect(clampSidebarWidth(300, Number.NaN, 500)).toBe(300);
-    expect(clampSidebarWidth(300, 400, 200)).toBe(400);
   });
 
   it("decides refresh failure action", () => {

@@ -1,0 +1,6 @@
+- [x] #1265 再発文字列を回帰テストで固定
+- [x] launch/probe/pty で正規化規約を統一
+- [x] `bunx` 優先 + `npx --yes` の生成テストを追加
+- [x] `installed` 選択を UI から消さない仕様へ更新
+- [x] StatusBar の agent 可用性表示を削除
+- [ ] Frontend テスト環境復旧後の再検証

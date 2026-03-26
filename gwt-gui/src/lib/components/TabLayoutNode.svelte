@@ -1,5 +1,16 @@
 <script lang="ts">
-  import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
+  import type {
+    BranchBrowserPanelConfig,
+    BranchBrowserPanelState,
+    GitHubIssueInfo,
+    LaunchAgentRequest,
+    Tab,
+    WorktreeInfo,
+  } from "../types";
+  import type {
+    AgentCanvasTileLayout,
+    AgentCanvasViewport,
+  } from "../agentCanvas";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -16,6 +27,21 @@
     tabsById,
     activeGroupId,
     projectPath,
+    branchBrowserConfig = undefined,
+    currentBranch = "",
+    selectedCanvasSessionTabId = null,
+    selectedCanvasTileId = null,
+    canvasViewport = undefined,
+    canvasTileLayouts = undefined,
+    canvasWorktrees = [],
+    selectedCanvasWorktreeBranch = null,
+    onCanvasWorktreeSelect = () => {},
+    branchBrowserState = undefined,
+    disableSplit = false,
+    onCanvasSessionSelect = () => {},
+    onCanvasViewportChange = () => {},
+    onCanvasTileLayoutsChange = () => {},
+    onCanvasSelectedTileChange = () => {},
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -50,6 +76,23 @@
     tabsById: Record<string, Tab>;
     activeGroupId: string;
     projectPath: string;
+    branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
+    currentBranch?: string;
+    selectedCanvasSessionTabId?: string | null;
+    selectedCanvasTileId?: string | null;
+    canvasViewport?: AgentCanvasViewport | undefined;
+    canvasTileLayouts?: Record<string, AgentCanvasTileLayout> | undefined;
+    canvasWorktrees?: WorktreeInfo[];
+    selectedCanvasWorktreeBranch?: string | null;
+    onCanvasWorktreeSelect?: (branchName: string) => void;
+    branchBrowserState?: BranchBrowserPanelState | undefined;
+    disableSplit?: boolean;
+    onCanvasSessionSelect?: (tabId: string) => void;
+    onCanvasViewportChange?: (viewport: AgentCanvasViewport) => void;
+    onCanvasTileLayoutsChange?: (
+      layouts: Record<string, AgentCanvasTileLayout>,
+    ) => void;
+    onCanvasSelectedTileChange?: (tileId: string | null) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -140,6 +183,14 @@
       {tabsById}
       {activeGroupId}
       {projectPath}
+      {branchBrowserConfig}
+      {currentBranch}
+      {selectedCanvasSessionTabId}
+      {canvasWorktrees}
+      {selectedCanvasWorktreeBranch}
+      {onCanvasWorktreeSelect}
+      {disableSplit}
+      {onCanvasSessionSelect}
       {draggedTabId}
       {dropTarget}
       {onGroupFocus}
@@ -182,6 +233,21 @@
         {tabsById}
         {activeGroupId}
         {projectPath}
+        {branchBrowserConfig}
+        {currentBranch}
+        {selectedCanvasSessionTabId}
+        {selectedCanvasTileId}
+        {canvasViewport}
+        {canvasTileLayouts}
+        {canvasWorktrees}
+        {selectedCanvasWorktreeBranch}
+        {onCanvasWorktreeSelect}
+        {branchBrowserState}
+        {disableSplit}
+        {onCanvasSessionSelect}
+        {onCanvasViewportChange}
+        {onCanvasTileLayoutsChange}
+        {onCanvasSelectedTileChange}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}
@@ -225,6 +291,21 @@
         {tabsById}
         {activeGroupId}
         {projectPath}
+        {branchBrowserConfig}
+        {currentBranch}
+        {selectedCanvasSessionTabId}
+        {selectedCanvasTileId}
+        {canvasViewport}
+        {canvasTileLayouts}
+        {canvasWorktrees}
+        {selectedCanvasWorktreeBranch}
+        {onCanvasWorktreeSelect}
+        {branchBrowserState}
+        {disableSplit}
+        {onCanvasSessionSelect}
+        {onCanvasViewportChange}
+        {onCanvasTileLayoutsChange}
+        {onCanvasSelectedTileChange}
         {draggedTabId}
         {dropTarget}
         {onGroupFocus}
@@ -279,18 +360,19 @@
   }
 
   .split-divider {
-    flex: 0 0 6px;
-    background: var(--bg-secondary);
+    flex: 0 0 4px;
+    background: color-mix(in srgb, var(--bg-secondary) 45%, transparent);
     cursor: col-resize;
-    border-left: 1px solid var(--border-color);
-    border-right: 1px solid var(--border-color);
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 75%, transparent);
+  }
+
+  .split-divider:hover {
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-secondary));
   }
 
   .split-divider.vertical {
     cursor: row-resize;
     border-left: none;
-    border-right: none;
-    border-top: 1px solid var(--border-color);
-    border-bottom: 1px solid var(--border-color);
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 75%, transparent);
   }
 </style>

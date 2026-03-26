@@ -61,8 +61,13 @@ if [[ -z "$APP_PATH" ]]; then
   if [[ -z "$SKIP_BUILD" ]]; then
     need_cmd cargo
 
-    info "Building app bundle..."
-    (cd "$REPO_ROOT" && cargo tauri build)
+    export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+    export CMAKE_OSX_DEPLOYMENT_TARGET="${CMAKE_OSX_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET}}"
+
+    info "Building app bundle only (skip dmg for local install)..."
+    info "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}"
+    info "CMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+    (cd "$REPO_ROOT" && cargo tauri build --bundles app -- --bin gwt-tauri)
   fi
 fi
 

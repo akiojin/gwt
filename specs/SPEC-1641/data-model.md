@@ -1,0 +1,11 @@
+- `voice_input`
+  - `enabled: boolean`
+  - `engine: "qwen3-asr"`
+  - `language: "auto" | "ja" | "en"`
+  - `quality: "fast" | "balanced" | "accurate"`
+  - `model: string`
+- 廃止:
+  - `hotkey`
+  - `ptt_hotkey`
+
+---
