@@ -1,19 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import type { Event as TauriEvent } from "@tauri-apps/api/event";
+import { listen as tauriListen } from "@tauri-apps/api/event";
+import type { UnlistenFn, Event as TauriEvent } from "@tauri-apps/api/event";
 import { errorBus, type StructuredError } from "./errorBus";
 import { isProfilingEnabled, recordInvokeMetric } from "./profiling.svelte";
-
-/**
- * Lazy wrapper around Tauri `listen` so `@tauri-apps/api/event` is only
- * loaded when `listen` is actually called, not when `invoke` is imported.
- */
-export async function listen<T>(
-  event: string,
-  handler: (event: TauriEvent<T>) => void,
-): Promise<() => void> {
-  const { listen: tauriListen } = await import("@tauri-apps/api/event");
-  return tauriListen<T>(event, handler);
-}
 
 function parseStructuredError(
   err: unknown,
@@ -77,3 +66,12 @@ export async function invoke<T>(
     throw structured;
   }
 }
+
+export async function listen<T>(
+  event: string,
+  handler: (event: TauriEvent<T>) => void,
+): Promise<UnlistenFn> {
+  return tauriListen<T>(event, handler);
+}
+
+export type { UnlistenFn, TauriEvent };
