@@ -1,0 +1,7 @@
+- [x] FR-048: `classifyIssuePrefix()` が AI 未設定時に `"feature/"` をデフォルト返却する
+- [x] FR-048: `classifyIssuePrefix()` が AI エラー時に `"feature/"` をフォールバック適用する
+- [x] FR-048: From Issue 選択時にプレフィックスドロップダウンがレンダリングされない
+- [x] FR-048: ラベルベースの自動分類（`determinePrefixFromLabels()`）が引き続き正常動作する
+- [x] 全テスト（1,413件）が GREEN のまま
+- [x] `cd gwt-gui && pnpm test` で全テスト通過
+- [x] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` で型チェック通過

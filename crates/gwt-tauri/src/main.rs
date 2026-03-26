@@ -9,7 +9,9 @@ mod assistant_engine;
 mod assistant_monitor;
 mod assistant_tools;
 mod commands;
+mod http_server;
 mod consultation;
+mod index_watcher;
 mod menu;
 mod pty_skills;
 mod session_watcher;
@@ -17,10 +19,9 @@ mod single_instance;
 mod state;
 mod tool_helpers;
 
-use std::{io::Read, sync::Arc};
-
 #[cfg(any(test, target_os = "macos"))]
 use std::path::{Path, PathBuf};
+use std::{io::Read, sync::Arc};
 
 use state::AppState;
 
@@ -54,6 +55,8 @@ fn main() {
     };
     let _profiling_guard = gwt_core::logging::init_logger(&log_config);
 
+    gwt_core::logging::log_flow_start("startup", "app_init");
+
     let single_instance_guard = match crate::single_instance::try_acquire_single_instance() {
         Ok(crate::single_instance::AcquireOutcome::Acquired(guard)) => Arc::new(guard),
         Ok(crate::single_instance::AcquireOutcome::AlreadyRunning(running)) => {
@@ -77,6 +80,15 @@ fn main() {
 
     let app_state = AppState::new();
 
+    // Start HTTP IPC server on a dedicated OS thread to bypass the
+    // WKWebView main-thread IPC bottleneck.  The HTTP server gets its
+    // own AppState so it never contends with the Tauri-managed one.
+    let http_state = Arc::new(AppState::new());
+    let http_port = crate::http_server::start_http_server(http_state);
+    app_state
+        .http_ipc_port
+        .store(http_port, std::sync::atomic::Ordering::Relaxed);
+
     let app = crate::app::build_app(
         tauri::Builder::default(),
         app_state,
@@ -84,6 +96,8 @@ fn main() {
     )
     .build(tauri::generate_context!())
     .expect("error while building tauri application");
+
+    gwt_core::logging::log_flow_success("startup", "app_init");
 
     app.run(crate::app::handle_run_event);
 }
@@ -381,8 +395,9 @@ fn maybe_run_internal_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn webkit_local_storage_targets_collects_top_level_and_nested_dirs() {

@@ -4,17 +4,18 @@
     OpenProjectResult,
     ProbePathResult,
   } from "../types";
-  import { listen } from "@tauri-apps/api/event";
-  import { open } from "@tauri-apps/plugin-dialog";
-  import { invoke } from "$lib/tauriInvoke";
+  import { invoke, listen } from "$lib/tauriInvoke";
+  import { isBrowserDevMode } from "$lib/tauriMock";
   import MigrationModal from "./MigrationModal.svelte";
+  import { startupProfilingTracker } from "$lib/startupProfiling";
 
   interface RecentProject {
     path: string;
     lastOpened: string;
+    repo_name?: string;
   }
 
-  let { onOpen }: { onOpen: (path: string) => void } = $props();
+  let { onOpen }: { onOpen: (path: string, startupToken?: string) => void } = $props();
 
   let recentProjects: RecentProject[] = $state([]);
   let opening: boolean = $state(false);
@@ -73,9 +74,15 @@
   }
 
   async function openFolder() {
+    if (isBrowserDevMode()) {
+      // In browser dev mode, simulate opening a project
+      onOpen("/Users/demo/projects/my-app");
+      return;
+    }
     opening = true;
     errorMessage = null;
     try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
       if (selected) {
         await probeAndOpen(selected as string, false);
@@ -89,14 +96,18 @@
   async function openGwtProject(projectPath: string, fromRecent: boolean) {
     opening = true;
     errorMessage = null;
+    const startupToken = startupProfilingTracker.start("open_project");
     try {
       const result = await invoke<OpenProjectResult>("open_project", {
         path: projectPath,
       });
       if (result.action === "opened") {
-        onOpen(result.info.path);
+        onOpen(result.info.path, startupToken);
+      } else {
+        startupProfilingTracker.discard(startupToken);
       }
     } catch (err) {
+      startupProfilingTracker.discard(startupToken);
       errorMessage = normalizeOpenProjectError(toErrorMessage(err));
     } finally {
       opening = false;
@@ -135,7 +146,9 @@
   }
 
   async function chooseParentDir() {
+    if (isBrowserDevMode()) return;
     try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
       if (selected) {
         parentDir = selected as string;
@@ -154,7 +167,6 @@
 
   async function createProject() {
     if (creating) return;
-
     errorMessage = null;
     cloneProgress = null;
     creating = true;
@@ -164,7 +176,6 @@
       unlisten = await listen<CloneProgress>("clone-progress", (event) => {
         cloneProgress = event.payload;
       });
-
       const result = await invoke<OpenProjectResult>("create_project", {
         request: { repoUrl, parentDir, shallow: shallowClone },
       });
@@ -177,45 +188,80 @@
         ? "Invalid repository URL"
         : `Failed to create project: ${msg}`;
     } finally {
-      if (unlisten) {
-        unlisten();
-      }
+      if (unlisten) unlisten();
       creating = false;
     }
   }
+
+  function formatRelativeTime(timestamp: string | number): string {
+    const ms = typeof timestamp === "number" ? timestamp : new Date(timestamp).getTime();
+    const diff = Date.now() - ms;
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return "Just now";
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days}d ago`;
+    return new Date(ms).toLocaleDateString();
+  }
+
+  function getProjectIcon(name: string): string {
+    if (name.includes("api") || name.includes("backend")) return "{}";
+    if (name.includes("ui") || name.includes("frontend") || name.includes("gui")) return "◇";
+    if (name.includes("docs") || name.includes("doc")) return "≡";
+    return "⬡";
+  }
 </script>
 
-<div class="open-project">
-  <div class="content">
-    <h1 class="title">gwt</h1>
-    <p class="subtitle">Git Worktree Manager</p>
+<div class="landing">
+  <div class="landing-content">
+    <!-- Hero section -->
+    <div class="hero">
+      <div class="logo">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <rect x="4" y="4" width="40" height="40" rx="12" fill="var(--accent-muted)" stroke="var(--accent)" stroke-width="1.5"/>
+          <path d="M16 24 L24 16 L32 24 L24 32Z" fill="var(--accent)" opacity="0.6"/>
+          <path d="M24 14 L24 34 M14 24 L34 24" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <h1 class="hero-title">gwt</h1>
+      <p class="hero-subtitle">Git Worktree Manager</p>
+    </div>
 
-    <div class="actions">
+    <!-- Action buttons -->
+    <div class="action-row">
       <button
-        class="open-btn"
+        class="btn btn-primary btn-lg action-open"
         onclick={openFolder}
         disabled={opening || creating}
       >
-        {opening ? "Opening..." : "Open Project..."}
+        <span class="action-icon">+</span>
+        {opening ? "Opening..." : "Open Project"}
       </button>
       <button
-        class="new-btn"
+        class="btn btn-secondary btn-lg"
         onclick={() => (showNewProject = !showNewProject)}
         disabled={opening || creating}
       >
-        New Project
+        Clone Repository
       </button>
     </div>
 
     {#if errorMessage}
-      <div class="error">{errorMessage}</div>
+      <div class="error-banner" role="alert">
+        <span class="error-icon">!</span>
+        <span>{errorMessage}</span>
+      </div>
     {/if}
 
+    <!-- New project form -->
     {#if showNewProject}
-      <div class="new-project">
-        <h3>New Project</h3>
-        <label class="field">
-          <span class="label">Repository URL</span>
+      <div class="card clone-form">
+        <h3 class="form-title">Clone Repository</h3>
+
+        <label class="form-field">
+          <span class="form-label">Repository URL</span>
           <input
             class="input"
             type="text"
@@ -229,9 +275,9 @@
           />
         </label>
 
-        <div class="field">
-          <span class="label">Parent Directory</span>
-          <div class="row">
+        <div class="form-field">
+          <span class="form-label">Parent Directory</span>
+          <div class="input-group">
             <input
               class="input"
               type="text"
@@ -245,29 +291,29 @@
               disabled={creating}
             />
             <button
-              class="choose-btn"
+              class="btn btn-secondary"
               onclick={chooseParentDir}
               disabled={creating}
             >
-              Choose...
+              Browse
             </button>
           </div>
         </div>
 
-        <div class="field">
-          <span class="label">Clone Mode</span>
-          <div class="row">
+        <div class="form-field">
+          <span class="form-label">Clone Mode</span>
+          <div class="toggle-group">
             <button
-              class="mode-btn"
+              class="toggle-option"
               class:active={shallowClone}
               type="button"
               onclick={() => (shallowClone = true)}
               disabled={creating}
             >
-              Shallow (Recommended)
+              Shallow
             </button>
             <button
-              class="mode-btn"
+              class="toggle-option"
               class:active={!shallowClone}
               type="button"
               onclick={() => (shallowClone = false)}
@@ -276,50 +322,52 @@
               Full
             </button>
           </div>
-          <span class="mode-hint">
-            Shallow clone uses --depth=1 (faster).
-          </span>
+          <span class="form-hint">Shallow clone downloads only recent history (faster)</span>
         </div>
 
         <button
-          class="create-btn"
+          class="btn btn-primary"
+          style="width: 100%"
           onclick={createProject}
           disabled={creating || !repoUrl || !parentDir}
         >
-          {creating ? "Creating..." : "Create"}
+          {creating ? "Cloning..." : "Clone & Open"}
         </button>
 
         {#if cloneProgress}
-          <div class="progress">
-            <div class="progress-row">
-              <span class="progress-label">{progressLabel(cloneProgress)}</span>
-              <span class="progress-percent">{cloneProgress.percent}%</span>
+          <div class="progress-section">
+            <div class="progress-meta">
+              <span>{progressLabel(cloneProgress)}</span>
+              <span class="mono">{cloneProgress.percent}%</span>
             </div>
-            <div class="progress-bar">
-              <div
-                class="progress-fill"
-                style={`width: ${cloneProgress.percent}%`}
-              ></div>
+            <div class="progress-track">
+              <div class="progress-bar" style={`width: ${cloneProgress.percent}%`}></div>
             </div>
           </div>
         {/if}
       </div>
     {/if}
 
+    <!-- Recent projects -->
     {#if recentProjects.length > 0}
-      <div class="recent">
-        <h3>Recent Projects</h3>
-        {#each recentProjects as project}
-          <button
-            class="recent-item"
-            onclick={() => probeAndOpen(project.path, true)}
-            disabled={opening || creating}
-          >
-            <span class="recent-name">{project.path.split("/").pop() || project.path}</span>
-            <span class="recent-path">{project.path}</span>
-            <span class="recent-time">{new Date(project.lastOpened).toLocaleDateString()}</span>
-          </button>
-        {/each}
+      <div class="recent-section">
+        <h3 class="section-title">Recent Projects</h3>
+        <div class="recent-list">
+          {#each recentProjects as project}
+            <button
+              class="recent-card card-interactive"
+              onclick={() => probeAndOpen(project.path, true)}
+              disabled={opening || creating}
+            >
+              <span class="project-icon">{getProjectIcon(project.path.split("/").pop() || "")}</span>
+              <div class="project-info">
+                <span class="project-name">{project.repo_name || project.path.split("/").pop()}</span>
+                <span class="project-path">{project.path}</span>
+              </div>
+              <span class="project-time">{formatRelativeTime(project.lastOpened)}</span>
+            </button>
+          {/each}
+        </div>
       </div>
     {/if}
   </div>
@@ -340,318 +388,291 @@
 />
 
 <style>
-  .open-project {
+  .landing {
     display: flex;
     align-items: center;
     justify-content: center;
     height: 100vh;
-    background-color: var(--bg-primary);
+    background: radial-gradient(ellipse at 50% 20%, var(--bg-elevated) 0%, var(--bg-primary) 70%);
   }
 
-  .content {
+  .landing-content {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 16px;
-    max-width: 480px;
+    gap: var(--space-5);
+    max-width: 520px;
     width: 100%;
-    padding: 48px;
+    padding: var(--space-12);
+    animation: slide-up var(--transition-slow) ease;
   }
 
-  .title {
-    font-size: 48px;
-    font-weight: 700;
+  /* Hero */
+  .hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+
+  .logo {
+    margin-bottom: var(--space-2);
+  }
+
+  .hero-title {
+    font-size: var(--ui-font-4xl);
+    font-weight: var(--font-weight-bold);
     color: var(--accent);
-    letter-spacing: -2px;
+    letter-spacing: -1.5px;
+    line-height: 1;
   }
 
-  .subtitle {
+  .hero-subtitle {
     color: var(--text-muted);
     font-size: var(--ui-font-lg);
-    margin-bottom: 24px;
+    font-weight: var(--font-weight-normal);
   }
 
-  .actions {
+  /* Actions */
+  .action-row {
     width: 100%;
     display: flex;
-    gap: 10px;
+    gap: var(--space-3);
   }
 
-  .open-btn {
+  .action-open {
     flex: 1;
-    padding: 12px 24px;
-    background-color: var(--accent);
+  }
+
+  .action-icon {
+    font-size: var(--ui-font-xl);
+    line-height: 1;
+  }
+
+  /* Error banner */
+  .error-banner {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--red-muted);
+    border: 1px solid rgba(243, 139, 168, 0.3);
+    border-radius: var(--radius-md);
+    color: var(--red);
+    font-size: var(--ui-font-md);
+    line-height: var(--line-height-normal);
+  }
+
+  .error-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius-full);
+    background: var(--red);
     color: var(--bg-primary);
-    border: none;
-    border-radius: 8px;
-    font-size: var(--ui-font-lg);
-    font-weight: 600;
-    cursor: pointer;
-    font-family: inherit;
-    transition: background-color 0.15s;
+    font-size: var(--ui-font-xs);
+    font-weight: var(--font-weight-bold);
+    flex-shrink: 0;
   }
 
-  .open-btn:hover:not(:disabled) {
-    background-color: var(--accent-hover);
-  }
-
-  .open-btn:disabled {
-    opacity: 0.7;
-    cursor: not-allowed;
-  }
-
-  .new-btn {
-    width: 140px;
-    padding: 12px 14px;
-    background: none;
-    color: var(--text-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    font-size: var(--ui-font-lg);
-    font-weight: 600;
-    cursor: pointer;
-    font-family: inherit;
-    transition: border-color 0.15s, background-color 0.15s;
-  }
-
-  .new-btn:hover:not(:disabled) {
-    border-color: var(--accent);
-    background-color: var(--bg-surface);
-  }
-
-  .new-btn:disabled {
-    opacity: 0.7;
-    cursor: not-allowed;
-  }
-
-  .error {
+  /* Clone form */
+  .clone-form {
     width: 100%;
-    padding: 10px 12px;
-    border: 1px solid rgba(255, 90, 90, 0.35);
-    background: rgba(255, 90, 90, 0.08);
-    color: rgb(255, 160, 160);
-    border-radius: 8px;
-    font-size: var(--ui-font-md);
-    line-height: 1.4;
-  }
-
-  .new-project {
-    width: 100%;
-    border: 1px solid var(--border-color);
-    background: var(--bg-secondary);
-    border-radius: 12px;
-    padding: 14px 14px 12px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-4);
+    animation: slide-up var(--transition-normal) ease;
   }
 
-  .new-project h3 {
+  .form-title {
     color: var(--text-secondary);
-    font-size: var(--ui-font-md);
-    font-weight: 500;
+    font-size: var(--ui-font-sm);
+    font-weight: var(--font-weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 1px;
-    margin: 0;
+    letter-spacing: 0.05em;
   }
 
-  .field {
+  .form-field {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-2);
   }
 
-  .label {
+  .form-label {
     font-size: var(--ui-font-sm);
     color: var(--text-muted);
+    font-weight: var(--font-weight-medium);
   }
 
-  .row {
+  .form-hint {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+  }
+
+  .input-group {
     display: flex;
-    gap: 8px;
+    gap: var(--space-2);
     align-items: center;
   }
 
-  .mode-btn {
+  .toggle-group {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+
+  .toggle-option {
     flex: 1;
-    padding: 8px 10px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    color: var(--text-primary);
-    cursor: pointer;
-    font-size: 12px;
-    font-family: inherit;
-    font-weight: 600;
-  }
-
-  .mode-btn:hover:not(:disabled) {
-    border-color: var(--accent);
-    background-color: var(--bg-surface);
-  }
-
-  .mode-btn:disabled {
-    opacity: 0.7;
-    cursor: not-allowed;
-  }
-
-  .mode-btn.active {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06) inset;
-  }
-
-  .mode-hint {
-    font-size: 11px;
-    color: var(--text-muted);
-    line-height: 1.4;
-  }
-
-  .input {
-    width: 100%;
-    padding: 8px 10px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font-size: var(--ui-font-md);
-    font-family: inherit;
-    outline: none;
-  }
-
-  .input:focus {
-    border-color: var(--accent);
-  }
-
-  .choose-btn {
-    width: 110px;
-    padding: 8px 10px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    color: var(--text-primary);
-    cursor: pointer;
-    font-size: var(--ui-font-md);
-    font-family: inherit;
-  }
-
-  .choose-btn:hover:not(:disabled) {
-    border-color: var(--accent);
-    background-color: var(--bg-surface);
-  }
-
-  .choose-btn:disabled {
-    opacity: 0.7;
-    cursor: not-allowed;
-  }
-
-  .create-btn {
-    width: 100%;
-    padding: 10px 12px;
-    background-color: var(--accent);
-    color: var(--bg-primary);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
     border: none;
-    border-radius: 8px;
-    font-size: var(--ui-font-base);
-    font-weight: 700;
+    color: var(--text-secondary);
     cursor: pointer;
     font-family: inherit;
+    font-size: var(--ui-font-sm);
+    font-weight: var(--font-weight-medium);
+    transition: background var(--transition-fast), color var(--transition-fast);
   }
 
-  .create-btn:disabled {
-    opacity: 0.7;
+  .toggle-option:hover:not(:disabled) {
+    background: var(--bg-hover);
+  }
+
+  .toggle-option.active {
+    background: var(--accent-muted);
+    color: var(--accent);
+  }
+
+  .toggle-option:disabled {
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
-  .progress {
-    width: 100%;
+  /* Progress */
+  .progress-section {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding-top: 4px;
+    gap: var(--space-2);
   }
 
-  .progress-row {
+  .progress-meta {
     display: flex;
-    align-items: baseline;
     justify-content: space-between;
     font-size: var(--ui-font-sm);
     color: var(--text-muted);
   }
 
-  .progress-label {
-    color: var(--text-secondary);
+  .mono {
+    font-family: var(--font-mono);
   }
 
-  .progress-percent {
-    font-family: monospace;
-  }
-
-  .progress-bar {
-    height: 6px;
-    border-radius: 999px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
+  .progress-track {
+    height: 4px;
+    border-radius: var(--radius-full);
+    background: var(--bg-inset);
     overflow: hidden;
   }
 
-  .progress-fill {
+  .progress-bar {
     height: 100%;
     background: var(--accent);
+    border-radius: var(--radius-full);
+    transition: width var(--transition-normal);
   }
 
-  .recent {
+  /* Recent projects */
+  .recent-section {
     width: 100%;
-    margin-top: 16px;
+    margin-top: var(--space-2);
   }
 
-  .recent h3 {
-    color: var(--text-secondary);
-    font-size: var(--ui-font-md);
-    font-weight: 500;
+  .section-title {
+    color: var(--text-muted);
+    font-size: var(--ui-font-xs);
+    font-weight: var(--font-weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 8px;
+    letter-spacing: 0.08em;
+    margin-bottom: var(--space-3);
   }
 
-  .recent-item {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    grid-template-rows: auto auto;
-    gap: 2px 12px;
+  .recent-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .recent-card {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
     width: 100%;
-    padding: 10px 12px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
+    padding: var(--space-3) var(--space-4);
     cursor: pointer;
     text-align: left;
-    margin-bottom: 4px;
     font-family: inherit;
     color: inherit;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
   }
 
-  .recent-item:hover {
-    background-color: var(--bg-surface);
+  .recent-card:hover:not(:disabled) {
+    background: var(--bg-surface);
     border-color: var(--accent);
   }
 
-  .recent-name {
-    font-size: var(--ui-font-base);
+  .recent-card:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .project-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-md);
+    background: var(--accent-subtle);
+    color: var(--accent);
+    font-size: var(--ui-font-lg);
+    flex-shrink: 0;
+  }
+
+  .project-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .project-name {
+    font-size: var(--ui-font-md);
+    font-weight: var(--font-weight-medium);
     color: var(--text-primary);
-    font-weight: 500;
   }
 
-  .recent-time {
-    font-size: var(--ui-font-sm);
+  .project-path {
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
-    grid-row: 1;
-    grid-column: 2;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .recent-path {
-    font-size: var(--ui-font-sm);
+  .project-time {
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
-    font-family: monospace;
-    grid-column: 1 / -1;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 </style>

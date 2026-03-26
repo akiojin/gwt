@@ -1,18 +1,71 @@
 //! Tauri commands for system info and statistics.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use gwt_core::{
     config::stats::Stats,
     system_info::{GpuDynamicInfo, GpuStaticInfo},
 };
-use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager};
 use tracing::{instrument, warn};
 
 use crate::state::AppState;
 
 const GET_SYSTEM_INFO_WARN_THRESHOLD: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupDiagnostics {
+    pub startup_trace: bool,
+    pub disable_tray: bool,
+    pub disable_login_shell_capture: bool,
+    pub disable_heartbeat_watchdog: bool,
+    pub disable_session_watcher: bool,
+    pub disable_startup_update_check: bool,
+    pub disable_profiling: bool,
+    pub disable_tab_restore: bool,
+    pub disable_window_session_restore: bool,
+}
+
+fn parse_env_flag(value: Option<std::ffi::OsString>) -> bool {
+    value
+        .and_then(|value| value.into_string().ok())
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+pub fn startup_diagnostics_from_env() -> StartupDiagnostics {
+    StartupDiagnostics {
+        startup_trace: parse_env_flag(std::env::var_os("GWT_DIAG_STARTUP_TRACE")),
+        disable_tray: parse_env_flag(std::env::var_os("GWT_DIAG_DISABLE_TRAY")),
+        disable_login_shell_capture: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_LOGIN_SHELL_CAPTURE",
+        )),
+        disable_heartbeat_watchdog: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_HEARTBEAT_WATCHDOG",
+        )),
+        disable_session_watcher: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_SESSION_WATCHER",
+        )),
+        disable_startup_update_check: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_STARTUP_UPDATE_CHECK",
+        )),
+        disable_profiling: parse_env_flag(std::env::var_os("GWT_DIAG_DISABLE_PROFILING")),
+        disable_tab_restore: parse_env_flag(std::env::var_os("GWT_DIAG_DISABLE_TAB_RESTORE")),
+        disable_window_session_restore: parse_env_flag(std::env::var_os(
+            "GWT_DIAG_DISABLE_WINDOW_SESSION_RESTORE",
+        )),
+    }
+}
 
 // --- T030: SystemInfoResponse / GpuInfo ---
 
@@ -142,11 +195,19 @@ pub async fn get_system_info(app_handle: AppHandle) -> SystemInfoResponse {
         get_system_info_impl(&state)
     })
     .await
-    .unwrap_or_else(|_| SystemInfoResponse {
-        cpu_usage_percent: 0.0,
-        memory_used_bytes: 0,
-        memory_total_bytes: 0,
-        gpus: Vec::new(),
+    .unwrap_or_else(|e| {
+        gwt_core::logging::log_incident(
+            "system",
+            "get_system_info",
+            Some("SYSTEM_INFO_TASK_FAILED"),
+            &e.to_string(),
+        );
+        SystemInfoResponse {
+            cpu_usage_percent: 0.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            gpus: Vec::new(),
+        }
     });
     let elapsed = started.elapsed();
     if elapsed > GET_SYSTEM_INFO_WARN_THRESHOLD {
@@ -212,20 +273,76 @@ pub fn get_stats() -> StatsResponse {
     }
 }
 
+#[instrument(skip_all, fields(command = "get_startup_diagnostics"))]
+#[tauri::command]
+pub fn get_startup_diagnostics() -> StartupDiagnostics {
+    startup_diagnostics_from_env()
+}
+
 // --- Freeze detection: heartbeat + frontend metrics ---
 
 #[instrument(skip_all, fields(command = "heartbeat"))]
 #[tauri::command]
-pub fn heartbeat(state: tauri::State<'_, AppState>) {
+pub fn heartbeat(state: tauri::State<'_, AppState>, app_handle: AppHandle) {
     if let Ok(mut slot) = state.last_heartbeat.lock() {
         *slot = Some(Instant::now());
     }
+
+    if startup_diagnostics_from_env().disable_heartbeat_watchdog {
+        return;
+    }
+
+    if state
+        .heartbeat_watchdog_started
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                let state = app_handle.state::<AppState>();
+                let elapsed = {
+                    let slot = state.last_heartbeat.lock().ok();
+                    slot.and_then(|guard| guard.map(|ts| ts.elapsed()))
+                };
+                if let Some(elapsed) = elapsed {
+                    if elapsed > Duration::from_secs(3) {
+                        warn!(
+                            category = "freeze_detection",
+                            elapsed_ms = elapsed.as_millis(),
+                            "Frontend heartbeat stale – possible UI freeze"
+                        );
+                        let _ = app_handle.emit("freeze-detected", elapsed.as_millis() as u64);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            category = "startup_diag",
+            checkpoint = "heartbeat_watchdog.ready",
+            "Frontend heartbeat watchdog armed after first heartbeat"
+        );
+    }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FrontendMetric {
-    pub command: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     pub duration_ms: f64,
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+    #[serde(default)]
+    pub startup_token: Option<String>,
+    #[serde(default)]
+    pub success: Option<bool>,
 }
 
 #[instrument(skip_all, fields(command = "report_frontend_metrics"))]
@@ -234,15 +351,31 @@ pub fn report_frontend_metrics(metrics: Vec<FrontendMetric>) {
     for m in &metrics {
         tracing::info!(
             target: "frontend",
-            command = %m.command,
+            kind = %m.kind.as_deref().unwrap_or("invoke"),
+            command = %m.command.as_deref().unwrap_or(""),
+            name = %m.name.as_deref().unwrap_or(""),
             duration_ms = m.duration_ms,
+            timestamp = m.timestamp.unwrap_or_default(),
+            startup_token = %m.startup_token.as_deref().unwrap_or(""),
+            success = m.success.unwrap_or(true),
             "Frontend invoke metric"
         );
     }
 }
 
+// --- HTTP IPC port ---
+
+#[tauri::command]
+pub fn get_http_ipc_port(state: tauri::State<'_, AppState>) -> u16 {
+    state
+        .http_ipc_port
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -352,5 +485,56 @@ mod tests {
 
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].name, "NVIDIA GPU");
+    }
+
+    #[test]
+    fn parse_env_flag_accepts_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(parse_env_flag(Some(std::ffi::OsString::from(value))));
+        }
+    }
+
+    #[test]
+    fn parse_env_flag_rejects_falsey_values() {
+        assert!(!parse_env_flag(None));
+        for value in ["0", "false", "FALSE", "no", "off", ""] {
+            assert!(!parse_env_flag(Some(std::ffi::OsString::from(value))));
+        }
+    }
+
+    #[test]
+    fn frontend_metric_accepts_legacy_invoke_shape() {
+        let metric: FrontendMetric = serde_json::from_value(json!({
+            "command": "open_project",
+            "durationMs": 12.5
+        }))
+        .expect("legacy invoke metric should deserialize");
+
+        assert_eq!(metric.command.as_deref(), Some("open_project"));
+        assert_eq!(metric.kind.as_deref(), None);
+        assert_eq!(metric.name.as_deref(), None);
+        assert_eq!(metric.duration_ms, 12.5);
+    }
+
+    #[test]
+    fn frontend_metric_accepts_startup_shape() {
+        let metric: FrontendMetric = serde_json::from_value(json!({
+            "kind": "startup",
+            "name": "project_start.open_project.total",
+            "durationMs": 432.1,
+            "timestamp": 1711111111u64,
+            "startupToken": "startup-1",
+            "success": true
+        }))
+        .expect("startup metric should deserialize");
+
+        assert_eq!(metric.kind.as_deref(), Some("startup"));
+        assert_eq!(
+            metric.name.as_deref(),
+            Some("project_start.open_project.total")
+        );
+        assert_eq!(metric.startup_token.as_deref(), Some("startup-1"));
+        assert_eq!(metric.success, Some(true));
+        assert_eq!(metric.duration_ms, 432.1);
     }
 }

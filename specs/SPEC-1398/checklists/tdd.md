@@ -1,0 +1,12 @@
+- 追加テスト:
+  - `shows No PR when latestBranchPr is MERGED and no sidebar PR number exists`
+  - `prefers sidebar prNumber over latestBranchPr when both are present`
+- RED (2026-03-02):
+  - `cd gwt-gui && pnpm test src/lib/components/WorktreeSummaryPanel.test.ts -t "shows No PR when latestBranchPr is MERGED and no sidebar PR number exists|prefers sidebar prNumber over latestBranchPr when both are present"`
+  - 結果: 2 tests failed（`No PR` が表示されず `#99` が表示、`#42` ではなく `#99` が表示）
+- GREEN (2026-03-02):
+  - 同コマンド再実行
+  - 結果: 2 passed
+- Regression (2026-03-02):
+  - `cd gwt-gui && pnpm test src/lib/components/WorktreeSummaryPanel.test.ts`
+  - 結果: 87 passed

@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-tasks
-description: Generate `tasks.md` for an existing `gwt-spec` from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. Use directly or through `gwt-spec-ops`.
+description: Generate `tasks.md` for an existing SPEC from `spec.md` and `plan.md`, grouped by phase and user story with exact file paths, `[P]` parallel markers, and test-first ordering. Use directly or through `gwt-spec-ops`.
 ---
 
 # gwt SPEC Tasks
@@ -14,9 +14,9 @@ Use this skill to turn the approved spec and plan artifacts into executable work
 
 ## Required inputs
 
-- `doc:spec.md`
-- `doc:plan.md`
-- Optional: `doc:research.md`, `doc:data-model.md`, `doc:quickstart.md`, `contract:*`
+- `spec.md`
+- `plan.md`
+- Optional: `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`
 
 ## `tasks.md` structure
 
@@ -74,7 +74,7 @@ Each task must include:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
-  --issue "<number>" \
+  --spec "<id>" \
   --upsert \
   --artifact "doc:tasks.md" \
   --body-file /tmp/tasks.md

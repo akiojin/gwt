@@ -1,11 +1,11 @@
 ---
 name: gwt-spec-implement
-description: Implement an existing `gwt-spec` end-to-end from `tasks.md`. Execute test-first tasks, update progress artifacts, and keep PR work moving until the SPEC is done.
+description: Implement an existing SPEC end-to-end from `tasks.md`. Execute test-first tasks, update progress artifacts, and keep PR work moving until the SPEC is done.
 ---
 
 # gwt SPEC Implement
 
-Use this skill after a `gwt-spec` has a stable `spec.md`, `plan.md`, `tasks.md`, and a `CLEAR`
+Use this skill after a SPEC has a stable `spec.md`, `plan.md`, `tasks.md`, and a `CLEAR`
 analysis result.
 
 - Primary caller: `gwt-spec-ops`
@@ -27,16 +27,16 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
 
 ## Required inputs
 
-- `doc:spec.md`
-- `doc:plan.md`
-- `doc:tasks.md`
+- `spec.md`
+- `plan.md`
+- `tasks.md`
 - latest analysis result of `CLEAR`
-- optional supporting artifacts: `doc:research.md`, `doc:data-model.md`, `doc:quickstart.md`, `contract:*`, `checklist:*`
+- optional supporting artifacts: `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`
 
 ## Workflow
 
 1. **Read the execution context.**
-   - Load the target Issue, the three core artifacts, and any supporting contracts/checklists.
+   - Load the SPEC directory, the three core artifacts, and any supporting contracts/checklists.
    - Identify the next incomplete task slice in phase order.
 
 2. **Execute tasks in dependency order.**
@@ -58,9 +58,10 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
    - If a failure indicates a spec gap rather than a code bug, return to `gwt-spec-ops`.
 
 6. **Update execution tracking.**
-   - Update `doc:tasks.md` with completed work when the task format supports completion markers.
-   - Post Issue progress comments using the required `Progress / Done / Next` template.
-   - Keep comments factual and incremental.
+   - Update `tasks.md` with completed work when the task format supports completion markers.
+   - Append progress updates to `specs/SPEC-{id}/progress.md` using the `Progress / Done / Next` template.
+   - Keep progress entries factual and incremental.
+   - Do not mark the SPEC complete yet; completion requires the exit gate below.
 
 7. **Keep PR flow moving.**
    - If there is no active PR for the branch, or prior PRs are already merged, use `gwt-pr`.
@@ -70,6 +71,11 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
 8. **Repeat until the scoped tasks are done.**
    - Continue task-by-task until the SPEC is complete or a true decision blocker remains.
 
+9. **Run the post-implementation completion gate.**
+   - Reconcile the implemented behavior against `spec.md`, `tasks.md`, `checklists/acceptance.md`, `checklists/tdd.md`, latest progress files, and executed verification.
+   - If these artifacts disagree, return to `gwt-spec-ops` and repair the artifact set or rollback false completion markers.
+   - Only after reconciliation passes may the workflow declare the SPEC complete.
+
 ## Stop Conditions
 
 Stop only when:
@@ -78,10 +84,20 @@ Stop only when:
 - a merge conflict or review request is ambiguous enough to risk the wrong behavior
 - the required repo/auth/tooling access is unavailable
 
+## Completion gate requirements
+
+Before declaring completion:
+
+- every claimed completed task in `tasks.md` must match the implementation
+- `checklists/acceptance.md` must reflect actual accepted behavior
+- `checklists/tdd.md` must reflect actual verification evidence
+- progress entries in `progress.md` must not claim completion that the artifacts or code do not support
+- if any of the above diverge, the next step is `gwt-spec-ops`, not `gwt-pr`
+
 ## Exit report
 
 ```text
-## Implementation Report: #<number>
+## Implementation Report: SPEC-<id>
 
 Completed tasks: <N>
 Updated files: <paths>

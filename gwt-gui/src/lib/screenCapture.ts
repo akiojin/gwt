@@ -128,12 +128,18 @@ export function collectScreenText(ctx: ScreenCaptureContext): string {
     lines.push(modalText);
   }
 
-  // Sidebar
-  const sidebar = document.querySelector(".sidebar");
-  if (sidebar) {
-    const sidebarText = getVisibleText(sidebar);
+  // Branch Browser / legacy Sidebar surface
+  const browserSurface =
+    document.querySelector(".branch-browser-panel") ??
+    document.querySelector(".sidebar");
+  if (browserSurface) {
+    const sidebarText = getVisibleText(browserSurface);
     lines.push("");
-    lines.push("--- Sidebar ---");
+    lines.push(
+      ctx.activeTabType === "branchBrowser"
+        ? "--- Branch Browser ---"
+        : "--- Sidebar ---",
+    );
     lines.push(sidebarText || "(empty)");
   }
 

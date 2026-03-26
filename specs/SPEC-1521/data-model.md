@@ -1,0 +1,2 @@
+- No schema changes.
+- `ProfilesConfig.profiles[profileKey].ai.api_key` remains the single persisted field for profile API keys.
