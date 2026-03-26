@@ -1,3 +1,4 @@
+import type { UnlistenFn, Event as TauriEvent } from "@tauri-apps/api/event";
 import { errorBus, type StructuredError } from "./errorBus";
 import { isProfilingEnabled, recordInvokeMetric } from "./profiling.svelte";
 import { isBrowserDevMode, getMockResponse } from "./tauriMock";
@@ -162,11 +163,13 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
  */
 export async function listen<T>(
   event: string,
-  handler: (event: { payload: T }) => void,
-): Promise<() => void> {
+  handler: (event: TauriEvent<T>) => void,
+): Promise<UnlistenFn> {
   if (IS_MOCK) {
     return () => {};
   }
   const listenFn = await ensureTauriListen();
-  return listenFn(event, handler as (event: { payload: unknown }) => void);
+  return listenFn(event, handler as (event: { payload: unknown }) => void) as Promise<UnlistenFn>;
 }
+
+export type { UnlistenFn, TauriEvent };
