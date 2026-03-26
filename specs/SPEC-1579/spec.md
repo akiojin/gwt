@@ -11,7 +11,7 @@ doc:spec.md
 - This redesign makes workflow ownership explicit: `gwt-spec-ops` owns artifact stabilization, `gwt-spec-implement` owns execution, and PR skills auto-handle routine merge/fix loops.
 - GitHub-backed skills currently lean too heavily on `gh pr list` / GraphQL paths for PR metadata and review inspection, which creates avoidable failures when REST token access still works or when GraphQL quotas are exhausted.
 - The current runtime can contain helper skills that exist on disk but are not present in the user-visible skill catalog. User-facing workflow guidance must not point directly at hidden skills.
-- The older storage design treated the GitHub Issue body as the canonical spec bundle with `Spec/Plan/Tasks/TDD/...` sections embedded directly in the body. The embedded skill workflow is now restructured around artifact-first storage where `doc:*`, `contract:*`, and `checklist:*` issue comments hold the real content and the Issue body is only an index.
+- The older storage design treated the GitHub Issue body as the canonical spec bundle with `Spec/Plan/Tasks/TDD/...` sections embedded directly in the body. The embedded skill workflow is now restructured around local file-based storage where `specs/SPEC-{N}/` directories hold the real content (`spec.md`, `plan.md`, `tasks.md`, and supporting artifacts) and the local SPEC directory is the canonical source.
 - The current workflow only defined a pre-implementation `CLEAR` gate. #1654 exposed a missing completion gate: `tasks.md` and progress comments were marked complete while the implementation still diverged from `doc:spec.md`, `checklist:acceptance.md`, and `checklist:tdd.md`.
 - This spec is the single canonical reference for the gwt-spec system: embedded workflow, storage/API, artifact CRUD, completion gate, registration contract, and GitHub transport policy. Issue-tab detail rendering lives in #1354.
 
@@ -65,8 +65,8 @@ As a maintainer, I want migration to be part of the redesign rather than an afte
 
 **Acceptance Scenarios**
 
-1. Given legacy local specs, when migration runs, then they can be converted into Issue-first artifacts.
-2. Given old monolithic `gwt-spec` Issues, when migration/repair runs, then they can be split into artifact comments and index-only bodies.
+1. Given legacy Issue-based specs, when migration runs, then they can be converted into local SPEC directories (`specs/SPEC-{N}/`).
+2. Given old monolithic `gwt-spec` Issues, when migration/repair runs, then their artifacts can be extracted into local SPEC files.
 3. Given the user explicitly asks to migrate or convert, when the dry-run completes cleanly, then the migration skill proceeds without an extra confirmation loop.
 
 ### User Story 6 - Prefer REST for GitHub-backed embedded skills when practical (Priority: P1)
@@ -83,39 +83,39 @@ As a maintainer, I want GitHub-backed embedded skills to prefer REST for metadat
 
 ### User Story 7 - Persist spec artifacts without relying on a monolithic body (Priority: P0)
 
-As a developer, I want the spec system to store `spec.md`, `plan.md`, `tasks.md`, and supporting docs as first-class artifact comments rather than a giant Issue body.
+As a developer, I want the spec system to store `spec.md`, `plan.md`, `tasks.md`, and supporting docs as local files in `specs/SPEC-{N}/` rather than a giant Issue body.
 
 **Acceptance Scenarios**
 
-1. Given a new `gwt-spec` Issue, when it is created or updated, then the Issue body may be index-only and the canonical content lives in `doc:*` comments.
-2. Given a `gwt-spec` Issue with `doc:*` comments, when backend detail APIs are called, then they reconstruct `SpecIssueSections` from those artifacts.
+1. Given a new SPEC, when it is created or updated, then the canonical content lives in local files under `specs/SPEC-{N}/`.
+2. Given a SPEC directory with local artifact files, when backend detail APIs are called, then they reconstruct `SpecIssueSections` from those local files.
 
 ### User Story 8 - Keep legacy issues readable during migration (Priority: P0)
 
-As a developer, I want legacy body-canonical spec issues to continue working while the system migrates to artifact-first storage.
+As a developer, I want legacy Issue-based specs to remain readable while the system migrates to local file-based storage.
 
 **Acceptance Scenarios**
 
 1. Given a legacy `gwt-spec` Issue with body sections only, when detail APIs are called, then the same sections are returned.
-2. Given a mixed issue with both body sections and `doc:*` comments, when detail APIs are called, then `doc:*` comments take precedence and body sections act as fallback.
+2. Given a mixed state with both Issue-based artifacts and local SPEC files, when detail APIs are called, then local files take precedence and Issue body sections act as fallback.
 
 ### User Story 9 - Manage document artifacts through the same CRUD layer (Priority: P0)
 
-As a developer or agent, I want `doc:*`, `contract:*`, and `checklist:*` artifacts to use the same list/get/upsert/delete model.
+As a developer or agent, I want `doc:*`, `contract:*`, and `checklist:*` artifacts to use the same local file CRUD model (`spec_artifact.py`).
 
 **Acceptance Scenarios**
 
-1. Given an artifact key `doc:plan.md`, when it is upserted, then the system stores it as a comment artifact with stable retrieval metadata.
-2. Given an artifact key `contract:openapi.yaml` or `checklist:tdd.md`, when it is listed, then it is returned through the same API family.
+1. Given an artifact key `doc:plan.md`, when it is upserted, then the system stores it as a local file in `specs/SPEC-{N}/` with stable retrieval metadata.
+2. Given an artifact key `contract:openapi.yaml` or `checklist:tdd.md`, when it is listed, then it is returned through the same local file API family.
 
 ### User Story 10 - Support migration tooling for old formats (Priority: P1)
 
-As a maintainer, I want migration tooling to handle both local legacy specs and old Issue-body bundles.
+As a maintainer, I want migration tooling to handle Issue-based specs and convert them to local SPEC directories.
 
 **Acceptance Scenarios**
 
-1. Given local `specs/SPEC-*`, when migration runs, then it can create Issue-first artifacts.
-2. Given an existing body-canonical `gwt-spec` Issue, when migration or repair runs, then it can split the body into `doc:*` and `checklist:*` artifact comments.
+1. Given an existing `gwt-spec` Issue, when migration runs, then it can extract artifacts into local `specs/SPEC-{N}/` directories.
+2. Given an existing body-canonical `gwt-spec` Issue, when migration or repair runs, then it can split the body into local `spec.md`, `plan.md`, `tasks.md`, and supporting files.
 
 ### User Story 11 - Implementation completion must be evidence-backed (Priority: P0)
 
@@ -171,7 +171,7 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 ## Functional Requirements
 
 - **FR-001**: `gwt-issue-register` and `gwt-issue-resolve` must route spec work through a single artifact-first workflow and continue automatically when the correct owner is clear.
-- **FR-002**: `gwt-spec-register` must create a SPEC container and seed `doc:spec.md` before any planning artifacts are generated.
+- **FR-002**: `gwt-spec-register` must create a SPEC container and seed `specs/SPEC-{N}/spec.md` before any planning artifacts are generated.
 - **FR-003**: `gwt-spec-ops` must own clarify/plan/tasks/analyze sequencing and keep driving the workflow until a true decision blocker appears.
 - **FR-004**: `gwt-spec-analyze` must classify readiness as `CLEAR`, `AUTO-FIXABLE`, or `NEEDS-DECISION`.
 - **FR-005**: `gwt-spec-implement` must own execution after `CLEAR`, including test-first task execution, progress updates, and PR handoff.
@@ -186,13 +186,13 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 - **FR-014**: REST-first GitHub skills must treat PR discovery, PR create/update, commit status, check-runs, reviews, review comments, and PR issue comments as REST-capable paths in both documentation and implementation planning.
 - **FR-015**: When REST or GraphQL rate limits are hit, embedded GitHub skills must document bounded retry/backoff behavior and must not claim that REST is unlimited.
 - **FR-016**: User-facing workflow guidance must reference only visible skills directly; if an internal helper skill such as `gwt-spec-plan` is not visible in the current user-facing catalog, the documented next step must route through its visible owner skill instead.
-- **FR-017**: `SpecIssueArtifactKind` must support `doc`, `contract`, and `checklist` artifact families.
-- **FR-018**: `get_spec_issue_detail()` must reconstruct `SpecIssueSections` from `doc:*` artifacts first and body sections second.
+- **FR-017**: The local SPEC directory structure must support `doc`, `contract`, and `checklist` artifact families as files under `specs/SPEC-{N}/`.
+- **FR-018**: `get_spec_issue_detail()` must reconstruct `SpecIssueSections` from local SPEC files first and Issue body sections second.
 - **FR-019**: `SpecIssueDetail.sections` must remain the stable frontend-facing aggregate shape.
-- **FR-020**: `list_spec_issue_artifact_comments` and related CRUD APIs must support `doc:*` artifacts alongside existing contract/checklist artifacts.
-- **FR-021**: Legacy body-canonical `gwt-spec` Issues must remain readable until migration is complete.
-- **FR-022**: The canonical body format for new `gwt-spec` Issues must be an artifact index plus status/links, not a full bundle dump.
-- **FR-023**: Migration tooling must cover both `specs/SPEC-* -> Issue-first` and `body-canonical issue -> artifact-first issue` flows.
+- **FR-020**: `spec_artifact.py` and related local CRUD operations must support `doc:*` artifacts alongside existing contract/checklist artifacts.
+- **FR-021**: Legacy Issue-based `gwt-spec` specs must remain readable until migration to local SPEC directories is complete.
+- **FR-022**: The canonical format for new SPECs must be a local `specs/SPEC-{N}/` directory with individual artifact files, not a monolithic Issue body.
+- **FR-023**: Migration tooling must cover `Issue-based spec -> local specs/SPEC-{N}/` and `body-canonical issue -> local SPEC directory` flows.
 - **FR-024**: `gwt-spec-analyze` must be documented as a pre-implementation readiness gate only.
 - **FR-025**: `gwt-spec-implement` must include a mandatory post-implementation completion gate before tasks or progress can declare completion.
 - **FR-026**: The completion gate must reconcile `doc:spec.md`, `doc:tasks.md`, `checklist:acceptance.md`, `checklist:tdd.md`, progress comments, and executed verification.
@@ -491,7 +491,7 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 - **操作**: `send_keys_to_pane`、`send_keys_broadcast`、`capture_scrollback_tail`、`list_terminals`、`close_terminal`
 - **停止条件**: なし（命令ディスパッチは即時完了）
 
-### gwt-file-search
+### gwt-project-search
 
 - **概要**: ChromaDB ベクトル埋め込みを使用したプロジェクトソースファイルのセマンティック検索。機能・バグ・概念に関連するファイルの発見に使用する。
 - **トリガー条件**: タスク開始時のファイル調査、バグ調査時の関連ファイル特定、機能追加時の既存実装検索、アーキテクチャ理解。
@@ -504,3 +504,69 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 - **依存スキル**: なし（独立実行）
 - **操作**: `chroma_index_runner.py --action search`
 - **停止条件**: なし（検索は即時完了）
+
+### gwt-spec-search
+
+- **概要**: ChromaDB ベクトル埋め込みを使用したローカル SPEC ファイル（`specs/SPEC-{N}/`）のセマンティック検索。既存スペックの発見・重複チェック・スコープ所有者の特定に使用する。
+- **トリガー条件**: SPEC 新規作成前の重複チェック、関連仕様の検索、スコープ所有者の特定。`gwt-spec-register`、`gwt-spec-ops`、`gwt-issue-register`、`gwt-issue-resolve` の必須プリフライト。
+- **ワークフロー**:
+  1. `chroma_index_runner.py --action search-specs` でセマンティッククエリを実行
+  2. `specs/` 配下の SPEC メタデータとコンテンツを検索対象とする
+  3. 結果は spec_id, title, status, phase, relevance を含む
+- **入力/出力**: 入力: 検索クエリ。出力: 関連 SPEC 一覧（ID・タイトル・ステータス・関連度）
+- **依存スキル**: なし（独立実行）
+- **操作**: `chroma_index_runner.py --action search-specs`
+- **停止条件**: なし（検索は即時完了）
+
+## Custom Slash Commands
+
+カスタムスラッシュコマンド（`.claude/commands/gwt-*.md`）は、各スキルへのエントリポイントとして機能する。ユーザーが `/gwt:<command-name>` で呼び出すと、対応するコマンドファイルが読み込まれ、SKILL.md のワークフローに従って処理が実行される。
+
+### コマンドファイルの構造
+
+各コマンドファイルは YAML frontmatter + Markdown body で構成される:
+
+```yaml
+---
+description: コマンドの説明（Claude のスキル一覧に表示される）
+author: akiojin
+allowed-tools: Read, Glob, Grep, Bash
+---
+```
+
+- **description**: Claude がコマンドの用途を判断するために使用。スキルの description と補完的な内容。
+- **allowed-tools**: コマンド実行時に許可されるツール。
+- **body**: `## Steps` セクションで SKILL.md の読み込みとワークフローの手順を記述。
+
+### コマンドとスキルの対応
+
+| コマンド | 対応スキル | 概要 |
+|---------|-----------|------|
+| `/gwt:gwt-issue-register` | gwt-issue-register | 新規作業の登録 |
+| `/gwt:gwt-issue-resolve` | gwt-issue-resolve | 既存 Issue の解決 |
+| `/gwt:gwt-issue-search` | gwt-issue-search | Issue のセマンティック検索 |
+| `/gwt:gwt-spec-register` | gwt-spec-register | 新規 SPEC の作成 |
+| `/gwt:gwt-spec-clarify` | gwt-spec-clarify | SPEC の曖昧箇所の明確化 |
+| `/gwt:gwt-spec-plan` | gwt-spec-plan | 計画アーティファクト生成 |
+| `/gwt:gwt-spec-tasks` | gwt-spec-tasks | tasks.md 生成 |
+| `/gwt:gwt-spec-analyze` | gwt-spec-analyze | SPEC 完全性チェック |
+| `/gwt:gwt-spec-implement` | gwt-spec-implement | SPEC の実装 |
+| `/gwt:gwt-spec-search` | gwt-spec-search | ローカル SPEC 検索 |
+| `/gwt:gwt-pr` | gwt-pr | PR 作成・更新 |
+| `/gwt:gwt-pr-check` | gwt-pr-check | PR ステータス確認 |
+| `/gwt:gwt-pr-fix` | gwt-pr-fix | CI/レビュー修正 |
+| `/gwt:gwt-project-search` | gwt-project-search | プロジェクトファイル検索 |
+| `/gwt:gwt-agent-dispatch` | gwt-agent-dispatch | Agent ペインへの命令ディスパッチ |
+
+### コマンドの配置
+
+- **正本**: `.claude/commands/gwt-*.md`（git 追跡対象）
+- **埋め込み**: `skill_registration.rs` の `CLAUDE_COMMAND_ASSETS` で `include_str!()` によりバイナリに埋め込み
+- **展開先**: gwt がプロジェクトに登録する際に `.claude/commands/` に書き出し
+
+### コマンドの設計原則
+
+1. **スキルへの委譲**: コマンドは SKILL.md のワークフローを呼び出すエントリポイントであり、ビジネスロジックは SKILL.md に記述する。
+2. **Step 1 は常に SKILL.md 読み込み**: `Load .claude/skills/<name>/SKILL.md and follow the workflow.`
+3. **ツール制限**: `allowed-tools` で実行可能なツールを制限（通常は `Read, Glob, Grep, Bash`）。
+4. **gwt-spec-ops にはコマンドなし**: オーケストレーションスキルは他のスキルから呼び出されるため、直接のスラッシュコマンドを持たない。

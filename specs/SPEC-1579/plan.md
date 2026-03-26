@@ -1,15 +1,15 @@
 ## Summary
 
-Unified plan for the gwt-spec system: embedded-skill autonomy, artifact-first storage/API, completion gate, and GitHub transport policy. Keep `gwt-spec-ops` as the workflow owner, `gwt-spec-implement` as the execution owner, shift storage from body-canonical to artifact-first comments, and add a post-implementation completion gate alongside the existing pre-implementation `CLEAR` gate.
+Unified plan for the gwt-spec system: embedded-skill autonomy, local file-based storage/API, completion gate, and GitHub transport policy. Keep `gwt-spec-ops` as the workflow owner, `gwt-spec-implement` as the execution owner, shift storage from Issue-based to local `specs/SPEC-{N}/` directories, and add a post-implementation completion gate alongside the existing pre-implementation `CLEAR` gate.
 
 ## Technical Context
 
-- Skill docs under `plugins/gwt/skills/*`
-- Command docs under `plugins/gwt/commands/*`
+- Skill docs under `.claude/skills/*`
+- Command docs under `.claude/commands/*`
 - Registration catalog and managed-skill block generation in `crates/gwt-core/src/config/skill_registration.rs`
 - Managed block sync in `CLAUDE.md`
-- Existing migration support in `plugins/gwt/skills/gwt-spec-to-issue-migration`
-- GitHub-backed skill surfaces: `plugins/gwt/skills/gwt-pr`, `plugins/gwt/skills/gwt-pr-check`, `plugins/gwt/skills/gwt-pr-fix`
+- Existing migration support in `.claude/skills/gwt-spec-to-issue-migration`
+- GitHub-backed skill surfaces: `.claude/skills/gwt-pr`, `.claude/skills/gwt-pr-check`, `.claude/skills/gwt-pr-fix`
 - Core storage module: `crates/gwt-core/src/git/issue_spec.rs`
 - Tauri bridge: `crates/gwt-tauri/src/commands/issue_spec.rs`
 - Agent/builtin integration: `crates/gwt-tauri/src/agent_tools.rs`
@@ -26,8 +26,8 @@ Unified plan for the gwt-spec system: embedded-skill autonomy, artifact-first st
 - Workflow/Storage/API/Completion canonical: #1579
 - Viewer canonical: #1354
 - Search canonical: #1643
-- Skill docs: `plugins/gwt/skills/*`
-- Command docs: `plugins/gwt/commands/*`
+- Skill docs: `.claude/skills/*`
+- Command docs: `.claude/commands/*`
 - Registration/catalog: `crates/gwt-core/src/config/skill_registration.rs`
 - Storage core: `crates/gwt-core/src/git/issue_spec.rs`
 - Reference remediation case: #1654
