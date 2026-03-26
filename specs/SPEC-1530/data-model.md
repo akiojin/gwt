@@ -1,0 +1,8 @@
+- Branch PR aggregate status:
+  - `open`: at least one PR with `mergedAt == null` and state OPEN
+  - `closed`: no open PR remains, but at least one PR with `mergedAt == null` and state CLOSED
+  - `merged`: all PRs for the branch have non-null `mergedAt`
+  - `none`: no PRs found
+- Cleanup safety mapping with remote delete enabled:
+  - `merged` => `safe`
+  - `open|closed|none` => `warning`

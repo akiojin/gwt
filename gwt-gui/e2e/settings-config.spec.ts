@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./support/tauri-mock";
 import {
+  captureUxSnapshot,
   defaultRecentProject,
   settingsFixture,
   profilesFixture,
@@ -11,6 +12,7 @@ import {
   openSettings,
   standardSettingsResponses,
   getInvokeArgs,
+  saveE2ECoverage,
 } from "./support/helpers";
 
 function generalTab(page: Parameters<typeof test>[0]["page"]) {
@@ -96,10 +98,15 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("opens Settings panel from menu action", async ({ page }) => {
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
+});
+
+test("opens Settings panel from menu action", async ({ page }, testInfo) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await captureUxSnapshot(page, testInfo, "settings-general-tab");
 });
 
 test("Settings General tab is active by default", async ({ page }) => {
@@ -231,7 +238,7 @@ test("default profile delete button is disabled", async ({ page }) => {
 
 test("Profiles tab shows selector and profile actions from the refactored header", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await openSettings(page, standardSettingsResponses());
 
@@ -241,6 +248,7 @@ test("Profiles tab shows selector and profile actions from the refactored header
   await expect(page.locator("#profile-edit")).toHaveCount(0);
   await expect(profileDeleteButton(page)).toBeVisible();
   await expect(profileNewButton(page)).toBeVisible();
+  await captureUxSnapshot(page, testInfo, "settings-profiles-tab");
 });
 
 test("creating a profile makes it active and save_profiles persists active profile edits", async ({

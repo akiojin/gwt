@@ -1,0 +1,7 @@
+- [ ] Graphics 配下の Modern Office PNG が Sprite importer として設定される
+- [ ] Modern Office 家具 singles が Single モードでインポートされる
+- [ ] UI シートが grid slice される
+- [ ] キャラクタースプライトシートが grid slice される
+- [ ] AnimationClip / AnimatorController が生成される
+- [ ] Office / UI 用 SpriteAtlas が生成される
+- [ ] Editor テストと Unity compile check が通る

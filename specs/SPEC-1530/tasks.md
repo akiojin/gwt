@@ -1,0 +1,8 @@
+- [x] T001 [S] Create and link this SPEC to issue #1525
+- [x] T002 [F] Add Rust RED test for `closed/unmerged + merged => warning`
+- [x] T003 [F] Add Rust RED test for `open + merged => warning`
+- [x] T004 [F] Add Rust RED test for `compute_safety_level(..., Closed) => Warning`
+- [x] T005 [U1] Implement unsafe-first PR aggregation in `gh_cli.rs`
+- [x] T006 [U2] Align cleanup safety mapping in `cleanup.rs`
+- [x] T007 [U3] Align Cleanup modal effective safety for `closed`
+- [x] T008 [FIN] Run Rust/frontend verification and sync issue updates
