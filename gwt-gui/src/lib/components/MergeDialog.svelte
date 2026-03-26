@@ -144,13 +144,13 @@
   .dialog {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 24px;
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
     min-width: 400px;
     max-width: 520px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-4);
   }
 
   .dialog-title {
@@ -167,10 +167,10 @@
   }
 
   .dialog-error {
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border: 1px solid rgba(255, 0, 0, 0.3);
     background: rgba(255, 0, 0, 0.06);
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
   }
@@ -212,10 +212,10 @@
   }
 
   .dialog-textarea {
-    padding: 8px 10px;
+    padding: var(--space-2) 10px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
     font-family: inherit;
@@ -230,12 +230,12 @@
   .dialog-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .dialog-btn {
-    padding: 8px 16px;
-    border-radius: 6px;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-sm);
     font-size: var(--ui-font-sm);
     font-weight: 600;
     cursor: pointer;
