@@ -287,8 +287,8 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 16px 18px 18px;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-4) var(--space-4);
     background:
       linear-gradient(180deg, color-mix(in srgb, var(--bg-secondary) 88%, transparent), var(--bg-primary)),
       radial-gradient(circle at top right, color-mix(in srgb, var(--cyan) 12%, transparent), transparent 32%);
@@ -307,7 +307,7 @@
   .browser-header,
   .browser-toolbar {
     justify-content: space-between;
-    gap: 16px;
+    gap: var(--space-4);
   }
 
   .browser-header h2 {
@@ -316,7 +316,7 @@
   }
 
   .browser-header p {
-    margin: 4px 0 0;
+    margin: var(--space-1) 0 0;
     color: var(--text-muted);
   }
 
@@ -325,8 +325,8 @@
     border: 1px solid var(--border-color);
     background: color-mix(in srgb, var(--bg-secondary) 80%, transparent);
     color: var(--text-primary);
-    border-radius: 999px;
-    padding: 7px 12px;
+    border-radius: var(--radius-full);
+    padding: var(--space-2) var(--space-3);
     cursor: pointer;
     font: inherit;
   }
@@ -342,7 +342,7 @@
   }
 
   .filter-row {
-    gap: 8px;
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
 
@@ -351,8 +351,8 @@
     border: 1px solid var(--border-color);
     background: var(--bg-primary);
     color: var(--text-primary);
-    border-radius: 10px;
-    padding: 8px 10px;
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
     font: inherit;
   }
 
@@ -361,7 +361,7 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-4);
   }
 
   .branch-list-panel,
@@ -376,7 +376,7 @@
   .detail-panel {
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     background: color-mix(in srgb, var(--bg-secondary) 82%, var(--bg-primary));
-    border-radius: 16px;
+    border-radius: var(--radius-xl);
     overflow: hidden;
   }
 
@@ -391,9 +391,9 @@
   .branch-row {
     display: flex;
     justify-content: space-between;
-    gap: 14px;
+    gap: var(--space-3);
     width: 100%;
-    padding: 12px 14px;
+    padding: var(--space-3) var(--space-4);
     border: none;
     border-bottom: 1px solid color-mix(in srgb, var(--border-color) 68%, transparent);
     background: transparent;
@@ -409,7 +409,7 @@
   .branch-primary {
     min-width: 0;
     display: grid;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .branch-name,
@@ -426,15 +426,15 @@
   }
 
   .branch-meta {
-    gap: 8px;
+    gap: var(--space-2);
     flex-shrink: 0;
   }
 
   .safety-pill,
   .divergence-pill,
   .detail-kind {
-    border-radius: 999px;
-    padding: 4px 8px;
+    border-radius: var(--radius-full);
+    padding: var(--space-1) var(--space-2);
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -471,8 +471,8 @@
   }
 
   .detail-header {
-    gap: 10px;
-    padding: 12px 14px;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid color-mix(in srgb, var(--border-color) 68%, transparent);
   }
 
@@ -482,17 +482,17 @@
 
   .detail-grid {
     display: grid;
-    gap: 12px;
-    padding: 16px;
+    gap: var(--space-3);
+    padding: var(--space-4);
   }
 
   .detail-actions {
-    padding: 0 16px 16px;
+    padding: 0 var(--space-4) var(--space-4);
   }
 
   .detail-row {
     display: grid;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .detail-label {
@@ -507,7 +507,7 @@
   }
 
   .state-msg {
-    padding: 16px;
+    padding: var(--space-4);
     color: var(--text-muted);
   }
 

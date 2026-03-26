@@ -90,7 +90,7 @@
   .detail-card {
     width: 100%;
     border: 1px solid var(--border-color);
-    border-radius: 18px;
+    border-radius: var(--radius-xl);
     background: color-mix(in srgb, var(--bg-secondary) 86%, transparent);
     overflow: hidden;
   }
@@ -98,14 +98,14 @@
   .detail-header {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 14px 16px;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border-color);
   }
 
   .detail-kind {
-    border-radius: 999px;
-    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    padding: var(--space-1) var(--space-3);
     font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -118,13 +118,13 @@
 
   .detail-grid {
     display: grid;
-    gap: 12px;
-    padding: 16px;
+    gap: var(--space-3);
+    padding: var(--space-4);
   }
 
   .detail-row {
     display: grid;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .detail-label {
@@ -142,21 +142,21 @@
   }
 
   .detail-actions {
-    padding: 0 16px 16px;
+    padding: 0 var(--space-4) var(--space-4);
   }
 
   .cleanup-btn {
     border: 1px solid var(--border-color);
     background: color-mix(in srgb, var(--bg-secondary) 80%, transparent);
     color: var(--text-primary);
-    border-radius: 999px;
-    padding: 7px 12px;
+    border-radius: var(--radius-full);
+    padding: var(--space-2) var(--space-3);
     cursor: pointer;
     font: inherit;
   }
 
   .state-msg {
-    padding: 16px;
+    padding: var(--space-4);
     color: var(--text-muted);
   }
 
