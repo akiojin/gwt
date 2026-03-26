@@ -92,9 +92,9 @@ pub fn start_index_watcher(project_root: String) -> Result<(), String> {
 
 /// Check if any event is under the specs/ directory.
 fn has_spec_change(events: &[DebouncedEvent], specs_dir: &Path) -> bool {
-    events.iter().any(|e| {
-        matches!(e.kind, DebouncedEventKind::Any) && e.path.starts_with(specs_dir)
-    })
+    events
+        .iter()
+        .any(|e| matches!(e.kind, DebouncedEventKind::Any) && e.path.starts_with(specs_dir))
 }
 
 #[cfg(test)]
@@ -125,10 +125,7 @@ mod tests {
     #[test]
     fn test_non_spec_change_ignored() {
         let specs_dir = PathBuf::from("/project/specs");
-        let events = vec![make_event(
-            "/project/src/main.rs",
-            DebouncedEventKind::Any,
-        )];
+        let events = vec![make_event("/project/src/main.rs", DebouncedEventKind::Any)];
         assert!(!has_spec_change(&events, &specs_dir));
     }
 

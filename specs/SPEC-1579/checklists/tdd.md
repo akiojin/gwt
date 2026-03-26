@@ -8,7 +8,7 @@
 | TDD-004 | コマンド `.claude/commands/gwt-spec-ops.md` が参照可能 | registration |
 | TDD-005 | `claude_registration_writes_local_assets_even_when_plugin_is_enabled` 通過 | registration |
 | TDD-006 | `refresh_skill_registration_for_project_root_repairs_assets_with_default_settings` 通過 | refresh |
-| TDD-007 | `python3 -m py_compile plugins/gwt/skills/gwt-issue-resolve/scripts/inspect_issue.py` 通過 | script |
+| TDD-007 | `python3 -m py_compile .claude/skills/gwt-issue-resolve/scripts/inspect_issue.py` 通過 | script |
 
 ### Phase 2: スキル登録
 

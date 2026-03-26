@@ -10,6 +10,8 @@
 - **Rust 実装の忠実な移植**: ロジック（exclude ブロック差し替え、レガシー移行、worktree commondir 解決）は Rust 実装をそのまま C# に移植する
 - **アセット埋め込み**: `include_str!` 相当は C# の `const string` / `static readonly string` として直接埋め込む（Rust 実装と同パターン、依存なし）
 - **冪等性保証**: 何回実行しても同じ結果になることをテストで保証する
+- **Claude hook の CWD 非依存性**: `settings.local.json` に登録する hook コマンドは相対 `.claude/...` を使わず、実行時に `git rev-parse --show-toplevel` で repo ルートを解決する
+- **Docker/DevContainer 前提の明示**: hook は mount 先の絶対パスを事前解析せず、コンテナ内から Git worktree と `git` が見えることを前提に同じ定義を使う
 
 ### リスク
 

@@ -10,6 +10,8 @@
 - [ ] T010 [U] [US-4] バージョンアップ時の上書き更新実装
 - [ ] T011 [U] [US-1] プレースホルダ置換（`${CLAUDE_PLUGIN_ROOT}` → プロジェクトルート名）実装
 - [ ] T012 [U] [US-8] `.claude/settings.local.json` フック定義自動登録実装
+- [ ] T012a [U] [US-10] Claude hook 定義を CWD 非依存の repo ルート解決形式に更新
+- [ ] T012b [U] [US-10] Docker / DevContainer でも同じ hook 定義が成立する前提と確認手順を SPEC に反映
 - [ ] T013 [U] [US-1] UNIX スクリプト実行権限付与実装
 - [ ] T014 [FIN] VContainer DI 登録
 - [ ] T015 [FIN] プロジェクトオープンイベントでの自動トリガー統合

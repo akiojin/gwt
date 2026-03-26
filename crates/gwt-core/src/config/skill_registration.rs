@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use super::Settings;
 use crate::{error::GwtError, process::command};
 
-// Auto-generated skill catalog from build.rs (parses plugins/gwt/skills/*/SKILL.md).
+// Auto-generated skill catalog from build.rs (parses .claude/skills/*/SKILL.md).
 include!(concat!(env!("OUT_DIR"), "/skill_catalog_generated.rs"));
 
 const MANAGED_SKILLS_BLOCK_BEGIN: &str = "<!-- BEGIN gwt managed skills -->";
@@ -203,7 +203,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-issue-register/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-register/SKILL.md"
+            "/../../.claude/skills/gwt-issue-register/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -212,7 +212,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-issue-resolve/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-resolve/SKILL.md"
+            "/../../.claude/skills/gwt-issue-resolve/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -221,7 +221,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-issue-resolve/scripts/inspect_issue.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-resolve/scripts/inspect_issue.py"
+            "/../../.claude/skills/gwt-issue-resolve/scripts/inspect_issue.py"
         )),
         executable: true,
         rewrite_for_project: false,
@@ -230,7 +230,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-register/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-register/SKILL.md"
+            "/../../.claude/skills/gwt-spec-register/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -239,7 +239,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-clarify/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-clarify/SKILL.md"
+            "/../../.claude/skills/gwt-spec-clarify/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -248,7 +248,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-plan/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-plan/SKILL.md"
+            "/../../.claude/skills/gwt-spec-plan/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -257,7 +257,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-tasks/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-tasks/SKILL.md"
+            "/../../.claude/skills/gwt-spec-tasks/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -266,7 +266,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-analyze/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-analyze/SKILL.md"
+            "/../../.claude/skills/gwt-spec-analyze/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -275,7 +275,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-pr-fix/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr-fix/SKILL.md"
+            "/../../.claude/skills/gwt-pr-fix/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -284,7 +284,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-pr-fix/scripts/inspect_pr_checks.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr-fix/scripts/inspect_pr_checks.py"
+            "/../../.claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -293,7 +293,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-ops/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-ops/SKILL.md"
+            "/../../.claude/skills/gwt-spec-ops/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -302,7 +302,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-ops/scripts/spec_artifact.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-ops/scripts/spec_artifact.py"
+            "/../../.claude/skills/gwt-spec-ops/scripts/spec_artifact.py"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -311,7 +311,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-implement/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-implement/SKILL.md"
+            "/../../.claude/skills/gwt-spec-implement/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -320,7 +320,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-pr/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr/SKILL.md"
+            "/../../.claude/skills/gwt-pr/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -329,7 +329,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-pr/references/pr-body-template.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr/references/pr-body-template.md"
+            "/../../.claude/skills/gwt-pr/references/pr-body-template.md"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -338,7 +338,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-pr-check/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr-check/SKILL.md"
+            "/../../.claude/skills/gwt-pr-check/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -347,7 +347,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-pr-check/scripts/check_pr_status.py",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pr-check/scripts/check_pr_status.py"
+            "/../../.claude/skills/gwt-pr-check/scripts/check_pr_status.py"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -356,7 +356,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-issue-search/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-issue-search/SKILL.md"
+            "/../../.claude/skills/gwt-issue-search/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -365,7 +365,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-project-search/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-project-search/SKILL.md"
+            "/../../.claude/skills/gwt-project-search/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -374,7 +374,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-search/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-search/SKILL.md"
+            "/../../.claude/skills/gwt-spec-search/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -383,7 +383,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-agent-dispatch/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-agent-dispatch/SKILL.md"
+            "/../../.claude/skills/gwt-agent-dispatch/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -392,7 +392,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-to-issue-migration/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/SKILL.md"
+            "/../../.claude/skills/gwt-spec-to-issue-migration/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -401,7 +401,7 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         relative_path: "skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
+            "/../../.claude/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -457,7 +457,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-issue-register.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-issue-register.md"
+            "/../../.claude/commands/gwt-issue-register.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -466,7 +466,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-issue-resolve.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-issue-resolve.md"
+            "/../../.claude/commands/gwt-issue-resolve.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -475,7 +475,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-spec-register.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-spec-register.md"
+            "/../../.claude/commands/gwt-spec-register.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -484,7 +484,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-spec-clarify.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-spec-clarify.md"
+            "/../../.claude/commands/gwt-spec-clarify.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -493,7 +493,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-spec-plan.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-spec-plan.md"
+            "/../../.claude/commands/gwt-spec-plan.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -502,7 +502,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-spec-tasks.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-spec-tasks.md"
+            "/../../.claude/commands/gwt-spec-tasks.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -511,7 +511,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-spec-analyze.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-spec-analyze.md"
+            "/../../.claude/commands/gwt-spec-analyze.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -520,7 +520,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-spec-implement.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-spec-implement.md"
+            "/../../.claude/commands/gwt-spec-implement.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -529,7 +529,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-pr-fix.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-pr-fix.md"
+            "/../../.claude/commands/gwt-pr-fix.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -538,7 +538,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-pr-check.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-pr-check.md"
+            "/../../.claude/commands/gwt-pr-check.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -547,7 +547,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-pr.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-pr.md"
+            "/../../.claude/commands/gwt-pr.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -556,7 +556,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-issue-search.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-issue-search.md"
+            "/../../.claude/commands/gwt-issue-search.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -565,7 +565,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-project-search.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-project-search.md"
+            "/../../.claude/commands/gwt-project-search.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -574,7 +574,7 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         relative_path: "commands/gwt-agent-dispatch.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-agent-dispatch.md"
+            "/../../.claude/commands/gwt-agent-dispatch.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -586,7 +586,7 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
         relative_path: "hooks/scripts/gwt-forward-hook.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-forward-hook.mjs"
+            "/../../.claude/hooks/scripts/gwt-forward-hook.mjs"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -595,7 +595,7 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
         relative_path: "hooks/scripts/gwt-block-git-branch-ops.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-block-git-branch-ops.mjs"
+            "/../../.claude/hooks/scripts/gwt-block-git-branch-ops.mjs"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -604,7 +604,7 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
         relative_path: "hooks/scripts/gwt-block-cd-command.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-block-cd-command.mjs"
+            "/../../.claude/hooks/scripts/gwt-block-cd-command.mjs"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -613,7 +613,7 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
         relative_path: "hooks/scripts/gwt-block-file-ops.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-block-file-ops.mjs"
+            "/../../.claude/hooks/scripts/gwt-block-file-ops.mjs"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -622,7 +622,7 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
         relative_path: "hooks/scripts/gwt-block-git-dir-override.mjs",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/hooks/scripts/gwt-block-git-dir-override.mjs"
+            "/../../.claude/hooks/scripts/gwt-block-git-dir-override.mjs"
         )),
         executable: false,
         rewrite_for_project: false,
@@ -1218,6 +1218,7 @@ fn rewrite_project_asset_content(content: &str, root_name: &str) -> String {
     content
         .replace("${CLAUDE_PLUGIN_ROOT}", root_name)
         .replace("$CLAUDE_PLUGIN_ROOT", root_name)
+        .replace(".claude/skills/", &format!("{root_name}/skills/"))
         .replace("`skills/", &format!("`{root_name}/skills/"))
 }
 
@@ -2232,6 +2233,8 @@ mod tests {
         let content = std::fs::read_to_string(settings_path).unwrap();
         assert!(content.contains("gwt-forward-hook.mjs"));
         assert!(content.contains("gwt-block-git-branch-ops.mjs"));
+        assert!(content.contains("git rev-parse --show-toplevel"));
+        assert!(!content.contains("node .claude/hooks/scripts/gwt-"));
         assert!(!content.contains("CLAUDE_PLUGIN_ROOT"));
 
         let exclude =
@@ -2542,7 +2545,7 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(issue_search_skill.contains("Issues search first"));
-        assert!(issue_search_skill.contains("spec integration"));
+        assert!(issue_search_skill.contains("canonical existing issue"));
         assert!(issue_search_skill.contains("search-issues"));
 
         let issue_spec_skill = std::fs::read_to_string(
@@ -2672,7 +2675,8 @@ OPENAI_API_KEY = "legacy-key"
                 .join("gwt-spec-register.md"),
         )
         .unwrap();
-        assert!(spec_register_command.contains("seed `doc:spec.md`"));
+        assert!(spec_register_command.contains("seed `spec.md`"));
+        assert!(spec_register_command.contains("specs/SPEC-{id}/"));
         assert!(spec_register_command.contains("gwt-issue-search"));
         assert!(spec_register_command.contains("gwt-issue-register"));
         assert!(spec_register_command.contains("gwt-spec-ops"));
@@ -2892,6 +2896,8 @@ OPENAI_API_KEY = "legacy-key"
         let settings_content =
             std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
         assert!(settings_content.contains(super::super::claude_plugins::GWT_PLUGIN_FULL_NAME));
+        assert!(settings_content.contains("git rev-parse --show-toplevel"));
+        assert!(!settings_content.contains("node .claude/hooks/scripts/gwt-"));
 
         let status = status_for_claude(Some(temp.path()));
         assert!(status.registered);
