@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import type { UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "./menuAction";
 
 // Mock the webviewWindow module
 const mockListen = vi.fn<(...args: unknown[]) => Promise<UnlistenFn>>();

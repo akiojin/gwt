@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("./tauriMock", () => ({
+  isBrowserDevMode: () => false,
+}));
+
 const shellOpenMock = vi.fn();
 
 vi.mock("@tauri-apps/plugin-shell", () => ({
