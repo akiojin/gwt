@@ -1,0 +1,5 @@
+- Current repo implementation and existing tests must be compared against this spec before changes land.
+- Dependency / plugin / asset constraints specific to `????: ?????????? (Lead ?? STT + TTS)` should be captured here as they are validated.
+- Any divergence between the issue body and the current code should be recorded here before implementation.
+- 2026-03-13 / #1599: current desktop voice runtime still depends on local Python/Qwen bootstrap in Rust/Tauri, so canonical voice spec needs an explicit compatibility requirement until #1539 migration removes this path.
+- 2026-03-13 / #1599: prior point-fix specs #1429 and #1370 cover setup/retry history, but the canonical open destination for cross-cutting voice behavior remains #1551.

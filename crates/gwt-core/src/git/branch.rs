@@ -11,7 +11,10 @@ use std::{
 
 use tracing::{debug, error, info, warn};
 
-use crate::error::{GwtError, Result};
+use crate::{
+    error::{GwtError, Result},
+    logging::{log_flow_failure, log_flow_start, log_flow_success},
+};
 
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 const GH_MERGE_BASE_BAD_KEY: &str = "branch..gh-merge-base";
@@ -735,6 +738,7 @@ impl Branch {
 
     /// Create a new branch from a base
     pub fn create(repo_path: &Path, name: &str, base: &str) -> Result<Branch> {
+        log_flow_start("git", "create_branch");
         debug!(category = "git", branch = name, base, "Creating branch");
 
         let output = crate::process::command("git")
@@ -755,6 +759,7 @@ impl Branch {
                 error = err_msg.as_str(),
                 "Failed to create branch"
             );
+            log_flow_failure("git", "create_branch", &err_msg);
             return Err(GwtError::BranchCreateFailed {
                 name: name.to_string(),
                 details: err_msg,
@@ -784,6 +789,7 @@ impl Branch {
             "Branch created"
         );
 
+        log_flow_success("git", "create_branch");
         Ok(Branch::new(name, commit))
     }
 
@@ -848,6 +854,7 @@ impl Branch {
 
     /// Delete a branch
     pub fn delete(repo_path: &Path, name: &str, force: bool) -> Result<()> {
+        log_flow_start("git", "delete_branch");
         debug!(category = "git", branch = name, force, "Deleting branch");
 
         let flag = if force { "-D" } else { "-d" };
@@ -861,6 +868,7 @@ impl Branch {
                 force,
                 "Branch deleted"
             );
+            log_flow_success("git", "delete_branch");
             Ok(())
         } else {
             let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
@@ -883,6 +891,7 @@ impl Branch {
                         fallback = true,
                         "Branch deleted via automatic force fallback"
                     );
+                    log_flow_success("git", "delete_branch");
                     return Ok(());
                 }
 
@@ -898,6 +907,7 @@ impl Branch {
                     error = combined_err.as_str(),
                     "Failed to delete branch after fallback"
                 );
+                log_flow_failure("git", "delete_branch", &combined_err);
                 return Err(GwtError::BranchDeleteFailed {
                     name: name.to_string(),
                     details: combined_err,
@@ -911,6 +921,7 @@ impl Branch {
                 error = err_msg.as_str(),
                 "Failed to delete branch"
             );
+            log_flow_failure("git", "delete_branch", &err_msg);
             Err(GwtError::BranchDeleteFailed {
                 name: name.to_string(),
                 details: err_msg,

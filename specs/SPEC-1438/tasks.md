@@ -1,0 +1,8 @@
+- [x] T001 launch 時 registration を launch target worktree へ切り替える
+- [x] T002 Codex/Gemini の bundle を Claude 相当の gwt skill/assets まで拡張する
+- [x] T003 `gwt-spec-to-issue-migration` の migration script を skill bundle へ移す
+- [x] T004 sidebar の spec task 取得を最新 `gwt-spec` Issue ベースへ切り替える
+- [x] T005 scanner / prompt builder から local `specs/` 依存を除去する
+- [x] T006 `specs/specs.md` と `specs/archive/` を削除する
+- [x] T007 launch target worktree での手動確認を完了する
+- [x] T008 project-local generated asset 用の shared `info/exclude` managed block 自動補完を実装する
