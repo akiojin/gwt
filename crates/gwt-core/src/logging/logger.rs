@@ -214,6 +214,59 @@ pub fn log_error_message(code: &str, category: &str, message: &str, details: Opt
     );
 }
 
+/// Log the start of a feature flow with required structured fields.
+pub fn log_flow_start(category: &str, event: &str) {
+    tracing::info!(
+        category = category,
+        event = event,
+        result = "start",
+        workspace = "default",
+    );
+}
+
+/// Log successful completion of a feature flow.
+pub fn log_flow_success(category: &str, event: &str) {
+    tracing::info!(
+        category = category,
+        event = event,
+        result = "success",
+        workspace = "default",
+    );
+}
+
+/// Log a feature flow failure with error detail for triage.
+pub fn log_flow_failure(category: &str, event: &str, error_detail: &str) {
+    tracing::warn!(
+        category = category,
+        event = event,
+        result = "failure",
+        workspace = "default",
+        error_detail = error_detail,
+    );
+}
+
+/// Log an incident with full context for first-response triage.
+pub fn log_incident(category: &str, event: &str, error_code: Option<&str>, error_detail: &str) {
+    if let Some(code) = error_code {
+        tracing::error!(
+            category = category,
+            event = event,
+            result = "failure",
+            workspace = "default",
+            error_code = code,
+            error_detail = error_detail,
+        );
+    } else {
+        tracing::error!(
+            category = category,
+            event = event,
+            result = "failure",
+            workspace = "default",
+            error_detail = error_detail,
+        );
+    }
+}
+
 /// Initialize a lightweight tracing subscriber for tests.
 ///
 /// Uses `try_init()` so it silently succeeds even when another test in the

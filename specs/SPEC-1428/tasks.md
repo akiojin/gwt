@@ -1,0 +1,6 @@
+- [ ] T001 [S] TDD テスト作成（RED 確認）
+- [ ] T002 [U] [US1] `should_fallback_to_manual_worktree_removal()` に `"does not exist"` パターン追加
+- [ ] T003 [U] [US1] `is_missing_worktree_error()` に `"does not exist"` パターン追加
+- [ ] T004 [FIN] 全テスト GREEN 確認
+- [ ] T005 [FIN] clippy / fmt 検証
+- [ ] T006 [FIN] コミット＆プッシュ

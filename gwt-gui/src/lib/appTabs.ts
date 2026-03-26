@@ -1,7 +1,8 @@
 import type { Tab } from "./types";
 
 const DEFAULT_APP_TABS: Tab[] = [
-  { id: "assistant", label: "Assistant", type: "assistant" },
+  { id: "agentCanvas", label: "Agent Canvas", type: "agentCanvas" },
+  { id: "branchBrowser", label: "Branch Browser", type: "branchBrowser" },
 ];
 export type TabDropPosition = "before" | "after";
 
@@ -10,7 +11,7 @@ export function defaultAppTabs(): Tab[] {
 }
 
 export function shouldAllowRestoredActiveTab(activeTabId: string): boolean {
-  return activeTabId === "assistant";
+  return activeTabId === "agentCanvas" || activeTabId === "branchBrowser";
 }
 
 export function reorderTabsByDrop(
