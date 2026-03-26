@@ -1,0 +1,8 @@
+{
+  "id": "1662",
+  "title": "fix: AssistantPanelで改行が潰れ、送信直後の入力が表示されない",
+  "status": "closed",
+  "phase": "draft",
+  "created_at": "2026-03-17T06:35:46Z",
+  "updated_at": "2026-03-18T14:47:47Z"
+}

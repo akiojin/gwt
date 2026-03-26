@@ -1,0 +1,6 @@
+- `BranchPrPreflight`:
+  - `baseBranch: String`
+  - `aheadBy: usize`
+  - `behindBy: usize`
+  - `status: "up_to_date" | "ahead" | "behind" | "diverged"`
+  - `blockingReason: Option<String>`

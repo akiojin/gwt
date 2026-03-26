@@ -1,0 +1,5 @@
+- [ ] T001 [S] `gwt-issue-spec-ops` の surfacing 経路を調査し、脱落箇所を特定する
+- [ ] T002 [S] skill selection / available skills 一覧の現状を再現するテストを追加して RED を確認する
+- [ ] T003 [U] `gwt-issue-spec-ops` が Codex へ露出するよう実装を修正する
+- [ ] T004 [U] SPEC作成要求時に repo 固有 skill が優先されるよう metadata または selection 経路を修正する
+- [ ] T005 [FIN] 回帰テストを GREEN にし、実セッションで `SPEC作成` 導線を確認する
