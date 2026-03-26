@@ -9,11 +9,7 @@ const invokeMock = vi.fn();
 
 vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
-}));
-
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (...args: unknown[]) =>
-    invokeMock(...(args as [string, Record<string, unknown> | undefined])),
+  listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
 async function renderLaunchForm(props: any) {

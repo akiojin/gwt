@@ -7,14 +7,16 @@ const listenMock = vi.fn();
 
 vi.mock("$lib/tauriInvoke", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
+  listen: (...args: unknown[]) => listenMock(...args),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...args: unknown[]) => openDialogMock(...args),
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: (...args: unknown[]) => listenMock(...args),
+vi.mock("$lib/tauriMock", () => ({
+  isBrowserDevMode: () => false,
+  getMockResponse: vi.fn(),
 }));
 
 async function renderOpenProject(props?: any) {
@@ -49,8 +51,8 @@ describe("OpenProject", () => {
     invokeMock.mockResolvedValue([]);
     const rendered = await renderOpenProject();
 
-    expect(rendered.getByText("Open Project...")).toBeTruthy();
-    expect(rendered.getByText("New Project")).toBeTruthy();
+    expect(rendered.getByText("Open Project")).toBeTruthy();
+    expect(rendered.getByText("Clone Repository")).toBeTruthy();
   });
 
   it("does not show Recent Projects section when empty", async () => {
@@ -84,8 +86,8 @@ describe("OpenProject", () => {
     expect(rendered.getByText("myproject")).toBeTruthy();
     expect(rendered.getByText("other-repo")).toBeTruthy();
     expect(rendered.getByText("/home/user/other-repo")).toBeTruthy();
-    expect(rendered.container.querySelector(".recent h3")).toBeTruthy();
-    expect(rendered.container.querySelectorAll(".recent-item").length).toBe(2);
+    expect(rendered.container.querySelector(".section-title")).toBeTruthy();
+    expect(rendered.container.querySelectorAll(".recent-card").length).toBe(2);
   });
 
   it("toggles New Project form on button click", async () => {
@@ -94,7 +96,7 @@ describe("OpenProject", () => {
 
     expect(rendered.queryByText("Repository URL")).toBeNull();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
 
     await waitFor(() => {
       expect(rendered.getByText("Repository URL")).toBeTruthy();
@@ -107,10 +109,10 @@ describe("OpenProject", () => {
     invokeMock.mockResolvedValue([]);
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
 
     await waitFor(() => {
-      const shallowBtn = rendered.getByText("Shallow (Recommended)");
+      const shallowBtn = rendered.getByText("Shallow");
       expect(shallowBtn.classList.contains("active")).toBe(true);
     });
   });
@@ -119,10 +121,10 @@ describe("OpenProject", () => {
     invokeMock.mockResolvedValue([]);
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
 
     await waitFor(() => {
-      const createBtn = rendered.getByText("Create") as HTMLButtonElement;
+      const createBtn = rendered.getByText("Clone & Open") as HTMLButtonElement;
       expect(createBtn.disabled).toBe(true);
     });
   });
@@ -148,7 +150,7 @@ describe("OpenProject", () => {
       expect(rendered.getByText("project")).toBeTruthy();
     });
 
-    const recentBtn = rendered.container.querySelector(".recent-item") as HTMLButtonElement;
+    const recentBtn = rendered.container.querySelector(".recent-card") as HTMLButtonElement;
     await fireEvent.click(recentBtn);
 
     await waitFor(() => {
@@ -172,7 +174,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/nonexistent/path");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Path does not exist.")).toBeTruthy();
@@ -191,7 +193,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/some/dir");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Not a gwt project.")).toBeTruthy();
@@ -210,7 +212,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/old/repo");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Migration Required")).toBeTruthy();
@@ -229,7 +231,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/empty/dir");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Repository URL")).toBeTruthy();
@@ -245,7 +247,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue(null);
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     // Should not show any error
     expect(rendered.queryByText(/error/i)).toBeNull();
@@ -261,7 +263,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/some/path");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Opening...")).toBeTruthy();
@@ -278,7 +280,7 @@ describe("OpenProject", () => {
 
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
 
     await waitFor(() => {
       expect(rendered.getByText("Repository URL")).toBeTruthy();
@@ -289,17 +291,17 @@ describe("OpenProject", () => {
     await fireEvent.input(urlInput, { target: { value: "https://github.com/test/repo" } });
 
     openDialogMock.mockResolvedValue("/parent/dir");
-    await fireEvent.click(rendered.getByText("Choose..."));
+    await fireEvent.click(rendered.getByText("Browse"));
 
     await waitFor(() => {
-      const createBtn = rendered.getByText("Create") as HTMLButtonElement;
+      const createBtn = rendered.getByText("Clone & Open") as HTMLButtonElement;
       expect(createBtn.disabled).toBe(false);
     });
 
-    await fireEvent.click(rendered.getByText("Create"));
+    await fireEvent.click(rendered.getByText("Clone & Open"));
 
     await waitFor(() => {
-      expect(rendered.getByText("Creating...")).toBeTruthy();
+      expect(rendered.getByText("Cloning...")).toBeTruthy();
     });
   });
 
@@ -313,19 +315,19 @@ describe("OpenProject", () => {
 
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
 
     const urlInput = rendered.container.querySelector('input[placeholder*="github.com"]') as HTMLInputElement;
     await fireEvent.input(urlInput, { target: { value: "https://github.com/test/repo" } });
 
     openDialogMock.mockResolvedValue("/parent");
-    await fireEvent.click(rendered.getByText("Choose..."));
+    await fireEvent.click(rendered.getByText("Browse"));
 
     await waitFor(() => {
-      expect((rendered.getByText("Create") as HTMLButtonElement).disabled).toBe(false);
+      expect((rendered.getByText("Clone & Open") as HTMLButtonElement).disabled).toBe(false);
     });
 
-    await fireEvent.click(rendered.getByText("Create"));
+    await fireEvent.click(rendered.getByText("Clone & Open"));
 
     await waitFor(() => {
       expect(rendered.getByText(/Failed to create project/)).toBeTruthy();
@@ -342,12 +344,12 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/some/path");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       const openBtn = rendered.getByText("Opening...") as HTMLButtonElement;
       expect(openBtn.disabled).toBe(true);
-      const newBtn = rendered.getByText("New Project") as HTMLButtonElement;
+      const newBtn = rendered.getByText("Clone Repository") as HTMLButtonElement;
       expect(newBtn.disabled).toBe(true);
     });
   });
@@ -370,7 +372,7 @@ describe("OpenProject", () => {
     const rendered = await renderOpenProject({ onOpen });
 
     // Open new project form
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
     await waitFor(() => {
       expect(rendered.getByText("Repository URL")).toBeTruthy();
     });
@@ -385,15 +387,15 @@ describe("OpenProject", () => {
 
     // Choose parent dir
     openDialogMock.mockResolvedValue("/parent");
-    await fireEvent.click(rendered.getByText("Choose..."));
+    await fireEvent.click(rendered.getByText("Browse"));
 
     await waitFor(() => {
       expect(
-        (rendered.getByText("Create") as HTMLButtonElement).disabled,
+        (rendered.getByText("Clone & Open") as HTMLButtonElement).disabled,
       ).toBe(false);
     });
 
-    await fireEvent.click(rendered.getByText("Create"));
+    await fireEvent.click(rendered.getByText("Clone & Open"));
 
     await waitFor(() => {
       expect(onOpen).toHaveBeenCalledWith("/cloned/repo");
@@ -414,7 +416,7 @@ describe("OpenProject", () => {
 
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
 
     const urlInput = rendered.container.querySelector(
       'input[placeholder*="github.com"]',
@@ -424,15 +426,15 @@ describe("OpenProject", () => {
     });
 
     openDialogMock.mockResolvedValue("/parent");
-    await fireEvent.click(rendered.getByText("Choose..."));
+    await fireEvent.click(rendered.getByText("Browse"));
 
     await waitFor(() => {
       expect(
-        (rendered.getByText("Create") as HTMLButtonElement).disabled,
+        (rendered.getByText("Clone & Open") as HTMLButtonElement).disabled,
       ).toBe(false);
     });
 
-    await fireEvent.click(rendered.getByText("Create"));
+    await fireEvent.click(rendered.getByText("Clone & Open"));
 
     await waitFor(() => {
       expect(rendered.getByText("Invalid repository URL")).toBeTruthy();
@@ -463,7 +465,7 @@ describe("OpenProject", () => {
     });
 
     const recentBtn = rendered.container.querySelector(
-      ".recent-item",
+      ".recent-card",
     ) as HTMLButtonElement;
     await fireEvent.click(recentBtn);
 
@@ -494,7 +496,7 @@ describe("OpenProject", () => {
     });
 
     const recentBtn = rendered.container.querySelector(
-      ".recent-item",
+      ".recent-card",
     ) as HTMLButtonElement;
     await fireEvent.click(recentBtn);
 
@@ -525,7 +527,7 @@ describe("OpenProject", () => {
     });
 
     const recentBtn = rendered.container.querySelector(
-      ".recent-item",
+      ".recent-card",
     ) as HTMLButtonElement;
     await fireEvent.click(recentBtn);
 
@@ -556,7 +558,7 @@ describe("OpenProject", () => {
     });
 
     const recentBtn = rendered.container.querySelector(
-      ".recent-item",
+      ".recent-card",
     ) as HTMLButtonElement;
     await fireEvent.click(recentBtn);
 
@@ -579,7 +581,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/bad/path");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Invalid path.")).toBeTruthy();
@@ -599,7 +601,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/some/path");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Failed to open project.")).toBeTruthy();
@@ -618,7 +620,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/some/path");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("plain string error")).toBeTruthy();
@@ -635,12 +637,12 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/some/path");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
-      expect(rendered.container.querySelector(".error")).toBeTruthy();
+      expect(rendered.container.querySelector(".error-banner")).toBeTruthy();
       expect(
-        rendered.container.querySelector(".error")!.textContent,
+        rendered.container.querySelector(".error-banner")!.textContent,
       ).toContain('{"code":42}');
     });
   });
@@ -656,7 +658,7 @@ describe("OpenProject", () => {
     openDialogMock.mockRejectedValue(new Error("dialog crashed"));
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(
@@ -676,13 +678,13 @@ describe("OpenProject", () => {
     const rendered = await renderOpenProject();
 
     // Open new project form
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
     await waitFor(() => {
-      expect(rendered.getByText("Choose...")).toBeTruthy();
+      expect(rendered.getByText("Browse")).toBeTruthy();
     });
 
     openDialogMock.mockRejectedValue(new Error("dir picker failed"));
-    await fireEvent.click(rendered.getByText("Choose..."));
+    await fireEvent.click(rendered.getByText("Browse"));
 
     await waitFor(() => {
       expect(
@@ -725,7 +727,7 @@ describe("OpenProject", () => {
 
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
     await waitFor(() => {
       expect(rendered.getByText("Repository URL")).toBeTruthy();
     });
@@ -734,13 +736,13 @@ describe("OpenProject", () => {
     await fireEvent.input(urlInput, { target: { value: "https://github.com/test/repo" } });
 
     openDialogMock.mockResolvedValue("/parent");
-    await fireEvent.click(rendered.getByText("Choose..."));
+    await fireEvent.click(rendered.getByText("Browse"));
 
     await waitFor(() => {
-      expect((rendered.getByText("Create") as HTMLButtonElement).disabled).toBe(false);
+      expect((rendered.getByText("Clone & Open") as HTMLButtonElement).disabled).toBe(false);
     });
 
-    await fireEvent.click(rendered.getByText("Create"));
+    await fireEvent.click(rendered.getByText("Clone & Open"));
 
     await waitFor(() => {
       expect(cloneProgressHandler).not.toBeNull();
@@ -771,7 +773,7 @@ describe("OpenProject", () => {
 
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
     await waitFor(() => {
       expect(rendered.getByText("Repository URL")).toBeTruthy();
     });
@@ -780,13 +782,13 @@ describe("OpenProject", () => {
     await fireEvent.input(urlInput, { target: { value: "https://github.com/test/repo" } });
 
     openDialogMock.mockResolvedValue("/parent");
-    await fireEvent.click(rendered.getByText("Choose..."));
+    await fireEvent.click(rendered.getByText("Browse"));
 
     await waitFor(() => {
-      expect((rendered.getByText("Create") as HTMLButtonElement).disabled).toBe(false);
+      expect((rendered.getByText("Clone & Open") as HTMLButtonElement).disabled).toBe(false);
     });
 
-    await fireEvent.click(rendered.getByText("Create"));
+    await fireEvent.click(rendered.getByText("Clone & Open"));
 
     await waitFor(() => {
       expect(cloneProgressHandler).not.toBeNull();
@@ -817,7 +819,7 @@ describe("OpenProject", () => {
 
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("New Project"));
+    await fireEvent.click(rendered.getByText("Clone Repository"));
     await waitFor(() => {
       expect(rendered.getByText("Repository URL")).toBeTruthy();
     });
@@ -826,13 +828,13 @@ describe("OpenProject", () => {
     await fireEvent.input(urlInput, { target: { value: "https://github.com/test/repo" } });
 
     openDialogMock.mockResolvedValue("/parent");
-    await fireEvent.click(rendered.getByText("Choose..."));
+    await fireEvent.click(rendered.getByText("Browse"));
 
     await waitFor(() => {
-      expect((rendered.getByText("Create") as HTMLButtonElement).disabled).toBe(false);
+      expect((rendered.getByText("Clone & Open") as HTMLButtonElement).disabled).toBe(false);
     });
 
-    await fireEvent.click(rendered.getByText("Create"));
+    await fireEvent.click(rendered.getByText("Clone & Open"));
 
     await waitFor(() => {
       expect(cloneProgressHandler).not.toBeNull();
@@ -864,7 +866,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/old/repo");
     const rendered = await renderOpenProject({ onOpen });
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Migration Required")).toBeTruthy();
@@ -884,7 +886,7 @@ describe("OpenProject", () => {
     openDialogMock.mockResolvedValue("/x");
     const rendered = await renderOpenProject();
 
-    await fireEvent.click(rendered.getByText("Open Project..."));
+    await fireEvent.click(rendered.getByText("Open Project"));
 
     await waitFor(() => {
       expect(rendered.getByText("Not a git repository.")).toBeTruthy();

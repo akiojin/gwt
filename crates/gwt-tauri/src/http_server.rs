@@ -7,11 +7,8 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State as AxumState,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
+    extract::State as AxumState, http::StatusCode, response::IntoResponse, routing::post, Json,
+    Router,
 };
 use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
@@ -154,9 +151,15 @@ fn build_router(state: SharedState) -> Router {
         .allow_headers(Any);
 
     Router::new()
-        .route("/ipc/list_worktree_branches", post(handle_list_worktree_branches))
+        .route(
+            "/ipc/list_worktree_branches",
+            post(handle_list_worktree_branches),
+        )
         .route("/ipc/list_worktrees", post(handle_list_worktrees))
-        .route("/ipc/list_branch_inventory", post(handle_list_branch_inventory))
+        .route(
+            "/ipc/list_branch_inventory",
+            post(handle_list_branch_inventory),
+        )
         .route(
             "/ipc/get_branch_inventory_detail",
             post(handle_get_branch_inventory_detail),
