@@ -341,6 +341,12 @@ impl Repository {
             }
         }
 
+        crate::logging::log_incident(
+            "git",
+            "discover",
+            Some("GIT_REPO_NOT_FOUND"),
+            &format!("Repository not found: {}", path.display()),
+        );
         Err(GwtError::RepositoryNotFound {
             path: path.to_path_buf(),
         })
@@ -412,6 +418,12 @@ impl Repository {
                 gix_repo: None,
             })
         } else {
+            crate::logging::log_incident(
+                "git",
+                "open",
+                Some("GIT_REPO_NOT_FOUND"),
+                &format!("Repository not found at: {}", path.display()),
+            );
             Err(GwtError::RepositoryNotFound {
                 path: path.to_path_buf(),
             })
@@ -649,17 +661,32 @@ impl Repository {
             .args(["pull", "--ff-only"])
             .current_dir(&self.root)
             .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "pull".to_string(),
-                details: e.to_string(),
+            .map_err(|e| {
+                crate::logging::log_incident(
+                    "git",
+                    "pull_fast_forward",
+                    Some("GIT_PULL_SPAWN_FAILED"),
+                    &e.to_string(),
+                );
+                GwtError::GitOperationFailed {
+                    operation: "pull".to_string(),
+                    details: e.to_string(),
+                }
             })?;
 
         if output.status.success() {
             Ok(())
         } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            crate::logging::log_incident(
+                "git",
+                "pull_fast_forward",
+                Some("GIT_PULL_FAILED"),
+                &stderr,
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "pull --ff-only".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: stderr,
             })
         }
     }
@@ -671,17 +698,27 @@ impl Repository {
             .args(["fetch", "--all", "--prune"])
             .current_dir(&self.root)
             .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "fetch".to_string(),
-                details: e.to_string(),
+            .map_err(|e| {
+                crate::logging::log_incident(
+                    "git",
+                    "fetch_all",
+                    Some("GIT_FETCH_SPAWN_FAILED"),
+                    &e.to_string(),
+                );
+                GwtError::GitOperationFailed {
+                    operation: "fetch".to_string(),
+                    details: e.to_string(),
+                }
             })?;
 
         if output.status.success() {
             Ok(())
         } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            crate::logging::log_incident("git", "fetch_all", Some("GIT_FETCH_FAILED"), &stderr);
             Err(GwtError::GitOperationFailed {
                 operation: "fetch --all".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: stderr,
             })
         }
     }
@@ -885,12 +922,11 @@ impl Repository {
             return Ok(());
         }
 
-        error!(
-            category = "git",
-            operation = "worktree_remove",
-            path = %path.display(),
-            error = err_msg.as_str(),
-            "Failed to remove git worktree"
+        crate::logging::log_incident(
+            "git",
+            "remove_worktree",
+            Some("GIT_WORKTREE_REMOVE_FAILED"),
+            &err_msg,
         );
         Err(GwtError::GitOperationFailed {
             operation: "worktree remove".to_string(),

@@ -1,9 +1,23 @@
 import path from "node:path";
 import { configDefaults, defineConfig } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import istanbul from "vite-plugin-istanbul";
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [
+    svelte(),
+    ...(process.env.E2E_COVERAGE === "1"
+      ? [
+          istanbul({
+            include: "src/**/*",
+            exclude: ["src/**/*.test.ts", "src/**/*.spec.ts", "src/app.d.ts"],
+            extension: [".ts", ".svelte"],
+            requireEnv: false,
+            forceBuildInstrument: true,
+          }),
+        ]
+      : []),
+  ],
   clearScreen: false,
   resolve: {
     alias: {
@@ -15,12 +29,15 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    watch: {
+      ignored: ["**/coverage-e2e/**", "**/.nyc_output/**"],
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
     target: "esnext",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
-    sourcemap: !!process.env.TAURI_DEBUG,
+    sourcemap: !!process.env.TAURI_DEBUG || process.env.E2E_COVERAGE === "1",
   },
   test: {
     environment: "jsdom",
