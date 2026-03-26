@@ -68,21 +68,21 @@
 
 <style>
   .stash-tab {
-    padding: 8px 0;
+    padding: var(--space-2) 0;
   }
 
   .stash-loading,
   .stash-empty {
     font-size: 12px;
     color: var(--text-muted);
-    padding: 8px 0;
+    padding: var(--space-2) 0;
   }
 
   .stash-error {
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: 12px;
   }
@@ -90,15 +90,15 @@
   .stash-list {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .stash-row {
     display: flex;
     align-items: baseline;
-    gap: 8px;
-    padding: 6px 8px;
-    border-radius: 4px;
+    gap: var(--space-2);
+    padding: 6px var(--space-2);
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
