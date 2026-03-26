@@ -1,3 +1,5 @@
+import { isBrowserDevMode } from "./tauriMock";
+
 export function formatWindowTitle(opts: {
   appName: string;
   projectPath: string | null;
@@ -14,6 +16,9 @@ export function formatAboutVersion(version: string | null): string {
 }
 
 export async function getAppVersionSafe(): Promise<string | null> {
+  if (isBrowserDevMode()) {
+    return "dev";
+  }
   try {
     const { getVersion } = await import("@tauri-apps/api/app");
     return await getVersion();
