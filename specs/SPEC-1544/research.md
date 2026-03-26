@@ -1,0 +1,3 @@
+- Current repo implementation and existing tests must be compared against this spec before changes land.
+- Dependency / plugin / asset constraints specific to `機能仕様: GitHub 連携 (gh CLI)` should be captured here as they are validated.
+- Any divergence between the issue body and the current code should be recorded here before implementation.

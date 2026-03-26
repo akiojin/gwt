@@ -1,0 +1,4 @@
+- current startup analysis is orchestrated from `assistant_start` and `AssistantEngine::run_initial_analysis`
+- current pending UI only shows generic `Analyzing project...`
+- no startup-analysis cache file exists yet
+- startup analysis still uses the normal assistant tool set unless explicitly restricted

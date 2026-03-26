@@ -65,6 +65,38 @@ describe("collectScreenText", () => {
     expect(result).toContain("main\ndevelop\nfeature/x");
   });
 
+  it("labels the browser surface as Branch Browser when that shell tab is active", () => {
+    container.appendChild(createEl("aside", "sidebar", "Local\nRemote\nAll"));
+    container.appendChild(createEl("main", "main-area", ""));
+    container.appendChild(createEl("footer", "statusbar", ""));
+
+    const result = collectScreenText({
+      branch: "main",
+      activeTab: "Branch Browser",
+      activeTabType: "branchBrowser",
+    });
+
+    expect(result).toContain("--- Branch Browser ---");
+    expect(result).not.toContain("--- Sidebar ---");
+  });
+
+  it("captures standalone branch browser surfaces without relying on .sidebar", () => {
+    container.appendChild(
+      createEl("section", "branch-browser-panel", "Local\nRemote\nAll\nfeature/x"),
+    );
+    container.appendChild(createEl("main", "main-area", "browser content"));
+    container.appendChild(createEl("footer", "statusbar", ""));
+
+    const result = collectScreenText({
+      branch: "feature/x",
+      activeTab: "Branch Browser",
+      activeTabType: "branchBrowser",
+    });
+
+    expect(result).toContain("--- Branch Browser ---");
+    expect(result).toContain("Local\nRemote\nAll\nfeature/x");
+  });
+
   it("includes main area visible text", () => {
     container.appendChild(createEl("aside", "sidebar", ""));
     container.appendChild(createEl("main", "main-area", "$ cargo test\nok"));
