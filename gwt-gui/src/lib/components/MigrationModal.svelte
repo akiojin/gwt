@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { MigrationFinishedPayload, MigrationProgressPayload } from "../types";
+  import { invoke, listen } from "$lib/tauriInvoke";
 
   let {
     open,
@@ -77,8 +78,6 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
-
         unlistenProgress = await listen<MigrationProgressPayload>(
           "migration-progress",
           (event) => {
@@ -131,7 +130,6 @@
     jobId = "";
 
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
       const id = await invoke<string>("start_migration_job", { path: sourceRoot });
       jobId = id;
     } catch (e) {
@@ -142,7 +140,6 @@
 
   async function quitApp() {
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("quit_app");
     } catch {
       // Ignore: not available outside Tauri runtime.
@@ -179,10 +176,10 @@
       </div>
 
       <div class="footer">
-        <button class="secondary" onclick={quitApp} disabled={running}>
+        <button class="btn" onclick={quitApp} disabled={running}>
           Quit
         </button>
-        <button class="primary" onclick={startMigration} disabled={running}>
+        <button class="btn btn-primary" onclick={startMigration} disabled={running}>
           {running ? "Migrating..." : error ? "Retry Migration" : "Migrate"}
         </button>
       </div>
@@ -203,74 +200,70 @@
 
   .dialog {
     width: min(680px, calc(100vw - 36px));
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
     overflow: hidden;
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+    box-shadow: var(--shadow-xl);
   }
 
   .header {
-    padding: 12px 14px;
+    padding: var(--space-lg) var(--space-xl);
     border-bottom: 1px solid var(--border-color);
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--space-lg);
   }
 
   h2 {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--ui-font-lg);
     font-weight: 700;
     color: var(--text-primary);
     letter-spacing: 0.2px;
   }
 
   .body {
-    padding: 14px;
+    padding: var(--space-xl);
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-md);
   }
 
   .desc {
     margin: 0;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     line-height: 1.5;
   }
 
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-      "Courier New", monospace;
+    font-family: var(--font-mono);
   }
 
   .path {
-    font-size: 11px;
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
-    padding: 8px 10px;
-    border-radius: 8px;
+    padding: var(--space-md);
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-color);
     background: var(--bg-primary);
     word-break: break-all;
   }
 
   .steps {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     color: var(--text-secondary);
-    padding: 10px;
-    border-radius: 10px;
+    padding: var(--space-md);
+    border-radius: var(--radius-lg);
     border: 1px solid var(--border-color);
     background: rgba(0, 0, 0, 0.14);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-sm);
   }
 
   .step-row {
     display: flex;
-    gap: 10px;
+    gap: var(--space-md);
     align-items: baseline;
   }
 
@@ -284,52 +277,21 @@
   }
 
   .error {
-    padding: 10px 12px;
+    padding: var(--space-md) var(--space-lg);
     border: 1px solid rgba(255, 90, 90, 0.35);
     background: rgba(255, 90, 90, 0.08);
     color: rgb(255, 160, 160);
-    border-radius: 8px;
-    font-size: 11px;
+    border-radius: var(--radius-md);
+    font-size: var(--ui-font-xs);
     line-height: 1.4;
     white-space: pre-wrap;
   }
 
   .footer {
-    padding: 12px 14px;
+    padding: var(--space-lg) var(--space-xl);
     border-top: 1px solid var(--border-color);
     display: flex;
     justify-content: flex-end;
-    gap: 10px;
-  }
-
-  button {
-    padding: 10px 12px;
-    border-radius: 10px;
-    border: 1px solid var(--border-color);
-    background: none;
-    color: var(--text-primary);
-    font-size: 12px;
-    font-weight: 700;
-    cursor: pointer;
-  }
-
-  button.primary {
-    background: var(--accent);
-    color: var(--bg-primary);
-    border-color: transparent;
-  }
-
-  button.secondary:hover:not(:disabled) {
-    border-color: var(--accent);
-    background: var(--bg-surface);
-  }
-
-  button.primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  button:disabled {
-    opacity: 0.7;
-    cursor: not-allowed;
+    gap: var(--space-md);
   }
 </style>
