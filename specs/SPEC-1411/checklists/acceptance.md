@@ -1,0 +1,8 @@
+- [ ] Agent Launch Form から GitHub Copilot を選択して起動できる
+- [ ] モデル選択で --model 引数が正しく渡される
+- [ ] Continue モードで --continue 引数が渡される
+- [ ] Skip permissions で --allow-all-tools 引数が渡される
+- [ ] 既存 4 エージェントのテストが全パス
+- [ ] cargo clippy 警告なし
+- [ ] フロントエンドテスト全パス
+- [ ] svelte-check エラーなし

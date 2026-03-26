@@ -200,18 +200,6 @@ export function toolUsageClass(usage: string | null | undefined): string {
   return "";
 }
 
-export function clampSidebarWidth(
-  width: number,
-  minWidthPx: number,
-  maxWidthPx: number,
-): number {
-  const min = Number.isFinite(minWidthPx) ? minWidthPx : 220;
-  const maxCandidate = Number.isFinite(maxWidthPx) ? maxWidthPx : 520;
-  const max = Math.max(min, maxCandidate);
-  if (!Number.isFinite(width)) return min;
-  return Math.max(min, Math.min(max, Math.round(width)));
-}
-
 export function decideRefreshFailureAction(
   background: boolean,
   hadFallbackCache: boolean,

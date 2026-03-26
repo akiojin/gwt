@@ -1,0 +1,5 @@
+- [ ] T001 `plugins/gwt/skills/gwt-pr/SKILL.md` の祖先判定と fallback 順序を修正する
+- [ ] T002 `plugins/gwt/commands/gwt-pr.md` / `gwt-pr-check.md` の指示文面を修正する
+- [ ] T003 `.codex/skills/gwt-pr/SKILL.md` を plugin source と同じ判定ルールへ同期する
+- [ ] T004 `crates/gwt-core/src/config/skill_registration.rs` に generated asset 回帰テストを追加する
+- [ ] T005 `NO ACTION` / `MANUAL CHECK` の文面が generated asset でも保持されることを確認する

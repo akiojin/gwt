@@ -1,0 +1,5 @@
+- [ ] `showReportDialog()` に `setFocus()` 呼び出しを追加
+- [ ] `cargo clippy` / `cargo fmt` 実行（Rust 側変更なしのため影響なし確認）
+- [ ] `cd gwt-gui && pnpm test` 実行
+- [ ] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` 実行
+- [ ] コミット＆プッシュ

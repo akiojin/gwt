@@ -1,0 +1,4 @@
+- [x] Pending required checks display `Checking merge status...`
+- [x] Actual blockers display `Blocked`
+- [x] Existing merged/closed/conflicting/mergeable behavior is preserved
+- [x] Rust and Svelte tests cover the state split

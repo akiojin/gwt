@@ -1,0 +1,5 @@
+- [x] macOS/Windows で API キー保存時の認証判定が一致する
+- [x] `ai.api_key` が Launch 環境に反映される
+- [x] env 優先順位が維持される
+- [x] Rust 回帰テストが追加され GREEN
+- [x] Playwright E2E シナリオが追加され GREEN
