@@ -119,12 +119,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: var(--space-4) var(--space-6);
     border-bottom: 1px solid var(--border-color);
   }
 
   .dialog-header h2 {
-    font-size: 15px;
+    font-size: var(--ui-font-lg);
     font-weight: 600;
     color: var(--text-primary);
   }
@@ -134,9 +134,9 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 20px;
-    padding: 4px 8px;
-    border-radius: 4px;
+    font-size: var(--ui-font-xl);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     line-height: 1;
   }
 
@@ -146,21 +146,21 @@
   }
 
   .dialog-body {
-    padding: 16px 20px;
+    padding: var(--space-4) var(--space-6);
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
 
   .field-label {
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-weight: 600;
     color: var(--text-primary);
   }
 
   .field-input {
-    padding: 8px 12px;
-    font-size: 13px;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--ui-font-base);
     font-family: inherit;
     background: var(--bg-primary);
     color: var(--text-primary);
@@ -179,23 +179,23 @@
   }
 
   .field-hint {
-    font-size: 11px;
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
   }
 
   .dialog-footer {
     display: flex;
     justify-content: flex-end;
-    gap: 8px;
-    padding: 16px 20px;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-6);
     border-top: 1px solid var(--border-color);
   }
 
   .btn {
-    padding: 8px 16px;
+    padding: var(--space-2) var(--space-4);
     border: none;
     border-radius: 6px;
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
