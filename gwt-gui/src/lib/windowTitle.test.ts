@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("./tauriMock", () => ({
+  isBrowserDevMode: () => false,
+}));
+
 import { formatAboutVersion, formatWindowTitle } from "./windowTitle";
 
 describe("formatWindowTitle", () => {
