@@ -611,7 +611,7 @@
   @keyframes dialog-fade-in {
     from {
       opacity: 0;
-      transform: translateY(-8px);
+      transform: translateY(calc(-1 * var(--space-2)));
     }
     to {
       opacity: 1;
@@ -623,12 +623,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px 0;
+    padding: var(--space-4) var(--space-5) 0;
   }
 
   .dialog-header h2 {
     font-size: var(--ui-font-2xl, 20px);
-    font-weight: 700;
+    font-weight: var(--font-weight-bold);
     color: var(--text-primary);
     margin: 0;
     line-height: 1.3;
@@ -640,8 +640,8 @@
     color: var(--text-muted);
     font-size: 20px;
     cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 4px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     line-height: 1;
   }
 
@@ -652,8 +652,8 @@
 
   .tab-bar {
     display: flex;
-    gap: 4px;
-    padding: 12px 20px 0;
+    gap: var(--space-1);
+    padding: var(--space-3) var(--space-5) 0;
     border-bottom: 1px solid var(--border-color);
   }
 
@@ -661,13 +661,13 @@
     background: none;
     border: 1px solid transparent;
     border-bottom: none;
-    border-radius: 6px 6px 0 0;
-    padding: 8px 16px;
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+    padding: var(--space-2) var(--space-4);
     color: var(--text-secondary);
     cursor: pointer;
     font-family: inherit;
     font-size: var(--ui-font-base, 14px);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
     line-height: 1.35;
   }
 
@@ -682,36 +682,36 @@
     border-bottom-color: var(--bg-secondary);
     background: rgba(137, 180, 250, 0.18);
     margin-bottom: -1px;
-    padding-bottom: 9px;
+    padding-bottom: calc(var(--space-2) + 1px);
   }
 
   .dialog-body {
     flex: 1;
     overflow-y: auto;
-    padding: 16px 20px;
+    padding: var(--space-4) var(--space-5);
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: var(--space-4);
   }
 
   .form-section {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-2);
   }
 
   .form-label {
     font-size: var(--ui-font-base, 14px);
     color: var(--text-primary);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
     line-height: 1.4;
   }
 
   .form-input {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--ui-font-lg, 14px);
@@ -731,8 +731,8 @@
   .form-textarea {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--ui-font-lg, 14px);
@@ -754,16 +754,16 @@
   .collapsible-header {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-2);
     background: none;
     border: none;
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--ui-font-base, 14px);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
     line-height: 1.4;
     cursor: pointer;
-    padding: 4px 0;
+    padding: var(--space-1) 0;
   }
 
   .collapsible-header:hover {
@@ -772,7 +772,7 @@
 
   .collapse-arrow {
     font-size: 10px;
-    transition: transform 0.15s ease;
+    transition: transform var(--transition-fast);
     display: inline-block;
   }
 
@@ -785,20 +785,20 @@
     font-size: var(--ui-font-sm, 13px);
     color: var(--text-secondary);
     background: var(--bg-primary);
-    padding: 2px 7px;
-    border-radius: 4px;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
     margin-left: auto;
   }
 
   .error-details {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 10px 12px;
-    margin-top: 4px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-3);
+    margin-top: var(--space-1);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-2);
     font-size: var(--ui-font-base, 14px);
   }
 
@@ -810,31 +810,31 @@
 
   .error-key {
     color: var(--text-secondary);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
   }
 
   .diagnostics-section {
     border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-3) var(--space-4);
     margin: 0;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-3);
     background: var(--bg-primary);
   }
 
   .diagnostics-section legend {
     font-size: var(--ui-font-base, 14px);
     color: var(--text-secondary);
-    font-weight: 600;
-    padding: 0 4px;
+    font-weight: var(--font-weight-semibold);
+    padding: 0 var(--space-1);
   }
 
   .checkbox-label {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     font-size: var(--ui-font-base, 14px);
     color: var(--text-primary);
     line-height: 1.4;
@@ -848,13 +848,13 @@
   .capture-terminal-row {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-top: 4px;
+    gap: var(--space-3);
+    margin-top: var(--space-1);
   }
 
   .btn-capture {
-    padding: 4px 12px;
-    border-radius: 5px;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
     font-family: inherit;
     font-size: var(--ui-font-xs, 12px);
     cursor: pointer;
@@ -879,16 +879,16 @@
 
   .preview-section {
     border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-3) var(--space-4);
     background: var(--bg-primary);
   }
 
   .preview-section h3 {
     font-size: var(--ui-font-base, 14px);
     color: var(--text-secondary);
-    font-weight: 600;
-    margin: 0 0 8px;
+    font-weight: var(--font-weight-semibold);
+    margin: 0 0 var(--space-2);
   }
 
   .preview-content {
@@ -903,8 +903,8 @@
     line-height: 1.55;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
     resize: vertical;
     width: 100%;
     box-sizing: border-box;
@@ -925,13 +925,13 @@
     color: var(--text-primary);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
     text-align: center;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .submit-success {
@@ -961,24 +961,24 @@
 
   .fallback-actions {
     display: flex;
-    gap: 8px;
+    gap: var(--space-2);
     justify-content: center;
   }
 
   .dialog-footer {
     display: flex;
     justify-content: flex-end;
-    gap: 8px;
-    padding: 12px 20px 16px;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-5) var(--space-4);
     border-top: 1px solid var(--border-color);
   }
 
   .btn {
-    padding: 6px 16px;
-    border-radius: 6px;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-sm);
     font-family: inherit;
     font-size: var(--ui-font-base, 14px);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
     cursor: pointer;
     border: 1px solid var(--border-color);
   }
@@ -992,20 +992,20 @@
     }
 
     .dialog-header {
-      padding: 12px 16px 0;
+      padding: var(--space-3) var(--space-4) 0;
     }
 
     .tab-bar {
-      padding: 8px 16px 0;
+      padding: var(--space-2) var(--space-4) 0;
     }
 
     .dialog-body {
-      padding: 12px 16px;
-      gap: 12px;
+      padding: var(--space-3) var(--space-4);
+      gap: var(--space-3);
     }
 
     .dialog-footer {
-      padding: 10px 16px 12px;
+      padding: var(--space-3) var(--space-4) var(--space-3);
     }
   }
 
