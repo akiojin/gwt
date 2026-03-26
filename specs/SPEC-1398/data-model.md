@@ -1,0 +1,2 @@
+- 既存 `BranchPrReference` (`number`, `state`, `title`, `url`) を利用。
+- 追加フィールドなし。

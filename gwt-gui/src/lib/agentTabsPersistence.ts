@@ -1,7 +1,10 @@
+import type {
+  AgentCanvasTileLayout,
+  AgentCanvasPersistedState,
+  AgentCanvasViewport,
+} from "./agentCanvas";
 import type { Tab, TerminalInfo } from "./types";
 import { inferAgentId } from "./agentUtils";
-import type { TabGroupState, TabLayoutNode } from "./tabLayout";
-import { createInitialTabLayout, flattenTabIdsByLayout } from "./tabLayout";
 
 /**
  * localStorage key used to persist tab state (per project path).
@@ -17,6 +20,7 @@ export type StoredAgentTab = {
   paneId: string;
   label: string;
   branchName?: string;
+  worktreePath?: string;
   agentId?: Tab["agentId"];
 };
 
@@ -25,11 +29,15 @@ export type StoredTerminalTab = {
   paneId: string;
   label: string;
   cwd?: string;
+  branchName?: string;
+  worktreePath?: string;
 };
 
 export type StoredStaticTab = {
   type:
     | "assistant"
+    | "agentCanvas"
+    | "branchBrowser"
     | "settings"
     | "versionHistory"
     | "issues"
@@ -52,9 +60,9 @@ export type StoredProjectTab =
 export type StoredProjectTabs = {
   tabs: StoredProjectTab[];
   activeTabId: string | null;
-  activeGroupId?: string | null;
-  groups?: StoredTabGroup[];
-  root?: StoredTabLayoutNode | null;
+  activeCanvasSessionTabId?: string | null;
+  agentCanvas?: AgentCanvasPersistedState;
+  branchBrowser?: StoredBranchBrowserState;
 };
 
 /**
@@ -63,11 +71,17 @@ export type StoredProjectTabs = {
 export type BuildRestoredProjectTabsResult = {
   tabs: Tab[];
   activeTabId: string | null;
-  activeGroupId: string | null;
-  groups: StoredTabGroup[];
-  root: StoredTabLayoutNode;
+  activeCanvasSessionTabId: string | null;
+  agentCanvas?: AgentCanvasPersistedState;
+  branchBrowser?: StoredBranchBrowserState;
   terminalTabsToRespawn: StoredTerminalTab[];
   activeTerminalPaneIdToRespawn: string | null;
+};
+
+export type StoredBranchBrowserState = {
+  filter: "Local" | "Remote" | "All";
+  query: string;
+  selectedBranchName: string | null;
 };
 
 // Backward-compatible shape consumed by legacy App.svelte restore/persist flow.
@@ -98,25 +112,6 @@ type StoredProjectTabsRoot = {
   version: 2 | 3;
   byProjectPath: Record<string, StoredProjectTabs>;
 };
-
-export type StoredTabGroup = {
-  id: string;
-  tabIds: string[];
-  activeTabId: string | null;
-};
-
-export type StoredTabLayoutNode =
-  | {
-      type: "group";
-      groupId: string;
-    }
-  | {
-      type: "split";
-      id: string;
-      axis: "horizontal" | "vertical";
-      sizes: [number, number];
-      children: [StoredTabLayoutNode, StoredTabLayoutNode];
-    };
 
 type LegacyStoredAgentTab = {
   paneId: string;
@@ -163,6 +158,77 @@ function normalizeAgentId(value: unknown): Tab["agentId"] | undefined {
   return undefined;
 }
 
+function buildProjectStorageKey(
+  projectPath: string,
+  windowLabel?: string | null,
+): string {
+  const path = projectPath.trim();
+  const label = normalizeString(windowLabel);
+  return label ? `${path}::window=${label}` : path;
+}
+
+function sanitizeViewport(raw: unknown): AgentCanvasViewport {
+  if (!raw || typeof raw !== "object") {
+    return { x: 0, y: 0, zoom: 1 };
+  }
+  const obj = raw as Record<string, unknown>;
+  const x = Number(obj.x);
+  const y = Number(obj.y);
+  const zoom = Number(obj.zoom);
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+    zoom: Number.isFinite(zoom) && zoom > 0 ? zoom : 1,
+  };
+}
+
+function sanitizeTileLayouts(raw: unknown): Record<string, AgentCanvasTileLayout> {
+  if (!raw || typeof raw !== "object") return {};
+  const layouts: Record<string, AgentCanvasTileLayout> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object") continue;
+    const obj = value as Record<string, unknown>;
+    const x = Number(obj.x);
+    const y = Number(obj.y);
+    const width = Number(obj.width);
+    const height = Number(obj.height);
+    if (![x, y, width, height].every((n) => Number.isFinite(n))) continue;
+    layouts[key] = { x, y, width, height };
+  }
+  return layouts;
+}
+
+function sanitizeAgentCanvasState(raw: unknown): AgentCanvasPersistedState {
+  if (!raw || typeof raw !== "object") {
+    return {
+      viewport: { x: 0, y: 0, zoom: 1 },
+      tileLayouts: {},
+      selectedTileId: null,
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    viewport: sanitizeViewport(obj.viewport),
+    tileLayouts: sanitizeTileLayouts(obj.tileLayouts ?? obj.cardLayouts),
+    selectedTileId: normalizeString(obj.selectedTileId ?? obj.selectedCardId) || null,
+  };
+}
+
+function sanitizeBranchBrowserState(raw: unknown): StoredBranchBrowserState {
+  if (!raw || typeof raw !== "object") {
+    return { filter: "Local", query: "", selectedBranchName: null };
+  }
+  const obj = raw as Record<string, unknown>;
+  const filterRaw = normalizeString(obj.filter);
+  const filter =
+    filterRaw === "Remote" || filterRaw === "All" ? filterRaw : "Local";
+  return {
+    filter,
+    query: typeof obj.query === "string" ? obj.query : "",
+    selectedBranchName: normalizeString(obj.selectedBranchName) || null,
+  };
+}
+
 function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
@@ -173,12 +239,14 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     if (!paneId) return null;
     const label = typeof obj.label === "string" ? obj.label : "";
     const branchName = normalizeString(obj.branchName);
+    const worktreePath = normalizeString(obj.worktreePath);
     const agentId = normalizeAgentId(obj.agentId);
     return {
       type: "agent",
       paneId,
       label,
       ...(branchName ? { branchName } : {}),
+      ...(worktreePath ? { worktreePath } : {}),
       ...(agentId ? { agentId } : {}),
     };
   }
@@ -188,16 +256,22 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     if (!paneId) return null;
     const label = typeof obj.label === "string" ? obj.label : "";
     const cwd = typeof obj.cwd === "string" ? obj.cwd : undefined;
+    const branchName = normalizeString(obj.branchName);
+    const worktreePath = normalizeString(obj.worktreePath);
     return {
       type: "terminal",
       paneId,
       label,
       ...(cwd ? { cwd } : {}),
+      ...(branchName ? { branchName } : {}),
+      ...(worktreePath ? { worktreePath } : {}),
     };
   }
 
   if (
     type === "assistant" ||
+    type === "agentCanvas" ||
+    type === "branchBrowser" ||
     type === "settings" ||
     type === "versionHistory" ||
     type === "issues" ||
@@ -205,10 +279,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     type === "projectIndex" ||
     type === "issueSpec"
   ) {
-    const canonicalType = type === "assistant" ? "assistant" : type;
+    const canonicalType =
+      type === "assistant" ? "agentCanvas" : type;
     const fallbackId =
-      canonicalType === "assistant"
-        ? "assistant"
+      canonicalType === "agentCanvas"
+        ? "agentCanvas"
+        : canonicalType === "branchBrowser"
+          ? "branchBrowser"
         : canonicalType === "settings"
           ? "settings"
           : canonicalType === "issues"
@@ -221,8 +298,10 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
                   ? "issueSpec"
                   : "versionHistory";
     const fallbackLabel =
-      canonicalType === "assistant"
-        ? "Assistant"
+      canonicalType === "agentCanvas"
+        ? "Agent Canvas"
+        : canonicalType === "branchBrowser"
+          ? "Branch Browser"
         : canonicalType === "settings"
           ? "Settings"
           : canonicalType === "issues"
@@ -236,13 +315,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
                   : "Version History";
     const idRaw = normalizeString(obj.id);
     const id =
-      canonicalType === "assistant"
-        ? "assistant"
+      canonicalType === "agentCanvas"
+        ? "agentCanvas"
         : idRaw || fallbackId;
     const labelRaw = typeof obj.label === "string" ? obj.label.trim() : "";
     const label =
-      canonicalType === "assistant" && (type === "assistant" || !labelRaw)
-        ? "Assistant"
+      canonicalType === "agentCanvas" && (type === "assistant" || !labelRaw)
+        ? "Agent Canvas"
         : labelRaw || fallbackLabel;
     const issueNumber =
       canonicalType === "issueSpec" && Number.isFinite(Number(obj.issueNumber))
@@ -282,104 +361,19 @@ function sanitizeProjectTabsEntry(rawEntry: unknown): StoredProjectTabs | null {
   }
 
   const activeTabId = normalizeString(entry.activeTabId) || null;
-  const groups = sanitizeStoredGroups(entry.groups, tabs.map(resolveStoredTabId));
-  const root = sanitizeStoredRoot(entry.root, groups.map((group) => group.id));
-  const activeGroupId = normalizeString(entry.activeGroupId) || null;
-
+  const activeCanvasSessionTabId =
+    normalizeString(entry.activeCanvasSessionTabId) || null;
   return {
     tabs,
     activeTabId,
-    ...(groups.length > 0 ? { groups } : {}),
-    ...(root ? { root } : {}),
-    ...(activeGroupId ? { activeGroupId } : {}),
+    ...(activeCanvasSessionTabId ? { activeCanvasSessionTabId } : {}),
+    ...("agentCanvas" in entry
+      ? { agentCanvas: sanitizeAgentCanvasState(entry.agentCanvas) }
+      : {}),
+    ...("branchBrowser" in entry
+      ? { branchBrowser: sanitizeBranchBrowserState(entry.branchBrowser) }
+      : {}),
   };
-}
-
-function resolveStoredTabId(tab: StoredProjectTab): string {
-  if (tab.type === "agent") return `agent-${tab.paneId}`;
-  if (tab.type === "terminal") return `terminal-${tab.paneId}`;
-  return tab.id;
-}
-
-function sanitizeStoredGroups(
-  rawGroups: unknown,
-  knownTabIds: string[],
-): StoredTabGroup[] {
-  if (!Array.isArray(rawGroups) || knownTabIds.length === 0) {
-    return [];
-  }
-
-  const known = new Set(knownTabIds);
-  const groups: StoredTabGroup[] = [];
-  const seenGroups = new Set<string>();
-
-  for (const rawGroup of rawGroups) {
-    if (!rawGroup || typeof rawGroup !== "object") continue;
-    const obj = rawGroup as Record<string, unknown>;
-    const id = normalizeString(obj.id);
-    if (!id || seenGroups.has(id)) continue;
-    const tabIds = Array.isArray(obj.tabIds)
-      ? obj.tabIds
-          .map((value) => normalizeString(value))
-          .filter((value) => value && known.has(value))
-      : [];
-    if (tabIds.length === 0) continue;
-    const activeTabIdRaw = normalizeString(obj.activeTabId);
-    groups.push({
-      id,
-      tabIds,
-      activeTabId: activeTabIdRaw && tabIds.includes(activeTabIdRaw) ? activeTabIdRaw : (tabIds[0] ?? null),
-    });
-    seenGroups.add(id);
-  }
-
-  return groups;
-}
-
-function sanitizeStoredRoot(
-  rawRoot: unknown,
-  knownGroupIds: string[],
-): StoredTabLayoutNode | null {
-  if (!rawRoot || typeof rawRoot !== "object" || knownGroupIds.length === 0) {
-    return null;
-  }
-  const known = new Set(knownGroupIds);
-
-  function visit(rawNode: unknown): StoredTabLayoutNode | null {
-    if (!rawNode || typeof rawNode !== "object") return null;
-    const obj = rawNode as Record<string, unknown>;
-    const type = normalizeString(obj.type);
-    if (type === "group") {
-      const groupId = normalizeString(obj.groupId);
-      return groupId && known.has(groupId) ? { type: "group", groupId } : null;
-    }
-    if (type !== "split") return null;
-    const id = normalizeString(obj.id);
-    const axis =
-      normalizeString(obj.axis) === "vertical" ? "vertical" : "horizontal";
-    const childrenRaw = Array.isArray(obj.children) ? obj.children : [];
-    if (childrenRaw.length !== 2) return null;
-    const first = visit(childrenRaw[0]);
-    const second = visit(childrenRaw[1]);
-    if (!first && !second) return null;
-    if (!first) return second;
-    if (!second) return first;
-    const sizesRaw = Array.isArray(obj.sizes) ? obj.sizes : [];
-    const firstSize = Number(sizesRaw[0]);
-    const primary =
-      Number.isFinite(firstSize) && firstSize > 0 && firstSize < 1
-        ? firstSize
-        : 0.5;
-    return {
-      type: "split",
-      id: id || `split-restored-${knownGroupIds.length}`,
-      axis,
-      sizes: [primary, 1 - primary],
-      children: [first, second],
-    };
-  }
-
-  return visit(rawRoot);
 }
 
 function sanitizeLegacyProjectTabsEntry(
@@ -499,16 +493,19 @@ function loadStoredProjectTabsLegacy(
 export function loadStoredProjectTabs(
   projectPath: string,
   storage?: Storage | null,
+  windowLabel?: string | null,
 ): StoredProjectTabs | null {
   const store = getStorageSafe(storage);
   if (!store) return null;
 
-  const key = projectPath.trim();
-  if (!key) return null;
+  const baseKey = projectPath.trim();
+  if (!baseKey) return null;
+  const scopedKey = buildProjectStorageKey(baseKey, windowLabel);
 
   return (
-    loadStoredProjectTabsCurrent(key, store) ??
-    loadStoredProjectTabsLegacy(key, store)
+    loadStoredProjectTabsCurrent(scopedKey, store) ??
+    loadStoredProjectTabsCurrent(baseKey, store) ??
+    loadStoredProjectTabsLegacy(baseKey, store)
   );
 }
 
@@ -521,11 +518,12 @@ export function persistStoredProjectTabs(
   projectPath: string,
   state: StoredProjectTabs,
   storage?: Storage | null,
+  windowLabel?: string | null,
 ) {
   const store = getStorageSafe(storage);
   if (!store) return;
 
-  const key = projectPath.trim();
+  const key = buildProjectStorageKey(projectPath, windowLabel);
   if (!key) return;
 
   try {
@@ -584,11 +582,13 @@ export function buildRestoredProjectTabs(
         normalizeString(tab.branchName) ||
         normalizeString(terminal?.branch_name) ||
         normalizeString(tab.label);
+      const worktreePath = normalizeString(tab.worktreePath);
       const agentId = inferAgentId(terminal?.agent_name) ?? tab.agentId;
       restoredTabs.push({
         id: `agent-${tab.paneId}`,
         label: tab.label,
         ...(branchName ? { branchName } : {}),
+        ...(worktreePath ? { worktreePath } : {}),
         type: "agent",
         paneId: tab.paneId,
         ...(agentId ? { agentId } : {}),
@@ -608,6 +608,8 @@ export function buildRestoredProjectTabs(
           type: "terminal",
           paneId: tab.paneId,
           ...(tab.cwd ? { cwd: tab.cwd } : {}),
+          ...(tab.branchName ? { branchName: tab.branchName } : {}),
+          ...(tab.worktreePath ? { worktreePath: tab.worktreePath } : {}),
         });
       } else {
         terminalTabsToRespawn.push(tab);
@@ -618,24 +620,53 @@ export function buildRestoredProjectTabs(
     const key = `id:${tab.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    if (tab.type === "assistant") {
+      restoredTabs.push({
+        id: "agentCanvas",
+        label: "Agent Canvas",
+        type: "agentCanvas",
+      });
+      continue;
+    }
     restoredTabs.push({ id: tab.id, label: tab.label, type: tab.type });
   }
 
-  if (!restoredTabs.some((tab) => tab.id === "assistant")) {
+  if (!restoredTabs.some((tab) => tab.id === "agentCanvas")) {
     restoredTabs.unshift({
-      id: "assistant",
-      label: "Assistant",
-      type: "assistant",
+      id: "agentCanvas",
+      label: "Agent Canvas",
+      type: "agentCanvas",
+    });
+  }
+  if (!restoredTabs.some((tab) => tab.id === "branchBrowser")) {
+    restoredTabs.splice(1, 0, {
+      id: "branchBrowser",
+      label: "Branch Browser",
+      type: "branchBrowser",
     });
   }
 
   const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
   const normalizedActiveTabId =
-    stored.activeTabId === "assistant" ? "assistant" : stored.activeTabId;
+    stored.activeTabId === "assistant" ? "agentCanvas" : stored.activeTabId;
+  const normalizedActiveCanvasSessionTabId =
+    normalizeString(stored.activeCanvasSessionTabId) ||
+    (normalizedActiveTabId &&
+    (normalizedActiveTabId.startsWith("agent-") ||
+      normalizedActiveTabId.startsWith("terminal-"))
+      ? normalizedActiveTabId
+      : null);
+  const activeCanvasSessionTabId =
+    normalizedActiveCanvasSessionTabId &&
+    restoredIds.has(normalizedActiveCanvasSessionTabId)
+      ? normalizedActiveCanvasSessionTabId
+      : null;
   const activeTabId =
     normalizedActiveTabId && restoredIds.has(normalizedActiveTabId)
       ? normalizedActiveTabId
-      : null;
+      : activeCanvasSessionTabId
+        ? "agentCanvas"
+        : null;
 
   const activeTerminalPaneId =
     stored.activeTabId && stored.activeTabId.startsWith("terminal-")
@@ -648,98 +679,27 @@ export function buildRestoredProjectTabs(
       ? activeTerminalPaneId
       : null;
 
-  const restoredLayout = buildRestoredLayoutState(
-    stored,
-    restoredTabs,
-    activeTabId,
-  );
-
   return {
     tabs: restoredTabs,
     activeTabId,
-    activeGroupId: restoredLayout.activeGroupId,
-    groups: Object.values(restoredLayout.groups),
-    root: restoredLayout.root as StoredTabLayoutNode,
+    activeCanvasSessionTabId,
+    ...("agentCanvas" in stored
+      ? { agentCanvas: sanitizeAgentCanvasState(stored.agentCanvas) }
+      : {}),
+    ...("branchBrowser" in stored
+      ? { branchBrowser: sanitizeBranchBrowserState(stored.branchBrowser) }
+      : {}),
     terminalTabsToRespawn,
     activeTerminalPaneIdToRespawn,
-  };
-}
-
-function buildRestoredLayoutState(
-  stored: StoredProjectTabs,
-  restoredTabs: Tab[],
-  restoredActiveTabId: string | null,
-): { groups: Record<string, TabGroupState>; root: TabLayoutNode; activeGroupId: string } {
-  if (restoredTabs.length === 0) {
-    return createInitialTabLayout([], null);
-  }
-
-  const restoredTabIds = restoredTabs.map((tab) => tab.id);
-  const knownTabs = new Set(restoredTabIds);
-  const storedGroups = Array.isArray(stored.groups) ? stored.groups : [];
-  const nextGroups: Record<string, TabGroupState> = {};
-
-  for (const group of storedGroups) {
-    const tabIds = group.tabIds.filter((tabId) => knownTabs.has(tabId));
-    if (tabIds.length === 0) continue;
-    nextGroups[group.id] = {
-      id: group.id,
-      tabIds,
-      activeTabId:
-        group.activeTabId && tabIds.includes(group.activeTabId)
-          ? group.activeTabId
-          : (tabIds[0] ?? null),
-    };
-  }
-
-  let root =
-    stored.root && Object.keys(nextGroups).length > 0
-      ? sanitizeStoredRoot(stored.root, Object.keys(nextGroups))
-      : null;
-
-  if (!root || Object.keys(nextGroups).length === 0) {
-    return createInitialTabLayout(restoredTabs, restoredActiveTabId);
-  }
-
-  const assigned = new Set<string>();
-  for (const group of Object.values(nextGroups)) {
-    for (const tabId of group.tabIds) {
-      assigned.add(tabId);
-    }
-  }
-
-  const missingTabIds = restoredTabIds.filter((tabId) => !assigned.has(tabId));
-  if (missingTabIds.length > 0) {
-    const firstGroupId = Object.keys(nextGroups)[0];
-    if (firstGroupId) {
-      const target = nextGroups[firstGroupId];
-      target.tabIds = [...target.tabIds, ...missingTabIds];
-      if (!target.activeTabId) {
-        target.activeTabId = target.tabIds[0] ?? null;
-      }
-    }
-  }
-
-  const activeGroupIdRaw =
-    normalizeString(stored.activeGroupId) ||
-    Object.values(nextGroups).find(
-      (group) => group.activeTabId && group.activeTabId === restoredActiveTabId,
-    )?.id ||
-    Object.keys(nextGroups)[0] ||
-    "";
-
-  return {
-    groups: nextGroups,
-    root,
-    activeGroupId: activeGroupIdRaw,
   };
 }
 
 export function loadStoredProjectAgentTabs(
   projectPath: string,
   storage?: Storage | null,
+  windowLabel?: string | null,
 ): StoredProjectAgentTabs | null {
-  const stored = loadStoredProjectTabs(projectPath, storage);
+  const stored = loadStoredProjectTabs(projectPath, storage, windowLabel);
   if (!stored) return null;
 
   const tabs = stored.tabs
@@ -762,6 +722,7 @@ export function persistStoredProjectAgentTabs(
   projectPath: string,
   state: StoredProjectAgentTabs,
   storage?: Storage | null,
+  windowLabel?: string | null,
 ) {
   const agentTabs: StoredProjectTab[] = state.tabs
     .map((tab) => {
@@ -776,7 +737,7 @@ export function persistStoredProjectAgentTabs(
     })
     .filter((tab): tab is StoredAgentTab => tab !== null);
 
-  const existing = loadStoredProjectTabs(projectPath, storage);
+  const existing = loadStoredProjectTabs(projectPath, storage, windowLabel);
   const preservedTabs = (existing?.tabs ?? []).filter((tab) => tab.type !== "agent");
 
   const activePaneId = normalizeString(state.activePaneId ?? "");
@@ -792,8 +753,14 @@ export function persistStoredProjectAgentTabs(
     {
       tabs: [...preservedTabs, ...agentTabs],
       activeTabId,
+      ...(existing?.activeCanvasSessionTabId
+        ? { activeCanvasSessionTabId: existing.activeCanvasSessionTabId }
+        : {}),
+      ...(existing?.agentCanvas ? { agentCanvas: existing.agentCanvas } : {}),
+      ...(existing?.branchBrowser ? { branchBrowser: existing.branchBrowser } : {}),
     },
     storage,
+    windowLabel,
   );
 }
 

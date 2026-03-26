@@ -1,42 +1,144 @@
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./support/tauri-mock";
 import {
-  defaultRecentProject,
-  branchMain,
-  branchDevelop,
   branchFeature,
-  prStatusFixture,
+  captureUxSnapshot,
+  defaultRecentProject,
   openRecentProject,
+  saveE2ECoverage,
   setMockCommandResponses,
-  waitForMenuActionListener,
-  emitTauriEvent,
-  getInvokeLog,
-  waitForEventListener,
+  standardBranchResponses,
+  waitForInvokeCommand,
 } from "./support/helpers";
 
-const prBranchResponses = {
-  list_worktree_branches: [branchMain, branchDevelop, branchFeature],
-  list_remote_branches: [],
-  list_worktrees: [],
-  fetch_pr_status: {
-    statuses: {
-      [branchFeature.name]: { number: 42 },
-      [branchMain.name]: null,
-      [branchDevelop.name]: null,
+const openPrList = {
+  items: [
+    {
+      number: 42,
+      title: "Workflow Demo PR",
+      state: "OPEN",
+      isDraft: false,
+      headRefName: branchFeature.name,
+      baseRefName: "main",
+      author: { login: "e2e" },
+      labels: [{ name: "bugfix", color: "d73a4a" }],
+      createdAt: "2026-03-19T10:00:00.000Z",
+      updatedAt: "2026-03-22T10:00:00.000Z",
+      url: "https://github.com/example/gwt/pull/42",
+      body: "## Summary\n\nCurrent shell PR body.",
+      reviewRequests: [{ login: "reviewer-1" }],
+      assignees: [{ login: "reviewer-1" }],
     },
-    ghStatus: { available: true, authenticated: true },
-  },
-  fetch_pr_detail: prStatusFixture,
-  get_branch_session_summary: {
-    status: "ok",
-    generating: false,
-    toolId: null,
-    sessionId: null,
-    markdown: "",
-    bulletPoints: [],
-    error: null,
-  },
+    {
+      number: 77,
+      title: "Draft shell cleanup",
+      state: "OPEN",
+      isDraft: true,
+      headRefName: "feature/draft-shell-cleanup",
+      baseRefName: "develop",
+      author: { login: "dev-1" },
+      labels: [],
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-21T10:00:00.000Z",
+      url: "https://github.com/example/gwt/pull/77",
+      body: "",
+      reviewRequests: [],
+      assignees: [],
+    },
+  ],
+  ghStatus: { available: true, authenticated: true },
 };
+
+const mergedPrList = {
+  items: [
+    {
+      number: 99,
+      title: "Merged shell stabilization",
+      state: "MERGED",
+      isDraft: false,
+      headRefName: "feature/merged-shell",
+      baseRefName: "main",
+      author: { login: "e2e" },
+      labels: [],
+      createdAt: "2026-03-10T10:00:00.000Z",
+      updatedAt: "2026-03-20T10:00:00.000Z",
+      url: "https://github.com/example/gwt/pull/99",
+      body: "Merged body",
+      reviewRequests: [],
+      assignees: [],
+    },
+  ],
+  ghStatus: { available: true, authenticated: true },
+};
+
+const prDetailFixture = {
+  number: 42,
+  title: "Workflow Demo PR",
+  state: "OPEN",
+  url: "https://github.com/example/gwt/pull/42",
+  mergeable: "MERGEABLE",
+  author: "e2e",
+  baseBranch: "main",
+  headBranch: branchFeature.name,
+  labels: ["bugfix"],
+  assignees: ["reviewer-1"],
+  milestone: null,
+  linkedIssues: [101],
+  checkSuites: [
+    {
+      workflowName: "CI Build",
+      runId: 100,
+      status: "completed",
+      conclusion: "success",
+    },
+    {
+      workflowName: "Lint",
+      runId: 101,
+      status: "in_progress",
+      conclusion: null,
+    },
+  ],
+  reviews: [{ reviewer: "reviewer-1", state: "APPROVED" }],
+  reviewComments: [],
+  changedFilesCount: 2,
+  additions: 12,
+  deletions: 3,
+  mergeStateStatus: "BEHIND",
+};
+
+function prResponses() {
+  return {
+    ...standardBranchResponses(),
+    check_gh_cli_status: { available: true, authenticated: true },
+    fetch_github_user: {
+      login: "e2e",
+      ghStatus: { available: true, authenticated: true },
+    },
+    fetch_pr_list: openPrList,
+    fetch_pr_detail: prDetailFixture,
+  };
+}
+
+async function seedPullRequestsTab(page: import("@playwright/test").Page) {
+  await page.evaluate((projectPath) => {
+    window.localStorage.setItem(
+      "gwt.projectTabs.v2",
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          [projectPath]: {
+            tabs: [
+              { type: "agentCanvas", id: "agentCanvas", label: "Agent Canvas" },
+              { type: "branchBrowser", id: "branchBrowser", label: "Branch Browser" },
+              { type: "prs", id: "prs", label: "Pull Requests" },
+            ],
+            activeTabId: "prs",
+          },
+        },
+      }),
+    );
+  }, defaultRecentProject.path);
+}
 
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page, {
@@ -46,407 +148,95 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("shows PR badge in sidebar for branch with PR", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
-  await openRecentProject(page);
-
-  await expect(page.locator(".pr-badge", { hasText: "#42" })).toBeVisible();
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
 });
 
-test("Summary > PR tab shows PR title", async ({ page }) => {
+test("opens Pull Requests as a top-level tab in the current shell", async ({
+  page,
+}, testInfo) => {
   await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
+  await seedPullRequestsTab(page);
+  await setMockCommandResponses(page, prResponses());
   await openRecentProject(page);
 
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "PR", exact: true })
-    .click();
-
-  await expect(page.locator(".pr-title")).toBeVisible();
-  await expect(page.locator(".pr-title")).toContainText(
-    prStatusFixture.title,
-  );
+  await expect(page.locator('[data-tab-id="prs"]')).toHaveClass(/active/);
+  await expect(page.getByRole("heading", { name: "Pull Requests" })).toBeVisible();
+  await expect(page.locator(".plp-pr-title", { hasText: "Workflow Demo PR" })).toBeVisible();
+  await captureUxSnapshot(page, testInfo, "prs-top-level-tab");
 });
 
-test("Summary > PR tab shows check suites section", async ({ page }) => {
+test("expanded PR row shows body, checks, and reviews", async ({ page }) => {
   await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
+  await seedPullRequestsTab(page);
+  await setMockCommandResponses(page, prResponses());
   await openRecentProject(page);
 
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "PR", exact: true })
-    .click();
-
-  const checksToggle = page.locator(".checks-section .checks-toggle");
-  await expect(checksToggle).toBeVisible();
+  await page.locator(".plp-pr-row", { hasText: "Workflow Demo PR" }).click();
+  await expect(page.locator(".plp-pr-expanded")).toContainText("Current shell PR body");
+  await expect(page.locator(".plp-check-name", { hasText: "CI Build" })).toBeVisible();
+  await expect(page.locator(".plp-review-item")).toContainText("reviewer-1");
 });
 
-test("expanding checks shows CI Build and Lint items", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "PR", exact: true })
-    .click();
-
-  await page.locator(".checks-section .checks-toggle").click();
-  await expect(
-    page.locator(".check-item .check-name", { hasText: "CI Build" }),
-  ).toBeVisible();
-  await expect(
-    page.locator(".check-item .check-conclusion", { hasText: "Success" }),
-  ).toBeVisible();
-  await expect(
-    page.locator(".check-item .check-conclusion", { hasText: "Running" }),
-  ).toBeVisible();
-});
-
-test("clicking CI check item opens CI log tab", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "PR", exact: true })
-    .click();
-
-  await page.locator(".checks-section .checks-toggle").click();
-  await page.locator(".check-item", { hasText: "CI Build" }).click();
-
-  await expect(page.locator(".tab.active .tab-label")).toHaveText("CI #100");
-});
-
-test("PR tab shows review comments", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "PR", exact: true })
-    .click();
-
-  await expect(page.getByText("reviewer-1").first()).toBeVisible();
-});
-
-test("PR tab shows mergeable status", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "PR", exact: true })
-    .click();
-
-  await expect(page.getByText("Mergeable")).toBeVisible();
-});
-
-test("PR tab shows changed files count", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "PR", exact: true })
-    .click();
-
-  // Should show additions/deletions info
-  await expect(page.getByText("+12")).toBeVisible();
-});
-
-test("Summary > Git tab shows git section", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Git", exact: true })
-    .click();
-
-  await expect(page.locator(".git-section")).toBeVisible();
-});
-
-test("Summary tab navigation works back and forth", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, prBranchResponses);
-  await openRecentProject(page);
-
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
-
-  // Navigate to Git
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Git", exact: true })
-    .click();
-  await expect(page.locator(".git-section")).toBeVisible();
-
-  // Navigate to PR
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "PR", exact: true })
-    .click();
-  await expect(page.locator(".pr-title")).toBeVisible();
-
-  // Navigate back to Summary
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Summary", exact: true })
-    .click();
-  // Summary tab should be active again
-  await expect(
-    page
-      .locator(".summary-tabs")
-      .getByRole("button", { name: "Summary", exact: true }),
-  ).toHaveClass(/active/);
-});
-
-test("PR badge shows open class for MERGEABLE state", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, {
-    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
-    list_remote_branches: [],
-    list_worktrees: [],
-    fetch_pr_status: {
-      statuses: {
-        [branchFeature.name]: {
-          number: 42,
-          state: "OPEN",
-          mergeable: "MERGEABLE",
-          headBranch: branchFeature.name,
-          retrying: false,
-        },
-      },
-      ghStatus: { available: true, authenticated: true },
-    },
-  });
-  await openRecentProject(page);
-
-  const prBadge = page.locator(".pr-badge", { hasText: "#42" });
-  await expect(prBadge).toBeVisible();
-  await expect(prBadge).toHaveClass(/open/);
-});
-
-test("PR badge shows checking class for UNKNOWN retrying state", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, {
-    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
-    list_remote_branches: [],
-    list_worktrees: [],
-    fetch_pr_status: {
-      statuses: {
-        [branchFeature.name]: {
-          number: 42,
-          state: "OPEN",
-          mergeable: "UNKNOWN",
-          headBranch: branchFeature.name,
-          retrying: true,
-        },
-      },
-      ghStatus: { available: true, authenticated: true },
-    },
-  });
-  await openRecentProject(page);
-
-  const prBadge = page.locator(".pr-badge", { hasText: "#42" });
-  await expect(prBadge).toBeVisible();
-  await expect(prBadge).toHaveClass(/pulse/);
-  await expect(prBadge).toHaveClass(/checking/);
-});
-
-test("pr-status-updated event updates badge", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, {
-    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
-    list_remote_branches: [],
-    list_worktrees: [],
-    fetch_pr_status: {
-      statuses: {
-        [branchFeature.name]: {
-          number: 42,
-          state: "OPEN",
-          mergeable: "UNKNOWN",
-          headBranch: branchFeature.name,
-          retrying: true,
-        },
-      },
-      ghStatus: { available: true, authenticated: true },
-      repoKey: "/tmp/gwt-playwright",
-    },
-  });
-  await openRecentProject(page);
-
-  const prBadge = page.locator(".pr-badge", { hasText: "#42" });
-  await expect(prBadge).toHaveClass(/pulse/);
-
-  await waitForEventListener(page, "pr-status-updated");
-
-  await emitTauriEvent(page, "pr-status-updated", {
-    repoKey: "/tmp/gwt-playwright",
-    branch: branchFeature.name,
-    status: {
-      number: 42,
-      state: "OPEN",
-      mergeable: "MERGEABLE",
-      headBranch: branchFeature.name,
-      retrying: false,
-    },
-  });
-
-  await expect(prBadge).not.toHaveClass(/pulse/);
-  await expect(prBadge).toHaveClass(/open/);
-});
-
-test("branch without PR shows no badge", async ({ page }) => {
-  await page.goto("/");
-  await setMockCommandResponses(page, {
-    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
-    list_remote_branches: [],
-    list_worktrees: [],
-    fetch_pr_status: {
-      statuses: {
-        [branchFeature.name]: null,
-        [branchMain.name]: null,
-        [branchDevelop.name]: null,
-      },
-      ghStatus: { available: true, authenticated: true },
-    },
-  });
-  await openRecentProject(page);
-
-  await expect(page.locator(".pr-badge")).toBeHidden();
-});
-
-test("Summary > Summary tab shows AI Summary when available", async ({
+test("PR state filter can switch to merged items in the current shell", async ({
   page,
 }) => {
   await page.goto("/");
-  await setMockCommandResponses(page, {
-    ...prBranchResponses,
-    get_branch_session_summary: {
-      status: "ok",
-      generating: false,
-      toolId: "codex",
-      sessionId: "session-1",
-      markdown: "## AI Summary\n- workflow verified",
-      bulletPoints: ["workflow verified"],
-      error: null,
-    },
-  });
+  await seedPullRequestsTab(page);
+  await setMockCommandResponses(page, prResponses());
   await openRecentProject(page);
 
-  await page
-    .locator(".branch-item")
-    .filter({ hasText: branchFeature.name })
-    .click();
+  await setMockCommandResponses(page, {
+    ...prResponses(),
+    fetch_pr_list: mergedPrList,
+  });
+  await page.getByRole("button", { name: "Merged" }).click();
 
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Summary", exact: true })
-    .click();
-
-  await expect(page.getByText("AI Summary")).toBeVisible();
+  await expect(page.locator(".plp-pr-title", { hasText: "Merged shell stabilization" })).toBeVisible();
 });
 
-test("PR merged badge styling", async ({ page }) => {
+test("PR row can switch back to Branch Browser worktree", async ({ page }) => {
   await page.goto("/");
-  await setMockCommandResponses(page, {
-    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
-    list_remote_branches: [],
-    list_worktrees: [],
-    fetch_pr_status: {
-      statuses: {
-        [branchFeature.name]: {
-          number: 42,
-          state: "MERGED",
-          mergeable: "UNKNOWN",
-          headBranch: branchFeature.name,
-          retrying: false,
-        },
-      },
-      ghStatus: { available: true, authenticated: true },
-    },
-  });
+  await seedPullRequestsTab(page);
+  await setMockCommandResponses(page, prResponses());
   await openRecentProject(page);
 
-  const prBadge = page.locator(".pr-badge", { hasText: "#42" });
-  await expect(prBadge).toBeVisible();
-  await expect(prBadge).toHaveClass(/merged/);
+  await page.locator(".plp-pr-row", { hasText: "Workflow Demo PR" }).getByRole("button", { name: "WT" }).click();
+
+  await expect(page.locator('[data-tab-id="branchBrowser"]')).toHaveClass(/active/);
+  await expect(page.getByTestId("branch-browser-panel")).toBeVisible();
 });
 
-test("PR closed badge styling", async ({ page }) => {
+test("behind PR can request update branch", async ({ page }) => {
   await page.goto("/");
+  await seedPullRequestsTab(page);
+  await setMockCommandResponses(page, prResponses());
+  await openRecentProject(page);
+
+  await page.locator(".plp-pr-row", { hasText: "Workflow Demo PR" }).getByRole("button", { name: "Update" }).click();
+  await waitForInvokeCommand(page, "update_pr_branch");
+});
+
+test("draft PR can be marked ready", async ({ page }) => {
+  await page.goto("/");
+  await seedPullRequestsTab(page);
+  await setMockCommandResponses(page, prResponses());
+  await openRecentProject(page);
+
+  await page.locator(".plp-pr-row", { hasText: "Draft shell cleanup" }).getByRole("button", { name: "Ready" }).click();
+  await waitForInvokeCommand(page, "mark_pr_ready");
+});
+
+test("missing gh authentication shows PR availability message", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await seedPullRequestsTab(page);
   await setMockCommandResponses(page, {
-    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
-    list_remote_branches: [],
-    list_worktrees: [],
-    fetch_pr_status: {
-      statuses: {
-        [branchFeature.name]: {
-          number: 42,
-          state: "CLOSED",
-          mergeable: "UNKNOWN",
-          headBranch: branchFeature.name,
-          retrying: false,
-        },
-      },
-      ghStatus: { available: true, authenticated: true },
-    },
+    ...standardBranchResponses(),
+    check_gh_cli_status: { available: false, authenticated: false },
   });
   await openRecentProject(page);
 
-  const prBadge = page.locator(".pr-badge", { hasText: "#42" });
-  await expect(prBadge).toBeVisible();
-  await expect(prBadge).toHaveClass(/closed/);
+  await expect(page.locator(".plp-error")).toContainText("GitHub CLI");
 });

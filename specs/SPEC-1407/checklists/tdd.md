@@ -1,0 +1,4 @@
+- 修正テスト:
+  - `shows merged PR detail when latestBranchPr is MERGED and no sidebar PR number exists`
+- RED (2026-03-02): テスト実行 → "No PR" が表示され `#99 Old merged PR` の期待と不一致で失敗
+- GREEN (2026-03-02): 全 87 テスト pass、svelte-check 0 errors

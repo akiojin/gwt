@@ -1,0 +1,8 @@
+- [x] `#1684` を canonical spec ではなく統合元として整理する
+- [x] Git 側 `Issues/Specs` 画面に unified search を追加する
+- [x] spec index 更新操作を Git 側へ移す
+- [x] `Project Index` の files/index/recovery 正本を `#1520` に固定する
+- [x] Issue タブ詳細フローの正本を `#1354` に固定する
+- [x] Issue タイトル解決 / local cache の upstream dependency を `#1714` に固定する
+- [ ] PR 管理の追加改善
+- [ ] Release/Tag/Version History の追加改善
