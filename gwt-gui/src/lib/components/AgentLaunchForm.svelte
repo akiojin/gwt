@@ -2009,27 +2009,27 @@
   .dialog {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
+    border-radius: var(--radius-xl);
     width: 560px;
     max-width: 90vw;
     max-height: 88vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-lg);
   }
 
   .dialog-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: var(--space-6) var(--space-7);
     border-bottom: 1px solid var(--border-color);
   }
 
   .dialog-header h2 {
     font-size: var(--ui-font-lg);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
     color: var(--text-primary);
   }
 
@@ -2039,9 +2039,10 @@
     color: var(--text-muted);
     cursor: pointer;
     font-size: 20px;
-    padding: 4px 8px;
-    border-radius: 4px;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
     line-height: 1;
+    transition: color var(--transition-fast), background var(--transition-fast);
   }
 
   .close-btn:hover {
@@ -2050,24 +2051,24 @@
   }
 
   .loading {
-    padding: 40px;
+    padding: var(--space-10);
     text-align: center;
     color: var(--text-muted);
   }
 
   .dialog-body {
-    padding: 20px;
+    padding: var(--space-7);
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-6);
     overflow: auto;
   }
 
   .error {
-    padding: 10px 12px;
+    padding: var(--space-4) var(--space-5);
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     color: var(--text-primary);
     font-size: var(--ui-font-md);
     line-height: 1.4;
@@ -2076,12 +2077,12 @@
   .field {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-2);
   }
 
   .field label {
     font-size: var(--ui-font-md);
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -2089,7 +2090,7 @@
 
   .field-label {
     font-size: var(--ui-font-md);
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -2108,14 +2109,15 @@
   .field input,
   .field textarea,
   .field select {
-    padding: 8px 12px;
+    padding: var(--space-3) var(--space-5);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-base);
-    font-family: monospace;
+    font-family: var(--font-mono);
     outline: none;
+    transition: border-color var(--transition-fast);
   }
 
   .field input:focus,
@@ -2132,17 +2134,17 @@
   .glm-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    padding: 10px 12px;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-5);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     background: var(--bg-primary);
   }
 
   .glm-field {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-2);
   }
 
   .glm-field.full {
@@ -2151,21 +2153,22 @@
 
   .glm-label {
     font-size: var(--ui-font-sm);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
 
   .glm-field input {
-    padding: 8px 12px;
+    padding: var(--space-3) var(--space-5);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-base);
-    font-family: monospace;
+    font-family: var(--font-mono);
     outline: none;
+    transition: border-color var(--transition-fast);
   }
 
   .glm-field input.api-key-masked {
@@ -2178,7 +2181,7 @@
 
   .branch-name-row {
     display: flex;
-    gap: 6px;
+    gap: var(--space-2);
     align-items: center;
   }
 
@@ -2190,11 +2193,11 @@
   .branch-prefix-value {
     width: 120px;
     flex: 0 0 auto;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 10px 12px;
-    background: var(--bg-elevated);
-    color: var(--text);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: var(--space-4) var(--space-5);
+    background: var(--bg-surface);
+    color: var(--text-primary);
     font-family: var(--font-mono);
     line-height: 1.2;
     box-sizing: border-box;
@@ -2208,7 +2211,7 @@
   .check-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-4);
     font-size: var(--ui-font-md);
     color: var(--text-primary);
   }
@@ -2219,18 +2222,16 @@
 
   .advanced-btn {
     width: 100%;
-    padding: 8px 10px;
+    padding: var(--space-3) var(--space-4);
     background: transparent;
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     color: var(--text-secondary);
     font-size: var(--ui-font-md);
-    font-weight: 700;
+    font-weight: var(--font-weight-bold);
     cursor: pointer;
     font-family: inherit;
-    transition:
-      border-color 0.15s,
-      background 0.15s;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
   }
 
   .advanced-btn:hover {
@@ -2241,7 +2242,7 @@
 
   .mode-toggle {
     display: flex;
-    gap: 6px;
+    gap: var(--space-2);
   }
 
   .branch-naming-toggle {
@@ -2250,18 +2251,16 @@
 
   .mode-btn {
     flex: 1;
-    padding: 8px 10px;
+    padding: var(--space-3) var(--space-4);
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     color: var(--text-primary);
     font-size: var(--ui-font-md);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
     cursor: pointer;
     font-family: inherit;
-    transition:
-      border-color 0.15s,
-      background 0.15s;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
   }
 
   .mode-btn:hover {
@@ -2276,8 +2275,8 @@
   .dialog-footer {
     display: flex;
     justify-content: flex-end;
-    gap: 8px;
-    padding: 16px 20px;
+    gap: var(--space-3);
+    padding: var(--space-6) var(--space-7);
     border-top: 1px solid var(--border-color);
   }
 
@@ -2290,14 +2289,14 @@
   }
 
   .btn {
-    padding: 8px 16px;
+    padding: var(--space-3) var(--space-6);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     font-size: var(--ui-font-base);
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     cursor: pointer;
     font-family: inherit;
-    transition: background-color 0.15s;
+    transition: background-color var(--transition-fast);
   }
 
   .btn-cancel {
@@ -2330,10 +2329,10 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-1);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 6px;
+    border-radius: var(--radius-lg);
+    padding: var(--space-2);
     background: var(--bg-primary);
   }
 
@@ -2341,19 +2340,17 @@
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    gap: 6px;
-    padding: 8px 10px;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     cursor: pointer;
     text-align: left;
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--ui-font-md);
-    transition:
-      border-color 0.15s,
-      background 0.15s;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
   }
 
   .issue-item:hover:not(:disabled) {
@@ -2372,8 +2369,8 @@
   }
 
   .issue-number {
-    font-family: monospace;
-    font-weight: 600;
+    font-family: var(--font-mono);
+    font-weight: var(--font-weight-semibold);
     color: var(--text-muted);
     flex: 0 0 auto;
   }
@@ -2388,15 +2385,15 @@
 
   .issue-labels {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     flex-wrap: wrap;
     flex: 0 0 auto;
   }
 
   .issue-label {
     font-size: var(--ui-font-sm);
-    padding: 1px 6px;
-    border-radius: 4px;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
@@ -2412,7 +2409,7 @@
 
   .issue-empty,
   .issue-loading {
-    padding: 12px;
+    padding: var(--space-5);
     text-align: center;
     color: var(--text-muted);
     font-size: var(--ui-font-md);
