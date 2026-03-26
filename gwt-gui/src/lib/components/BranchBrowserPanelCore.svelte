@@ -153,7 +153,8 @@
   $effect(() => {
     const path = config.projectPath;
     const refreshKey = config.refreshKey;
-    if (!path) return;
+    const isActive = config.isActive ?? true;
+    if (!path || !isActive) return;
     const nextFetchRequestKey = buildFetchRequestKeyRuntime(path, refreshKey);
     if (nextFetchRequestKey === lastFetchRequestKey) return;
     lastFetchRequestKey = nextFetchRequestKey;

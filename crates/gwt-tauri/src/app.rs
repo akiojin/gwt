@@ -873,6 +873,7 @@ pub fn build_app(
             crate::commands::system::get_startup_diagnostics,
             crate::commands::system::heartbeat,
             crate::commands::system::report_frontend_metrics,
+            crate::commands::system::get_http_ipc_port,
             crate::commands::project_index::ensure_index_runtime,
             crate::commands::project_index::index_project_cmd,
             crate::commands::project_index::search_project_index_cmd,

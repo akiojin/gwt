@@ -1357,7 +1357,10 @@
     return resolveWorktreeTabLabel(branch, branches);
   }
 
+  let refreshAgentTabLabelsInflight = false;
   async function refreshAgentTabLabelsForProject(targetProjectPath: string) {
+    if (refreshAgentTabLabelsInflight) return;
+    refreshAgentTabLabelsInflight = true;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const branches = await invoke<BranchInfo[]>("list_worktree_branches", {
@@ -1367,6 +1370,8 @@
       tabs = syncAgentTabLabels(tabs, branches);
     } catch (err) {
       console.error("Failed to refresh agent tab labels:", err);
+    } finally {
+      refreshAgentTabLabelsInflight = false;
     }
   }
 

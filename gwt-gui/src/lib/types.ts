@@ -257,6 +257,7 @@ export interface Tab {
 export interface BranchBrowserPanelConfig {
   projectPath: string;
   refreshKey: number;
+  isActive?: boolean;
   selectedBranch?: BranchInfo | null;
   currentBranch: string;
   agentTabBranches: string[];

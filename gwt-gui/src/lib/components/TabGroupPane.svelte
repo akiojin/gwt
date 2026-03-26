@@ -471,6 +471,7 @@
             {:else if tab.type === "branchBrowser" && branchBrowserConfig}
               <BranchBrowserPanel config={{
                 ...branchBrowserConfig,
+                isActive: group.activeTabId === tab.id,
                 initialFilter: branchBrowserState?.filter,
                 initialQuery: branchBrowserState?.query,
                 selectedBranchName: branchBrowserState?.selectedBranchName ?? null,

@@ -474,9 +474,9 @@ fn with_panic_guard<T>(
 }
 
 #[derive(Debug)]
-struct WorktreeBranchListing {
-    infos: Vec<BranchInfo>,
-    branch_names: Vec<String>,
+pub(crate) struct WorktreeBranchListing {
+    pub(crate) infos: Vec<BranchInfo>,
+    pub(crate) branch_names: Vec<String>,
 }
 
 fn is_unknown_display_name(text: &str) -> bool {
@@ -993,7 +993,7 @@ fn apply_session_meta(
     }
 }
 
-fn list_worktree_branches_impl(
+pub(crate) fn list_worktree_branches_impl(
     project_path: &str,
     state: &AppState,
 ) -> Result<WorktreeBranchListing, StructuredError> {
@@ -1156,7 +1156,7 @@ fn list_branch_inventory_worktrees_impl(
         .collect())
 }
 
-fn list_branch_inventory_impl(
+pub(crate) fn list_branch_inventory_impl(
     project_path: &str,
     refresh_key: u64,
     state: &AppState,
@@ -1220,7 +1220,7 @@ fn list_branch_inventory_impl(
     result
 }
 
-fn get_branch_inventory_detail_impl(
+pub(crate) fn get_branch_inventory_detail_impl(
     project_path: &str,
     canonical_name: &str,
     force_refresh: bool,

@@ -231,7 +231,12 @@
 
     const defaults = buildDefaultLayouts(renderableTiles);
     const nextLayouts: Record<string, AgentCanvasTileLayout> = {};
-    let needsLayoutSync = Object.keys(tileLayouts).length !== renderableTiles.length;
+    let needsLayoutSync = false;
+    const existingKeys = Object.keys(tileLayouts);
+    const tileIds = renderableTiles.map((t) => t.id);
+    if (existingKeys.length !== tileIds.length || existingKeys.some((k) => !tileIds.includes(k))) {
+      needsLayoutSync = true;
+    }
     for (const tile of renderableTiles) {
       const existing = tileLayouts[tile.id];
       if (!existing) needsLayoutSync = true;
