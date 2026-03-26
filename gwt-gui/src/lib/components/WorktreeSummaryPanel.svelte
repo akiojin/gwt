@@ -847,7 +847,7 @@
     let cancelled = false;
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const { listen } = await import("$lib/tauriInvoke");
         const unlistenSummaryFn = await listen<SessionSummaryUpdatedPayload>(
           "session-summary-updated",
           (event) => {
@@ -1878,10 +1878,10 @@
 
 <style>
   .worktree-summary-panel {
-    padding: 12px;
+    padding: var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-5);
   }
 
   .placeholder {
@@ -1889,7 +1889,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    gap: var(--space-3);
     color: var(--text-muted);
     text-align: center;
     min-height: 120px;
@@ -1908,14 +1908,14 @@
   .branch-detail {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-5);
   }
 
   .branch-header {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--space-6);
     flex-wrap: wrap;
   }
 
@@ -1924,14 +1924,14 @@
     flex: 1 1 auto;
     min-width: 0;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-2);
   }
 
   .branch-header-actions {
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 8px;
+    gap: var(--space-4);
     flex-wrap: wrap;
     margin-left: auto;
     min-width: 0;
@@ -1954,7 +1954,7 @@
   .branch-name-heading {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
   .branch-display-name {
@@ -1965,7 +1965,7 @@
   .branch-meta-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-4);
     flex-wrap: wrap;
     min-width: 0;
   }
@@ -1974,7 +1974,7 @@
     flex-shrink: 0;
     background: none;
     border: none;
-    padding: 2px;
+    padding: var(--space-1);
     cursor: pointer;
     color: var(--text-muted);
     opacity: 0.5;
@@ -2000,9 +2000,9 @@
   .branch-tool-badge {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 2px 8px;
-    border-radius: 999px;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-4);
+    border-radius: var(--radius-full);
     border: 1px solid var(--border-color);
     background: var(--bg-surface);
     color: var(--text-secondary);
@@ -2051,8 +2051,8 @@
     font-family: monospace;
     background: var(--bg-surface);
     border: 1px solid var(--accent);
-    border-radius: 6px;
-    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-3);
     outline: none;
   }
 
@@ -2066,7 +2066,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-color);
     background: var(--bg-surface);
     color: var(--text-primary);
@@ -2074,7 +2074,6 @@
     transition: border-color 0.15s, background-color 0.15s, color 0.15s;
     flex-shrink: 0;
     font-family: inherit;
-    flex-shrink: 0;
   }
 
   .header-icon-btn:hover:not(:disabled) {
@@ -2128,13 +2127,13 @@
   .detail-grid {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-4);
   }
 
   .detail-item {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: var(--space-4);
     min-width: 0;
   }
 
@@ -2161,19 +2160,20 @@
 
   .quick-start {
     border: 1px solid var(--border-color);
-    border-radius: 12px;
+    border-radius: var(--radius-xl);
     background: var(--bg-secondary);
-    padding: 12px;
+    box-shadow: var(--shadow-sm);
+    padding: var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-5);
   }
 
   .quick-header {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--space-6);
   }
 
   .quick-title {
@@ -2194,7 +2194,7 @@
   .quick-subtitle.rebuild-progress {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-4);
   }
 
   .summary-spinner {
@@ -2202,7 +2202,7 @@
     height: 12px;
     border: 2px solid rgba(255, 255, 255, 0.25);
     border-top-color: rgba(255, 255, 255, 0.75);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     animation: summary-spin 0.8s linear infinite;
   }
 
@@ -2218,7 +2218,7 @@
   .session-summary-meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
+    gap: var(--space-5);
     font-size: var(--ui-font-xs);
     color: var(--text-muted);
     font-family: monospace;
@@ -2230,20 +2230,20 @@
   }
 
   .quick-error {
-    padding: 10px 12px;
+    padding: var(--space-5) var(--space-6);
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
     line-height: 1.4;
   }
 
   .session-summary-warning {
-    padding: 10px 12px;
+    padding: var(--space-5) var(--space-6);
     border: 1px solid rgba(249, 226, 175, 0.35);
     background: rgba(249, 226, 175, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
     line-height: 1.4;
@@ -2264,17 +2264,17 @@
   .quick-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-5);
   }
 
   .linked-issue-card {
     border: 1px solid var(--border-color);
     background: var(--bg-primary);
-    border-radius: 10px;
-    padding: 10px 12px;
+    border-radius: var(--radius-lg);
+    padding: var(--space-5) var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-4);
   }
 
   .linked-issue-title {
@@ -2292,24 +2292,24 @@
   .quick-row {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-5);
     border: 1px solid var(--border-color);
     background: var(--bg-primary);
-    border-radius: 10px;
-    padding: 10px 12px;
+    border-radius: var(--radius-lg);
+    padding: var(--space-5) var(--space-6);
   }
 
   .quick-info {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-3);
     min-width: 0;
   }
 
   .quick-tool {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: var(--space-4);
     font-family: monospace;
     min-width: 0;
   }
@@ -2347,7 +2347,7 @@
   .quick-meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: var(--space-3);
     color: var(--text-muted);
     font-size: var(--ui-font-xs);
   }
@@ -2355,8 +2355,8 @@
   .quick-pill {
     border: 1px solid var(--border-color);
     background: var(--bg-secondary);
-    border-radius: 999px;
-    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    padding: var(--space-1) var(--space-4);
     font-family: monospace;
   }
 
@@ -2378,14 +2378,14 @@
   .quick-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-4);
     justify-content: flex-end;
     flex-wrap: wrap;
   }
 
   .quick-btn {
-    padding: 7px 10px;
-    border-radius: 8px;
+    padding: var(--space-4) var(--space-5);
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-color);
     background: var(--bg-surface);
     color: var(--text-primary);
@@ -2415,37 +2415,37 @@
   .docker-summary-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-4);
   }
 
   .docker-current {
     border: 1px solid var(--border-color);
     background: var(--bg-primary);
-    border-radius: 10px;
-    padding: 10px 12px;
+    border-radius: var(--radius-lg);
+    padding: var(--space-5) var(--space-6);
   }
 
   .docker-summary-item {
     border: 1px solid var(--border-color);
     background: var(--bg-primary);
-    border-radius: 10px;
-    padding: 10px 12px;
+    border-radius: var(--radius-lg);
+    padding: var(--space-5) var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-4);
   }
 
   .docker-summary-head {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--space-6);
   }
 
   .docker-summary-identity {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-2);
     min-width: 0;
   }
 
@@ -2465,9 +2465,9 @@
 
   .session-summary-markdown {
     border: 1px solid var(--border-color);
-    border-radius: 10px;
+    border-radius: var(--radius-lg);
     background: var(--bg-primary);
-    padding: 10px 12px;
+    padding: var(--space-5) var(--space-6);
     overflow: hidden;
     margin: 0;
   }
@@ -2476,11 +2476,11 @@
     display: flex;
     gap: 0;
     border-bottom: 1px solid var(--border-color);
-    margin-bottom: 10px;
+    margin-bottom: var(--space-5);
   }
 
   .summary-tab {
-    padding: 6px 16px;
+    padding: var(--space-3) var(--space-8);
     border: none;
     background: none;
     color: var(--text-muted);
