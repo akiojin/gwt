@@ -2,6 +2,15 @@
 
 このファイルは、このリポジトリでコードを扱う際のガイダンスを提供します。
 
+## エージェント運用原則
+
+- **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
+- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策は `tasks/lessons.md` に記録し、同種の作業を始める前に確認する。
+- **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
+- **Subagent Strategy:** 独立した調査、分析、実装、テスト整備はサブエージェントに分割し、メインのコンテキストを不要な詳細で汚さない。担当範囲、完了条件、検証観点を明示して責務を重複させない。
+- **Demand Elegance:** 非自明な変更では、力技で実装する前に 2〜3 のアプローチを比較し、もっともシンプルで保守しやすい案を選ぶ。単純な修正では過剰設計しない。
+- **Autonomous Bug Fixing:** バグ対応では、まず再現手順、ログ、失敗テスト、関連コードを自律的に調査し、原因特定、修正、再発防止確認まで進める。不可逆な仕様判断やプロダクト判断だけをユーザーに確認する。
+
 ## 開発指針
 
 ### 🛠️ 技術実装指針
@@ -263,9 +272,9 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-project-search | `/gwt:gwt-project-search` | Semantic search over project source files using vector embeddings. Use when user says "search project files", "find related files", "which files handle X", or asks to locate source files related to a feature, bug, or concept. |
-| gwt-agent-dispatch | `/gwt:gwt-agent-dispatch` | PTY-based instruction dispatch from Assistant to Agent panes. Send commands, capture output, and manage Agent lifecycle. Use when user says "send to pane", "broadcast to agents", "check pane output", "dispatch to agent", or when managing multi-agent Project Mode sessions. |
-| gwt-spec-to-issue-migration | — | Migrate GitHub Issue-based specs to local SPEC directories. Supports reverse migration from gwt-spec Issues to local specs/SPEC-{id}/ directories. Use when user says "migrate specs", "convert issues to local specs", "move specs from issues", or asks to transform Issue-based specs into local SPEC directories. |
+| gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
+| gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
+| gwt-spec-to-issue-migration | — | Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script. |
 
 ### Recommended Workflow
 
