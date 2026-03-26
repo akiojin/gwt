@@ -28,6 +28,7 @@
   import QuitConfirmToast from "./lib/components/QuitConfirmToast.svelte";
   import ReportDialog from "./lib/components/ReportDialog.svelte";
   import { formatWindowTitle } from "./lib/windowTitle";
+  import { isBrowserDevMode } from "./lib/tauriMock";
   import {
     buildWindowMenuTabsSignature,
     buildWindowMenuVisibleTabs,
@@ -437,11 +438,16 @@
   }
   async function confirmAndApplyUpdate(latest: string) {
     try {
-      const { confirm } = await import("@tauri-apps/plugin-dialog");
-      const ok = await confirm(
-        `Update available: v${latest}\nRestart to update now?`,
-        { title: "gwt", kind: "info" },
-      );
+      let ok: boolean;
+      if (isBrowserDevMode()) {
+        ok = window.confirm(`Update available: v${latest}\nRestart to update now?`);
+      } else {
+        const { confirm } = await import("@tauri-apps/plugin-dialog");
+        ok = await confirm(
+          `Update available: v${latest}\nRestart to update now?`,
+          { title: "gwt", kind: "info" },
+        );
+      }
       if (!ok) return;
 
       showToast(`Updating to v${latest}...`, 0);
@@ -468,9 +474,11 @@
     toastMessage = null;
     toastAction = null;
     // Bring window to front so the report dialog is visible (#1256)
-    import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow }) => getCurrentWindow().setFocus())
-      .catch(() => {});
+    if (!isBrowserDevMode()) {
+      import("@tauri-apps/api/window")
+        .then(({ getCurrentWindow }) => getCurrentWindow().setFocus())
+        .catch(() => {});
+    }
   }
 
   // Subscribe to toast bus for success/info notifications (gwt-spec issue FR-006)
@@ -1380,11 +1388,13 @@
     // Document title also covers non-tauri contexts (e.g. web preview).
     document.title = title;
 
-    try {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      await getCurrentWindow().setTitle(title);
-    } catch {
-      // Ignore: title API not available outside Tauri runtime.
+    if (!isBrowserDevMode()) {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().setTitle(title);
+      } catch {
+        // Ignore: title API not available outside Tauri runtime.
+      }
     }
   }
 
