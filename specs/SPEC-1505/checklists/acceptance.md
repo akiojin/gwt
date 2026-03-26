@@ -1,0 +1,3 @@
+- [x] Codex / Claude Code / GWT で PR 作成前 preflight rule が統一されている
+- [x] PR 未作成 branch の PR タブで blocking 状態が分かる
+- [x] RED → GREEN のテスト履歴で実装されている

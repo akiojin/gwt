@@ -5,6 +5,7 @@ import {
   getInvokeArgs,
   openSettings,
   profilesFixture,
+  saveE2ECoverage,
   settingsFixture,
   standardBranchResponses,
   waitForInvokeCommand,
@@ -38,6 +39,10 @@ test.beforeEach(async ({ page }) => {
       get_recent_projects: [defaultRecentProject],
     },
   });
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
 });
 
 test("voice input fields are enabled when capability is unavailable", async ({

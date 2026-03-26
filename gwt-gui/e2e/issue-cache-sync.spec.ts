@@ -3,6 +3,7 @@ import { installTauriMock } from "./support/tauri-mock";
 import {
   defaultRecentProject,
   openSettings,
+  saveE2ECoverage,
   standardSettingsResponses,
 } from "./support/helpers";
 
@@ -30,6 +31,10 @@ test.beforeEach(async ({ page }) => {
       get_recent_projects: [defaultRecentProject],
     },
   });
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  await saveE2ECoverage(page, testInfo);
 });
 
 test("Issue cache section is visible in Settings General tab", async ({

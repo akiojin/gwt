@@ -1,0 +1,1 @@
+- データモデル変更なし（`profiles.toml` の既存 `ai.api_key` を再利用）

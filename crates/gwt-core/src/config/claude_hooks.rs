@@ -126,9 +126,14 @@ fn is_gwt_hook_command(command: &str) -> bool {
 
 /// Check if a command invokes a gwt node-based hook script.
 ///
-/// Matches commands like "node .claude/hooks/scripts/gwt-forward-hook.mjs Event".
+/// Matches both legacy relative-path commands
+/// ("node .claude/hooks/scripts/gwt-forward-hook.mjs Event")
+/// and the current absolute-path commands that use `git rev-parse --show-toplevel`
+/// ("node \"$(git rev-parse --show-toplevel)/.claude/hooks/scripts/gwt-...\"").
 fn is_gwt_node_hook_command(command: &str) -> bool {
-    command.starts_with("node .claude/hooks/scripts/gwt-")
+    let trimmed = command.trim();
+    trimmed.starts_with("node .claude/hooks/scripts/gwt-")
+        || (trimmed.starts_with("node \"") && trimmed.contains("/.claude/hooks/scripts/gwt-"))
 }
 
 /// Claude Code settings.local.json structure (partial)
@@ -419,8 +424,16 @@ mod tests {
 
     #[test]
     fn test_is_gwt_hook_command_node_script() {
+        // Legacy relative-path format
         assert!(is_gwt_hook_command(
             "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
+        ));
+        // Current git rev-parse absolute-path format
+        assert!(is_gwt_hook_command(
+            r#"node "$(git rev-parse --show-toplevel)/.claude/hooks/scripts/gwt-forward-hook.mjs" Stop"#
+        ));
+        assert!(is_gwt_hook_command(
+            r#"node "$(git rev-parse --show-toplevel)/.claude/hooks/scripts/gwt-block-cd-command.mjs""#
         ));
     }
 
