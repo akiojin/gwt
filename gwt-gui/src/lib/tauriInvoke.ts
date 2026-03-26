@@ -1,6 +1,10 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen } from "@tauri-apps/api/event";
 import { errorBus, type StructuredError } from "./errorBus";
 import { isProfilingEnabled, recordInvokeMetric } from "./profiling.svelte";
+
+export type { UnlistenFn, Event } from "@tauri-apps/api/event";
+export const listen = tauriListen;
 
 function parseStructuredError(
   err: unknown,
