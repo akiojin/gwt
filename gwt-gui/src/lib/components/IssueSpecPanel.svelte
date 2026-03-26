@@ -139,16 +139,16 @@
   .issue-spec-panel {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-4);
   }
 
   .issue-spec-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     background: var(--bg-surface);
   }
 
@@ -159,9 +159,9 @@
 
   .issue-spec-meta {
     display: flex;
-    gap: 10px;
+    gap: var(--space-2);
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
   }
 
   .issue-spec-loading {
@@ -176,7 +176,7 @@
   .issue-spec-content {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-4);
   }
 
   .issue-spec-content h2 {
@@ -186,21 +186,21 @@
 
   .meta-row {
     display: flex;
-    gap: 12px;
+    gap: var(--space-3);
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     color: var(--text-muted);
   }
 
   .section {
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     background: var(--bg-secondary);
-    padding: 10px;
+    padding: var(--space-2);
   }
 
   .section h3 {
-    margin: 0 0 8px;
+    margin: 0 0 var(--space-2);
     font-size: var(--ui-font-md);
     color: var(--text-primary);
   }
