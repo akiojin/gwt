@@ -128,20 +128,20 @@
   .dialog {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     max-width: 480px;
     width: 90vw;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-xl);
   }
 
   .dialog-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: var(--space-4) var(--space-5);
     border-bottom: 1px solid var(--border-color);
   }
 
@@ -157,8 +157,8 @@
     color: var(--text-muted);
     cursor: pointer;
     font-size: 20px;
-    padding: 4px 8px;
-    border-radius: 4px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     line-height: 1;
   }
 
@@ -168,17 +168,17 @@
   }
 
   .dialog-body {
-    padding: 16px 20px;
+    padding: var(--space-4) var(--space-5);
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-4);
   }
 
   .pr-info-title {
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
   }
 
   .pr-info-branch {
@@ -201,7 +201,7 @@
   .merge-review-item {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     font-size: 12px;
     padding: 2px 0;
   }
@@ -243,15 +243,15 @@
   .dialog-footer {
     display: flex;
     justify-content: flex-end;
-    gap: 8px;
-    padding: 16px 20px;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-5);
     border-top: 1px solid var(--border-color);
   }
 
   .btn {
-    padding: 8px 16px;
+    padding: var(--space-2) var(--space-4);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;

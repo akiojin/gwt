@@ -427,7 +427,7 @@
   .pr-status-section {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-3);
   }
 
   .pr-title {
@@ -455,7 +455,7 @@
   .pr-meta-item {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .pr-meta-label {
@@ -471,8 +471,8 @@
   }
 
   .mergeable-badge {
-    padding: 2px 8px;
-    border-radius: 999px;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-full);
     font-size: var(--ui-font-xs);
     font-weight: 600;
   }
@@ -508,8 +508,8 @@
   }
 
   .merge-warning-badge {
-    padding: 2px 8px;
-    border-radius: 999px;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-full);
     font-size: var(--ui-font-xs);
     font-weight: 600;
     background: rgba(227, 179, 65, 0.15);
@@ -539,12 +539,12 @@
 
   .label-pill {
     display: inline-flex;
-    padding: 1px 8px;
-    border-radius: 999px;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
     font-size: var(--ui-font-xs);
     border: 1px solid var(--border-color);
     background: var(--bg-secondary);
-    margin-right: 4px;
+    margin-right: var(--space-1);
   }
 
   .merge-meta-value {
@@ -555,8 +555,8 @@
   }
 
   .merge-state-badge {
-    padding: 2px 8px;
-    border-radius: 999px;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-full);
     font-size: var(--ui-font-xs);
     font-weight: 600;
   }
@@ -588,7 +588,7 @@
 
   .update-branch-btn {
     padding: 2px 10px;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     font-size: var(--ui-font-xs);
     font-weight: 600;
     border: 1px solid var(--border-color);
@@ -647,10 +647,10 @@
   .check-item {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     font-size: var(--ui-font-sm);
-    padding: 4px 8px;
-    border-radius: 6px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     cursor: pointer;
     background: none;
     border: none;
@@ -693,7 +693,7 @@
 
   .required-badge {
     padding: 1px 6px;
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     font-size: 10px;
     font-weight: 600;
     background: rgba(128, 128, 128, 0.15);
@@ -709,15 +709,15 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2);
   }
 
   .review-item {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     font-size: var(--ui-font-sm);
-    padding: 4px 0;
+    padding: var(--space-1) 0;
   }
 
   .review-state.approved {
@@ -736,9 +736,9 @@
 
   .comment-item {
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     padding: 10px;
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2);
     background: var(--bg-secondary);
   }
 
@@ -763,8 +763,8 @@
   .code-snippet {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 8px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
     font-size: var(--ui-font-xs);
     font-family: monospace;
     overflow-x: auto;
@@ -779,7 +779,7 @@
 
   .changes-stats {
     display: flex;
-    gap: 12px;
+    gap: var(--space-3);
     font-size: var(--ui-font-sm);
   }
 
@@ -795,24 +795,24 @@
   .pr-status-placeholder {
     color: var(--text-muted);
     font-size: var(--ui-font-sm);
-    padding: 12px 0;
+    padding: var(--space-3) 0;
   }
 
   .pr-status-error {
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
     line-height: 1.4;
   }
 
   .pr-status-warning {
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     border: 1px solid rgba(255, 179, 0, 0.35);
     background: rgba(255, 179, 0, 0.12);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
     line-height: 1.4;
