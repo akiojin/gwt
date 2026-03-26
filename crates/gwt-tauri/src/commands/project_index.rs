@@ -942,7 +942,10 @@ pub async fn index_local_specs_cmd(project_root: String) -> Result<IndexSpecsRes
     .map_err(|e| format!("Index local specs task failed: {e}"))?
 }
 
-#[instrument(skip_all, fields(command = "search_local_specs_semantic_cmd", project_root))]
+#[instrument(
+    skip_all,
+    fields(command = "search_local_specs_semantic_cmd", project_root)
+)]
 #[tauri::command]
 pub async fn search_local_specs_semantic_cmd(
     project_root: String,
