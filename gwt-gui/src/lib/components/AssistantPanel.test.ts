@@ -13,8 +13,11 @@ const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
 
-vi.mock("$lib/tauriInvoke", () => ({
+vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: unknown[]) => listenMock(...args),
 }));
 

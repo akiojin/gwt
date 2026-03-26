@@ -51,7 +51,7 @@ describe("StatusBar", () => {
       terminalCount: 3,
     });
     await waitFor(() => {
-      expect(rendered.getByText("3 terminals")).toBeTruthy();
+      expect(rendered.getByText("[3 terminals]")).toBeTruthy();
     });
   });
 
@@ -78,7 +78,7 @@ describe("StatusBar", () => {
       osEnvReady: false,
     });
     await waitFor(() => {
-      expect(rendered.getByText("Loading env...")).toBeTruthy();
+      expect(rendered.getByText("Loading environment...")).toBeTruthy();
     });
   });
 

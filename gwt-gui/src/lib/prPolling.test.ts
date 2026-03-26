@@ -3,9 +3,8 @@ import type { PrStatusResponse } from "./types";
 
 const invokeMock = vi.fn();
 
-vi.mock("$lib/tauriInvoke", () => ({
+vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
-  listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
 const mockResponse: PrStatusResponse = {
