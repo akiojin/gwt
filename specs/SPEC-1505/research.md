@@ -1,0 +1,4 @@
+- 既存の `mergeStateStatus=BEHIND` は PR 作成後のみ有効で、PR 未作成 branch では使えない
+- `crates/gwt-core/src/git/branch.rs` に `divergence_between()` があり、`origin/<base>` との ahead/behind 判定に流用できる
+- GWT の project-local skill 配布は `crates/gwt-core/src/config/skill_registration.rs` を通る
+- Claude Code 側の home workflow 実体は marketplace/plugin 配下に存在する
