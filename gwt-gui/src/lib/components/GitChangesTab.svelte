@@ -347,19 +347,19 @@
 
 <style>
   .changes-tab {
-    padding: 8px 0;
+    padding: var(--space-2) 0;
   }
 
   .filter-bar {
     display: flex;
-    gap: 4px;
+    gap: var(--space-1);
     margin-bottom: 10px;
   }
 
   .filter-btn {
-    padding: 4px 12px;
+    padding: var(--space-1) var(--space-3);
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-secondary);
     font-size: 11px;
@@ -382,14 +382,14 @@
   .changes-empty {
     font-size: 12px;
     color: var(--text-muted);
-    padding: 8px 0;
+    padding: var(--space-2) 0;
   }
 
   .changes-error {
-    padding: 10px 12px;
+    padding: 10px var(--space-3);
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: 12px;
   }
@@ -404,7 +404,7 @@
     display: flex;
     align-items: baseline;
     gap: 6px;
-    padding: 4px 8px;
+    padding: var(--space-1) var(--space-2);
     font-size: 12px;
   }
 
@@ -421,9 +421,9 @@
   .file-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 4px 8px;
-    border-radius: 4px;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     font-size: 12px;
     cursor: pointer;
   }
@@ -472,8 +472,8 @@
   }
 
   .stat-block {
-    width: 8px;
-    height: 8px;
+    width: var(--space-2);
+    height: var(--space-2);
     border-radius: 1px;
   }
 
@@ -490,25 +490,25 @@
 
   .stat-del {
     color: var(--red);
-    margin-left: 4px;
+    margin-left: var(--space-1);
   }
 
   .diff-panel {
     border-left: 2px solid var(--border-color);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
   }
 
   .diff-loading {
     font-size: 11px;
     color: var(--text-muted);
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
   }
 
   .diff-content {
     font-family: monospace;
     font-size: 11px;
     line-height: 1.5;
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     overflow-x: auto;
     white-space: pre;
     margin: 0;
@@ -531,7 +531,7 @@
   .diff-truncated {
     font-size: 11px;
     color: var(--yellow);
-    padding: 6px 12px;
+    padding: 6px var(--space-3);
     font-style: italic;
   }
 
@@ -539,7 +539,7 @@
   .wt-sections {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-3);
   }
 
   .wt-section-header {
@@ -548,23 +548,23 @@
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--text-muted);
-    padding: 4px 8px;
+    padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--border-color);
   }
 
   .wt-empty {
     font-size: 12px;
     color: var(--text-muted);
-    padding: 6px 8px;
+    padding: 6px var(--space-2);
   }
 
   .wt-row {
     display: flex;
     align-items: baseline;
-    gap: 8px;
-    padding: 4px 8px;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
     font-size: 12px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
 
   .wt-row:hover {
