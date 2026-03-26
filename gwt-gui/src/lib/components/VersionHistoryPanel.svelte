@@ -111,7 +111,7 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const { listen } = await import("$lib/tauriInvoke");
         unlisten = await listen<{
           projectPath: string;
           versionId: string;
@@ -221,7 +221,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    padding: 18px 18px 24px;
+    padding: var(--space-9) var(--space-9) var(--space-10);
     background: var(--bg-primary);
     overflow: hidden;
   }
@@ -230,8 +230,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding-bottom: 14px;
+    gap: var(--space-6);
+    padding-bottom: var(--space-7);
     border-bottom: 1px solid var(--border-color);
   }
 
@@ -249,10 +249,10 @@
   }
 
   .vh-btn {
-    padding: 6px 14px;
+    padding: var(--space-3) var(--space-7);
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     color: var(--text-primary);
     cursor: pointer;
     font-family: inherit;
@@ -268,10 +268,10 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
-    padding-top: 14px;
+    padding-top: var(--space-7);
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-6);
   }
 
   .mono {
@@ -281,8 +281,9 @@
 
   .vh-card {
     border: 1px solid var(--border-color);
-    border-radius: 12px;
+    border-radius: var(--radius-xl);
     background: var(--bg-secondary);
+    box-shadow: var(--shadow-sm);
     overflow: hidden;
     flex-shrink: 0;
   }
@@ -291,8 +292,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding: 12px 14px;
+    gap: var(--space-6);
+    padding: var(--space-6) var(--space-7);
     cursor: pointer;
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0));
   }
@@ -300,7 +301,7 @@
   .vh-card-left {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-2);
     min-width: 0;
   }
 
@@ -322,14 +323,14 @@
   .vh-card-right {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-5);
     flex-shrink: 0;
   }
 
   .vh-status {
     font-size: var(--ui-font-sm);
-    padding: 2px 8px;
-    border-radius: 999px;
+    padding: var(--space-1) var(--space-4);
+    border-radius: var(--radius-full);
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
     background: var(--bg-primary);
@@ -365,42 +366,42 @@
   }
 
   .vh-body {
-    padding: 12px 14px 14px;
+    padding: var(--space-6) var(--space-7) var(--space-7);
     border-top: 1px solid var(--border-color);
     background: var(--bg-secondary);
   }
 
   .vh-body h3 {
-    margin: 10px 0 8px;
+    margin: var(--space-5) 0 var(--space-4);
     font-size: var(--ui-font-md);
     font-weight: 800;
     color: var(--text-primary);
   }
 
   .vh-markdown {
-    margin: 0 0 10px;
+    margin: 0 0 var(--space-5);
     border: 1px solid var(--border-color);
-    border-radius: 10px;
+    border-radius: var(--radius-lg);
     background: var(--bg-primary);
-    padding: 10px 12px;
+    padding: var(--space-5) var(--space-6);
   }
 
   .vh-note {
     color: var(--text-muted);
     font-size: var(--ui-font-md);
-    margin-bottom: 10px;
+    margin-bottom: var(--space-5);
   }
 
   .vh-error {
     color: rgb(255, 160, 160);
     font-size: var(--ui-font-md);
     white-space: pre-wrap;
-    margin-bottom: 10px;
+    margin-bottom: var(--space-5);
   }
 
   .vh-empty {
     color: var(--text-muted);
     font-size: var(--ui-font-md);
-    padding: 14px 0;
+    padding: var(--space-7) 0;
   }
 </style>
