@@ -107,16 +107,16 @@
       "Liberation Mono", "Courier New", monospace;
     font-size: 0.92em;
     background: rgba(255, 255, 255, 0.06);
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     padding: 0.06rem 0.24rem;
   }
 
   .markdown-renderer :global(pre) {
     margin: 0 0 0.55rem;
     border: 1px solid var(--border-color);
-    border-radius: 10px;
+    border-radius: var(--radius-lg);
     background: var(--bg-primary);
-    padding: 10px 12px;
+    padding: var(--space-3);
     overflow: auto;
     max-width: 100%;
     white-space: pre-wrap;
@@ -158,7 +158,7 @@
   .markdown-renderer :global(th),
   .markdown-renderer :global(td) {
     border: 1px solid var(--border-color);
-    padding: 6px 10px;
+    padding: var(--space-2) var(--space-3);
     text-align: left;
   }
 
@@ -175,11 +175,11 @@
   .markdown-renderer :global(img) {
     max-width: 100%;
     height: auto;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
   }
 
   .markdown-renderer :global(input[type="checkbox"]) {
-    margin-right: 4px;
+    margin-right: var(--space-1);
     pointer-events: none;
   }
 </style>
