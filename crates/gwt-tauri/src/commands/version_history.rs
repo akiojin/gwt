@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use gwt_core::{
@@ -1113,6 +1114,12 @@ fn find_uncached_versions(
 
 /// Inner prefetch logic, callable from both the Tauri command and the project open hook.
 pub fn prefetch_version_history_inner(project_path: &str, app_handle: &AppHandle) {
+    let started = Instant::now();
+    let _span = tracing::info_span!(
+        "startup.prefetch_version_history_inner",
+        project_path = %project_path
+    )
+    .entered();
     let profiles = match ProfilesConfig::load() {
         Ok(p) => p,
         Err(_) => return,
@@ -1138,6 +1145,14 @@ pub fn prefetch_version_history_inner(project_path: &str, app_handle: &AppHandle
             app_handle.clone(),
         );
     }
+
+    tracing::info!(
+        category = "project_start",
+        command = "prefetch_version_history_inner",
+        project_path = %project_path,
+        elapsed_ms = started.elapsed().as_millis(),
+        "Version history prefetch queued"
+    );
 }
 
 /// Prefetch version history for all uncached versions in a project.

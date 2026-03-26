@@ -462,7 +462,7 @@ def fallback_substring_search(collection, query: str, n_results: int) -> List[di
 
 
 def action_index_issues(project_root: str, db_path: str) -> dict:
-    """Index GitHub Issues (gwt-spec label) into ChromaDB collection 'issues'."""
+    """Index GitHub Issues into ChromaDB collection 'issues'."""
     import chromadb  # type: ignore
 
     root = Path(project_root).resolve()
@@ -475,7 +475,6 @@ def action_index_issues(project_root: str, db_path: str) -> dict:
         result = subprocess.run(
             [
                 "gh", "issue", "list",
-                "--label", "gwt-spec",
                 "--state", "all",
                 "--limit", "200",
                 "--json", "number,title,body,labels,state,url",
@@ -583,6 +582,122 @@ def action_search_issues(db_path: str, query: str, n_results: int = 10) -> dict:
     return {"ok": True, "issueResults": items}
 
 
+def action_index_specs(project_root: str, db_path: str) -> dict:
+    """Index local SPEC directories into ChromaDB collection 'specs'."""
+    import chromadb  # type: ignore
+
+    root = Path(project_root).resolve()
+    db = Path(db_path).resolve()
+    db.mkdir(parents=True, exist_ok=True)
+
+    start = time.monotonic()
+
+    specs_dir = root / "specs"
+    spec_dirs = sorted(specs_dir.glob("SPEC-*")) if specs_dir.is_dir() else []
+
+    client = chromadb.PersistentClient(path=str(db))
+    collection = client.get_or_create_collection(
+        name="specs",
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    # Clear existing entries before re-indexing
+    try:
+        existing = collection.get()
+        if existing["ids"]:
+            collection.delete(ids=existing["ids"])
+    except Exception:
+        pass
+
+    ids = []
+    documents = []
+    metadatas = []
+
+    for spec_path in spec_dirs:
+        metadata_file = spec_path / "metadata.json"
+        if not metadata_file.is_file():
+            continue
+
+        try:
+            meta = json.loads(metadata_file.read_text(errors="replace"))
+        except (json.JSONDecodeError, ValueError, OSError):
+            continue
+
+        spec_id = meta.get("id", "")
+        title = meta.get("title", "")
+        status = meta.get("status", "")
+        phase = meta.get("phase", "")
+        dir_name = spec_path.name  # e.g., "SPEC-1579"
+
+        spec_content = ""
+        spec_md = spec_path / "spec.md"
+        if spec_md.is_file():
+            try:
+                spec_content = spec_md.read_text(errors="replace")[:500]
+            except OSError:
+                pass
+
+        ids.append(f"spec-{spec_id}")
+        documents.append(f"{title}\n{spec_content}")
+        metadatas.append({
+            "spec_id": str(spec_id),
+            "title": title,
+            "status": status,
+            "phase": phase,
+            "dir_name": dir_name,
+        })
+
+    if ids:
+        batch_size = 100
+        for i in range(0, len(ids), batch_size):
+            collection.upsert(
+                ids=ids[i : i + batch_size],
+                documents=documents[i : i + batch_size],
+                metadatas=metadatas[i : i + batch_size],
+            )
+
+    elapsed = int((time.monotonic() - start) * 1000)
+    return {"ok": True, "specsIndexed": len(ids), "durationMs": elapsed}
+
+
+def action_search_specs(db_path: str, query: str, n_results: int = 10) -> dict:
+    """Search the local SPEC index."""
+    import chromadb  # type: ignore
+
+    db = Path(db_path).resolve()
+    if not db.is_dir():
+        return {"ok": False, "error": f"Index not found at {db}"}
+
+    client = chromadb.PersistentClient(path=str(db))
+    try:
+        collection = client.get_collection("specs")
+    except Exception:
+        return {"ok": False, "error": "Collection 'specs' not found. Run index-specs first."}
+
+    count = collection.count()
+    if count == 0:
+        return {"ok": True, "specResults": []}
+
+    actual_n = min(n_results, count)
+    results = collection.query(query_texts=[query], n_results=actual_n)
+
+    items = []
+    if results and results["ids"] and results["ids"][0]:
+        for idx, spec_id in enumerate(results["ids"][0]):
+            meta = results["metadatas"][0][idx] if results["metadatas"] else {}
+            distance = results["distances"][0][idx] if results["distances"] else None
+            items.append({
+                "spec_id": meta.get("spec_id", spec_id),
+                "title": meta.get("title", ""),
+                "status": meta.get("status", ""),
+                "phase": meta.get("phase", ""),
+                "dir_name": meta.get("dir_name", ""),
+                "distance": round(distance, 4) if distance is not None else None,
+            })
+
+    return {"ok": True, "specResults": items}
+
+
 def action_status(db_path: str) -> dict:
     """Get index status."""
     import chromadb  # type: ignore
@@ -618,7 +733,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--action",
         required=True,
-        choices=["probe", "index", "search", "status", "index-issues", "search-issues"],
+        choices=["probe", "index", "search", "status", "index-issues", "search-issues", "index-specs", "search-specs"],
     )
     parser.add_argument("--project-root", default="")
     parser.add_argument("--db-path", default="")
@@ -680,6 +795,26 @@ def main() -> int:
                 emit({"ok": False, "error": "--query is required for search-issues"})
                 return 2
             emit(action_search_issues(args.db_path, args.query, args.n_results))
+            return 0
+
+        if args.action == "index-specs":
+            if not args.project_root:
+                emit({"ok": False, "error": "--project-root is required for index-specs"})
+                return 2
+            if not args.db_path:
+                emit({"ok": False, "error": "--db-path is required for index-specs"})
+                return 2
+            emit(action_index_specs(args.project_root, args.db_path))
+            return 0
+
+        if args.action == "search-specs":
+            if not args.db_path:
+                emit({"ok": False, "error": "--db-path is required for search-specs"})
+                return 2
+            if not args.query:
+                emit({"ok": False, "error": "--query is required for search-specs"})
+                return 2
+            emit(action_search_specs(args.db_path, args.query, args.n_results))
             return 0
 
         emit({"ok": False, "error": f"Unsupported action: {args.action}"})
