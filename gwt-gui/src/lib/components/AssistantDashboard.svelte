@@ -171,7 +171,7 @@
 
 <style>
   .dashboard-loading {
-    padding: 12px;
+    padding: var(--space-3);
     color: var(--text-muted);
     font-size: var(--ui-font-sm);
   }
@@ -179,8 +179,8 @@
   .dashboard {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 12px;
+    gap: var(--space-3);
+    padding: var(--space-3);
     border-bottom: 1px solid var(--border-color);
     background:
       linear-gradient(180deg, color-mix(in srgb, var(--bg-secondary) 82%, transparent), transparent);
@@ -189,7 +189,7 @@
   .goal-strip {
     display: grid;
     gap: 10px;
-    padding: 12px;
+    padding: var(--space-3);
     border-radius: 10px;
     background:
       linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--bg-secondary)), var(--bg-secondary));
@@ -198,7 +198,7 @@
 
   .goal-main {
     display: grid;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .goal-label,
@@ -217,12 +217,12 @@
 
   .goal-meta {
     display: flex;
-    gap: 8px;
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
 
   .meta-pill {
-    padding: 3px 8px;
+    padding: 3px var(--space-2);
     border-radius: 999px;
     font-size: var(--ui-font-xs);
     background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
@@ -235,7 +235,7 @@
 
   .goal-section {
     display: grid;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .insight-cards {
@@ -244,8 +244,8 @@
   }
 
   .insight-card {
-    padding: 8px 10px;
-    border-radius: 8px;
+    padding: var(--space-2) 10px;
+    border-radius: var(--radius-md);
     font-size: var(--ui-font-sm);
     line-height: 1.45;
     color: var(--text-primary);
@@ -264,7 +264,7 @@
   }
 
   h3 {
-    margin: 0 0 6px 0;
+    margin: 0 0 var(--space-1) 0;
     font-size: var(--ui-font-sm);
     font-weight: 600;
     color: var(--text-secondary);
@@ -281,8 +281,8 @@
 
   .spec-card,
   .ci-card {
-    padding: 8px 10px;
-    border-radius: 8px;
+    padding: var(--space-2) 10px;
+    border-radius: var(--radius-md);
     background: var(--bg-secondary);
     display: flex;
     flex-direction: column;
@@ -293,7 +293,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .spec-title {
@@ -306,7 +306,7 @@
   }
 
   .phase-badge {
-    padding: 2px 8px;
+    padding: 2px var(--space-2);
     border-radius: 999px;
     font-size: var(--ui-font-xs);
     background: color-mix(in srgb, var(--accent) 20%, var(--bg-primary));
@@ -315,7 +315,7 @@
   }
 
   .progress-bar-container {
-    height: 4px;
+    height: var(--space-1);
     border-radius: 2px;
     background: color-mix(in srgb, var(--border-color) 50%, transparent);
     overflow: hidden;
@@ -325,7 +325,7 @@
     height: 100%;
     border-radius: 2px;
     background: var(--accent);
-    transition: width 0.3s ease;
+    transition: width var(--transition-normal) ease;
   }
 
   .progress-text {
@@ -339,8 +339,8 @@
   }
 
   .ci-indicator {
-    width: 8px;
-    height: 8px;
+    width: var(--space-2);
+    height: var(--space-2);
     border-radius: 50%;
     flex-shrink: 0;
     background-color: var(--text-muted);
@@ -361,7 +361,7 @@
   .ci-info {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 2px; /* intentionally smaller than space-1 for tight label pairs */
     min-width: 0;
   }
 
@@ -384,7 +384,7 @@
     align-items: center;
     gap: 6px;
     padding: 6px 10px;
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--accent) 12%, var(--bg-secondary));
     border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-color));
   }
@@ -396,7 +396,7 @@
 
   .git-info {
     display: flex;
-    gap: 12px;
+    gap: var(--space-3);
     align-items: center;
     flex-wrap: wrap;
   }
@@ -427,15 +427,15 @@
   .pane-card {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 8px;
-    border-radius: 4px;
+    gap: var(--space-2);
+    padding: 6px var(--space-2);
+    border-radius: var(--radius-sm);
     background-color: var(--bg-secondary);
   }
 
   .status-indicator {
-    width: 8px;
-    height: 8px;
+    width: var(--space-2);
+    height: var(--space-2);
     border-radius: 50%;
     flex-shrink: 0;
     background-color: var(--text-muted);
