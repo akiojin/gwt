@@ -15,6 +15,15 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+vi.mock("$lib/profiling.svelte", () => ({
+  setProfilingEnabled: setProfilingEnabledMock,
+  isProfilingEnabled: () => false,
+  recordInvokeMetric: vi.fn(),
+  recordFrontendMetric: vi.fn(),
+  initProfiling: vi.fn(),
+  teardownProfiling: vi.fn(),
+}));
+
 const settingsFixture: SettingsData = {
   protected_branches: ["main", "develop"],
   default_base_branch: "main",
