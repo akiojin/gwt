@@ -712,6 +712,11 @@
     // transitions may not propagate to the WebView.
     let unlistenTauriFocus: (() => void) | null = null;
     (async () => {
+      const { isBrowserDevMode } = await import("$lib/tauriMock");
+      if (isBrowserDevMode()) {
+        // Skip window focus detection in browser mode
+        return;
+      }
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         unlistenTauriFocus = await getCurrentWindow().listen(
@@ -973,7 +978,7 @@
     onOutput?: (bytes: Uint8Array) => void,
   ): Promise<(() => void) | null> {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const { listen } = await import("$lib/tauriListen");
       const unlistenFn = await listen<{ pane_id: string; data: number[] }>(
         "terminal-output",
         (event) => {

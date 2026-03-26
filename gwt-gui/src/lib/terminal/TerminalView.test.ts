@@ -47,6 +47,14 @@ vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
 }));
 
+vi.mock("$lib/tauriListen", () => ({
+  listen: listenMock,
+}));
+
+vi.mock("$lib/tauriMock", () => ({
+  isBrowserDevMode: () => false,
+}));
+
 vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
   default: {
