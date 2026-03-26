@@ -1,0 +1,43 @@
+---
+description: Check GitHub PR status and post-merge commits using the gwt-pr-check skill
+author: akiojin
+allowed-tools: Read, Glob, Grep, Bash
+---
+
+# GitHub PR Check Command
+
+Use this command to inspect PR status for the current branch with the gh CLI.
+
+## Usage
+
+```text
+/gwt:gwt-pr-check [optional context]
+```
+
+## Steps
+
+1. Load `skills/gwt-pr-check/SKILL.md` and follow the workflow.
+2. Run `python3 ".claude/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "."`.
+3. Prefer the REST pull-request list endpoint as the primary transport for PR discovery.
+4. Ensure `gh auth status` succeeds before running PR checks, or continue with token-backed REST auth when `GH_TOKEN` / `GITHUB_TOKEN` is already provided.
+5. When all PRs for the head are merged, validate merge commit ancestry before counting post-merge commits.
+6. If any post-merge count is greater than `0`, verify `git diff --quiet origin/<base>...HEAD --` before recommending `CREATE PR`.
+7. If the merge commit is missing or not an ancestor of `HEAD`, compare `origin/<head>..HEAD` first and then `origin/<base>..HEAD` before returning `NO ACTION`.
+8. If both upstream and base comparisons fail, return `MANUAL CHECK` instead of inferring `CREATE PR`.
+9. Return the human-readable summary from the script:
+   - Result
+   - Recommended next step
+   - Why
+   - Context and key evidence
+10. Append JSON only if the user explicitly asks for machine-readable output.
+11. Do not push or create/edit PRs in this command.
+
+## Examples
+
+```text
+/gwt:gwt-pr-check
+```
+
+```text
+/gwt:gwt-pr-check check current branch after merge
+```

@@ -72,6 +72,17 @@ pub struct IssueListCacheEntry {
     pub response_json: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct BranchInventorySnapshotCacheEntry {
+    pub refresh_key: u64,
+    pub entries: Vec<crate::commands::branches::BranchInventorySnapshotEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchInventoryDetailCacheEntry {
+    pub detail: crate::commands::branches::BranchInventoryDetail,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTabMenuState {
     pub id: String,
@@ -156,6 +167,11 @@ pub struct AppState {
     pub project_version_history_inflight: Mutex<HashSet<String>>,
     pub project_issue_list_cache: Mutex<HashMap<String, HashMap<String, IssueListCacheEntry>>>,
     pub project_issue_list_inflight: Mutex<HashSet<String>>,
+    pub project_branch_inventory_snapshot_cache:
+        Mutex<HashMap<String, BranchInventorySnapshotCacheEntry>>,
+    pub project_branch_inventory_snapshot_inflight: Mutex<HashSet<String>>,
+    pub project_branch_inventory_detail_cache:
+        Mutex<HashMap<String, HashMap<String, BranchInventoryDetailCacheEntry>>>,
     /// Semaphore to limit concurrent AI summary generation (max 3).
     pub version_history_semaphore: Arc<Semaphore>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
@@ -207,6 +223,8 @@ pub struct AppState {
     pub last_heartbeat: Mutex<Option<Instant>>,
     /// Port of the local HTTP IPC server (0 = not started).
     pub http_ipc_port: std::sync::atomic::AtomicU16,
+    /// Whether the frontend watchdog task has already been armed.
+    pub heartbeat_watchdog_started: AtomicBool,
 }
 
 impl AppState {
@@ -228,6 +246,9 @@ impl AppState {
             project_version_history_inflight: Mutex::new(HashSet::new()),
             project_issue_list_cache: Mutex::new(HashMap::new()),
             project_issue_list_inflight: Mutex::new(HashSet::new()),
+            project_branch_inventory_snapshot_cache: Mutex::new(HashMap::new()),
+            project_branch_inventory_snapshot_inflight: Mutex::new(HashSet::new()),
+            project_branch_inventory_detail_cache: Mutex::new(HashMap::new()),
             version_history_semaphore: Arc::new(Semaphore::new(3)),
             pane_launch_meta: Mutex::new(HashMap::new()),
             pane_runtime_contexts: Mutex::new(HashMap::new()),
@@ -256,6 +277,7 @@ impl AppState {
             assistant_monitor_handle: Mutex::new(HashMap::new()),
             last_heartbeat: Mutex::new(None),
             http_ipc_port: std::sync::atomic::AtomicU16::new(0),
+            heartbeat_watchdog_started: AtomicBool::new(false),
         }
     }
 
