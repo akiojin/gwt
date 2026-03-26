@@ -452,6 +452,33 @@ pub fn build_app(
                     });
                 }
 
+                // Background task: HTTP IPC server for heavy Git queries
+                {
+                    let app_handle = _app.handle().clone();
+                    tokio::spawn(async move {
+                        match crate::http_server::start_http_server().await {
+                            Ok(port) => {
+                                let state = app_handle.state::<AppState>();
+                                state
+                                    .http_ipc_port
+                                    .store(port, std::sync::atomic::Ordering::Relaxed);
+                                info!(
+                                    category = "http_ipc",
+                                    port,
+                                    "HTTP IPC server started"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    category = "http_ipc",
+                                    error = %e,
+                                    "Failed to start HTTP IPC server; falling back to Tauri invoke"
+                                );
+                            }
+                        }
+                    });
+                }
+
                 // Background task: watch session files for agent status changes (gwt-spec issue FR-820)
                 {
                     let watcher_handle = _app.handle().clone();
@@ -676,6 +703,7 @@ pub fn build_app(
         })
         .invoke_handler(tauri::generate_handler![
             crate::commands::greet,
+            crate::commands::get_http_ipc_port,
             crate::commands::branches::list_branches,
             crate::commands::branches::list_worktree_branches,
             crate::commands::branches::list_remote_branches,

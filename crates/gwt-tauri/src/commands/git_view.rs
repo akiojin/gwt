@@ -174,6 +174,118 @@ mod tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared _impl functions (used by both Tauri commands and HTTP IPC handlers)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn get_git_change_summary_impl(
+    project_path: &str,
+    branch: &str,
+    base_branch: Option<&str>,
+) -> Result<GitChangeSummary, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_git_change_summary"))?;
+
+    let base = match base_branch {
+        Some(b) => b.to_string(),
+        None => git::detect_base_branch(&repo_path, branch)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "get_git_change_summary"))?,
+    };
+
+    let exec_path = resolve_git_view_exec_path(&repo_path, branch)
+        .map_err(|e| StructuredError::internal(&e, "get_git_change_summary"))?;
+    git::get_git_change_summary(&exec_path, branch, &base)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "get_git_change_summary"))
+}
+
+pub(crate) fn get_branch_diff_files_impl(
+    project_path: &str,
+    branch: &str,
+    base_branch: &str,
+) -> Result<Vec<FileChange>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_branch_diff_files"))?;
+    let exec_path = resolve_git_view_exec_path(&repo_path, branch)
+        .map_err(|e| StructuredError::internal(&e, "get_branch_diff_files"))?;
+    git::get_branch_diff_files(&exec_path, branch, base_branch)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "get_branch_diff_files"))
+}
+
+pub(crate) fn get_branch_commits_impl(
+    project_path: &str,
+    branch: &str,
+    base_branch: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<GitViewCommit>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_branch_commits"))?;
+    let exec_path = resolve_git_view_exec_path(&repo_path, branch)
+        .map_err(|e| StructuredError::internal(&e, "get_branch_commits"))?;
+    git::get_branch_commits(&exec_path, branch, base_branch, offset, limit)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "get_branch_commits"))
+}
+
+pub(crate) fn get_working_tree_status_impl(
+    project_path: &str,
+    branch: &str,
+) -> Result<Vec<WorkingTreeEntry>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_working_tree_status"))?;
+    let branch_ref = branch.trim();
+    if branch_ref.is_empty() {
+        return Err(StructuredError::internal(
+            "Branch is required",
+            "get_working_tree_status",
+        ));
+    }
+
+    let exec_path = if git::is_bare_repository(&repo_path) {
+        resolve_existing_worktree_path(&repo_path, branch_ref)
+            .map_err(|e| StructuredError::internal(&e, "get_working_tree_status"))?
+            .ok_or_else(|| {
+                StructuredError::internal(
+                    &format!("Worktree not found for branch: {}", branch_ref),
+                    "get_working_tree_status",
+                )
+            })?
+    } else {
+        repo_path
+    };
+
+    git::get_working_tree_status(&exec_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "get_working_tree_status"))
+}
+
+pub(crate) fn get_stash_list_impl(
+    project_path: &str,
+    branch: &str,
+) -> Result<Vec<StashEntry>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_stash_list"))?;
+    let branch_ref = branch.trim();
+    let exec_path = if branch_ref.is_empty() {
+        resolve_any_active_worktree_path(&repo_path)
+            .map_err(|e| StructuredError::internal(&e, "get_stash_list"))?
+            .unwrap_or_else(|| repo_path.clone())
+    } else {
+        resolve_git_view_exec_path(&repo_path, branch_ref)
+            .map_err(|e| StructuredError::internal(&e, "get_stash_list"))?
+    };
+
+    git::get_stash_list(&exec_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "get_stash_list"))
+}
+
+// ---------------------------------------------------------------------------
+// Tauri command wrappers (thin delegates to _impl functions)
+// ---------------------------------------------------------------------------
+
 #[instrument(
     skip_all,
     fields(command = "get_git_change_summary", project_path, branch)
@@ -184,20 +296,7 @@ pub fn get_git_change_summary(
     branch: String,
     base_branch: Option<String>,
 ) -> Result<GitChangeSummary, StructuredError> {
-    let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "get_git_change_summary"))?;
-
-    let base = match base_branch {
-        Some(b) => b,
-        None => git::detect_base_branch(&repo_path, &branch)
-            .map_err(|e| StructuredError::from_gwt_error(&e, "get_git_change_summary"))?,
-    };
-
-    let exec_path = resolve_git_view_exec_path(&repo_path, &branch)
-        .map_err(|e| StructuredError::internal(&e, "get_git_change_summary"))?;
-    git::get_git_change_summary(&exec_path, &branch, &base)
-        .map_err(|e| StructuredError::from_gwt_error(&e, "get_git_change_summary"))
+    get_git_change_summary_impl(&project_path, &branch, base_branch.as_deref())
 }
 
 #[instrument(
@@ -210,13 +309,7 @@ pub fn get_branch_diff_files(
     branch: String,
     base_branch: String,
 ) -> Result<Vec<FileChange>, StructuredError> {
-    let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "get_branch_diff_files"))?;
-    let exec_path = resolve_git_view_exec_path(&repo_path, &branch)
-        .map_err(|e| StructuredError::internal(&e, "get_branch_diff_files"))?;
-    git::get_branch_diff_files(&exec_path, &branch, &base_branch)
-        .map_err(|e| StructuredError::from_gwt_error(&e, "get_branch_diff_files"))
+    get_branch_diff_files_impl(&project_path, &branch, &base_branch)
 }
 
 #[instrument(skip_all, fields(command = "get_file_diff", project_path, branch))]
@@ -245,13 +338,7 @@ pub fn get_branch_commits(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<GitViewCommit>, StructuredError> {
-    let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "get_branch_commits"))?;
-    let exec_path = resolve_git_view_exec_path(&repo_path, &branch)
-        .map_err(|e| StructuredError::internal(&e, "get_branch_commits"))?;
-    git::get_branch_commits(&exec_path, &branch, &base_branch, offset, limit)
-        .map_err(|e| StructuredError::from_gwt_error(&e, "get_branch_commits"))
+    get_branch_commits_impl(&project_path, &branch, &base_branch, offset, limit)
 }
 
 #[instrument(
@@ -263,32 +350,7 @@ pub fn get_working_tree_status(
     project_path: String,
     branch: String,
 ) -> Result<Vec<WorkingTreeEntry>, StructuredError> {
-    let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "get_working_tree_status"))?;
-    let branch_ref = branch.trim();
-    if branch_ref.is_empty() {
-        return Err(StructuredError::internal(
-            "Branch is required",
-            "get_working_tree_status",
-        ));
-    }
-
-    let exec_path = if git::is_bare_repository(&repo_path) {
-        resolve_existing_worktree_path(&repo_path, branch_ref)
-            .map_err(|e| StructuredError::internal(&e, "get_working_tree_status"))?
-            .ok_or_else(|| {
-                StructuredError::internal(
-                    &format!("Worktree not found for branch: {}", branch_ref),
-                    "get_working_tree_status",
-                )
-            })?
-    } else {
-        repo_path
-    };
-
-    git::get_working_tree_status(&exec_path)
-        .map_err(|e| StructuredError::from_gwt_error(&e, "get_working_tree_status"))
+    get_working_tree_status_impl(&project_path, &branch)
 }
 
 #[instrument(skip_all, fields(command = "get_stash_list", project_path, branch))]
@@ -297,21 +359,7 @@ pub fn get_stash_list(
     project_path: String,
     branch: String,
 ) -> Result<Vec<StashEntry>, StructuredError> {
-    let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)
-        .map_err(|e| StructuredError::internal(&e, "get_stash_list"))?;
-    let branch_ref = branch.trim();
-    let exec_path = if branch_ref.is_empty() {
-        resolve_any_active_worktree_path(&repo_path)
-            .map_err(|e| StructuredError::internal(&e, "get_stash_list"))?
-            .unwrap_or_else(|| repo_path.clone())
-    } else {
-        resolve_git_view_exec_path(&repo_path, branch_ref)
-            .map_err(|e| StructuredError::internal(&e, "get_stash_list"))?
-    };
-
-    git::get_stash_list(&exec_path)
-        .map_err(|e| StructuredError::from_gwt_error(&e, "get_stash_list"))
+    get_stash_list_impl(&project_path, &branch)
 }
 
 #[instrument(skip_all, fields(command = "get_base_branch_candidates", project_path))]

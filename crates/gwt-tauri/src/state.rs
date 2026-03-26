@@ -205,6 +205,8 @@ pub struct AppState {
         Mutex<HashMap<String, crate::assistant_monitor::AssistantMonitorHandle>>,
     /// Last heartbeat timestamp from the frontend (freeze detection).
     pub last_heartbeat: Mutex<Option<Instant>>,
+    /// Port of the local HTTP IPC server (0 = not started).
+    pub http_ipc_port: std::sync::atomic::AtomicU16,
 }
 
 impl AppState {
@@ -253,6 +255,7 @@ impl AppState {
             assistant_runtime: Mutex::new(HashMap::new()),
             assistant_monitor_handle: Mutex::new(HashMap::new()),
             last_heartbeat: Mutex::new(None),
+            http_ipc_port: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
