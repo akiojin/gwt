@@ -5,7 +5,7 @@
  * heartbeat interval, and freeze-detected event listener.
  */
 
-import { invoke } from "./tauriInvoke";
+import { invoke, listen } from "./tauriInvoke";
 
 // ---------------------------------------------------------------------------
 // State
@@ -108,7 +108,6 @@ function stopMetricReporter(): void {
 async function startFreezeListener(): Promise<void> {
   if (freezeUnlisten) return;
   try {
-    const { listen } = await import("@tauri-apps/api/event");
     const unlisten = await listen<string>("freeze-detected", (event) => {
       console.warn("[profiling] freeze detected:", event.payload);
     });
