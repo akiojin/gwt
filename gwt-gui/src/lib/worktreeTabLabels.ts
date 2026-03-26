@@ -28,15 +28,18 @@ export function resolveWorktreeTabLabel(
 }
 
 export function syncAgentTabLabels(tabs: Tab[], branches: BranchInfo[]): Tab[] {
-  return tabs.map((tab) => {
+  let changed = false;
+  const next = tabs.map((tab) => {
     if (tab.type !== "agent") return tab;
     const branchName = tab.branchName?.trim() ?? "";
     if (!branchName) return tab;
 
     const nextLabel = resolveWorktreeTabLabel(branchName, branches, tab.label);
     if (nextLabel === tab.label) return tab;
+    changed = true;
     return { ...tab, label: nextLabel };
   });
+  return changed ? next : tabs;
 }
 
 export function findAgentTabByBranchName(

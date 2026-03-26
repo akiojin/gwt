@@ -1,0 +1,6 @@
+- [x] T001 gwt-spec Issue 作成
+- [x] T002 SettingsPanel.svelte — Setup ボタン追加 + 警告メッセージ改善
+- [x] T003 voiceInputController.ts — リトライロジック修正 + API 統一
+- [x] T004 voiceInputController.test.ts — テスト更新・追加
+- [x] T005 voice.rs — python3.13 追加 + バージョン検証 + メッセージ改善
+- [x] T006 全検証（test / clippy / svelte-check）

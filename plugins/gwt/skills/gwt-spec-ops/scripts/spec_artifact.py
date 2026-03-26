@@ -1,137 +1,76 @@
 #!/usr/bin/env python3
-"""Manage gwt SPEC artifact comments on GitHub Issues."""
+"""Manage gwt SPEC artifacts as local files under specs/SPEC-{id}/ directories."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
-import tempfile
-import time
-from dataclasses import dataclass
+import glob
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-ARTIFACT_MARKER_RE = re.compile(r"^<!--\s*GWT_SPEC_ARTIFACT:([^:]+):(.+?)\s*-->\s*$")
 VALID_KINDS = {"doc", "contract", "checklist"}
-SECONDARY_RATE_LIMIT_MARKERS = (
-    "submitted too quickly",
-    "secondary rate limit",
-    "retry-after",
-)
-RETRY_SLEEP_SECONDS = (5, 15, 30, 60)
 
-
-@dataclass
-class ArtifactComment:
-    kind: str
-    name: str
-    comment_id: int
-    body: str
-    content: str
-    created_at: str
-    updated_at: str
-    author: str
-
-    @property
-    def key(self) -> str:
-        return f"{self.kind}:{self.name}"
-
-
-def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        text=True,
-        encoding="utf-8",
-        capture_output=True,
-        check=False,
-    )
-
-
-def require_success(proc: subprocess.CompletedProcess[str], context: str) -> str:
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
-        raise RuntimeError(f"{context}: {stderr}")
-    return proc.stdout.strip()
-
-
-def should_retry(proc: subprocess.CompletedProcess[str]) -> bool:
-    message = f"{proc.stderr}\n{proc.stdout}".lower()
-    return any(marker in message for marker in SECONDARY_RATE_LIMIT_MARKERS)
-
-
-def run_with_retry(cmd: list[str], cwd: Path, context: str) -> subprocess.CompletedProcess[str]:
-    last_proc: subprocess.CompletedProcess[str] | None = None
-    for attempt, sleep_seconds in enumerate((0, *RETRY_SLEEP_SECONDS), start=1):
-        if sleep_seconds:
-            time.sleep(sleep_seconds)
-        proc = run(cmd, cwd)
-        last_proc = proc
-        if proc.returncode == 0 or not should_retry(proc):
-            return proc
-    assert last_proc is not None
-    return last_proc
-
-
-def run_gh_api_with_json(
-    repo_root: Path,
-    endpoint: str,
-    method: str,
-    payload: dict[str, Any],
-    context: str,
-) -> dict[str, Any]:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tmp:
-        json.dump(payload, tmp, ensure_ascii=False)
-        tmp_path = Path(tmp.name)
-    try:
-        proc = run_with_retry(
-            ["gh", "api", endpoint, "--method", method, "--input", str(tmp_path)],
-            repo_root,
-            context,
-        )
-        data = require_success(proc, context)
-        return json.loads(data or "{}")
-    finally:
-        tmp_path.unlink(missing_ok=True)
+# Maps artifact kind to subdirectory (None = spec root)
+KIND_SUBDIR = {
+    "doc": None,
+    "contract": "contracts",
+    "checklist": "checklists",
+}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Manage gwt SPEC artifacts as local files."
+    )
     parser.add_argument("--repo", default=".")
-    parser.add_argument("--issue", required=True)
+    parser.add_argument("--spec", help="SPEC ID (UUID8 string like 'a1b2c3d4')")
     parser.add_argument("--artifact", help="Artifact key like doc:spec.md")
-    parser.add_argument("--body-file", help="Path to artifact markdown content")
+    parser.add_argument("--body-file", help="Path to artifact content file")
+    parser.add_argument("--title", help="Title for new SPEC (used with --create)")
     parser.add_argument("--json", action="store_true")
 
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--list", action="store_true")
     action.add_argument("--get", action="store_true")
     action.add_argument("--upsert", action="store_true")
+    action.add_argument("--create", action="store_true")
+    action.add_argument("--close", action="store_true")
 
     return parser.parse_args()
 
 
+def next_spec_id(git_root: Path) -> str:
+    """Generate the next sequential SPEC ID."""
+    specs = git_root / "specs"
+    max_id = 0
+    if specs.exists():
+        for entry in specs.iterdir():
+            name = entry.name
+            if name.startswith("SPEC-") and entry.is_dir():
+                try:
+                    num = int(name[5:])
+                    max_id = max(max_id, num)
+                except ValueError:
+                    pass
+    return str(max_id + 1)
+
+
 def find_git_root(start: Path) -> Path:
-    proc = run(["git", "rev-parse", "--show-toplevel"], start)
-    root = require_success(proc, "git rev-parse --show-toplevel")
-    return Path(root)
-
-
-def ensure_gh_auth(repo_root: Path) -> None:
-    proc = run(["gh", "auth", "status"], repo_root)
-    require_success(proc, "gh auth status")
-
-
-def fetch_repo_slug(repo_root: Path) -> str:
-    proc = run(["gh", "repo", "view", "--json", "nameWithOwner"], repo_root)
-    data = json.loads(require_success(proc, "gh repo view"))
-    slug = data.get("nameWithOwner")
-    if not slug:
-        raise RuntimeError("gh repo view: missing nameWithOwner")
-    return str(slug)
+    proc = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=str(start),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
+        raise RuntimeError(f"git rev-parse --show-toplevel: {stderr}")
+    return Path(proc.stdout.strip())
 
 
 def parse_artifact_key(value: str | None) -> tuple[str, str]:
@@ -149,177 +88,252 @@ def normalize_content(raw: str) -> str:
     return raw.rstrip() + "\n"
 
 
-def build_comment_body(kind: str, name: str, content: str) -> str:
-    normalized = normalize_content(content)
-    return (
-        f"<!-- GWT_SPEC_ARTIFACT:{kind}:{name} -->\n"
-        f"{kind}:{name}\n\n"
-        f"{normalized}"
+def spec_dir(git_root: Path, spec_id: str) -> Path:
+    return git_root / "specs" / f"SPEC-{spec_id}"
+
+
+def artifact_path(git_root: Path, spec_id: str, kind: str, name: str) -> Path:
+    base = spec_dir(git_root, spec_id)
+    subdir = KIND_SUBDIR.get(kind)
+    if subdir:
+        return base / subdir / name
+    return base / name
+
+
+def ensure_spec_exists(git_root: Path, spec_id: str) -> Path:
+    d = spec_dir(git_root, spec_id)
+    if not d.is_dir():
+        raise RuntimeError(f"SPEC directory not found: {d}")
+    return d
+
+
+def read_metadata(git_root: Path, spec_id: str) -> dict:
+    meta_path = spec_dir(git_root, spec_id) / "metadata.json"
+    if not meta_path.exists():
+        raise RuntimeError(f"metadata.json not found: {meta_path}")
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def write_metadata(git_root: Path, spec_id: str, metadata: dict) -> None:
+    meta_path = spec_dir(git_root, spec_id) / "metadata.json"
+    meta_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )
 
 
-def extract_content(body: str, kind: str, name: str) -> str:
-    lines = body.splitlines()
-    if len(lines) >= 2 and lines[1].strip() == f"{kind}:{name}":
-        remainder = "\n".join(lines[2:]).lstrip("\n")
-        return normalize_content(remainder)
-    return normalize_content(body)
+def update_timestamp(git_root: Path, spec_id: str) -> None:
+    metadata = read_metadata(git_root, spec_id)
+    metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+    write_metadata(git_root, spec_id, metadata)
 
 
-def parse_artifact_comment(comment: dict[str, Any]) -> ArtifactComment | None:
-    body = str(comment.get("body") or "")
-    first_line = body.splitlines()[0] if body.splitlines() else ""
-    match = ARTIFACT_MARKER_RE.match(first_line.strip())
-    if not match:
-        return None
-
-    kind, name = match.groups()
-    if kind not in VALID_KINDS:
-        return None
-
-    content = extract_content(body, kind, name)
-    return ArtifactComment(
-        kind=kind,
-        name=name,
-        comment_id=int(comment["id"]),
-        body=body,
-        content=content,
-        created_at=str(comment.get("created_at") or ""),
-        updated_at=str(comment.get("updated_at") or ""),
-        author=str((comment.get("user") or {}).get("login") or "unknown"),
-    )
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def fetch_issue_comments(repo_root: Path, repo_slug: str, issue_number: str) -> list[dict[str, Any]]:
-    proc = run(
-        ["gh", "api", f"repos/{repo_slug}/issues/{issue_number}/comments?per_page=100"],
-        repo_root,
-    )
-    payload = require_success(proc, "gh api issue comments")
-    comments = json.loads(payload or "[]")
-    if not isinstance(comments, list):
-        raise RuntimeError("gh api issue comments: expected JSON array")
-    return comments
+# --- Commands ---
 
 
-def collect_artifacts(repo_root: Path, issue_number: str) -> tuple[str, list[ArtifactComment]]:
-    repo_slug = fetch_repo_slug(repo_root)
-    comments = fetch_issue_comments(repo_root, repo_slug, issue_number)
-    artifacts = [parsed for comment in comments if (parsed := parse_artifact_comment(comment))]
-    return repo_slug, sorted(artifacts, key=lambda item: item.key)
+def cmd_create(git_root: Path, title: str | None, as_json: bool) -> int:
+    if not title:
+        print("--title is required with --create", file=sys.stderr)
+        return 1
 
+    spec_id = next_spec_id(git_root)
+    d = spec_dir(git_root, spec_id)
+    d.mkdir(parents=True, exist_ok=True)
 
-def upsert_artifact(
-    repo_root: Path,
-    repo_slug: str,
-    issue_number: str,
-    kind: str,
-    name: str,
-    content: str,
-) -> ArtifactComment:
-    _, artifacts = collect_artifacts(repo_root, issue_number)
-    existing = next((artifact for artifact in artifacts if artifact.key == f"{kind}:{name}"), None)
-    body = build_comment_body(kind, name, content)
+    now = now_iso()
+    metadata = {
+        "id": spec_id,
+        "title": title,
+        "status": "open",
+        "phase": "draft",
+        "created_at": now,
+        "updated_at": now,
+    }
+    write_metadata(git_root, spec_id, metadata)
 
-    if existing:
-        data = run_gh_api_with_json(
-            repo_root,
-            f"repos/{repo_slug}/issues/comments/{existing.comment_id}",
-            "PATCH",
-            {"body": body},
-            "gh api patch issue comment",
-        )
-    else:
-        data = run_gh_api_with_json(
-            repo_root,
-            f"repos/{repo_slug}/issues/{issue_number}/comments",
-            "POST",
-            {"body": body},
-            "gh api create issue comment",
-        )
-
-    parsed = parse_artifact_comment(data)
-    if not parsed:
-        raise RuntimeError("failed to parse created artifact comment")
-    return parsed
-
-
-def print_artifact_list(artifacts: list[ArtifactComment], as_json: bool) -> None:
     if as_json:
-        payload = [
-            {
-                "artifact": artifact.key,
-                "comment_id": artifact.comment_id,
-                "author": artifact.author,
-                "created_at": artifact.created_at,
-                "updated_at": artifact.updated_at,
-            }
-            for artifact in artifacts
-        ]
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return
+        print(json.dumps({"id": spec_id, "path": str(d)}, indent=2))
+    else:
+        print(spec_id)
+    return 0
+
+
+def cmd_close(git_root: Path, spec_id: str, as_json: bool) -> int:
+    ensure_spec_exists(git_root, spec_id)
+    metadata = read_metadata(git_root, spec_id)
+    metadata["status"] = "closed"
+    metadata["updated_at"] = now_iso()
+    write_metadata(git_root, spec_id, metadata)
+
+    if as_json:
+        print(json.dumps(metadata, ensure_ascii=False, indent=2))
+    else:
+        print(f"SPEC-{spec_id} closed.")
+    return 0
+
+
+def collect_artifacts(git_root: Path, spec_id: str) -> list[dict]:
+    d = ensure_spec_exists(git_root, spec_id)
+    artifacts = []
+
+    # Scan doc artifacts (files directly in spec dir, excluding metadata.json)
+    for f in sorted(d.iterdir()):
+        if f.is_file() and f.name != "metadata.json":
+            stat = f.stat()
+            artifacts.append({
+                "key": f"doc:{f.name}",
+                "kind": "doc",
+                "name": f.name,
+                "path": str(f),
+                "modified_at": datetime.fromtimestamp(
+                    stat.st_mtime, tz=timezone.utc
+                ).isoformat(),
+            })
+
+    # Scan contract and checklist subdirectories
+    for kind, subdir_name in (("contract", "contracts"), ("checklist", "checklists")):
+        subdir = d / subdir_name
+        if subdir.is_dir():
+            for f in sorted(subdir.iterdir()):
+                if f.is_file():
+                    stat = f.stat()
+                    artifacts.append({
+                        "key": f"{kind}:{f.name}",
+                        "kind": kind,
+                        "name": f.name,
+                        "path": str(f),
+                        "modified_at": datetime.fromtimestamp(
+                            stat.st_mtime, tz=timezone.utc
+                        ).isoformat(),
+                    })
+
+    return sorted(artifacts, key=lambda a: a["key"])
+
+
+def cmd_list(git_root: Path, spec_id: str, as_json: bool) -> int:
+    artifacts = collect_artifacts(git_root, spec_id)
+
+    if as_json:
+        print(json.dumps(artifacts, ensure_ascii=False, indent=2))
+        return 0
 
     if not artifacts:
-        print("No artifact comments found.")
-        return
+        print("No artifacts found.")
+        return 0
 
-    for artifact in artifacts:
-        print(f"- {artifact.key} (comment {artifact.comment_id}, author={artifact.author})")
+    for a in artifacts:
+        print(f"- {a['key']}")
+    return 0
 
 
-def print_single_artifact(artifact: ArtifactComment, as_json: bool) -> None:
+def cmd_get(
+    git_root: Path, spec_id: str, artifact_key: str | None, as_json: bool
+) -> int:
+    kind, name = parse_artifact_key(artifact_key)
+    ensure_spec_exists(git_root, spec_id)
+
+    fpath = artifact_path(git_root, spec_id, kind, name)
+    if not fpath.is_file():
+        print(f"Artifact not found: {kind}:{name}", file=sys.stderr)
+        return 1
+
+    content = normalize_content(fpath.read_text(encoding="utf-8"))
+    stat = fpath.stat()
+    modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+
     if as_json:
         print(
             json.dumps(
                 {
-                    "artifact": artifact.key,
-                    "comment_id": artifact.comment_id,
-                    "author": artifact.author,
-                    "created_at": artifact.created_at,
-                    "updated_at": artifact.updated_at,
-                    "content": artifact.content,
+                    "artifact": f"{kind}:{name}",
+                    "path": str(fpath),
+                    "modified_at": modified_at,
+                    "content": content,
                 },
                 ensure_ascii=False,
                 indent=2,
             )
         )
-        return
+    else:
+        sys.stdout.write(content)
+    return 0
 
-    sys.stdout.write(artifact.content)
+
+def cmd_upsert(
+    git_root: Path,
+    spec_id: str,
+    artifact_key: str | None,
+    body_file: str | None,
+    as_json: bool,
+) -> int:
+    if not body_file:
+        print("--body-file is required with --upsert", file=sys.stderr)
+        return 1
+
+    kind, name = parse_artifact_key(artifact_key)
+    ensure_spec_exists(git_root, spec_id)
+
+    source = Path(body_file)
+    if not source.is_file():
+        raise RuntimeError(f"body-file not found: {source}")
+
+    content = normalize_content(source.read_text(encoding="utf-8"))
+    fpath = artifact_path(git_root, spec_id, kind, name)
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+    fpath.write_text(content, encoding="utf-8")
+
+    update_timestamp(git_root, spec_id)
+
+    stat = fpath.stat()
+    modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "artifact": f"{kind}:{name}",
+                    "path": str(fpath),
+                    "modified_at": modified_at,
+                    "content": content,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(f"Upserted {kind}:{name} -> {fpath}")
+    return 0
 
 
 def main() -> int:
     args = parse_args()
     repo_root = find_git_root(Path(args.repo).resolve())
-    ensure_gh_auth(repo_root)
 
-    issue_number = str(args.issue)
-    repo_slug, artifacts = collect_artifacts(repo_root, issue_number)
+    if args.create:
+        return cmd_create(repo_root, args.title, args.json)
 
-    if args.list:
-        print_artifact_list(artifacts, args.json)
-        return 0
-
-    kind, name = parse_artifact_key(args.artifact)
-
-    if args.get:
-        artifact = next((item for item in artifacts if item.key == f"{kind}:{name}"), None)
-        if not artifact:
-            print(f"Artifact not found: {kind}:{name}", file=sys.stderr)
-            return 1
-        print_single_artifact(artifact, args.json)
-        return 0
-
-    if not args.body_file:
-        print("--body-file is required with --upsert", file=sys.stderr)
+    if not args.spec:
+        print("--spec is required", file=sys.stderr)
         return 1
 
-    content = Path(args.body_file).read_text(encoding="utf-8")
-    artifact = upsert_artifact(repo_root, repo_slug, issue_number, kind, name, content)
-    if args.json:
-        print_single_artifact(artifact, True)
-    else:
-        print(f"Upserted {artifact.key} on issue #{issue_number} (comment {artifact.comment_id}).")
+    spec_id = args.spec
+
+    if args.close:
+        return cmd_close(repo_root, spec_id, args.json)
+
+    if args.list:
+        return cmd_list(repo_root, spec_id, args.json)
+
+    if args.get:
+        return cmd_get(repo_root, spec_id, args.artifact, args.json)
+
+    if args.upsert:
+        return cmd_upsert(repo_root, spec_id, args.artifact, args.body_file, args.json)
+
     return 0
 
 

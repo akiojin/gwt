@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "$lib/tauriInvoke";
 import type { PrStatusLite, PrStatusResponse, GhCliStatus } from "./types";
 
 const POLL_INTERVAL_MS = 30_000;

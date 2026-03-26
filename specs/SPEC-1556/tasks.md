@@ -1,0 +1,18 @@
+- [ ] T001 [S] [US-1] ~/.gwt/ の既存データ構造の棚卸し
+- [ ] T002 [F] [US-1] TOML/JSON パーサーの選定・実装
+- [ ] T003 [U] [US-1,US-2] ~/.gwt/config.toml → JSON 形式変換ロジックの実装
+- [ ] T004 [U] [US-1,US-2] ~/.gwt/sessions/ → 新 JSON スキーマ変換ロジックの実装
+- [ ] T005 [U] [US-1,US-2] ~/.gwt/agents.toml → 新 JSON 形式変換ロジックの実装
+- [ ] T006 [U] [US-1,US-2] ~/.gwt/config/profiles.toml → JSON 形式変換ロジックの実装
+- [ ] T007 [U] [US-1,US-2] ~/.gwt/config/agent-config.toml → JSON 形式変換ロジックの実装
+- [ ] T008 [U] [US-1,US-2] その他TOMLファイルの汎用JSON変換ロジックの実装
+- [ ] T009 [U] [US-2] Rust版セッション形式 → Unity版セッション形式の自動変換実装
+- [ ] T010 [U] [US-2] AI プロバイダー設定の移行ロジック実装
+- [ ] T011 [U] [US-2] エージェント設定の移行ロジック実装
+- [ ] T012 [U] [US-1] 元ファイル保持ロジックの実装（変換後もTOML元ファイルを削除しない）
+- [ ] T013 [U] [US-3] バックアップ機構の実装（ロールバックUIなし）
+- [ ] T014 [U] [US-1] プログレスバー UI の実装
+- [ ] T015 [FIN] [US-1,US-2] テスト（正常系・異常系・スキップ動作）
+- [ ] T016 [FIN] [US-1,US-2] Rust版サンプルデータでの変換テスト
+- [ ] T017 [FIN] [US-1,US-2] 全TOML→JSON変換の網羅テスト（agents.toml含む）
+- [ ] T018 [FIN] [US-1] 元ファイル保持確認テスト

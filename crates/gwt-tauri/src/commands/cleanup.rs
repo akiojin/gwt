@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::atomic::Ordering,
+    time::{Duration, Instant},
 };
 
 use gwt_core::{
@@ -15,7 +16,7 @@ use gwt_core::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::{
     commands::{
@@ -23,6 +24,8 @@ use crate::{
     },
     state::AppState,
 };
+
+const LIST_WORKTREES_WARN_THRESHOLD: Duration = Duration::from_millis(300);
 
 /// Safety level for a worktree (FR-500)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -251,7 +254,15 @@ fn running_agent_branches(state: &AppState) -> HashSet<String> {
     branches
 }
 
-fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<WorktreeInfo>, String> {
+pub(crate) fn list_worktrees_impl(
+    project_path: &str,
+    state: &AppState,
+) -> Result<Vec<WorktreeInfo>, String> {
+    let _span = tracing::info_span!(
+        "startup.list_worktrees_impl",
+        project_path = %project_path
+    )
+    .entered();
     let project_root = Path::new(project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
     let last_tool = build_last_tool_usage_map(&repo_path);
@@ -330,6 +341,8 @@ pub async fn list_worktrees(
     project_path: String,
     app_handle: AppHandle,
 ) -> Result<Vec<WorktreeInfo>, StructuredError> {
+    let started = Instant::now();
+    let project_path_for_warn = project_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
         list_worktrees_impl(&project_path, &state)
@@ -338,6 +351,18 @@ pub async fn list_worktrees(
     .await
     .map_err(|e| {
         StructuredError::internal(&format!("Failed to list worktrees: {e}"), "list_worktrees")
+    })
+    .inspect(|_result| {
+        let elapsed = started.elapsed();
+        if elapsed > LIST_WORKTREES_WARN_THRESHOLD {
+            warn!(
+                category = "project_start",
+                command = "list_worktrees",
+                project_path = %project_path_for_warn,
+                elapsed_ms = elapsed.as_millis(),
+                "list_worktrees took longer than expected"
+            );
+        }
     })?
 }
 

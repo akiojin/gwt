@@ -1,0 +1,6 @@
+- [ ] Phase 1: セクションヘッダー CSS・ラベル sentence case・タブ改名・divider 廃止
+- [ ] Phase 2: Terminal font 移動・Terminal 常時表示・General/Terminal セクション分割
+- [ ] Phase 3: ConfirmDialog + CreateProfileDialog 作成・Profiles ヘッダー・AI 単一カラム
+- [ ] Phase 4: Voice Input 条件表示・セクション分割
+- [ ] Phase 5: Session Summary 廃止（UI + Rust）
+- [ ] Phase 6: 全体検証（Save/Load・lint・test）

@@ -71,7 +71,11 @@ pub fn generate_managed_skills_block() -> String {
     block.push('\n');
     block.push_str("## Available Skills & Commands (gwt)\n\n");
     block.push_str("Skills are located in `.claude/skills/<name>/SKILL.md`.\n");
-    block.push_str("Commands can be invoked as `/gwt:<command-name>`.\n\n");
+    block.push_str("Commands can be invoked as `/gwt:<command-name>`.\n");
+    block.push_str("Routing rule: if the user is registering new work and no GitHub Issue number or URL exists yet, use `gwt-issue-register` before any manual `gh issue create` or SPEC command.\n");
+    block.push_str(
+        "Never bypass `gwt-issue-register` for duplicate search or ISSUE vs SPEC selection.\n\n",
+    );
 
     block.push_str("### Issue & SPEC Management\n\n");
     block.push_str("| Skill | Command | Description |\n");
@@ -188,8 +192,9 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-pr-fix",
     "gwt-pr",
     "gwt-pr-check",
-    "gwt-project-index",
-    "gwt-pty-communication",
+    "gwt-project-search",
+    "gwt-spec-search",
+    "gwt-agent-dispatch",
     "gwt-spec-to-issue-migration",
 ];
 
@@ -357,19 +362,28 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-project-index/SKILL.md",
+        relative_path: "skills/gwt-project-search/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-project-index/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-project-search/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "skills/gwt-pty-communication/SKILL.md",
+        relative_path: "skills/gwt-spec-search/SKILL.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/skills/gwt-pty-communication/SKILL.md"
+            "/../../plugins/gwt/skills/gwt-spec-search/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-agent-dispatch/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/gwt/skills/gwt-agent-dispatch/SKILL.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -394,7 +408,9 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
     },
 ];
 
-const PROJECT_ROOT_ASSETS: &[ManagedAsset] = &[ManagedAsset {
+const PROJECT_LOCAL_MANAGED_ASSET_ROOT: &str = ".gwt";
+
+const PROJECT_LOCAL_MANAGED_ASSETS: &[ManagedAsset] = &[ManagedAsset {
     relative_path: "memory/constitution.md",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -405,11 +421,22 @@ const PROJECT_ROOT_ASSETS: &[ManagedAsset] = &[ManagedAsset {
 }];
 
 const LEGACY_MANAGED_GWT_HOOK_COMMANDS: &[&str] = &[
+    // v1: gwt binary direct invocation
     "gwt hook UserPromptSubmit",
     "gwt hook PreToolUse",
     "gwt hook PostToolUse",
     "gwt hook Notification",
     "gwt hook Stop",
+    // v2: relative-path node scripts (broken when CWD != project root, #1771)
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit",
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs PreToolUse",
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs PostToolUse",
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs Notification",
+    "node .claude/hooks/scripts/gwt-forward-hook.mjs Stop",
+    "node .claude/hooks/scripts/gwt-block-git-branch-ops.mjs",
+    "node .claude/hooks/scripts/gwt-block-cd-command.mjs",
+    "node .claude/hooks/scripts/gwt-block-file-ops.mjs",
+    "node .claude/hooks/scripts/gwt-block-git-dir-override.mjs",
 ];
 
 const LEGACY_MANAGED_HOOK_SCRIPT_BASENAMES: &[&str] = &[
@@ -535,19 +562,19 @@ const CLAUDE_COMMAND_ASSETS: &[ManagedAsset] = &[
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-project-index.md",
+        relative_path: "commands/gwt-project-search.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-project-index.md"
+            "/../../plugins/gwt/commands/gwt-project-search.md"
         )),
         executable: false,
         rewrite_for_project: true,
     },
     ManagedAsset {
-        relative_path: "commands/gwt-pty-communication.md",
+        relative_path: "commands/gwt-agent-dispatch.md",
         body: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/gwt/commands/gwt-pty-communication.md"
+            "/../../plugins/gwt/commands/gwt-agent-dispatch.md"
         )),
         executable: false,
         rewrite_for_project: true,
@@ -623,13 +650,13 @@ const PROJECT_ROOT_REQUIRED_MESSAGE: &str =
 const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_BEGIN_MARKER: &str = "# BEGIN gwt managed local assets";
 const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER: &str = "# END gwt managed local assets";
 const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
+    "/.gwt/",
     "/.codex/skills/gwt-*/",
     "/.gemini/skills/gwt-*/",
     "/.claude/skills/gwt-*/",
     "/.claude/commands/gwt-*.md",
     "/.claude/hooks/scripts/gwt-*.mjs",
     "/.claude/settings.local.json",
-    "/memory/constitution.md",
 ];
 const LEGACY_PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     ".gwt/",
@@ -745,9 +772,9 @@ fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
         SkillAgentType::Gemini => project_asset_missing_items(".gemini"),
     };
     items.extend(
-        PROJECT_ROOT_ASSETS
+        PROJECT_LOCAL_MANAGED_ASSETS
             .iter()
-            .map(|asset| asset.relative_path.to_string()),
+            .map(|asset| project_local_managed_asset_display_path(asset.relative_path)),
     );
     items
 }
@@ -790,6 +817,27 @@ fn agent_root_for(agent: SkillAgentType, project_root: Option<&Path>) -> Option<
     Some(project_root.join(agent_root_name(agent)))
 }
 
+fn project_local_managed_assets_root(project_root: &Path) -> PathBuf {
+    project_root.join(PROJECT_LOCAL_MANAGED_ASSET_ROOT)
+}
+
+fn project_local_managed_asset_path(project_root: &Path, relative_path: &str) -> PathBuf {
+    project_local_managed_assets_root(project_root).join(relative_path)
+}
+
+fn legacy_project_local_managed_asset_path(project_root: &Path, relative_path: &str) -> PathBuf {
+    project_root.join(relative_path)
+}
+
+fn project_local_managed_asset_display_path(relative_path: &str) -> String {
+    format!("{PROJECT_LOCAL_MANAGED_ASSET_ROOT}/{relative_path}")
+}
+
+fn project_local_managed_asset_exists(project_root: &Path, relative_path: &str) -> bool {
+    project_local_managed_asset_path(project_root, relative_path).exists()
+        || legacy_project_local_managed_asset_path(project_root, relative_path).exists()
+}
+
 fn claude_root_for(project_root: Option<&Path>) -> Option<PathBuf> {
     project_root.map(|root| root.join(".claude"))
 }
@@ -801,7 +849,7 @@ fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
 #[cfg(test)]
 fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
     write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")?;
-    write_managed_assets(root, PROJECT_ROOT_ASSETS.iter(), ".")
+    register_project_local_managed_assets(root)
 }
 
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
@@ -820,6 +868,16 @@ fn all_claude_assets() -> impl Iterator<Item = &'static ManagedAsset> {
         .iter()
         .chain(CLAUDE_HOOK_ASSETS.iter())
         .chain(PROJECT_SKILL_ASSETS.iter())
+}
+
+fn register_project_local_managed_assets(project_root: &Path) -> Result<(), GwtError> {
+    let root = project_local_managed_assets_root(project_root);
+    write_managed_assets(
+        &root,
+        PROJECT_LOCAL_MANAGED_ASSETS.iter(),
+        PROJECT_LOCAL_MANAGED_ASSET_ROOT,
+    )?;
+    cleanup_legacy_project_local_managed_assets(project_root)
 }
 
 fn write_managed_assets<'a>(
@@ -864,6 +922,72 @@ fn cleanup_legacy_managed_assets(root: &Path) -> Result<(), GwtError> {
                 ),
             })?;
         }
+    }
+
+    Ok(())
+}
+
+fn cleanup_legacy_project_local_managed_assets(project_root: &Path) -> Result<(), GwtError> {
+    for asset in PROJECT_LOCAL_MANAGED_ASSETS {
+        let legacy_path =
+            legacy_project_local_managed_asset_path(project_root, asset.relative_path);
+        remove_legacy_project_local_managed_asset(project_root, &legacy_path)?;
+    }
+
+    Ok(())
+}
+
+fn remove_legacy_project_local_managed_asset(
+    project_root: &Path,
+    legacy_path: &Path,
+) -> Result<(), GwtError> {
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+
+    if legacy_path.is_dir() {
+        std::fs::remove_dir_all(legacy_path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove legacy project-local managed asset {}: {}",
+                legacy_path.display(),
+                e
+            ),
+        })?;
+    } else {
+        std::fs::remove_file(legacy_path).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove legacy project-local managed asset {}: {}",
+                legacy_path.display(),
+                e
+            ),
+        })?;
+    }
+
+    let mut current = legacy_path.parent();
+    while let Some(dir) = current {
+        if dir == project_root {
+            break;
+        }
+
+        let mut entries = std::fs::read_dir(dir).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to inspect legacy project-local managed asset directory {}: {}",
+                dir.display(),
+                e
+            ),
+        })?;
+        if entries.next().is_some() {
+            break;
+        }
+
+        std::fs::remove_dir(dir).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to remove empty legacy project-local managed asset directory {}: {}",
+                dir.display(),
+                e
+            ),
+        })?;
+        current = dir.parent();
     }
 
     Ok(())
@@ -1097,6 +1221,23 @@ fn rewrite_project_asset_content(content: &str, root_name: &str) -> String {
         .replace("`skills/", &format!("`{root_name}/skills/"))
 }
 
+/// Build a fully-quoted hook command that resolves the git repository root at
+/// runtime via `git rev-parse --show-toplevel`.  This makes hook commands
+/// independent of the current working directory and portable across Docker,
+/// worktrees, and any environment where the CWD may differ from the project
+/// root.
+///
+/// `script` is the basename (e.g. `"gwt-forward-hook.mjs"`).
+/// `args` are appended after the quoted path (e.g. `"Stop"`); pass `""` for none.
+fn hook_script_command(script: &str, args: &str) -> String {
+    let base = "node \"$(git rev-parse --show-toplevel)/.claude/hooks/scripts/";
+    if args.is_empty() {
+        format!("{base}{script}\"")
+    } else {
+        format!("{base}{script}\" {args}")
+    }
+}
+
 fn managed_hooks_definition() -> Value {
     serde_json::json!({
         "hooks": {
@@ -1104,7 +1245,7 @@ fn managed_hooks_definition() -> Value {
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit"
+                    "command": hook_script_command("gwt-forward-hook.mjs", "UserPromptSubmit")
                 }]
             }],
             "PreToolUse": [
@@ -1112,7 +1253,7 @@ fn managed_hooks_definition() -> Value {
                     "matcher": "*",
                     "hooks": [{
                         "type": "command",
-                        "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PreToolUse"
+                        "command": hook_script_command("gwt-forward-hook.mjs", "PreToolUse")
                     }]
                 },
                 {
@@ -1120,19 +1261,19 @@ fn managed_hooks_definition() -> Value {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "node .claude/hooks/scripts/gwt-block-git-branch-ops.mjs"
+                            "command": hook_script_command("gwt-block-git-branch-ops.mjs", "")
                         },
                         {
                             "type": "command",
-                            "command": "node .claude/hooks/scripts/gwt-block-cd-command.mjs"
+                            "command": hook_script_command("gwt-block-cd-command.mjs", "")
                         },
                         {
                             "type": "command",
-                            "command": "node .claude/hooks/scripts/gwt-block-file-ops.mjs"
+                            "command": hook_script_command("gwt-block-file-ops.mjs", "")
                         },
                         {
                             "type": "command",
-                            "command": "node .claude/hooks/scripts/gwt-block-git-dir-override.mjs"
+                            "command": hook_script_command("gwt-block-git-dir-override.mjs", "")
                         }
                     ]
                 }
@@ -1141,21 +1282,21 @@ fn managed_hooks_definition() -> Value {
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PostToolUse"
+                    "command": hook_script_command("gwt-forward-hook.mjs", "PostToolUse")
                 }]
             }],
             "Notification": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs Notification"
+                    "command": hook_script_command("gwt-forward-hook.mjs", "Notification")
                 }]
             }],
             "Stop": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs Stop"
+                    "command": hook_script_command("gwt-forward-hook.mjs", "Stop")
                 }]
             }]
         }
@@ -1504,7 +1645,7 @@ pub fn register_agent_skills_with_settings_at_project_root(
         });
     };
 
-    write_managed_assets(project_root, PROJECT_ROOT_ASSETS.iter(), ".")?;
+    register_project_local_managed_assets(project_root)?;
 
     match agent {
         SkillAgentType::Claude => register_claude_assets_at(project_root),
@@ -1526,7 +1667,7 @@ pub fn register_all_skills_with_settings_at_project_root(
 ) -> Result<(), GwtError> {
     if let Some(project_root) = project_root {
         ensure_project_local_exclude_rules(project_root)?;
-        write_managed_assets(project_root, PROJECT_ROOT_ASSETS.iter(), ".")?;
+        register_project_local_managed_assets(project_root)?;
     }
 
     let mut failures = Vec::new();
@@ -1596,10 +1737,11 @@ fn status_for(
             ));
         }
     }
-    for asset in PROJECT_ROOT_ASSETS {
-        let asset_path = project_root.join(asset.relative_path);
-        if !asset_path.exists() {
-            missing.push(asset.relative_path.to_string());
+    for asset in PROJECT_LOCAL_MANAGED_ASSETS {
+        if !project_local_managed_asset_exists(project_root, asset.relative_path) {
+            missing.push(project_local_managed_asset_display_path(
+                asset.relative_path,
+            ));
         }
     }
 
@@ -1653,10 +1795,11 @@ fn status_for_claude(project_root: Option<&Path>) -> SkillAgentRegistrationStatu
         }
     }
     if let Some(project_root) = project_root {
-        for asset in PROJECT_ROOT_ASSETS {
-            let asset_path = project_root.join(asset.relative_path);
-            if !asset_path.exists() {
-                missing_items.push(asset.relative_path.to_string());
+        for asset in PROJECT_LOCAL_MANAGED_ASSETS {
+            if !project_local_managed_asset_exists(project_root, asset.relative_path) {
+                missing_items.push(project_local_managed_asset_display_path(
+                    asset.relative_path,
+                ));
             }
         }
     }
@@ -1777,6 +1920,14 @@ mod tests {
         std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
     }
 
+    fn project_local_constitution_path(root: &Path) -> PathBuf {
+        root.join(".gwt").join("memory").join("constitution.md")
+    }
+
+    fn legacy_constitution_path(root: &Path) -> PathBuf {
+        root.join("memory").join("constitution.md")
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = crate::process::command("git")
             .args(args)
@@ -1837,7 +1988,7 @@ mod tests {
             .join("scripts")
             .join("spec_artifact.py")
             .exists());
-        assert!(tmp.path().join("memory").join("constitution.md").exists());
+        assert!(project_local_constitution_path(tmp.path()).exists());
     }
 
     #[test]
@@ -1854,13 +2005,10 @@ mod tests {
 
     #[test]
     fn managed_hook_detection_uses_exact_template_commands() {
-        let managed_hook_commands =
-            vec!["node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()];
+        let sample_cmd = hook_script_command("gwt-forward-hook.mjs", "UserPromptSubmit");
+        let managed_hook_commands = vec![sample_cmd.clone()];
 
-        assert!(is_managed_hook_command(
-            "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit",
-            &managed_hook_commands
-        ));
+        assert!(is_managed_hook_command(&sample_cmd, &managed_hook_commands));
         assert!(!is_managed_hook_command(
             "echo gwt hook UserPromptSubmit",
             &managed_hook_commands
@@ -1887,8 +2035,10 @@ mod tests {
 
     #[test]
     fn prune_managed_hook_entries_preserves_user_hook_that_mentions_gwt_hook() {
-        let managed_hook_commands =
-            vec!["node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()];
+        let managed_hook_commands = vec![hook_script_command(
+            "gwt-forward-hook.mjs",
+            "UserPromptSubmit",
+        )];
         let mut value = serde_json::json!(["echo gwt hook UserPromptSubmit"]);
 
         prune_managed_hook_entries(&mut value, &managed_hook_commands);
@@ -2041,7 +2191,7 @@ mod tests {
             .join("scripts")
             .join("spec_artifact.py")
             .exists());
-        assert!(temp.path().join("memory").join("constitution.md").exists());
+        assert!(project_local_constitution_path(temp.path()).exists());
         assert!(temp
             .path()
             .join(".gemini")
@@ -2094,6 +2244,7 @@ mod tests {
         assert!(exclude.contains("/.claude/commands/gwt-*.md"));
         assert!(exclude.contains("/.claude/hooks/scripts/gwt-*.mjs"));
         assert!(exclude.contains("/.claude/settings.local.json"));
+        assert!(exclude.contains("/.gwt/"));
     }
 
     #[test]
@@ -2213,9 +2364,8 @@ OPENAI_API_KEY = "legacy-key"
         )
         .unwrap();
         assert!(!gemini_skill_content.contains("CLAUDE_PLUGIN_ROOT"));
-        assert!(gemini_skill_content.contains(
-            ".gemini/skills/gwt-spec-to-issue-migration/scripts/migrate-specs-to-issues.mjs"
-        ));
+        assert!(gemini_skill_content
+            .contains(".gemini/skills/gwt-spec-to-issue-migration/scripts/reverse-migrate.py"));
     }
 
     #[test]
@@ -2365,16 +2515,17 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(issue_register_skill.contains("Search existing Issues and `gwt-spec` Issues first"));
+        assert!(issue_register_skill.contains("Search existing Issues and SPECs first"));
         assert!(issue_register_skill.contains("gwt-issue-search"));
         assert!(issue_register_skill.contains("gwt-spec-register"));
         assert!(issue_register_skill.contains("gwt-issue-resolve"));
+        assert!(issue_register_skill.contains("Do not call `gh issue create` manually"));
 
         let project_index_skill = std::fs::read_to_string(
             temp.path()
                 .join(".codex")
                 .join("skills")
-                .join("gwt-project-index")
+                .join("gwt-project-search")
                 .join("SKILL.md"),
         )
         .unwrap();
@@ -2424,11 +2575,10 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_register_skill.contains("Issue-first SPEC container"));
+        assert!(spec_register_skill.contains("local SPEC directory"));
         assert!(spec_register_skill.contains("gwt-issue-search"));
-        assert!(spec_register_skill.contains("GWT_SPEC_ARTIFACT:doc:spec.md"));
+        assert!(spec_register_skill.contains("metadata.json"));
         assert!(spec_register_skill.contains("gwt-spec-ops"));
-        assert!(spec_register_skill.contains("repos/<owner>/<repo>/issues"));
 
         let spec_clarify_skill = std::fs::read_to_string(
             temp.path()
@@ -2449,7 +2599,7 @@ OPENAI_API_KEY = "legacy-key"
                 .join("SKILL.md"),
         )
         .unwrap();
-        assert!(spec_plan_skill.contains("memory/constitution.md"));
+        assert!(spec_plan_skill.contains(".gwt/memory/constitution.md"));
         assert!(spec_plan_skill.contains("Constitution Check"));
         assert!(spec_plan_skill.contains("gwt-spec-tasks"));
 
@@ -2501,6 +2651,7 @@ OPENAI_API_KEY = "legacy-key"
         assert!(issue_register_command.contains("gwt-spec-register"));
         assert!(issue_register_command.contains("gwt-spec-ops"));
         assert!(issue_register_command.contains("POST /repos/<owner>/<repo>/issues"));
+        assert!(issue_register_command.contains("instead of creating a GitHub Issue directly"));
 
         let issue_resolve_command = std::fs::read_to_string(
             temp.path()
@@ -2543,7 +2694,7 @@ OPENAI_API_KEY = "legacy-key"
                 .join("gwt-spec-plan.md"),
         )
         .unwrap();
-        assert!(spec_plan_command.contains("memory/constitution.md"));
+        assert!(spec_plan_command.contains(".gwt/memory/constitution.md"));
         assert!(spec_plan_command.contains("gwt-spec-tasks"));
         assert!(spec_plan_command.contains("gwt-spec-ops"));
 
@@ -2736,7 +2887,7 @@ OPENAI_API_KEY = "legacy-key"
             .join("scripts")
             .join("gwt-forward-hook.mjs")
             .exists());
-        assert!(temp.path().join("memory").join("constitution.md").exists());
+        assert!(project_local_constitution_path(temp.path()).exists());
 
         let settings_content =
             std::fs::read_to_string(claude_root.join("settings.local.json")).unwrap();
@@ -2832,6 +2983,47 @@ OPENAI_API_KEY = "legacy-key"
     }
 
     #[test]
+    fn registration_migrates_legacy_project_local_asset_to_gwt_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        init_test_git_dir(temp.path());
+
+        let legacy_path = legacy_constitution_path(temp.path());
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "legacy constitution").unwrap();
+
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+
+        assert!(project_local_constitution_path(temp.path()).exists());
+        assert!(!legacy_path.exists());
+        assert!(!temp.path().join("memory").exists());
+    }
+
+    #[test]
+    fn status_accepts_legacy_project_local_asset_during_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+
+        let legacy_path = legacy_constitution_path(temp.path());
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "legacy constitution").unwrap();
+
+        let status = get_skill_registration_status_with_settings_at_project_root(
+            &settings,
+            Some(temp.path()),
+        );
+
+        let codex = status
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == "codex")
+            .unwrap();
+        assert!(!codex
+            .missing_skills
+            .contains(&".gwt/memory/constitution.md".to_string()));
+    }
+
+    #[test]
     fn exclude_rules_are_added_idempotently() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
@@ -2878,6 +3070,7 @@ OPENAI_API_KEY = "legacy-key"
 # custom rule
 custom-pattern
 /.codex/skills/gwt-*/**
+/memory/constitution.md
 # BEGIN gwt managed local assets
 /.claude/skills/gwt-*/
 # END gwt managed local assets
@@ -2893,6 +3086,7 @@ another-pattern
         assert!(exclude.contains("custom-pattern"));
         assert!(exclude.contains("another-pattern"));
         assert!(!exclude.contains("/.codex/skills/gwt-*/**"));
+        assert!(!exclude.contains("/memory/constitution.md"));
         assert_eq!(
             exclude
                 .lines()
@@ -2978,6 +3172,9 @@ another-pattern
                 "managed block should NOT contain command ref for no-command skill: {command_ref}"
             );
         }
+
+        assert!(block.contains("no GitHub Issue number or URL exists yet"));
+        assert!(block.contains("Never bypass `gwt-issue-register`"));
     }
 
     #[test]

@@ -1,11 +1,13 @@
 ---
 name: gwt-spec-analyze
-description: Analyze a `gwt-spec` artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers.
+description: Analyze a SPEC artifact set for completeness and consistency across `spec.md`, `plan.md`, `tasks.md`, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers.
 ---
 
 # gwt SPEC Analyze
 
 Use this skill as the final gate before implementation starts.
+
+This skill is a **pre-implementation readiness gate only**. It does not certify that implementation is complete.
 
 - `gwt-spec-analyze` is still non-implementation work.
 - Do not implement code here.
@@ -13,17 +15,17 @@ Use this skill as the final gate before implementation starts.
 
 ## Required artifact set
 
-- `doc:spec.md`
-- `doc:plan.md`
-- `doc:tasks.md`
+- `spec.md`
+- `plan.md`
+- `tasks.md`
 - `memory/constitution.md`
 
 Optional but validated when present:
 
-- `doc:research.md`
-- `doc:data-model.md`
-- `doc:quickstart.md`
-- `contract:*`
+- `research.md`
+- `data-model.md`
+- `quickstart.md`
+- `contracts/*`
 
 ## Mandatory checks
 
@@ -48,7 +50,7 @@ Optional but validated when present:
 ## Required output
 
 ```text
-## Analysis Report: #<number>
+## Analysis Report: SPEC-<id>
 
 Status: CLEAR | AUTO-FIXABLE | NEEDS-DECISION
 
@@ -68,11 +70,23 @@ Next:
 - `AUTO-FIXABLE`: `gwt-spec-ops` should repair the artifact set and rerun analysis
 - `NEEDS-DECISION`: the report must point to the exact user decision or unresolved ambiguity
 
+## Boundary
+
+- `CLEAR` means the artifact set is ready for execution.
+- `CLEAR` does **not** mean the SPEC may be marked complete.
+- Completion requires a post-implementation reconciliation pass in `gwt-spec-implement` against:
+  - `spec.md`
+  - `tasks.md`
+  - `checklists/acceptance.md`
+  - `checklists/tdd.md`
+  - latest progress files
+  - executed verification evidence
+
 ## Operations
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
-  --issue "<number>" \
+  --spec "<id>" \
   --list
 ```

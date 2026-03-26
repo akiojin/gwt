@@ -4,6 +4,8 @@ use std::{
     collections::{HashMap, HashSet},
     panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
+    thread,
+    time::{Duration, Instant},
 };
 
 use gwt_core::{
@@ -15,7 +17,7 @@ use gwt_core::{
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
-use tracing::{error, instrument};
+use tracing::{error, instrument, warn};
 
 use crate::{
     commands::{
@@ -24,6 +26,9 @@ use crate::{
     },
     state::AppState,
 };
+
+const LIST_WORKTREE_BRANCHES_WARN_THRESHOLD: Duration = Duration::from_millis(300);
+const BRANCH_INVENTORY_INFLIGHT_WAIT_MS: u64 = 30_000;
 
 /// Serializable branch info for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +47,74 @@ pub struct BranchInfo {
     pub commit_timestamp: Option<i64>,
     pub is_gone: bool,
     pub last_tool_usage: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterializeWorktreeResult {
+    pub worktree: crate::commands::cleanup::WorktreeInfo,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BranchInventoryResolutionAction {
+    FocusExisting,
+    CreateWorktree,
+    ResolveAmbiguity,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchInventorySnapshotEntry {
+    pub id: String,
+    pub canonical_name: String,
+    pub primary_branch: BranchInfo,
+    pub local_branch: Option<BranchInfo>,
+    pub remote_branch: Option<BranchInfo>,
+    pub has_local: bool,
+    pub has_remote: bool,
+    pub worktree_path: Option<String>,
+    pub worktree_count: usize,
+    pub resolution_action: BranchInventoryResolutionAction,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchInventoryDetail {
+    pub id: String,
+    pub canonical_name: String,
+    pub primary_branch: BranchInfo,
+    pub local_branch: Option<BranchInfo>,
+    pub remote_branch: Option<BranchInfo>,
+    pub has_local: bool,
+    pub has_remote: bool,
+    pub worktree_path: Option<String>,
+    pub worktree_count: usize,
+    pub resolution_action: BranchInventoryResolutionAction,
+}
+
+#[derive(Debug, Clone)]
+struct BranchInventoryWorktree {
+    path: String,
+    branch: String,
+}
+
+impl From<BranchInventorySnapshotEntry> for BranchInventoryDetail {
+    fn from(value: BranchInventorySnapshotEntry) -> Self {
+        Self {
+            id: value.id,
+            canonical_name: value.canonical_name,
+            primary_branch: value.primary_branch,
+            local_branch: value.local_branch,
+            remote_branch: value.remote_branch,
+            has_local: value.has_local,
+            has_remote: value.has_remote,
+            worktree_path: value.worktree_path,
+            worktree_count: value.worktree_count,
+            resolution_action: value.resolution_action,
+        }
+    }
 }
 
 impl From<Branch> for BranchInfo {
@@ -216,6 +289,130 @@ fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str
     branch
 }
 
+fn branch_inventory_key(branch: &str, remotes: &[Remote]) -> String {
+    strip_known_remote_prefix(branch, remotes)
+        .trim()
+        .to_string()
+}
+
+fn build_branch_inventory_snapshot_entries(
+    local: Vec<BranchInfo>,
+    remote: Vec<BranchInfo>,
+    worktrees: Vec<BranchInventoryWorktree>,
+    remotes: &[Remote],
+) -> Vec<BranchInventorySnapshotEntry> {
+    let mut local_by_key = HashMap::new();
+    let mut remote_by_key = HashMap::new();
+    let mut keys = HashSet::new();
+
+    for info in local {
+        let key = branch_inventory_key(&info.name, remotes);
+        keys.insert(key.clone());
+        local_by_key.insert(key, info);
+    }
+
+    for info in remote {
+        let key = branch_inventory_key(&info.name, remotes);
+        keys.insert(key.clone());
+        remote_by_key.insert(key, info);
+    }
+
+    let mut worktrees_by_key: HashMap<String, Vec<BranchInventoryWorktree>> = HashMap::new();
+    for worktree in worktrees {
+        let key = branch_inventory_key(&worktree.branch, remotes);
+        worktrees_by_key.entry(key).or_default().push(worktree);
+    }
+
+    let mut sorted_keys = keys.into_iter().collect::<Vec<_>>();
+    sorted_keys.sort();
+
+    sorted_keys
+        .into_iter()
+        .filter_map(|key| {
+            let local_branch = local_by_key.remove(&key);
+            let remote_branch = remote_by_key.remove(&key);
+            let primary_branch = local_branch.clone().or_else(|| remote_branch.clone())?;
+            let matching_worktrees = worktrees_by_key.remove(&key).unwrap_or_default();
+            let worktree_count = matching_worktrees.len();
+            let worktree_path = if worktree_count == 1 {
+                matching_worktrees
+                    .into_iter()
+                    .next()
+                    .map(|worktree| worktree.path)
+            } else {
+                None
+            };
+            let resolution_action = match worktree_count {
+                0 => BranchInventoryResolutionAction::CreateWorktree,
+                1 => BranchInventoryResolutionAction::FocusExisting,
+                _ => BranchInventoryResolutionAction::ResolveAmbiguity,
+            };
+            Some(BranchInventorySnapshotEntry {
+                id: key.clone(),
+                canonical_name: key,
+                primary_branch,
+                has_local: local_branch.is_some(),
+                has_remote: remote_branch.is_some(),
+                local_branch,
+                remote_branch,
+                worktree_path,
+                worktree_count,
+                resolution_action,
+            })
+        })
+        .collect()
+}
+
+fn materialize_worktree_ref_impl(
+    project_path: &str,
+    branch_ref: &str,
+    state: &AppState,
+) -> Result<MaterializeWorktreeResult, String> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+    let remotes = Remote::list(&repo_path).unwrap_or_default();
+    let normalized_branch = strip_known_remote_prefix(branch_ref, &remotes).to_string();
+
+    let mut existing = crate::commands::cleanup::list_worktrees_impl(project_path, state)?
+        .into_iter()
+        .filter(|info| info.branch == normalized_branch || info.branch == branch_ref)
+        .collect::<Vec<_>>();
+
+    if existing.len() > 1 {
+        return Err(format!(
+            "Multiple worktrees already exist for branch '{}'; resolve the ambiguity before focusing.",
+            normalized_branch
+        ));
+    }
+
+    if let Some(worktree) = existing.pop() {
+        return Ok(MaterializeWorktreeResult {
+            worktree,
+            created: false,
+        });
+    }
+
+    let created = manager
+        .create_for_branch(branch_ref)
+        .map_err(|e| e.to_string())?;
+
+    let worktree = crate::commands::cleanup::list_worktrees_impl(project_path, state)?
+        .into_iter()
+        .find(|info| info.path == created.path.to_string_lossy())
+        .ok_or_else(|| {
+            format!(
+                "Worktree was created for '{}' but could not be resolved in the refreshed listing.",
+                branch_ref
+            )
+        })?;
+
+    Ok(MaterializeWorktreeResult {
+        worktree,
+        created: true,
+    })
+}
+
 fn build_last_tool_usage_map(repo_path: &Path) -> HashMap<String, String> {
     gwt_core::config::get_last_tool_usage_map(repo_path)
         .into_iter()
@@ -277,9 +474,9 @@ fn with_panic_guard<T>(
 }
 
 #[derive(Debug)]
-struct WorktreeBranchListing {
-    infos: Vec<BranchInfo>,
-    branch_names: Vec<String>,
+pub(crate) struct WorktreeBranchListing {
+    pub(crate) infos: Vec<BranchInfo>,
+    pub(crate) branch_names: Vec<String>,
 }
 
 fn is_unknown_display_name(text: &str) -> bool {
@@ -399,6 +596,252 @@ fn build_issue_display_name_map(
         let issue = fetch_issue_detail(repo_path, issue_number)?;
         Ok((issue.number, issue.title))
     })
+}
+
+fn build_cached_issue_display_name_map(
+    branch_names: &[String],
+    repo_path: &Path,
+    state: &AppState,
+) -> HashMap<String, String> {
+    let cached_titles = build_cached_issue_title_map(state, repo_path);
+    build_issue_display_name_map_with(branch_names.iter(), |issue_number| {
+        cached_titles
+            .get(&issue_number)
+            .cloned()
+            .map(|title| (issue_number, title))
+            .ok_or_else(|| format!("Issue #{issue_number} not found in cache"))
+    })
+}
+
+fn build_session_display_name_map(repo_path: &Path) -> HashMap<String, String> {
+    let manager = match WorktreeManager::new(repo_path) {
+        Ok(manager) => manager,
+        Err(_) => return HashMap::new(),
+    };
+    let worktrees = match manager.list_basic() {
+        Ok(worktrees) => worktrees,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut names = HashMap::new();
+    for worktree in worktrees {
+        let Some(branch_name) = worktree.branch else {
+            continue;
+        };
+        let Some(session) = Session::load_for_worktree(&worktree.path) else {
+            continue;
+        };
+        let Some(display_name) = session
+            .display_name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        names.insert(branch_name, display_name);
+    }
+    names
+}
+
+fn apply_snapshot_display_name(
+    info: &mut BranchInfo,
+    branch_key: &str,
+    session_display_names: &HashMap<String, String>,
+    issue_display_names: &HashMap<String, String>,
+) {
+    if let Some(display_name) = session_display_names.get(branch_key) {
+        info.display_name = Some(display_name.clone());
+        return;
+    }
+    if let Some(display_name) = resolve_auto_display_name(branch_key, issue_display_names, None) {
+        info.display_name = Some(display_name);
+    }
+}
+
+fn branch_inventory_detail_names(
+    entry: &BranchInventorySnapshotEntry,
+    remotes: &[Remote],
+) -> Vec<String> {
+    let mut names = HashSet::new();
+    names.insert(branch_inventory_key(&entry.primary_branch.name, remotes));
+    if let Some(local_branch) = &entry.local_branch {
+        names.insert(branch_inventory_key(&local_branch.name, remotes));
+    }
+    if let Some(remote_branch) = &entry.remote_branch {
+        names.insert(branch_inventory_key(&remote_branch.name, remotes));
+    }
+    names.into_iter().collect()
+}
+
+fn apply_branch_inventory_detail(
+    info: &mut BranchInfo,
+    remotes: &[Remote],
+    last_tool: &HashMap<String, String>,
+    running_branches: &HashSet<String>,
+    meta_map: &HashMap<String, SessionBranchMeta>,
+    summary_cache: &Option<&gwt_core::ai::SessionSummaryCache>,
+    issue_display_names: &HashMap<String, String>,
+) {
+    let branch_key = branch_inventory_key(&info.name, remotes);
+    info.last_tool_usage = last_tool.get(&branch_key).cloned();
+    info.is_agent_running = running_branches.contains(&branch_key);
+    apply_session_meta(
+        info,
+        &branch_key,
+        meta_map,
+        summary_cache,
+        issue_display_names,
+    );
+}
+
+fn build_branch_inventory_detail(
+    snapshot: BranchInventorySnapshotEntry,
+    repo_path: &Path,
+    state: &AppState,
+    remotes: &[Remote],
+) -> BranchInventoryDetail {
+    let last_tool = build_last_tool_usage_map(repo_path);
+    let running_branches = running_agent_branches(state, repo_path);
+    let meta_map = build_session_branch_meta_map(repo_path, state);
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let summary_cache_guard = state.session_summary_cache.lock().ok();
+    let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
+    let branch_names = branch_inventory_detail_names(&snapshot, remotes);
+    let issue_display_names = build_issue_display_name_map(&branch_names, repo_path, state);
+
+    let mut detail = BranchInventoryDetail::from(snapshot);
+    apply_branch_inventory_detail(
+        &mut detail.primary_branch,
+        remotes,
+        &last_tool,
+        &running_branches,
+        &meta_map,
+        &summary_cache,
+        &issue_display_names,
+    );
+    if let Some(local_branch) = detail.local_branch.as_mut() {
+        apply_branch_inventory_detail(
+            local_branch,
+            remotes,
+            &last_tool,
+            &running_branches,
+            &meta_map,
+            &summary_cache,
+            &issue_display_names,
+        );
+    }
+    if let Some(remote_branch) = detail.remote_branch.as_mut() {
+        apply_branch_inventory_detail(
+            remote_branch,
+            remotes,
+            &last_tool,
+            &running_branches,
+            &meta_map,
+            &summary_cache,
+            &issue_display_names,
+        );
+    }
+    detail
+}
+
+fn try_get_branch_inventory_snapshot_cache(
+    state: &AppState,
+    repo_key: &str,
+    refresh_key: u64,
+) -> Option<Vec<BranchInventorySnapshotEntry>> {
+    let guard = state.project_branch_inventory_snapshot_cache.lock().ok()?;
+    let entry = guard.get(repo_key)?;
+    if entry.refresh_key != refresh_key {
+        return None;
+    }
+    Some(entry.entries.clone())
+}
+
+fn put_branch_inventory_snapshot_cache(
+    state: &AppState,
+    repo_key: &str,
+    refresh_key: u64,
+    entries: &[BranchInventorySnapshotEntry],
+) {
+    if let Ok(mut guard) = state.project_branch_inventory_snapshot_cache.lock() {
+        if let Some(existing) = guard.get(repo_key) {
+            if existing.refresh_key > refresh_key {
+                return;
+            }
+        }
+        guard.insert(
+            repo_key.to_string(),
+            crate::state::BranchInventorySnapshotCacheEntry {
+                refresh_key,
+                entries: entries.to_vec(),
+            },
+        );
+    }
+    if let Ok(mut guard) = state.project_branch_inventory_detail_cache.lock() {
+        guard.remove(repo_key);
+    }
+}
+
+fn mark_branch_inventory_snapshot_inflight(state: &AppState, inflight_key: &str) -> bool {
+    if let Ok(mut set) = state.project_branch_inventory_snapshot_inflight.lock() {
+        if set.contains(inflight_key) {
+            return false;
+        }
+        set.insert(inflight_key.to_string());
+        return true;
+    }
+    true
+}
+
+fn clear_branch_inventory_snapshot_inflight(state: &AppState, inflight_key: &str) {
+    if let Ok(mut set) = state.project_branch_inventory_snapshot_inflight.lock() {
+        set.remove(inflight_key);
+    }
+}
+
+fn wait_for_branch_inventory_snapshot_inflight(state: &AppState, inflight_key: &str) {
+    let mut waited_ms: u64 = 0;
+    while waited_ms < BRANCH_INVENTORY_INFLIGHT_WAIT_MS {
+        let still_inflight = state
+            .project_branch_inventory_snapshot_inflight
+            .lock()
+            .map(|set| set.contains(inflight_key))
+            .unwrap_or(false);
+        if !still_inflight {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+        waited_ms += 10;
+    }
+}
+
+fn try_get_branch_inventory_detail_cache(
+    state: &AppState,
+    repo_key: &str,
+    canonical_name: &str,
+) -> Option<BranchInventoryDetail> {
+    let guard = state.project_branch_inventory_detail_cache.lock().ok()?;
+    let repo_entries = guard.get(repo_key)?;
+    repo_entries
+        .get(canonical_name)
+        .map(|entry| entry.detail.clone())
+}
+
+fn put_branch_inventory_detail_cache(
+    state: &AppState,
+    repo_key: &str,
+    canonical_name: &str,
+    detail: &BranchInventoryDetail,
+) {
+    if let Ok(mut guard) = state.project_branch_inventory_detail_cache.lock() {
+        let repo_entries = guard.entry(repo_key.to_string()).or_default();
+        repo_entries.insert(
+            canonical_name.to_string(),
+            crate::state::BranchInventoryDetailCacheEntry {
+                detail: detail.clone(),
+            },
+        );
+    }
 }
 
 fn branch_topic_label(branch_name: &str) -> Option<String> {
@@ -550,10 +993,15 @@ fn apply_session_meta(
     }
 }
 
-fn list_worktree_branches_impl(
+pub(crate) fn list_worktree_branches_impl(
     project_path: &str,
     state: &AppState,
 ) -> Result<WorktreeBranchListing, StructuredError> {
+    let _span = tracing::info_span!(
+        "startup.list_worktree_branches_impl",
+        project_path = %project_path
+    )
+    .entered();
     let project_root = Path::new(project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "list_worktree_branches"))?;
@@ -657,6 +1105,164 @@ fn list_remote_branches_impl(
     Ok(infos)
 }
 
+fn list_local_inventory_branches_impl(
+    project_path: &str,
+) -> Result<Vec<BranchInfo>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))?;
+    let branches = Branch::list(&repo_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?;
+    Ok(branches.into_iter().map(BranchInfo::from).collect())
+}
+
+fn list_remote_inventory_branches_impl(
+    project_path: &str,
+) -> Result<Vec<BranchInfo>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))?;
+    let branches = if is_bare_repository(&repo_path) {
+        Branch::list_remote_from_origin(&repo_path)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?
+    } else {
+        Branch::list_remote(&repo_path)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?
+    };
+    Ok(branches.into_iter().map(BranchInfo::from).collect())
+}
+
+fn list_branch_inventory_worktrees_impl(
+    project_path: &str,
+) -> Result<Vec<BranchInventoryWorktree>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))?;
+    let manager = WorktreeManager::new(&repo_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?;
+    let worktrees = manager
+        .list_basic()
+        .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?;
+    Ok(worktrees
+        .into_iter()
+        .filter(|worktree| worktree.is_active())
+        .filter_map(|worktree| {
+            let branch = worktree.branch?;
+            Some(BranchInventoryWorktree {
+                path: worktree.path.to_string_lossy().to_string(),
+                branch,
+            })
+        })
+        .collect())
+}
+
+pub(crate) fn list_branch_inventory_impl(
+    project_path: &str,
+    refresh_key: u64,
+    state: &AppState,
+) -> Result<Vec<BranchInventorySnapshotEntry>, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))?;
+    let repo_key = repo_path.to_string_lossy().to_string();
+    if let Some(hit) = try_get_branch_inventory_snapshot_cache(state, &repo_key, refresh_key) {
+        return Ok(hit);
+    }
+    let inflight_key = format!("{repo_key}::{refresh_key}");
+    let fetch_owner = mark_branch_inventory_snapshot_inflight(state, &inflight_key);
+    if !fetch_owner {
+        wait_for_branch_inventory_snapshot_inflight(state, &inflight_key);
+        if let Some(hit) = try_get_branch_inventory_snapshot_cache(state, &repo_key, refresh_key) {
+            return Ok(hit);
+        }
+    }
+
+    let result = (|| {
+        let remotes = Remote::list(&repo_path).unwrap_or_default();
+        let mut local = list_local_inventory_branches_impl(project_path)?;
+        let mut remote = list_remote_inventory_branches_impl(project_path)?;
+        let worktrees = list_branch_inventory_worktrees_impl(project_path)?;
+        let session_display_names = build_session_display_name_map(&repo_path);
+        let branch_names = local
+            .iter()
+            .chain(remote.iter())
+            .map(|branch| branch_inventory_key(&branch.name, &remotes))
+            .collect::<Vec<_>>();
+        let issue_display_names =
+            build_cached_issue_display_name_map(&branch_names, &repo_path, state);
+        for info in &mut local {
+            let branch_key = branch_inventory_key(&info.name, &remotes);
+            apply_snapshot_display_name(
+                info,
+                &branch_key,
+                &session_display_names,
+                &issue_display_names,
+            );
+        }
+        for info in &mut remote {
+            let branch_key = branch_inventory_key(&info.name, &remotes);
+            apply_snapshot_display_name(
+                info,
+                &branch_key,
+                &session_display_names,
+                &issue_display_names,
+            );
+        }
+        let entries = build_branch_inventory_snapshot_entries(local, remote, worktrees, &remotes);
+        put_branch_inventory_snapshot_cache(state, &repo_key, refresh_key, &entries);
+        Ok(entries)
+    })();
+
+    if fetch_owner {
+        clear_branch_inventory_snapshot_inflight(state, &inflight_key);
+    }
+
+    result
+}
+
+pub(crate) fn get_branch_inventory_detail_impl(
+    project_path: &str,
+    canonical_name: &str,
+    force_refresh: bool,
+    state: &AppState,
+) -> Result<BranchInventoryDetail, StructuredError> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_branch_inventory_detail"))?;
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let remotes = Remote::list(&repo_path).unwrap_or_default();
+    let canonical_name = branch_inventory_key(canonical_name, &remotes);
+
+    if !force_refresh {
+        if let Some(hit) = try_get_branch_inventory_detail_cache(state, &repo_key, &canonical_name)
+        {
+            return Ok(hit);
+        }
+    }
+
+    let refresh_key = state
+        .project_branch_inventory_snapshot_cache
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(&repo_key).map(|entry| entry.refresh_key))
+        .unwrap_or(0);
+    let snapshots = list_branch_inventory_impl(project_path, refresh_key, state)?;
+    let snapshot = snapshots
+        .into_iter()
+        .find(|entry| entry.canonical_name == canonical_name)
+        .ok_or_else(|| {
+            StructuredError::internal(
+                &format!("Branch inventory detail not found for '{}'", canonical_name),
+                "get_branch_inventory_detail",
+            )
+        })?;
+    let detail = build_branch_inventory_detail(snapshot, &repo_path, state, &remotes);
+    put_branch_inventory_detail_cache(state, &repo_key, &canonical_name, &detail);
+    Ok(detail)
+}
+
+const LIST_BRANCH_INVENTORY_WARN_THRESHOLD_MS: u128 = 500;
+
 /// List all local branches in a repository
 #[instrument(skip_all, fields(command = "list_branches", project_path))]
 #[tauri::command]
@@ -699,6 +1305,76 @@ pub fn list_branches(
     })
 }
 
+#[instrument(skip_all, fields(command = "list_branch_inventory", project_path))]
+#[tauri::command]
+pub async fn list_branch_inventory(
+    project_path: String,
+    refresh_key: Option<u64>,
+    app_handle: AppHandle,
+) -> Result<Vec<BranchInventorySnapshotEntry>, StructuredError> {
+    let started = Instant::now();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        with_panic_guard("listing branch inventory", "list_branch_inventory", || {
+            list_branch_inventory_impl(&project_path, refresh_key.unwrap_or(0), &state)
+        })
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Unexpected error while listing branch inventory: {e}"),
+            "list_branch_inventory",
+        )
+    })??;
+
+    let elapsed_ms = started.elapsed().as_millis();
+    if elapsed_ms > LIST_BRANCH_INVENTORY_WARN_THRESHOLD_MS {
+        warn!(
+            category = "branches",
+            elapsed_ms,
+            reason = "explicit-refresh",
+            "list_branch_inventory took longer than expected"
+        );
+    }
+
+    Ok(result)
+}
+
+#[instrument(
+    skip_all,
+    fields(command = "get_branch_inventory_detail", project_path, canonical_name)
+)]
+#[tauri::command]
+pub async fn get_branch_inventory_detail(
+    project_path: String,
+    canonical_name: String,
+    force_refresh: Option<bool>,
+    app_handle: AppHandle,
+) -> Result<BranchInventoryDetail, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        with_panic_guard(
+            "getting branch inventory detail",
+            "get_branch_inventory_detail",
+            || {
+                get_branch_inventory_detail_impl(
+                    &project_path,
+                    &canonical_name,
+                    force_refresh.unwrap_or(false),
+                    &state,
+                )
+            },
+        )
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Unexpected error while getting branch inventory detail: {e}"),
+            "get_branch_inventory_detail",
+        )
+    })?
+}
+
 /// List branches that currently have a local worktree (gwt "Local" view)
 #[instrument(skip_all, fields(command = "list_worktree_branches", project_path))]
 #[tauri::command]
@@ -706,6 +1382,8 @@ pub async fn list_worktree_branches(
     project_path: String,
     app_handle: AppHandle,
 ) -> Result<Vec<BranchInfo>, StructuredError> {
+    let started = Instant::now();
+    let project_path_for_warn = project_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         with_panic_guard(
             "listing worktree branches",
@@ -735,6 +1413,18 @@ pub async fn list_worktree_branches(
             &format!("Unexpected error while listing worktree branches: {e}"),
             "list_worktree_branches",
         )
+    })
+    .inspect(|_result| {
+        let elapsed = started.elapsed();
+        if elapsed > LIST_WORKTREE_BRANCHES_WARN_THRESHOLD {
+            warn!(
+                category = "project_start",
+                command = "list_worktree_branches",
+                project_path = %project_path_for_warn,
+                elapsed_ms = elapsed.as_millis(),
+                "list_worktree_branches took longer than expected"
+            );
+        }
     })?
 }
 
@@ -756,6 +1446,36 @@ pub async fn list_remote_branches(
         StructuredError::internal(
             &format!("Unexpected error while listing remote branches: {e}"),
             "list_remote_branches",
+        )
+    })?
+}
+
+#[instrument(
+    skip_all,
+    fields(command = "materialize_worktree_ref", project_path, branch_ref)
+)]
+#[tauri::command]
+pub async fn materialize_worktree_ref(
+    project_path: String,
+    branch_ref: String,
+    app_handle: AppHandle,
+) -> Result<MaterializeWorktreeResult, StructuredError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_panic_guard(
+            "materializing worktree ref",
+            "materialize_worktree_ref",
+            || {
+                let state = app_handle.state::<AppState>();
+                materialize_worktree_ref_impl(&project_path, &branch_ref, &state)
+                    .map_err(|e| StructuredError::internal(&e, "materialize_worktree_ref"))
+            },
+        )
+    })
+    .await
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Unexpected error while materializing worktree ref: {e}"),
+            "materialize_worktree_ref",
         )
     })?
 }
@@ -939,6 +1659,200 @@ mod tests {
 
         let out = list_remote_branches_impl(&project_path, &state).expect("listing should work");
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_list_branch_inventory_worktrees_impl_includes_main_checkout() {
+        let repo = TempDir::new().expect("temp dir");
+        init_git_repo(repo.path());
+        let project_path = repo.path().to_string_lossy().to_string();
+
+        let out = list_branch_inventory_worktrees_impl(&project_path).expect("listing should work");
+
+        assert_eq!(out.len(), 1);
+        let actual = std::fs::canonicalize(&out[0].path).expect("actual path should exist");
+        let expected = std::fs::canonicalize(&project_path).expect("project path should exist");
+        assert_eq!(actual, expected);
+        assert!(!out[0].branch.trim().is_empty());
+    }
+
+    #[test]
+    fn test_materialize_worktree_ref_impl_reuses_existing_worktree() {
+        let repo = TempDir::new().expect("temp dir");
+        init_git_repo(repo.path());
+        let branch = "feature/browser-open";
+        let create_branch = command("git")
+            .args(["branch", branch])
+            .current_dir(repo.path())
+            .output()
+            .expect("git branch should run");
+        assert!(create_branch.status.success(), "git branch failed");
+
+        let project_path = repo.path().to_string_lossy().to_string();
+        let state = AppState::new();
+
+        let first =
+            materialize_worktree_ref_impl(&project_path, branch, &state).expect("first create");
+        assert!(first.created);
+        assert_eq!(first.worktree.branch, branch);
+
+        let second =
+            materialize_worktree_ref_impl(&project_path, branch, &state).expect("reuse existing");
+        assert!(!second.created);
+        assert_eq!(second.worktree.branch, branch);
+        assert_eq!(second.worktree.path, first.worktree.path);
+    }
+
+    fn make_branch_info(name: &str) -> BranchInfo {
+        BranchInfo {
+            name: name.to_string(),
+            display_name: None,
+            commit: "abc1234".to_string(),
+            is_current: false,
+            is_agent_running: false,
+            agent_status: "unknown".to_string(),
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            divergence_status: "UpToDate".to_string(),
+            commit_timestamp: Some(1_700_000_000_000),
+            is_gone: false,
+            last_tool_usage: None,
+        }
+    }
+
+    fn make_inventory_worktree(path: &str, branch: &str) -> BranchInventoryWorktree {
+        BranchInventoryWorktree {
+            path: path.to_string(),
+            branch: branch.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_build_branch_inventory_snapshot_entries_merges_local_and_remote_refs() {
+        let entries = build_branch_inventory_snapshot_entries(
+            vec![make_branch_info("feature/inventory")],
+            vec![make_branch_info("origin/feature/inventory")],
+            vec![make_inventory_worktree(
+                "/tmp/wt-feature-inventory",
+                "feature/inventory",
+            )],
+            &[Remote::new("origin", "https://example.com/repo.git")],
+        );
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.canonical_name, "feature/inventory");
+        assert!(entry.has_local);
+        assert!(entry.has_remote);
+        assert_eq!(entry.primary_branch.name, "feature/inventory");
+        assert_eq!(
+            entry.resolution_action,
+            BranchInventoryResolutionAction::FocusExisting
+        );
+        assert_eq!(entry.worktree_count, 1);
+        assert_eq!(
+            entry.worktree_path.as_deref(),
+            Some("/tmp/wt-feature-inventory")
+        );
+        assert_eq!(entry.primary_branch.display_name, None);
+        assert_eq!(entry.primary_branch.last_tool_usage, None);
+        assert_eq!(entry.primary_branch.agent_status, "unknown");
+    }
+
+    #[test]
+    fn test_build_branch_inventory_snapshot_entries_marks_ambiguous_worktrees() {
+        let entries = build_branch_inventory_snapshot_entries(
+            vec![make_branch_info("feature/ambiguous")],
+            Vec::new(),
+            vec![
+                make_inventory_worktree("/tmp/wt-a", "feature/ambiguous"),
+                make_inventory_worktree("/tmp/wt-b", "feature/ambiguous"),
+            ],
+            &[Remote::new("origin", "https://example.com/repo.git")],
+        );
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.worktree_count, 2);
+        assert!(entry.worktree_path.is_none());
+        assert_eq!(
+            entry.resolution_action,
+            BranchInventoryResolutionAction::ResolveAmbiguity
+        );
+    }
+
+    #[test]
+    fn test_apply_snapshot_display_name_prefers_session_name_then_cached_issue() {
+        let mut info = make_branch_info("feature/issue-1644");
+        let session_display_names = HashMap::from([(
+            "feature/issue-1644".to_string(),
+            "Custom Display Name".to_string(),
+        )]);
+        let issue_display_names = HashMap::from([(
+            "feature/issue-1644".to_string(),
+            "#1644 Worktree管理".to_string(),
+        )]);
+
+        apply_snapshot_display_name(
+            &mut info,
+            "feature/issue-1644",
+            &session_display_names,
+            &issue_display_names,
+        );
+        assert_eq!(info.display_name.as_deref(), Some("Custom Display Name"));
+
+        let mut issue_only = make_branch_info("feature/issue-1644");
+        apply_snapshot_display_name(
+            &mut issue_only,
+            "feature/issue-1644",
+            &HashMap::new(),
+            &issue_display_names,
+        );
+        assert_eq!(
+            issue_only.display_name.as_deref(),
+            Some("#1644 Worktree管理")
+        );
+    }
+
+    #[test]
+    fn test_put_branch_inventory_snapshot_cache_keeps_newer_refresh_key() {
+        let state = AppState::new();
+        let repo_key = "repo";
+
+        let newer = vec![BranchInventorySnapshotEntry {
+            id: "feature/new".to_string(),
+            canonical_name: "feature/new".to_string(),
+            primary_branch: make_branch_info("feature/new"),
+            local_branch: None,
+            remote_branch: None,
+            has_local: true,
+            has_remote: false,
+            worktree_path: None,
+            worktree_count: 0,
+            resolution_action: BranchInventoryResolutionAction::CreateWorktree,
+        }];
+        put_branch_inventory_snapshot_cache(&state, repo_key, 2, &newer);
+
+        let older = vec![BranchInventorySnapshotEntry {
+            id: "feature/old".to_string(),
+            canonical_name: "feature/old".to_string(),
+            primary_branch: make_branch_info("feature/old"),
+            local_branch: None,
+            remote_branch: None,
+            has_local: true,
+            has_remote: false,
+            worktree_path: None,
+            worktree_count: 0,
+            resolution_action: BranchInventoryResolutionAction::CreateWorktree,
+        }];
+        put_branch_inventory_snapshot_cache(&state, repo_key, 1, &older);
+
+        let hit = try_get_branch_inventory_snapshot_cache(&state, repo_key, 2)
+            .expect("newer cache should remain");
+        assert_eq!(hit[0].canonical_name, "feature/new");
+        assert!(try_get_branch_inventory_snapshot_cache(&state, repo_key, 1).is_none());
     }
 
     // --- display_name tests ---

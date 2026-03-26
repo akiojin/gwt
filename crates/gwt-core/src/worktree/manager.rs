@@ -8,6 +8,7 @@ use super::{CleanupCandidate, Worktree, WorktreeLocation, WorktreePath, Worktree
 use crate::{
     error::{GwtError, Result},
     git::{get_main_repo_root, is_bare_repository, Branch, Remote, Repository},
+    logging::{log_flow_start, log_flow_success},
 };
 
 /// Protected branch names that cannot be deleted
@@ -344,6 +345,7 @@ impl WorktreeManager {
     /// Create a new worktree for an existing branch
     #[instrument(skip(self))]
     pub fn create_for_branch(&self, branch_name: &str) -> Result<Worktree> {
+        log_flow_start("worktree", "create_for_branch");
         debug!(
             category = "worktree",
             branch = branch_name,
@@ -649,6 +651,7 @@ impl WorktreeManager {
             path = %worktree.path.display(),
             "Worktree created for existing branch"
         );
+        log_flow_success("worktree", "create_for_branch");
         Ok(worktree)
     }
 
@@ -659,6 +662,7 @@ impl WorktreeManager {
         branch_name: &str,
         base_branch: Option<&str>,
     ) -> Result<Worktree> {
+        log_flow_start("worktree", "create_new_branch");
         debug!(
             category = "worktree",
             branch = branch_name,
@@ -680,10 +684,11 @@ impl WorktreeManager {
 
         // Check if branch already exists
         if Branch::exists(&self.repo_root, branch_name)? {
-            error!(
-                category = "worktree",
-                branch = branch_name,
-                "Branch already exists"
+            crate::logging::log_incident(
+                "worktree",
+                "create_new_branch",
+                Some("WORKTREE_BRANCH_ALREADY_EXISTS"),
+                &format!("Branch already exists: {}", branch_name),
             );
             return Err(GwtError::BranchAlreadyExists {
                 name: branch_name.to_string(),
@@ -816,13 +821,26 @@ impl WorktreeManager {
                 .args(["reset", "--hard", base])
                 .current_dir(&path)
                 .output()
-                .map_err(|e| GwtError::WorktreeCreateFailed {
-                    reason: e.to_string(),
+                .map_err(|e| {
+                    crate::logging::log_incident(
+                        "worktree",
+                        "create_new_branch",
+                        Some("WORKTREE_RESET_FAILED"),
+                        &e.to_string(),
+                    );
+                    GwtError::WorktreeCreateFailed {
+                        reason: e.to_string(),
+                    }
                 })?;
             if !reset_output.status.success() {
-                return Err(GwtError::WorktreeCreateFailed {
-                    reason: String::from_utf8_lossy(&reset_output.stderr).to_string(),
-                });
+                let stderr = String::from_utf8_lossy(&reset_output.stderr).to_string();
+                crate::logging::log_incident(
+                    "worktree",
+                    "create_new_branch",
+                    Some("WORKTREE_RESET_FAILED"),
+                    &stderr,
+                );
+                return Err(GwtError::WorktreeCreateFailed { reason: stderr });
             }
             drop(wt_repo);
         }
@@ -865,12 +883,14 @@ impl WorktreeManager {
             path = %worktree.path.display(),
             "Worktree created with new branch"
         );
+        log_flow_success("worktree", "create_new_branch");
         Ok(worktree)
     }
 
     /// Remove a worktree by path
     #[instrument(skip(self))]
     pub fn remove(&self, path: &Path, force: bool) -> Result<()> {
+        log_flow_start("worktree", "remove_worktree");
         debug!(
             category = "worktree",
             path = %path.display(),
@@ -890,10 +910,11 @@ impl WorktreeManager {
         // Check for protected branch
         if let Some(ref branch) = wt.branch {
             if Self::is_protected(branch) && !force {
-                warn!(
-                    category = "worktree",
-                    branch = branch.as_str(),
-                    "Attempted to remove protected branch worktree"
+                crate::logging::log_incident(
+                    "worktree",
+                    "remove",
+                    Some("WORKTREE_PROTECTED_BRANCH"),
+                    &format!("Attempted to remove protected branch worktree: {}", branch),
                 );
                 return Err(GwtError::ProtectedBranch {
                     branch: branch.clone(),
@@ -903,10 +924,11 @@ impl WorktreeManager {
 
         // Check for uncommitted changes
         if wt.has_changes && !force {
-            warn!(
-                category = "worktree",
-                path = %path.display(),
-                "Attempted to remove worktree with uncommitted changes"
+            crate::logging::log_incident(
+                "worktree",
+                "remove",
+                Some("WORKTREE_UNCOMMITTED_CHANGES"),
+                &format!("Worktree has uncommitted changes: {}", path.display()),
             );
             return Err(GwtError::UncommittedChanges);
         }
@@ -923,6 +945,7 @@ impl WorktreeManager {
             "Worktree removed"
         );
 
+        log_flow_success("worktree", "remove_worktree");
         Ok(())
     }
 
