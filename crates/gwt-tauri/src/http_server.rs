@@ -168,10 +168,7 @@ fn build_router() -> Router {
             "/get_git_change_summary",
             post(handle_get_git_change_summary),
         )
-        .route(
-            "/get_branch_diff_files",
-            post(handle_get_branch_diff_files),
-        )
+        .route("/get_branch_diff_files", post(handle_get_branch_diff_files))
         .route("/get_branch_commits", post(handle_get_branch_commits))
         .route(
             "/get_working_tree_status",
