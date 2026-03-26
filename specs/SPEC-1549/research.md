@@ -1,0 +1,5 @@
+- LLM function calling 設計: Lead 専用 SPEC 内蔵ツールの function calling スキーマ設計。OpenAI / Anthropic / Google の function calling 仕様差異を調査し、共通インターフェースを定義する
+- SPEC 内蔵ツール設計: gwt-spec-ops スキルとの機能差分を明確化し、Lead AI セッション内から直接呼び出せる形式（tool definition）を設計する
+- Current repo implementation and existing tests must be compared against this spec before changes land
+- Dependency / plugin / asset constraints specific to this spec should be captured here as they are validated
+- Any divergence between the issue body and the current code should be recorded here before implementation

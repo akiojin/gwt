@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "$lib/tauriInvoke";
   import type { ProjectIndexSearchResult } from "../types";
 
   let { projectPath }: { projectPath: string } = $props();

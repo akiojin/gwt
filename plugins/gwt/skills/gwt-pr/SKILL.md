@@ -24,11 +24,13 @@ Create or update GitHub Pull Requests with the gh CLI using a detailed body temp
    - Primary lookup path:
      - `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100`
 5. **If no PR exists** → create a new PR.
-6. **If any PR exists and is NOT merged** (`mergedAt` is null) → push only and finish (do **not** create a new PR).
-   - This applies to OPEN or CLOSED (unmerged) PRs.
+6. **If any OPEN PR exists and is NOT merged** (`state == open` and `mergedAt` is null) → push only and finish (do **not** create a new PR).
+   - Only an OPEN PR blocks new PR creation.
+   - CLOSED and unmerged PRs do **not** block creating a new PR.
    - Only update title/body/labels if the user explicitly requests changes.
-7. **If all PRs for the head are merged** → check for post-merge commits (see below).
-8. **If multiple PRs exist for the head** → use the most recently updated PR for reporting, but the create vs push decision is based on `mergedAt`.
+7. **If no OPEN unmerged PR exists and at least one PR for the head is merged** → check for post-merge commits (see below).
+8. **If the only existing PRs are CLOSED and unmerged** → create a new PR.
+9. **If multiple PRs exist for the head** → use the most recently updated PR for reporting, but the create vs push decision is based on open-unmerged vs merged state.
 
 ## Post-merge commit check (critical)
 
@@ -42,7 +44,12 @@ When all PRs for the head branch are merged, you **must** check whether there ar
    - `git rev-list --count origin/<head>..HEAD`
 5. **If the upstream comparison returns `0` or fails**, compare against the base branch:
    - `git rev-list --count origin/<base>..HEAD`
-6. **Decision**:
+6. **Before creating a PR from post-merge commit counts, verify the branch still differs from the base branch**:
+   - `git diff --quiet origin/<base>...HEAD --`
+   - Exit code `1` → a PR-worthy diff exists; proceed
+   - Exit code `0` → no PR-worthy diff remains; finish with `NO ACTION`
+   - Any other failure → stop with `MANUAL CHECK`
+7. **Decision**:
    - If the selected count is greater than 0 → create a new PR
    - If both upstream and base comparisons report `0` → report "No new changes since merge" and finish
    - If both fallback comparisons fail → stop and report `MANUAL CHECK`
@@ -150,12 +157,15 @@ Next
    - Use the REST pull-request list endpoint as the primary transport.
    - Use decision rules above to pick action.
    - Treat `merged_at` as the source of truth for "merged".
+   - Treat `state == open && merged_at == null` as the source of truth for "existing active PR".
 
-6. **If all PRs are merged, perform post-merge commit check**
+6. **If no OPEN unmerged PR exists and at least one PR is merged, perform post-merge commit check**
    - Get merge commit from the latest merged item returned by `GET /repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>`
    - If the merge commit is an ancestor of `HEAD`, count `git rev-list --count <merge_commit>..HEAD`
    - If the merge commit is missing or not an ancestor, count `git rev-list --count origin/<head>..HEAD` first
    - If the upstream count is `0`, still count `git rev-list --count origin/<base>..HEAD` before concluding `NO_ACTION`
+   - If any count is greater than `0`, verify `git diff --quiet origin/<base>...HEAD --` before creating a PR
+   - If the base compare is empty, return `NO ACTION` because merged base commits alone do not justify a new PR
    - Only if both fallback comparisons fail, stop with `MANUAL CHECK`
    - If the selected count is 0 → finish with message "No new changes since merge"
    - If the selected count is >0 → proceed to create new PR
@@ -203,6 +213,15 @@ head=$(git rev-parse --abbrev-ref HEAD)
 base=develop
 PR_BODY_TEMPLATE="${CLAUDE_PLUGIN_ROOT}/skills/gwt-pr/references/pr-body-template.md"
 
+base_compare_has_diff() {
+  git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
+  case $? in
+    0) echo "no" ;;
+    1) echo "yes" ;;
+    *) echo "" ;;
+  esac
+}
+
 if [ ! -f "$PR_BODY_TEMPLATE" ]; then
   echo "PR template not found: $PR_BODY_TEMPLATE" >&2
   exit 1
@@ -243,12 +262,16 @@ repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 owner="${repo_slug%%/*}"
 pr_json=$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")
 pr_count=$(echo "$pr_json" | jq 'length')
-unmerged_count=$(echo "$pr_json" | jq 'map(select(.merged_at == null)) | length')
+open_unmerged_count=$(echo "$pr_json" | jq 'map(select(.state == "open" and .merged_at == null)) | length')
+merged_count=$(echo "$pr_json" | jq 'map(select(.merged_at != null)) | length')
 
 if [ "$pr_count" -eq 0 ]; then
   action=create
-elif [ "$unmerged_count" -gt 0 ]; then
+elif [ "$open_unmerged_count" -gt 0 ]; then
   action=push_only
+elif [ "$merged_count" -eq 0 ]; then
+  # Only closed, unmerged PRs exist for this head. They do not block a new PR.
+  action=create
 else
   # All PRs are merged - check for post-merge commits
   merge_commit=$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')
@@ -261,8 +284,17 @@ else
 
   if [ -n "$new_commits" ]; then
     if [ "$new_commits" -gt 0 ]; then
-      echo "Found $new_commits commit(s) after merge - creating new PR"
-      action=create
+      compare_has_diff="$(base_compare_has_diff)"
+      if [ "$compare_has_diff" = "yes" ]; then
+        echo "Found $new_commits commit(s) after merge and a diff against origin/$base - creating new PR"
+        action=create
+      elif [ "$compare_has_diff" = "no" ]; then
+        echo "No PR-worthy diff remains against origin/$base - nothing to do"
+        action=none
+      else
+        echo "Manual check required: could not compare HEAD against origin/$base" >&2
+        action=manual_check
+      fi
     else
       echo "No new commits since merge - nothing to do"
       action=none
@@ -271,15 +303,33 @@ else
     upstream_commits=$(git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo "")
 
     if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
-      echo "Found $upstream_commits commit(s) ahead of origin/$head - creating new PR"
-      action=create
+      compare_has_diff="$(base_compare_has_diff)"
+      if [ "$compare_has_diff" = "yes" ]; then
+        echo "Found $upstream_commits commit(s) ahead of origin/$head and a diff against origin/$base - creating new PR"
+        action=create
+      elif [ "$compare_has_diff" = "no" ]; then
+        echo "No PR-worthy diff remains against origin/$base - nothing to do"
+        action=none
+      else
+        echo "Manual check required: could not compare HEAD against origin/$base" >&2
+        action=manual_check
+      fi
     else
       fallback_commits=$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "")
 
       if [ -n "$fallback_commits" ]; then
         if [ "$fallback_commits" -gt 0 ]; then
-          echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base - creating new PR"
-          action=create
+          compare_has_diff="$(base_compare_has_diff)"
+          if [ "$compare_has_diff" = "yes" ]; then
+            echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base with a diff - creating new PR"
+            action=create
+          elif [ "$compare_has_diff" = "no" ]; then
+            echo "No PR-worthy diff remains against origin/$base - nothing to do"
+            action=none
+          else
+            echo "Manual check required: could not compare HEAD against origin/$base" >&2
+            action=manual_check
+          fi
         else
           echo "No commits ahead of origin/$head or origin/$base - nothing to do"
           action=none

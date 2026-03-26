@@ -1,5 +1,16 @@
 <script lang="ts">
-  import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
+  import type {
+    BranchBrowserPanelConfig,
+    BranchBrowserPanelState,
+    GitHubIssueInfo,
+    LaunchAgentRequest,
+    Tab,
+    WorktreeInfo,
+  } from "../types";
+  import type {
+    AgentCanvasTileLayout,
+    AgentCanvasViewport,
+  } from "../agentCanvas";
   import type {
     TabDropPosition,
     TabGroupState,
@@ -14,6 +25,8 @@
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
   import ProjectIndexPanel from "./ProjectIndexPanel.svelte";
   import AssistantPanel from "./AssistantPanel.svelte";
+  import AgentCanvasPanel from "./AgentCanvasPanel.svelte";
+  import BranchBrowserPanel from "./BranchBrowserPanel.svelte";
 
   function isAgentOrTerminal(tab: Tab | null | undefined): boolean {
     return tab?.type === "agent" || tab?.type === "terminal";
@@ -24,6 +37,22 @@
     tabsById,
     activeGroupId,
     projectPath,
+    branchBrowserConfig = undefined,
+    currentBranch = "",
+    flatShell = false,
+    selectedCanvasSessionTabId = null,
+    selectedCanvasTileId = null,
+    canvasViewport = undefined,
+    canvasTileLayouts = undefined,
+    canvasWorktrees = [],
+    selectedCanvasWorktreeBranch = null,
+    onCanvasWorktreeSelect = () => {},
+    branchBrowserState = undefined,
+    disableSplit = false,
+    onCanvasSessionSelect = () => {},
+    onCanvasViewportChange = () => {},
+    onCanvasTileLayoutsChange = () => {},
+    onCanvasSelectedTileChange = () => {},
     draggedTabId = null,
     dropTarget = null,
     onGroupFocus,
@@ -38,6 +67,7 @@
     onGroupDrop,
     onSplitDragOver,
     onSplitDrop,
+    onSplitResize = () => {},
     onLaunchAgent: _onLaunchAgent,
     onQuickLaunch: _onQuickLaunch,
     onWorkOnIssue,
@@ -56,6 +86,24 @@
     tabsById: Record<string, Tab>;
     activeGroupId: string;
     projectPath: string;
+    branchBrowserConfig?: BranchBrowserPanelConfig | undefined;
+    currentBranch?: string;
+    flatShell?: boolean;
+    selectedCanvasSessionTabId?: string | null;
+    selectedCanvasTileId?: string | null;
+    canvasViewport?: AgentCanvasViewport | undefined;
+    canvasTileLayouts?: Record<string, AgentCanvasTileLayout> | undefined;
+    canvasWorktrees?: WorktreeInfo[];
+    selectedCanvasWorktreeBranch?: string | null;
+    onCanvasWorktreeSelect?: (branchName: string) => void;
+    branchBrowserState?: BranchBrowserPanelState | undefined;
+    disableSplit?: boolean;
+    onCanvasSessionSelect?: (tabId: string) => void;
+    onCanvasViewportChange?: (viewport: AgentCanvasViewport) => void;
+    onCanvasTileLayoutsChange?: (
+      layouts: Record<string, AgentCanvasTileLayout>,
+    ) => void;
+    onCanvasSelectedTileChange?: (tileId: string | null) => void;
     draggedTabId?: string | null;
     dropTarget?: TabLayoutDropTarget | null;
     onGroupFocus: (groupId: string) => void;
@@ -92,6 +140,7 @@
       direction: TabSplitDirection,
       event: DragEvent,
     ) => void;
+    onSplitResize?: (splitId: string, primaryFraction: number) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
@@ -110,6 +159,19 @@
   let groupTabs = $derived(
     group.tabIds.map((tabId) => tabsById[tabId]).filter(Boolean),
   );
+  let visibleGroupTabs = $derived(
+    groupTabs.filter(
+      (tab) =>
+        tab.type !== "assistant" &&
+        tab.type !== "agent" &&
+        tab.type !== "terminal",
+    ),
+  );
+  let canvasSessionTabs = $derived(
+    Object.values(tabsById).filter(
+      (tab) => tab.type === "agent" || tab.type === "terminal",
+    ),
+  );
   let activeTab = $derived(
     group.activeTabId ? tabsById[group.activeTabId] : null,
   );
@@ -120,11 +182,11 @@
   );
 
   function isPinnedTab(tab: Tab | null | undefined) {
-    return tab?.type === "assistant";
+    return tab?.type === "agentCanvas" || tab?.type === "branchBrowser";
   }
 
   function canSplitCurrentGroup(): boolean {
-    return group.tabIds.length > 1;
+    return !disableSplit && group.tabIds.length > 1;
   }
 
   function handleSplitAction(
@@ -165,6 +227,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="group-pane"
+  class:flat-shell={flatShell}
   role="group"
   class:active-group={isActiveGroup}
   onmousedown={() => onGroupFocus(group.id)}
@@ -178,7 +241,7 @@
     ondragover={(event) => onGroupDragOver(group.id, event)}
     ondrop={(event) => onGroupDrop(group.id, event)}
   >
-    {#each groupTabs as tab (tab.id)}
+    {#each visibleGroupTabs as tab (tab.id)}
       <div
         class="tab"
         role="tab"
@@ -189,7 +252,7 @@
         class:dragging={draggedTabId === tab.id}
         class:drop-before={isTabDropTarget(tab.id, "before")}
         class:drop-after={isTabDropTarget(tab.id, "after")}
-        draggable="true"
+        draggable={!disableSplit}
         title={tab.type === "terminal" ? tab.cwd || "" : ""}
         onclick={() => onTabSelect(group.id, tab.id)}
         onkeydown={(event) => {
@@ -238,56 +301,58 @@
         {:else}
           <span class="tab-label">{tab.label}</span>
         {/if}
-        <details class="tab-actions">
-          <summary
-            class="tab-actions-toggle"
-            onpointerdown={(event) => event.stopPropagation()}
-          >
-            ⋯
-          </summary>
-          <div class="tab-actions-menu">
-            <button
-              type="button"
-              disabled={!canSplitCurrentGroup()}
-              onclick={(event) => {
-                event.stopPropagation();
-                handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "left");
-              }}
+        {#if !disableSplit}
+          <details class="tab-actions">
+            <summary
+              class="tab-actions-toggle"
+              onpointerdown={(event) => event.stopPropagation()}
             >
-              Split Left
-            </button>
-            <button
-              type="button"
-              disabled={!canSplitCurrentGroup()}
-              onclick={(event) => {
-                event.stopPropagation();
-                handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "right");
-              }}
-            >
-              Split Right
-            </button>
-            <button
-              type="button"
-              disabled={!canSplitCurrentGroup()}
-              onclick={(event) => {
-                event.stopPropagation();
-                handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "up");
-              }}
-            >
-              Split Up
-            </button>
-            <button
-              type="button"
-              disabled={!canSplitCurrentGroup()}
-              onclick={(event) => {
-                event.stopPropagation();
-                handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "down");
-              }}
-            >
-              Split Down
-            </button>
-          </div>
-        </details>
+              ⋯
+            </summary>
+            <div class="tab-actions-menu">
+              <button
+                type="button"
+                disabled={!canSplitCurrentGroup()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "left");
+                }}
+              >
+                Split Left
+              </button>
+              <button
+                type="button"
+                disabled={!canSplitCurrentGroup()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "right");
+                }}
+              >
+                Split Right
+              </button>
+              <button
+                type="button"
+                disabled={!canSplitCurrentGroup()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "up");
+                }}
+              >
+                Split Up
+              </button>
+              <button
+                type="button"
+                disabled={!canSplitCurrentGroup()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  handleSplitAction(event.currentTarget.closest("details") as HTMLDetailsElement, tab.id, "down");
+                }}
+              >
+                Split Down
+              </button>
+            </div>
+          </details>
+        {/if}
         {#if !isPinnedTab(tab)}
           <button
             class="tab-close"
@@ -306,40 +371,42 @@
   </div>
 
   <div class="group-content" class:drag-active={draggedTabId !== null}>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="split-target split-target-top"
-      role="presentation"
-      class:active={isSplitTarget("up")}
-      ondragover={(event) => onSplitDragOver(group.id, "up", event)}
-      ondrop={(event) => onSplitDrop(group.id, "up", event)}
-    ></div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="split-target split-target-right"
-      role="presentation"
-      class:active={isSplitTarget("right")}
-      ondragover={(event) => onSplitDragOver(group.id, "right", event)}
-      ondrop={(event) => onSplitDrop(group.id, "right", event)}
-    ></div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="split-target split-target-bottom"
-      role="presentation"
-      class:active={isSplitTarget("down")}
-      ondragover={(event) => onSplitDragOver(group.id, "down", event)}
-      ondrop={(event) => onSplitDrop(group.id, "down", event)}
-    ></div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="split-target split-target-left"
-      role="presentation"
-      class:active={isSplitTarget("left")}
-      ondragover={(event) => onSplitDragOver(group.id, "left", event)}
-      ondrop={(event) => onSplitDrop(group.id, "left", event)}
-    ></div>
+    {#if !disableSplit}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="split-target split-target-top"
+        role="presentation"
+        class:active={isSplitTarget("up")}
+        ondragover={(event) => onSplitDragOver(group.id, "up", event)}
+        ondrop={(event) => onSplitDrop(group.id, "up", event)}
+      ></div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="split-target split-target-right"
+        role="presentation"
+        class:active={isSplitTarget("right")}
+        ondragover={(event) => onSplitDragOver(group.id, "right", event)}
+        ondrop={(event) => onSplitDrop(group.id, "right", event)}
+      ></div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="split-target split-target-bottom"
+        role="presentation"
+        class:active={isSplitTarget("down")}
+        ondragover={(event) => onSplitDragOver(group.id, "down", event)}
+        ondrop={(event) => onSplitDrop(group.id, "down", event)}
+      ></div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="split-target split-target-left"
+        role="presentation"
+        class:active={isSplitTarget("left")}
+        ondragover={(event) => onSplitDragOver(group.id, "left", event)}
+        ondrop={(event) => onSplitDrop(group.id, "left", event)}
+      ></div>
+    {/if}
 
-    {#if groupTabs.length === 0}
+    {#if visibleGroupTabs.length === 0}
       <div class="placeholder">
         <h2>Select a tab</h2>
       </div>
@@ -376,6 +443,39 @@
               />
             {:else if tab.type === "projectIndex"}
               <ProjectIndexPanel {projectPath} />
+            {:else if tab.type === "agentCanvas"}
+              <AgentCanvasPanel
+                {projectPath}
+                {currentBranch}
+                tabs={canvasSessionTabs}
+                worktrees={canvasWorktrees}
+                selectedWorktreeBranch={selectedCanvasWorktreeBranch}
+                onWorktreeSelect={onCanvasWorktreeSelect}
+                selectedSessionTabId={selectedCanvasSessionTabId}
+                persistedSelectedTileId={selectedCanvasTileId}
+                persistedViewport={canvasViewport}
+                persistedTileLayouts={canvasTileLayouts}
+                onSessionSelect={onCanvasSessionSelect}
+                onViewportChange={onCanvasViewportChange}
+                onTileLayoutsChange={onCanvasTileLayoutsChange}
+                onSelectedTileChange={onCanvasSelectedTileChange}
+                onOpenSettings={onOpenSettings ?? (() => {})}
+                {voiceInputEnabled}
+                {voiceInputListening}
+                {voiceInputPreparing}
+                {voiceInputSupported}
+                {voiceInputAvailable}
+                {voiceInputAvailabilityReason}
+                {voiceInputError}
+              />
+            {:else if tab.type === "branchBrowser" && branchBrowserConfig}
+              <BranchBrowserPanel config={{
+                ...branchBrowserConfig,
+                isActive: group.activeTabId === tab.id,
+                initialFilter: branchBrowserState?.filter,
+                initialQuery: branchBrowserState?.query,
+                selectedBranchName: branchBrowserState?.selectedBranchName ?? null,
+              }} />
             {:else if tab.type === "assistant"}
               <AssistantPanel
                 isActive={group.activeTabId === tab.id}
@@ -418,20 +518,33 @@
     min-height: 0;
     overflow: hidden;
     background: var(--bg-primary);
-    border: 1px solid var(--border-color);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-color) 72%, transparent);
   }
 
   .group-pane.active-group {
-    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 36%, var(--border-color));
+  }
+
+  .group-pane.flat-shell,
+  .group-pane.flat-shell.active-group {
+    flex: 1 1 auto;
+    width: 100%;
+    align-self: stretch;
+    box-shadow: none;
   }
 
   .tab-bar {
     display: flex;
     min-height: var(--tab-height);
     background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-subtle);
     overflow-x: auto;
     user-select: none;
+    scrollbar-width: none;
+  }
+
+  .tab-bar::-webkit-scrollbar {
+    display: none;
   }
 
   .tab-bar.drop-target {
@@ -442,24 +555,33 @@
     position: relative;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-2);
     box-sizing: border-box;
-    flex: 0 0 180px;
-    min-width: 180px;
-    max-width: 180px;
-    padding: 0 14px;
-    border-right: 1px solid var(--border-color);
+    flex: 0 0 auto;
+    min-width: 120px;
+    max-width: 200px;
+    padding: 0 var(--space-4);
+    border-right: 1px solid var(--border-subtle);
     cursor: pointer;
     white-space: nowrap;
     user-select: none;
     background: transparent;
+    color: var(--text-muted);
+    font-size: var(--ui-font-sm);
+    font-weight: var(--font-weight-medium);
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .tab:hover {
     color: var(--text-secondary);
+    background: var(--bg-elevated);
   }
 
   .tab.active {
     background: var(--bg-primary);
     color: var(--text-primary);
     border-bottom: 2px solid var(--accent);
+    font-weight: var(--font-weight-semibold);
   }
 
   .tab.dragging {
@@ -552,9 +674,16 @@
     font-size: var(--ui-font-sm);
     font-family: monospace;
     cursor: pointer;
-    padding: 0 2px;
+    padding: 2px;
     line-height: 1;
     flex-shrink: 0;
+    border-radius: var(--radius-sm);
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .tab-close:hover {
+    color: var(--red);
+    background: var(--red-muted);
   }
 
   .tab-actions {
@@ -579,21 +708,31 @@
     right: 0;
     display: flex;
     flex-direction: column;
-    min-width: 132px;
-    padding: 6px;
-    gap: 4px;
+    min-width: 140px;
+    padding: var(--space-1);
+    gap: 2px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
     z-index: 20;
   }
 
   .tab-actions-menu button {
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
-    padding: 6px 8px;
+    padding: var(--space-2) var(--space-3);
     text-align: left;
     cursor: pointer;
+    font-family: inherit;
+    font-size: var(--ui-font-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .tab-actions-menu button:hover:not(:disabled) {
+    background: var(--bg-hover);
   }
 
   .tab-actions-menu button:disabled {
@@ -601,15 +740,12 @@
     opacity: 0.5;
   }
 
-  .tab-close:hover {
-    color: var(--red);
-  }
-
   .group-content {
     position: relative;
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    background: var(--bg-primary);
   }
 
   .panel-wrapper,
@@ -623,7 +759,7 @@
   }
 
   .panel-wrapper {
-    padding: 24px;
+    padding: 0;
   }
 
   .panel-wrapper.active,

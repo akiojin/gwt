@@ -20,4 +20,6 @@ Use this command after a SPEC is execution-ready.
 2. Read `spec.md`, `plan.md`, `tasks.md`, and the latest analysis result for the target `gwt-spec`.
 3. Execute the next incomplete task slice in phase order, writing tests before code where behavior changes.
 4. Update task/progress tracking and run the relevant verification commands.
-5. Keep PR flow moving with `gwt-pr` and `gwt-pr-fix` until the scoped work is complete or a real decision blocker remains.
+5. Reconcile `spec.md`, `tasks.md`, `checklist:acceptance.md`, `checklist:tdd.md`, progress comments, and verification evidence before declaring the SPEC complete.
+6. If reconciliation fails, return to `gwt-spec-ops` instead of leaving false completion markers behind.
+7. Keep PR flow moving with `gwt-pr` and `gwt-pr-fix` until the scoped work is complete or a real decision blocker remains.

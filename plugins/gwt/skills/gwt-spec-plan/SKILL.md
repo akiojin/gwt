@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-plan
-description: "Generate planning artifacts for an existing `gwt-spec`: `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*`, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`."
+description: "Generate `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contracts/*` planning artifacts for an existing SPEC, including a constitution check against `memory/constitution.md`. Use directly or through `gwt-spec-ops`."
 ---
 
 # gwt SPEC Plan
@@ -14,18 +14,18 @@ Use this skill to translate a clarified `spec.md` into implementation-ready plan
 
 ## Required inputs
 
-- `spec.md` artifact from the target `gwt-spec`
+- `spec.md` artifact from the target SPEC directory
 - Repo-level constitution: `memory/constitution.md`
 
 ## Required outputs
 
-Create or update these artifacts as issue comments:
+Create or update these artifacts in the SPEC directory:
 
-- `doc:plan.md`
-- `doc:research.md`
-- `doc:data-model.md`
-- `doc:quickstart.md`
-- `contract:<name>` when interface or schema details are needed
+- `plan.md`
+- `research.md`
+- `data-model.md`
+- `quickstart.md`
+- `contracts/<name>` when interface or schema details are needed
 
 ## `plan.md` structure
 
@@ -41,7 +41,7 @@ Create or update these artifacts as issue comments:
 ## Workflow
 
 1. **Read the source artifacts.**
-   - Load `spec.md` and `memory/constitution.md`.
+   - Load `spec.md` and `.gwt/memory/constitution.md`.
    - Refuse to continue only when `spec.md` is missing or a user decision still blocks planning.
 
 2. **Establish technical context.**
@@ -49,7 +49,7 @@ Create or update these artifacts as issue comments:
    - Record assumptions explicitly.
 
 3. **Run the constitution check.**
-   - Evaluate the work against `memory/constitution.md`.
+   - Evaluate the work against `.gwt/memory/constitution.md`.
    - If a rule is violated, either redesign or record the reason in `Complexity Tracking`.
 
 4. **Produce supporting artifacts.**
@@ -80,28 +80,28 @@ Planning is complete only when:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
-  --issue "<number>" \
+  --spec "<id>" \
   --upsert \
   --artifact "doc:plan.md" \
   --body-file /tmp/plan.md
 
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
-  --issue "<number>" \
+  --spec "<id>" \
   --upsert \
   --artifact "doc:research.md" \
   --body-file /tmp/research.md
 
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
-  --issue "<number>" \
+  --spec "<id>" \
   --upsert \
   --artifact "doc:data-model.md" \
   --body-file /tmp/data-model.md
 
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
-  --issue "<number>" \
+  --spec "<id>" \
   --upsert \
   --artifact "doc:quickstart.md" \
   --body-file /tmp/quickstart.md

@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-resolve
-description: Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing gwt-spec issue, or promoted to a new spec issue, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration.
+description: Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing SPEC, or promoted to a new SPEC, and continue toward resolution. Use `gwt-issue-register` for brand-new work registration.
 metadata:
   short-description: Resolve GitHub Issues through direct fixes or spec workflows
 ---
@@ -14,10 +14,10 @@ Use this skill as the main entrypoint when the user brings a GitHub Issue and wa
 The skill must decide the execution path:
 
 - Direct fix path for clear bugs or small corrective work
-- Existing SPEC path when the Issue belongs in a canonical `gwt-spec` issue
+- Existing SPEC path when the Issue belongs in a canonical SPEC
 - New SPEC path when the Issue needs spec management but no suitable SPEC exists yet
 
-Do not require the Issue author to pre-label or pre-register the work as `gwt-spec`.
+Do not require the Issue author to pre-label or pre-register the work as a SPEC.
 
 ## Overview
 
@@ -27,13 +27,13 @@ Use gh to inspect a GitHub Issue and:
 - Fetch all comments
 - Fetch linked PRs via timeline events
 - Extract error messages, stack traces, file references, code blocks, and cross-references
-- Detect whether the issue is already a spec issue (`gwt-spec` label, `GWT_SPEC_ID` marker, or spec section structure)
+- Detect whether the issue is already a spec issue (has a corresponding local SPEC directory, or body contains spec section structure)
 - Classify the work as BUG / FEATURE / ENHANCEMENT / DOCUMENTATION / QUESTION / UNCLASSIFIED
 - Search the codebase for relevant files
 - Decide whether to fix directly, update an existing SPEC, or register a new SPEC
 - Continue toward resolution instead of stopping at triage
 
-If the issue is already a spec issue, switch to `gwt-spec-ops`.
+If the issue already has a corresponding local SPEC directory, switch to `gwt-spec-ops`.
 
 If the issue is not a spec issue:
 
@@ -49,9 +49,10 @@ Required behavior:
 
 1. Ensure `gh auth status` is valid before any `index-issues` call
 2. Update the Issues index if needed
-3. Run semantic Issue search with queries derived from the current request
-4. Prefer an existing canonical integrated SPEC over a transient point-fix/refactor SPEC
-5. Create a new `gwt-spec` Issue only when no suitable canonical SPEC exists
+3. Run semantic search with queries derived from the current request
+4. Also search local `specs/` directory via `spec_artifact.py --repo . --list-all`
+5. Prefer an existing canonical integrated SPEC over a transient point-fix/refactor SPEC
+6. Create a new SPEC only when no suitable canonical SPEC exists
 
 Do not ask the user whether to use an existing or new SPEC if the repo state and search results make the answer clear.
 
@@ -140,8 +141,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py
    - Check file existence for extracted file references.
 
 4. **Already-SPEC path.**
-   - If labels include `gwt-spec`, or the body contains `<!-- GWT_SPEC_ID:#... -->`, or the body clearly follows the `## Spec` / `## Plan` / `## Tasks` / `## TDD` structure, stop generic issue handling.
-   - Hand off to `gwt-spec-ops` with the issue number and current context.
+   - If a corresponding local SPEC directory exists (check `specs/` directory), or the body clearly follows the `## Spec` / `## Plan` / `## Tasks` / `## TDD` structure, stop generic issue handling.
+   - Hand off to `gwt-spec-ops` with the SPEC ID and current context.
 
 5. **Direct-fix vs spec-needed decision.**
    - Prefer the direct-fix path for clear bugs and small corrective work.
@@ -156,9 +157,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py
 
 7. **Spec-needed path.**
    - Use `gwt-issue-search` before creating or updating any SPEC.
+   - Also search local `specs/` via `spec_artifact.py --repo . --list-all`.
    - Search with at least 2 semantic queries derived from the Issue.
    - If a canonical existing SPEC is found, update that destination and continue with `gwt-spec-ops`.
-   - If no suitable SPEC exists, create the new `gwt-spec` Issue container through `gwt-spec-register`.
+   - If no suitable SPEC exists, create a new local SPEC directory through `gwt-spec-register`.
    - After the target SPEC exists, continue with `gwt-spec-ops`, which owns clarify/plan/tasks/analyze and then implementation.
 
 8. **Produce Issue Analysis Report for non-SPEC issues before execution.**
@@ -249,7 +251,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/gwt-issue-resolve/scripts/inspect_issue.py
 
 10. **Execution handoff or implementation.**
     - Direct-fix path: apply the fix, summarize diffs and tests, then update the issue and PR linkage.
-    - SPEC path: pass the resolved SPEC issue number and context into `gwt-spec-ops`, then let that workflow continue end-to-end.
+    - SPEC path: pass the resolved SPEC ID and context into `gwt-spec-ops`, then let that workflow continue end-to-end.
 
 ## Bundled Resources
 

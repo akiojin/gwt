@@ -30,6 +30,33 @@ export interface BranchInfo {
   last_tool_usage?: string | null;
 }
 
+export type BranchInventoryResolutionAction =
+  | "focusExisting"
+  | "createWorktree"
+  | "resolveAmbiguity";
+
+export interface BranchInventorySnapshotEntry {
+  id: string;
+  canonical_name: string;
+  primary_branch: BranchInfo;
+  local_branch?: BranchInfo | null;
+  remote_branch?: BranchInfo | null;
+  has_local: boolean;
+  has_remote: boolean;
+  worktree_path?: string | null;
+  worktree_count: number;
+  resolution_action: BranchInventoryResolutionAction;
+}
+
+export interface BranchInventoryDetail extends BranchInventorySnapshotEntry {}
+
+export type BranchInventoryEntry = BranchInventorySnapshotEntry;
+
+export interface MaterializeWorktreeResult {
+  worktree: WorktreeInfo;
+  created: boolean;
+}
+
 export interface ProjectInfo {
   path: string;
   repo_name: string;
@@ -114,6 +141,8 @@ export interface SettingsData {
   default_base_branch: string;
   worktree_root: string;
   debug: boolean;
+  /** Enable frontend/backend profiling and Chrome Trace output. */
+  profiling: boolean;
   log_dir?: string | null;
   log_retention_days: number;
   agent_default?: string | null;
@@ -205,10 +234,13 @@ export interface Tab {
   id: string;
   label: string;
   branchName?: string;
+  worktreePath?: string;
   agentId?: AgentId;
   type:
     | "summary"
+    | "agentCanvas"
     | "agent"
+    | "branchBrowser"
     | "settings"
     | "versionHistory"
     | "terminal"
@@ -220,6 +252,36 @@ export interface Tab {
   paneId?: string;
   cwd?: string;
   issueNumber?: number;
+}
+
+export interface BranchBrowserPanelConfig {
+  projectPath: string;
+  refreshKey: number;
+  isActive?: boolean;
+  selectedBranch?: BranchInfo | null;
+  currentBranch: string;
+  agentTabBranches: string[];
+  activeAgentTabBranch?: string | null;
+  appLanguage: SettingsData["app_language"];
+  initialFilter?: "Local" | "Remote" | "All";
+  initialQuery?: string;
+  selectedBranchName?: string | null;
+  onStateChange?: (state: BranchBrowserPanelState) => void;
+  onBranchSelect: (branch: BranchInfo) => void;
+  onBranchActivate?: (branch: BranchInfo) => void;
+  onCleanupRequest?: (preSelectedBranch?: string) => void;
+  onLaunchAgent?: () => void;
+  onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
+  onNewTerminal?: () => void;
+  onOpenDocsEditor?: (worktreePath: string) => Promise<void> | void;
+  onOpenCiLog?: (runId: number) => void;
+  onDisplayNameChanged?: () => void;
+}
+
+export interface BranchBrowserPanelState {
+  filter: "Local" | "Remote" | "All";
+  query: string;
+  selectedBranchName: string | null;
 }
 
 export interface ToolSessionEntry {
