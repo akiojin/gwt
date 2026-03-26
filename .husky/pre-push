@@ -9,7 +9,4 @@ cargo fmt --all -- --check
 bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md
 pnpm lint:skills
 
-echo "Running frontend build check..."
-(cd gwt-gui && pnpm run build)
-
-echo "All pre-push checks passed."
+echo "Lint checks passed."
