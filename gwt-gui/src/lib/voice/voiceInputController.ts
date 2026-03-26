@@ -125,7 +125,7 @@ async function defaultInvokeTauri<T>(
   command: string,
   payload?: unknown,
 ): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core");
+  const { invoke } = await import("$lib/tauriInvoke");
   return invoke<T>(command, payload as Record<string, unknown> | undefined);
 }
 
