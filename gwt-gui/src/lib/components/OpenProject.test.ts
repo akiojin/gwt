@@ -7,14 +7,11 @@ const listenMock = vi.fn();
 
 vi.mock("$lib/tauriInvoke", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
+  listen: (...args: unknown[]) => listenMock(...args),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...args: unknown[]) => openDialogMock(...args),
-}));
-
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: (...args: unknown[]) => listenMock(...args),
 }));
 
 async function renderOpenProject(props?: any) {

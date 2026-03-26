@@ -3,8 +3,9 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
+  listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
 vi.mock("../openExternalUrl", () => ({

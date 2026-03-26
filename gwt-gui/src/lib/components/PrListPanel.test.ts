@@ -13,10 +13,7 @@ const invokeMock = vi.fn();
 // all dynamic import paths resolve correctly in Svelte 5 $effect chains
 vi.mock("$lib/tauriInvoke", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
-}));
-
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (...args: unknown[]) => invokeMock(...args),
+  listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
 vi.mock("../openExternalUrl", () => ({
