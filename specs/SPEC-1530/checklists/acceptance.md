@@ -1,0 +1,4 @@
+- [x] Mixed `closed/open + merged` histories are warning in Cleanup
+- [x] Latest PR display remains available without driving branch safety
+- [x] All merged branches still allow post-merge checks
+- [x] Rust and frontend regression tests cover the new rules

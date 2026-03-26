@@ -152,6 +152,87 @@ function sanitizeActiveGroupId(
   return groupIds[0] ?? "group-unknown";
 }
 
+function sanitizeRuntimeRoot(
+  node: TabLayoutNode,
+  knownGroupIds: Set<string>,
+): TabLayoutNode | null {
+  if (node.type === "group") {
+    return knownGroupIds.has(node.groupId) ? node : null;
+  }
+
+  const first = sanitizeRuntimeRoot(node.children[0], knownGroupIds);
+  const second = sanitizeRuntimeRoot(node.children[1], knownGroupIds);
+
+  if (!first && !second) return null;
+  if (!first) return second;
+  if (!second) return first;
+
+  const [primary, secondary] = node.sizes;
+  const normalizedPrimary =
+    Number.isFinite(primary) && primary > 0 && primary < 1 ? primary : 0.5;
+
+  return {
+    ...node,
+    sizes: [normalizedPrimary, 1 - normalizedPrimary],
+    children: [first, second],
+  };
+}
+
+function dedupeTabIds(tabIds: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tabId of tabIds) {
+    if (!tabId || seen.has(tabId)) continue;
+    seen.add(tabId);
+    out.push(tabId);
+  }
+  return out;
+}
+
+function collapseToSingleGroup(
+  groups: Record<string, TabGroupState>,
+  preferredGroupId: string | null,
+  preferredActiveTabId: string | null,
+  orderedTabIds: string[],
+): TabLayoutState {
+  const groupIds = Object.keys(groups);
+  if (groupIds.length === 0) {
+    return createInitialTabLayout([], null);
+  }
+
+  const targetGroupId =
+    (preferredGroupId && groups[preferredGroupId] && preferredGroupId) ||
+    groupIds[0] ||
+    "group-unknown";
+  const targetGroup = groups[targetGroupId];
+  const fallbackOrder = dedupeTabIds(
+    orderedTabIds.length > 0
+      ? orderedTabIds
+      : groupIds.flatMap((groupId) => groups[groupId]?.tabIds ?? []),
+  );
+  const activeTabId =
+    preferredActiveTabId && fallbackOrder.includes(preferredActiveTabId)
+      ? preferredActiveTabId
+      : targetGroup?.activeTabId && fallbackOrder.includes(targetGroup.activeTabId)
+        ? targetGroup.activeTabId
+        : (fallbackOrder[0] ?? null);
+
+  return {
+    groups: {
+      [targetGroupId]: {
+        id: targetGroupId,
+        tabIds: fallbackOrder,
+        activeTabId,
+      },
+    },
+    root: {
+      type: "group",
+      groupId: targetGroupId,
+    },
+    activeGroupId: targetGroupId,
+  };
+}
+
 export function createInitialTabLayout(
   tabs: Pick<Tab, "id">[],
   activeTabId: string | null,
@@ -171,6 +252,85 @@ export function createInitialTabLayout(
       groupId,
     },
     activeGroupId: groupId,
+  };
+}
+
+export function normalizeTabLayoutState(
+  layout: TabLayoutState,
+  preferredActiveTabIdOverride: string | null = null,
+): TabLayoutState {
+  const normalizedGroups: Record<string, TabGroupState> = {};
+
+  for (const [groupId, group] of Object.entries(layout.groups)) {
+    const tabIds = dedupeTabIds(group.tabIds);
+    if (tabIds.length === 0) continue;
+    normalizedGroups[groupId] = {
+      id: group.id,
+      tabIds,
+      activeTabId:
+        group.activeTabId && tabIds.includes(group.activeTabId)
+          ? group.activeTabId
+          : (tabIds[0] ?? null),
+    };
+  }
+
+  const groupIds = Object.keys(normalizedGroups);
+  if (groupIds.length === 0) {
+    return createInitialTabLayout([], null);
+  }
+
+  const knownGroupIds = new Set(groupIds);
+  const sanitizedRoot = sanitizeRuntimeRoot(layout.root, knownGroupIds);
+  const preferredActiveTabId =
+    preferredActiveTabIdOverride ??
+    normalizedGroups[layout.activeGroupId]?.activeTabId ??
+    normalizedGroups[groupIds[0]]?.activeTabId ??
+    null;
+
+  if (!sanitizedRoot) {
+    return collapseToSingleGroup(
+      normalizedGroups,
+      layout.activeGroupId,
+      preferredActiveTabId,
+      groupIds.flatMap((groupId) => normalizedGroups[groupId]?.tabIds ?? []),
+    );
+  }
+
+  const renderedGroupIds = collectGroupIds(sanitizedRoot);
+  const rootOrderedTabIds = dedupeTabIds(
+    renderedGroupIds.flatMap((groupId) => normalizedGroups[groupId]?.tabIds ?? []),
+  );
+
+  if (renderedGroupIds.length !== groupIds.length) {
+    return collapseToSingleGroup(
+      normalizedGroups,
+      renderedGroupIds[0] ?? layout.activeGroupId,
+      preferredActiveTabId,
+      [
+        ...rootOrderedTabIds,
+        ...groupIds.flatMap((groupId) => normalizedGroups[groupId]?.tabIds ?? []),
+      ],
+    );
+  }
+
+  if (renderedGroupIds.length === 1) {
+    const groupId = renderedGroupIds[0] ?? groupIds[0] ?? "group-unknown";
+    return {
+      groups: {
+        [groupId]: normalizedGroups[groupId],
+      },
+      root: {
+        type: "group",
+        groupId,
+      },
+      activeGroupId: groupId,
+    };
+  }
+
+  return {
+    groups: normalizedGroups,
+    root: sanitizedRoot,
+    activeGroupId: sanitizeActiveGroupId(sanitizedRoot, layout.activeGroupId),
   };
 }
 
