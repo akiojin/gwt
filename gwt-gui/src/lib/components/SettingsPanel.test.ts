@@ -11,18 +11,17 @@ import type {
 const invokeMock = vi.fn();
 const setProfilingEnabledMock = vi.fn();
 
-vi.mock("$lib/tauriInvoke", () => ({
+vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
 vi.mock("$lib/profiling.svelte", () => ({
   setProfilingEnabled: setProfilingEnabledMock,
-}));
-
-const tauriCoreInvokeMock = vi.fn();
-
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: tauriCoreInvokeMock,
+  isProfilingEnabled: () => false,
+  recordInvokeMetric: vi.fn(),
+  recordFrontendMetric: vi.fn(),
+  initProfiling: vi.fn(),
+  teardownProfiling: vi.fn(),
 }));
 
 const settingsFixture: SettingsData = {
@@ -121,19 +120,13 @@ describe("SettingsPanel", () => {
   beforeEach(() => {
     cleanup();
     invokeMock.mockReset();
-    setProfilingEnabledMock.mockReset();
-    tauriCoreInvokeMock.mockReset();
-    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_voice_capability") {
-        return { available: true, reason: null };
-      }
-      return null;
-    });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
       if (command === "get_available_shells") return [];
+      if (command === "get_voice_capability") return { available: true, reason: null };
+      if (command === "ensure_voice_runtime") return null;
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -149,8 +142,8 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("get_settings");
-      expect(invokeMock).toHaveBeenCalledWith("get_profiles");
+      expect(invokeMock).toHaveBeenCalledWith("get_settings", undefined);
+      expect(invokeMock).toHaveBeenCalledWith("get_profiles", undefined);
       const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
       const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
       expect(tabNames).toEqual([
@@ -1314,17 +1307,12 @@ describe("SettingsPanel", () => {
   it("keeps voice input fields enabled when voice capability is unavailable", async () => {
     const enabledVoiceSettings = structuredClone(settingsFixture);
     enabledVoiceSettings.voice_input.enabled = true;
-    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_voice_capability") {
-        return { available: false, reason: "GPU acceleration is not available" };
-      }
-      return null;
-    });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(enabledVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
       if (command === "get_available_shells") return [];
+      if (command === "get_voice_capability") return { available: false, reason: "GPU acceleration is not available" };
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -1358,17 +1346,12 @@ describe("SettingsPanel", () => {
   it("saves voice settings when capability is unavailable", async () => {
     const enabledVoiceSettings = structuredClone(settingsFixture);
     enabledVoiceSettings.voice_input.enabled = true;
-    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_voice_capability") {
-        return { available: false, reason: "GPU acceleration is not available" };
-      }
-      return null;
-    });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(enabledVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
       if (command === "get_available_shells") return [];
+      if (command === "get_voice_capability") return { available: false, reason: "GPU acceleration is not available" };
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -1406,17 +1389,12 @@ describe("SettingsPanel", () => {
   it("shows unavailable reason banner when voice capability is unavailable", async () => {
     const enabledVoiceSettings = structuredClone(settingsFixture);
     enabledVoiceSettings.voice_input.enabled = true;
-    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_voice_capability") {
-        return { available: false, reason: "GPU acceleration is not available" };
-      }
-      return null;
-    });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(enabledVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
       if (command === "get_available_shells") return [];
+      if (command === "get_voice_capability") return { available: false, reason: "GPU acceleration is not available" };
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -1915,16 +1893,11 @@ describe("SettingsPanel", () => {
     enabledVoiceSettings.voice_input.enabled = true;
     let resolveCapability!: (v: any) => void;
     const pendingCapability = new Promise<any>((r) => { resolveCapability = r; });
-    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_voice_capability") {
-        return pendingCapability;
-      }
-      return null;
-    });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(enabledVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "get_available_shells") return [];
+      if (command === "get_voice_capability") return pendingCapability;
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -1946,10 +1919,13 @@ describe("SettingsPanel", () => {
   });
 
   it("handles voice capability check error gracefully and keeps fields enabled", async () => {
-    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_voice_capability") {
-        throw new Error("tauri not available");
-      }
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "get_voice_capability") throw new Error("tauri not available");
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
       return null;
     });
 
@@ -1993,7 +1969,7 @@ describe("SettingsPanel", () => {
     try {
       await renderSettingsPanel();
       await waitFor(() => {
-        expect(tauriCoreInvokeMock).toHaveBeenCalledWith(
+        expect(invokeMock).toHaveBeenCalledWith(
           "get_voice_capability",
           expect.objectContaining({ gpuAvailable: false }),
         );
@@ -2021,7 +1997,7 @@ describe("SettingsPanel", () => {
     try {
       await renderSettingsPanel();
       await waitFor(() => {
-        expect(tauriCoreInvokeMock).toHaveBeenCalledWith(
+        expect(invokeMock).toHaveBeenCalledWith(
           "get_voice_capability",
           expect.objectContaining({ gpuAvailable: true }),
         );
@@ -2049,7 +2025,7 @@ describe("SettingsPanel", () => {
     try {
       await renderSettingsPanel();
       await waitFor(() => {
-        expect(tauriCoreInvokeMock).toHaveBeenCalledWith(
+        expect(invokeMock).toHaveBeenCalledWith(
           "get_voice_capability",
           expect.objectContaining({ gpuAvailable: true }),
         );
@@ -2106,16 +2082,11 @@ describe("SettingsPanel", () => {
   it("shows default unavailable reason when voice capability reason is null", async () => {
     const enabledVoiceSettings = structuredClone(settingsFixture);
     enabledVoiceSettings.voice_input.enabled = true;
-    tauriCoreInvokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_voice_capability") {
-        return { available: false, reason: null };
-      }
-      return null;
-    });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_settings") return structuredClone(enabledVoiceSettings);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "get_available_shells") return [];
+      if (command === "get_voice_capability") return { available: false, reason: null };
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
