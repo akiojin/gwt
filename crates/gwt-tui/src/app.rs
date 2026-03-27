@@ -61,9 +61,6 @@ impl App {
         self.terminal_rows = size.height.saturating_sub(2); // minus tab bar + status bar
         self.terminal_cols = size.width;
 
-        // Auto-open first shell tab
-        self.spawn_shell_tab()?;
-
         loop {
             self.render(terminal)?;
 
