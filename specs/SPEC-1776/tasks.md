@@ -2,42 +2,42 @@
 
 ## Phase 0: Setup
 
-- [ ] T001: Add `crates/gwt-tui/` to Cargo workspace members in `Cargo.toml`
-- [ ] T002: Create `crates/gwt-tui/Cargo.toml` with dependencies: ratatui, crossterm, tokio, gwt-core
-- [ ] T003: Create `crates/gwt-tui/src/main.rs` — crossterm raw mode init, ratatui Terminal, empty event loop, graceful shutdown
-- [ ] T004: Verify `cargo build -p gwt-tui` and `cargo clippy -p gwt-tui` pass
+- [x] T001: Add `crates/gwt-tui/` to Cargo workspace members in `Cargo.toml`
+- [x] T002: Create `crates/gwt-tui/Cargo.toml` with dependencies: ratatui, crossterm, tokio, gwt-core
+- [x] T003: Create `crates/gwt-tui/src/main.rs` — crossterm raw mode init, ratatui Terminal, empty event loop, graceful shutdown
+- [x] T004: Verify `cargo build -p gwt-tui` and `cargo clippy -p gwt-tui` pass
 
 ## Phase 1: Foundational — Minimal TUI (US1, US3)
 
 ### Renderer (FR-016)
 
-- [ ] T010: Write tests for VT100 Cell → ratatui Cell color mapping in `crates/gwt-tui/src/renderer.rs` (named, indexed, RGB colors + bold/italic/underline/inverse attributes)
-- [ ] T011: Implement `renderer.rs` — convert vt100::Screen grid to ratatui Buffer
-- [ ] T012: [P] Write snapshot tests for renderer with multi-color PTY output samples
+- [x] T010: Write tests for VT100 Cell → ratatui Cell color mapping in `crates/gwt-tui/src/renderer.rs` (named, indexed, RGB colors + bold/italic/underline/inverse attributes)
+- [x] T011: Implement `renderer.rs` — convert vt100::Screen grid to ratatui Buffer
+- [x] T012: [P] Write snapshot tests for renderer with multi-color PTY output samples
 
 ### State & Event Loop
 
-- [ ] T020: Write tests for `crates/gwt-tui/src/state.rs` — TuiState tab add/remove/switch, active index bounds
-- [ ] T021: Implement `state.rs` — TuiState struct with tabs, active_tab, layout, prefix state
-- [ ] T022: Write tests for `crates/gwt-tui/src/event.rs` — event polling, PTY output channel dispatch
-- [ ] T023: Implement `event.rs` — crossterm event reader + PTY output channel + tick timer (100ms)
+- [x] T020: Write tests for `crates/gwt-tui/src/state.rs` — TuiState tab add/remove/switch, active index bounds
+- [x] T021: Implement `state.rs` — TuiState struct with tabs, active_tab, layout, prefix state
+- [x] T022: Write tests for `crates/gwt-tui/src/event.rs` — event polling, PTY output channel dispatch
+- [x] T023: Implement `event.rs` — crossterm event reader + PTY output channel + tick timer (100ms)
 
 ### Key Binding (FR-004)
 
-- [ ] T030: Write tests for `crates/gwt-tui/src/input/keybind.rs` — Ctrl+G prefix detection, timeout, action dispatch, passthrough
-- [ ] T031: Implement `input/keybind.rs` — prefix state machine (Idle → PrefixActive → action/timeout/cancel)
+- [x] T030: Write tests for `crates/gwt-tui/src/input/keybind.rs` — Ctrl+G prefix detection, timeout, action dispatch, passthrough
+- [x] T031: Implement `input/keybind.rs` — prefix state machine (Idle → PrefixActive → action/timeout/cancel)
 
 ### UI Components (FR-002, FR-003, FR-009, FR-010)
 
-- [ ] T040: [P] Implement `crates/gwt-tui/src/ui/tab_bar.rs` — tab names, status colors (AgentColor mapping), active indicator
-- [ ] T041: [P] Implement `crates/gwt-tui/src/ui/terminal_view.rs` — render VT100 buffer via renderer to Frame area
-- [ ] T042: [P] Implement `crates/gwt-tui/src/ui/status_bar.rs` — tab index, agent state, branch, SPEC ID
-- [ ] T043: Write snapshot tests for tab_bar, terminal_view, status_bar using ratatui TestBackend
+- [x] T040: [P] Implement `crates/gwt-tui/src/ui/tab_bar.rs` — tab names, status colors (AgentColor mapping), active indicator
+- [x] T041: [P] Implement `crates/gwt-tui/src/ui/terminal_view.rs` — render VT100 buffer via renderer to Frame area
+- [x] T042: [P] Implement `crates/gwt-tui/src/ui/status_bar.rs` — tab index, agent state, branch, SPEC ID
+- [x] T043: Write snapshot tests for tab_bar, terminal_view, status_bar using ratatui TestBackend
 
 ### App Integration (FR-007)
 
-- [ ] T050: Implement `crates/gwt-tui/src/app.rs` — App struct orchestrating state + event + UI render cycle
-- [ ] T051: Wire shell tab creation (Ctrl+G,s) via PaneManager::spawn_shell()
+- [x] T050: Implement `crates/gwt-tui/src/app.rs` — App struct orchestrating state + event + UI render cycle
+- [ ] T051: Wire shell tab creation (Ctrl+G,c) via PaneManager::spawn_shell()
 - [ ] T052: Wire PTY I/O: key input → write_input(), PTY reader → process_bytes() → render
 - [ ] T053: Wire terminal resize event → PaneManager::resize_all() + re-render
 - [ ] T054: Implement scrollback scroll mode (Ctrl+G,PgUp to enter, Escape to exit)
@@ -45,7 +45,7 @@
 ### Phase 1 Verification
 
 - [ ] T060: Integration test — launch gwt-tui, open shell tab, verify PTY output renders with ANSI colors
-- [ ] T061: Verify `cargo test -p gwt-tui` and `cargo test -p gwt-core` both pass
+- [x] T061: Verify `cargo test -p gwt-tui` and `cargo test -p gwt-core` both pass
 
 ## Phase 2: Agent Tabs + Management Panel (US2, US4)
 
