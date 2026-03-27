@@ -18,18 +18,17 @@
 - **設計・実装は複雑にせずに、シンプルさの極限を追求してください**
 - **ただし、ユーザビリティと開発者体験の品質は決して妥協しない**
 - 実装はシンプルに、開発者体験は最高品質に
-- GUI操作の直感性と効率性を技術的複雑さより優先
+- TUI 操作の直感性と効率性を技術的複雑さより優先
 - **変更は外科的に行い、影響範囲を最小限にする。** 必要な箇所だけに手を入れ、新たなバグを持ち込まない
 - **非自明な変更では、実装前に「もっともシンプルでエレガントな解」を比較し、採用理由を1行で明示する。**
 - **場当たり的な修正（ワークアラウンド）を禁止する。** 必ず根本原因を特定してから修正すること。原因が不明な場合はログ・テスト・コードを調査し、推測で修正しない
 
-### 🧩 Tauri GUI ガイドライン
+### 🧩 TUI ガイドライン
 
-- デスクトップGUI は Tauri v2 + Svelte 5 + xterm.js
-- バックエンド: Rust (gwt-core + gwt-tauri)
-- フロントエンド: Svelte 5 + TypeScript + Vite (gwt-gui/)
-- ターミナルエミュレーション: xterm.js v6
-- UIアイコンはGUIに適したアイコン（SVG / Unicode シンボル等）を使用する
+- デスクトップ TUI は ratatui + crossterm
+- バックエンド: Rust (gwt-core + gwt-tui)
+- ターミナルエミュレーション: vt100 crate
+- UI アイコンは Unicode シンボルを使用する
 
 ### 📝 設計ガイドライン
 
@@ -76,7 +75,6 @@
 
 - 仕様の受け入れシナリオに基づき、**実装コードより先にテストコードを書く**
 - Rust: `crates/*/tests/` または `#[cfg(test)]` モジュール内にテストを追加
-- Frontend: `gwt-gui/src/**/*.test.ts` にテストを追加（vitest + @testing-library/svelte）
 - テストが RED（失敗）状態であることを確認してから実装に進む
 
 #### 適用除外
@@ -134,35 +132,17 @@
 
 ### ローカル検証/実行ルール（Rust）
 
-- このリポジトリのローカル検証・実行は Cargo + Tauri CLI を使用する
-- ビルド: `cargo tauri build`
-- 開発: `cargo tauri dev`
-- テスト: `cargo test`
+- このリポジトリのローカル検証・実行は Cargo を使用する
+- ビルド: `cargo build -p gwt-tui`
+- 開発: `cargo run -p gwt-tui`
+- テスト: `cargo test -p gwt-core -p gwt-tui`
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
-- フロントエンドチェック: `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
-
-### フロントエンド実行前セットアップ（gwt-gui）
-
-- `gwt-gui` の依存はこの配下で管理されており、未インストールだと `vitest` / `@tsconfig/svelte` が見つからないエラーになります。  
-  まず `cd gwt-gui && pnpm install` を実行してください（Node 依存の初回/クリーン環境用）。
-- `vitest` を実行する場合は `cd gwt-gui && pnpm test` を使います。  
-  ファイルを限定する場合は `cd gwt-gui && pnpm test src/lib/components/Sidebar.test.ts src/lib/components/WorktreeSummaryPanel.test.ts` のように指定します。
-
-### フロントエンド E2E（Playwright）手順
-
-- `gwt-gui/e2e/` 配下の WebUI E2E は Playwright で実行します（`playwright.config.ts` の Chromium 設定を使用）。
-- 依存が未取得の場合は `cd gwt-gui && pnpm install` の後、初回のみブラウザバイナリを取得します。
-  - `cd gwt-gui && pnpm exec playwright install chromium`
-- E2E 実行コマンド:
-  - `cd gwt-gui && pnpm test:e2e`
-- Playwright 側のローカルサーバー起動は自動です（`http://127.0.0.1:4173`）。必要なら個別実行で絞り込みます。
-  - `cd gwt-gui && pnpm exec playwright test e2e/open-project-smoke.spec.ts`
 
 ## コミュニケーションガイドライン
 
 - 回答は必ず日本語
-- GUIのユーザー向け表示は英語のみ（日本語の文言を表示しない）
+- TUI のユーザー向け表示は英語のみ（日本語の文言を表示しない）
 - ログ（`~/.gwt/logs/` 等）はこの環境から直接参照できる前提で対応すること
 - ログ参照の指示があれば、この環境から直接読み取って調査すること
 
@@ -175,7 +155,7 @@
 
 - 利用者向けの導線: インストール方法、起動方法、基本操作、主要機能の使い方
 - 利用前提: サポートOS、初期設定（例: AI 機能を使う場合の設定）
-- 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`pnpm test`, E2Eなど）
+- 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`cargo test` など）
 - 配布情報: リリース/バイナリ資産の取得先、バージョン取得方法
 - 代表的な画面操作: よく使う画面遷移や一般的なトラブル時の案内（再現しやすく簡潔）
 - 変更が設計判断を必要とする場合の案内: 重要仕様の所在（`specs/SPEC-{N}/` ディレクトリへの参照）
@@ -206,7 +186,7 @@
   - develop → main への PR を作成（リリースブランチは作成しない）
 - Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
   - タグ・GitHub Release を作成
-  - Tauri ビルド（.dmg/.msi/.AppImage）を GitHub Release にアップロード
+  - ビルド済みバイナリを GitHub Release にアップロード
 
 ## パッケージ公開状況
 
@@ -215,9 +195,8 @@
 | GitHub Release | `gh release list --repo akiojin/gwt --limit 1` |
 
 ## 使用中の技術
-- Rust 2021 Edition (stable) + Tauri v2, portable-pty, serde, tokio
-- Svelte 5 + TypeScript + Vite 6
-- xterm.js v6 (@xterm/xterm, @xterm/addon-fit, @xterm/addon-web-links)
+
+- Rust 2021 Edition (stable) + ratatui, crossterm, vt100, portable-pty, serde, tokio
 - ローカルファイルと Git メタデータ（DB なし）
 
 ## プロジェクト構成
@@ -226,16 +205,10 @@
 ├── Cargo.toml          # ワークスペース設定
 ├── crates/
 │   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
-│   └── gwt-tauri/      # Tauri v2 バックエンド（コマンド・状態管理）
-├── gwt-gui/            # Svelte 5 フロントエンド（UI・xterm.js）
-│   ├── src/
-│   │   ├── lib/components/  # UIコンポーネント
-│   │   ├── lib/terminal/    # xterm.jsラッパー
-│   │   └── lib/types.ts     # TypeScript型定義
-│   └── package.json
+│   └── gwt-tui/        # ratatui TUI フロントエンド
 ├── specs/              # ローカル SPEC 管理（SPEC-{N}/）
 │   └── SPEC-*/         # 各 SPEC のアーティファクト（spec.md, plan.md, tasks.md 等）
-└── package.json        # Tauri開発用スクリプト
+└── package.json        # 開発用スクリプト
 ```
 
 <!-- BEGIN gwt managed skills -->
