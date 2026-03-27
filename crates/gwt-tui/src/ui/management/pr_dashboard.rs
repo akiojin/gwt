@@ -60,8 +60,8 @@ pub struct PrDashboard;
 /// CI status badge character and color.
 pub fn ci_status_badge(status: &CiStatus) -> (char, Color) {
     match status {
-        CiStatus::Passing => ('\u{2713}', Color::Green),  // ✓
-        CiStatus::Failing => ('\u{2717}', Color::Red),    // ✗
+        CiStatus::Passing => ('\u{2713}', Color::Green), // ✓
+        CiStatus::Failing => ('\u{2717}', Color::Red),   // ✗
         CiStatus::Pending => ('\u{25CB}', Color::Yellow), // ○
         CiStatus::None => ('-', Color::DarkGray),
     }
@@ -79,8 +79,8 @@ pub fn pr_state_color(state: &PrState) -> Color {
 /// Review status indicator character.
 pub fn review_indicator(status: &ReviewStatus) -> &'static str {
     match status {
-        ReviewStatus::Approved => "\u{2714}",          // ✔
-        ReviewStatus::ChangesRequested => "\u{270E}",   // ✎
+        ReviewStatus::Approved => "\u{2714}",         // ✔
+        ReviewStatus::ChangesRequested => "\u{270E}", // ✎
         ReviewStatus::Pending => "?",
         ReviewStatus::None => "",
     }
@@ -206,7 +206,10 @@ mod tests {
     #[test]
     fn test_review_indicator() {
         assert_eq!(review_indicator(&ReviewStatus::Approved), "\u{2714}");
-        assert_eq!(review_indicator(&ReviewStatus::ChangesRequested), "\u{270E}");
+        assert_eq!(
+            review_indicator(&ReviewStatus::ChangesRequested),
+            "\u{270E}"
+        );
         assert_eq!(review_indicator(&ReviewStatus::Pending), "?");
         assert_eq!(review_indicator(&ReviewStatus::None), "");
     }

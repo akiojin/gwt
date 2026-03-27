@@ -1,0 +1,4 @@
+- [ ] merged PR 後の no-op 判定が deterministic になっている
+- [ ] `gwt-pr-check` と `gwt-pr` の判定が一致している
+- [ ] merge commit 非祖先ケースの fallback がテストで固定化されている
+- [ ] 推測ベースの `CREATE PR` 誤報告が再発しない

@@ -1,3 +1,6 @@
 //! UI components for TUI
 
 pub mod management;
+pub mod status_bar;
+pub mod tab_bar;
+pub mod terminal_view;

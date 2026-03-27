@@ -1,0 +1,3 @@
+- [ ] B-2-1: README.md 更新
+- [ ] B-2-2: README.ja.md 更新
+- [ ] B-3: markdownlint 検証

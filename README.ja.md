@@ -29,6 +29,18 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 pnpm run installer:macos
 ```
 
+GitHub Release を待たずにローカルビルドを `/Applications/gwt.app` へ直接入れて素早く検証:
+
+```bash
+pnpm run install:local:macos
+```
+
+すでにビルド済みの `.app` を再ビルドせず入れ直す:
+
+```bash
+pnpm run install:local:macos:skip-build
+```
+
 ### Windows
 
 GitHub Releases から `.msi` をダウンロードして実行します。
@@ -167,6 +179,11 @@ scripts/voice-eval.sh
 
 - `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
 - `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
+
+### ログとプロファイリング
+
+通常ログは `~/.gwt/logs/` 配下に JSON Lines 形式で保存されます。パフォーマンスプロファイリングは **Settings > Profiling** で有効化できます。
+ログ仕様の詳細は [#1758](https://github.com/akiojin/gwt/issues/1758) を参照してください。
 
 ## ライセンス
 

@@ -73,10 +73,7 @@ impl CiStatus {
                 .get("conclusion")
                 .and_then(|c| c.as_str())
                 .unwrap_or("");
-            let status = check
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
+            let status = check.get("status").and_then(|s| s.as_str()).unwrap_or("");
 
             match conclusion.to_uppercase().as_str() {
                 "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" => return Self::Failing,
@@ -216,8 +213,7 @@ where
 {
     require_gh()?;
 
-    let output = run_gh_output_with_repair(repo_root, args)
-        .map_err(|e| gh_error(label, e))?;
+    let output = run_gh_output_with_repair(repo_root, args).map_err(|e| gh_error(label, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -254,7 +250,16 @@ pub fn fetch_pr_status(
 pub fn fetch_open_prs(repo_root: &Path) -> Result<Vec<PrStatus>, crate::error::GwtError> {
     let value = run_gh_json(
         repo_root,
-        ["pr", "list", "--state", "open", "--json", PR_JSON_FIELDS, "--limit", "100"],
+        [
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            PR_JSON_FIELDS,
+            "--limit",
+            "100",
+        ],
         "pr list",
         &[],
     )?;
@@ -356,10 +361,7 @@ mod tests {
             ReviewStatus::from_review_decision(Some("REVIEW_REQUIRED")),
             ReviewStatus::Pending
         );
-        assert_eq!(
-            ReviewStatus::from_review_decision(None),
-            ReviewStatus::None
-        );
+        assert_eq!(ReviewStatus::from_review_decision(None), ReviewStatus::None);
     }
 
     #[test]
