@@ -493,16 +493,16 @@
   .messages {
     flex: 1;
     overflow-y: auto;
-    padding: 12px;
+    padding: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .message {
     max-width: 80%;
-    padding: 8px 12px;
-    border-radius: 8px;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
     font-size: var(--ui-font-sm);
     line-height: 1.5;
     word-break: break-word;
@@ -547,13 +547,13 @@
   }
 
   .action-icon {
-    margin-right: 4px;
+    margin-right: var(--space-1);
   }
 
   .message.thinking {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     color: var(--text-muted);
     font-size: var(--ui-font-xs);
   }
@@ -577,13 +577,13 @@
     color: var(--text-muted);
     font-size: var(--ui-font-sm);
     text-align: center;
-    padding: 24px;
+    padding: var(--space-6);
   }
 
   .startup-recovery {
     display: grid;
     gap: 10px;
-    padding: 12px;
+    padding: var(--space-3);
     border-radius: 10px;
     border: 1px solid color-mix(in srgb, var(--yellow) 35%, var(--border-color));
     background: color-mix(in srgb, var(--yellow) 10%, var(--bg-secondary));
@@ -604,18 +604,18 @@
 
   .startup-recovery-hints {
     margin: 0;
-    padding-left: 18px;
+    padding-left: var(--space-4);
     font-size: var(--ui-font-sm);
   }
 
   .startup-recovery-actions {
     display: flex;
-    gap: 8px;
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
 
   .recovery-btn {
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border: none;
     border-radius: 6px;
     background-color: var(--accent);
@@ -638,24 +638,24 @@
 
   .input-area {
     border-top: 1px solid var(--border-color);
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
   }
 
   .ai-not-ready {
     font-size: var(--ui-font-xs);
     color: var(--yellow);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
   }
 
   .queued-send-indicator {
     font-size: var(--ui-font-xs);
     color: var(--accent);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
   }
 
   .input-row {
     display: flex;
-    gap: 8px;
+    gap: var(--space-2);
     align-items: flex-end;
   }
 
@@ -664,7 +664,7 @@
     resize: none;
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    padding: 8px 10px;
+    padding: var(--space-2) 10px;
     font-size: var(--ui-font-sm);
     font-family: inherit;
     background-color: var(--bg-primary);
@@ -682,7 +682,7 @@
   }
 
   .send-btn {
-    padding: 8px 16px;
+    padding: var(--space-2) var(--space-4);
     border: none;
     border-radius: 6px;
     background-color: var(--accent);

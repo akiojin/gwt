@@ -137,12 +137,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: var(--space-4) var(--space-6);
     border-bottom: 1px solid var(--border-color);
   }
 
   .dialog-header h2 {
-    font-size: 15px;
+    font-size: var(--ui-font-lg);
     font-weight: 600;
     color: var(--text-primary);
   }
@@ -152,9 +152,9 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 20px;
-    padding: 4px 8px;
-    border-radius: 4px;
+    font-size: var(--ui-font-xl);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     line-height: 1;
   }
 
@@ -164,11 +164,11 @@
   }
 
   .dialog-body {
-    padding: 16px 20px;
+    padding: var(--space-4) var(--space-6);
   }
 
   .message {
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     color: var(--text-secondary);
     line-height: 1.5;
     margin: 0;
@@ -177,16 +177,16 @@
   .dialog-footer {
     display: flex;
     justify-content: flex-end;
-    gap: 8px;
-    padding: 16px 20px;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-6);
     border-top: 1px solid var(--border-color);
   }
 
   .btn {
-    padding: 8px 16px;
+    padding: var(--space-2) var(--space-4);
     border: none;
     border-radius: 6px;
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;

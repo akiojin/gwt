@@ -80,15 +80,6 @@ fn main() {
 
     let app_state = AppState::new();
 
-    // Start HTTP IPC server on a dedicated OS thread to bypass the
-    // WKWebView main-thread IPC bottleneck.  The HTTP server gets its
-    // own AppState so it never contends with the Tauri-managed one.
-    let http_state = Arc::new(AppState::new());
-    let http_port = crate::http_server::start_http_server(http_state);
-    app_state
-        .http_ipc_port
-        .store(http_port, std::sync::atomic::Ordering::Relaxed);
-
     let app = crate::app::build_app(
         tauri::Builder::default(),
         app_state,

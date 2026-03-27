@@ -1,25 +1,83 @@
-//! Lightweight axum HTTP server that offloads heavy IPC commands off the
-//! WKWebView main-thread URL scheme handler.
+//! Lightweight axum HTTP server for heavy IPC commands.
 //!
-//! The server is started on a **dedicated OS thread** with its own tokio
-//! runtime so it never contends with the Tauri async runtime.
+//! Offloads expensive Git queries from the WKWebView main thread by letting
+//! the frontend `fetch()` directly to a local HTTP endpoint instead of going
+//! through the Tauri invoke bridge.
 
 use std::sync::Arc;
 
 use axum::{
-    extract::State as AxumState, http::StatusCode, response::IntoResponse, routing::post, Json,
+    extract::{Json, State as AxumState},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::post,
     Router,
 };
+use gwt_core::StructuredError;
 use serde::Deserialize;
+use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
+use crate::commands::git_view;
 use crate::state::AppState;
 
 /// Shared state accessible from axum handlers.
 type SharedState = Arc<AppState>;
 
-// ── Request payloads ────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Request types (git_view endpoints)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeSummaryRequest {
+    project_path: String,
+    branch: String,
+    base_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchDiffFilesRequest {
+    project_path: String,
+    branch: String,
+    base_branch: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchCommitsRequest {
+    project_path: String,
+    branch: String,
+    base_branch: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+fn default_limit() -> usize {
+    50
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkingTreeStatusRequest {
+    project_path: String,
+    branch: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StashListRequest {
+    project_path: String,
+    branch: String,
+}
+
+// ---------------------------------------------------------------------------
+// Request types (branch / worktree endpoints)
+// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,13 +101,110 @@ struct BranchInventoryDetailRequest {
     force_refresh: bool,
 }
 
-// ── Handlers ────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Error response helper
+// ---------------------------------------------------------------------------
+
+struct HttpError(StructuredError);
+
+impl IntoResponse for HttpError {
+    fn into_response(self) -> axum::response::Response {
+        let body = serde_json::to_value(&self.0).unwrap_or_default();
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+    }
+}
+
+impl From<StructuredError> for HttpError {
+    fn from(e: StructuredError) -> Self {
+        Self(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocking dispatch helper
+// ---------------------------------------------------------------------------
+
+/// Run a blocking closure on the tokio blocking pool, converting JoinError
+/// to StructuredError.
+async fn blocking<T, F>(cmd: &'static str, f: F) -> Result<Json<T>, HttpError>
+where
+    T: serde::Serialize + Send + 'static,
+    F: FnOnce() -> Result<T, StructuredError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err(StructuredError::internal(&e.to_string(), cmd)))
+        .map(Json)
+        .map_err(HttpError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Route handlers – git_view endpoints (stateless)
+// ---------------------------------------------------------------------------
+
+async fn handle_get_git_change_summary(
+    Json(req): Json<ChangeSummaryRequest>,
+) -> Result<impl IntoResponse, HttpError> {
+    blocking("get_git_change_summary", move || {
+        git_view::get_git_change_summary_impl(
+            &req.project_path,
+            &req.branch,
+            req.base_branch.as_deref(),
+        )
+    })
+    .await
+}
+
+async fn handle_get_branch_diff_files(
+    Json(req): Json<BranchDiffFilesRequest>,
+) -> Result<impl IntoResponse, HttpError> {
+    blocking("get_branch_diff_files", move || {
+        git_view::get_branch_diff_files_impl(&req.project_path, &req.branch, &req.base_branch)
+    })
+    .await
+}
+
+async fn handle_get_branch_commits(
+    Json(req): Json<BranchCommitsRequest>,
+) -> Result<impl IntoResponse, HttpError> {
+    blocking("get_branch_commits", move || {
+        git_view::get_branch_commits_impl(
+            &req.project_path,
+            &req.branch,
+            &req.base_branch,
+            req.offset,
+            req.limit,
+        )
+    })
+    .await
+}
+
+async fn handle_get_working_tree_status(
+    Json(req): Json<WorkingTreeStatusRequest>,
+) -> Result<impl IntoResponse, HttpError> {
+    blocking("get_working_tree_status", move || {
+        git_view::get_working_tree_status_impl(&req.project_path, &req.branch)
+    })
+    .await
+}
+
+async fn handle_get_stash_list(
+    Json(req): Json<StashListRequest>,
+) -> Result<impl IntoResponse, HttpError> {
+    blocking("get_stash_list", move || {
+        git_view::get_stash_list_impl(&req.project_path, &req.branch)
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Route handlers – branch / worktree endpoints (need AppState)
+// ---------------------------------------------------------------------------
 
 async fn handle_list_worktree_branches(
     AxumState(state): AxumState<SharedState>,
     Json(req): Json<ProjectPathRequest>,
 ) -> impl IntoResponse {
-    let state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::commands::branches::list_worktree_branches_impl(&req.project_path, &state)
     })
@@ -70,7 +225,6 @@ async fn handle_list_worktrees(
     AxumState(state): AxumState<SharedState>,
     Json(req): Json<ProjectPathRequest>,
 ) -> impl IntoResponse {
-    let state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::commands::cleanup::list_worktrees_impl(&req.project_path, &state)
     })
@@ -95,7 +249,6 @@ async fn handle_list_branch_inventory(
     AxumState(state): AxumState<SharedState>,
     Json(req): Json<BranchInventoryRequest>,
 ) -> impl IntoResponse {
-    let state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::commands::branches::list_branch_inventory_impl(
             &req.project_path,
@@ -120,7 +273,6 @@ async fn handle_get_branch_inventory_detail(
     AxumState(state): AxumState<SharedState>,
     Json(req): Json<BranchInventoryDetailRequest>,
 ) -> impl IntoResponse {
-    let state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::commands::branches::get_branch_inventory_detail_impl(
             &req.project_path,
@@ -142,7 +294,9 @@ async fn handle_get_branch_inventory_detail(
     }
 }
 
-// ── Server bootstrap ────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Router & server startup
+// ---------------------------------------------------------------------------
 
 fn build_router(state: SharedState) -> Router {
     let cors = CorsLayer::new()
@@ -151,6 +305,19 @@ fn build_router(state: SharedState) -> Router {
         .allow_headers(Any);
 
     Router::new()
+        // git_view endpoints
+        .route(
+            "/get_git_change_summary",
+            post(handle_get_git_change_summary),
+        )
+        .route("/get_branch_diff_files", post(handle_get_branch_diff_files))
+        .route("/get_branch_commits", post(handle_get_branch_commits))
+        .route(
+            "/get_working_tree_status",
+            post(handle_get_working_tree_status),
+        )
+        .route("/get_stash_list", post(handle_get_stash_list))
+        // branch / worktree endpoints
         .route(
             "/ipc/list_worktree_branches",
             post(handle_list_worktree_branches),
@@ -168,44 +335,40 @@ fn build_router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-/// Start the HTTP IPC server on a dedicated OS thread with its own tokio
-/// runtime.  Returns the ephemeral port the server is listening on.
-pub fn start_http_server(app_state: Arc<AppState>) -> u16 {
-    let (tx, rx) = std::sync::mpsc::channel::<u16>();
+/// Start the HTTP IPC server on a random port and return the port number.
+///
+/// The server runs as a background tokio task and lives for the lifetime of
+/// the process.  An `Arc<AppState>` is required for branch/worktree endpoints.
+#[cfg_attr(test, allow(dead_code))]
+pub async fn start_http_server(app_state: Arc<AppState>) -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("Failed to bind HTTP IPC server: {e}"))?;
 
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("failed to build HTTP IPC tokio runtime");
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local address: {e}"))?
+        .port();
 
-        rt.block_on(async move {
-            let router = build_router(app_state);
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("failed to bind HTTP IPC server");
-            let port = listener.local_addr().unwrap().port();
+    info!(port, "HTTP IPC server listening");
 
-            info!(
-                category = "http_ipc",
-                port = port,
-                "HTTP IPC server listening"
-            );
+    let router = build_router(app_state);
 
-            if tx.send(port).is_err() {
-                warn!(
-                    category = "http_ipc",
-                    "Failed to send port back to main thread"
-                );
-                return;
-            }
-
-            axum::serve(listener, router)
-                .await
-                .expect("HTTP IPC server failed");
-        });
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, router).await {
+            warn!(error = %e, "HTTP IPC server exited with error");
+        }
     });
 
-    rx.recv().expect("failed to receive HTTP IPC port")
+    Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn router_builds_without_panic() {
+        let _ = build_router(Arc::new(AppState::new()));
+    }
 }
