@@ -2389,6 +2389,8 @@ dependencies = [
  "fs2",
  "gix",
  "libc",
+ "notify",
+ "notify-debouncer-mini",
  "nvml-wrapper",
  "portable-pty",
  "reqwest 0.12.28",
