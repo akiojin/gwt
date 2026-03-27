@@ -89,6 +89,7 @@ mod tests {
         state.add_tab(TabInfo {
             pane_id: "p1".into(),
             name: "claude".into(),
+            tab_type: crate::state::TabType::Shell,
             color: AgentColor::Green,
             status: PaneStatusIndicator::Running,
             branch: Some("feature/test".into()),

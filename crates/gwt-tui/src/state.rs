@@ -34,6 +34,15 @@ pub enum AppMode {
     ScrollMode,
 }
 
+/// Type of tab content.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TabType {
+    /// Plain shell session.
+    Shell,
+    /// Coding agent (Claude Code, Codex, Gemini, etc.).
+    Agent,
+}
+
 /// Pane status indicator.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaneStatusIndicator {
@@ -48,6 +57,7 @@ pub enum PaneStatusIndicator {
 pub struct TabInfo {
     pub pane_id: String,
     pub name: String,
+    pub tab_type: TabType,
     pub color: AgentColor,
     pub status: PaneStatusIndicator,
     pub branch: Option<String>,
@@ -146,6 +156,7 @@ mod tests {
         TabInfo {
             pane_id: format!("pane-{name}"),
             name: name.to_string(),
+            tab_type: TabType::Shell,
             color: AgentColor::Green,
             status: PaneStatusIndicator::Running,
             branch: None,

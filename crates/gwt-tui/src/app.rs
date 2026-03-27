@@ -16,7 +16,7 @@ use ratatui::{
 
 use crate::event::{self, EventLoop, PtyOutputSender, TuiEvent};
 use crate::input::keybind::{self, KeyAction};
-use crate::state::{AppMode, PaneStatusIndicator, TabInfo, TuiState};
+use crate::state::{AppMode, PaneStatusIndicator, TabInfo, TabType, TuiState};
 use crate::ui;
 use gwt_core::terminal::{manager::PaneManager, AgentColor, BuiltinLaunchConfig};
 
@@ -117,6 +117,7 @@ impl App {
         self.state.add_tab(TabInfo {
             pane_id,
             name: "shell".to_string(),
+            tab_type: TabType::Shell,
             color: AgentColor::White,
             status: PaneStatusIndicator::Running,
             branch: None,
@@ -224,8 +225,22 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
-        // Ctrl+C: double-tap within 500ms quits, single tap forwards to PTY
+        // Ctrl+C handling depends on active tab type
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            let is_agent_tab = self
+                .state
+                .active_tab_info()
+                .map(|t| t.tab_type == TabType::Agent)
+                .unwrap_or(false);
+
+            if is_agent_tab {
+                // Agent tab: always forward Ctrl+C to PTY (never quit)
+                self.write_to_active_pty(&[0x03])?;
+                self.last_ctrl_c = None;
+                return Ok(());
+            }
+
+            // Shell tab or no tab: double-tap within 500ms quits
             if let Some(last) = self.last_ctrl_c {
                 if last.elapsed().as_millis() < 500 {
                     self.should_quit = true;
@@ -233,7 +248,6 @@ impl App {
                 }
             }
             self.last_ctrl_c = Some(Instant::now());
-            // Forward Ctrl+C (0x03) to PTY
             self.write_to_active_pty(&[0x03])?;
             return Ok(());
         }
@@ -483,6 +497,7 @@ mod tests {
         app.state.add_tab(TabInfo {
             pane_id: "p1".into(),
             name: "tab1".into(),
+            tab_type: TabType::Shell,
             color: AgentColor::Green,
             status: PaneStatusIndicator::Running,
             branch: None,
@@ -492,6 +507,7 @@ mod tests {
         app.state.add_tab(TabInfo {
             pane_id: "p2".into(),
             name: "tab2".into(),
+            tab_type: TabType::Shell,
             color: AgentColor::Blue,
             status: PaneStatusIndicator::Running,
             branch: None,

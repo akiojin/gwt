@@ -77,12 +77,13 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &TuiState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::TabInfo;
+    use crate::state::{TabInfo, TabType};
 
     fn make_tab(name: &str, color: AgentColor, active: bool) -> TabInfo {
         TabInfo {
             pane_id: format!("pane-{name}"),
             name: name.to_string(),
+            tab_type: TabType::Shell,
             color,
             status: if active {
                 PaneStatusIndicator::Running
