@@ -1,10 +1,3 @@
-mod app;
-mod event;
-mod input;
-mod renderer;
-mod state;
-mod ui;
-
 use std::io;
 
 use crossterm::{

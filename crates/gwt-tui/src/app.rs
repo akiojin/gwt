@@ -19,6 +19,7 @@ pub struct App {
     state: TuiState,
     vt_parsers: HashMap<String, vt100::Parser>,
     should_quit: bool,
+    #[allow(dead_code)]
     repo_root: PathBuf,
 }
 
