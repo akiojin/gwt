@@ -19,7 +19,8 @@ use crate::input::keybind::{self, Direction, KeyAction};
 use crate::state::{AppMode, PaneStatusIndicator, TabInfo, TabType, TuiState};
 use crate::ui;
 use crate::ui::split_layout::{LayoutTree, SplitDirection};
-use gwt_core::terminal::{manager::PaneManager, AgentColor, BuiltinLaunchConfig};
+use gwt_core::agent::launch::{AgentLaunchBuilder, ShellLaunchBuilder};
+use gwt_core::terminal::{manager::PaneManager, AgentColor};
 
 pub struct App {
     state: TuiState,
@@ -82,19 +83,7 @@ impl App {
     // --- Pane lifecycle ---
 
     fn spawn_shell_pane(&mut self) -> Result<String, Box<dyn std::error::Error>> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let config = BuiltinLaunchConfig {
-            command: shell,
-            args: vec!["-l".to_string()],
-            working_dir: self.repo_root.clone(),
-            branch_name: "shell".to_string(),
-            agent_name: "shell".to_string(),
-            agent_color: AgentColor::White,
-            env_vars: HashMap::new(),
-            terminal_shell: None,
-            interactive: true,
-            windows_force_utf8: false,
-        };
+        let config = ShellLaunchBuilder::new(&self.repo_root).build();
 
         let pane_id = self.pane_manager.spawn_shell(
             &self.repo_root,
@@ -499,33 +488,28 @@ impl App {
 
     fn launch_agent_from_dialog(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let dialog = &self.state.management.launch_dialog;
-        let agent_label = dialog.selected_agent_label().to_string();
 
-        let (command, agent_name, color) = match agent_label.as_str() {
-            "Claude Code" => ("claude".to_string(), "claude".to_string(), AgentColor::Green),
-            "Codex CLI" => ("codex".to_string(), "codex".to_string(), AgentColor::Blue),
-            "Gemini CLI" => ("gemini".to_string(), "gemini".to_string(), AgentColor::Cyan),
-            _ => ("claude".to_string(), "claude".to_string(), AgentColor::Green),
+        // Map dialog selection to agent_id
+        let agent_id = match dialog.selected_agent {
+            0 => "claude",
+            1 => "codex",
+            2 => "gemini",
+            _ => "claude",
         };
 
         let branch = if dialog.branch_input.is_empty() {
-            None
+            "main".to_string()
         } else {
-            Some(dialog.branch_input.clone())
+            dialog.branch_input.clone()
         };
 
-        let config = BuiltinLaunchConfig {
-            command,
-            args: vec![],
-            working_dir: self.repo_root.clone(),
-            branch_name: branch.clone().unwrap_or_else(|| "main".to_string()),
-            agent_name: agent_name.clone(),
-            agent_color: color,
-            env_vars: HashMap::new(),
-            terminal_shell: None,
-            interactive: true,
-            windows_force_utf8: false,
-        };
+        let config = AgentLaunchBuilder::new(agent_id, &self.repo_root)
+            .branch_name(&branch)
+            .interactive(true)
+            .build()?;
+
+        let agent_name = config.agent_name.clone();
+        let color = config.agent_color;
 
         let pane_id = self.pane_manager.launch_agent(
             &self.repo_root,
@@ -547,7 +531,7 @@ impl App {
             tab_type: TabType::Agent,
             color,
             status: PaneStatusIndicator::Running,
-            branch,
+            branch: Some(branch),
             spec_id: None,
             pane_count: 1,
         });
