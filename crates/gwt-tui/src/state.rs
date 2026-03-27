@@ -1,6 +1,10 @@
+use std::collections::HashMap;
 use std::time::Instant;
 
 use gwt_core::terminal::AgentColor;
+
+use crate::ui::management::ManagementState;
+use crate::ui::split_layout::LayoutTree;
 
 /// Prefix key state for Ctrl+G handling.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -32,6 +36,8 @@ pub enum AppMode {
     Management,
     /// Keyboard scroll mode active.
     ScrollMode,
+    /// Launch agent dialog visible.
+    LaunchDialog,
 }
 
 /// Type of tab content.
@@ -73,6 +79,9 @@ pub struct TuiState {
     pub prefix_state: PrefixState,
     pub scroll_state: ScrollState,
     pub mode: AppMode,
+    pub management: ManagementState,
+    pub layout_trees: HashMap<String, LayoutTree>,
+    pub zoomed: bool,
 }
 
 impl TuiState {
@@ -83,6 +92,19 @@ impl TuiState {
             prefix_state: PrefixState::default(),
             scroll_state: ScrollState::default(),
             mode: AppMode::default(),
+            management: ManagementState::default(),
+            layout_trees: HashMap::new(),
+            zoomed: false,
+        }
+    }
+
+    /// Get the focused pane_id for the active tab (respects split layout focus).
+    pub fn focused_pane_id(&self) -> Option<String> {
+        let tab = self.tabs.get(self.active_tab)?;
+        if let Some(tree) = self.layout_trees.get(&tab.pane_id) {
+            Some(tree.focused_pane().to_string())
+        } else {
+            Some(tab.pane_id.clone())
         }
     }
 

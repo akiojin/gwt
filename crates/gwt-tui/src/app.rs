@@ -15,9 +15,10 @@ use ratatui::{
 };
 
 use crate::event::{self, EventLoop, PtyOutputSender, TuiEvent};
-use crate::input::keybind::{self, KeyAction};
+use crate::input::keybind::{self, Direction, KeyAction};
 use crate::state::{AppMode, PaneStatusIndicator, TabInfo, TabType, TuiState};
 use crate::ui;
+use crate::ui::split_layout::{LayoutTree, SplitDirection};
 use gwt_core::terminal::{manager::PaneManager, AgentColor, BuiltinLaunchConfig};
 
 pub struct App {
@@ -56,9 +57,8 @@ impl App {
         self.pty_tx = pty_tx;
         let mut event_loop = EventLoop::new(pty_rx);
 
-        // Store initial terminal size
         let size = terminal.size()?;
-        self.terminal_rows = size.height.saturating_sub(2); // minus tab bar + status bar
+        self.terminal_rows = size.height.saturating_sub(2);
         self.terminal_cols = size.width;
 
         loop {
@@ -79,7 +79,9 @@ impl App {
         }
     }
 
-    fn spawn_shell_tab(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    // --- Pane lifecycle ---
+
+    fn spawn_shell_pane(&mut self) -> Result<String, Box<dyn std::error::Error>> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let config = BuiltinLaunchConfig {
             command: shell,
@@ -101,18 +103,21 @@ impl App {
             self.terminal_cols,
         )?;
 
-        // Start PTY reader thread
         self.start_pty_reader(&pane_id)?;
-
-        // Register vt100 parser
         self.vt_parsers.insert(
             pane_id.clone(),
             vt100::Parser::new(self.terminal_rows, self.terminal_cols, 1000),
         );
 
-        // Add tab to state
+        Ok(pane_id)
+    }
+
+    fn spawn_shell_tab(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let pane_id = self.spawn_shell_pane()?;
+        let tree = LayoutTree::new(&pane_id);
+
         self.state.add_tab(TabInfo {
-            pane_id,
+            pane_id: pane_id.clone(),
             name: "shell".to_string(),
             tab_type: TabType::Shell,
             color: AgentColor::White,
@@ -122,7 +127,91 @@ impl App {
             pane_count: 1,
         });
 
+        self.state.layout_trees.insert(pane_id, tree);
         Ok(())
+    }
+
+    fn split_active_pane(
+        &mut self,
+        direction: SplitDirection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let tab_pane_id = match self.state.active_tab_info() {
+            Some(tab) => tab.pane_id.clone(),
+            None => return Ok(()),
+        };
+
+        let new_pane_id = self.spawn_shell_pane()?;
+
+        if let Some(tree) = self.state.layout_trees.get_mut(&tab_pane_id) {
+            tree.split(direction, &new_pane_id);
+        }
+
+        // Update pane count on tab
+        if let Some(tab) = self.state.tabs.get_mut(self.state.active_tab) {
+            if let Some(tree) = self.state.layout_trees.get(&tab.pane_id) {
+                tab.pane_count = tree.pane_count();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn close_active_pane(&mut self) {
+        let Some(focused_id) = self.state.focused_pane_id() else {
+            return;
+        };
+        let Some(tab) = self.state.active_tab_info() else {
+            return;
+        };
+        let tab_pane_id = tab.pane_id.clone();
+
+        self.vt_parsers.remove(&focused_id);
+        // Find and kill the pane in PaneManager
+        if let Some(idx) = self
+            .pane_manager
+            .panes()
+            .iter()
+            .position(|p| p.pane_id() == focused_id)
+        {
+            self.pane_manager.close_pane(idx);
+        }
+
+        if let Some(tree) = self.state.layout_trees.get_mut(&tab_pane_id) {
+            if tree.pane_count() <= 1 {
+                // Last pane in tab — close the whole tab
+                self.state.layout_trees.remove(&tab_pane_id);
+                self.state.remove_tab(self.state.active_tab);
+            } else {
+                tree.remove(&focused_id);
+                if let Some(tab) = self.state.tabs.get_mut(self.state.active_tab) {
+                    tab.pane_count = tree.pane_count();
+                }
+            }
+        }
+    }
+
+    fn close_active_tab(&mut self) {
+        let Some(tab) = self.state.active_tab_info() else {
+            return;
+        };
+        let tab_pane_id = tab.pane_id.clone();
+
+        // Kill all panes in the tab's layout tree
+        if let Some(tree) = self.state.layout_trees.get(&tab_pane_id) {
+            for id in tree.pane_ids() {
+                self.vt_parsers.remove(&id);
+                if let Some(idx) = self
+                    .pane_manager
+                    .panes()
+                    .iter()
+                    .position(|p| p.pane_id() == id)
+                {
+                    self.pane_manager.close_pane(idx);
+                }
+            }
+        }
+        self.state.layout_trees.remove(&tab_pane_id);
+        self.state.remove_tab(self.state.active_tab);
     }
 
     fn start_pty_reader(&self, pane_id: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -156,41 +245,7 @@ impl App {
         Ok(())
     }
 
-    // Need &mut self for pane_manager, but also need &self for pane_id lookup.
-    // Use index-based access instead.
-    fn start_pty_reader_by_index(
-        pane_manager: &PaneManager,
-        pane_id: &str,
-        tx: &PtyOutputSender,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let pane = pane_manager
-            .panes()
-            .iter()
-            .find(|p| p.pane_id() == pane_id)
-            .ok_or("pane not found")?;
-        let mut reader = pane.take_reader()?;
-        let tx = tx.clone();
-        let id = pane_id.to_string();
-
-        std::thread::Builder::new()
-            .name(format!("pty-reader-{id}"))
-            .spawn(move || {
-                let mut buf = [0u8; 4096];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if tx.send((id.clone(), buf[..n].to_vec())).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            })?;
-
-        Ok(())
-    }
+    // --- Rendering ---
 
     fn render(
         &self,
@@ -206,23 +261,88 @@ impl App {
             .split(area);
 
             let buf = frame.buffer_mut();
-            ui::tab_bar::render(buf, layout[0], &self.state);
 
-            if self.state.tabs.is_empty() {
-                render_welcome(buf, layout[1]);
-            } else if let Some(tab) = self.state.active_tab_info() {
-                if let Some(parser) = self.vt_parsers.get(&tab.pane_id) {
-                    ui::terminal_view::render(buf, layout[1], parser.screen());
+            match self.state.mode {
+                AppMode::Management => {
+                    ui::tab_bar::render(buf, layout[0], &self.state);
+                    ui::management::render(buf, layout[1], &self.state.management);
+                    ui::status_bar::render(buf, layout[2], &self.state);
+                }
+                AppMode::LaunchDialog => {
+                    ui::tab_bar::render(buf, layout[0], &self.state);
+                    self.render_terminal_area(buf, layout[1]);
+                    ui::status_bar::render(buf, layout[2], &self.state);
+                    // Overlay launch dialog
+                    ui::management::launch_dialog::render(
+                        buf,
+                        centered_rect(60, 40, area),
+                        &self.state.management.launch_dialog,
+                    );
+                }
+                _ => {
+                    ui::tab_bar::render(buf, layout[0], &self.state);
+                    self.render_terminal_area(buf, layout[1]);
+                    ui::status_bar::render(buf, layout[2], &self.state);
                 }
             }
-
-            ui::status_bar::render(buf, layout[2], &self.state);
         })?;
         Ok(())
     }
 
+    fn render_terminal_area(&self, buf: &mut Buffer, area: Rect) {
+        if self.state.tabs.is_empty() {
+            render_welcome(buf, area);
+            return;
+        }
+
+        let Some(tab) = self.state.active_tab_info() else {
+            return;
+        };
+
+        if self.state.zoomed {
+            // Zoomed: render only focused pane
+            if let Some(focused_id) = self.state.focused_pane_id() {
+                if let Some(parser) = self.vt_parsers.get(&focused_id) {
+                    ui::terminal_view::render(buf, area, parser.screen());
+                }
+            }
+            return;
+        }
+
+        if let Some(tree) = self.state.layout_trees.get(&tab.pane_id) {
+            let areas = tree.calculate_areas(area);
+            let focused = tree.focused_pane().to_string();
+            for (pane_id, pane_area) in &areas {
+                if let Some(parser) = self.vt_parsers.get(pane_id) {
+                    ui::terminal_view::render(buf, *pane_area, parser.screen());
+                }
+                // Draw focus indicator (thin border highlight for focused pane)
+                if *pane_id == focused && areas.len() > 1 {
+                    let border_style = Style::default().fg(Color::Cyan);
+                    // Top border
+                    for x in pane_area.left()..pane_area.right() {
+                        if let Some(cell) = buf.cell_mut((x, pane_area.top())) {
+                            cell.set_style(border_style);
+                        }
+                    }
+                }
+            }
+        } else if let Some(parser) = self.vt_parsers.get(&tab.pane_id) {
+            ui::terminal_view::render(buf, area, parser.screen());
+        }
+    }
+
+    // --- Key handling ---
+
     fn handle_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
-        // Ctrl+C handling depends on active tab type
+        // Mode-specific key handling
+        match self.state.mode {
+            AppMode::Management => return self.handle_management_key(key),
+            AppMode::LaunchDialog => return self.handle_launch_dialog_key(key),
+            _ => {}
+        }
+
+        // Ctrl+C handling
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             let is_agent_tab = self
                 .state
@@ -231,13 +351,11 @@ impl App {
                 .unwrap_or(false);
 
             if is_agent_tab {
-                // Agent tab: always forward Ctrl+C to PTY (never quit)
-                self.write_to_active_pty(&[0x03])?;
+                self.write_to_focused_pty(&[0x03])?;
                 self.last_ctrl_c = None;
                 return Ok(());
             }
 
-            // Shell tab or no tab: double-tap within 500ms quits
             if let Some(last) = self.last_ctrl_c {
                 if last.elapsed().as_millis() < 500 {
                     self.should_quit = true;
@@ -245,33 +363,42 @@ impl App {
                 }
             }
             self.last_ctrl_c = Some(Instant::now());
-            self.write_to_active_pty(&[0x03])?;
+            self.write_to_focused_pty(&[0x03])?;
             return Ok(());
         }
 
-        // Reset Ctrl+C timer on any other key
         self.last_ctrl_c = None;
 
         let action = keybind::process_key(&mut self.state.prefix_state, key);
         match action {
             KeyAction::Quit => self.should_quit = true,
             KeyAction::NewShellWindow => self.spawn_shell_tab()?,
+            KeyAction::NewAgentWindow => self.state.mode = AppMode::LaunchDialog,
             KeyAction::NextWindow => self.state.next_tab(),
             KeyAction::PrevWindow => self.state.prev_tab(),
             KeyAction::SwitchTab(n) => self.state.set_active_tab(n),
-            KeyAction::CloseWindow => {
+            KeyAction::CloseWindow => self.close_active_tab(),
+            KeyAction::VerticalSplit => self.split_active_pane(SplitDirection::Vertical)?,
+            KeyAction::HorizontalSplit => self.split_active_pane(SplitDirection::Horizontal)?,
+            KeyAction::FocusPane(dir) => {
                 if let Some(tab) = self.state.active_tab_info() {
-                    let pane_id = tab.pane_id.clone();
-                    self.vt_parsers.remove(&pane_id);
-                    self.pane_manager.close_pane(self.state.active_tab);
-                    self.state.remove_tab(self.state.active_tab);
+                    let tab_id = tab.pane_id.clone();
+                    if let Some(tree) = self.state.layout_trees.get_mut(&tab_id) {
+                        let (split_dir, first) = match dir {
+                            Direction::Left => (SplitDirection::Horizontal, true),
+                            Direction::Right => (SplitDirection::Horizontal, false),
+                            Direction::Up => (SplitDirection::Vertical, true),
+                            Direction::Down => (SplitDirection::Vertical, false),
+                        };
+                        tree.focus_direction(split_dir, first);
+                    }
                 }
             }
+            KeyAction::ClosePane => self.close_active_pane(),
+            KeyAction::ZoomPane => self.state.zoomed = !self.state.zoomed,
             KeyAction::ToggleManagement => {
-                self.state.mode = match self.state.mode {
-                    AppMode::Management => AppMode::Normal,
-                    _ => AppMode::Management,
-                };
+                self.state.mode = AppMode::Management;
+                self.sync_management_state();
             }
             KeyAction::ScrollMode => {
                 self.state.mode = AppMode::ScrollMode;
@@ -279,17 +406,99 @@ impl App {
             KeyAction::Passthrough(key) => {
                 let bytes = key_event_to_bytes(&key);
                 if !bytes.is_empty() {
-                    self.write_to_active_pty(&bytes)?;
+                    self.write_to_focused_pty(&bytes)?;
                 }
+            }
+            KeyAction::None => {}
+        }
+        Ok(())
+    }
+
+    fn handle_management_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.state.mode = AppMode::Normal,
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.state.mode = AppMode::Normal;
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.state.management.select_prev(),
+            KeyCode::Down | KeyCode::Char('j') => self.state.management.select_next(),
+            KeyCode::Enter => {
+                // Switch to selected agent's tab
+                if let Some(agent) = self.state.management.selected_agent() {
+                    let pane_id = agent.pane_id.clone();
+                    if let Some(idx) = self.state.tabs.iter().position(|t| t.pane_id == pane_id) {
+                        self.state.set_active_tab(idx);
+                    }
+                }
+                self.state.mode = AppMode::Normal;
+            }
+            KeyCode::Char('n') => {
+                self.state.mode = AppMode::LaunchDialog;
+            }
+            KeyCode::Char('s') => {
+                self.spawn_shell_tab()?;
+                self.state.mode = AppMode::Normal;
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn write_to_active_pty(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(tab) = self.state.active_tab_info() {
-            let pane_id = tab.pane_id.clone();
+    fn handle_launch_dialog_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match key.code {
+            KeyCode::Esc => self.state.mode = AppMode::Normal,
+            KeyCode::Tab => self.state.management.launch_dialog.focus_next(),
+            KeyCode::Enter => {
+                // For now, launch a shell tab (agent launch requires gwt-core agent integration)
+                self.spawn_shell_tab()?;
+                self.state.mode = AppMode::Normal;
+            }
+            KeyCode::Char(c) => {
+                self.state.management.launch_dialog.branch_input.push(c);
+            }
+            KeyCode::Backspace => {
+                self.state.management.launch_dialog.branch_input.pop();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn sync_management_state(&mut self) {
+        use crate::ui::management::{AgentEntry, AgentStatus};
+
+        self.state.management.agents = self
+            .state
+            .tabs
+            .iter()
+            .map(|tab| AgentEntry {
+                pane_id: tab.pane_id.clone(),
+                agent_name: tab.name.clone(),
+                agent_type: match tab.tab_type {
+                    TabType::Shell => "shell".to_string(),
+                    TabType::Agent => "agent".to_string(),
+                },
+                branch: tab.branch.clone(),
+                status: match &tab.status {
+                    PaneStatusIndicator::Running => AgentStatus::Running,
+                    PaneStatusIndicator::Idle => AgentStatus::Idle,
+                    PaneStatusIndicator::Completed(c) => AgentStatus::Completed(*c),
+                    PaneStatusIndicator::Error(e) => AgentStatus::Error(e.clone()),
+                },
+                uptime: None,
+                pr_url: None,
+                spec_id: tab.spec_id.clone(),
+            })
+            .collect();
+    }
+
+    // --- PTY I/O ---
+
+    fn write_to_focused_pty(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(pane_id) = self.state.focused_pane_id() {
             if let Some(pane) = self.pane_manager.pane_mut_by_id(&pane_id) {
                 pane.write_input(data)?;
             }
@@ -298,11 +507,10 @@ impl App {
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) -> Result<(), Box<dyn std::error::Error>> {
-        let rows = height.saturating_sub(2); // minus tab bar + status bar
+        let rows = height.saturating_sub(2);
         self.terminal_rows = rows;
         self.terminal_cols = width;
         self.pane_manager.resize_all(rows, width)?;
-        // Resize vt100 parsers too
         for parser in self.vt_parsers.values_mut() {
             parser.set_size(rows, width);
         }
@@ -310,31 +518,28 @@ impl App {
     }
 
     fn handle_pty_output(&mut self, pane_id: &str, data: &[u8]) {
-        // Feed to vt100 parser for rendering
         if let Some(parser) = self.vt_parsers.get_mut(pane_id) {
             parser.process(data);
         }
-        // Feed to scrollback
         if let Some(pane) = self.pane_manager.pane_mut_by_id(pane_id) {
             let _ = pane.process_bytes(data);
         }
     }
 }
 
-/// Convert a crossterm KeyEvent to bytes for PTY input.
+// --- Helpers ---
+
 fn key_event_to_bytes(key: &KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                // Ctrl+A = 0x01, Ctrl+B = 0x02, etc.
                 let ctrl_byte = (c as u8).wrapping_sub(b'a').wrapping_add(1);
                 if ctrl_byte <= 26 {
                     return vec![ctrl_byte];
                 }
             }
             let mut buf = [0u8; 4];
-            let s = c.encode_utf8(&mut buf);
-            s.as_bytes().to_vec()
+            c.encode_utf8(&mut buf).as_bytes().to_vec()
         }
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![0x7f],
@@ -369,6 +574,14 @@ fn key_event_to_bytes(key: &KeyEvent) -> Vec<u8> {
     }
 }
 
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let w = area.width * percent_x / 100;
+    let h = area.height * percent_y / 100;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
 fn render_welcome(buf: &mut Buffer, area: Rect) {
     if area.height < 8 || area.width < 40 {
         return;
@@ -380,10 +593,7 @@ fn render_welcome(buf: &mut Buffer, area: Rect) {
     let text_area = Rect::new(text_x, center_y, max_width, 9);
 
     let lines = vec![
-        Line::from(Span::styled(
-            "Welcome to gwt",
-            Style::default().fg(Color::Cyan),
-        )),
+        Line::from(Span::styled("Welcome to gwt", Style::default().fg(Color::Cyan))),
         Line::from(""),
         Line::from(Span::styled(
             "No agents running. Get started:",
@@ -426,20 +636,30 @@ mod tests {
     #[test]
     fn test_ctrl_c_double_tap_quits() {
         let mut app = App::new(PathBuf::from("/tmp/test"));
-        // No PTY, so write_to_active_pty is a no-op
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         app.handle_key(ctrl_c.clone()).unwrap();
-        assert!(!app.should_quit); // first tap doesn't quit
+        assert!(!app.should_quit);
         app.handle_key(ctrl_c).unwrap();
-        assert!(app.should_quit); // second tap within 500ms quits
+        assert!(app.should_quit);
     }
 
     #[test]
-    fn test_ctrl_c_single_tap_does_not_quit() {
+    fn test_ctrl_c_agent_tab_never_quits() {
         let mut app = App::new(PathBuf::from("/tmp/test"));
+        app.state.add_tab(TabInfo {
+            pane_id: "p1".into(),
+            name: "claude".into(),
+            tab_type: TabType::Agent,
+            color: AgentColor::Green,
+            status: PaneStatusIndicator::Running,
+            branch: None,
+            spec_id: None,
+            pane_count: 1,
+        });
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_c.clone()).unwrap();
         app.handle_key(ctrl_c).unwrap();
-        assert!(!app.should_quit);
+        assert!(!app.should_quit); // Agent tab: never quits via Ctrl+C
     }
 
     #[test]
@@ -453,70 +673,114 @@ mod tests {
     }
 
     #[test]
+    fn test_launch_dialog_mode() {
+        let mut app = App::new(PathBuf::from("/tmp/test"));
+        // Ctrl+G, n -> LaunchDialog mode
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.state.mode, AppMode::LaunchDialog);
+        // Esc -> back to Normal
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.state.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn test_management_mode() {
+        let mut app = App::new(PathBuf::from("/tmp/test"));
+        // Ctrl+G, Ctrl+G -> Management mode
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.state.mode, AppMode::Management);
+        // Esc -> back to Normal
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.state.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn test_zoom_toggle() {
+        let mut app = App::new(PathBuf::from("/tmp/test"));
+        assert!(!app.state.zoomed);
+        // Ctrl+G, z -> zoom
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.state.zoomed);
+        // Ctrl+G, z -> unzoom
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.state.zoomed);
+    }
+
+    #[test]
     fn test_handle_pty_output() {
         let mut app = App::new(PathBuf::from("/tmp/test"));
         app.vt_parsers
             .insert("pane-1".to_string(), vt100::Parser::new(24, 80, 0));
         app.handle_pty_output("pane-1", b"Hello");
         let screen = app.vt_parsers.get("pane-1").unwrap().screen();
-        let cell = screen.cell(0, 0).unwrap();
-        assert_eq!(cell.contents(), "H");
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "H");
     }
 
     #[test]
-    fn test_key_event_to_bytes_char() {
-        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert_eq!(key_event_to_bytes(&key), b"a");
+    fn test_key_event_to_bytes() {
+        assert_eq!(
+            key_event_to_bytes(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            b"a"
+        );
+        assert_eq!(
+            key_event_to_bytes(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            b"\r"
+        );
+        assert_eq!(
+            key_event_to_bytes(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            vec![0x01]
+        );
+        assert_eq!(
+            key_event_to_bytes(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            b"\x1b[A"
+        );
     }
 
     #[test]
-    fn test_key_event_to_bytes_enter() {
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(key_event_to_bytes(&key), b"\r");
+    fn test_centered_rect() {
+        let area = Rect::new(0, 0, 100, 50);
+        let r = centered_rect(60, 40, area);
+        assert_eq!(r.width, 60);
+        assert_eq!(r.height, 20);
+        assert_eq!(r.x, 20);
+        assert_eq!(r.y, 15);
     }
 
     #[test]
-    fn test_key_event_to_bytes_ctrl_a() {
-        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        assert_eq!(key_event_to_bytes(&key), vec![0x01]);
+    fn test_focused_pane_id_no_tabs() {
+        let state = TuiState::new();
+        assert!(state.focused_pane_id().is_none());
     }
 
     #[test]
-    fn test_key_event_to_bytes_arrow_up() {
-        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(key_event_to_bytes(&key), b"\x1b[A");
-    }
-
-    #[test]
-    fn test_handle_tab_navigation() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
-
-        app.state.add_tab(TabInfo {
-            pane_id: "p1".into(),
-            name: "tab1".into(),
+    fn test_focused_pane_id_with_layout() {
+        let mut state = TuiState::new();
+        state.add_tab(TabInfo {
+            pane_id: "tab1".into(),
+            name: "shell".into(),
             tab_type: TabType::Shell,
-            color: AgentColor::Green,
+            color: AgentColor::White,
             status: PaneStatusIndicator::Running,
             branch: None,
             spec_id: None,
             pane_count: 1,
         });
-        app.state.add_tab(TabInfo {
-            pane_id: "p2".into(),
-            name: "tab2".into(),
-            tab_type: TabType::Shell,
-            color: AgentColor::Blue,
-            status: PaneStatusIndicator::Running,
-            branch: None,
-            spec_id: None,
-            pane_count: 1,
-        });
-
-        assert_eq!(app.state.active_tab, 1);
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.state.active_tab, 0);
+        let tree = LayoutTree::new("tab1");
+        state.layout_trees.insert("tab1".to_string(), tree);
+        assert_eq!(state.focused_pane_id(), Some("tab1".to_string()));
     }
 }
