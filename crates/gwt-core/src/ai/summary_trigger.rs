@@ -7,9 +7,12 @@
 use crate::error::GwtError;
 use crate::terminal::scrollback::{self, ScrollbackFile};
 
-/// Summary of an agent's terminal session.
+/// Summary of an agent's terminal scrollback.
+///
+/// Named `ScrollbackSummary` to avoid collision with [`super::summary::SessionSummary`]
+/// which represents a parsed session summary with metrics.
 #[derive(Debug, Clone)]
-pub struct SessionSummary {
+pub struct ScrollbackSummary {
     pub pane_id: String,
     pub summary: String,
     pub generated_at: chrono::DateTime<chrono::Utc>,
@@ -65,13 +68,10 @@ pub fn should_regenerate(
     last_generated: Option<chrono::DateTime<chrono::Utc>>,
     config: &SummaryConfig,
 ) -> bool {
-    match last_generated {
-        None => true,
-        Some(t) => {
-            chrono::Utc::now().signed_duration_since(t).num_seconds() as u64
-                >= config.min_interval_secs
-        }
-    }
+    last_generated.is_none_or(|t| {
+        let elapsed = chrono::Utc::now().signed_duration_since(t).num_seconds();
+        elapsed >= 0 && elapsed as u64 >= config.min_interval_secs
+    })
 }
 
 #[cfg(test)]
