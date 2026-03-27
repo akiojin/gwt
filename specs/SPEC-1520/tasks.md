@@ -1,0 +1,7 @@
+- [x] T001 [S] Project Index 関連 spec / issue を `gwt-project-search` の files/index 観点で再確認する
+- [x] T002 [S] `#1427` から files collection の恒久要件を抽出し、この spec へ転記する
+- [x] T003 [S] `#1519` の persisted DB recovery 要件をこの spec へ転記する
+- [x] T004 [F] Files index / recovery の責務境界を本文に固定する
+- [x] T005 [F] Issue search ownership を `#1643`、Issue cache/linkage ownership を `#1714` へ参照整理する
+- [x] T006 [FIN] Files index と recovery の実装・テスト・manual harness のカバレッジをこの spec にひも付ける
+- [x] T007 [FIN] `#1427` を historical reference として整理する

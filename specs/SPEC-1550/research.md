@@ -1,0 +1,3 @@
+- Canonical persistence layout: #1542
+- AI settings persistence bug は sidecar file と non-canonical schema が原因になりやすいため、runtime と UI の source of truth を一本化する
+- OpenAI-compatible 方針、コスト表示不要、tool definition hardcode 方針は維持する

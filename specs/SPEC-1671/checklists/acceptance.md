@@ -1,0 +1,4 @@
+- [x] 初回分析が自動開始される
+- [x] 初回分析の結果が transcript に表示される
+- [x] 初回分析の内部プロンプトが transcript に出ない
+- [x] tests updated and passing
