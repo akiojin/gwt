@@ -5,6 +5,7 @@ pub mod launch_dialog;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
+    style::Color,
 };
 
 /// Status of an agent process.
@@ -14,6 +15,28 @@ pub enum AgentStatus {
     Idle,
     Completed(i32),
     Error(String),
+}
+
+impl AgentStatus {
+    /// Map this status to a display color.
+    pub fn color(&self) -> Color {
+        match self {
+            AgentStatus::Running => Color::Green,
+            AgentStatus::Idle => Color::Yellow,
+            AgentStatus::Completed(_) => Color::Cyan,
+            AgentStatus::Error(_) => Color::Red,
+        }
+    }
+
+    /// Short text label for list display.
+    pub fn label(&self) -> &str {
+        match self {
+            AgentStatus::Running => "running",
+            AgentStatus::Idle => "idle",
+            AgentStatus::Completed(_) => "done",
+            AgentStatus::Error(_) => "error",
+        }
+    }
 }
 
 impl std::fmt::Display for AgentStatus {

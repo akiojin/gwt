@@ -84,22 +84,32 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     .split(vertical[1])[1]
 }
 
+/// Return a style with REVERSED modifier when focused, or the base color otherwise.
+fn button_style(focused: bool, color: Color) -> Style {
+    if focused {
+        Style::new()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(color)
+    }
+}
+
 /// Render the launch dialog as a centered modal.
 pub fn render(buf: &mut Buffer, area: Rect, state: &LaunchDialogState) {
     let popup_area = centered_rect(60, 30, area);
 
-    // Clear the background
     Clear.render(popup_area, buf);
 
     let block = Block::default()
         .title(" Launch Agent ")
         .borders(Borders::ALL)
-        .style(Style::default().bg(Color::Black));
+        .style(Style::new().bg(Color::Black));
 
     let inner = block.inner(popup_area);
     block.render(popup_area, buf);
 
-    // Layout: 4 rows inside the dialog (agent, branch, spacer, buttons)
     let rows = Layout::vertical([
         Constraint::Length(1), // Agent selector
         Constraint::Length(1), // Branch input
@@ -110,60 +120,50 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &LaunchDialogState) {
 
     // Agent selector
     let agent_style = if state.focused_field == DialogField::Agent {
-        Style::default().add_modifier(Modifier::REVERSED)
+        Style::new().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
     };
-    let agent_line = Line::from(vec![
-        Span::styled("Agent:   ", Style::default().fg(Color::DarkGray)),
+    Paragraph::new(Line::from(vec![
+        Span::styled("Agent:   ", Style::new().fg(Color::DarkGray)),
         Span::styled(
             format!("[{} \u{25bc}]", state.selected_agent_label()),
             agent_style,
         ),
-    ]);
-    Paragraph::new(agent_line).render(rows[0], buf);
+    ]))
+    .render(rows[0], buf);
 
     // Branch input
     let branch_style = if state.focused_field == DialogField::Branch {
-        Style::default().add_modifier(Modifier::REVERSED)
+        Style::new().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
     };
     let branch_display = if state.branch_input.is_empty() {
-        "<branch name>".to_string()
+        "<branch name>"
     } else {
-        state.branch_input.clone()
+        &state.branch_input
     };
-    let branch_line = Line::from(vec![
-        Span::styled("Branch:  ", Style::default().fg(Color::DarkGray)),
+    Paragraph::new(Line::from(vec![
+        Span::styled("Branch:  ", Style::new().fg(Color::DarkGray)),
         Span::styled(format!("[{}]", branch_display), branch_style),
-    ]);
-    Paragraph::new(branch_line).render(rows[1], buf);
+    ]))
+    .render(rows[1], buf);
 
     // Buttons
-    let launch_style = if state.focused_field == DialogField::LaunchButton {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    let cancel_style = if state.focused_field == DialogField::CancelButton {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Red)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Red)
-    };
-    let button_line = Line::from(vec![
+    Paragraph::new(Line::from(vec![
         Span::raw("       "),
-        Span::styled(" Launch ", launch_style),
+        Span::styled(
+            " Launch ",
+            button_style(state.focused_field == DialogField::LaunchButton, Color::Green),
+        ),
         Span::raw("  "),
-        Span::styled(" Cancel ", cancel_style),
-    ]);
-    Paragraph::new(button_line).render(rows[3], buf);
+        Span::styled(
+            " Cancel ",
+            button_style(state.focused_field == DialogField::CancelButton, Color::Red),
+        ),
+    ]))
+    .render(rows[3], buf);
 }
 
 #[cfg(test)]
@@ -189,7 +189,6 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 30));
         let state = LaunchDialogState::default();
         render(&mut buf, Rect::new(0, 0, 100, 30), &state);
-        // The popup should be roughly centered; check title exists
         let all_content: String = (0..30)
             .flat_map(|y| (0..100).map(move |x| (x, y)))
             .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())

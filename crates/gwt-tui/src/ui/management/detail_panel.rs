@@ -7,7 +7,6 @@ use ratatui::{
 };
 
 use super::ManagementState;
-use crate::ui::management::agent_list::status_color;
 
 /// Format a duration as "Xh Ym Zs" or "Ym Zs" or "Zs".
 fn format_uptime(d: &std::time::Duration) -> String {
@@ -24,71 +23,63 @@ fn format_uptime(d: &std::time::Duration) -> String {
     }
 }
 
+/// Build a detail row with a label and value.
+fn detail_row<'a>(label: &'a str, value: Span<'a>) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(label, Style::new().fg(Color::DarkGray)),
+        value,
+    ])
+}
+
 /// Render the detail panel for the selected agent.
 pub fn render(buf: &mut Buffer, area: Rect, state: &ManagementState) {
     let block = Block::default()
         .title(" Agent Details ")
         .borders(Borders::ALL);
 
-    if let Some(agent) = state.selected_agent() {
-        let color = status_color(&agent.status);
-        let status_str = if let Some(ref uptime) = agent.uptime {
-            format!("{} ({})", agent.status, format_uptime(uptime))
-        } else {
-            agent.status.to_string()
-        };
-
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Name:      ", Style::default().fg(Color::DarkGray)),
-                Span::raw(&agent.agent_name),
-            ]),
-            Line::from(vec![
-                Span::styled("Type:      ", Style::default().fg(Color::DarkGray)),
-                Span::raw(&agent.agent_type),
-            ]),
-            Line::from(vec![
-                Span::styled("Branch:    ", Style::default().fg(Color::DarkGray)),
-                Span::raw(agent.branch.as_deref().unwrap_or("-")),
-            ]),
-            Line::from(vec![
-                Span::styled("Status:    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(status_str, Style::default().fg(color)),
-            ]),
-        ];
-
-        if let Some(ref spec_id) = agent.spec_id {
-            lines.push(Line::from(vec![
-                Span::styled("SPEC:      ", Style::default().fg(Color::DarkGray)),
-                Span::raw(spec_id.as_str()),
-            ]));
-        }
-
-        if let Some(ref pr_url) = agent.pr_url {
-            lines.push(Line::from(vec![
-                Span::styled("PR:        ", Style::default().fg(Color::DarkGray)),
-                Span::raw(pr_url.as_str()),
-            ]));
-        }
-
-        lines.push(Line::default());
-        lines.push(Line::from(vec![
-            Span::styled("[k]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Kill  "),
-            Span::styled("[r]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Restart  "),
-            Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Focus"),
-        ]));
-
-        let paragraph = Paragraph::new(lines).block(block);
-        paragraph.render(area, buf);
-    } else {
+    let Some(agent) = state.selected_agent() else {
         let paragraph = Paragraph::new("No agent selected")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::new().fg(Color::DarkGray))
             .block(block);
         paragraph.render(area, buf);
+        return;
+    };
+
+    let color = agent.status.color();
+    let status_str = match agent.uptime {
+        Some(ref uptime) => format!("{} ({})", agent.status, format_uptime(uptime)),
+        None => agent.status.to_string(),
+    };
+
+    let mut lines = vec![
+        detail_row("Name:      ", Span::raw(&agent.agent_name)),
+        detail_row("Type:      ", Span::raw(&agent.agent_type)),
+        detail_row(
+            "Branch:    ",
+            Span::raw(agent.branch.as_deref().unwrap_or("-")),
+        ),
+        detail_row("Status:    ", Span::styled(status_str, Style::new().fg(color))),
+    ];
+
+    if let Some(ref spec_id) = agent.spec_id {
+        lines.push(detail_row("SPEC:      ", Span::raw(spec_id.as_str())));
     }
+
+    if let Some(ref pr_url) = agent.pr_url {
+        lines.push(detail_row("PR:        ", Span::raw(pr_url.as_str())));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled("[k]", Style::new().fg(Color::Yellow)),
+        Span::raw(" Kill  "),
+        Span::styled("[r]", Style::new().fg(Color::Yellow)),
+        Span::raw(" Restart  "),
+        Span::styled("[Enter]", Style::new().fg(Color::Yellow)),
+        Span::raw(" Focus"),
+    ]));
+
+    Paragraph::new(lines).block(block).render(area, buf);
 }
 
 #[cfg(test)]
@@ -107,6 +98,13 @@ mod tests {
             pr_url: Some("#42".to_string()),
             spec_id: Some("SPEC-1776".to_string()),
         }
+    }
+
+    fn collect_buf_content(buf: &Buffer, width: u16, height: u16) -> String {
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect()
     }
 
     #[test]
@@ -138,10 +136,7 @@ mod tests {
             ..Default::default()
         };
         render(&mut buf, Rect::new(0, 0, 50, 12), &state);
-        let content: String = (0..12)
-            .flat_map(|y| (0..50).map(move |x| (x, y)))
-            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
-            .collect();
+        let content = collect_buf_content(&buf, 50, 12);
         assert!(content.contains("Claude Code"));
         assert!(content.contains("claude"));
         assert!(content.contains("Running"));
@@ -156,10 +151,7 @@ mod tests {
             ..Default::default()
         };
         render(&mut buf, Rect::new(0, 0, 50, 14), &state);
-        let content: String = (0..14)
-            .flat_map(|y| (0..50).map(move |x| (x, y)))
-            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
-            .collect();
+        let content = collect_buf_content(&buf, 50, 14);
         assert!(content.contains("SPEC-1776"));
         assert!(content.contains("#42"));
     }
