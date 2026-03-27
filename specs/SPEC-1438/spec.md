@@ -44,6 +44,47 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 - `plugins/gwt/hooks/hooks.json` は runtime asset としては廃止し、managed hook definition の正本は `skill_registration.rs` に内包する。
 - Claude 向け generated asset で既存更新対象に含めるのは `./.claude/settings.json` のみとする。
 
+### Codex hook support
+
+Codex CLI (v0.116.0+) が Hooks フレームワークをサポートしている。gwt は Codex のエージェント起動時にも hook assets を埋め込む対象とする。
+
+#### Codex 対応フックイベント
+
+| Event | Scope | Description |
+|-------|-------|-------------|
+| `SessionStart` | Session | セッション開始時に発火 |
+| `PreToolUse` | Turn | ツール呼び出し前に発火。Block/Modify が可能 |
+| `PostToolUse` | Turn | ツール呼び出し後に発火（現在 Bash のみ） |
+| `UserPromptSubmit` | Turn | プロンプト送信前に発火。ブロック/拡張が可能 |
+| `Stop` | Turn | ターン終了時に発火 |
+
+#### Claude Code との対応
+
+| Claude Code Event | Codex Equivalent | Notes |
+|---|---|---|
+| `PreToolUse` | `PreToolUse` | 同等。Codex では `systemMessage` をサポート |
+| `PostToolUse` | `PostToolUse` | Codex は Bash のみ対応 |
+| `Stop` | `Stop` | 同等 |
+| `SessionStart` | `SessionStart` | 同等 |
+| `UserPromptSubmit` | `UserPromptSubmit` | 同等 |
+| `SessionEnd` | — | Codex 未対応 |
+| `SubagentStop` | — | Codex 未対応 |
+| `PreCompact` | — | Codex 未対応 |
+| `Notification` | — | Codex 未対応 |
+
+#### Codex hook の設定場所
+
+- Codex は `hooks.json` をアクティブな設定レイヤー（`.codex/` 等）から検出する
+- 各 hook は stdin で JSON を受け取り、stdout で制御結果を返す
+- Windows は現在 Hooks 無効
+
+#### gwt embed 対応方針
+
+- Codex 向け hook embed は `./.codex/hooks.json` に配置する
+- Claude Code と共通の hook ロジック（gwt-tauri hook 呼び出し等）を Codex 向けに変換して埋め込む
+- `skill_registration.rs` で Claude/Codex 両方の hook 定義を管理する
+- Codex 未対応イベント（`SessionEnd`, `SubagentStop`, `PreCompact`, `Notification`）は skip する
+
 ### Lifecycle
 
 1. agent launch 時に target worktree root へ registration / repair を実行する。
@@ -84,6 +125,10 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 | FR-SYNC-004 | `gwt-sync-base` はマージコンフリクト発生時に自動解決せず、ユーザーに報告して停止する |
 | FR-SYNC-005 | `gwt-sync-base` は rebase や force-push を使用しない。常に merge を使用する |
 | FR-SYNC-006 | `gwt-sync-base` はブランチの作成・切り替えを行わない |
+| FR-HOOK-001 | Codex agent launch 時に `./.codex/hooks.json` へ gwt managed hook を埋め込む |
+| FR-HOOK-002 | Codex hooks は SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop の 5 イベントに対応する |
+| FR-HOOK-003 | Claude Code と Codex で共通の hook ロジックは `skill_registration.rs` で一元管理する |
+| FR-HOOK-004 | Codex 未対応イベント (SessionEnd, SubagentStop, PreCompact, Notification) は Codex 向け hook 生成時にスキップする |
 
 ### Acceptance scenarios
 
@@ -98,6 +143,8 @@ Claude を含む全エージェントで、CLI-visible な gwt asset は launch 
 | US7 | ユーザーが「最新にして」と指示する | `gwt-sync-base` がベースブランチを自動検出し、fetch → merge → push を実行して最新コミットが現在のブランチに取り込まれる |
 | US8 | ベースブランチとのマージでコンフリクトが発生する | `gwt-sync-base` がコンフリクトを報告し、ユーザーに解決を委ねる |
 | US9 | 現在のブランチが既にベースブランチと同期済み | `gwt-sync-base` が「Already up to date」を報告し、push をスキップする |
+| US10 | Codex セッションを worktree で起動 | `./.codex/hooks.json` が生成され、gwt managed hook が 5 イベント分登録されている |
+| US11 | Codex セッションで PreToolUse hook が発火 | gwt-tauri (or gwt-server) の hook エンドポイントが呼ばれ、対応するアクションが実行される |
 
 ### Success criteria
 
