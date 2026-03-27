@@ -1,0 +1,12 @@
+[package]
+name = "gwt-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "TUI frontend for Git Worktree Manager"
+publish = false
+
+[dependencies]
+gwt-core.workspace = true
