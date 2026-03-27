@@ -1,3 +1,5 @@
+#![allow(dead_code, clippy::should_implement_trait)]
+
 mod app;
 mod event;
 mod input;

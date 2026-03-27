@@ -292,7 +292,7 @@ mod tests {
         state.handle_search_input('u');
         assert_eq!(state.search_query, "tu");
         // "TUI Migration" matches "tu"
-        assert!(state.filtered.len() >= 1);
+        assert!(!state.filtered.is_empty());
     }
 
     #[test]
