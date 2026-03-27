@@ -2,11 +2,10 @@
 resolver = "2"
 members = [
     "crates/gwt-core",
-    "crates/gwt-tauri",
     "crates/gwt-tui",
 ]
 default-members = [
-    "crates/gwt-tauri",
+    "crates/gwt-tui",
 ]
 
 [workspace.package]
@@ -29,7 +28,7 @@ semver = "1"
 # Self-update payload extraction
 flate2 = "1.0"
 tar = "0.4"
-zip = "8.2"
+zip = "8.3"
 
 # Git operations
 gix = { version = "0.80", default-features = false, features = [
@@ -73,10 +72,6 @@ libc = "0.2"
 # HTTP client (blocking)
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
-# WebSocket
-tokio-tungstenite = "0.28"
-futures-util = "0.3"
-
 # Base64 encoding
 base64 = "0.22"
 
@@ -92,10 +87,6 @@ dunce = "1"
 # System information
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 nvml-wrapper = "0.12"
-
-# File system watcher (gwt-spec issue)
-notify = "8"
-notify-debouncer-mini = "0.7"
 
 [profile.release]
 lto = true
