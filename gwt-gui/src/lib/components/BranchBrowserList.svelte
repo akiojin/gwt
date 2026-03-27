@@ -63,7 +63,7 @@
 
 <style>
   .state-msg {
-    padding: 16px;
+    padding: var(--space-4);
     color: var(--text-muted);
   }
 
@@ -74,16 +74,16 @@
   .branch-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-3);
   }
 
   .branch-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding: 14px 16px;
-    border-radius: 16px;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-xl);
     border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
     background: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
     color: var(--text-primary);
@@ -107,18 +107,18 @@
 
   .branch-sub {
     color: var(--text-muted);
-    margin-top: 2px;
+    margin-top: var(--space-1);
   }
 
   .branch-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .divergence-pill {
-    border-radius: 999px;
-    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    padding: var(--space-1) var(--space-3);
     font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;

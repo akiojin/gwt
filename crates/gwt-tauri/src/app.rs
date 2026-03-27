@@ -493,7 +493,8 @@ pub fn build_app(
                 {
                     let app_handle = _app.handle().clone();
                     tokio::spawn(async move {
-                        match crate::http_server::start_http_server().await {
+                        let app_state = Arc::new(AppState::new());
+                        match crate::http_server::start_http_server(app_state).await {
                             Ok(port) => {
                                 let state = app_handle.state::<AppState>();
                                 state
@@ -757,7 +758,6 @@ pub fn build_app(
         })
         .invoke_handler(tauri::generate_handler![
             crate::commands::greet,
-            crate::commands::get_http_ipc_port,
             crate::commands::branches::list_branches,
             crate::commands::branches::list_worktree_branches,
             crate::commands::branches::list_remote_branches,
@@ -901,6 +901,7 @@ pub fn build_app(
             crate::commands::system::get_startup_diagnostics,
             crate::commands::system::heartbeat,
             crate::commands::system::report_frontend_metrics,
+            crate::commands::system::get_http_ipc_port,
             crate::commands::project_index::ensure_index_runtime,
             crate::commands::project_index::index_project_cmd,
             crate::commands::project_index::search_project_index_cmd,

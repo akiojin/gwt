@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
+  import { invoke, listen } from "$lib/tauriInvoke";
   import { onMount } from "svelte";
   import type { AssistantState, DashboardData } from "../types";
   import AssistantDashboard from "./AssistantDashboard.svelte";

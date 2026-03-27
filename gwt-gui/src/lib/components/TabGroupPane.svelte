@@ -471,6 +471,7 @@
             {:else if tab.type === "branchBrowser" && branchBrowserConfig}
               <BranchBrowserPanel config={{
                 ...branchBrowserConfig,
+                isActive: group.activeTabId === tab.id,
                 initialFilter: branchBrowserState?.filter,
                 initialQuery: branchBrowserState?.query,
                 selectedBranchName: branchBrowserState?.selectedBranchName ?? null,
@@ -536,9 +537,14 @@
     display: flex;
     min-height: var(--tab-height);
     background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-subtle);
     overflow-x: auto;
     user-select: none;
+    scrollbar-width: none;
+  }
+
+  .tab-bar::-webkit-scrollbar {
+    display: none;
   }
 
   .tab-bar.drop-target {
@@ -549,24 +555,33 @@
     position: relative;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-2);
     box-sizing: border-box;
-    flex: 0 0 180px;
-    min-width: 180px;
-    max-width: 180px;
-    padding: 0 14px;
-    border-right: 1px solid var(--border-color);
+    flex: 0 0 auto;
+    min-width: 120px;
+    max-width: 200px;
+    padding: 0 var(--space-4);
+    border-right: 1px solid var(--border-subtle);
     cursor: pointer;
     white-space: nowrap;
     user-select: none;
     background: transparent;
+    color: var(--text-muted);
+    font-size: var(--ui-font-sm);
+    font-weight: var(--font-weight-medium);
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .tab:hover {
     color: var(--text-secondary);
+    background: var(--bg-elevated);
   }
 
   .tab.active {
     background: var(--bg-primary);
     color: var(--text-primary);
     border-bottom: 2px solid var(--accent);
+    font-weight: var(--font-weight-semibold);
   }
 
   .tab.dragging {
@@ -659,9 +674,16 @@
     font-size: var(--ui-font-sm);
     font-family: monospace;
     cursor: pointer;
-    padding: 0 2px;
+    padding: 2px;
     line-height: 1;
     flex-shrink: 0;
+    border-radius: var(--radius-sm);
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .tab-close:hover {
+    color: var(--red);
+    background: var(--red-muted);
   }
 
   .tab-actions {
@@ -686,30 +708,36 @@
     right: 0;
     display: flex;
     flex-direction: column;
-    min-width: 132px;
-    padding: 6px;
-    gap: 4px;
+    min-width: 140px;
+    padding: var(--space-1);
+    gap: 2px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
     z-index: 20;
   }
 
   .tab-actions-menu button {
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
-    padding: 6px 8px;
+    padding: var(--space-2) var(--space-3);
     text-align: left;
     cursor: pointer;
+    font-family: inherit;
+    font-size: var(--ui-font-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .tab-actions-menu button:hover:not(:disabled) {
+    background: var(--bg-hover);
   }
 
   .tab-actions-menu button:disabled {
     cursor: not-allowed;
     opacity: 0.5;
-  }
-
-  .tab-close:hover {
-    color: var(--red);
   }
 
   .group-content {

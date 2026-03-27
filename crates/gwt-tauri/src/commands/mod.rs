@@ -72,11 +72,3 @@ impl Drop for TestEnvGuard {
 pub fn greet(name: &str) -> String {
     format!("Hello, {}! Welcome to gwt.", name)
 }
-
-/// Return the port of the local HTTP IPC server (0 if not yet started).
-#[tauri::command]
-pub fn get_http_ipc_port(state: tauri::State<'_, crate::state::AppState>) -> u16 {
-    state
-        .http_ipc_port
-        .load(std::sync::atomic::Ordering::Relaxed)
-}

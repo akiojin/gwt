@@ -19,6 +19,58 @@
     UpdateState,
     VoiceInputSettings,
   } from "./lib/types";
+  import {
+    createToastState,
+    showToast as showToastRuntime,
+    showAvailableUpdateToast as showAvailableUpdateToastRuntime,
+    dismissToast as dismissToastRuntime,
+    setupToastSubscriptions,
+    type ToastState,
+    type ToastAction as ToastActionRT,
+    type ShowToastCallbacks,
+  } from "./lib/appToastRuntime";
+  import {
+    createVoiceInputState,
+    applyVoiceInputSettings as applyVoiceInputSettingsRT,
+    resetVoiceInputTransientState,
+    syncControllerState,
+    setupVoiceController,
+    type VoiceInputState,
+  } from "./lib/appVoiceInputRuntime";
+  import {
+    createModalState,
+    showReportDialogRuntime,
+    openAboutDialogRuntime,
+    openCleanupModalRuntime,
+    type ModalState,
+  } from "./lib/appModalStateRuntime";
+  import {
+    createAppearanceState,
+    applyAppearanceSettingsRuntime,
+    checkOsEnvCaptureOnStartupRuntime,
+    clampFontSizeRuntime as clampFontSizeAppearance,
+    normalizeAppLanguageRuntime as normalizeAppLanguageAppearance,
+    normalizeUiFontFamilyRuntime,
+    normalizeTerminalFontFamilyRuntime,
+    normalizeVoiceInputSettingsRuntime as normalizeVoiceInputSettingsAppearance,
+    applyUiFontSizeRuntime,
+    applyUiFontFamilyRuntime,
+    applyTerminalFontSizeRuntime,
+    applyTerminalFontFamilyRuntime,
+    DEFAULT_UI_FONT_FAMILY as DEFAULT_UI_FONT_FAMILY_APPEARANCE,
+    DEFAULT_TERMINAL_FONT_FAMILY as DEFAULT_TERMINAL_FONT_FAMILY_APPEARANCE,
+    DEFAULT_VOICE_INPUT_SETTINGS as DEFAULT_VOICE_INPUT_SETTINGS_APPEARANCE,
+    type AppearanceState,
+  } from "./lib/appAppearanceRuntime";
+  import {
+    createLaunchState,
+    bufferLaunchProgressEventRuntime,
+    bufferLaunchFinishedEventRuntime,
+    LAUNCH_STEP_IDS as LAUNCH_STEP_IDS_RT,
+    LAUNCH_EVENT_BUFFER_LIMIT as LAUNCH_EVENT_BUFFER_LIMIT_RT,
+    type LaunchState,
+    type LaunchStepId as LaunchStepIdRT,
+  } from "./lib/appLaunchStateRuntime";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import AboutDialog from "./lib/components/AboutDialog.svelte";
@@ -32,7 +84,7 @@
   import TerminalDiagnosticsDialog from "./lib/components/TerminalDiagnosticsDialog.svelte";
   import CapturedEnvironmentDialog from "./lib/components/CapturedEnvironmentDialog.svelte";
   import AppErrorDialog from "./lib/components/AppErrorDialog.svelte";
-  import ToastBanner, { type ToastAction } from "./lib/components/ToastBanner.svelte";
+  import ToastBanner from "./lib/components/ToastBanner.svelte";
   import { formatWindowTitle } from "./lib/windowTitle";
   import {
     buildWindowMenuTabsSignature,
@@ -56,10 +108,8 @@
     shouldAllowRestoredActiveTab,
   } from "./lib/appTabs";
   import { getNextTabId, getPreviousTabId } from "./lib/tabNavigation";
-  import {
-    VoiceInputController,
-    type VoiceControllerState,
-  } from "./lib/voice/voiceInputController";
+  import type { VoiceControllerState } from "./lib/voice/voiceInputController";
+  import { VoiceInputController } from "./lib/voice/voiceInputController";
   import { createSystemMonitor } from "./lib/systemMonitor.svelte";
   import {
     deduplicateByProjectPath,
@@ -150,9 +200,6 @@
     fallbackMenuEditActionRuntime,
     getActiveTerminalPaneIdRuntime,
     isTauriRuntimeAvailableRuntime,
-    normalizeAppLanguageRuntime,
-    normalizeFontFamilyRuntime,
-    normalizeVoiceInputSettingsRuntime,
     shouldHandleExternalLinkClickRuntime,
     toErrorMessageRuntime,
   } from "./lib/appUiRuntime";
@@ -208,17 +255,9 @@
 
   const ISSUE_CACHE_WARMUP_DELAY_MS = 2_000;
 
-  const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
-    enabled: false,
-    engine: "qwen3-asr",
-    language: "auto",
-    quality: "balanced",
-    model: "Qwen/Qwen3-ASR-1.7B",
-  };
-  const DEFAULT_UI_FONT_FAMILY =
-    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
-  const DEFAULT_TERMINAL_FONT_FAMILY =
-    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
+  const DEFAULT_VOICE_INPUT_SETTINGS = DEFAULT_VOICE_INPUT_SETTINGS_APPEARANCE;
+  const DEFAULT_UI_FONT_FAMILY = DEFAULT_UI_FONT_FAMILY_APPEARANCE;
+  const DEFAULT_TERMINAL_FONT_FAMILY = DEFAULT_TERMINAL_FONT_FAMILY_APPEARANCE;
   const DOCS_EDITOR_AUTO_CLOSE_POLL_MS = 1200;
   const DEFAULT_BRANCH_BROWSER_STATE: BranchBrowserPanelState = {
     filter: "Local",
@@ -249,12 +288,7 @@
   let projectPath: string | null = $state(null);
   let showAgentLaunch: boolean = $state(false);
   let prefillIssue: GitHubIssueInfo | null = $state(null);
-  let showCleanupModal: boolean = $state(false);
-  let cleanupPreselectedBranch: string | null = $state(null);
-  let showAbout: boolean = $state(false);
-  let aboutInitialTab: "general" | "system" | "statistics" = $state("general");
-  let showTerminalDiagnostics: boolean = $state(false);
-  let appError: string | null = $state(null);
+  const modal: ModalState = $state(createModalState());
   let worktreeInventoryRefreshKey: number = $state(0);
   let issueCacheWarmupTimer: ReturnType<typeof setTimeout> | null = null;
   let issueCacheWarmupProjectPath: string | null = null;
@@ -264,37 +298,10 @@
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
 
-  let launchProgressOpen: boolean = $state(false);
-  let launchJobId: string = $state("");
-  let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
-  let docsEditorAutoClosePaneIds: string[] = $state([]);
-
-  type LaunchStepId =
-    | "fetch"
-    | "validate"
-    | "paths"
-    | "conflicts"
-    | "create"
-    | "skills"
-    | "deps";
-  let launchStep: LaunchStepId = $state("fetch");
-  let launchDetail: string = $state("");
-  let launchStatus: "running" | "ok" | "error" | "cancelled" =
-    $state("running");
-  let launchError: string | null = $state(null);
-  const LAUNCH_STEP_IDS: LaunchStepId[] = [
-    "fetch",
-    "validate",
-    "paths",
-    "conflicts",
-    "create",
-    "skills",
-    "deps",
-  ];
-  const LAUNCH_EVENT_BUFFER_LIMIT = 64;
-  let launchJobStartPending = false;
-  let bufferedLaunchProgressEvents: LaunchProgressPayload[] = [];
-  let bufferedLaunchFinishedEvents: LaunchFinishedPayload[] = [];
+  const launch: LaunchState = $state(createLaunchState());
+  type LaunchStepId = LaunchStepIdRT;
+  const LAUNCH_STEP_IDS = LAUNCH_STEP_IDS_RT;
+  const LAUNCH_EVENT_BUFFER_LIMIT = LAUNCH_EVENT_BUFFER_LIMIT_RT;
 
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
@@ -343,24 +350,12 @@
   let branchBrowserState = $state<BranchBrowserPanelState>(
     DEFAULT_BRANCH_BROWSER_STATE,
   );
-  let terminalDiagnosticsLoading: boolean = $state(false);
-  let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
-  let terminalDiagnosticsError: string | null = $state(null);
-
-  let osEnvReady = $state(false);
+  const appearance: AppearanceState = $state(createAppearanceState());
   let startupOsEnvCaptureChecked = false;
   let startupOsEnvCaptureResolved = $state(false);
   let startupDiagnostics: StartupDiagnostics | null = $state(null);
-  let voiceInputSettings: VoiceInputSettings = $state(
-    DEFAULT_VOICE_INPUT_SETTINGS,
-  );
+  const voice: VoiceInputState = $state(createVoiceInputState());
   let appLanguage: SettingsData["app_language"] = $state("auto");
-  let voiceInputListening = $state(false);
-  let voiceInputPreparing = $state(false);
-  let voiceInputSupported = $state(true);
-  let voiceInputAvailable = $state(false);
-  let voiceInputAvailabilityReason: string | null = $state(null);
-  let voiceInputError: string | null = $state(null);
   let voiceController: VoiceInputController | null = null;
   let branchBrowserConfig = $derived<BranchBrowserPanelConfig | undefined>(
     projectPath
@@ -398,49 +393,28 @@
 
   const systemMonitor = createSystemMonitor();
 
+  const toast: ToastState = $state(createToastState());
   let toastMessage = $state<string | null>(null);
-  let toastTimeout: ReturnType<typeof setTimeout> | null = null;
-  let toastAction = $state<ToastAction>(null);
-  let lastUpdateToastVersion = $state<string | null>(null);
-
-  let showOsEnvDebug = $state(false);
-  let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
-  let osEnvDebugLoading = $state(false);
-  let osEnvDebugError = $state<string | null>(null);
+  let toastAction = $state<ToastActionRT>(null);
   type AvailableUpdateState = Extract<UpdateState, { state: "available" }>;
+
+  const toastCallbacks: ShowToastCallbacks = {
+    setState: (message, action) => {
+      toastMessage = message;
+      toastAction = action;
+    },
+  };
 
   function showToast(
     message: string,
     durationMs = 8000,
-    action: ToastAction = null,
+    action: ToastActionRT = null,
   ) {
-    toastMessage = message;
-    toastAction = action;
-    if (toastTimeout) clearTimeout(toastTimeout);
-    toastTimeout = null;
-    if (durationMs > 0) {
-      toastTimeout = setTimeout(() => {
-        toastMessage = null;
-        toastAction = null;
-      }, durationMs);
-    }
+    showToastRuntime(toast, message, durationMs, action, toastCallbacks);
   }
 
   function showAvailableUpdateToast(s: AvailableUpdateState, force = false) {
-    if (!force && lastUpdateToastVersion === s.latest) return;
-    lastUpdateToastVersion = s.latest;
-
-    if (s.asset_url) {
-      showToast(`Update available: v${s.latest} (click update)`, 0, {
-        kind: "apply-update",
-        latest: s.latest,
-      });
-    } else {
-      showToast(
-        `Update available: v${s.latest}. Manual download required.`,
-        15000,
-      );
-    }
+    showAvailableUpdateToastRuntime(toast, s, force, toastCallbacks);
   }
   async function confirmAndApplyUpdate(latest: string) {
     try {
@@ -460,36 +434,25 @@
     }
   }
 
-  let reportDialogOpen = $state(false);
-  let reportDialogMode = $state<"bug" | "feature">("bug");
-  let reportDialogPrefillError = $state<StructuredError | undefined>(undefined);
-
   function showReportDialog(
     mode: "bug" | "feature",
     prefillError?: StructuredError,
   ) {
-    reportDialogMode = mode;
-    reportDialogPrefillError = prefillError;
-    reportDialogOpen = true;
+    showReportDialogRuntime(modal, mode, prefillError);
     // Close the toast
-    toastMessage = null;
-    toastAction = null;
+    dismissToastRuntime(toast, toastCallbacks);
     // Bring window to front so the report dialog is visible (#1256)
     import("@tauri-apps/api/window")
       .then(({ getCurrentWindow }) => getCurrentWindow().setFocus())
       .catch(() => {});
   }
 
-  // Subscribe to toast bus for success/info notifications (gwt-spec issue FR-006)
-  const unsubToastBus = toastBus.subscribe((event) => {
-    showToast(event.message, event.durationMs ?? 5000);
-  });
-
-  // Subscribe to error bus for report-worthy errors
-  const unsubErrorBus = errorBus.subscribe((error) => {
-    if (error.severity === "error" || error.severity === "critical") {
-      showToast(`Error: ${error.message}`, 0, { kind: "report-error", error });
-    }
+  // Subscribe to toast bus and error bus for notifications
+  const unsubToastSubscriptions = setupToastSubscriptions({
+    toastBus,
+    errorBus,
+    state: toast,
+    cb: toastCallbacks,
   });
 
   async function handleToastClick() {
@@ -504,36 +467,30 @@
   }
 
   function clearBufferedLaunchEvents() {
-    launchJobStartPending = false;
-    bufferedLaunchProgressEvents = [];
-    bufferedLaunchFinishedEvents = [];
+    launch.jobStartPending = false;
+    launch.bufferedProgressEvents = [];
+    launch.bufferedFinishedEvents = [];
   }
 
   function bufferLaunchProgressEvent(payload: LaunchProgressPayload) {
-    if (bufferedLaunchProgressEvents.length >= LAUNCH_EVENT_BUFFER_LIMIT) {
-      bufferedLaunchProgressEvents.shift();
-    }
-    bufferedLaunchProgressEvents.push(payload);
+    bufferLaunchProgressEventRuntime(launch, payload);
   }
 
   function bufferLaunchFinishedEvent(payload: LaunchFinishedPayload) {
-    if (bufferedLaunchFinishedEvents.length >= LAUNCH_EVENT_BUFFER_LIMIT) {
-      bufferedLaunchFinishedEvents.shift();
-    }
-    bufferedLaunchFinishedEvents.push(payload);
+    bufferLaunchFinishedEventRuntime(launch, payload);
   }
 
   function applyLaunchProgressPayload(payload: LaunchProgressPayload) {
     applyLaunchProgressRuntime({
       payload,
-      launchStatus,
+      launchStatus: launch.status,
       launchStepIds: LAUNCH_STEP_IDS,
-      currentLaunchStep: launchStep,
+      currentLaunchStep: launch.step,
       setLaunchStep: (step) => {
-        launchStep = step;
+        launch.step = step;
       },
       setLaunchDetail: (detail) => {
-        launchDetail = detail;
+        launch.detail = detail;
       },
     });
   }
@@ -541,16 +498,16 @@
   function applyLaunchFinishedPayload(payload: LaunchFinishedPayload) {
     applyLaunchFinishedRuntime({
       payload,
-      pendingLaunchRequest,
+      pendingLaunchRequest: launch.pendingRequest,
       parseE1004BranchName,
       setPendingLaunchRequest: (request) => {
-        pendingLaunchRequest = request;
+        launch.pendingRequest = request;
       },
       setLaunchStatus: (status) => {
-        launchStatus = status;
+        launch.status = status;
       },
       setLaunchError: (error) => {
-        launchError = error;
+        launch.error = error;
       },
       onCancelled: () => {
         handleLaunchModalClose();
@@ -563,13 +520,13 @@
 
   function flushBufferedLaunchEventsForActiveJob() {
     flushBufferedLaunchEventsRuntime({
-      launchJobId,
-      bufferedLaunchProgressEvents,
-      bufferedLaunchFinishedEvents,
+      launchJobId: launch.jobId,
+      bufferedLaunchProgressEvents: launch.bufferedProgressEvents,
+      bufferedLaunchFinishedEvents: launch.bufferedFinishedEvents,
       clearBufferedLaunchEvents,
       applyLaunchProgressPayload,
       applyLaunchFinishedPayload,
-      getLaunchJobId: () => launchJobId,
+      getLaunchJobId: () => launch.jobId,
     });
   }
 
@@ -591,9 +548,9 @@
   // Poll OS env readiness at startup; stop once ready.
   $effect(() => {
     return setupOsEnvReadyPollingEffect({
-      getOsEnvReady: () => osEnvReady,
+      getOsEnvReady: () => appearance.osEnvReady,
       setOsEnvReady: (value) => {
-        osEnvReady = value;
+        appearance.osEnvReady = value;
       },
     });
   });
@@ -607,7 +564,7 @@
   $effect(() => {
     return setupStartupUpdateCheckEffect({
       startupDiagnostics,
-      lastUpdateToastVersion,
+      lastUpdateToastVersion: toast.lastUpdateVersion,
       showAvailableUpdateToast,
     });
   });
@@ -715,8 +672,8 @@
   // LaunchProgressModal is a pure display component; all event handling lives here.
   $effect(() => {
     return setupLaunchProgressListenerEffect({
-      getLaunchJobId: () => launchJobId,
-      getLaunchJobStartPending: () => launchJobStartPending,
+      getLaunchJobId: () => launch.jobId,
+      getLaunchJobStartPending: () => launch.jobStartPending,
       applyLaunchProgressPayload,
       bufferLaunchProgressEvent,
       debugLaunchEvent,
@@ -729,8 +686,8 @@
   // Handle progress modal state on launch completion.
   $effect(() => {
     return setupLaunchFinishedListenerEffect({
-      getLaunchJobId: () => launchJobId,
-      getLaunchJobStartPending: () => launchJobStartPending,
+      getLaunchJobId: () => launch.jobId,
+      getLaunchJobStartPending: () => launch.jobStartPending,
       applyLaunchFinishedPayload,
       bufferLaunchFinishedEvent,
       debugLaunchEvent,
@@ -746,14 +703,14 @@
   // event would be.
   $effect(() => {
     return setupLaunchPollEffect({
-      launchProgressOpen,
-      launchJobId,
-      launchStatus,
+      launchProgressOpen: launch.progressOpen,
+      launchJobId: launch.jobId,
+      launchStatus: launch.status,
       pollIntervalMs: 1500,
       applyLaunchFinishedPayload,
       setUnexpectedLaunchError: () => {
-        launchStatus = "error";
-        launchError = "Launch job ended unexpectedly. Please retry.";
+        launch.status = "error";
+        launch.error = "Launch job ended unexpectedly. Please retry.";
       },
     });
   });
@@ -761,7 +718,7 @@
   // Close docs editor tabs automatically after vi exits.
   $effect(() => {
     return setupDocsEditorAutoCloseEffect({
-      paneIds: docsEditorAutoClosePaneIds,
+      paneIds: launch.docsEditorAutoClosePaneIds,
       pollIntervalMs: DOCS_EDITOR_AUTO_CLOSE_POLL_MS,
       isTerminalProcessEnded,
       removeDocsEditorAutoClosePane,
@@ -800,60 +757,45 @@
   function normalizeVoiceInputSettings(
     value: Partial<VoiceInputSettings> | null | undefined,
   ): VoiceInputSettings {
-    return normalizeVoiceInputSettingsRuntime(value, DEFAULT_VOICE_INPUT_SETTINGS);
+    return normalizeVoiceInputSettingsAppearance(value);
   }
 
   function normalizeAppLanguage(
     value: string | null | undefined,
   ): SettingsData["app_language"] {
-    return normalizeAppLanguageRuntime(value);
+    return normalizeAppLanguageAppearance(value);
   }
 
   function normalizeUiFontFamily(value: string | null | undefined): string {
-    return normalizeFontFamilyRuntime(value, DEFAULT_UI_FONT_FAMILY);
+    return normalizeUiFontFamilyRuntime(value);
   }
 
   function normalizeTerminalFontFamily(
     value: string | null | undefined,
   ): string {
-    return normalizeFontFamilyRuntime(value, DEFAULT_TERMINAL_FONT_FAMILY);
+    return normalizeTerminalFontFamilyRuntime(value);
   }
 
   function applyUiFontSize(size: number) {
-    document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
+    applyUiFontSizeRuntime(size);
   }
 
   function applyUiFontFamily(family: string | null | undefined) {
-    document.documentElement.style.setProperty(
-      "--ui-font-family",
-      normalizeUiFontFamily(family),
-    );
+    applyUiFontFamilyRuntime(family);
   }
 
   function applyTerminalFontSize(size: number) {
-    (window as any).__gwtTerminalFontSize = size;
-    window.dispatchEvent(
-      new CustomEvent("gwt-terminal-font-size", { detail: size }),
-    );
+    applyTerminalFontSizeRuntime(size);
   }
 
   function applyTerminalFontFamily(family: string | null | undefined) {
-    const normalized = normalizeTerminalFontFamily(family);
-    document.documentElement.style.setProperty(
-      "--terminal-font-family",
-      normalized,
-    );
-    (window as any).__gwtTerminalFontFamily = normalized;
-    window.dispatchEvent(
-      new CustomEvent("gwt-terminal-font-family", { detail: normalized }),
-    );
+    applyTerminalFontFamilyRuntime(family);
   }
 
   function applyVoiceInputSettings(
     value: Partial<VoiceInputSettings> | null | undefined,
   ) {
-    voiceInputSettings = normalizeVoiceInputSettings(value);
-    voiceController?.updateSettings();
+    applyVoiceInputSettingsRT(voice, value, { controller: voiceController });
   }
 
   function applyAppLanguage(value: string | null | undefined) {
@@ -861,21 +803,17 @@
   }
 
   async function checkOsEnvCaptureOnStartup() {
-    // OS env capture is now automatic (login_shell on Unix, process_env on Windows).
-    // No prompt needed - just mark as resolved and check readiness.
-    if (!isTauriRuntimeAvailable()) {
-      startupOsEnvCaptureResolved = true;
-      return;
-    }
-
-    try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      osEnvReady = await invoke<boolean>("is_os_env_ready");
-      startupOsEnvCaptureResolved = true;
-    } catch (err) {
-      startupOsEnvCaptureResolved = true;
-      console.error("Failed to check os env capture status:", err);
-    }
+    await checkOsEnvCaptureOnStartupRuntime({
+      state: appearance,
+      isTauriAvailable: isTauriRuntimeAvailable,
+      invokeIsOsEnvReady: async () => {
+        const { invoke } = await import("$lib/tauriInvoke");
+        return invoke<boolean>("is_os_env_ready");
+      },
+      onResolved: () => {
+        startupOsEnvCaptureResolved = true;
+      },
+    });
   }
 
   async function rebuildAllBranchSessionSummaries(
@@ -906,7 +844,7 @@
   }
 
   function readVoiceInputSettingsForController(): VoiceInputSettings {
-    return voiceInputSettings;
+    return voice.settings;
   }
 
   function readVoiceFallbackTerminalPaneId(): string | null {
@@ -915,25 +853,19 @@
 
   async function applyAppearanceSettings() {
     try {
-      const { invoke } = await import("$lib/tauriInvoke");
-      const settings =
-        await invoke<
-          Pick<
-            SettingsData,
-            | "ui_font_size"
-            | "terminal_font_size"
-            | "ui_font_family"
-            | "terminal_font_family"
-            | "app_language"
-            | "voice_input"
-          >
-        >("get_settings");
-      applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
-      applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
-      applyUiFontFamily(settings.ui_font_family);
-      applyTerminalFontFamily(settings.terminal_font_family);
-      applyAppLanguage(settings.app_language);
-      applyVoiceInputSettings(settings.voice_input);
+      await applyAppearanceSettingsRuntime({
+        state: appearance,
+        onLanguageChange: (lang) => {
+          appLanguage = lang;
+        },
+        onVoiceInputChange: (settings) => {
+          applyVoiceInputSettings(settings);
+        },
+        invokeGetSettings: async () => {
+          const { invoke } = await import("$lib/tauriInvoke");
+          return invoke<SettingsData>("get_settings");
+        },
+      });
     } catch {
       // Ignore: settings API not available outside Tauri runtime.
     }
@@ -972,7 +904,7 @@
         migrationOpen = value;
       },
       setAppError: (message) => {
-        appError = message;
+        modal.appError = message;
       },
     });
   }
@@ -1204,8 +1136,7 @@
   }
 
   function handleCleanupRequest(preSelectedBranch?: string) {
-    cleanupPreselectedBranch = preSelectedBranch ?? null;
-    showCleanupModal = true;
+    openCleanupModalRuntime(modal, preSelectedBranch);
   }
 
   async function handleOpenCiLog(runId: number) {
@@ -1357,7 +1288,10 @@
     return resolveWorktreeTabLabel(branch, branches);
   }
 
+  let refreshAgentTabLabelsInflight = false;
   async function refreshAgentTabLabelsForProject(targetProjectPath: string) {
+    if (refreshAgentTabLabelsInflight) return;
+    refreshAgentTabLabelsInflight = true;
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const branches = await invoke<BranchInfo[]>("list_worktree_branches", {
@@ -1367,6 +1301,8 @@
       tabs = syncAgentTabLabels(tabs, branches);
     } catch (err) {
       console.error("Failed to refresh agent tab labels:", err);
+    } finally {
+      refreshAgentTabLabelsInflight = false;
     }
   }
 
@@ -1448,15 +1384,15 @@
   function addDocsEditorAutoClosePane(paneId: string) {
     const normalized = paneId.trim();
     if (!normalized) return;
-    if (docsEditorAutoClosePaneIds.includes(normalized)) return;
-    docsEditorAutoClosePaneIds = [...docsEditorAutoClosePaneIds, normalized];
+    if (launch.docsEditorAutoClosePaneIds.includes(normalized)) return;
+    launch.docsEditorAutoClosePaneIds = [...launch.docsEditorAutoClosePaneIds, normalized];
   }
 
   function removeDocsEditorAutoClosePane(paneId: string) {
     const normalized = paneId.trim();
     if (!normalized) return;
-    if (!docsEditorAutoClosePaneIds.includes(normalized)) return;
-    docsEditorAutoClosePaneIds = docsEditorAutoClosePaneIds.filter(
+    if (!launch.docsEditorAutoClosePaneIds.includes(normalized)) return;
+    launch.docsEditorAutoClosePaneIds = launch.docsEditorAutoClosePaneIds.filter(
       (id) => id !== normalized,
     );
   }
@@ -1528,22 +1464,22 @@
 
   async function handleAgentLaunch(request: LaunchAgentRequest) {
     // Reset progress state before starting the job.
-    launchStep = "fetch";
-    launchDetail = "";
-    launchStatus = "running";
-    launchError = null;
-    launchJobStartPending = true;
-    bufferedLaunchProgressEvents = [];
-    bufferedLaunchFinishedEvents = [];
+    launch.step = "fetch";
+    launch.detail = "";
+    launch.status = "running";
+    launch.error = null;
+    launch.jobStartPending = true;
+    launch.bufferedProgressEvents = [];
+    launch.bufferedFinishedEvents = [];
 
     try {
       const { invoke } = await import("$lib/tauriInvoke");
       const jobId = await invoke<string>("start_launch_job", { request });
 
-      pendingLaunchRequest = request;
-      launchJobId = jobId;
-      launchJobStartPending = false;
-      launchProgressOpen = true;
+      launch.pendingRequest = request;
+      launch.jobId = jobId;
+      launch.jobStartPending = false;
+      launch.progressOpen = true;
       flushBufferedLaunchEventsForActiveJob();
     } catch (err) {
       clearBufferedLaunchEvents();
@@ -1552,18 +1488,18 @@
   }
 
   async function handleLaunchCancel() {
-    if (!launchJobId) {
+    if (!launch.jobId) {
       handleLaunchModalClose();
       return;
     }
     try {
       const { invoke } = await import("$lib/tauriInvoke");
-      await invoke("cancel_launch_job", { jobId: launchJobId });
+      await invoke("cancel_launch_job", { jobId: launch.jobId });
       handleLaunchModalClose();
     } catch (err) {
       console.error("Failed to cancel launch job:", err);
-      launchStatus = "error";
-      launchError =
+      launch.status = "error";
+      launch.error =
         "Failed to send cancel request. Close this dialog and retry.";
     }
   }
@@ -1572,38 +1508,38 @@
     closeLaunchModalRuntime({
       clearBufferedLaunchEvents,
       setLaunchProgressOpen: (open) => {
-        launchProgressOpen = open;
+        launch.progressOpen = open;
       },
       setLaunchJobId: (jobId) => {
-        launchJobId = jobId;
+        launch.jobId = jobId;
       },
       setPendingLaunchRequest: (request) => {
-        pendingLaunchRequest = request;
+        launch.pendingRequest = request;
       },
       setLaunchStatus: (status) => {
-        launchStatus = status;
+        launch.status = status;
       },
       setLaunchStep: (step) => {
-        launchStep = step;
+        launch.step = step;
       },
       setLaunchDetail: (detail) => {
-        launchDetail = detail;
+        launch.detail = detail;
       },
       setLaunchError: (error) => {
-        launchError = error;
+        launch.error = error;
       },
     });
   }
 
   function handleUseExistingBranch() {
-    const retryRequest = buildUseExistingBranchRetryRequest(pendingLaunchRequest);
+    const retryRequest = buildUseExistingBranchRetryRequest(launch.pendingRequest);
     if (!retryRequest) return;
     handleLaunchModalClose();
     void handleAgentLaunch(retryRequest);
   }
 
   function handleLaunchSuccess(paneId: string) {
-    const req = pendingLaunchRequest;
+    const req = launch.pendingRequest;
     const requestedBranch = req?.branch?.trim() ?? "";
     const label = req ? worktreeTabLabel(requestedBranch) : "Worktree";
     const requestedAgentId = inferAgentId(req?.agentId);
@@ -2027,7 +1963,7 @@
             migrationOpen = value;
           },
           setAppError: (message) => {
-            appError = message;
+            modal.appError = message;
           },
           toErrorMessage,
         }),
@@ -2041,7 +1977,7 @@
             migrationOpen = value;
           },
           setAppError: (message) => {
-            appError = message;
+            modal.appError = message;
           },
           toErrorMessage,
         }),
@@ -2076,8 +2012,7 @@
       },
       cleanupWorktrees: () => {
         if (projectPath) {
-          cleanupPreselectedBranch = null;
-          showCleanupModal = true;
+          openCleanupModalRuntime(modal);
         }
       },
       openSettings: () => {
@@ -2102,8 +2037,7 @@
           toErrorMessage,
         }),
       openAbout: () => {
-        aboutInitialTab = "general";
-        showAbout = true;
+        openAboutDialogRuntime(modal);
       },
       reportIssue: () => {
         showReportDialog("bug");
@@ -2131,16 +2065,16 @@
       debugOsEnv: () => {
         void openOsEnvDebug({
           setShowOsEnvDebug: (value) => {
-            showOsEnvDebug = value;
+            modal.osEnvDebug.open = value;
           },
           setOsEnvDebugLoading: (value) => {
-            osEnvDebugLoading = value;
+            modal.osEnvDebug.loading = value;
           },
           setOsEnvDebugError: (value) => {
-            osEnvDebugError = value;
+            modal.osEnvDebug.error = value;
           },
           setOsEnvDebugData: (value) => {
-            osEnvDebugData = value;
+            modal.osEnvDebug.data = value;
           },
         });
       },
@@ -2150,19 +2084,19 @@
             getSelectedCanvasSessionTab()?.paneId ??
             (tabs.find((t) => t.id === activeTabId)?.paneId ?? null),
           setAppError: (message) => {
-            appError = message;
+            modal.appError = message;
           },
           setShowTerminalDiagnostics: (value) => {
-            showTerminalDiagnostics = value;
+            modal.terminalDiagnostics.open = value;
           },
           setTerminalDiagnosticsLoading: (value) => {
-            terminalDiagnosticsLoading = value;
+            modal.terminalDiagnostics.loading = value;
           },
           setTerminalDiagnosticsError: (value) => {
-            terminalDiagnosticsError = value;
+            modal.terminalDiagnostics.error = value;
           },
           setTerminalDiagnostics: (value) => {
-            terminalDiagnostics = value;
+            modal.terminalDiagnostics.data = value;
           },
           toErrorMessage,
         }),
@@ -2356,7 +2290,7 @@
       isTauriRuntimeAvailable,
       handleMenuAction,
       setAppError: (message) => {
-        appError = message;
+        modal.appError = message;
       },
       toErrorMessage,
     });
@@ -2371,43 +2305,21 @@
   });
 
   $effect(() => {
-    const controller = new VoiceInputController({
+    const result = setupVoiceController({
       getSettings: readVoiceInputSettingsForController,
       getFallbackTerminalPaneId: readVoiceFallbackTerminalPaneId,
-      onStateChange: (state: VoiceControllerState) => {
-        voiceInputListening = state.listening;
-        voiceInputPreparing = state.preparing;
-        voiceInputSupported = state.supported;
-        voiceInputAvailable = state.available;
-        voiceInputAvailabilityReason = state.availabilityReason;
-        voiceInputError = state.error;
+      onStateChange: (cs: VoiceControllerState) => {
+        syncControllerState(voice, cs);
       },
     });
-    voiceController = controller;
-    controller.updateSettings();
-
-    const handleVoicePttStart = () => {
-      controller.pressPushToTalk();
-    };
-    const handleVoicePttStop = () => {
-      controller.releasePushToTalk();
-    };
-    window.addEventListener("gwt-voice-ptt-start", handleVoicePttStart);
-    window.addEventListener("gwt-voice-ptt-stop", handleVoicePttStop);
+    voiceController = result.controller;
 
     return () => {
-      window.removeEventListener("gwt-voice-ptt-start", handleVoicePttStart);
-      window.removeEventListener("gwt-voice-ptt-stop", handleVoicePttStop);
-      controller.dispose();
-      if (voiceController === controller) {
+      result.cleanup();
+      if (voiceController === result.controller) {
         voiceController = null;
       }
-      voiceInputListening = false;
-      voiceInputPreparing = false;
-      voiceInputError = null;
-      voiceInputSupported = true;
-      voiceInputAvailable = false;
-      voiceInputAvailabilityReason = null;
+      resetVoiceInputTransientState(voice);
     };
   });
 
@@ -2416,16 +2328,16 @@
       const detail = (event as CustomEvent<SettingsUpdatedPayload>).detail;
       if (!detail) return;
       if (typeof detail.uiFontSize === "number") {
-        applyUiFontSize(clampFontSize(detail.uiFontSize));
+        applyUiFontSizeRuntime(clampFontSizeAppearance(detail.uiFontSize));
       }
       if (typeof detail.terminalFontSize === "number") {
-        applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
+        applyTerminalFontSizeRuntime(clampFontSizeAppearance(detail.terminalFontSize));
       }
       if (typeof detail.uiFontFamily === "string") {
-        applyUiFontFamily(detail.uiFontFamily);
+        applyUiFontFamilyRuntime(detail.uiFontFamily);
       }
       if (typeof detail.terminalFontFamily === "string") {
-        applyTerminalFontFamily(detail.terminalFontFamily);
+        applyTerminalFontFamilyRuntime(detail.terminalFontFamily);
       }
       if (typeof detail.appLanguage === "string") {
         const nextLanguage = normalizeAppLanguage(detail.appLanguage);
@@ -2471,11 +2383,11 @@
       getActiveTabId: () => activeTabId,
       getProjectPath: () => projectPath,
       getToastMessage: () => toastMessage,
-      isReportDialogOpen: () => reportDialogOpen,
+      isReportDialogOpen: () => modal.reportDialog.open,
       resetCurrentWindowLabelCache: () => {
         currentWindowLabel = null;
       },
-      getDocsEditorAutoClosePaneIds: () => docsEditorAutoClosePaneIds,
+      getDocsEditorAutoClosePaneIds: () => launch.docsEditorAutoClosePaneIds,
       forceActiveTabId: (tabId) => {
         activeTabId = tabId;
       },
@@ -2536,16 +2448,16 @@
       openCiLog: handleOpenCiLog,
       branchDisplayNameChanged: handleBranchDisplayNameChanged,
       dismissAppError: () => {
-        appError = null;
+        modal.appError = null;
       },
       dismissOsEnvDebug: () => {
-        showOsEnvDebug = false;
+        modal.osEnvDebug.open = false;
       },
       dismissTerminalDiagnostics: () => {
-        showTerminalDiagnostics = false;
+        modal.terminalDiagnostics.open = false;
       },
       dismissAbout: () => {
-        showAbout = false;
+        modal.about.open = false;
       },
       clearToast: () => {
         toastMessage = null;
@@ -2665,13 +2577,13 @@
         onSwitchToWorktree={handleSwitchToWorktreeFromTab}
         onIssueCountChange={handleIssueCountChange}
         onOpenSettings={openSettingsTab}
-        voiceInputEnabled={voiceInputSettings.enabled}
-        {voiceInputListening}
-        {voiceInputPreparing}
-        {voiceInputSupported}
-        {voiceInputAvailable}
-        {voiceInputAvailabilityReason}
-        {voiceInputError}
+        voiceInputEnabled={voice.settings.enabled}
+        voiceInputListening={voice.listening}
+        voiceInputPreparing={voice.preparing}
+        voiceInputSupported={voice.supported}
+        voiceInputAvailable={voice.available}
+        voiceInputAvailabilityReason={voice.availabilityReason}
+        voiceInputError={voice.error}
         canvasWorktrees={canvasWorktrees}
         selectedCanvasWorktreeBranch={selectedCanvasWorktreeBranch}
         onCanvasWorktreeSelect={(branchName) => {
@@ -2684,14 +2596,14 @@
       {projectPath}
       {currentBranch}
       {terminalCount}
-      {osEnvReady}
-      voiceInputEnabled={voiceInputSettings.enabled}
-      {voiceInputListening}
-      {voiceInputPreparing}
-      {voiceInputSupported}
-      {voiceInputAvailable}
-      {voiceInputAvailabilityReason}
-      {voiceInputError}
+      osEnvReady={appearance.osEnvReady}
+      voiceInputEnabled={voice.settings.enabled}
+      voiceInputListening={voice.listening}
+      voiceInputPreparing={voice.preparing}
+      voiceInputSupported={voice.supported}
+      voiceInputAvailable={voice.available}
+      voiceInputAvailabilityReason={voice.availabilityReason}
+      voiceInputError={voice.error}
     />
   </div>
 {/if}
@@ -2700,7 +2612,7 @@
   <AgentLaunchForm
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
-    {osEnvReady}
+    osEnvReady={appearance.osEnvReady}
     {prefillIssue}
     onLaunch={handleAgentLaunch}
     onClose={() => {
@@ -2713,30 +2625,30 @@
 <QuitConfirmToast />
 
 <CleanupModal
-  open={showCleanupModal}
-  preselectedBranch={cleanupPreselectedBranch}
+  open={modal.cleanup.open}
+  preselectedBranch={modal.cleanup.preselectedBranch}
   refreshKey={worktreeInventoryRefreshKey}
   projectPath={projectPath ?? ""}
   {agentTabBranches}
-  onClose={() => (showCleanupModal = false)}
+  onClose={() => (modal.cleanup.open = false)}
 />
 
 <AboutDialog
-  open={showAbout}
-  initialTab={aboutInitialTab}
+  open={modal.about.open}
+  initialTab={modal.about.initialTab}
   cpuUsage={systemMonitor.cpuUsage}
   memUsed={systemMonitor.memUsed}
   memTotal={systemMonitor.memTotal}
   gpuInfos={systemMonitor.gpuInfos}
-  onclose={() => (showAbout = false)}
+  onclose={() => (modal.about.open = false)}
 />
 
 <TerminalDiagnosticsDialog
-  open={showTerminalDiagnostics}
-  loading={terminalDiagnosticsLoading}
-  error={terminalDiagnosticsError}
-  diagnostics={terminalDiagnostics}
-  onclose={() => (showTerminalDiagnostics = false)}
+  open={modal.terminalDiagnostics.open}
+  loading={modal.terminalDiagnostics.loading}
+  error={modal.terminalDiagnostics.error}
+  diagnostics={modal.terminalDiagnostics.data}
+  onclose={() => (modal.terminalDiagnostics.open = false)}
 />
 
 <MigrationModal
@@ -2749,7 +2661,7 @@
     try {
       await openProjectAndApplyCurrentWindow(p);
     } catch (err) {
-      appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
+      modal.appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
     }
   }}
   onDismiss={() => {
@@ -2759,26 +2671,26 @@
 />
 
 <LaunchProgressModal
-  open={launchProgressOpen}
-  step={launchStep}
-  detail={launchDetail}
-  status={launchStatus}
-  error={launchError}
+  open={launch.progressOpen}
+  step={launch.step}
+  detail={launch.detail}
+  status={launch.status}
+  error={launch.error}
   onCancel={handleLaunchCancel}
   onClose={handleLaunchModalClose}
   onUseExisting={handleUseExistingBranch}
 />
 <CapturedEnvironmentDialog
-  open={showOsEnvDebug}
-  loading={osEnvDebugLoading}
-  error={osEnvDebugError}
-  data={osEnvDebugData}
-  onclose={() => (showOsEnvDebug = false)}
+  open={modal.osEnvDebug.open}
+  loading={modal.osEnvDebug.loading}
+  error={modal.osEnvDebug.error}
+  data={modal.osEnvDebug.data}
+  onclose={() => (modal.osEnvDebug.open = false)}
 />
 
 <AppErrorDialog
-  message={appError}
-  onclose={() => (appError = null)}
+  message={modal.appError}
+  onclose={() => (modal.appError = null)}
 />
 
 {#if copyFlashActive}
@@ -2797,18 +2709,18 @@
 />
 
 <ReportDialog
-  open={reportDialogOpen}
-  mode={reportDialogMode}
-  prefillError={reportDialogPrefillError}
+  open={modal.reportDialog.open}
+  mode={modal.reportDialog.mode}
+  prefillError={modal.reportDialog.prefillError}
   projectPath={projectPath ?? ""}
   screenCaptureBranch={currentBranch}
   screenCaptureActiveTab={tabs.find((t) => t.id === activeTabId)?.label ??
     activeTabId}
   onclose={() => {
-    reportDialogOpen = false;
+    modal.reportDialog.open = false;
   }}
   onsuccess={(result: { url: string; number: number }) => {
-    reportDialogOpen = false;
+    modal.reportDialog.open = false;
     showToast(`Issue #${result.number} created successfully.`, 8000);
   }}
 />

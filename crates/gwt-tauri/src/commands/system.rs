@@ -363,6 +363,15 @@ pub fn report_frontend_metrics(metrics: Vec<FrontendMetric>) {
     }
 }
 
+// --- HTTP IPC port ---
+
+#[tauri::command]
+pub fn get_http_ipc_port(state: tauri::State<'_, AppState>) -> u16 {
+    state
+        .http_ipc_port
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

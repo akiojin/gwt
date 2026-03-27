@@ -231,7 +231,12 @@
 
     const defaults = buildDefaultLayouts(renderableTiles);
     const nextLayouts: Record<string, AgentCanvasTileLayout> = {};
-    let needsLayoutSync = Object.keys(tileLayouts).length !== renderableTiles.length;
+    let needsLayoutSync = false;
+    const existingKeys = Object.keys(tileLayouts);
+    const tileIds = renderableTiles.map((t) => t.id);
+    if (existingKeys.length !== tileIds.length || existingKeys.some((k) => !tileIds.includes(k))) {
+      needsLayoutSync = true;
+    }
     for (const tile of renderableTiles) {
       const existing = tileLayouts[tile.id];
       if (!existing) needsLayoutSync = true;
@@ -701,15 +706,11 @@
 
 <style>
   .agent-canvas {
+    position: relative;
     height: 100%;
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
-    padding: var(--space-4) var(--space-5) var(--space-5);
     min-height: 0;
-    background:
-      radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 10%, transparent), transparent 28%),
-      linear-gradient(180deg, color-mix(in srgb, var(--bg-secondary) 88%, transparent), var(--bg-primary));
     overflow: hidden;
   }
 
@@ -725,18 +726,25 @@
   }
 
   .canvas-toolbar {
-    justify-content: space-between;
-    gap: var(--space-4);
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-4);
+    z-index: 10;
+    justify-content: flex-end;
+    gap: var(--space-3);
+    pointer-events: none;
+  }
+
+  .canvas-toolbar > * {
+    pointer-events: auto;
   }
 
   .canvas-toolbar h2 {
-    margin: 0;
-    font-size: 1rem;
+    display: none;
   }
 
   .canvas-toolbar p {
-    margin: var(--space-1) 0 0;
-    color: var(--text-muted);
+    display: none;
   }
 
   .toolbar-group {
@@ -744,12 +752,13 @@
   }
 
   .toolbar-chip {
-    border: 1px solid var(--border-color);
+    border: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
     border-radius: var(--radius-full);
-    padding: var(--space-2) var(--space-3);
-    color: var(--text-secondary);
-    background: color-mix(in srgb, var(--bg-secondary) 75%, transparent);
-    transition: background var(--transition-fast);
+    padding: var(--space-1) var(--space-3);
+    color: var(--text-muted);
+    background: color-mix(in srgb, var(--bg-secondary) 85%, transparent);
+    backdrop-filter: blur(8px);
+    font-size: 0.8rem;
   }
 
   .zoom-controls {
@@ -757,13 +766,15 @@
   }
 
   .zoom-btn {
-    min-width: 36px;
-    height: 32px;
+    min-width: 30px;
+    height: 26px;
     border-radius: var(--radius-full);
-    border: 1px solid var(--border-color);
-    background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+    background: color-mix(in srgb, var(--bg-secondary) 85%, transparent);
+    backdrop-filter: blur(8px);
     color: var(--text-primary);
     cursor: pointer;
+    font-size: 0.8rem;
     transition: background var(--transition-fast);
   }
 
@@ -774,17 +785,13 @@
   .canvas-board-panel {
     flex: 1;
     min-height: 0;
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-xl);
     overflow: hidden;
-    background: color-mix(in srgb, var(--bg-secondary) 78%, var(--bg-primary));
-    box-shadow: var(--shadow-lg);
   }
 
   .canvas-board {
     position: relative;
     height: 100%;
-    overflow: auto;
+    overflow: hidden;
     cursor: grab;
     background:
       linear-gradient(90deg, color-mix(in srgb, var(--border-color) 18%, transparent) 1px, transparent 1px),

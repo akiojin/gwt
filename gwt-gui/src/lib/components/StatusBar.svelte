@@ -47,100 +47,166 @@
     return "Voice: idle";
   }
 
+  function shortenPath(path: string): string {
+    const home = "/Users/";
+    if (path.startsWith(home)) {
+      const rest = path.slice(home.length);
+      const slashIdx = rest.indexOf("/");
+      if (slashIdx > 0) return "~" + rest.slice(slashIdx);
+    }
+    return path;
+  }
+
   $effect(() => {
     void projectPath;
     void osEnvReady;
   });
 </script>
 
-<footer class="statusbar">
-  <span class="status-item">
-    <span class="branch-indicator">*</span>
-    {currentBranch || "---"}
-  </span>
-  {#if terminalCount > 0}
-    <span class="status-item terminal-count">
-      [{terminalCount} terminal{terminalCount !== 1 ? "s" : ""}]
+<footer class="statusbar" role="contentinfo">
+  <!-- Left side -->
+  <div class="status-left">
+    <span class="status-chip branch-chip">
+      <span class="branch-dot"></span>
+      {currentBranch || "---"}
     </span>
-  {/if}
-  {#if isProfilingEnabled()}
-    <span class="status-item profiling-badge">PROFILING</span>
-  {/if}
-  {#if !osEnvReady}
-    <span class="status-loading">Loading environment...</span>
-  {/if}
-  <span
-    class={`status-item voice ${voiceStatusClass()}`}
-    title={voiceInputError ?? voiceInputAvailabilityReason ?? ""}
-  >
-    {voiceStatusText()}
-  </span>
-  <span class="spacer"></span>
-  <span class="status-item path">{projectPath}</span>
+
+    {#if terminalCount > 0}
+      <span class="status-chip terminal-chip">
+        {terminalCount} terminal{terminalCount !== 1 ? "s" : ""}
+      </span>
+    {/if}
+
+    {#if isProfilingEnabled()}
+      <span class="status-chip profiling-chip">PROFILING</span>
+    {/if}
+
+    {#if !osEnvReady}
+      <span class="status-chip loading-chip">Loading env...</span>
+    {/if}
+  </div>
+
+  <!-- Right side -->
+  <div class="status-right">
+    <span
+      class={`status-chip voice-chip voice-${voiceStatusClass()}`}
+      title={voiceInputError ?? voiceInputAvailabilityReason ?? ""}
+    >
+      {#if voiceInputListening}
+        <span class="voice-dot pulse"></span>
+      {/if}
+      {voiceStatusText()}
+    </span>
+    <span class="status-path" title={projectPath}>{shortenPath(projectPath)}</span>
+  </div>
 </footer>
 
 <style>
   .statusbar {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     height: var(--statusbar-height);
-    background-color: var(--bg-surface);
-    border-top: 1px solid var(--border-color);
-    padding: 0 12px;
-    font-size: var(--ui-font-sm);
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-subtle);
+    padding: 0 var(--space-3);
+    font-size: var(--ui-font-xs);
     color: var(--text-muted);
-    gap: 16px;
+    gap: var(--space-4);
+    user-select: none;
   }
 
-  .branch-indicator {
-    color: var(--green);
+  .status-left,
+  .status-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
   }
 
-  .terminal-count {
+  .status-right {
+    justify-content: flex-end;
+  }
+
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    white-space: nowrap;
+  }
+
+  .branch-chip {
+    color: var(--text-secondary);
+    font-weight: var(--font-weight-medium);
+  }
+
+  .branch-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: var(--radius-full);
+    background: var(--green);
+  }
+
+  .terminal-chip {
     color: var(--accent);
   }
 
-  .voice {
-    font-size: 10px;
-  }
-
-  .voice.ok {
-    color: var(--green);
-  }
-
-  .voice.warn {
-    color: var(--yellow);
-  }
-
-  .voice.bad {
+  .profiling-chip {
+    background: var(--red-muted);
     color: var(--red);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: 9px;
+    font-weight: var(--font-weight-semibold);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
   }
 
-  .voice.muted {
-    color: var(--text-muted);
-  }
-
-  .spacer {
-    flex: 1;
-  }
-
-  .profiling-badge {
-    background-color: var(--red, #e74c3c);
-    color: #fff;
-    padding: 0 6px;
-    border-radius: 3px;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-  }
-
-  .status-loading {
+  .loading-chip {
     color: var(--text-muted);
     font-style: italic;
   }
 
-  .path {
-    font-family: monospace;
+  .voice-chip {
     font-size: var(--ui-font-xs);
+  }
+
+  .voice-ok {
+    color: var(--green);
+  }
+
+  .voice-warn {
+    color: var(--yellow);
+  }
+
+  .voice-bad {
+    color: var(--red);
+  }
+
+  .voice-muted {
+    color: var(--text-muted);
+  }
+
+  .voice-dot {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: var(--radius-full);
+    background: currentColor;
+  }
+
+  .voice-dot.pulse {
+    animation: pulse-dot 1.2s ease-in-out infinite;
+  }
+
+  .status-path {
+    font-family: var(--font-mono);
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 300px;
   }
 </style>
