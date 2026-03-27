@@ -1,0 +1,38 @@
+:root {
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  --color-bg: #1e1e2e;
+  --color-surface: #282840;
+  --color-primary: #89b4fa;
+  --color-text: #cdd6f4;
+  --color-text-secondary: #a6adc8;
+  --color-border: #45475a;
+  --color-error: #f38ba8;
+  --color-success: #a6e3a1;
+  --color-warning: #f9e2af;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--font-family);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  height: 100%;
+  width: 100%;
+}
