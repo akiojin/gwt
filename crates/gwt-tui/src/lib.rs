@@ -1,4 +1,4 @@
-//! TUI frontend for Git Worktree Manager (SPEC-1776)
+//! gwt-tui: TUI frontend for Git Worktree Manager
 
 pub mod app;
 pub mod event;

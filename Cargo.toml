@@ -91,6 +91,10 @@ dunce = "1"
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 nvml-wrapper = "0.12"
 
+# File watching
+notify = "7"
+notify-debouncer-mini = "0.5"
+
 [profile.release]
 lto = true
 codegen-units = 1
