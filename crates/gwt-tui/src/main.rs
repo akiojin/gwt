@@ -17,17 +17,17 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Run app
-    let result = run_app(&mut terminal);
+    let repo_root = std::env::current_dir().unwrap_or_default();
+    let mut app = app::App::new(repo_root);
+    let result = app.run(&mut terminal);
 
-    // Restore terminal
+    // Restore terminal regardless of result
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -42,30 +42,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        terminal.draw(|frame| {
-            let area = frame.area();
-            let block = ratatui::widgets::Block::default()
-                .title(" gwt-tui ")
-                .borders(ratatui::widgets::Borders::ALL);
-            frame.render_widget(block, area);
-        })?;
-
-        if crossterm::event::poll(std::time::Duration::from_millis(100))? {
-            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                if key.code == crossterm::event::KeyCode::Char('q')
-                    && key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL)
-                {
-                    return Ok(());
-                }
-            }
-        }
-    }
 }

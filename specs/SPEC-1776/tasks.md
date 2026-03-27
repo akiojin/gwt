@@ -37,9 +37,9 @@
 ### App Integration (FR-007)
 
 - [x] T050: Implement `crates/gwt-tui/src/app.rs` — App struct orchestrating state + event + UI render cycle
-- [ ] T051: Wire shell tab creation (Ctrl+G,c) via PaneManager::spawn_shell()
-- [ ] T052: Wire PTY I/O: key input → write_input(), PTY reader → process_bytes() → render
-- [ ] T053: Wire terminal resize event → PaneManager::resize_all() + re-render
+- [x] T051: Wire shell tab creation (Ctrl+G,c) via PaneManager::spawn_shell()
+- [x] T052: Wire PTY I/O: key input → write_input(), PTY reader → process_bytes() → render
+- [x] T053: Wire terminal resize event → PaneManager::resize_all() + re-render
 - [ ] T054: Implement scrollback scroll mode (Ctrl+G,PgUp to enter, Escape to exit)
 
 ### Phase 1 Verification
