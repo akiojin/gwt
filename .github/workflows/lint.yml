@@ -26,11 +26,8 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.29.2 --activate
           pnpm --version
-      - name: Install system dependencies (Linux)
-        run: |
-          bash scripts/install-linux-deps.sh
       - name: Run Clippy
-        run: cargo clippy -p gwt-core -p gwt-tauri --all-targets --all-features -- -D warnings
+        run: cargo clippy -p gwt-core -p gwt-tui --all-targets --all-features -- -D warnings
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Markdownlint
