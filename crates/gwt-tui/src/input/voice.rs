@@ -10,7 +10,7 @@ pub struct VoiceInputState {
 }
 
 /// Visual indicator for voice input status, shown in the TUI status bar.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum VoiceIndicator {
     /// Voice input is off or not available.
     #[default]

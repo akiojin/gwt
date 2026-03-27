@@ -37,7 +37,7 @@ impl Default for VoiceConfig {
 }
 
 /// Runtime state of a voice backend.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceState {
     /// Voice input is disabled or not configured.
     Disabled,
@@ -90,21 +90,21 @@ impl VoiceBackend for NoOpVoiceBackend {
     }
 }
 
+/// Well-known Whisper model filenames to probe under `~/.gwt/models/`.
+const MODEL_CANDIDATES: &[&str] = &["ggml-base.bin", "ggml-small.bin", "ggml-large.bin"];
+
 /// Check whether voice models are available on the system.
 ///
 /// Looks for well-known model files under `~/.gwt/models/`.
 /// Returns `false` by default when no model is found.
 pub fn detect_voice_support() -> bool {
-    if let Some(home) = dirs::home_dir() {
-        let model_dir = home.join(".gwt").join("models");
-        if model_dir.is_dir() {
-            let candidates = ["ggml-base.bin", "ggml-small.bin", "ggml-large.bin"];
-            return candidates
-                .iter()
-                .any(|name| model_dir.join(name).is_file());
-        }
-    }
-    false
+    let Some(model_dir) = dirs::home_dir().map(|h| h.join(".gwt").join("models")) else {
+        return false;
+    };
+    model_dir.is_dir()
+        && MODEL_CANDIDATES
+            .iter()
+            .any(|name| model_dir.join(name).is_file())
 }
 
 #[cfg(test)]
