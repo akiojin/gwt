@@ -1,0 +1,7 @@
+- [x] T001 [U1] `runner.rs` で Issue #1265 再発入力正規化を強化
+- [x] T002 [U1] `terminal.rs` Launch 解決で pre-check 依存を削減し実行時失敗責務へ変更
+- [x] T003 [U1] `terminal.rs` で `bunx` 優先ランナー選択と `npx --yes` 生成を実装
+- [x] T004 [U2] `AgentLaunchForm.svelte` で `installed` 選択肢を常時表示に変更
+- [x] T005 [U2] `StatusBar.svelte` から agent 可用性表示を削除
+- [x] T006 [FIN] Rust 対象テスト + fmt で検証
+- [ ] T007 [FIN] Frontend テスト実行環境を復旧し、変更ケースを再実行

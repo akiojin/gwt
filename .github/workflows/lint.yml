@@ -14,7 +14,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 10.29.2
           run_install: false
@@ -50,7 +50,7 @@ jobs:
         with:
           fetch-depth: 0
       # actions/setup-node's pnpm cache requires pnpm to be available.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 10.29.2
           run_install: false
