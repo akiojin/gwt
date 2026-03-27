@@ -14,6 +14,7 @@ pub mod prompt_builder;
 pub mod scanner;
 pub mod session;
 pub mod session_store;
+pub mod session_watcher;
 pub mod sub_agent;
 pub mod task;
 pub mod trait_agent;
