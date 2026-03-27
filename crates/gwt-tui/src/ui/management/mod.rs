@@ -1,6 +1,10 @@
+//! Management UI components
+
 pub mod agent_list;
 pub mod detail_panel;
+pub mod issue_panel;
 pub mod launch_dialog;
+pub mod pr_dashboard;
 
 use ratatui::{
     buffer::Buffer,

@@ -13,6 +13,7 @@ pub mod issue_cache;
 pub mod issue_linkage;
 mod issue_spec;
 pub mod local_spec;
+pub mod pr_status;
 mod pullrequest;
 mod remote;
 mod repository;

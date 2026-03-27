@@ -19,6 +19,9 @@ authors = ["akiojin"]
 # Internal crates
 gwt-core = { path = "crates/gwt-core" }
 
+# TUI
+ratatui = "0.29"
+
 # Error handling
 thiserror = "2"
 
@@ -51,12 +54,12 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-appender = "0.2"
 tracing-chrome = "0.7"
 
-# File locking
-fs2 = "0.4"
-
 # File watching
 notify = "7"
 notify-debouncer-mini = "0.5"
+
+# File locking
+fs2 = "0.4"
 
 # Terminal
 portable-pty = "0.9"
