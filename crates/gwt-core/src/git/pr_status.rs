@@ -121,14 +121,14 @@ pub enum ReviewStatus {
 impl ReviewStatus {
     /// Parse from GitHub reviewDecision string.
     pub fn from_review_decision(decision: Option<&str>) -> Self {
-        match decision {
-            Some(d) => match d.to_uppercase().as_str() {
-                "APPROVED" => Self::Approved,
-                "CHANGES_REQUESTED" => Self::ChangesRequested,
-                "REVIEW_REQUIRED" => Self::Pending,
-                _ => Self::None,
-            },
-            None => Self::None,
+        let Some(d) = decision else {
+            return Self::None;
+        };
+        match d.to_uppercase().as_str() {
+            "APPROVED" => Self::Approved,
+            "CHANGES_REQUESTED" => Self::ChangesRequested,
+            "REVIEW_REQUIRED" => Self::Pending,
+            _ => Self::None,
         }
     }
 }
@@ -156,17 +156,16 @@ fn parse_pr_json(value: &serde_json::Value) -> Option<PrStatus> {
         .unwrap_or("")
         .to_string();
 
-    let mergeable_str = value
+    let mergeable = value
         .get("mergeable")
         .and_then(|m| m.as_str())
-        .unwrap_or("UNKNOWN");
-    let mergeable = mergeable_str.eq_ignore_ascii_case("MERGEABLE");
+        .is_some_and(|s| s.eq_ignore_ascii_case("MERGEABLE"));
 
-    let empty_checks = Vec::new();
-    let checks = value
+    let checks: &[serde_json::Value] = value
         .get("statusCheckRollup")
         .and_then(|v| v.as_array())
-        .unwrap_or(&empty_checks);
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
 
     let review_decision = value.get("reviewDecision").and_then(|r| r.as_str());
 
@@ -185,15 +184,53 @@ fn parse_pr_json(value: &serde_json::Value) -> Option<PrStatus> {
 const PR_JSON_FIELDS: &str =
     "number,title,state,url,headRefName,reviewDecision,statusCheckRollup,mergeable";
 
+/// Build a `GitCommandFailed` error for a `gh` subcommand.
+fn gh_error(subcommand: &str, reason: impl std::fmt::Display) -> crate::error::GwtError {
+    crate::error::GwtError::GitCommandFailed {
+        command: format!("gh {subcommand}"),
+        reason: reason.to_string(),
+    }
+}
+
 /// Guard: return error if `gh` CLI is not available.
 fn require_gh() -> Result<(), crate::error::GwtError> {
     if !is_gh_available() {
-        return Err(crate::error::GwtError::GitCommandFailed {
-            command: "gh".to_string(),
-            reason: "gh CLI is not installed or not in PATH".to_string(),
-        });
+        return Err(gh_error("", "gh CLI is not installed or not in PATH"));
     }
     Ok(())
+}
+
+/// Run a `gh` subcommand and return the stdout as a parsed JSON value.
+///
+/// On non-zero exit the stderr is returned as an error, unless `ignore_stderr`
+/// matches the message (used to tolerate "no pull requests found" etc.).
+fn run_gh_json<I, S>(
+    repo_root: &Path,
+    args: I,
+    label: &str,
+    ignore_stderr: &[&str],
+) -> Result<Option<serde_json::Value>, crate::error::GwtError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    require_gh()?;
+
+    let output = run_gh_output_with_repair(repo_root, args)
+        .map_err(|e| gh_error(label, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if ignore_stderr.iter().any(|pat| stderr.contains(pat)) {
+            return Ok(None);
+        }
+        return Err(gh_error(label, &*stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value = serde_json::from_str(&stdout)
+        .map_err(|e| gh_error(label, format!("Failed to parse JSON: {e}")))?;
+    Ok(Some(value))
 }
 
 /// Fetch PR status for a specific branch using `gh` CLI.
@@ -203,83 +240,28 @@ pub fn fetch_pr_status(
     repo_root: &Path,
     branch: &str,
 ) -> Result<Option<PrStatus>, crate::error::GwtError> {
-    require_gh()?;
-
-    let output = run_gh_output_with_repair(
+    let value = run_gh_json(
         repo_root,
-        [
-            "pr",
-            "view",
-            branch,
-            "--json",
-            PR_JSON_FIELDS,
-        ],
-    )
-    .map_err(|e| crate::error::GwtError::GitCommandFailed {
-        command: "gh pr view".to_string(),
-        reason: e.to_string(),
-    })?;
+        ["pr", "view", branch, "--json", PR_JSON_FIELDS],
+        "pr view",
+        &["no pull requests found", "Could not resolve"],
+    )?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // "no pull requests found" is not an error — just no PR for this branch
-        if stderr.contains("no pull requests found") || stderr.contains("Could not resolve") {
-            return Ok(None);
-        }
-        return Err(crate::error::GwtError::GitCommandFailed {
-            command: "gh pr view".to_string(),
-            reason: stderr.to_string(),
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
-        crate::error::GwtError::GitCommandFailed {
-            command: "gh pr view".to_string(),
-            reason: format!("Failed to parse JSON: {e}"),
-        }
-    })?;
-
-    Ok(parse_pr_json(&value))
+    Ok(value.as_ref().and_then(parse_pr_json))
 }
 
 /// Fetch all open PRs for a repository.
 pub fn fetch_open_prs(repo_root: &Path) -> Result<Vec<PrStatus>, crate::error::GwtError> {
-    require_gh()?;
-
-    let output = run_gh_output_with_repair(
+    let value = run_gh_json(
         repo_root,
-        [
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--json",
-            PR_JSON_FIELDS,
-            "--limit",
-            "100",
-        ],
-    )
-    .map_err(|e| crate::error::GwtError::GitCommandFailed {
-        command: "gh pr list".to_string(),
-        reason: e.to_string(),
-    })?;
+        ["pr", "list", "--state", "open", "--json", PR_JSON_FIELDS, "--limit", "100"],
+        "pr list",
+        &[],
+    )?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::error::GwtError::GitCommandFailed {
-            command: "gh pr list".to_string(),
-            reason: stderr.to_string(),
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let values: Vec<serde_json::Value> =
-        serde_json::from_str(&stdout).map_err(|e| crate::error::GwtError::GitCommandFailed {
-            command: "gh pr list".to_string(),
-            reason: format!("Failed to parse JSON: {e}"),
-        })?;
-
+    let values = value
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
     Ok(values.iter().filter_map(parse_pr_json).collect())
 }
 

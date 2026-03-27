@@ -34,34 +34,23 @@ impl PrDashboardState {
         Self { selected, prs }
     }
 
-    /// Move selection down.
+    /// Move selection down (wraps around).
     pub fn next(&mut self) {
         if self.prs.is_empty() {
             return;
         }
-        self.selected = Some(
-            self.selected
-                .map(|i| if i + 1 < self.prs.len() { i + 1 } else { 0 })
-                .unwrap_or(0),
-        );
+        let i = self.selected.unwrap_or(0);
+        self.selected = Some((i + 1) % self.prs.len());
     }
 
-    /// Move selection up.
+    /// Move selection up (wraps around).
     pub fn previous(&mut self) {
         if self.prs.is_empty() {
             return;
         }
-        self.selected = Some(
-            self.selected
-                .map(|i| {
-                    if i == 0 {
-                        self.prs.len().saturating_sub(1)
-                    } else {
-                        i - 1
-                    }
-                })
-                .unwrap_or(0),
-        );
+        let len = self.prs.len();
+        let i = self.selected.unwrap_or(0);
+        self.selected = Some((i + len - 1) % len);
     }
 }
 
@@ -104,8 +93,9 @@ pub fn render_pr_line(pr: &PrStatus) -> Line<'static> {
     let review = review_indicator(&pr.review_status);
 
     let number_str = format!("#{:<4}", pr.number);
-    let title = if pr.title.len() > 30 {
-        format!("{:.30}...", &pr.title)
+    let title = if pr.title.chars().count() > 30 {
+        let truncated: String = pr.title.chars().take(30).collect();
+        format!("{truncated}...")
     } else {
         pr.title.clone()
     };
