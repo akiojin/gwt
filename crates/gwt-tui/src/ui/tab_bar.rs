@@ -66,14 +66,11 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &TuiState) {
     }
 
     // Add [+] button
-    spans.push(Span::styled(
-        " [+] ",
-        Style::default().fg(Color::DarkGray),
-    ));
+    spans.push(Span::styled(" [+] ", Style::default().fg(Color::DarkGray)));
 
     let line = Line::from(spans);
-    let line_widget = ratatui::widgets::Paragraph::new(line)
-        .style(Style::default().bg(Color::Black));
+    let line_widget =
+        ratatui::widgets::Paragraph::new(line).style(Style::default().bg(Color::Black));
     line_widget.render(area, buf);
 }
 

@@ -51,6 +51,10 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-appender = "0.2"
 tracing-chrome = "0.7"
 
+# File watching
+notify = "7"
+notify-debouncer-mini = "0.5"
+
 # File locking
 fs2 = "0.4"
 
