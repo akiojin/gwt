@@ -102,6 +102,12 @@ struct BranchInventoryDetailRequest {
     force_refresh: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListTerminalsRequest {
+    project_root: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Error response helper
 // ---------------------------------------------------------------------------
@@ -196,6 +202,30 @@ async fn handle_get_stash_list(
         git_view::get_stash_list_impl(&req.project_path, &req.branch)
     })
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Route handlers – terminal endpoints (need AppState)
+// ---------------------------------------------------------------------------
+
+async fn handle_list_terminals(
+    AxumState(app_handle): AxumState<SharedState>,
+    Json(req): Json<ListTerminalsRequest>,
+) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        crate::commands::terminal::list_terminals_impl(&state, req.project_root)
+    })
+    .await;
+
+    match result {
+        Ok(terminals) => Json(terminals).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "message": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +352,8 @@ fn build_router(state: SharedState) -> Router {
             post(handle_get_working_tree_status),
         )
         .route("/get_stash_list", post(handle_get_stash_list))
+        // terminal endpoints
+        .route("/list_terminals", post(handle_list_terminals))
         // branch / worktree endpoints
         .route(
             "/list_worktree_branches",

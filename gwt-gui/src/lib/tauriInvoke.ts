@@ -44,6 +44,7 @@ const HTTP_COMMANDS: ReadonlySet<string> = new Set([
   "get_branch_commits",
   "get_working_tree_status",
   "get_stash_list",
+  "list_terminals",
   "list_worktree_branches",
   "list_worktrees",
   "list_branch_inventory",

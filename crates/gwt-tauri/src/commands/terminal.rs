@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, OnceLock,
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use chrono::Utc;
@@ -40,7 +40,6 @@ use tracing::{instrument, warn};
 use uuid::Uuid;
 use which::which;
 
-const LIST_TERMINALS_WARN_THRESHOLD: Duration = Duration::from_millis(150);
 
 use crate::{
     commands::project::resolve_repo_path_for_project_root,
@@ -6064,22 +6063,18 @@ pub fn close_terminal(
     Ok(())
 }
 
-/// List terminal panes scoped to the given project root.
-///
-/// When `project_root` is provided, only panes belonging to that project are
-/// returned (multi-project isolation). When omitted, all panes are listed
-/// (backwards-compatible).
-#[instrument(skip_all, fields(command = "list_terminals"))]
-#[tauri::command]
-pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> Vec<TerminalInfo> {
-    let started = Instant::now();
+/// Core implementation: list terminal panes, optionally scoped to a project root.
+pub(crate) fn list_terminals_impl(
+    state: &AppState,
+    project_root: Option<String>,
+) -> Vec<TerminalInfo> {
     let manager = match state.pane_manager.lock() {
         Ok(m) => m,
         Err(_) => return Vec::new(),
     };
 
     let project_filter = project_root.map(PathBuf::from);
-    let terminals = manager
+    manager
         .panes()
         .iter()
         .filter(|pane| match &project_filter {
@@ -6099,17 +6094,17 @@ pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> V
                 status,
             }
         })
-        .collect();
-    let elapsed = started.elapsed();
-    if elapsed > LIST_TERMINALS_WARN_THRESHOLD {
-        warn!(
-            category = "project_start",
-            command = "list_terminals",
-            elapsed_ms = elapsed.as_millis(),
-            "list_terminals took longer than expected"
-        );
-    }
-    terminals
+        .collect()
+}
+
+/// List terminal panes scoped to the given project root.
+///
+/// When `project_root` is provided, only panes belonging to that project are
+/// returned (multi-project isolation). When omitted, all panes are listed
+/// (backwards-compatible).
+#[tauri::command]
+pub fn list_terminals(state: State<AppState>, project_root: Option<String>) -> Vec<TerminalInfo> {
+    list_terminals_impl(&state, project_root)
 }
 
 pub(crate) fn capture_scrollback_tail_from_state(
