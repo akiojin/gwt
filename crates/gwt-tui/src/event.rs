@@ -43,7 +43,6 @@ impl EventLoop {
     }
 
     /// Poll for the next event. This is a blocking call.
-    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<TuiEvent, Box<dyn std::error::Error>> {
         // Check for PTY output first (non-blocking)
         if let Ok((pane_id, data)) = self.pty_rx.try_recv() {

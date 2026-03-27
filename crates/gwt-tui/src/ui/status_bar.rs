@@ -30,11 +30,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &TuiState) {
 
         let mut parts = vec![
             Span::styled(
-                format!(
-                    " W{} | Pane 1/{} ",
-                    state.active_tab + 1,
-                    tab.pane_count
-                ),
+                format!(" W{} | Pane 1/{} ", state.active_tab + 1, tab.pane_count),
                 Style::default().fg(Color::White).bg(Color::DarkGray),
             ),
             Span::styled(
@@ -66,8 +62,8 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &TuiState) {
     };
 
     let line = Line::from(spans);
-    let paragraph = ratatui::widgets::Paragraph::new(line)
-        .style(Style::default().bg(Color::DarkGray));
+    let paragraph =
+        ratatui::widgets::Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
     paragraph.render(area, buf);
 }
 

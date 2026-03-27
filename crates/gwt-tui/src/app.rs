@@ -19,7 +19,6 @@ pub struct App {
     state: TuiState,
     vt_parsers: HashMap<String, vt100::Parser>,
     should_quit: bool,
-    #[allow(dead_code)]
     repo_root: PathBuf,
 }
 
@@ -67,7 +66,7 @@ impl App {
             let area = frame.area();
             let layout = Layout::vertical([
                 Constraint::Length(1), // Tab bar
-                Constraint::Min(1),   // Terminal view
+                Constraint::Min(1),    // Terminal view
                 Constraint::Length(1), // Status bar
             ])
             .split(area);
