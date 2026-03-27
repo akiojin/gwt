@@ -1,6 +1,6 @@
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
@@ -45,22 +45,10 @@ impl IssuePanelState {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                if query.is_empty() {
-                    return true;
-                }
-                if entry.title.to_lowercase().contains(&query) {
-                    return true;
-                }
-                if let IssueType::Spec(ref id) = entry.issue_type {
-                    if id.to_lowercase().contains(&query) {
-                        return true;
-                    }
-                }
-                let num_str = entry.number.to_string();
-                if num_str.contains(&query) {
-                    return true;
-                }
-                false
+                query.is_empty()
+                    || entry.title.to_lowercase().contains(&query)
+                    || entry.number.to_string().contains(&query)
+                    || matches!(&entry.issue_type, IssueType::Spec(id) if id.to_lowercase().contains(&query))
             })
             .map(|(i, _)| i)
             .collect();
@@ -117,27 +105,14 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &IssuePanelState) {
         return;
     }
 
-    let search_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: 1,
-    };
+    let [search_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+
     let search_line = Line::from(vec![
         Span::styled("Search: ", Style::default().fg(Color::Yellow)),
         Span::raw(&state.search_query),
     ]);
     Paragraph::new(search_line).render(search_area, buf);
-
-    if inner.height < 3 {
-        return;
-    }
-    let list_area = Rect {
-        x: inner.x,
-        y: inner.y + 1,
-        width: inner.width,
-        height: inner.height - 1,
-    };
 
     if state.filtered.is_empty() {
         let empty = Paragraph::new("  No issues found.");
@@ -163,13 +138,9 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &IssuePanelState) {
                 ),
             };
 
-            let state_color = match entry.state {
-                IssueState::Open => Color::Green,
-                IssueState::Closed => Color::DarkGray,
-            };
-            let state_label = match entry.state {
-                IssueState::Open => "open",
-                IssueState::Closed => "closed",
+            let (state_label, state_color) = match entry.state {
+                IssueState::Open => ("open", Color::Green),
+                IssueState::Closed => ("closed", Color::DarkGray),
             };
 
             let line = Line::from(vec![
@@ -179,18 +150,18 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &IssuePanelState) {
                 Span::styled(state_label, Style::default().fg(state_color)),
             ]);
 
-            let mut style = Style::default();
-            if is_selected {
-                style = style
+            let style = if is_selected {
+                Style::default()
                     .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD);
-            }
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
             ListItem::new(line).style(style)
         })
         .collect();
 
-    let list = List::new(items);
-    list.render(list_area, buf);
+    List::new(items).render(list_area, buf);
 }
 
 /// Truncate a string to `max_len` characters, appending "..." if truncated.
