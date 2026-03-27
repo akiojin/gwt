@@ -17,6 +17,7 @@ pub mod process;
 pub mod system_info;
 pub mod terminal;
 pub mod update;
+pub mod voice;
 pub mod worktree;
 
 pub use error::{ErrorSeverity, GwtError, Result, StructuredError};

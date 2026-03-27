@@ -1690,6 +1690,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-tui"
+version = "8.17.2"
+dependencies = [
+ "gwt-core",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
