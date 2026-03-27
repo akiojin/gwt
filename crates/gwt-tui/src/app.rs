@@ -1,15 +1,9 @@
 //! TUI application: integrates PaneManager, PTY I/O, key handling, and rendering
 
-use std::{
-    collections::HashMap,
-    io::Read,
-    path::PathBuf,
-};
+use std::{collections::HashMap, io::Read, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::terminal::{
-    manager::PaneManager, AgentColor, BuiltinLaunchConfig,
-};
+use gwt_core::terminal::{manager::PaneManager, AgentColor, BuiltinLaunchConfig};
 
 use crate::{
     event::PtyOutputSender,
@@ -19,43 +13,18 @@ use crate::{
 /// Key actions produced by the key mapper.
 #[derive(Debug)]
 pub enum KeyAction {
-    /// Quit the application.
     Quit,
-    /// Create a new shell tab.
     NewShellWindow,
-    /// Pass key through to the active PTY.
     Passthrough(KeyEvent),
-    /// Switch to next tab.
     NextTab,
-    /// Switch to previous tab.
     PrevTab,
-    /// Enter scroll mode.
     EnterScrollMode,
-    /// Scroll up one page (scroll mode only).
     ScrollUp,
-    /// Scroll down one page (scroll mode only).
     ScrollDown,
-    /// Scroll to top (scroll mode only).
     ScrollHome,
-    /// Scroll to bottom / exit scroll mode.
     ScrollEnd,
-    /// Exit scroll mode without scrolling.
     ExitScrollMode,
-    /// No action.
     None,
-}
-
-/// Per-pane vt100 parser for terminal emulation.
-pub struct PaneParser {
-    pub parser: vt100::Parser,
-}
-
-impl PaneParser {
-    pub fn new(rows: u16, cols: u16) -> Self {
-        Self {
-            parser: vt100::Parser::new(rows, cols, 1000),
-        }
-    }
 }
 
 /// The main TUI application.
@@ -65,15 +34,12 @@ pub struct App {
     pub repo_root: PathBuf,
     pub pty_tx: PtyOutputSender,
     /// Per-pane vt100 parsers keyed by pane_id.
-    pub parsers: HashMap<String, PaneParser>,
-    /// Terminal dimensions (rows, cols).
+    pub parsers: HashMap<String, vt100::Parser>,
     pub term_size: (u16, u16),
-    /// Whether the app should quit.
     pub should_quit: bool,
 }
 
 impl App {
-    /// Create a new App instance.
     pub fn new(repo_root: PathBuf, pty_tx: PtyOutputSender, rows: u16, cols: u16) -> Self {
         Self {
             state: TuiState::new(),
@@ -86,9 +52,7 @@ impl App {
         }
     }
 
-    /// Map a key event to a KeyAction based on current mode.
     pub fn map_key(&self, key: KeyEvent) -> KeyAction {
-        // Ctrl-C always quits
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return KeyAction::Quit;
         }
@@ -104,8 +68,6 @@ impl App {
     }
 
     fn map_normal_key(&self, key: KeyEvent) -> KeyAction {
-        // Ctrl-B + c => new shell, Ctrl-B + n => next tab, Ctrl-B + p => prev tab
-        // For simplicity, use Ctrl-T for new tab, Ctrl-N/Ctrl-P for tab switching
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('t') => return KeyAction::NewShellWindow,
@@ -115,7 +77,6 @@ impl App {
             }
         }
 
-        // PageUp enters scroll mode
         if key.code == KeyCode::PageUp {
             return KeyAction::EnterScrollMode;
         }
@@ -134,7 +95,6 @@ impl App {
         }
     }
 
-    /// Handle a mapped key action. Returns true if the app should continue.
     pub fn handle_action(&mut self, action: KeyAction) {
         match action {
             KeyAction::Quit => {
@@ -162,7 +122,6 @@ impl App {
             }
             KeyAction::EnterScrollMode => {
                 self.state.mode = AppMode::ScrollMode;
-                // Start with one page up
                 self.scroll_up();
             }
             KeyAction::ScrollUp => {
@@ -182,7 +141,6 @@ impl App {
         }
     }
 
-    /// Spawn a new shell tab. Returns the pane_id on success.
     pub fn spawn_shell_tab(&mut self) -> Result<String, gwt_core::terminal::TerminalError> {
         let (rows, cols) = self.term_size;
         let config = BuiltinLaunchConfig {
@@ -200,11 +158,9 @@ impl App {
 
         let pane_id = self.pane_manager.spawn_shell(&self.repo_root, config, rows, cols)?;
 
-        // Register vt100 parser for this pane
         self.parsers
-            .insert(pane_id.clone(), PaneParser::new(rows, cols));
+            .insert(pane_id.clone(), vt100::Parser::new(rows, cols, 1000));
 
-        // Add tab info
         self.state.tabs.push(TabInfo {
             pane_id: pane_id.clone(),
             name: "shell".to_string(),
@@ -214,7 +170,6 @@ impl App {
         });
         self.state.active_tab = self.state.tabs.len() - 1;
 
-        // Spawn PTY reader thread: take the reader from the pane we just created
         let pane = self
             .pane_manager
             .pane_mut_by_id(&pane_id)
@@ -231,33 +186,23 @@ impl App {
         Ok(pane_id)
     }
 
-    /// Handle PTY output data: feed to vt100 parser and process_bytes on pane.
     pub fn handle_pty_output(&mut self, pane_id: &str, data: &[u8]) {
-        // Feed data to the vt100 parser
-        if let Some(pp) = self.parsers.get_mut(pane_id) {
-            pp.parser.process(data);
+        if let Some(parser) = self.parsers.get_mut(pane_id) {
+            parser.process(data);
         }
-
-        // Also write to pane's scrollback
         if let Some(pane) = self.pane_manager.pane_mut_by_id(pane_id) {
             let _ = pane.process_bytes(data);
         }
     }
 
-    /// Handle terminal resize.
     pub fn handle_resize(&mut self, cols: u16, rows: u16) {
         self.term_size = (rows, cols);
-
-        // Resize all PTY panes
         let _ = self.pane_manager.resize_all(rows, cols);
-
-        // Resize all vt100 parsers
-        for pp in self.parsers.values_mut() {
-            pp.parser.set_size(rows, cols);
+        for parser in self.parsers.values_mut() {
+            parser.set_size(rows, cols);
         }
     }
 
-    /// Convert a KeyEvent to bytes for PTY input.
     fn handle_passthrough(&mut self, key: KeyEvent) {
         let bytes = key_event_to_bytes(&key);
         if bytes.is_empty() {
@@ -273,8 +218,6 @@ impl App {
             let _ = pane.write_input(&bytes);
         }
     }
-
-    // -- Scroll helpers --
 
     fn scroll_up(&mut self) {
         let page_size = self.term_size.0 as usize;
@@ -297,33 +240,24 @@ impl App {
     }
 
     fn scroll_home(&mut self) {
-        // Scroll to maximum offset (beginning of scrollback).
-        // Use a large value; rendering will clamp to actual scrollback size.
         self.state.scroll_state = ScrollState::Scrolled { offset: usize::MAX };
     }
 
-    /// Get the vt100 screen content for the active pane, accounting for scroll offset.
     pub fn active_screen_rows(&self) -> Vec<String> {
-        let pane_id = match self.state.active_pane_id() {
-            Some(id) => id,
-            None => return vec!["No active pane. Press Ctrl-T to create a shell.".to_string()],
+        let Some(pane_id) = self.state.active_pane_id() else {
+            return vec!["No active pane. Press Ctrl-T to create a shell.".to_string()];
         };
-
-        let parser = match self.parsers.get(pane_id) {
-            Some(pp) => &pp.parser,
-            None => return vec![],
+        let Some(parser) = self.parsers.get(pane_id) else {
+            return vec![];
         };
 
         let screen = parser.screen();
-        let rows = screen.rows(0, screen.size().1);
-        let all_rows: Vec<String> = rows.map(|row| row.to_string()).collect();
+        let all_rows: Vec<String> = screen.rows(0, screen.size().1).map(|r| r.to_string()).collect();
 
         let offset = self.state.scroll_offset();
         if offset == 0 {
-            // Live mode: show the tail
             all_rows
         } else {
-            // Scrolled: shift view up by offset
             let total = all_rows.len();
             let end = total.saturating_sub(offset);
             let start = end.saturating_sub(self.term_size.0 as usize);
@@ -332,7 +266,6 @@ impl App {
     }
 }
 
-/// Background PTY reader loop. Reads from the PTY reader and sends data to the channel.
 fn pty_reader_loop(
     mut reader: Box<dyn Read + Send>,
     pane_id: &str,
@@ -352,12 +285,9 @@ fn pty_reader_loop(
     }
 }
 
-/// Convert a crossterm KeyEvent to raw bytes for PTY input.
 pub fn key_event_to_bytes(key: &KeyEvent) -> Vec<u8> {
-    // Handle Ctrl+key combinations
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         if let KeyCode::Char(c) = key.code {
-            // Ctrl+A = 0x01, Ctrl+B = 0x02, ..., Ctrl+Z = 0x1A
             let ctrl_byte = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
             if ctrl_byte <= 26 {
                 return vec![ctrl_byte];
@@ -390,7 +320,6 @@ pub fn key_event_to_bytes(key: &KeyEvent) -> Vec<u8> {
         KeyCode::F(3) => b"\x1bOR".to_vec(),
         KeyCode::F(4) => b"\x1bOS".to_vec(),
         KeyCode::F(n) if n >= 5 => {
-            // F5-F12 use CSI sequences
             let code = match n {
                 5 => "15",
                 6 => "17",
@@ -430,8 +359,6 @@ mod tests {
             state: KeyEventState::NONE,
         }
     }
-
-    // -- key_event_to_bytes tests --
 
     #[test]
     fn test_char_to_bytes() {
@@ -502,8 +429,6 @@ mod tests {
         assert_eq!(bytes, "\u{3042}".as_bytes());
     }
 
-    // -- App key mapping tests --
-
     #[test]
     fn test_ctrl_c_maps_to_quit() {
         let (tx, _rx) = crate::event::pty_output_channel();
@@ -563,8 +488,6 @@ mod tests {
             KeyAction::ExitScrollMode
         ));
     }
-
-    // -- Scroll state tests --
 
     #[test]
     fn test_scroll_up_increases_offset() {
@@ -626,12 +549,11 @@ mod tests {
     fn test_handle_pty_output_feeds_parser() {
         let (tx, _rx) = crate::event::pty_output_channel();
         let mut app = App::new(PathBuf::from("/tmp"), tx, 24, 80);
-        // Add a parser manually (without spawning a real PTY)
         app.parsers
-            .insert("test-pane".to_string(), PaneParser::new(24, 80));
+            .insert("test-pane".to_string(), vt100::Parser::new(24, 80, 1000));
         app.handle_pty_output("test-pane", b"Hello, world!");
 
-        let screen = app.parsers["test-pane"].parser.screen();
+        let screen = app.parsers["test-pane"].screen();
         let row0 = screen.rows(0, 80).next().unwrap().to_string();
         assert!(row0.contains("Hello, world!"));
     }
@@ -641,11 +563,11 @@ mod tests {
         let (tx, _rx) = crate::event::pty_output_channel();
         let mut app = App::new(PathBuf::from("/tmp"), tx, 24, 80);
         app.parsers
-            .insert("test-pane".to_string(), PaneParser::new(24, 80));
+            .insert("test-pane".to_string(), vt100::Parser::new(24, 80, 1000));
 
         app.handle_resize(120, 40);
 
-        let size = app.parsers["test-pane"].parser.screen().size();
+        let size = app.parsers["test-pane"].screen().size();
         assert_eq!(size, (40, 120));
     }
 }

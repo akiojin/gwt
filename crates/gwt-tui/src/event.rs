@@ -3,25 +3,17 @@
 use crossterm::event::KeyEvent;
 use tokio::sync::mpsc;
 
-/// Events the TUI event loop processes.
 #[derive(Debug)]
 pub enum TuiEvent {
-    /// Terminal key input.
     Key(KeyEvent),
-    /// Terminal resize.
     Resize(u16, u16),
-    /// PTY output from a pane.
     PtyOutput { pane_id: String, data: Vec<u8> },
-    /// Periodic tick for UI updates.
     Tick,
 }
 
-/// Sender half for PTY output forwarding.
 pub type PtyOutputSender = mpsc::UnboundedSender<(String, Vec<u8>)>;
-/// Receiver half for PTY output forwarding.
 pub type PtyOutputReceiver = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
 
-/// Create a new PTY output channel pair.
 pub fn pty_output_channel() -> (PtyOutputSender, PtyOutputReceiver) {
     mpsc::unbounded_channel()
 }

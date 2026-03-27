@@ -4,21 +4,18 @@ use std::time::Instant;
 
 use gwt_core::terminal::AgentColor;
 
-/// Prefix key state (e.g. Ctrl-B prefix for tmux-like bindings).
 #[derive(Debug)]
 pub enum PrefixState {
     Idle,
     Active(Instant),
 }
 
-/// Scroll position state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScrollState {
     Live,
     Scrolled { offset: usize },
 }
 
-/// Application mode.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
     Normal,
@@ -26,7 +23,6 @@ pub enum AppMode {
     ScrollMode,
 }
 
-/// Tab status for display.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TabStatus {
     Running,
@@ -34,7 +30,6 @@ pub enum TabStatus {
     Error,
 }
 
-/// Information about a single tab.
 #[derive(Debug, Clone)]
 pub struct TabInfo {
     pub pane_id: String,
@@ -44,7 +39,6 @@ pub struct TabInfo {
     pub branch: String,
 }
 
-/// Top-level TUI state.
 pub struct TuiState {
     pub tabs: Vec<TabInfo>,
     pub active_tab: usize,
@@ -64,12 +58,10 @@ impl TuiState {
         }
     }
 
-    /// Get the active tab's pane_id, if any.
     pub fn active_pane_id(&self) -> Option<&str> {
         self.tabs.get(self.active_tab).map(|t| t.pane_id.as_str())
     }
 
-    /// Get scroll offset (0 = live tail).
     pub fn scroll_offset(&self) -> usize {
         match &self.scroll_state {
             ScrollState::Live => 0,
