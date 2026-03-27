@@ -44,6 +44,10 @@ const HTTP_COMMANDS: ReadonlySet<string> = new Set([
   "get_branch_commits",
   "get_working_tree_status",
   "get_stash_list",
+  "list_worktree_branches",
+  "list_worktrees",
+  "list_branch_inventory",
+  "get_branch_inventory_detail",
 ]);
 
 /** Cached HTTP IPC port. 0 = not yet resolved, -1 = unavailable. */

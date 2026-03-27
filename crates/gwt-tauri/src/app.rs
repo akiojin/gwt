@@ -491,8 +491,9 @@ pub fn build_app(
 
                 // Background task: HTTP IPC server on a dedicated OS thread
                 // to bypass WKWebView main-thread IPC bottleneck.
+                // Passes AppHandle so the HTTP server shares the same AppState.
                 {
-                    let app_state = Arc::new(AppState::new());
+                    let app_handle_for_http = _app.handle().clone();
                     let (tx, rx) = std::sync::mpsc::channel::<Result<u16, String>>();
                     std::thread::spawn(move || {
                         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -501,7 +502,7 @@ pub fn build_app(
                             .build()
                             .expect("failed to build HTTP IPC tokio runtime");
                         rt.block_on(async move {
-                            match crate::http_server::start_http_server(app_state).await {
+                            match crate::http_server::start_http_server(app_handle_for_http).await {
                                 Ok(port) => { let _ = tx.send(Ok(port)); }
                                 Err(e) => { let _ = tx.send(Err(e)); }
                             }

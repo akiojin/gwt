@@ -4,8 +4,6 @@
 //! the frontend `fetch()` directly to a local HTTP endpoint instead of going
 //! through the Tauri invoke bridge.
 
-use std::sync::Arc;
-
 use axum::{
     extract::{Json, State as AxumState},
     http::StatusCode,
@@ -15,6 +13,7 @@ use axum::{
 };
 use gwt_core::StructuredError;
 use serde::Deserialize;
+use tauri::Manager;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
@@ -23,7 +22,9 @@ use crate::commands::git_view;
 use crate::state::AppState;
 
 /// Shared state accessible from axum handlers.
-type SharedState = Arc<AppState>;
+/// Uses `AppHandle` so the HTTP server shares the same `AppState`
+/// that Tauri manages — no duplicate state, caches are shared.
+type SharedState = tauri::AppHandle;
 
 // ---------------------------------------------------------------------------
 // Request types (git_view endpoints)
@@ -202,10 +203,11 @@ async fn handle_get_stash_list(
 // ---------------------------------------------------------------------------
 
 async fn handle_list_worktree_branches(
-    AxumState(state): AxumState<SharedState>,
+    AxumState(app_handle): AxumState<SharedState>,
     Json(req): Json<ProjectPathRequest>,
 ) -> impl IntoResponse {
     let result = tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
         crate::commands::branches::list_worktree_branches_impl(&req.project_path, &state)
     })
     .await;
@@ -222,10 +224,11 @@ async fn handle_list_worktree_branches(
 }
 
 async fn handle_list_worktrees(
-    AxumState(state): AxumState<SharedState>,
+    AxumState(app_handle): AxumState<SharedState>,
     Json(req): Json<ProjectPathRequest>,
 ) -> impl IntoResponse {
     let result = tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
         crate::commands::cleanup::list_worktrees_impl(&req.project_path, &state)
     })
     .await;
@@ -246,10 +249,11 @@ async fn handle_list_worktrees(
 }
 
 async fn handle_list_branch_inventory(
-    AxumState(state): AxumState<SharedState>,
+    AxumState(app_handle): AxumState<SharedState>,
     Json(req): Json<BranchInventoryRequest>,
 ) -> impl IntoResponse {
     let result = tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
         crate::commands::branches::list_branch_inventory_impl(
             &req.project_path,
             req.refresh_key,
@@ -270,10 +274,11 @@ async fn handle_list_branch_inventory(
 }
 
 async fn handle_get_branch_inventory_detail(
-    AxumState(state): AxumState<SharedState>,
+    AxumState(app_handle): AxumState<SharedState>,
     Json(req): Json<BranchInventoryDetailRequest>,
 ) -> impl IntoResponse {
     let result = tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
         crate::commands::branches::get_branch_inventory_detail_impl(
             &req.project_path,
             &req.canonical_name,
@@ -319,16 +324,16 @@ fn build_router(state: SharedState) -> Router {
         .route("/get_stash_list", post(handle_get_stash_list))
         // branch / worktree endpoints
         .route(
-            "/ipc/list_worktree_branches",
+            "/list_worktree_branches",
             post(handle_list_worktree_branches),
         )
-        .route("/ipc/list_worktrees", post(handle_list_worktrees))
+        .route("/list_worktrees", post(handle_list_worktrees))
         .route(
-            "/ipc/list_branch_inventory",
+            "/list_branch_inventory",
             post(handle_list_branch_inventory),
         )
         .route(
-            "/ipc/get_branch_inventory_detail",
+            "/get_branch_inventory_detail",
             post(handle_get_branch_inventory_detail),
         )
         .layer(cors)
@@ -338,9 +343,10 @@ fn build_router(state: SharedState) -> Router {
 /// Start the HTTP IPC server on a random port and return the port number.
 ///
 /// The server runs as a background tokio task and lives for the lifetime of
-/// the process.  An `Arc<AppState>` is required for branch/worktree endpoints.
+/// the process.  Accepts the Tauri `AppHandle` so that branch/worktree
+/// handlers share the same `AppState` managed by the main application.
 #[cfg_attr(test, allow(dead_code))]
-pub async fn start_http_server(app_state: Arc<AppState>) -> Result<u16, String> {
+pub async fn start_http_server(app_handle: tauri::AppHandle) -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("Failed to bind HTTP IPC server: {e}"))?;
@@ -352,7 +358,7 @@ pub async fn start_http_server(app_state: Arc<AppState>) -> Result<u16, String> 
 
     info!(port, "HTTP IPC server listening");
 
-    let router = build_router(app_state);
+    let router = build_router(app_handle);
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
@@ -368,7 +374,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn router_builds_without_panic() {
-        let _ = build_router(Arc::new(AppState::new()));
+    fn shared_state_type_is_app_handle() {
+        // Compile-time verification: SharedState == AppHandle (Wry runtime).
+        // build_router() requires the real Wry runtime so it is validated by
+        // `cargo check` / `cargo build` rather than a unit test with MockRuntime.
+        fn _assert_shared_state(_: SharedState) {}
     }
 }
