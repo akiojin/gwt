@@ -1,0 +1,6 @@
+- [x] T001 [S] Create and link spec issue for #1480 follow-up.
+- [x] T002 [F] Add RED unit tests for pasted API key button visibility, Refresh, Save, and reopen persistence.
+- [x] T003 [F] Add RED Playwright E2E for pasted API key behavior in Settings > Profiles.
+- [x] T004 [U1] Implement API Key paste synchronization in `SettingsPanel.svelte`.
+- [x] T005 [U1] Keep Save path using plain data payloads for `save_settings` and `save_profiles`.
+- [x] T006 [FIN] Run unit tests, E2E, `svelte-check`, and core roundtrip tests; update issue progress.
