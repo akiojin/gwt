@@ -1,0 +1,5 @@
+- [x] ボタンが `48x48px` で表示される
+- [x] アイコンが `24px` で描画される
+- [x] ターミナル操作を妨げない pointer-events 構成を維持する
+- [x] `pnpm exec svelte-check --tsconfig ./tsconfig.json` が通過する
+- [ ] `cargo tauri dev` で GUI の目視確認を行う

@@ -1,0 +1,3 @@
+- Parent bug: #1525
+- Related specs: #1351, #1404, #1526
+- Current gap: existing specs cover Cleanup GUI and post-merge decision separately, but not the integrated responsibility split between latest PR display and branch safety.
