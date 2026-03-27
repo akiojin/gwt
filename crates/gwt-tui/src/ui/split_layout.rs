@@ -24,14 +24,17 @@ pub enum LayoutNode {
     },
 }
 
+/// Placeholder used during in-place node replacement via `std::mem::replace`.
+const PLACEHOLDER: LayoutNode = LayoutNode::Leaf {
+    pane_id: String::new(),
+};
+
 /// A layout tree managing the arrangement of panes.
 #[derive(Debug, Clone)]
 pub struct LayoutTree {
     root: LayoutNode,
     focused_pane: String,
 }
-
-// --- LayoutNode helpers ---
 
 impl LayoutNode {
     /// Count leaves in this subtree.
@@ -54,17 +57,17 @@ impl LayoutNode {
     }
 
     /// Check if this subtree contains a pane.
-    fn contains(&self, pane_id: &str) -> bool {
+    fn contains(&self, target: &str) -> bool {
         match self {
-            LayoutNode::Leaf { pane_id: id } => id == pane_id,
+            LayoutNode::Leaf { pane_id } => pane_id == target,
             LayoutNode::Split { first, second, .. } => {
-                first.contains(pane_id) || second.contains(pane_id)
+                first.contains(target) || second.contains(target)
             }
         }
     }
 
-    /// Calculate areas recursively.
-    fn calculate_areas_recursive(&self, area: Rect, out: &mut Vec<(String, Rect)>) {
+    /// Calculate areas recursively, splitting along the primary axis.
+    fn calculate_areas(&self, area: Rect, out: &mut Vec<(String, Rect)>) {
         match self {
             LayoutNode::Leaf { pane_id } => {
                 out.push((pane_id.clone(), area));
@@ -75,34 +78,9 @@ impl LayoutNode {
                 first,
                 second,
             } => {
-                let (first_area, second_area) = match direction {
-                    SplitDirection::Horizontal => {
-                        let width = (area.width as f32 * ratio) as u16;
-                        (
-                            Rect::new(area.x, area.y, width, area.height),
-                            Rect::new(
-                                area.x + width,
-                                area.y,
-                                area.width.saturating_sub(width),
-                                area.height,
-                            ),
-                        )
-                    }
-                    SplitDirection::Vertical => {
-                        let height = (area.height as f32 * ratio) as u16;
-                        (
-                            Rect::new(area.x, area.y, area.width, height),
-                            Rect::new(
-                                area.x,
-                                area.y + height,
-                                area.width,
-                                area.height.saturating_sub(height),
-                            ),
-                        )
-                    }
-                };
-                first.calculate_areas_recursive(first_area, out);
-                second.calculate_areas_recursive(second_area, out);
+                let (first_area, second_area) = split_rect(area, *direction, *ratio);
+                first.calculate_areas(first_area, out);
+                second.calculate_areas(second_area, out);
             }
         }
     }
@@ -116,17 +94,14 @@ impl LayoutNode {
     ) -> bool {
         match self {
             LayoutNode::Leaf { pane_id } if pane_id == target_pane_id => {
-                let original = LayoutNode::Leaf {
-                    pane_id: pane_id.clone(),
-                };
-                let new_leaf = LayoutNode::Leaf {
-                    pane_id: new_pane_id,
-                };
+                let original = std::mem::replace(self, PLACEHOLDER);
                 *self = LayoutNode::Split {
                     direction,
                     ratio: 0.5,
                     first: Box::new(original),
-                    second: Box::new(new_leaf),
+                    second: Box::new(LayoutNode::Leaf {
+                        pane_id: new_pane_id,
+                    }),
                 };
                 true
             }
@@ -138,61 +113,79 @@ impl LayoutNode {
         }
     }
 
-    /// Remove a pane by ID and return the promoted sibling if removal happened.
-    /// Returns `Some(sibling_node)` when a pane was found inside a Split and removed,
-    /// or `None` if not found (or if this is the only leaf).
-    fn remove_pane(&mut self, target_pane_id: &str) -> Option<LayoutNode> {
-        match self {
-            LayoutNode::Leaf { .. } => None,
-            LayoutNode::Split { first, second, .. } => {
-                // Check if first child is the target leaf
-                if let LayoutNode::Leaf { pane_id } = first.as_ref() {
-                    if pane_id == target_pane_id {
-                        return Some(*second.clone());
-                    }
-                }
-                // Check if second child is the target leaf
-                if let LayoutNode::Leaf { pane_id } = second.as_ref() {
-                    if pane_id == target_pane_id {
-                        return Some(*first.clone());
-                    }
-                }
-                // Recurse into children
-                if let Some(promoted) = first.remove_pane(target_pane_id) {
-                    **first = promoted;
-                    return Some(self.clone());
-                }
-                if let Some(promoted) = second.remove_pane(target_pane_id) {
-                    **second = promoted;
-                    return Some(self.clone());
-                }
-                None
-            }
+    /// Remove a pane by ID. Returns true if found and removed.
+    /// When a direct child is removed, the sibling is promoted in place.
+    fn remove_pane(&mut self, target_pane_id: &str) -> bool {
+        let LayoutNode::Split { first, second, .. } = self else {
+            return false;
+        };
+
+        // Direct child removal: promote sibling in place
+        if matches!(first.as_ref(), LayoutNode::Leaf { pane_id } if pane_id == target_pane_id) {
+            *self = std::mem::replace(second, PLACEHOLDER);
+            return true;
         }
+        if matches!(second.as_ref(), LayoutNode::Leaf { pane_id } if pane_id == target_pane_id) {
+            *self = std::mem::replace(first, PLACEHOLDER);
+            return true;
+        }
+
+        // Recurse into children
+        first.remove_pane(target_pane_id) || second.remove_pane(target_pane_id)
     }
 
     /// Adjust the ratio of the split that directly contains the given pane.
     fn adjust_ratio_for_pane(&mut self, pane_id: &str, delta: f32) -> bool {
-        match self {
-            LayoutNode::Leaf { .. } => false,
-            LayoutNode::Split {
-                ratio,
-                first,
-                second,
-                ..
-            } => {
-                let first_is_direct =
-                    matches!(first.as_ref(), LayoutNode::Leaf { pane_id: id } if id == pane_id);
-                let second_is_direct =
-                    matches!(second.as_ref(), LayoutNode::Leaf { pane_id: id } if id == pane_id);
+        let LayoutNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return false;
+        };
 
-                if first_is_direct || second_is_direct {
-                    *ratio = (*ratio + delta).clamp(0.1, 0.9);
-                    return true;
-                }
-                first.adjust_ratio_for_pane(pane_id, delta)
-                    || second.adjust_ratio_for_pane(pane_id, delta)
-            }
+        let is_direct_child = first.is_leaf(pane_id) || second.is_leaf(pane_id);
+        if is_direct_child {
+            *ratio = (*ratio + delta).clamp(0.1, 0.9);
+            return true;
+        }
+        first.adjust_ratio_for_pane(pane_id, delta) || second.adjust_ratio_for_pane(pane_id, delta)
+    }
+
+    /// Check if this node is a leaf with the given pane ID.
+    fn is_leaf(&self, target: &str) -> bool {
+        matches!(self, LayoutNode::Leaf { pane_id } if pane_id == target)
+    }
+}
+
+/// Split a `Rect` into two along the given direction at the given ratio.
+fn split_rect(area: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect) {
+    match direction {
+        SplitDirection::Horizontal => {
+            let w = (area.width as f32 * ratio) as u16;
+            (
+                Rect::new(area.x, area.y, w, area.height),
+                Rect::new(
+                    area.x + w,
+                    area.y,
+                    area.width.saturating_sub(w),
+                    area.height,
+                ),
+            )
+        }
+        SplitDirection::Vertical => {
+            let h = (area.height as f32 * ratio) as u16;
+            (
+                Rect::new(area.x, area.y, area.width, h),
+                Rect::new(
+                    area.x,
+                    area.y + h,
+                    area.width,
+                    area.height.saturating_sub(h),
+                ),
+            )
         }
     }
 }
@@ -221,31 +214,25 @@ impl LayoutTree {
     /// Remove a pane by ID. If it's a leaf in a split, promote the sibling.
     /// Returns true if the pane was found and removed.
     pub fn remove(&mut self, pane_id: &str) -> bool {
-        // Cannot remove the last pane
         if self.pane_count() <= 1 {
             return false;
         }
-        if let Some(promoted) = self.root.remove_pane(pane_id) {
-            // If the removed pane was focused, move focus to first available pane
-            if self.focused_pane == pane_id {
-                let mut ids = Vec::new();
-                promoted.collect_pane_ids(&mut ids);
-                if let Some(first_id) = ids.first() {
-                    self.focused_pane = first_id.clone();
-                }
-            }
-            self.root = promoted;
-            true
-        } else {
-            false
+        if !self.root.remove_pane(pane_id) {
+            return false;
         }
+        // If the removed pane was focused, move focus to first available pane
+        if self.focused_pane == pane_id {
+            if let Some(first_id) = self.pane_ids().first() {
+                self.focused_pane = first_id.clone();
+            }
+        }
+        true
     }
 
     /// Calculate the Rect for each pane given the total area.
-    /// Returns Vec of (pane_id, Rect) pairs.
     pub fn calculate_areas(&self, area: Rect) -> Vec<(String, Rect)> {
         let mut out = Vec::new();
-        self.root.calculate_areas_recursive(area, &mut out);
+        self.root.calculate_areas(area, &mut out);
         out
     }
 
