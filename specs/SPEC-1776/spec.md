@@ -67,21 +67,26 @@ As a developer, I want to use voice input (Qwen3-ASR) to send commands to the ac
 ## Functional Requirements
 
 - FR-001: gwt-tui crate using ratatui + crossterm replaces gwt-tauri + gwt-gui
-- FR-002: Tab bar with agent name, branch, and status color indicators
+- FR-002: Tab bar (Window bar) with agent name, branch, pane count, and status color indicators
 - FR-003: Full PTY terminal rendering with ANSI color and attribute support
-- FR-004: Ctrl+G prefix key system for all management operations
-- FR-005: Management panel with agent list, detail view, and quick actions (kill, restart, logs)
+- FR-004: Ctrl+G prefix key system for all management operations (2s timeout)
+- FR-005: Management panel with Window list, detail view, and quick actions (kill, restart)
 - FR-006: New agent launch dialog with agent type, branch/Issue, and directory selection
-- FR-007: Shell tab support (opens default shell in current or specified directory)
-- FR-008: Horizontal and vertical pane splitting
-- FR-009: Status bar showing current tab info, SPEC association, and agent state
-- FR-010: Scrollback buffer with scroll mode (Ctrl+G, PgUp) and file persistence
+- FR-007: Shell pane/Window support (opens default shell in current or specified directory)
+- FR-008: Horizontal and vertical pane splitting within a Window (tmux-style)
+- FR-009: Status bar showing current Window/Pane info, SPEC association, and agent state
+- FR-010: Scrollback buffer with mouse wheel/trackpad scroll (always active) and keyboard scroll mode
 - FR-011: PR dashboard in management panel (status, CI checks, merge state)
 - FR-012: Issue/SPEC list in management panel with search
 - FR-013: AI session summary display in management panel
 - FR-014: Voice input integration (Qwen3-ASR)
 - FR-015: Automatic worktree creation on agent launch and cleanup on close
 - FR-016: VT100 emulator buffer to ratatui Cell conversion (renderer)
+- FR-017: Welcome screen when no Windows exist (quick launch options)
+- FR-018: Window = tab with multiple panes; pane focus via Ctrl+G + arrow keys
+- FR-019: Pane zoom (Ctrl+G, z) to toggle active pane fullscreen
+- FR-020: Window remembers last focused pane when switching away and back
+- FR-021: Skill registration auto-execution on startup (same as current GUI)
 
 ## Non-Functional Requirements
 

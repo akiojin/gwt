@@ -42,81 +42,216 @@ Business logic currently in gwt-tauri that must move to gwt-core:
 - Session summary generation trigger -> `gwt-core::ai`
 - Voice input runtime management -> `gwt-core` (new module)
 
-## TUI Layout
-
-### Normal Mode
+## Conceptual Model (tmux-style)
 
 ```text
-+--[* claude:feature/x]--[* codex:fix/y]--[o shell]--[+]--+
-|                                                           |
-|  Active tab terminal output (full-screen PTY)             |
-|                                                           |
-|  $ claude code --model opus ...                           |
-|  > Analyzing codebase...                                  |
-|                                                           |
-+-----------------------------------------------------------+
-| gwt | Tab 1/3 | * running | feature/x | SPEC-42          |
-+-----------------------------------------------------------+
+gwt
+ +-- Window (= tab bar item)
+      +-- Pane A (PTY)
+      +-- Pane B (PTY)   <- added by split
+      +-- Pane C (PTY)   <- further split
 ```
 
-- **Tab bar** (top): agent name + branch, status color (running/idle/error)
-- **Terminal area**: active tab PTY output, full screen
-- **Status bar** (bottom): current tab info, SPEC association, agent state
+- **Window** = one tab bar item. Contains one or more panes.
+- **Pane** = one PTY session (agent or shell).
+- Windows can be split into multiple panes. Without splits, 1 Window = 1 Pane.
+- Each Window remembers its last focused pane when switching away.
 
-### Split Mode
+## Screen Definitions
 
-Horizontal and vertical splits supported (tmux-style):
+### Welcome Screen (no windows)
 
 ```text
-+--[* claude]--[* codex]--[o shell]--[+]-------------------+
-| claude:feature/x          | codex:fix/y                   |
-|                           |                               |
-| > Implementing auth...    | > Running tests...            |
-|                           |                               |
-+---------------------------+-------------------------------+
-| gwt | Split 2 | SPEC-42                                   |
-+-----------------------------------------------------------+
++--[+]----------------------------------------------------------+
+|                                                                |
+|                       Welcome to gwt                           |
+|                                                                |
+|       No agents running. Get started:                          |
+|                                                                |
+|       [n]  Launch new agent                                    |
+|       [s]  Open shell                                          |
+|       [q]  Quit                                                |
+|                                                                |
++----------------------------------------------------------------+
+| gwt v9.0.0 | No active windows                                 |
++----------------------------------------------------------------+
 ```
 
-### Management Panel (Ctrl+G toggle)
+### Single Pane (default)
 
 ```text
-+-- MANAGEMENT -------------------------------------------------+
-| +-- Agents ---------+-- Detail ----------------------------- +|
-| | * claude  [run]   | Agent: Claude Code v1.0.46             ||
-| | * codex   [run]   | Branch: feature/x                     ||
-| | o shell   [idle]  | Worktree: /tmp/gwt/feature-x          ||
-| |                   | SPEC: SPEC-42                          ||
-| | [n] New Agent     | Status: running (2h 15m)              ||
-| | [s] New Shell     | PR: #1234 (checks passing)            ||
-| |                   |                                        ||
-| |-- Quick Actions --| [k] Kill  [r] Restart  [l] Logs      ||
-| | [p] PR Status     | [Enter] Switch to tab                 ||
-| | [i] Issues        |                                        ||
-| | [S] SPECs         |-- AI Summary --------------------------||
-| |                   | Implementing authentication module...  ||
-| |                   | 3 files modified, 2 tests passing      ||
-| +-------------------+----------------------------------------+|
-+---------------------------------------------------------------+
++--[W1: * claude]--[W2: * codex]--[W3: o shell]--[+]-----------+
+|                                                                |
+|  Active Window's active Pane (full-screen PTY)                 |
+|                                                                |
+|  $ claude code --model opus ...                                |
+|  > Analyzing codebase...                                       |
+|                                                                |
++----------------------------------------------------------------+
+| W1 | Pane 1/1 | * running | feature/x | SPEC-42               |
++----------------------------------------------------------------+
 ```
 
-Activated by Ctrl+G. Dismisses on Ctrl+G again or Escape.
+### Vertical Split (left/right, same Window)
+
+```text
++--[W1: * split(2)]--[W2: * codex]--[W3: o shell]--[+]---------+
+| * claude           | o shell                                   |
+| feature/x          | ~/project                                 |
+|                    |                                            |
+| > Implementing...  | $ cargo test                              |
+|                    | running 42 tests...                        |
+|                    |                                            |
++----------------------------------------------------------------+
+| W1 | Pane 1/2 [focus:L] | * running | feature/x               |
++----------------------------------------------------------------+
+```
+
+### Horizontal Split (top/bottom, same Window)
+
+```text
++--[W1: * split(2)]--[W2: o shell]--[+]-------------------------+
+| * claude | feature/x                                           |
+| > Implementing authentication module...                        |
+| > Modified: src/auth.rs, src/middleware.rs                      |
++----------------------------------------------------------------+
+| * codex | fix/bug-123                                          |
+| > Running tests... 42/42 passed                                |
+|                                                                |
++----------------------------------------------------------------+
+| W1 | Pane 1/2 [focus:T] | * running | feature/x               |
++----------------------------------------------------------------+
+```
+
+### Management Panel (Ctrl+G, Ctrl+G toggle)
+
+```text
++-- MANAGEMENT --------------------------------------------------+
+| +-- Windows --------+-- Detail ------------------------------+|
+| | W1: * claude      | Window: W1                             ||
+| |   +-- 2 panes     | Panes: claude(run), shell(idle)        ||
+| | W2: * codex       | Branch: feature/x                     ||
+| |   +-- 1 pane      | Worktree: ~/.gwt/wt/feature-x         ||
+| | W3: o shell       | SPEC: SPEC-42                          ||
+| |   +-- 1 pane      | Uptime: 2h 15m                        ||
+| |                    | PR: #1234 (checks passing)             ||
+| | [n] New Agent      |                                       ||
+| | [s] New Shell      | [k] Kill  [r] Restart                 ||
+| | [p] PR Status      | [Enter] Switch to window              ||
+| | [i] Issues         |                                       ||
+| |                    |-- AI Summary -------------------------||
+| |                    | Implementing auth module. Modified     ||
+| |                    | 3 files, 2 tests passing.             ||
+| +--------------------+---------------------------------------+|
++----------------------------------------------------------------+
+```
+
+### Window Navigation Example
+
+```text
+State: W1 left pane focused
++--[W1: * split(2)]--[W2: o shell]--+
+| [FOCUS]        | pane B            |
+| pane A         |                   |
++----------------+-------------------+
+
+Ctrl+G, Right -> W1 right pane focused
++--[W1: * split(2)]--[W2: o shell]--+
+| pane A         | [FOCUS]           |
+|                | pane B            |
++----------------+-------------------+
+
+Ctrl+G, ] -> Switch to W2 (whole Window changes)
++--[W1: * split(2)]--[W2: o shell]--+
+|                                    |
+| [FOCUS] shell                      |
+| $ _                                |
++------------------------------------+
+
+Ctrl+G, [ -> Back to W1 (remembers last focused pane)
++--[W1: * split(2)]--[W2: o shell]--+
+| pane A         | [FOCUS]           |
+|                | pane B            |
++----------------+-------------------+
+```
 
 ## Key Bindings
 
+### Normal Mode (PTY passthrough)
+
+All keystrokes are forwarded to the active pane's PTY.
+Only `Ctrl+G` is intercepted as the prefix key.
+
+### Ctrl+G Prefix Mode
+
+Pressing Ctrl+G enters prefix mode (2 second timeout).
+
+**Window (tab) operations:**
+
 | Key | Action |
 |-----|--------|
-| `Ctrl+G` | Toggle management panel |
-| `Ctrl+G, n` | New agent tab (launch dialog) |
-| `Ctrl+G, s` | New shell tab |
-| `Ctrl+G, 1-9` | Switch to tab by number |
-| `Ctrl+G, ]` / `[` | Next / previous tab |
-| `Ctrl+G, v` | Vertical split |
-| `Ctrl+G, h` | Horizontal split |
-| `Ctrl+G, x` | Close current tab |
-| `Ctrl+G, q` | Quit gwt |
+| `Ctrl+G, c` | New Window with empty shell pane |
+| `Ctrl+G, n` | New agent Window (launch dialog) |
+| `Ctrl+G, 1-9` | Switch to Window by number |
+| `Ctrl+G, ]` | Next Window |
+| `Ctrl+G, [` | Previous Window |
+| `Ctrl+G, &` | Close Window (confirm: kills all panes) |
 
-`Ctrl+G` is a prefix key. All other input passes directly to the active PTY.
+**Pane operations (within current Window):**
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+G, v` | Vertical split (new shell pane on right) |
+| `Ctrl+G, h` | Horizontal split (new shell pane below) |
+| `Ctrl+G, Left/Right/Up/Down` | Move focus to adjacent pane |
+| `Ctrl+G, x` | Close active pane (confirm if running) |
+| `Ctrl+G, z` | Zoom: toggle active pane fullscreen |
+
+**Scrollback:**
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+G, PgUp` | Enter scroll mode |
+| Mouse wheel / trackpad | Scroll PTY output (enters scroll mode automatically) |
+
+**Management:**
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+G, Ctrl+G` | Toggle management panel |
+| `Ctrl+G, q` | Quit gwt (confirm if agents running) |
+
+**Cancel:**
+
+| Key | Action |
+|-----|--------|
+| `Escape` | Cancel prefix, return to normal mode |
+| 2s timeout | Auto-cancel |
+
+### Scroll Mode
+
+Entered via `Ctrl+G, PgUp` or mouse wheel/trackpad scroll.
+
+| Key | Action |
+|-----|--------|
+| `PgUp` / `PgDn` | Page scroll |
+| `Up` / `Down` | Line scroll |
+| Mouse wheel / trackpad | Scroll |
+| `q` / `Escape` | Exit scroll mode, return to live output |
+
+### Management Panel
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Navigate Window list |
+| `Enter` | Switch to selected Window (closes panel) |
+| `k` | Kill selected Window's agent |
+| `r` | Restart selected Window's agent |
+| `p` | Switch to PR dashboard view |
+| `i` | Switch to Issue/SPEC list view |
+| `n` | New agent launch dialog |
+| `s` | New shell Window |
+| `Escape` / `Ctrl+G` | Close management panel |
 
 ## Component Design
 
@@ -218,13 +353,14 @@ Worktrees are backend infrastructure, not user-facing. The user interacts with a
 
 ## Scrollback Buffer
 
-Each PTY tab has a scrollback buffer, backed by gwt-core's `terminal/scrollback.rs` (file-based persistence at `~/.gwt/terminals/{id}.log`). In the TUI:
+Each PTY pane has a scrollback buffer, backed by gwt-core's `terminal/scrollback.rs` (file-based persistence at `~/.gwt/terminals/{id}.log`). In the TUI:
 
-- Normal mode: terminal shows live PTY output at the bottom of the scrollback
-- Scroll mode (activated by `Ctrl+G, PgUp` or mouse wheel): freezes the viewport and allows scrolling through history
-- Exiting scroll mode (press `q` or `Escape`): returns to live output
-- Scrollback is preserved across tab switches
-- AI summary generation reads from the scrollback buffer
+- **Mouse wheel / trackpad scroll is always active** — no special mode needed to scroll. Scrolling up freezes the viewport; new PTY output continues buffering but the viewport stays at the scrolled position.
+- `Ctrl+G, PgUp` also enters scroll mode for keyboard-only navigation.
+- When scrolled up, a "scroll indicator" shows lines from bottom (e.g., `[+142 lines]`).
+- Scrolling to the very bottom (or pressing `q`/`Escape` in keyboard scroll mode) returns to live output tracking.
+- Scrollback is preserved across Window switches.
+- AI summary generation reads from the scrollback buffer.
 
 ## Error Handling
 
