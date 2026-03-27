@@ -1,158 +1,161 @@
-# Tasks: SPEC-1776 — ratatui TUI Migration
+# Tasks: SPEC-1776 — Migrate from Tauri GUI to ratatui TUI
 
 ## Phase 0: Setup
 
-- [ ] T-001: Cargo workspace に `crates/gwt-tui` クレートを追加
-- [ ] T-002: `crates/gwt-tui/Cargo.toml` 作成 (ratatui, crossterm, vt100, gwt-core, tokio)
+- [ ] T001: Add `crates/gwt-tui/` to Cargo workspace members in `Cargo.toml`
+- [ ] T002: Create `crates/gwt-tui/Cargo.toml` with dependencies: ratatui, crossterm, tokio, gwt-core
+- [ ] T003: Create `crates/gwt-tui/src/main.rs` — crossterm raw mode init, ratatui Terminal, empty event loop, graceful shutdown
+- [ ] T004: Verify `cargo build -p gwt-tui` and `cargo clippy -p gwt-tui` pass
 
-## Phase 1: 最小 TUI シェル (US1, US3)
+## Phase 1: Foundational — Minimal TUI (US1, US3)
 
-> User Story 1 (Launch gwt as terminal replacement) + User Story 3 (Shell tabs)
+### Renderer (FR-016)
 
-- [ ] T-010: `src/main.rs` — crossterm raw mode 開始、ratatui Terminal 初期化、パニックハンドラ
-  - `crossterm::terminal::enable_raw_mode()`
-  - `ratatui::Terminal::new(CrosstermBackend::new(stdout))`
-  - パニック時に raw mode を確実に解除
-- [ ] T-011: `src/app.rs` — App 構造体とメインイベントループ
-  - `App { tabs, active_tab, mode, should_quit }`
-  - `crossterm::event::poll(Duration::from_millis(10))` でイベント待機
-  - `terminal.draw(|frame| ui::render(frame, &app))` で描画
-- [ ] T-012: `src/pty/session.rs` — PTY セッション管理
-  - `portable_pty::native_pty_system().openpty(PtySize)` で PTY 生成
-  - `child_killer`, `reader`, `writer` の管理
-  - PTY 出力を非同期で読み取るスレッド
-  - `crates/gwt-core/src/terminal/` の既存 PTY ロジックを活用
-- [ ] T-013: `src/pty/renderer.rs` — VT100 → ratatui 変換
-  - `vt100::Parser` で PTY バイト列をパース
-  - `vt100::Screen` → `ratatui::buffer::Buffer` のセル変換
-  - ANSI カラー (256色 + TrueColor) + 属性 (bold, italic, underline) 対応
-  - カーソル位置の追跡
-- [ ] T-014: `src/ui/tab_bar.rs` — タブバー描画
-  - タブ名、アクティブタブのハイライト、タブ番号表示
-  - `ratatui::widgets::Tabs` ベース
-- [ ] T-015: `src/ui/terminal.rs` — PTY 出力描画
-  - `renderer.rs` の Buffer を frame に書き込み
-  - カーソル表示/非表示の制御
-- [ ] T-016: `src/ui/status.rs` — ステータスバー
-  - 現在のタブ情報、ヘルプヒント (`Ctrl+G for commands`)
-- [ ] T-017: `src/input/handler.rs` — キー入力ルーティング
-  - 通常モード: キー入力を PTY に転送
-  - Ctrl+G 検出 → コマンドモードに遷移
-  - Ctrl+C → PTY に SIGINT 転送 (TUI は終了しない)
-- [ ] T-018: **テスト** — renderer のユニットテスト
-  - VT100 シーケンス → ratatui Cell 変換の正確性
-  - カラーマッピング、属性、カーソル位置
-- [ ] T-019: **検証** — `cargo run -p gwt-tui` → シェル操作 → ls, vim, top 等が正常動作
+- [ ] T010: Write tests for VT100 Cell → ratatui Cell color mapping in `crates/gwt-tui/src/renderer.rs` (named, indexed, RGB colors + bold/italic/underline/inverse attributes)
+- [ ] T011: Implement `renderer.rs` — convert vt100::Screen grid to ratatui Buffer
+- [ ] T012: [P] Write snapshot tests for renderer with multi-color PTY output samples
 
-## Phase 2: タブ管理 + Ctrl+G (US2, US4)
+### State & Event Loop
 
-> User Story 2 (Manage agent tabs) + User Story 4 (View management panel)
+- [ ] T020: Write tests for `crates/gwt-tui/src/state.rs` — TuiState tab add/remove/switch, active index bounds
+- [ ] T021: Implement `state.rs` — TuiState struct with tabs, active_tab, layout, prefix state
+- [ ] T022: Write tests for `crates/gwt-tui/src/event.rs` — event polling, PTY output channel dispatch
+- [ ] T023: Implement `event.rs` — crossterm event reader + PTY output channel + tick timer (100ms)
 
-- [ ] T-020: `src/input/keybind.rs` — Ctrl+G プレフィックスキーシステム
-  - `InputMode::Normal` / `InputMode::Command` / `InputMode::Panel` 状態マシン
-  - Ctrl+G → c: 新規シェルタブ
-  - Ctrl+G → n: 新規エージェント起動ダイアログ
-  - Ctrl+G → 1-9: タブ切替
-  - Ctrl+G → x: 現在のタブ終了
-  - Ctrl+G → g: 管理パネルトグル
-  - Ctrl+G → h/l: 前/次のタブ
-  - Ctrl+G → q: gwt 終了
-  - Ctrl+G → ?: ヘルプ表示
-- [ ] T-021: `src/state/tabs.rs` — タブ状態管理
-  - `Tab { id, name, tab_type, pty_session, status }`
-  - `TabType::Shell | TabType::Agent { agent_id, branch, spec_id }`
-  - タブ追加/削除/切替/リネーム
-  - 最後のタブ終了 → gwt 終了
-- [ ] T-022: `src/ui/panel.rs` — 管理パネル
-  - エージェント一覧 (名前、ブランチ、ステータス)
-  - 選択 → Enter でタブ切替
-  - k: kill, r: restart, l: ログ表示
-  - ratatui Table ウィジェット
-- [ ] T-023: `src/ui/dialog.rs` — エージェント起動ダイアログ
-  - エージェント種別選択 (Claude Code, Codex, Gemini)
-  - ブランチ/Issue 選択
-  - ディレクトリ選択
-  - ratatui Popup ベース
-- [ ] T-024: **テスト** — keybind のユニットテスト
-  - Ctrl+G → c の状態遷移
-  - Normal → Command → Normal のサイクル
-  - PTY に Ctrl+G が転送されないことの検証
-- [ ] T-025: **検証** — 複数タブ作成/切替/終了、Ctrl+G パネル表示
+### Key Binding (FR-004)
 
-## Phase 3: エージェント起動 + gwt-core 連携 (US2, US8)
+- [ ] T030: Write tests for `crates/gwt-tui/src/input/keybind.rs` — Ctrl+G prefix detection, timeout, action dispatch, passthrough
+- [ ] T031: Implement `input/keybind.rs` — prefix state machine (Idle → PrefixActive → action/timeout/cancel)
 
-> User Story 2 (Manage agent tabs) + Acceptance Scenario 8 (worktree auto-create)
+### UI Components (FR-002, FR-003, FR-009, FR-010)
 
-- [ ] T-030: `src/state/agents.rs` — エージェント状態管理
-  - gwt-core の `PaneManager` との連携
-  - エージェント起動パラメータ構築
-  - ワークツリー自動作成 (gwt-core worktree モジュール)
-- [ ] T-031: エージェント起動フロー統合
-  - ダイアログからパラメータ受取 → worktree 作成 → PTY 起動 → タブ追加
-  - gwt-core の `agent::launch` ロジック活用
-- [ ] T-032: ワークツリークリーンアップ
-  - タブ終了時に worktree を安全に削除
-  - 未コミット変更がある場合は確認ダイアログ
-- [ ] T-033: エージェント状態表示拡充
-  - ステータスバーにエージェント種別、ブランチ、SPEC 表示
-  - 管理パネルにリアルタイムステータス更新
-- [ ] T-034: **検証** — エージェント起動 → 動作確認 → タブ終了 → worktree 消去
+- [ ] T040: [P] Implement `crates/gwt-tui/src/ui/tab_bar.rs` — tab names, status colors (AgentColor mapping), active indicator
+- [ ] T041: [P] Implement `crates/gwt-tui/src/ui/terminal_view.rs` — render VT100 buffer via renderer to Frame area
+- [ ] T042: [P] Implement `crates/gwt-tui/src/ui/status_bar.rs` — tab index, agent state, branch, SPEC ID
+- [ ] T043: Write snapshot tests for tab_bar, terminal_view, status_bar using ratatui TestBackend
 
-## Phase 4: ペイン分割 + PR/Issue パネル (US5, US6, US7)
+### App Integration (FR-007)
 
-- [ ] T-040: [P] `src/ui/split.rs` — ペイン分割
-  - Ctrl+G → -: 水平分割
-  - Ctrl+G → |: 垂直分割
-  - Ctrl+G → 矢印キー: ペイン間移動
-  - ratatui Layout::split でサイズ計算
-  - 各ペインに独立した PTY セッション
-- [ ] T-041: [P] `src/ui/panel.rs` — PR ダッシュボード拡充
-  - PR ステータス、CI チェック結果、マージ状態
-  - gwt-core の GitHub API 連携
-- [ ] T-042: [P] `src/ui/panel.rs` — Issue/SPEC リスト
-  - Issue 検索、SPEC 一覧、ステータス表示
-- [ ] T-043: [P] AI セッションサマリー表示
-  - gwt-core のセッションサマリー機能連携
-  - 管理パネル内にサマリーテキスト表示
-- [ ] T-044: スクロールバック実装
-  - Ctrl+G → PgUp: スクロールモード開始
-  - vt100 のスクロールバックバッファ活用
-  - ファイル永続化 (大量出力対応)
-- [ ] T-045: **検証** — ペイン分割動作、PR 表示、スクロールバック
+- [ ] T050: Implement `crates/gwt-tui/src/app.rs` — App struct orchestrating state + event + UI render cycle
+- [ ] T051: Wire shell tab creation (Ctrl+G,s) via PaneManager::spawn_shell()
+- [ ] T052: Wire PTY I/O: key input → write_input(), PTY reader → process_bytes() → render
+- [ ] T053: Wire terminal resize event → PaneManager::resize_all() + re-render
+- [ ] T054: Implement scrollback scroll mode (Ctrl+G,PgUp to enter, Escape to exit)
 
-## Phase 5: 仕上げ + 配布
+### Phase 1 Verification
 
-- [ ] T-050: gwt-tauri / gwt-gui / gwt-server 削除
-  - Cargo.toml から members 削除
-  - ディレクトリ削除
-  - CI 参照の更新
-- [ ] T-051: CI/CD パイプライン更新
-  - `.github/workflows/release.yml` を TUI バイナリ配布に変更
-  - クロスプラットフォームビルド (macOS, Windows, Linux)
-  - `cargo install gwt-tui` 対応
-- [ ] T-052: README.md / README.ja.md 更新
-  - TUI 版のインストール・使い方
-  - キーバインド一覧
-  - スクリーンショット
-- [ ] T-053: **最終検証** — SC-001〜SC-008
-  - SC-001: TUI 起動、タブバー + ターミナル表示
-  - SC-002: タブ作成/切替/終了
-  - SC-003: Ctrl+G パネル動作
-  - SC-004: ペイン分割
-  - SC-005: gwt-core テスト全パス
-  - SC-006: gwt-tui テストカバレッジ > 80%
-  - SC-007: gwt-tauri, gwt-gui 完全削除
-  - SC-008: CI パイプライン更新
+- [ ] T060: Integration test — launch gwt-tui, open shell tab, verify PTY output renders with ANSI colors
+- [ ] T061: Verify `cargo test -p gwt-tui` and `cargo test -p gwt-core` both pass
 
-## Traceability Matrix
+## Phase 2: Agent Tabs + Management Panel (US2, US4)
 
-| User Story | Tasks |
-|---|---|
-| US1 - Launch as terminal replacement | T-010–T-019 |
-| US2 - Manage agent tabs | T-020–T-025, T-030–T-034 |
-| US3 - Shell tabs | T-012, T-021 |
-| US4 - Management panel | T-022, T-023, T-025 |
-| US5 - Split panes | T-040 |
-| US6 - PR/Issue status | T-041, T-042 |
-| US7 - AI session summaries | T-043 |
-| US8 - Voice input | (P3, deferred) |
+### Business Logic Extraction
+
+- [ ] T100: Extract agent launch parameter builder from `crates/gwt-tauri/src/commands/terminal.rs` to `crates/gwt-core/src/agent/launch.rs`
+- [ ] T101: Write tests for extracted launch builder in gwt-core
+- [ ] T102: [P] Extract session completion watcher from `crates/gwt-tauri/src/session_watcher.rs` to `crates/gwt-core/src/agent/session_watcher.rs`
+
+### Launch Dialog (FR-006)
+
+- [ ] T110: Write tests for `crates/gwt-tui/src/ui/management/launch_dialog.rs` — field navigation, agent type selection, input validation
+- [ ] T111: Implement `launch_dialog.rs` — agent type selector, branch/Issue input, directory picker, confirm/cancel
+
+### Management Panel (FR-005)
+
+- [ ] T120: Write tests for `crates/gwt-tui/src/ui/management/agent_list.rs` — list rendering, cursor navigation, status indicators
+- [ ] T121: Implement `agent_list.rs` — agent list with status color (running/idle/error), selection cursor
+- [ ] T122: [P] Write tests for `crates/gwt-tui/src/ui/management/detail_panel.rs` — detail fields display
+- [ ] T123: [P] Implement `detail_panel.rs` — agent name, branch, worktree path, SPEC, status, uptime, PR link
+- [ ] T124: Implement `crates/gwt-tui/src/ui/management/mod.rs` — panel layout (left list + right detail), Ctrl+G toggle
+
+### Agent Tab Lifecycle (FR-015)
+
+- [ ] T130: Wire Ctrl+G,n → launch_dialog → PaneManager::launch_agent() with auto-worktree
+- [ ] T131: Wire management panel quick actions: k (kill), r (restart), Enter (switch to tab)
+- [ ] T132: Implement worktree auto-cleanup on agent tab close (with uncommitted changes safety check)
+
+### Phase 2 Verification
+
+- [ ] T140: Integration test — launch agent, verify appears in management panel, kill via panel, worktree cleaned up
+- [ ] T141: Verify all tests pass: `cargo test -p gwt-tui && cargo test -p gwt-core`
+
+## Phase 3: Split Panes (US5)
+
+### Split Layout (FR-008)
+
+- [ ] T200: Write tests for `crates/gwt-tui/src/ui/split_layout.rs` — LayoutTree insert split, remove leaf, resize ratio, area calculation
+- [ ] T201: Implement `split_layout.rs` — binary tree layout with H/V splits, ratio-based area subdivision
+- [ ] T202: Wire Ctrl+G,v (vertical split) and Ctrl+G,h (horizontal split)
+- [ ] T203: Implement pane focus switching within split layout (Ctrl+G,arrow keys)
+- [ ] T204: Wire terminal resize → recalculate all split pane areas
+
+### Phase 3 Verification
+
+- [ ] T210: Snapshot test — two panes in vertical split render correct areas
+- [ ] T211: Integration test — split, resize terminal, verify both panes update
+
+## Phase 4: Extended Features (US6, US7)
+
+### PR Dashboard (FR-011)
+
+- [ ] T300: [P] Extract PR status polling from `crates/gwt-tauri/src/commands/` to `crates/gwt-core/src/git/pr_status.rs`
+- [ ] T301: [P] Write tests for PR status module in gwt-core
+- [ ] T302: Implement `crates/gwt-tui/src/ui/management/pr_dashboard.rs` — PR list, CI check badges, merge state
+
+### Issue/SPEC Panel (FR-012)
+
+- [ ] T310: [P] Implement `crates/gwt-tui/src/ui/management/issue_panel.rs` — Issue/SPEC list with search input
+- [ ] T311: Wire Issue search to gwt-core's ChromaDB index (existing gwt-issue-search infrastructure)
+
+### AI Session Summaries (FR-013)
+
+- [ ] T320: [P] Extract summary trigger from gwt-tauri to `crates/gwt-core/src/ai/summary_trigger.rs`
+- [ ] T321: Display AI summary in management detail panel, updated periodically from scrollback
+
+### Phase 4 Verification
+
+- [ ] T330: Verify PR status displays in management panel
+- [ ] T331: Verify Issue search returns results
+- [ ] T332: Verify AI summary generates from agent scrollback
+
+## Phase 5: Voice Input (US8)
+
+### Voice Runtime (FR-014)
+
+- [ ] T400: Extract voice runtime from `crates/gwt-tauri/src/commands/voice.rs` to `crates/gwt-core/src/voice/runtime.rs`
+- [ ] T401: Write tests for voice runtime initialization and transcription pipeline
+- [ ] T402: Implement `crates/gwt-tui/src/input/voice.rs` — hotkey activation, audio capture, inject transcribed text to active PTY
+
+### Phase 5 Verification
+
+- [ ] T410: Manual test — voice input hotkey → speak → text appears in terminal
+
+## Phase 6: Cleanup + Release (SC-007, SC-008)
+
+### Code Removal
+
+- [ ] T500: Delete `crates/gwt-tauri/` directory
+- [ ] T501: Delete `gwt-gui/` directory
+- [ ] T502: Update `Cargo.toml` workspace members (remove gwt-tauri, keep gwt-tui)
+- [ ] T503: Remove Tauri-specific dependencies from workspace Cargo.toml
+- [ ] T504: Update binary target in Cargo.toml to point to gwt-tui
+
+### CI/Release Pipeline
+
+- [ ] T510: [P] Update `.github/workflows/ci.yml` — remove Tauri build steps, add gwt-tui build/test
+- [ ] T511: [P] Update `.github/workflows/release.yml` — produce native binary (no .dmg/.msi), cross-compile targets
+- [ ] T512: Remove `tauri.conf.json` and related Tauri config files
+
+### Documentation
+
+- [ ] T520: [P] Update `README.md` — installation, usage for TUI binary
+- [ ] T521: [P] Update `README.ja.md` — same changes in Japanese
+- [ ] T522: Update `CLAUDE.md` — remove Tauri/GUI references, add TUI development instructions
+
+### Phase 6 Verification
+
+- [ ] T530: `cargo build -p gwt-tui` succeeds as the sole frontend
+- [ ] T531: `cargo test` (all crates) passes
+- [ ] T532: `cargo clippy --all-targets --all-features -- -D warnings` passes
+- [ ] T533: CI pipeline runs successfully
+- [ ] T534: Release workflow produces correct binary artifacts

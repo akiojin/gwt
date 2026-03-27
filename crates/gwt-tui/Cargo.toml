@@ -1,0 +1,20 @@
+[package]
+name = "gwt-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "ratatui TUI for gwt — terminal replacement with agent tab management"
+
+[[bin]]
+name = "gwt"
+path = "src/main.rs"
+
+[dependencies]
+gwt-core = { workspace = true }
+
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+vt100 = { workspace = true }
+tokio = { workspace = true }

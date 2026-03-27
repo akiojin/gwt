@@ -4,6 +4,7 @@ members = [
     "crates/gwt-core",
     "crates/gwt-tauri",
     "crates/gwt-server",
+    "crates/gwt-tui",
 ]
 default-members = [
     "crates/gwt-tauri",
@@ -69,6 +70,11 @@ directories = "6"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
+
+# TUI (ratatui + crossterm)
+ratatui = "0.29"
+crossterm = "0.28"
+vt100 = "0.15"
 
 # HTTP server (axum – lightweight IPC for offloading WKWebView main thread)
 axum = { version = "0.8", features = ["json", "ws"] }
