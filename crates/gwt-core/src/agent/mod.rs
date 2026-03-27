@@ -9,6 +9,7 @@ pub mod codex;
 pub mod conversation;
 pub mod gemini;
 pub mod issue;
+pub mod launch;
 pub mod prompt_builder;
 pub mod scanner;
 pub mod session;
