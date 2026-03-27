@@ -448,22 +448,111 @@ impl App {
         &mut self,
         key: KeyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::ui::management::launch_dialog::DialogField;
+
+        let field = &self.state.management.launch_dialog.focused_field;
+
         match key.code {
-            KeyCode::Esc => self.state.mode = AppMode::Normal,
-            KeyCode::Tab => self.state.management.launch_dialog.focus_next(),
-            KeyCode::Enter => {
-                // For now, launch a shell tab (agent launch requires gwt-core agent integration)
-                self.spawn_shell_tab()?;
+            KeyCode::Esc => {
+                self.state.management.launch_dialog = Default::default();
                 self.state.mode = AppMode::Normal;
             }
-            KeyCode::Char(c) => {
+            KeyCode::Tab => self.state.management.launch_dialog.focus_next(),
+            KeyCode::Enter => {
+                match field {
+                    DialogField::CancelButton => {
+                        self.state.management.launch_dialog = Default::default();
+                        self.state.mode = AppMode::Normal;
+                    }
+                    DialogField::LaunchButton => {
+                        self.launch_agent_from_dialog()?;
+                        self.state.management.launch_dialog = Default::default();
+                        self.state.mode = AppMode::Normal;
+                    }
+                    DialogField::Agent => {
+                        // Enter on agent field cycles agent
+                        self.state.management.launch_dialog.next_agent();
+                    }
+                    DialogField::Branch => {
+                        // Enter on branch field moves to Launch button
+                        self.state.management.launch_dialog.focus_next();
+                    }
+                }
+            }
+            // Agent field: Left/Right or Space to cycle agent
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if *field == DialogField::Agent =>
+            {
+                self.state.management.launch_dialog.next_agent();
+            }
+            // Branch field: character input
+            KeyCode::Char(c) if *field == DialogField::Branch => {
                 self.state.management.launch_dialog.branch_input.push(c);
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if *field == DialogField::Branch => {
                 self.state.management.launch_dialog.branch_input.pop();
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn launch_agent_from_dialog(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let dialog = &self.state.management.launch_dialog;
+        let agent_label = dialog.selected_agent_label().to_string();
+
+        let (command, agent_name, color) = match agent_label.as_str() {
+            "Claude Code" => ("claude".to_string(), "claude".to_string(), AgentColor::Green),
+            "Codex CLI" => ("codex".to_string(), "codex".to_string(), AgentColor::Blue),
+            "Gemini CLI" => ("gemini".to_string(), "gemini".to_string(), AgentColor::Cyan),
+            _ => ("claude".to_string(), "claude".to_string(), AgentColor::Green),
+        };
+
+        let branch = if dialog.branch_input.is_empty() {
+            None
+        } else {
+            Some(dialog.branch_input.clone())
+        };
+
+        let config = BuiltinLaunchConfig {
+            command,
+            args: vec![],
+            working_dir: self.repo_root.clone(),
+            branch_name: branch.clone().unwrap_or_else(|| "main".to_string()),
+            agent_name: agent_name.clone(),
+            agent_color: color,
+            env_vars: HashMap::new(),
+            terminal_shell: None,
+            interactive: true,
+            windows_force_utf8: false,
+        };
+
+        let pane_id = self.pane_manager.launch_agent(
+            &self.repo_root,
+            config,
+            self.terminal_rows,
+            self.terminal_cols,
+        )?;
+
+        self.start_pty_reader(&pane_id)?;
+        self.vt_parsers.insert(
+            pane_id.clone(),
+            vt100::Parser::new(self.terminal_rows, self.terminal_cols, 1000),
+        );
+
+        let tree = LayoutTree::new(&pane_id);
+        self.state.add_tab(TabInfo {
+            pane_id: pane_id.clone(),
+            name: agent_name,
+            tab_type: TabType::Agent,
+            color,
+            status: PaneStatusIndicator::Running,
+            branch,
+            spec_id: None,
+            pane_count: 1,
+        });
+        self.state.layout_trees.insert(pane_id, tree);
+
         Ok(())
     }
 
