@@ -1,4 +1,6 @@
-use ratatui::{buffer::Buffer, layout::Rect, style::Color as RatColor, style::Modifier, style::Style};
+use ratatui::{
+    buffer::Buffer, layout::Rect, style::Color as RatColor, style::Modifier, style::Style,
+};
 
 /// Convert a vt100 color to a ratatui color.
 pub fn convert_color(color: vt100::Color) -> RatColor {
@@ -65,7 +67,10 @@ mod tests {
 
     #[test]
     fn test_convert_indexed_color() {
-        assert_eq!(convert_color(vt100::Color::Idx(196)), RatColor::Indexed(196));
+        assert_eq!(
+            convert_color(vt100::Color::Idx(196)),
+            RatColor::Indexed(196)
+        );
     }
 
     #[test]

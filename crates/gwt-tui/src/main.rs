@@ -57,7 +57,9 @@ fn run_app(
         if crossterm::event::poll(std::time::Duration::from_millis(100))? {
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                 if key.code == crossterm::event::KeyCode::Char('q')
-                    && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
                 {
                     return Ok(());
                 }
