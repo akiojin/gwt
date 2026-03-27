@@ -9,6 +9,7 @@ pub mod diff;
 pub mod gh_cli;
 pub mod graphql;
 mod issue;
+pub mod pr_status;
 pub mod issue_cache;
 pub mod issue_linkage;
 mod issue_spec;
