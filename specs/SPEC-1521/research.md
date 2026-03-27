@@ -1,0 +1,4 @@
+- `SettingsPanel.svelte` originally listened only to `oninput` and `onchange` for API Key, so paste-only flows were uncovered.
+- Existing tests covered typed value flows but not paste-specific events.
+- `ProfilesConfig::save/load` already preserves a non-empty `default.ai.api_key`; the higher-risk path was frontend save serialization.
+- Save path also needed plain-data conversion to avoid passing Svelte reactive proxies over IPC.

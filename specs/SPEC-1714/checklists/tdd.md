@@ -1,0 +1,7 @@
+- [x] local linkage bootstrap が `issue-1234` branch から初回取り込みできること
+- [x] exact cache hit 時に online lookup を行わないこと
+- [x] `gh issue view` の rate limit / 403 / transport error 時に REST fallback すること
+- [x] diff sync が watermark 以降のみ更新すること
+- [x] full sync が stale entry を削除すること
+- [x] 手動更新 UI が diff/full を実行できること
+- [x] cache-first title resolution path が `resolve_worktree_issue` / `fetch_branch_linked_issue` 経路で検証されていること

@@ -1,0 +1,4 @@
+- `cd gwt-gui`
+- `pnpm install`
+- `pnpm exec vitest run src/lib/terminal/TerminalView.test.ts`
+- `pnpm exec svelte-check --tsconfig ./tsconfig.json`

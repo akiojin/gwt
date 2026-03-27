@@ -1,0 +1,85 @@
+### Phase S: Setup
+- [ ] T001 [S] [US-1] IEntityService / IInteractionService インターフェース定義・VContainer 登録
+- [ ] T002 [S] [US-1] コアエンティティモデル（Issue → Worktree(デスク) → Agent(スタッフ)）の依存チェーン管理
+- [ ] T003 [S] [US-1] A* Pathfinding Pro 導入・GridGraph（Tilemap連動）実装
+- [ ] T004 [S] [US-30] Pixel Perfect Camera セットアップ
+- [ ] T005 [S] [US-1] Script Backend を IL2CPP に設定（ProjectSettings 反映済み、link.xml による型保護、VContainer IL2CPP 互換性確認）
+- [ ] T006 [S] [US-1] New Input System 設定確認（旧 Input API 使用箇所がないことを確認）
+
+### Phase F: Foundation
+- [ ] T007 [F] [US-1] Tilemap＋フリー配置ハイブリッドのスタジオワールド構築
+- [ ] T008 [F] [US-29] スタジオ動的拡張ロジック（行単位追加・縮小）
+- [ ] T009 [F] [US-22] スタジオ入口（ドア）配置＋入退場経路設定
+- [ ] T010 [F] [US-1] 1リポジトリ = 1スタジオのモデル管理
+- [ ] T011 [F] [US-1] AgentPrefab_Base 作成（Animator, Collider, AgentBehaviour, BubbleAnchor, NameLabel, AgentTypeLabel）
+- [ ] T012 [F] [US-1] プロファイル別 Prefab Variant 作成（AgentPrefab_ClaudeCode, AgentPrefab_Codex, AgentPrefab_Gemini, AgentPrefab_Copilot, AgentPrefab_Custom。SpriteRendererのみオーバーライド）
+- [ ] T013 [F] [US-13] Lead 専用 Prefab 作成（デスクなし、巡回専用スプライト・アニメーション）
+- [ ] T014 [F] [US-1] 4方向歩行アニメーション実装（上・下・左・右）
+- [ ] T015 [F] [US-1] カメラ パン＋ズーム操作実装（Pixel Perfect Camera対応）
+- [ ] T016 [F] [US-1] ヒット判定システム（優先順位: Lead > Developerキャラクター > デスク > マーカー、貫通なし）
+
+### Phase U: User Story
+- [ ] T017 [U] [US-1] Developerアニメーション: running=PCでタイピング, waiting_input=手を振る, stopped=スタジオ内ランダム歩行＋家具インタラクション, idle=デスクに座って待機
+- [ ] T018 [U] [US-1] Developer状態遷移実装（雇用→ドア入場→idle→running→waiting_input→stopped→解雇→ドア退場）
+- [ ] T019 [U] [US-13] Lead 巡回パターン実装（デスク間歩行 + 指示 + Issue判断、デスクなし、完全自律）
+- [ ] T020 [U] [US-16] stopped状態ランダム歩行＋家具インタラクション実装
+- [ ] T021 [U] [US-25] ランダム名生成システム実装
+- [ ] T022 [U] [US-25] エージェント種別ラベル表示（NameLabel下部）
+- [ ] T023 [U] [US-6] Worktree = デスク＋PC スプライト作成
+- [ ] T024 [U] [US-6] 空席デスク表示実装（Worktree あり + Agent未起動 = デスクのみ、スタッフなし）
+- [ ] T025 [U] [US-7] 半透明デスク表示実装（リモートブランチ = 半透明デスク）
+- [ ] T026 [U] [US-6] デスクのフリー配置ロジック（自動配置＋ドラッグ並替え可能、グリッドスナップ）
+- [ ] T027 [U] [US-20] Issue起点のデスク出現フロー（依存チェーン一括: Issue → ブランチ自動作成 → Worktree(デスク)作成 → ドアからスタッフ入場）
+- [ ] T028 [U] [US-6] Issueなし既存Worktreeのデスク表示＋後からIssue紐付け機能
+- [ ] T029 [U] [US-26] デスクドラッグ移動実装（キャラクター連動、重なり防止）
+- [ ] T030 [U] [US-26] グリッドスナップ＋A* GridGraph部分再計算（バッチ）
+- [ ] T031 [U] [US-24] コーヒーマシン・本棚・ホワイトボードの家具スプライト配置
+- [ ] T032 [U] [US-24] 家具インタラクションアニメーション実装（飲む・読む・書く）
+- [ ] T033 [U] [US-24] stopped状態Developerの家具ランダム選択＋移動＋インタラクション
+- [ ] T034 [U] [US-29] スタジオ拡張時の家具自動追加
+- [ ] T035 [U] [US-21] Issue マーカー「!」スプライト作成
+- [ ] T036 [U] [US-21] 未連携Issue: スタジオ内自由浮遊（クラスタリング＋重なり回避）
+- [ ] T037 [U] [US-21] ブランチ連携済みIssue: デスク付近浮遊固定
+- [ ] T038 [U] [US-20] Issue-Branch自動連携: 雇用時にIssue番号→ブランチ名自動生成→依存チェーン一括実行
+- [ ] T039 [U] [US-20] スタッフ雇用時「!」マーカー移動アニメーション（浮遊→デスクへ飛行→デスク付近固定）
+- [ ] T040 [U] [US-21] Issue close 時フェードアウト消滅
+- [ ] T041 [U] [US-14] Lead質問「?」マーカースプライト・Lead付近浮遊配置
+- [ ] T042 [U] [US-15] 「?」マーカー緩急度色分け（赤=ブロッキング点滅, 黄=通常浮遊, 青=微光浮遊）
+- [ ] T043 [U] [US-14] 「?」マーカー回答後消滅処理
+- [ ] T044 [U] [US-8] PR ステータスバッジ（アイコン＋色のみ、PR存在時のみデスクに表示）
+- [ ] T045 [U] [US-4] デスクコンテキストメニュー UI コンポーネント実装（ピクセルアート統一デザイン、Screen Space、画面端クランプ）
+- [ ] T046 [U] [US-10] コンテキストメニュー → Terminal: プレーンターミナル起動（新規PTY、worktreeディレクトリ、パネル閉じ=PTY終了）
+- [ ] T047 [U] [US-11] コンテキストメニュー → Summary: AI要約オーバーレイパネル表示（キャッシュ即時表示）
+- [ ] T048 [U] [US-9] コンテキストメニュー → Git: GitDetailPanel 表示（スナップショット＋手動リフレッシュ）
+- [ ] T049 [U] [US-8] コンテキストメニュー → PR: PrDetailPanel 表示（ステータス確認＋GitHubリンク、マージ操作なし）
+- [ ] T050 [U] [US-9] コンテキストメニュー利用不可項目グレーアウト（PR未作成時、Summary未生成時）
+- [ ] T051 [U] [US-9] メニュー外クリック / ESCキーでのメニュー閉じ処理
+- [ ] T052 [U] [US-27] 空席デスクコンテキストメニュー実装（Hire Agent / Terminal / Git / Delete Worktree）
+- [ ] T053 [U] [US-28] Delete Worktreeフロー実装（確認ダイアログ→未コミット変更警告→Worktree削除→デスク消滅→Issue未連携化）
+- [ ] T054 [U] [US-12] 状態別段階的確認ダイアログ実装（idle=シンプル, running=追加警告, waiting_input=選択肢提示）
+- [ ] T055 [U] [US-12] エージェントプロセス停止（SIGTERM → graceful shutdown → SIGKILL）
+- [ ] T056 [U] [US-23] デスク即座空席化 + ドアへ歩行退場アニメーション装飾的並行再生
+- [ ] T057 [U] [US-2] 複数パネル同時表示＋ドラッグ移動フレームワーク（エンティティ別独立パネル）
+- [ ] T058 [U] [US-2] Developerクリック → ライブターミナル パネル（スタッフがいる＝ターミナルが存在する）
+- [ ] T059 [U] [US-13] Leadクリック → オーケストレーション ライブターミナル パネル（デスクなし、巡回中にクリック）
+- [ ] T060 [U] [US-14] 「?」マーカークリック → 回答オーバーレイUI（質問表示＋テキスト入力＋Approve/Reject）
+- [ ] T061 [U] [US-3] Issue マーカークリック → Issue 詳細 + スタッフ雇用 UI パネル（雇用で依存チェーン一括実行）
+- [ ] T062 [U] [US-27] 空席デスクコンテキストメニュー → Hire Agent → スタッフ雇用 UI（プロファイル選択＋タスク指定、カスタムAgent=CLIパス＋引数）
+- [ ] T063 [U] [US-7] 半透明デスククリック → 確認ダイアログ（自動決定パス表示＋編集可）→ worktree(デスク)作成 + スタッフ雇用
+- [ ] T064 [U] [US-5] 2D オーバーレイフォーム（worktree 作成、エージェント設定）
+- [ ] T065 [U] [US-1] マウスオーバーツールチップ表示
+- [ ] T066 [U] [US-1] 選択ハイライトエフェクト（アウトライン or グロー）
+- [ ] T067 [U] [US-1] 吹き出し表示システム実装（テンプレート固定短文のみ）
+- [ ] T068 [U] [US-17] コマンドパレット（Cmd+K）実装
+- [ ] T069 [U] [US-17] HUD/サイドバーとコマンドパレットのハイブリッド機能アクセス実装
+- [ ] T070 [U] [US-17] 包括的キーボードショートカット実装（Cmd+K, Cmd+T, Cmd+G, ESC, スペース, 数字キー等）
+- [ ] T071 [U] [US-18] トースト通知システム（エラー時即時表示、5秒自動消去）
+- [ ] T072 [U] [US-18] エンティティエラーアイコン持続表示（クリックで詳細確認）
+- [ ] T073 [U] [US-11] AI要約イベント駆動生成＋キャッシュシステム（agent状態変化、commit検出、5分以上running継続）
+- [ ] T074 [U] [US-1] データ更新ハイブリッド方式（エージェント状態=イベント駆動、Git/PR/Issue=ポーリング30秒）
+
+### Phase FIN: Finalization
+- [ ] T075 [FIN] [US-19] ピクセルアート風サウンドエフェクト実装（事前アセットのみ）
+- [ ] T076 [FIN] [US-1] ObjectPool 実装（BubblePool / IssueMarkerPool / QuestionMarkerPool / EffectPool）
+- [ ] T077 [FIN] [US-1] 50+ エンティティのパフォーマンステスト（NFR-001〜005 検証）
+- [ ] T078 [FIN] [US-1] US-1〜US-30 の受け入れテスト
