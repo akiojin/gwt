@@ -793,6 +793,8 @@
     height: 100%;
     overflow: hidden;
     cursor: grab;
+    touch-action: none;
+    user-select: none;
     background:
       linear-gradient(90deg, color-mix(in srgb, var(--border-color) 18%, transparent) 1px, transparent 1px),
       linear-gradient(color-mix(in srgb, var(--border-color) 18%, transparent) 1px, transparent 1px),
