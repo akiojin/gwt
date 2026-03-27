@@ -4,35 +4,27 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use gwt_core::worktree::WorktreeManager;
 use tempfile::TempDir;
 
+fn run_git(repo: &std::path::Path, args: &[&str]) {
+    let output = gwt_core::process::git_command()
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git command should spawn");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn create_test_repo() -> TempDir {
     let temp = TempDir::new().unwrap();
-    gwt_core::process::git_command()
-        .args(["init"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    gwt_core::process::git_command()
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    gwt_core::process::git_command()
-        .args(["config", "user.name", "Test User"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    // Create initial commit
+    run_git(temp.path(), &["init"]);
+    run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+    run_git(temp.path(), &["config", "user.name", "Test User"]);
     std::fs::write(temp.path().join("README.md"), "# Test").unwrap();
-    gwt_core::process::git_command()
-        .args(["add", "."])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    gwt_core::process::git_command()
-        .args(["commit", "-m", "Initial commit"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
+    run_git(temp.path(), &["add", "."]);
+    run_git(temp.path(), &["commit", "-m", "Initial commit"]);
     temp
 }
 

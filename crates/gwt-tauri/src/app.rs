@@ -455,7 +455,7 @@ pub fn build_app(
                 // Background task: watch session files for agent status changes (gwt-spec issue FR-820)
                 {
                     let watcher_handle = _app.handle().clone();
-                    if let Err(e) = crate::session_watcher::start_session_watcher(watcher_handle) {
+                    if let Err(e) = crate::session_watcher::start_session_watcher_for_app(watcher_handle) {
                         warn!(
                             category = "session_watcher",
                             error = %e,

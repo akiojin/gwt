@@ -88,7 +88,7 @@ pub fn start_session_watcher(
 
 /// Check if a path is a TOML session file (extracted for testability).
 fn is_session_file(path: &Path) -> bool {
-    path.extension().map(|ext| ext == "toml").unwrap_or(false)
+    path.extension().is_some_and(|ext| ext == "toml")
 }
 
 /// Filter debounced events, returning true if any `.toml` file was changed.
