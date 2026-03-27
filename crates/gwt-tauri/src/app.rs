@@ -489,13 +489,28 @@ pub fn build_app(
                     });
                 }
 
-                // Background task: HTTP IPC server for heavy Git queries
+                // Background task: HTTP IPC server on a dedicated OS thread
+                // to bypass WKWebView main-thread IPC bottleneck.
                 {
+                    let app_state = Arc::new(AppState::new());
+                    let (tx, rx) = std::sync::mpsc::channel::<Result<u16, String>>();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_multi_thread()
+                            .worker_threads(2)
+                            .enable_all()
+                            .build()
+                            .expect("failed to build HTTP IPC tokio runtime");
+                        rt.block_on(async move {
+                            match crate::http_server::start_http_server(app_state).await {
+                                Ok(port) => { let _ = tx.send(Ok(port)); }
+                                Err(e) => { let _ = tx.send(Err(e)); }
+                            }
+                        });
+                    });
                     let app_handle = _app.handle().clone();
-                    tokio::spawn(async move {
-                        let app_state = Arc::new(AppState::new());
-                        match crate::http_server::start_http_server(app_state).await {
-                            Ok(port) => {
+                    tauri::async_runtime::spawn(async move {
+                        match rx.recv() {
+                            Ok(Ok(port)) => {
                                 let state = app_handle.state::<AppState>();
                                 state
                                     .http_ipc_port
@@ -506,11 +521,18 @@ pub fn build_app(
                                     "HTTP IPC server started"
                                 );
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 warn!(
                                     category = "http_ipc",
                                     error = %e,
                                     "Failed to start HTTP IPC server; falling back to Tauri invoke"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    category = "http_ipc",
+                                    error = %e,
+                                    "HTTP IPC server thread communication failed"
                                 );
                             }
                         }
