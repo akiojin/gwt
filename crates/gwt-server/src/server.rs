@@ -17,9 +17,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Health & system
         .route("/healthz", get(handlers::system::healthz))
         .route("/heartbeat", post(handlers::system::heartbeat))
+        // Terminal
+        .route("/list_terminals", post(handlers::terminal::list_terminals))
+        .route("/write_terminal", post(handlers::terminal::write_terminal))
+        .route("/resize_terminal", post(handlers::terminal::resize_terminal))
+        .route("/close_terminal", post(handlers::terminal::close_terminal))
+        // Project
+        .route("/probe_path", post(handlers::project::probe_path))
+        .route("/is_git_repo", post(handlers::project::is_git_repo))
+        .route("/get_current_branch", post(handlers::project::get_current_branch))
+        // Settings
+        .route("/get_settings", post(handlers::settings::get_settings))
+        .route("/save_settings", post(handlers::settings::save_settings))
         // WebSocket
         .route("/ws", get(ws::ws_handler).with_state(broadcaster))
-        // TODO: Phase 2 — add all 161 command routes here
         .layer(cors)
         .with_state(state)
 }
