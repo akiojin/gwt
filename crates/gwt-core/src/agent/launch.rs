@@ -105,9 +105,7 @@ pub fn merge_env_vars(
     overrides: &HashMap<String, String>,
 ) -> HashMap<String, String> {
     let mut merged = base.clone();
-    for (k, v) in overrides {
-        merged.insert(k.clone(), v.clone());
-    }
+    merged.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
     merged
 }
 
@@ -268,12 +266,6 @@ impl ShellLaunchBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_builtin_agent_defs_contains_claude() {
-        let defs = builtin_agent_defs();
-        assert!(defs.iter().any(|d| d.id == "claude"));
-    }
 
     #[test]
     fn test_builtin_agent_defs_contains_all_known() {
