@@ -19,6 +19,9 @@ authors = ["akiojin"]
 # Internal crates
 gwt-core = { path = "crates/gwt-core" }
 
+# TUI
+ratatui = "0.29"
+
 # Error handling
 thiserror = "2"
 

@@ -322,13 +322,16 @@ mod tests {
             })
             .unwrap();
 
-        let buf_str = terminal.backend().buffer().content().iter().fold(
-            String::new(),
-            |mut acc, cell| {
-                acc.push_str(cell.symbol());
-                acc
-            },
-        );
+        let buf_str =
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .fold(String::new(), |mut acc, cell| {
+                    acc.push_str(cell.symbol());
+                    acc
+                });
         assert!(buf_str.contains("Issues & SPECs"));
         assert!(buf_str.contains("No issues found"));
     }
@@ -346,13 +349,16 @@ mod tests {
             })
             .unwrap();
 
-        let buf_str = terminal.backend().buffer().content().iter().fold(
-            String::new(),
-            |mut acc, cell| {
-                acc.push_str(cell.symbol());
-                acc
-            },
-        );
+        let buf_str =
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .fold(String::new(), |mut acc, cell| {
+                    acc.push_str(cell.symbol());
+                    acc
+                });
         assert!(buf_str.contains("Issues & SPECs"));
         assert!(buf_str.contains("Search:"));
         assert!(buf_str.contains("#42"));
