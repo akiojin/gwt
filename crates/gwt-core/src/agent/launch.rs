@@ -23,6 +23,8 @@ pub struct AgentDef {
     pub display_name: &'static str,
     /// CLI command name (e.g. `"claude"`).
     pub command: &'static str,
+    /// npm/bunx package name for fallback installation (e.g. `"@anthropic-ai/claude-code"`).
+    pub bunx_package: &'static str,
     /// Default CLI arguments appended to every launch.
     pub default_args: &'static [&'static str],
     /// Default tab/header color.
@@ -36,6 +38,7 @@ pub fn builtin_agent_defs() -> &'static [AgentDef] {
             id: "claude",
             display_name: "Claude Code",
             command: "claude",
+            bunx_package: "@anthropic-ai/claude-code",
             default_args: &[],
             color: AgentColor::Green,
         },
@@ -43,6 +46,7 @@ pub fn builtin_agent_defs() -> &'static [AgentDef] {
             id: "codex",
             display_name: "Codex CLI",
             command: "codex",
+            bunx_package: "@openai/codex",
             default_args: &[],
             color: AgentColor::Blue,
         },
@@ -50,6 +54,7 @@ pub fn builtin_agent_defs() -> &'static [AgentDef] {
             id: "gemini",
             display_name: "Gemini CLI",
             command: "gemini",
+            bunx_package: "@google/gemini-cli",
             default_args: &[],
             color: AgentColor::Cyan,
         },
@@ -57,6 +62,7 @@ pub fn builtin_agent_defs() -> &'static [AgentDef] {
             id: "opencode",
             display_name: "OpenCode",
             command: "opencode",
+            bunx_package: "opencode-ai",
             default_args: &[],
             color: AgentColor::Yellow,
         },
@@ -64,6 +70,7 @@ pub fn builtin_agent_defs() -> &'static [AgentDef] {
             id: "copilot",
             display_name: "GitHub Copilot",
             command: "copilot",
+            bunx_package: "@github/copilot",
             default_args: &[],
             color: AgentColor::Magenta,
         },
@@ -130,16 +137,44 @@ pub fn resolve_shell_command() -> (String, Vec<String>) {
 }
 
 // ---------------------------------------------------------------------------
+// SessionMode
+// ---------------------------------------------------------------------------
+
+/// Session mode for agent launch (normal, continue, resume).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionMode {
+    /// Start a fresh session.
+    #[default]
+    Normal,
+    /// Continue the most recent session.
+    Continue,
+    /// Resume a specific (or latest) session.
+    Resume,
+}
+
+// ---------------------------------------------------------------------------
 // AgentLaunchBuilder
 // ---------------------------------------------------------------------------
 
 /// Builder for constructing a [`BuiltinLaunchConfig`] for a coding agent.
+///
+/// Handles environment merging (OS env -> profile env -> overrides),
+/// bunx/npx fallback for missing commands, and agent-specific CLI arguments
+/// (model, session mode, skip-permissions, etc.).
 pub struct AgentLaunchBuilder {
     agent_id: String,
     working_dir: PathBuf,
     branch_name: String,
     env_overrides: HashMap<String, String>,
+    os_env: Option<HashMap<String, String>>,
+    profile_name: Option<String>,
+    model: Option<String>,
+    skip_permissions: bool,
+    session_mode: SessionMode,
+    resume_session_id: Option<String>,
     interactive: bool,
+    auto_worktree: bool,
+    repo_root: Option<PathBuf>,
 }
 
 impl AgentLaunchBuilder {
@@ -150,7 +185,15 @@ impl AgentLaunchBuilder {
             working_dir: working_dir.into(),
             branch_name: String::new(),
             env_overrides: HashMap::new(),
+            os_env: None,
+            profile_name: None,
+            model: None,
+            skip_permissions: false,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
             interactive: false,
+            auto_worktree: false,
+            repo_root: None,
         }
     }
 
@@ -166,9 +209,57 @@ impl AgentLaunchBuilder {
         self
     }
 
+    /// Provide the OS environment snapshot (instead of reading `std::env::vars()`).
+    pub fn with_os_env(mut self, env: HashMap<String, String>) -> Self {
+        self.os_env = Some(env);
+        self
+    }
+
+    /// Set the profile name to use for environment merging.
+    pub fn profile_name(mut self, name: impl Into<String>) -> Self {
+        self.profile_name = Some(name.into());
+        self
+    }
+
+    /// Set the model to pass to the agent CLI.
+    pub fn model(mut self, model: Option<&str>) -> Self {
+        self.model = model.map(|s| s.to_string());
+        self
+    }
+
+    /// Enable or disable skip-permissions mode.
+    pub fn skip_permissions(mut self, skip: bool) -> Self {
+        self.skip_permissions = skip;
+        self
+    }
+
+    /// Set the session mode (Normal, Continue, Resume).
+    pub fn session_mode(mut self, mode: SessionMode) -> Self {
+        self.session_mode = mode;
+        self
+    }
+
+    /// Set the session ID for resume mode.
+    pub fn resume_session_id(mut self, id: impl Into<String>) -> Self {
+        self.resume_session_id = Some(id.into());
+        self
+    }
+
     /// Mark the launch as interactive (e.g. shell spawn).
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Enable automatic worktree creation for the branch.
+    pub fn auto_worktree(mut self, auto: bool) -> Self {
+        self.auto_worktree = auto;
+        self
+    }
+
+    /// Set the repository root path (used for worktree creation and GWT_PROJECT_ROOT).
+    pub fn repo_root(mut self, path: &std::path::Path) -> Self {
+        self.repo_root = Some(path.to_path_buf());
         self
     }
 
@@ -182,21 +273,31 @@ impl AgentLaunchBuilder {
             }
         })?;
 
-        // Resolve the command via PATH (fall back to bare name so the PTY
-        // layer can report a proper "command not found").
-        let command = which::which(def.command)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| def.command.to_string());
+        let mut env_vars = self.collect_env_vars();
+        let (command, mut args) = self.resolve_command_and_args(def);
+        self.append_agent_args(def, &mut args);
 
-        let args: Vec<String> = def.default_args.iter().map(|s| s.to_string()).collect();
-
-        let mut env_vars = self.env_overrides;
+        // Agent-specific environment variables
+        if self.agent_id == "claude" {
+            env_vars
+                .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+        if let Some(ref root) = self.repo_root {
+            env_vars.insert(
+                "GWT_PROJECT_ROOT".to_string(),
+                root.to_string_lossy().to_string(),
+            );
+        }
         ensure_terminal_env_defaults(&mut env_vars);
+
+        // Worktree auto-creation
+        let final_working_dir = self.resolve_working_dir();
 
         Ok(BuiltinLaunchConfig {
             command,
             args,
-            working_dir: self.working_dir,
+            working_dir: final_working_dir,
             branch_name: self.branch_name,
             agent_name: def.display_name.to_string(),
             agent_color: def.color,
@@ -205,6 +306,189 @@ impl AgentLaunchBuilder {
             interactive: self.interactive,
             windows_force_utf8: false,
         })
+    }
+
+    // --- Private helpers ---
+
+    /// Collect and merge environment variables: OS env -> profile env -> overrides.
+    fn collect_env_vars(&self) -> HashMap<String, String> {
+        let mut env_vars = self
+            .os_env
+            .clone()
+            .unwrap_or_else(|| std::env::vars().collect());
+
+        // Merge profile env if available
+        if let Ok(profiles_config) = crate::config::ProfilesConfig::load() {
+            let profile_name = self
+                .profile_name
+                .as_deref()
+                .or(profiles_config.active.as_deref());
+            if let Some(name) = profile_name {
+                if let Some(profile) = profiles_config.profiles.get(name) {
+                    // Remove disabled env vars
+                    for key in &profile.disabled_env {
+                        env_vars.remove(key);
+                    }
+                    // Override with profile env vars
+                    for (k, v) in &profile.env {
+                        env_vars.insert(k.clone(), v.clone());
+                    }
+                    // Inject AI API key if missing or empty
+                    let needs_key = !env_vars.contains_key("OPENAI_API_KEY")
+                        || env_vars
+                            .get("OPENAI_API_KEY")
+                            .map(|v| v.trim().is_empty())
+                            .unwrap_or(true);
+                    if needs_key {
+                        if let Some(ai) = &profile.ai {
+                            let key = ai.api_key.trim();
+                            if !key.is_empty() {
+                                env_vars.insert("OPENAI_API_KEY".to_string(), key.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply env overrides (highest priority)
+        for (k, v) in &self.env_overrides {
+            env_vars.insert(k.clone(), v.clone());
+        }
+
+        env_vars
+    }
+
+    /// Resolve command with bunx/npx fallback.
+    fn resolve_command_and_args(&self, def: &AgentDef) -> (String, Vec<String>) {
+        let command = which::which(def.command)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| {
+                // Try bunx/npx fallback
+                if which::which("bunx").is_ok() {
+                    "bunx".to_string()
+                } else if which::which("npx").is_ok() {
+                    "npx".to_string()
+                } else {
+                    def.command.to_string()
+                }
+            });
+
+        let args: Vec<String> = if command.ends_with("bunx") || command.ends_with("npx") {
+            vec![def.bunx_package.to_string()]
+        } else {
+            def.default_args.iter().map(|s| s.to_string()).collect()
+        };
+
+        (command, args)
+    }
+
+    /// Append agent-specific CLI arguments (model, session mode, permissions).
+    fn append_agent_args(&self, _def: &AgentDef, args: &mut Vec<String>) {
+        match self.agent_id.as_str() {
+            "claude" => {
+                match self.session_mode {
+                    SessionMode::Continue => {
+                        if let Some(ref id) = self.resume_session_id {
+                            args.push("--resume".to_string());
+                            args.push(id.clone());
+                        } else {
+                            args.push("--continue".to_string());
+                        }
+                    }
+                    SessionMode::Resume => {
+                        args.push("--resume".to_string());
+                        if let Some(ref id) = self.resume_session_id {
+                            args.push(id.clone());
+                        }
+                    }
+                    SessionMode::Normal => {}
+                }
+                if self.skip_permissions {
+                    args.push("--dangerously-skip-permissions".to_string());
+                }
+                if let Some(ref model) = self.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "codex" => {
+                match self.session_mode {
+                    SessionMode::Continue | SessionMode::Resume => {
+                        args.insert(0, "resume".to_string());
+                        if let Some(ref id) = self.resume_session_id {
+                            args.insert(1, id.clone());
+                        } else if self.session_mode == SessionMode::Continue {
+                            args.insert(1, "--last".to_string());
+                        }
+                    }
+                    SessionMode::Normal => {}
+                }
+                if let Some(ref model) = self.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+                if self.skip_permissions {
+                    args.push("--full-auto".to_string());
+                }
+            }
+            "gemini" => {
+                match self.session_mode {
+                    SessionMode::Continue | SessionMode::Resume => {
+                        args.push("-r".to_string());
+                        if let Some(ref id) = self.resume_session_id {
+                            args.push(id.clone());
+                        } else {
+                            args.push("latest".to_string());
+                        }
+                    }
+                    SessionMode::Normal => {}
+                }
+                if self.skip_permissions {
+                    args.push("-y".to_string());
+                }
+                if let Some(ref model) = self.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "opencode" => {
+                if let Some(ref model) = self.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "copilot" => {
+                if self.skip_permissions {
+                    args.push("--allow-all-tools".to_string());
+                }
+                if let Some(ref model) = self.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Resolve the working directory, creating a worktree if needed.
+    fn resolve_working_dir(&self) -> PathBuf {
+        if self.auto_worktree && !self.branch_name.is_empty() {
+            if let Some(ref repo_root) = self.repo_root {
+                if let Ok(wt_manager) = crate::worktree::WorktreeManager::new(repo_root) {
+                    match wt_manager.get_by_branch(&self.branch_name) {
+                        Ok(Some(wt)) => return wt.path,
+                        Ok(None) => {
+                            if let Ok(wt) = wt_manager.create_for_branch(&self.branch_name) {
+                                return wt.path;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        self.working_dir.clone()
     }
 }
 
@@ -365,6 +649,172 @@ mod tests {
     fn test_agent_launch_builder_unknown_agent() {
         let result = AgentLaunchBuilder::new("nonexistent", "/tmp").build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_agent_launch_builder_with_model() {
+        let config = AgentLaunchBuilder::new("claude", "/tmp/work")
+            .model(Some("opus"))
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"--model".to_string()));
+        assert!(config.args.contains(&"opus".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_claude_skip_permissions() {
+        let config = AgentLaunchBuilder::new("claude", "/tmp/work")
+            .skip_permissions(true)
+            .build()
+            .expect("build should succeed");
+        assert!(config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_claude_continue_mode() {
+        let config = AgentLaunchBuilder::new("claude", "/tmp/work")
+            .session_mode(SessionMode::Continue)
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"--continue".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_claude_resume_with_id() {
+        let config = AgentLaunchBuilder::new("claude", "/tmp/work")
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("abc123")
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"--resume".to_string()));
+        assert!(config.args.contains(&"abc123".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_codex_model() {
+        let config = AgentLaunchBuilder::new("codex", "/tmp/work")
+            .model(Some("o3"))
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"-m".to_string()));
+        assert!(config.args.contains(&"o3".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_codex_skip_permissions() {
+        let config = AgentLaunchBuilder::new("codex", "/tmp/work")
+            .skip_permissions(true)
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"--full-auto".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_gemini_model() {
+        let config = AgentLaunchBuilder::new("gemini", "/tmp/work")
+            .model(Some("gemini-2.5-pro"))
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"-m".to_string()));
+        assert!(config.args.contains(&"gemini-2.5-pro".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_gemini_skip_permissions() {
+        let config = AgentLaunchBuilder::new("gemini", "/tmp/work")
+            .skip_permissions(true)
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"-y".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_copilot_model() {
+        let config = AgentLaunchBuilder::new("copilot", "/tmp/work")
+            .model(Some("gpt-4o"))
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"--model".to_string()));
+        assert!(config.args.contains(&"gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_copilot_skip_permissions() {
+        let config = AgentLaunchBuilder::new("copilot", "/tmp/work")
+            .skip_permissions(true)
+            .build()
+            .expect("build should succeed");
+        assert!(config.args.contains(&"--allow-all-tools".to_string()));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_claude_sets_agent_teams_env() {
+        let config = AgentLaunchBuilder::new("claude", "/tmp/work")
+            .with_os_env(HashMap::new())
+            .build()
+            .expect("build should succeed");
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+                .map(|s| s.as_str()),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn test_agent_launch_builder_repo_root_sets_env() {
+        let config = AgentLaunchBuilder::new("claude", "/tmp/work")
+            .with_os_env(HashMap::new())
+            .repo_root(std::path::Path::new("/my/repo"))
+            .build()
+            .expect("build should succeed");
+        assert_eq!(
+            config
+                .env_vars
+                .get("GWT_PROJECT_ROOT")
+                .map(|s| s.as_str()),
+            Some("/my/repo")
+        );
+    }
+
+    #[test]
+    fn test_session_mode_default_is_normal() {
+        assert_eq!(SessionMode::default(), SessionMode::Normal);
+    }
+
+    #[test]
+    fn test_agent_def_bunx_package() {
+        let def = find_agent_def("claude").unwrap();
+        assert_eq!(def.bunx_package, "@anthropic-ai/claude-code");
+        let def = find_agent_def("codex").unwrap();
+        assert_eq!(def.bunx_package, "@openai/codex");
+        let def = find_agent_def("gemini").unwrap();
+        assert_eq!(def.bunx_package, "@google/gemini-cli");
+    }
+
+    #[test]
+    fn test_agent_launch_builder_os_env_override() {
+        let mut os_env = HashMap::new();
+        os_env.insert("MY_KEY".to_string(), "from_os".to_string());
+        let config = AgentLaunchBuilder::new("claude", "/tmp/work")
+            .with_os_env(os_env)
+            .env_var("MY_KEY", "from_override")
+            .build()
+            .expect("build should succeed");
+        // env_var overrides should win over os_env
+        assert_eq!(config.env_vars.get("MY_KEY").unwrap(), "from_override");
+    }
+
+    #[test]
+    fn test_agent_launch_builder_no_model_no_args() {
+        let config = AgentLaunchBuilder::new("claude", "/tmp/work")
+            .model(None)
+            .build()
+            .expect("build should succeed");
+        assert!(!config.args.contains(&"--model".to_string()));
     }
 
     #[test]

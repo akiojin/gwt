@@ -480,6 +480,10 @@ impl App {
                         // Enter on agent field cycles agent
                         self.state.management.launch_dialog.next_agent();
                     }
+                    DialogField::Model => {
+                        // Enter on model field cycles model
+                        self.state.management.launch_dialog.next_model();
+                    }
                     DialogField::Branch => {
                         // Enter on branch field moves to Launch button
                         self.state.management.launch_dialog.focus_next();
@@ -491,6 +495,12 @@ impl App {
                 if *field == DialogField::Agent =>
             {
                 self.state.management.launch_dialog.next_agent();
+            }
+            // Model field: Left/Right or Space to cycle model
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if *field == DialogField::Model =>
+            {
+                self.state.management.launch_dialog.next_model();
             }
             // Branch field: character input
             KeyCode::Char(c) if *field == DialogField::Branch => {
@@ -521,9 +531,15 @@ impl App {
             dialog.branch_input.clone()
         };
 
+        let selected_model = dialog.selected_model_name().map(|s| s.to_string());
+
         let config = AgentLaunchBuilder::new(agent_id, &self.repo_root)
             .branch_name(&branch)
+            .with_os_env(std::env::vars().collect())
+            .model(selected_model.as_deref())
             .interactive(true)
+            .auto_worktree(!branch.is_empty() && branch != "main")
+            .repo_root(&self.repo_root)
             .build()?;
 
         let agent_name = config.agent_name.clone();
