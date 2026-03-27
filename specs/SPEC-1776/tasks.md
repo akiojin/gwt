@@ -140,22 +140,35 @@
 - [ ] T503: Remove Tauri-specific dependencies from workspace Cargo.toml
 - [ ] T504: Update binary target in Cargo.toml to point to gwt-tui
 
-### CI/Release Pipeline
+### CI/CD Pipeline Updates
 
-- [ ] T510: [P] Update `.github/workflows/ci.yml` — remove Tauri build steps, add gwt-tui build/test
-- [ ] T511: [P] Update `.github/workflows/release.yml` — produce native binary (no .dmg/.msi), cross-compile targets
-- [ ] T512: Remove `tauri.conf.json` and related Tauri config files
+- [ ] T510: Update `.github/workflows/test.yml` — remove vitest job, remove Playwright E2E job, remove Tauri WebDriver E2E job, keep `cargo test -p gwt-core -p gwt-tui`
+- [ ] T511: [P] Update `.github/workflows/release.yml` — replace `cargo tauri build` with `cargo build --release -p gwt-tui`, remove pnpm/Node steps, remove macOS signing/notarization, remove Windows MSI builder, add cross-compile (Linux x86_64/aarch64, macOS universal, Windows x86_64)
+- [ ] T512: [P] Update `.github/workflows/lint.yml` — remove `svelte-check` job, keep Clippy/Rustfmt/markdownlint/commitlint
+- [ ] T513: [P] Update `.github/workflows/coverage.yml` — remove frontend coverage job, remove `frontend` Codecov flag, keep Rust `cargo llvm-cov`
+- [ ] T514: Update `.github/workflows/voice-eval.yml` — update paths if gwt-tui changes affect voice module location
+- [ ] T515: Remove `tauri.conf.json` and related Tauri config files
+- [ ] T516: Delete `installers/` directory (macOS .dmg builder, Windows .msi builder)
+
+### Playwright E2E Removal + TUI Test Replacement
+
+- [ ] T517: Delete `gwt-gui/e2e/` (22 Playwright test files)
+- [ ] T518: Delete `gwt-gui/e2e-tauri/` (Tauri WebDriver tests)
+- [ ] T519: Delete `gwt-gui/playwright.config.ts`
+- [ ] T520: Add ratatui TestBackend snapshot tests for all TUI screens (welcome, single pane, split, management panel)
+- [ ] T521: Add PTY integration tests — spawn gwt-tui subprocess, send keystrokes, verify output
 
 ### Documentation
 
-- [ ] T520: [P] Update `README.md` — installation, usage for TUI binary
-- [ ] T521: [P] Update `README.ja.md` — same changes in Japanese
-- [ ] T522: Update `CLAUDE.md` — remove Tauri/GUI references, add TUI development instructions
+- [ ] T530: [P] Update `README.md` — installation = download binary, remove Tauri/GUI references
+- [ ] T531: [P] Update `README.ja.md` — same changes in Japanese
+- [ ] T532: Update `CLAUDE.md` — remove Tauri/GUI references, add TUI development instructions, update build/test commands
 
 ### Phase 6 Verification
 
-- [ ] T530: `cargo build -p gwt-tui` succeeds as the sole frontend
-- [ ] T531: `cargo test` (all crates) passes
-- [ ] T532: `cargo clippy --all-targets --all-features -- -D warnings` passes
-- [ ] T533: CI pipeline runs successfully
-- [ ] T534: Release workflow produces correct binary artifacts
+- [ ] T540: `cargo build -p gwt-tui` succeeds as the sole frontend
+- [ ] T541: `cargo test` (all crates) passes
+- [ ] T542: `cargo clippy --all-targets --all-features -- -D warnings` passes
+- [ ] T543: CI pipeline runs successfully on all platforms
+- [ ] T544: Release workflow produces correct cross-platform binary artifacts
+- [ ] T545: TUI snapshot tests cover all defined screens

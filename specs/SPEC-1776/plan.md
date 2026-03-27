@@ -153,12 +153,52 @@ gwt-gui/             # DELETED in Phase 6
 
 ### Phase 6: Cleanup + Release (SC-007, SC-008)
 
-**Goal**: Remove old code, update CI.
+**Goal**: Remove old code, update all CI/CD pipelines.
+
+#### Code Removal
 
 - Delete `crates/gwt-tauri/`
-- Delete `gwt-gui/`
+- Delete `gwt-gui/` (includes Playwright E2E, vitest, Svelte components)
+- Delete `installers/` (macOS .dmg builder, Windows .msi builder)
+- Delete `tauri.conf.json`
 - Update `Cargo.toml` workspace members
-- Update CI workflows (remove Tauri build, add TUI binary build)
-- Update release workflow (no .dmg/.msi, just binary)
-- Update README.md and README.ja.md
-- Verify: Full CI passes, release produces correct binaries
+
+#### CI/CD Pipeline Updates
+
+**test.yml** (currently: cargo test + vitest + Playwright E2E):
+- Keep: `cargo test -p gwt-core -p gwt-tui`
+- Remove: vitest job (no frontend)
+- Remove: Playwright E2E job (no web UI)
+- Remove: Tauri WebDriver E2E job (no Tauri)
+- Add: TUI snapshot tests via `cargo test -p gwt-tui`
+
+**release.yml** (currently: Tauri build → .dmg/.msi/.AppImage):
+- Replace: `cargo tauri build` → `cargo build --release -p gwt-tui`
+- Remove: pnpm/Node.js installation steps
+- Remove: macOS code signing + notarization (`build-installer.sh`)
+- Remove: Windows MSI builder (`build-msi.ps1`)
+- Add: Cross-compile for Linux (x86_64, aarch64), macOS (universal), Windows (x86_64)
+- Artifacts: plain binaries (gwt-tui / gwt-tui.exe), no installers
+
+**lint.yml** (currently: Clippy + svelte-check + markdownlint + commitlint):
+- Keep: Clippy, Rustfmt, markdownlint, commitlint
+- Remove: `svelte-check` job
+
+**coverage.yml** (currently: Rust LCOV + Frontend LCOV):
+- Keep: `cargo llvm-cov` for Rust coverage
+- Remove: vitest coverage job
+- Update: Codecov flags (remove `frontend` flag)
+
+#### Documentation
+
+- Update README.md / README.ja.md (installation = download binary, no Tauri)
+- Update CLAUDE.md (remove Tauri/GUI references, add TUI dev instructions)
+
+#### TUI E2E Testing Strategy
+
+Since Playwright E2E (22 test files) is deleted, TUI testing uses:
+1. **ratatui TestBackend snapshot tests** — verify rendered screen output
+2. **PTY integration tests** — spawn gwt-tui subprocess, send keystrokes via stdin, verify stdout
+3. **gwt-core tests** — unchanged, provide coverage for terminal/git/agent logic
+
+Verify: Full CI passes, release produces correct cross-platform binaries
