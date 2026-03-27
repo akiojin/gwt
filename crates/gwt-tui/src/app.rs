@@ -300,18 +300,36 @@ impl App {
 
         if let Some(tree) = self.state.layout_trees.get(&tab.pane_id) {
             let areas = tree.calculate_areas(area);
-            let focused = tree.focused_pane().to_string();
-            for (pane_id, pane_area) in &areas {
-                if let Some(parser) = self.vt_parsers.get(pane_id) {
-                    ui::terminal_view::render(buf, *pane_area, parser.screen());
+            if areas.len() <= 1 {
+                // Single pane — no border needed
+                if let Some((pane_id, pane_area)) = areas.first() {
+                    if let Some(parser) = self.vt_parsers.get(pane_id) {
+                        ui::terminal_view::render(buf, *pane_area, parser.screen());
+                    }
                 }
-                // Draw focus indicator (thin border highlight for focused pane)
-                if *pane_id == focused && areas.len() > 1 {
-                    let border_style = Style::default().fg(Color::Cyan);
-                    // Top border
-                    for x in pane_area.left()..pane_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, pane_area.top())) {
-                            cell.set_style(border_style);
+            } else {
+                let focused = tree.focused_pane().to_string();
+                for (pane_id, pane_area) in &areas {
+                    let is_focused = *pane_id == focused;
+                    let border_color = if is_focused {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    };
+
+                    // Draw border around each pane
+                    draw_pane_border(buf, *pane_area, border_color, is_focused);
+
+                    // Render terminal content inside the border (1px inset)
+                    let inner = Rect::new(
+                        pane_area.x + 1,
+                        pane_area.y + 1,
+                        pane_area.width.saturating_sub(2),
+                        pane_area.height.saturating_sub(2),
+                    );
+                    if inner.width > 0 && inner.height > 0 {
+                        if let Some(parser) = self.vt_parsers.get(pane_id) {
+                            ui::terminal_view::render(buf, inner, parser.screen());
                         }
                     }
                 }
@@ -653,6 +671,64 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
+}
+
+fn draw_pane_border(buf: &mut Buffer, area: Rect, color: Color, focused: bool) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+
+    let style = Style::default().fg(color);
+    let (tl, tr, bl, br, h, v) = if focused {
+        ("┏", "┓", "┗", "┛", "━", "┃")
+    } else {
+        ("┌", "┐", "└", "┘", "─", "│")
+    };
+
+    // Top edge
+    if let Some(cell) = buf.cell_mut((area.x, area.y)) {
+        cell.set_symbol(tl);
+        cell.set_style(style);
+    }
+    for x in (area.x + 1)..area.right().saturating_sub(1) {
+        if let Some(cell) = buf.cell_mut((x, area.y)) {
+            cell.set_symbol(h);
+            cell.set_style(style);
+        }
+    }
+    if let Some(cell) = buf.cell_mut((area.right().saturating_sub(1), area.y)) {
+        cell.set_symbol(tr);
+        cell.set_style(style);
+    }
+
+    // Bottom edge
+    let bottom = area.bottom().saturating_sub(1);
+    if let Some(cell) = buf.cell_mut((area.x, bottom)) {
+        cell.set_symbol(bl);
+        cell.set_style(style);
+    }
+    for x in (area.x + 1)..area.right().saturating_sub(1) {
+        if let Some(cell) = buf.cell_mut((x, bottom)) {
+            cell.set_symbol(h);
+            cell.set_style(style);
+        }
+    }
+    if let Some(cell) = buf.cell_mut((area.right().saturating_sub(1), bottom)) {
+        cell.set_symbol(br);
+        cell.set_style(style);
+    }
+
+    // Left and right edges
+    for y in (area.y + 1)..bottom {
+        if let Some(cell) = buf.cell_mut((area.x, y)) {
+            cell.set_symbol(v);
+            cell.set_style(style);
+        }
+        if let Some(cell) = buf.cell_mut((area.right().saturating_sub(1), y)) {
+            cell.set_symbol(v);
+            cell.set_style(style);
+        }
+    }
 }
 
 fn render_welcome(buf: &mut Buffer, area: Rect) {
