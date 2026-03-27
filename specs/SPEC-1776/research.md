@@ -1,61 +1,64 @@
-# Research: SPEC-1776 — Electron Migration
+# Research: SPEC-1776 — TUI Migration
 
-## Key Decision: Sidecar vs napi-rs vs Full Rewrite
+## VT100 to ratatui Rendering
 
-| Criterion | Sidecar (HTTP/WS) | napi-rs | TypeScript Rewrite |
-|---|---|---|---|
-| Migration effort | 3-5 weeks | 8-12 weeks | 16-24 weeks |
-| Risk | Low | High | Very High |
-| gwt-core changes | None | Binding layer needed | Full rewrite |
-| PTY throughput | Excellent (separate process) | Good (in-process) | Good (node-pty) |
-| Maintenance | Low-Med | High (FFI boundary) | Low (single lang) |
+### Proven Pattern (v6.x)
 
-**Decision**: Sidecar approach chosen. Rationale:
-1. gwt-core remains unchanged (zero risk)
-2. HTTP IPC pattern already proven with 10 endpoints
-3. Separate process eliminates ALL main thread blocking
-4. WebSocket for events is well-understood
+The pre-v7.0.0 TUI used `vt100` crate + `ratatui` with a renderer that converts vt100::Screen cells to ratatui Buffer cells. Key mappings:
 
-## WKWebView Main Thread Problem (Root Cause)
+- `vt100::Color` → `ratatui::style::Color`
+  - Named colors map 1:1 (Red→Red, etc.)
+  - Indexed (0-255) → `Color::Indexed(n)`
+  - RGB → `Color::Rgb(r,g,b)`
+- Cell attributes: bold, italic, underline, inverse map directly to `ratatui::style::Modifier`
+- Cursor position from vt100::Screen → set cursor in ratatui Frame
 
-- Tauri v2 uses WKWebView on macOS
-- WKWebView's URL scheme handler processes IPC responses on the main thread
-- Even with `spawn_blocking`, the response serialization and delivery blocks the main thread
-- High-frequency commands like `list_terminals` (600+ calls/sec from `$effect` loop) make UI completely unresponsive
-- HTTP IPC routing partially bypasses this but doesn't cover all commands
-- **Conclusion**: The problem is architectural and cannot be fixed within Tauri v2
+### Performance Consideration
 
-## Electron IPC Architecture
+- vt100 crate processes raw bytes efficiently
+- Rendering should diff previous frame (ratatui handles this internally via double-buffering)
+- Target: <16ms per frame at 120x40 terminal (trivially achievable)
 
-- Electron uses Chromium (multi-process: main + renderer)
-- IPC between main and renderer is asynchronous and non-blocking
-- With sidecar approach, no IPC goes through Electron at all for commands
-- Frontend directly HTTP-fetches the Rust server (localhost TCP)
-- Events arrive via WebSocket (also direct TCP)
-- **Result**: Zero main thread contention
+## Ctrl+G Prefix Key Design
 
-## WebSocket Design for Terminal Output
+### State Machine
 
-- Terminal output is the highest-frequency event (~60fps for active terminals)
-- Binary frames (opcode 0x2) for PTY byte streams
-- Text frames (opcode 0x1) for structured JSON events
-- Single WS connection per renderer, multiplexed by event type
-- Message format: `{ "event": "terminal-output", "pane_id": "...", "data": base64 }`
-- For binary: `[1-byte event type][pane_id length][pane_id bytes][payload bytes]`
+```
+Idle → [Ctrl+G pressed] → PrefixActive
+PrefixActive → [n/s/1-9/v/h/x/q/[/]/PgUp] → Execute action → Idle
+PrefixActive → [Ctrl+G again] → Toggle management panel → Idle
+PrefixActive → [Escape or timeout 2s] → Cancel → Idle
+PrefixActive → [any other key] → Ignore → Idle
+```
 
-## Frontend `$effect` Loop Prevention
+### Why Ctrl+G
 
-The current Tauri app has a bug where `list_terminals` is called 600+ times/second:
-- Svelte 5 `$effect` tracks implicit dependencies
-- A function called within an effect that reads/writes reactive state causes re-triggering
-- **Design rule for new frontend**: No IPC call inside `$effect`. All IPC is triggered by:
-  1. User actions (click, input, etc.)
-  2. WebSocket events (server push)
-  3. Explicit timers with guards (debounced polling)
+- Not used by most terminal programs (Ctrl+A=tmux, Ctrl+B=tmux alt, Ctrl+G=bell in some)
+- Bell character (0x07) is rare in modern terminal workflows
+- Established in gwt v6.x TUI
 
-## electron-vite vs Manual Vite Setup
+## Split Layout Data Structure
 
-- electron-vite provides out-of-box Svelte 5 + Electron integration
-- Handles main/preload/renderer build targets automatically
-- HMR for renderer process
-- **Decision**: Use electron-vite for project scaffolding
+Binary tree where leaves are pane IDs and internal nodes are split directions:
+
+```rust
+enum LayoutNode {
+    Leaf(String),  // pane_id
+    Split {
+        direction: Direction,  // Horizontal | Vertical
+        ratio: f64,            // 0.0..1.0, position of split
+        first: Box<LayoutNode>,
+        second: Box<LayoutNode>,
+    },
+}
+```
+
+## Business Logic to Extract from gwt-tauri
+
+| Source (gwt-tauri) | Target (gwt-core) | Description |
+|-|-|-|
+| commands/terminal.rs launch_agent() | agent/launch.rs | Agent launch parameter construction |
+| commands/terminal.rs session watcher | agent/session_watcher.rs | Session completion monitoring |
+| state.rs PR cache polling | git/pr_status.rs | PR/CI status polling |
+| state.rs AI summary trigger | ai/summary_trigger.rs | Periodic summary generation |
+| commands/voice.rs | voice/runtime.rs | Voice input runtime management |

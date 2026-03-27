@@ -1,165 +1,91 @@
-# Data Model: SPEC-1776 — Electron Migration
+# Data Model: SPEC-1776 — TUI Migration
 
-## AppState (gwt-server)
+## Core State
 
-Migrated from `crates/gwt-tauri/src/state.rs`. Tauri types removed.
+### TuiState
 
-```rust
-pub struct AppState {
-    // PTY & Terminal
-    pub pane_manager: Mutex<PaneManager>,
-    pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
-    pub pane_runtime_contexts: Mutex<HashMap<String, PaneRuntimeContext>>,
-    pub launch_jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    pub launch_results: Mutex<HashMap<String, LaunchFinishedPayload>>,
+Central application state for gwt-tui.
 
-    // Caching
-    pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
-    pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
-    pub project_version_history_cache: Mutex<HashMap<String, VersionHistoryCacheEntry>>,
-    pub project_issue_list_cache: Mutex<HashMap<String, IssueListCacheEntry>>,
-    pub project_branch_inventory_snapshot_cache: Mutex<HashMap<String, BranchInventorySnapshotCacheEntry>>,
-
-    // Async tracking
-    pub session_summary_inflight: Mutex<HashSet<String>>,
-    pub project_version_history_inflight: Mutex<HashSet<String>>,
-    pub version_history_semaphore: Arc<Semaphore>,
-
-    // System
-    pub system_monitor: Mutex<Option<SystemMonitor>>,
-    pub os_env: RwLock<HashMap<String, String>>,
-    pub os_env_ready: AtomicBool,
-
-    // Event broadcasting (replaces app_handle.emit())
-    pub event_broadcaster: EventBroadcaster,
-
-    // Window tracking (simplified for Electron)
-    pub window_projects: Mutex<HashMap<String, String>>,
-
-    // Application state
-    pub is_quitting: AtomicBool,
-    pub gh_available: AtomicBool,
-    pub http_port: AtomicU16,
-}
+```
+TuiState
+  tabs: Vec<TabInfo>           -- Ordered list of open tabs
+  active_tab: usize            -- Index of currently focused tab
+  layout: LayoutTree           -- Split pane layout (binary tree)
+  management_visible: bool     -- Management panel toggle
+  management_focus: Section    -- Which management section has focus
+  prefix_active: bool          -- Ctrl+G prefix key state
+  prefix_timeout: Instant      -- When prefix expires (2s)
+  pane_manager: PaneManager    -- gwt-core pane lifecycle (owned)
 ```
 
-## EventBroadcaster
+### TabInfo
 
-Replaces `app_handle.emit()` with WebSocket-compatible broadcasting.
+Metadata for a single tab.
 
-```rust
-pub struct EventBroadcaster {
-    sender: broadcast::Sender<ServerEvent>,
-}
-
-pub struct ServerEvent {
-    pub event: String,           // "terminal-output", "launch-progress", etc.
-    pub target: EventTarget,     // All, Window(label), Pane(id)
-    pub payload: serde_json::Value,
-}
-
-pub enum EventTarget {
-    All,
-    Window(String),
-    Pane(String),
-}
+```
+TabInfo
+  pane_id: String              -- Maps to TerminalPane in PaneManager
+  tab_type: TabType            -- Agent | Shell
+  label: String                -- Display name in tab bar
+  branch: Option<String>       -- Git branch (agents only)
+  spec_id: Option<String>      -- Associated SPEC (agents only)
+  agent_type: Option<String>   -- "claude" | "codex" | "gemini"
+  color: AgentColor            -- Tab color indicator
 ```
 
-## HTTP API Request/Response
+### LayoutTree
 
-### Command Request (HTTP POST)
+Binary tree for split pane layout.
 
-```typescript
-// POST http://localhost:{port}/{command_name}
-// Content-Type: application/json
-{
-  "projectPath": "/path/to/project",
-  "branchName": "main",
-  // ... command-specific fields
-}
+```
+LayoutNode
+  Leaf { pane_id: String }
+  Split { direction: H|V, ratio: f64, first: Node, second: Node }
 ```
 
-### Command Response
+### ManagementState
 
-```typescript
-// Success: 200 OK
-{ /* command-specific response */ }
+State for the management panel overlay.
 
-// Error: 500 Internal Server Error
-{
-  "severity": "error",
-  "code": "E9002",
-  "message": "...",
-  "command": "list_terminals",
-  "category": "Internal",
-  "suggestions": [],
-  "timestamp": "2026-03-27T12:00:00Z"
-}
+```
+ManagementState
+  selected_agent: usize        -- Cursor position in agent list
+  active_section: Section      -- AgentList | Detail | PrDashboard | Issues
+  pr_cache: Vec<PrStatus>      -- Cached PR statuses
+  issue_cache: Vec<IssueInfo>  -- Cached Issue list
+  summary_cache: Map<String, String>  -- pane_id -> AI summary
 ```
 
-### WebSocket Event Frame
+## Lifecycle
 
-```typescript
-// Text frame (structured events)
-{
-  "event": "launch-progress",
-  "target": { "type": "all" },
-  "payload": { "jobId": "...", "step": "fetch", "progress": 0.5 }
-}
-
-// Binary frame (terminal output)
-// [event_type: u8][pane_id_len: u8][pane_id: bytes][data: bytes]
 ```
+App start
+  -> Create PaneManager
+  -> Open default shell tab (or restore previous session)
+  -> Enter event loop
 
-## Frontend State (Svelte stores)
+Event loop (100ms tick)
+  -> Poll crossterm events (key, mouse, resize)
+  -> Poll PTY output from all panes
+  -> Render active frame
 
-```typescript
-// lib/stores/project.ts
-export const projectPath = writable<string | null>(null);
-export const currentBranch = writable<string>("");
-export const worktrees = writable<WorktreeInfo[]>([]);
+Tab create (agent)
+  -> PaneManager::launch_agent() with BuiltinLaunchConfig
+  -> Auto-create worktree if branch specified
+  -> Add TabInfo to tabs vector
+  -> Switch to new tab
 
-// lib/stores/terminals.ts
-export const terminals = writable<TerminalInfo[]>([]);
-export const activeTerminalId = writable<string | null>(null);
+Tab create (shell)
+  -> PaneManager::spawn_shell()
+  -> Add TabInfo to tabs vector
 
-// lib/stores/canvas.ts
-export const canvasViewport = writable<Viewport>({ x: 0, y: 0, zoom: 1 });
-export const tileLayouts = writable<Record<string, TileLayout>>({});
-export const selectedTileId = writable<string>("assistant");
+Tab close
+  -> PaneManager::close_pane()
+  -> Worktree cleanup (if agent tab with auto-created worktree)
+  -> Remove TabInfo
+  -> Adjust active_tab index
 
-// lib/stores/tabs.ts
-export const tabs = writable<Tab[]>([]);
-export const activeTabId = writable<string | null>(null);
-```
-
-## Electron Preload API
-
-```typescript
-// Exposed via contextBridge
-interface ElectronAPI {
-  sidecarPort: number;
-  appVersion: string;
-  platform: NodeJS.Platform;
-  dialog: {
-    openFile(options: OpenDialogOptions): Promise<string | null>;
-    showMessage(options: MessageBoxOptions): Promise<number>;
-  };
-  shell: {
-    openExternal(url: string): Promise<void>;
-  };
-  window: {
-    setTitle(title: string): void;
-    minimize(): void;
-    maximize(): void;
-    close(): void;
-  };
-  onMenuAction(callback: (action: string) => void): () => void;
-}
-
-declare global {
-  interface Window {
-    electronAPI: ElectronAPI;
-  }
-}
+App shutdown
+  -> PaneManager::kill_all()
+  -> Save session state for restore
 ```

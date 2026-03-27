@@ -1,243 +1,158 @@
-# Tasks: SPEC-1776 — Electron Full Scratch Migration
+# Tasks: SPEC-1776 — ratatui TUI Migration
 
 ## Phase 0: Setup
 
-- [ ] T-001: Cargo workspace に `crates/gwt-server` クレートを追加 (`Cargo.toml` の members)
-- [ ] T-002: `crates/gwt-server/Cargo.toml` 作成 (axum, tokio, gwt-core, serde, tower-http, tokio-tungstenite, tracing)
-- [ ] T-003: `gwt-electron/` ディレクトリを electron-vite + Svelte 5 で初期化 (`package.json`, `vite.config.ts`, `tsconfig.json`)
-- [ ] T-004: `gwt-electron/package.json` に electron, electron-builder, @xterm/xterm 等の依存を追加
+- [ ] T-001: Cargo workspace に `crates/gwt-tui` クレートを追加
+- [ ] T-002: `crates/gwt-tui/Cargo.toml` 作成 (ratatui, crossterm, vt100, gwt-core, tokio)
 
-## Phase 1: Foundational — gwt-server 基盤
+## Phase 1: 最小 TUI シェル (US1, US3)
 
-- [ ] T-010: `crates/gwt-server/src/error.rs` — `StructuredError` → axum `IntoResponse` 変換 (`HttpError` 型)
-  - 参照: `crates/gwt-tauri/src/http_server.rs` lines 108-121
-- [ ] T-011: `crates/gwt-server/src/state.rs` — Tauri 非依存の `AppState` 構築
-  - `crates/gwt-tauri/src/state.rs` から移植、`tauri::*` 型を除去
-  - `EventBroadcaster` フィールドを追加
-  - `Arc<AppState>` でラップ
-- [ ] T-012: `crates/gwt-server/src/ws.rs` — WebSocket イベントブロードキャスト
-  - `tokio::sync::broadcast::Sender<ServerEvent>` ベース
-  - `ServerEvent { event: String, target: EventTarget, payload: Value }`
-  - axum WebSocket upgrade ハンドラ (`/ws` エンドポイント)
-  - テキストフレーム (JSON イベント) + バイナリフレーム (ターミナル出力) 対応
-- [ ] T-013: `crates/gwt-server/src/server.rs` — axum ルーター構築
-  - CORS 設定 (`tower_http::cors`)
-  - `/healthz` エンドポイント
-  - `/ws` WebSocket エンドポイント
-  - ハンドラモジュール群のルート登録
-- [ ] T-014: `crates/gwt-server/src/main.rs` — エントリーポイント
-  - `AppState::new()` → `Arc<AppState>`
-  - `TcpListener::bind("127.0.0.1:0")` でランダムポート
-  - stdout に `GWT_SERVER_PORT={port}` を出力
-  - シグナルハンドリング (SIGTERM/SIGINT → graceful shutdown)
-  - tracing 初期化
-- [ ] T-015: **検証** — `cargo run -p gwt-server` → `curl /healthz` → 200 OK
-  - WebSocket 接続テスト (`websocat ws://localhost:{port}/ws`)
+> User Story 1 (Launch gwt as terminal replacement) + User Story 3 (Shell tabs)
 
-## Phase 2: US1 — コマンドハンドラ移植 (Terminal)
+- [ ] T-010: `src/main.rs` — crossterm raw mode 開始、ratatui Terminal 初期化、パニックハンドラ
+  - `crossterm::terminal::enable_raw_mode()`
+  - `ratatui::Terminal::new(CrosstermBackend::new(stdout))`
+  - パニック時に raw mode を確実に解除
+- [ ] T-011: `src/app.rs` — App 構造体とメインイベントループ
+  - `App { tabs, active_tab, mode, should_quit }`
+  - `crossterm::event::poll(Duration::from_millis(10))` でイベント待機
+  - `terminal.draw(|frame| ui::render(frame, &app))` で描画
+- [ ] T-012: `src/pty/session.rs` — PTY セッション管理
+  - `portable_pty::native_pty_system().openpty(PtySize)` で PTY 生成
+  - `child_killer`, `reader`, `writer` の管理
+  - PTY 出力を非同期で読み取るスレッド
+  - `crates/gwt-core/src/terminal/` の既存 PTY ロジックを活用
+- [ ] T-013: `src/pty/renderer.rs` — VT100 → ratatui 変換
+  - `vt100::Parser` で PTY バイト列をパース
+  - `vt100::Screen` → `ratatui::buffer::Buffer` のセル変換
+  - ANSI カラー (256色 + TrueColor) + 属性 (bold, italic, underline) 対応
+  - カーソル位置の追跡
+- [ ] T-014: `src/ui/tab_bar.rs` — タブバー描画
+  - タブ名、アクティブタブのハイライト、タブ番号表示
+  - `ratatui::widgets::Tabs` ベース
+- [ ] T-015: `src/ui/terminal.rs` — PTY 出力描画
+  - `renderer.rs` の Buffer を frame に書き込み
+  - カーソル表示/非表示の制御
+- [ ] T-016: `src/ui/status.rs` — ステータスバー
+  - 現在のタブ情報、ヘルプヒント (`Ctrl+G for commands`)
+- [ ] T-017: `src/input/handler.rs` — キー入力ルーティング
+  - 通常モード: キー入力を PTY に転送
+  - Ctrl+G 検出 → コマンドモードに遷移
+  - Ctrl+C → PTY に SIGINT 転送 (TUI は終了しない)
+- [ ] T-018: **テスト** — renderer のユニットテスト
+  - VT100 シーケンス → ratatui Cell 変換の正確性
+  - カラーマッピング、属性、カーソル位置
+- [ ] T-019: **検証** — `cargo run -p gwt-tui` → シェル操作 → ls, vim, top 等が正常動作
 
-> User Story 1 (Desktop App Startup) + User Story 2 (Terminal Operations)
+## Phase 2: タブ管理 + Ctrl+G (US2, US4)
 
-- [ ] T-020: [P] `handlers/terminal.rs` — PTY 管理コマンド (19 cmd)
-  - `launch_terminal`, `spawn_shell`, `launch_agent`, `start_launch_job`, `cancel_launch_job`, `poll_launch_job`
-  - `write_terminal`, `send_keys_to_pane`, `send_keys_broadcast`, `resize_terminal`
-  - `close_terminal`, `list_terminals`, `terminal_ready`
-  - `probe_terminal_ansi`, `capture_scrollback_tail`, `save_clipboard_image`
-  - `get_captured_environment`, `is_os_env_ready`, `get_available_shells`
-  - PTY 出力ループ: `app_handle.emit("terminal-output")` → `broadcaster.send()`
-  - 参照: `crates/gwt-tauri/src/commands/terminal.rs`
-- [ ] T-021: [P] `handlers/system.rs` — システム/診断コマンド (8 cmd)
-  - `get_system_info`, `get_stats`, `get_startup_diagnostics`, `heartbeat`
-  - `report_frontend_metrics`, `get_http_ipc_port` (→ 自身のポートを返す)
-  - `get_current_window_label`, `try_acquire_window_restore_leader`, `release_window_restore_leader`
-- [ ] T-022: **検証** — `curl POST /list_terminals` + `curl POST /launch_terminal` → PTY 出力が WS で受信
+> User Story 2 (Manage agent tabs) + User Story 4 (View management panel)
 
-## Phase 2: US1 — コマンドハンドラ移植 (Git/Branch)
+- [ ] T-020: `src/input/keybind.rs` — Ctrl+G プレフィックスキーシステム
+  - `InputMode::Normal` / `InputMode::Command` / `InputMode::Panel` 状態マシン
+  - Ctrl+G → c: 新規シェルタブ
+  - Ctrl+G → n: 新規エージェント起動ダイアログ
+  - Ctrl+G → 1-9: タブ切替
+  - Ctrl+G → x: 現在のタブ終了
+  - Ctrl+G → g: 管理パネルトグル
+  - Ctrl+G → h/l: 前/次のタブ
+  - Ctrl+G → q: gwt 終了
+  - Ctrl+G → ?: ヘルプ表示
+- [ ] T-021: `src/state/tabs.rs` — タブ状態管理
+  - `Tab { id, name, tab_type, pty_session, status }`
+  - `TabType::Shell | TabType::Agent { agent_id, branch, spec_id }`
+  - タブ追加/削除/切替/リネーム
+  - 最後のタブ終了 → gwt 終了
+- [ ] T-022: `src/ui/panel.rs` — 管理パネル
+  - エージェント一覧 (名前、ブランチ、ステータス)
+  - 選択 → Enter でタブ切替
+  - k: kill, r: restart, l: ログ表示
+  - ratatui Table ウィジェット
+- [ ] T-023: `src/ui/dialog.rs` — エージェント起動ダイアログ
+  - エージェント種別選択 (Claude Code, Codex, Gemini)
+  - ブランチ/Issue 選択
+  - ディレクトリ選択
+  - ratatui Popup ベース
+- [ ] T-024: **テスト** — keybind のユニットテスト
+  - Ctrl+G → c の状態遷移
+  - Normal → Command → Normal のサイクル
+  - PTY に Ctrl+G が転送されないことの検証
+- [ ] T-025: **検証** — 複数タブ作成/切替/終了、Ctrl+G パネル表示
 
-- [ ] T-030: [P] `handlers/branches.rs` — ブランチ/ワークツリーコマンド (9 cmd)
-  - `list_branches`, `list_branch_inventory`, `get_branch_inventory_detail`
-  - `list_worktree_branches`, `list_remote_branches`, `materialize_worktree_ref`
-  - `get_current_branch`, `list_worktrees`
-  - 参照: `crates/gwt-tauri/src/commands/branches.rs`
-- [ ] T-031: [P] `handlers/git_view.rs` — Git 差分/コミットコマンド (8 cmd)
-  - `get_git_change_summary`, `get_branch_diff_files`, `get_file_diff`
-  - `get_branch_commits`, `get_working_tree_status`, `get_stash_list`
-  - `get_base_branch_candidates`
-  - 参照: `crates/gwt-tauri/src/commands/git_view.rs`
-- [ ] T-032: **検証** — ブランチ一覧取得、差分取得の HTTP テスト
+## Phase 3: エージェント起動 + gwt-core 連携 (US2, US8)
 
-## Phase 2: US1 — コマンドハンドラ移植 (残り全て)
+> User Story 2 (Manage agent tabs) + Acceptance Scenario 8 (worktree auto-create)
 
-- [ ] T-040: [P] `handlers/project.rs` — プロジェクト管理 (9 cmd)
-  - `probe_path`, `open_project`, `get_project_info`, `close_project`
-  - `is_git_repo`, `create_project`, `start_migration_job`, `quit_app`, `cancel_quit_confirm`
-- [ ] T-041: [P] `handlers/sessions.rs` — セッション管理 (5 cmd)
-  - `get_branch_quick_start`, `get_agent_sidebar_view`, `get_branch_session_summary`
-  - `rebuild_all_branch_session_summaries`, `set_branch_display_name`
-- [ ] T-042: [P] `handlers/settings.rs` — 設定/構成 (8 cmd)
-  - `get_settings`, `save_settings`, `get_agent_config`, `save_agent_config`
-  - `get_profiles`, `save_profiles`, `list_ai_models`
-  - `get_skill_registration_status_cmd`, `repair_skill_registration_cmd`
-- [ ] T-043: [P] `handlers/issue.rs` — Issue/SPEC 管理 (33 cmd)
-  - issue_spec (10), local_spec (11), issue (13) の全コマンド
-  - 参照: `crates/gwt-tauri/src/commands/issue_spec.rs`, `local_spec.rs`, `issue.rs`
-- [ ] T-044: [P] `handlers/pullrequest.rs` — PR 操作 (12 cmd)
-  - `fetch_pr_status`, `fetch_pr_detail`, `merge_pull_request` 等全コマンド
-- [ ] T-045: [P] `handlers/assistant.rs` — アシスタント (5 cmd)
-  - `assistant_get_state`, `assistant_send_message`, `assistant_start`, `assistant_stop`, `assistant_get_dashboard`
-- [ ] T-046: [P] `handlers/cleanup.rs` — クリーンアップ (8 cmd)
-  - `list_worktrees`, `check_gh_available`, `cleanup_worktrees` 等
-- [ ] T-047: [P] `handlers/voice.rs` — 音声 (4 cmd)
-  - `get_voice_capability`, `prepare_voice_model`, `ensure_voice_runtime`, `transcribe_voice_audio`
-- [ ] T-048: [P] `handlers/misc.rs` — その他 (残りの cmd)
-  - `detect_agents`, `list_agent_versions`, `detect_docker_context`
-  - `suggest_branch_name`, `is_ai_configured`
-  - `read_recent_logs`, `get_report_system_info`, `detect_report_target`, `create_github_issue`
-  - `list_project_versions`, `get_project_version_history`, `prefetch_version_history`
-  - `get_recent_projects`, `sync_window_agent_tabs`, `sync_window_active_tab`
-  - `check_and_fix_agent_instruction_docs`, `project_index` 系 (8 cmd)
-- [ ] T-049: `server.rs` に全ハンドラモジュールのルートを登録
-- [ ] T-050: **検証** — 全 161 エンドポイントに対する HTTP スモークテスト (スクリプト)
+- [ ] T-030: `src/state/agents.rs` — エージェント状態管理
+  - gwt-core の `PaneManager` との連携
+  - エージェント起動パラメータ構築
+  - ワークツリー自動作成 (gwt-core worktree モジュール)
+- [ ] T-031: エージェント起動フロー統合
+  - ダイアログからパラメータ受取 → worktree 作成 → PTY 起動 → タブ追加
+  - gwt-core の `agent::launch` ロジック活用
+- [ ] T-032: ワークツリークリーンアップ
+  - タブ終了時に worktree を安全に削除
+  - 未コミット変更がある場合は確認ダイアログ
+- [ ] T-033: エージェント状態表示拡充
+  - ステータスバーにエージェント種別、ブランチ、SPEC 表示
+  - 管理パネルにリアルタイムステータス更新
+- [ ] T-034: **検証** — エージェント起動 → 動作確認 → タブ終了 → worktree 消去
 
-## Phase 3: US1 — Electron シェル
+## Phase 4: ペイン分割 + PR/Issue パネル (US5, US6, US7)
 
-> User Story 1 (Desktop App Startup)
+- [ ] T-040: [P] `src/ui/split.rs` — ペイン分割
+  - Ctrl+G → -: 水平分割
+  - Ctrl+G → |: 垂直分割
+  - Ctrl+G → 矢印キー: ペイン間移動
+  - ratatui Layout::split でサイズ計算
+  - 各ペインに独立した PTY セッション
+- [ ] T-041: [P] `src/ui/panel.rs` — PR ダッシュボード拡充
+  - PR ステータス、CI チェック結果、マージ状態
+  - gwt-core の GitHub API 連携
+- [ ] T-042: [P] `src/ui/panel.rs` — Issue/SPEC リスト
+  - Issue 検索、SPEC 一覧、ステータス表示
+- [ ] T-043: [P] AI セッションサマリー表示
+  - gwt-core のセッションサマリー機能連携
+  - 管理パネル内にサマリーテキスト表示
+- [ ] T-044: スクロールバック実装
+  - Ctrl+G → PgUp: スクロールモード開始
+  - vt100 のスクロールバックバッファ活用
+  - ファイル永続化 (大量出力対応)
+- [ ] T-045: **検証** — ペイン分割動作、PR 表示、スクロールバック
 
-- [ ] T-060: `electron/sidecar.ts` — Rust サイドカー管理
-  - `child_process.spawn()` で gwt-server を起動
-  - stdout パースで `GWT_SERVER_PORT=` からポート取得
-  - プロセス終了検知 → エラーダイアログ → 再起動オプション
-  - アプリ終了時に `kill()` でクリーンアップ
-- [ ] T-061: `electron/preload.ts` — contextBridge API
-  - `window.electronAPI.sidecarPort` (number)
-  - `window.electronAPI.appVersion` (string)
-  - `window.electronAPI.platform` (string)
-  - `window.electronAPI.dialog.openFile()` / `showMessage()`
-  - `window.electronAPI.shell.openExternal(url)`
-  - `window.electronAPI.window.setTitle()` / `minimize()` / `maximize()` / `close()`
-  - `window.electronAPI.onMenuAction(callback)` → unsubscribe 関数を返す
-- [ ] T-062: `electron/main.ts` — メインプロセス
-  - BrowserWindow 作成 (1200x800, min 800x600)
-  - サイドカー起動 → ポート取得 → preload にポート注入
-  - 開発: Vite dev server URL ロード / 本番: `file://` ロード
-  - `app.on("window-all-closed")` → macOS 以外で quit
-  - `app.on("before-quit")` → サイドカー停止
-  - シングルインスタンス (`app.requestSingleInstanceLock()`)
-- [ ] T-063: `electron/menu.ts` — ネイティブメニュー
-  - File (Open Project, Close Project, Quit)
-  - Edit (Undo, Redo, Cut, Copy, Paste, Select All)
-  - Git (Branches, Pull Requests)
-  - Tools (Agent Canvas, Branch Browser, Settings)
-  - Window (Minimize, Zoom)
-  - Help (About, Report Bug)
-  - メニューアクション → renderer に IPC 送信 (`menu-action`)
-- [ ] T-064: `electron/tray.ts` — システムトレイ
-  - アイコン表示 (macOS: Template, other: standard)
-  - コンテキストメニュー: Show / Quit
-- [ ] T-065: **検証** — `pnpm electron:dev` → ウィンドウ表示、メニュー動作、サイドカー接続
+## Phase 5: 仕上げ + 配布
 
-## Phase 4: US2/US3/US6 — フロントエンド API 層
-
-> User Story 2 (Terminal), User Story 3 (Canvas), User Story 6 (No IPC Loop)
-
-- [ ] T-070: `src/lib/api/client.ts` — HTTP API クライアント
-  - `invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>`
-  - ポート解決: `window.electronAPI.sidecarPort`
-  - エラーハンドリング: `StructuredError` パース → throw
-  - コマンド別スロットル (同一コマンド 100ms デバウンス)
-  - プロファイリング対応 (performance.now)
-- [ ] T-071: `src/lib/api/events.ts` — WebSocket イベントクライアント
-  - シングル WS 接続 (`ws://localhost:{port}/ws`)
-  - 自動再接続 (exponential backoff: 500ms → 1s → 2s → 4s → max 8s)
-  - テキストフレーム → JSON パース → イベント名でディスパッチ
-  - バイナリフレーム → ターミナル出力ルーティング
-  - `events.on(eventName, callback)` / `events.off(eventName, callback)`
-- [ ] T-072: `src/lib/api/types.ts` — API 型定義
-  - `TerminalInfo`, `BranchInfo`, `WorktreeInfo`, `Tab`, `AgentCanvasViewport` 等
-  - 既存 `gwt-gui/src/lib/types.ts` から移植
-- [ ] T-073: **検証** — `client.invoke("list_terminals")` → レスポンス取得、WS イベント受信
-
-## Phase 4: US2 — ターミナルビュー
-
-- [ ] T-080: `src/lib/terminal/TerminalView.svelte` — xterm.js ターミナル
-  - xterm.js v6 + @xterm/addon-fit
-  - WS バイナリフレームで PTY 出力受信 → `terminal.write(data)`
-  - キー入力 → HTTP POST `/write_terminal` (or `/send_keys_to_pane`)
-  - リサイズ → HTTP POST `/resize_terminal`
-  - `$effect` 内で IPC 呼び出し禁止 (FR-016)
-- [ ] T-081: **検証** — ターミナル起動 → リアルタイム出力 → キー入力 → リサイズ
-
-## Phase 4: US3 — Agent Canvas
-
-- [ ] T-090: `src/lib/components/AgentCanvas/Canvas.svelte` — キャンバス本体
-  - Figma 風フルスクリーンキャンバス
-  - `touch-action: none; user-select: none;` (D&D/パン問題防止)
-  - ポインターイベントでタイル D&D
-  - 背景ドラッグでパン操作
-  - Ctrl+ホイールでズーム
-  - CSS transform ベースのビューポート制御
-- [ ] T-091: `src/lib/components/AgentCanvas/Tile.svelte` — タイルコンポーネント
-  - ドラッグハンドル (`::`)
-  - 種別表示 (Assistant / Worktree / Agent / Terminal)
-  - 選択状態のハイライト
-- [ ] T-092: `src/lib/components/AgentCanvas/Toolbar.svelte` — ツールバー
-  - タイル数表示、ズームコントロール
-  - `position: absolute` でキャンバス上にオーバーレイ
-- [ ] T-093: **検証** — タイル D&D、パン、ズームが滑らかに動作 (Playwright E2E)
-
-## Phase 4: US4/US5 — Branch Browser / Settings
-
-- [ ] T-100: [P] `src/lib/components/BranchBrowser/` — ブランチブラウザ
-  - ブランチ一覧 (HTTP GET `/list_branch_inventory`)
-  - ブランチ詳細パネル
-  - ワークツリー管理操作
-- [ ] T-101: [P] `src/lib/components/Settings/` — 設定パネル
-  - 一般設定、AI モデル設定、エージェント設定
-  - HTTP GET/POST `/get_settings` / `/save_settings`
-- [ ] T-102: [P] `src/lib/components/Sidebar/` — サイドバーナビゲーション
-  - タブ切替 (Agent Canvas, Branch Browser, Settings 等)
-- [ ] T-103: [P] `src/lib/components/Assistant/` — アシスタントパネル
-  - アシスタント状態表示、メッセージ送受信
-- [ ] T-104: `src/App.svelte` — ルートコンポーネント
-  - レイアウト構成 (サイドバー + メインコンテンツ)
-  - グローバル状態初期化
-  - メニューアクション受信 (`window.electronAPI.onMenuAction`)
-  - プロジェクト開閉フロー
-- [ ] T-105: **検証** — 全画面遷移、設定読み書き、ブランチ一覧表示
-
-## Phase 5: Polish / Cross-Cutting
-
-- [ ] T-110: デザイントークン CSS (`app.css`)
-  - 既存の `--bg-primary`, `--accent`, `--border-color` 等を移植
-  - ダークモード対応
-- [ ] T-111: E2E テスト (Playwright)
-  - 起動テスト、ターミナル操作、Canvas D&D、ブランチブラウザ
-  - `playwright.config.ts` を Electron 用に設定
-- [ ] T-112: `electron-builder.config.js` — ビルド設定
-  - macOS: DMG, コード署名, 公証
-  - Windows: MSI (NSIS)
-  - Linux: AppImage
-  - gwt-server バイナリを `extraResources` に同梱
-- [ ] T-113: `.github/workflows/release-electron.yml` — CI/CD
+- [ ] T-050: gwt-tauri / gwt-gui / gwt-server 削除
+  - Cargo.toml から members 削除
+  - ディレクトリ削除
+  - CI 参照の更新
+- [ ] T-051: CI/CD パイプライン更新
+  - `.github/workflows/release.yml` を TUI バイナリ配布に変更
   - クロスプラットフォームビルド (macOS, Windows, Linux)
-  - gwt-server のクロスコンパイルまたはマトリクスビルド
-  - アーティファクトを GitHub Release にアップロード
-- [ ] T-114: **最終検証** — SC-001〜SC-007 全項目の確認
-  - SC-001: `pnpm electron:dev` で起動・操作可能
-  - SC-002: E2E テスト全パス
-  - SC-003: ターミナルリアルタイム表示
-  - SC-004: Canvas D&D/パン/ズーム
-  - SC-005: アイドル CPU < 5%
-  - SC-006: 全プラットフォームビルド成功
-  - SC-007: `@tauri-apps` import がゼロ
+  - `cargo install gwt-tui` 対応
+- [ ] T-052: README.md / README.ja.md 更新
+  - TUI 版のインストール・使い方
+  - キーバインド一覧
+  - スクリーンショット
+- [ ] T-053: **最終検証** — SC-001〜SC-008
+  - SC-001: TUI 起動、タブバー + ターミナル表示
+  - SC-002: タブ作成/切替/終了
+  - SC-003: Ctrl+G パネル動作
+  - SC-004: ペイン分割
+  - SC-005: gwt-core テスト全パス
+  - SC-006: gwt-tui テストカバレッジ > 80%
+  - SC-007: gwt-tauri, gwt-gui 完全削除
+  - SC-008: CI パイプライン更新
 
 ## Traceability Matrix
 
 | User Story | Tasks |
 |---|---|
-| US1 - Desktop App Startup | T-014, T-015, T-060–T-065 |
-| US2 - Terminal Operations | T-020–T-022, T-070–T-073, T-080–T-081 |
-| US3 - Agent Canvas | T-090–T-093 |
-| US4 - Branch Browser | T-030–T-032, T-100 |
-| US5 - Settings | T-042, T-101 |
-| US6 - No IPC Loop | T-070 (throttle), T-071 (event-driven), T-080 (no $effect IPC) |
+| US1 - Launch as terminal replacement | T-010–T-019 |
+| US2 - Manage agent tabs | T-020–T-025, T-030–T-034 |
+| US3 - Shell tabs | T-012, T-021 |
+| US4 - Management panel | T-022, T-023, T-025 |
+| US5 - Split panes | T-040 |
+| US6 - PR/Issue status | T-041, T-042 |
+| US7 - AI session summaries | T-043 |
+| US8 - Voice input | (P3, deferred) |

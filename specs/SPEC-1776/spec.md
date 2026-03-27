@@ -1,142 +1,103 @@
-# Feature Specification: Electron Full Scratch Migration
+# Feature Specification: Migrate from Tauri GUI to ratatui TUI
 
 ## Background
 
-Tauri v2 + WKWebView の IPC アーキテクチャにより、メインスレッドがブロックされ
-UI が操作不能になる問題が発生している。`list_terminals` 等の高頻度 IPC 呼び出しが
-WKWebView の URL scheme handler を経由するため、HTTP IPC へのルーティング等の
-ワークアラウンドでも根本解決に至らない。
+gwt is a SPEC-driven agent management tool that launches coding agents (Claude Code, Codex, Gemini) against SPECs with git worktrees providing isolated workspaces. The current frontend is a Tauri v2 + Svelte 5 desktop GUI introduced in v7.0.0.
 
-本 SPEC では Tauri を Electron に全面置換し、Rust バックエンドをサイドカープロセス
-(axum HTTP/WebSocket サーバー) として維持する構成に移行する。
-フロントエンドは Svelte 5 で新規作成する。
+This SPEC replaces the GUI with a ratatui-based TUI, making gwt a terminal application that serves as a terminal replacement with its own tab management. Users launch gwt instead of a terminal app and manage all agents from within it. The core value proposition (SPEC-driven agent management with automatic worktree isolation) remains unchanged.
 
-### Architecture
-
-```text
-Electron Main Process
-  ├── Rust sidecar lifecycle (child_process.spawn)
-  ├── Native menu / tray / dialogs
-  ├── Window management (BrowserWindow)
-  └── Auto-update (electron-updater)
-
-Renderer (Svelte 5 + Vite)
-  ├── HTTP POST → gwt-server (commands)
-  └── WebSocket ← gwt-server (events)
-
-gwt-server (Rust, standalone binary)
-  ├── axum HTTP API (all 158+ commands)
-  ├── WebSocket event broadcasting
-  ├── gwt-core (git, PTY, AI, config)
-  └── AppState (Arc<AppState>, no Tauri dependency)
-```
+Design document: \`docs/superpowers/specs/2026-03-27-tui-migration-design.md\`
 
 ## User Stories
 
-### User Story 1 - Desktop App Startup (Priority: P1)
+### User Story 1 - Launch gwt as terminal replacement (Priority: P1)
 
-As a developer, I want the Electron app to start, automatically launch the Rust
-sidecar server, and display the main UI within 3 seconds, so that I can begin
-working without delay.
+As a developer, I want to launch gwt from my shell and have it replace my terminal application, so that I can manage all coding agents and shell sessions from a single TUI interface.
 
-**Acceptance Scenario:**
-1. Given the app is installed
-2. When I launch it
-3. Then the main window appears within 3 seconds
-4. And the Rust sidecar is running and accepting HTTP requests
-5. And the WebSocket connection is established
+### User Story 2 - Manage agent tabs (Priority: P1)
 
-### User Story 2 - Terminal Operations (Priority: P1)
+As a developer, I want to create, switch between, and close agent tabs within gwt, so that I can run multiple coding agents simultaneously without opening multiple terminal windows.
 
-As a developer, I want to spawn agent/terminal sessions and see real-time PTY
-output in xterm.js tiles, so that I can interact with CLI agents.
+### User Story 3 - Use shell tabs (Priority: P1)
 
-**Acceptance Scenario:**
-1. Given the app is running with a project open
-2. When I launch an agent session
-3. Then a terminal tile appears in the Agent Canvas
-4. And PTY output streams in real-time via WebSocket
-5. And I can type input that is sent to the PTY
+As a developer, I want to open plain shell tabs alongside agent tabs, so that I can use gwt as my complete terminal solution.
 
-### User Story 3 - Agent Canvas Interaction (Priority: P1)
+### User Story 4 - View management panel (Priority: P1)
 
-As a developer, I want to drag, pan, and zoom tiles on the Agent Canvas
-(Figma-style), so that I can organize my workspace visually.
+As a developer, I want to toggle a management panel with Ctrl+G to see all agents' status, SPEC associations, and quick actions, so that I can monitor and control agents without leaving the TUI.
 
-**Acceptance Scenario:**
-1. Given the Agent Canvas is displayed with tiles
-2. When I drag a tile's handle
-3. Then the tile moves smoothly following the pointer
-4. When I drag the canvas background
-5. Then the viewport pans smoothly
-6. When I Ctrl+scroll
-7. Then the canvas zooms in/out
+### User Story 5 - Split panes (Priority: P2)
 
-### User Story 4 - Branch Browser (Priority: P2)
+As a developer, I want to split the terminal view horizontally or vertically, so that I can monitor multiple agents side by side like tmux.
 
-As a developer, I want to browse branches, view branch details, and manage
-worktrees from the GUI, so that I can manage my git workflow visually.
+### User Story 6 - View PR and Issue status (Priority: P2)
 
-### User Story 5 - Settings and Configuration (Priority: P2)
+As a developer, I want to see PR status, CI results, and Issue/SPEC information in the management panel, so that I can track progress without switching to a browser.
 
-As a developer, I want to configure app settings (AI models, themes, agent
-configs), so that I can customize the tool for my workflow.
+### User Story 7 - AI session summaries (Priority: P2)
 
-### User Story 6 - No IPC Loop Bug (Priority: P1)
+As a developer, I want to see AI-generated summaries of each agent's scrollback, so that I can quickly understand what each agent is doing without reading full terminal output.
 
-As a developer, I want the app to never freeze due to runaway IPC calls,
-so that the UI remains responsive at all times.
+### User Story 8 - Use voice input (Priority: P3)
 
-**Acceptance Scenario:**
-1. Given the app is running
-2. When I open a project with multiple worktrees and agents
-3. Then CPU usage remains below 10% at idle
-4. And no IPC command is called more than once per user action or server event
+As a developer, I want to use voice input (Qwen3-ASR) to send commands to the active terminal tab, so that I can interact hands-free.
+
+## Acceptance Scenarios
+
+1. Given gwt is launched from a shell, when it starts, then a ratatui TUI is displayed with a tab bar, terminal area, and status bar.
+2. Given the TUI is running, when the user presses Ctrl+G then n, then a new agent launch dialog appears allowing agent type and branch selection.
+3. Given an agent tab is active, when the user types, then keystrokes are forwarded to the agent's PTY.
+4. Given multiple tabs exist, when the user presses Ctrl+G then 1-9, then the corresponding tab becomes active.
+5. Given the TUI is running, when the user presses Ctrl+G, then the management panel toggles showing agent list, detail, and quick actions.
+6. Given the management panel is visible, when the user selects an agent and presses Enter, then the TUI switches to that agent's tab.
+7. Given split mode is active, when two agents run side by side, then both PTY outputs render correctly in their respective panes.
+8. Given an agent is launched with an Issue/branch, then a worktree is automatically created and the agent runs within it.
+9. Given an agent tab is closed, then the associated worktree is cleaned up (with safety checks).
+10. Given the TUI is running, when the terminal is resized, then all panes and the tab bar resize correctly.
 
 ## Edge Cases
 
-- Rust sidecar crashes → Electron detects exit, shows error, offers restart
-- Sidecar port conflict → retry with random port
-- WebSocket disconnect → auto-reconnect with exponential backoff
-- Large terminal output burst → WebSocket backpressure handling
-- Multiple Electron windows → single sidecar shared across windows
+- Terminal size below 80x24: display warning, disable split mode
+- Agent PTY crash: tab remains with error indicator, restart option available
+- Worktree creation failure (disk full, permissions): error shown in management panel, tab not created
+- GitHub API unreachable: PR/Issue panels show offline state, background retry
+- Rapid tab switching: debounce rendering to prevent flicker
+- Ctrl+G conflicts: prefix key should not be forwarded to PTY under any circumstances
 
 ## Functional Requirements
 
-- FR-001: Electron app launches Rust sidecar via `child_process.spawn`
-- FR-002: All Rust commands accessible via HTTP POST to sidecar
-- FR-003: All server events delivered via WebSocket
-- FR-004: Terminal output streams via WebSocket binary frames
-- FR-005: Native menu matches current Tauri menu structure
-- FR-006: System tray with Show/Quit actions
-- FR-007: File open dialog via Electron dialog API
-- FR-008: External URL opening via Electron shell API
-- FR-009: Window title management via Electron BrowserWindow
-- FR-010: Auto-update via electron-updater
-- FR-011: macOS code signing and notarization
-- FR-012: Windows MSI packaging
-- FR-013: Linux AppImage packaging
-- FR-014: Single-instance enforcement
-- FR-015: Frontend has zero Tauri dependency
-- FR-016: No `$effect` may directly invoke IPC — all IPC is action/event driven
-- FR-017: API client layer includes per-command throttling
+- FR-001: gwt-tui crate using ratatui + crossterm replaces gwt-tauri + gwt-gui
+- FR-002: Tab bar with agent name, branch, and status color indicators
+- FR-003: Full PTY terminal rendering with ANSI color and attribute support
+- FR-004: Ctrl+G prefix key system for all management operations
+- FR-005: Management panel with agent list, detail view, and quick actions (kill, restart, logs)
+- FR-006: New agent launch dialog with agent type, branch/Issue, and directory selection
+- FR-007: Shell tab support (opens default shell in current or specified directory)
+- FR-008: Horizontal and vertical pane splitting
+- FR-009: Status bar showing current tab info, SPEC association, and agent state
+- FR-010: Scrollback buffer with scroll mode (Ctrl+G, PgUp) and file persistence
+- FR-011: PR dashboard in management panel (status, CI checks, merge state)
+- FR-012: Issue/SPEC list in management panel with search
+- FR-013: AI session summary display in management panel
+- FR-014: Voice input integration (Qwen3-ASR)
+- FR-015: Automatic worktree creation on agent launch and cleanup on close
+- FR-016: VT100 emulator buffer to ratatui Cell conversion (renderer)
 
 ## Non-Functional Requirements
 
-- NFR-001: App startup to interactive UI < 3 seconds
-- NFR-002: Terminal output latency (PTY → screen) < 16ms (60fps)
-- NFR-003: Idle CPU usage < 5%
-- NFR-004: No IPC command called > 10 times/second without explicit user action
-- NFR-005: gwt-core crate remains unchanged (zero modifications)
-- NFR-006: Sidecar binary size < 50MB
-- NFR-007: Electron app total package < 200MB
+- NFR-001: Rendering latency under 16ms per frame (60fps capable)
+- NFR-002: Memory usage proportional to scrollback buffer size, not unbounded
+- NFR-003: Cross-platform support (macOS, Linux, Windows) via crossterm
+- NFR-004: Startup time under 500ms to first interactive frame
+- NFR-005: gwt-core changes limited to business logic migration from gwt-tauri; no breaking API changes
 
 ## Success Criteria
 
-- SC-001: `cargo tauri dev` replaced by `pnpm electron:dev` — app launches and is interactive
-- SC-002: All existing E2E scenarios pass on Electron (adapted from Playwright tests)
-- SC-003: Terminal output renders in real-time without UI freeze
-- SC-004: Agent Canvas D&D / pan / zoom operates smoothly
-- SC-005: CPU at idle < 5% (validated via `ps aux` monitoring)
-- SC-006: macOS .dmg, Windows .msi, Linux .AppImage build successfully in CI
-- SC-007: No `@tauri-apps` import exists anywhere in the final codebase
+- SC-001: gwt launches as a TUI application and displays a functional tab bar + terminal
+- SC-002: Users can create, switch, and close both agent and shell tabs
+- SC-003: Ctrl+G management panel shows accurate agent status and allows control operations
+- SC-004: Split panes render correctly with independent PTY sessions
+- SC-005: All existing gwt-core tests pass without modification
+- SC-006: gwt-tui has >80% test coverage on renderer, keybind, and state modules
+- SC-007: gwt-tauri and gwt-gui are fully removed from the repository
+- SC-008: CI/release pipeline updated for TUI binary distribution
