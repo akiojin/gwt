@@ -1,147 +1,67 @@
-//! gwt-tui: TUI frontend for Git Worktree Manager
-
 mod app;
 mod event;
+mod input;
+mod renderer;
 mod state;
+mod ui;
 
 use std::io;
 
 use crossterm::{
-    event::{self as ct_event, Event, KeyEventKind},
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    layout::{Constraint, Direction, Layout},
-    prelude::CrosstermBackend,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs},
-    Terminal,
-};
-
-use crate::{
-    app::App,
-    event::{pty_output_channel, TuiEvent},
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let repo_root = std::env::current_dir().unwrap_or_default();
-
+    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let size = terminal.size()?;
-    let (rows, cols) = (size.height, size.width);
-    let (pty_tx, mut pty_rx) = pty_output_channel();
-    let mut app = App::new(repo_root, pty_tx, rows, cols);
+    // Run app
+    let result = run_app(&mut terminal);
 
-    let result = run_event_loop(&mut app, &mut terminal, &mut pty_rx);
-
+    // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
-    result
-}
-
-fn run_event_loop(
-    app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    pty_rx: &mut event::PtyOutputReceiver,
-) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        terminal.draw(|frame| render(app, frame))?;
-
-        let event = poll_event(pty_rx)?;
-
-        match event {
-            TuiEvent::Key(key) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                let action = app.map_key(key);
-                app.handle_action(action);
-            }
-            TuiEvent::Resize(cols, rows) => {
-                app.handle_resize(cols, rows);
-            }
-            TuiEvent::PtyOutput { pane_id, data } => {
-                app.handle_pty_output(&pane_id, &data);
-            }
-            TuiEvent::Tick => {}
-        }
-
-        if app.should_quit {
-            break;
-        }
+    if let Err(err) = result {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
     }
 
     Ok(())
 }
 
-fn poll_event(
-    pty_rx: &mut event::PtyOutputReceiver,
-) -> Result<TuiEvent, Box<dyn std::error::Error>> {
-    if let Ok((pane_id, data)) = pty_rx.try_recv() {
-        return Ok(TuiEvent::PtyOutput { pane_id, data });
-    }
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let block = ratatui::widgets::Block::default()
+                .title(" gwt-tui ")
+                .borders(ratatui::widgets::Borders::ALL);
+            frame.render_widget(block, area);
+        })?;
 
-    if ct_event::poll(std::time::Duration::from_millis(16))? {
-        match ct_event::read()? {
-            Event::Key(key) => return Ok(TuiEvent::Key(key)),
-            Event::Resize(cols, rows) => return Ok(TuiEvent::Resize(cols, rows)),
-            _ => {}
+        if crossterm::event::poll(std::time::Duration::from_millis(100))? {
+            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                if key.code == crossterm::event::KeyCode::Char('q')
+                    && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                {
+                    return Ok(());
+                }
+            }
         }
     }
-
-    Ok(TuiEvent::Tick)
-}
-
-fn render(app: &App, frame: &mut ratatui::Frame) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(frame.area());
-
-    let tab_titles: Vec<Line> = app
-        .state
-        .tabs
-        .iter()
-        .map(|t| Line::from(Span::raw(&t.name)))
-        .collect();
-
-    if !tab_titles.is_empty() {
-        let tabs = Tabs::new(tab_titles)
-            .select(app.state.active_tab)
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
-        frame.render_widget(tabs, chunks[0]);
-    } else {
-        let hint = Paragraph::new("Press Ctrl-T to open a shell tab")
-            .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(hint, chunks[0]);
-    }
-
-    let rows = app.active_screen_rows();
-    let lines: Vec<Line> = rows.iter().map(|r| Line::from(r.as_str())).collect();
-
-    let mode_indicator = match app.state.mode {
-        state::AppMode::ScrollMode => " [SCROLL] ",
-        state::AppMode::Management => " [MGMT] ",
-        state::AppMode::Normal => "",
-    };
-
-    let block = Block::default()
-        .borders(Borders::NONE)
-        .title(mode_indicator);
-
-    let content = Paragraph::new(lines).block(block);
-    frame.render_widget(content, chunks[1]);
 }

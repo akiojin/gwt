@@ -1,0 +1,6 @@
+- [x] Pasted API Key shows Peek/Copy buttons.
+- [x] Pasted API Key is passed to `list_ai_models` on Refresh.
+- [x] Hand-typed API Key is preserved after Save and reopen.
+- [x] Pasted API Key is preserved after Save and reopen.
+- [x] `default` profile keeps non-empty `ai.api_key` across save/load.
+- [x] Unit tests, Playwright E2E, and `svelte-check` pass.
