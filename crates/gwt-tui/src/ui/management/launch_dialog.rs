@@ -13,8 +13,37 @@ pub enum DialogField {
     Agent,
     Model,
     Branch,
+    SessionMode,
+    SkipPermissions,
     LaunchButton,
     CancelButton,
+}
+
+/// Session launch mode.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum DialogSessionMode {
+    #[default]
+    Normal,
+    Continue,
+    Resume,
+}
+
+impl DialogSessionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Continue => "Continue",
+            Self::Resume => "Resume",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::Continue,
+            Self::Continue => Self::Resume,
+            Self::Resume => Self::Normal,
+        }
+    }
 }
 
 /// Model options per agent.
@@ -44,6 +73,8 @@ pub struct LaunchDialogState {
     pub model_options: Vec<Vec<String>>,
     pub selected_model: usize,
     pub branch_input: String,
+    pub session_mode: DialogSessionMode,
+    pub skip_permissions: bool,
     pub focused_field: DialogField,
 }
 
@@ -59,6 +90,8 @@ impl Default for LaunchDialogState {
             model_options: model_options_for_agents(),
             selected_model: 0,
             branch_input: String::new(),
+            session_mode: DialogSessionMode::Normal,
+            skip_permissions: false,
             focused_field: DialogField::Agent,
         }
     }
@@ -70,7 +103,9 @@ impl LaunchDialogState {
         self.focused_field = match self.focused_field {
             DialogField::Agent => DialogField::Model,
             DialogField::Model => DialogField::Branch,
-            DialogField::Branch => DialogField::LaunchButton,
+            DialogField::Branch => DialogField::SessionMode,
+            DialogField::SessionMode => DialogField::SkipPermissions,
+            DialogField::SkipPermissions => DialogField::LaunchButton,
             DialogField::LaunchButton => DialogField::CancelButton,
             DialogField::CancelButton => DialogField::Agent,
         };
@@ -80,7 +115,6 @@ impl LaunchDialogState {
     pub fn next_agent(&mut self) {
         if !self.agent_options.is_empty() {
             self.selected_agent = (self.selected_agent + 1) % self.agent_options.len();
-            // Reset model selection when agent changes
             self.selected_model = 0;
         }
     }
@@ -92,6 +126,16 @@ impl LaunchDialogState {
                 self.selected_model = (self.selected_model + 1) % models.len();
             }
         }
+    }
+
+    /// Toggle session mode.
+    pub fn next_session_mode(&mut self) {
+        self.session_mode = self.session_mode.next();
+    }
+
+    /// Toggle skip permissions.
+    pub fn toggle_skip_permissions(&mut self) {
+        self.skip_permissions = !self.skip_permissions;
     }
 
     /// Get the currently selected agent option label.
@@ -121,7 +165,14 @@ impl LaunchDialogState {
     }
 }
 
-/// Return a style with REVERSED modifier when focused, or the base color otherwise.
+fn field_style(focused: bool) -> Style {
+    if focused {
+        Style::new().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    }
+}
+
 fn button_style(focused: bool, color: Color) -> Style {
     if focused {
         Style::new()
@@ -133,93 +184,109 @@ fn button_style(focused: bool, color: Color) -> Style {
     }
 }
 
-/// Render the launch dialog as a centered modal.
+/// Render the launch dialog.
 ///
 /// The caller is responsible for centering the `area` if needed.
-/// This function renders directly into the given area.
 pub fn render(buf: &mut Buffer, area: Rect, state: &LaunchDialogState) {
     Clear.render(area, buf);
-
-    let popup_area = area;
 
     let block = Block::default()
         .title(" Launch Agent ")
         .borders(Borders::ALL)
         .style(Style::new().bg(Color::Black));
 
-    let inner = block.inner(popup_area);
-    block.render(popup_area, buf);
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    if inner.height < 7 || inner.width < 30 {
+        return;
+    }
 
     let rows = Layout::vertical([
         Constraint::Length(1), // Agent selector
         Constraint::Length(1), // Model selector
         Constraint::Length(1), // Branch input
+        Constraint::Length(1), // Session mode
+        Constraint::Length(1), // Skip permissions
         Constraint::Length(1), // Spacer
         Constraint::Length(1), // Buttons
     ])
     .split(inner);
 
+    let label_w = 10;
+
     // Agent selector
-    let agent_style = if state.focused_field == DialogField::Agent {
-        Style::new().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
     Paragraph::new(Line::from(vec![
-        Span::styled("Agent:   ", Style::new().fg(Color::DarkGray)),
+        Span::styled(format!("{:<label_w$}", "Agent:"), Style::new().fg(Color::DarkGray)),
         Span::styled(
             format!("[{} \u{25bc}]", state.selected_agent_label()),
-            agent_style,
+            field_style(state.focused_field == DialogField::Agent),
         ),
     ]))
     .render(rows[0], buf);
 
     // Model selector
-    let model_style = if state.focused_field == DialogField::Model {
-        Style::new().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
     Paragraph::new(Line::from(vec![
-        Span::styled("Model:   ", Style::new().fg(Color::DarkGray)),
+        Span::styled(format!("{:<label_w$}", "Model:"), Style::new().fg(Color::DarkGray)),
         Span::styled(
             format!("[{} \u{25bc}]", state.selected_model_label()),
-            model_style,
+            field_style(state.focused_field == DialogField::Model),
         ),
     ]))
     .render(rows[1], buf);
 
     // Branch input
-    let branch_style = if state.focused_field == DialogField::Branch {
-        Style::new().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
     let branch_display = if state.branch_input.is_empty() {
         "<branch name>"
     } else {
         &state.branch_input
     };
     Paragraph::new(Line::from(vec![
-        Span::styled("Branch:  ", Style::new().fg(Color::DarkGray)),
-        Span::styled(format!("[{}]", branch_display), branch_style),
+        Span::styled(format!("{:<label_w$}", "Branch:"), Style::new().fg(Color::DarkGray)),
+        Span::styled(
+            format!("[{}]", branch_display),
+            field_style(state.focused_field == DialogField::Branch),
+        ),
     ]))
     .render(rows[2], buf);
 
-    // Buttons
+    // Session mode
     Paragraph::new(Line::from(vec![
-        Span::raw("       "),
+        Span::styled(format!("{:<label_w$}", "Session:"), Style::new().fg(Color::DarkGray)),
         Span::styled(
-            " Launch ",
-            button_style(state.focused_field == DialogField::LaunchButton, Color::Green),
+            format!("[{} \u{25bc}]", state.session_mode.label()),
+            field_style(state.focused_field == DialogField::SessionMode),
         ),
-        Span::raw("  "),
+    ]))
+    .render(rows[3], buf);
+
+    // Skip permissions toggle
+    let check = if state.skip_permissions { "x" } else { " " };
+    Paragraph::new(Line::from(vec![
+        Span::styled(format!("{:<label_w$}", "Perms:"), Style::new().fg(Color::DarkGray)),
         Span::styled(
-            " Cancel ",
-            button_style(state.focused_field == DialogField::CancelButton, Color::Red),
+            format!("[{check}] Skip Permissions"),
+            field_style(state.focused_field == DialogField::SkipPermissions),
         ),
     ]))
     .render(rows[4], buf);
+
+    // Buttons
+    if rows.len() > 6 {
+        Paragraph::new(Line::from(vec![
+            Span::raw("       "),
+            Span::styled(
+                " Launch ",
+                button_style(state.focused_field == DialogField::LaunchButton, Color::Green),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                " Cancel ",
+                button_style(state.focused_field == DialogField::CancelButton, Color::Red),
+            ),
+        ]))
+        .render(rows[6], buf);
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +301,10 @@ mod tests {
         assert_eq!(state.focused_field, DialogField::Model);
         state.focus_next();
         assert_eq!(state.focused_field, DialogField::Branch);
+        state.focus_next();
+        assert_eq!(state.focused_field, DialogField::SessionMode);
+        state.focus_next();
+        assert_eq!(state.focused_field, DialogField::SkipPermissions);
         state.focus_next();
         assert_eq!(state.focused_field, DialogField::LaunchButton);
         state.focus_next();
@@ -261,6 +332,8 @@ mod tests {
         assert_eq!(state.selected_agent, 0);
         assert_eq!(state.selected_model, 0);
         assert!(state.branch_input.is_empty());
+        assert_eq!(state.session_mode, DialogSessionMode::Normal);
+        assert!(!state.skip_permissions);
         assert_eq!(state.focused_field, DialogField::Agent);
         assert_eq!(state.selected_agent_label(), "Claude Code");
         assert_eq!(state.selected_model_label(), "opus");
@@ -281,7 +354,6 @@ mod tests {
     #[test]
     fn test_next_model_cycles() {
         let mut state = LaunchDialogState::default();
-        // Claude models: opus, sonnet, haiku
         assert_eq!(state.selected_model_label(), "opus");
         state.next_model();
         assert_eq!(state.selected_model_label(), "sonnet");
@@ -294,9 +366,9 @@ mod tests {
     #[test]
     fn test_agent_change_resets_model() {
         let mut state = LaunchDialogState::default();
-        state.next_model(); // sonnet
+        state.next_model();
         assert_eq!(state.selected_model_label(), "sonnet");
-        state.next_agent(); // Switch to Codex
+        state.next_agent();
         assert_eq!(state.selected_model, 0);
         assert_eq!(state.selected_model_label(), "o3");
     }
@@ -310,17 +382,36 @@ mod tests {
     #[test]
     fn test_model_options_per_agent() {
         let mut state = LaunchDialogState::default();
-        // Claude: 3 models
         assert_eq!(state.model_options[0].len(), 3);
-        // Codex: 2 models
         state.next_agent();
         assert_eq!(state.selected_model_label(), "o3");
         state.next_model();
         assert_eq!(state.selected_model_label(), "o4-mini");
-        // Gemini: 2 models
         state.next_agent();
         assert_eq!(state.selected_model_label(), "gemini-2.5-pro");
         state.next_model();
         assert_eq!(state.selected_model_label(), "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn test_session_mode_cycling() {
+        let mut state = LaunchDialogState::default();
+        assert_eq!(state.session_mode, DialogSessionMode::Normal);
+        state.next_session_mode();
+        assert_eq!(state.session_mode, DialogSessionMode::Continue);
+        state.next_session_mode();
+        assert_eq!(state.session_mode, DialogSessionMode::Resume);
+        state.next_session_mode();
+        assert_eq!(state.session_mode, DialogSessionMode::Normal);
+    }
+
+    #[test]
+    fn test_skip_permissions_toggle() {
+        let mut state = LaunchDialogState::default();
+        assert!(!state.skip_permissions);
+        state.toggle_skip_permissions();
+        assert!(state.skip_permissions);
+        state.toggle_skip_permissions();
+        assert!(!state.skip_permissions);
     }
 }

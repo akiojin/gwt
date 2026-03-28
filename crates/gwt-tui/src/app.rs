@@ -263,7 +263,7 @@ impl App {
                     ui::status_bar::render(buf, layout[2], &self.state);
                     // Overlay launch dialog — fixed size, centered on full area
                     let dialog_w = 50u16.min(area.width.saturating_sub(4));
-                    let dialog_h = 9u16.min(area.height.saturating_sub(4));
+                    let dialog_h = 11u16.min(area.height.saturating_sub(4));
                     let dialog_x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
                     let dialog_y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
                     let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
@@ -490,8 +490,13 @@ impl App {
                         self.state.management.launch_dialog.next_model();
                     }
                     DialogField::Branch => {
-                        // Enter on branch field moves to Launch button
                         self.state.management.launch_dialog.focus_next();
+                    }
+                    DialogField::SessionMode => {
+                        self.state.management.launch_dialog.next_session_mode();
+                    }
+                    DialogField::SkipPermissions => {
+                        self.state.management.launch_dialog.toggle_skip_permissions();
                     }
                 }
             }
@@ -506,6 +511,18 @@ impl App {
                 if *field == DialogField::Model =>
             {
                 self.state.management.launch_dialog.next_model();
+            }
+            // Session mode field: Left/Right or Space to cycle
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter
+                if *field == DialogField::SessionMode =>
+            {
+                self.state.management.launch_dialog.next_session_mode();
+            }
+            // Skip permissions field: Space or Enter to toggle
+            KeyCode::Char(' ') | KeyCode::Enter
+                if *field == DialogField::SkipPermissions =>
+            {
+                self.state.management.launch_dialog.toggle_skip_permissions();
             }
             // Branch field: character input
             KeyCode::Char(c) if *field == DialogField::Branch => {
@@ -538,10 +555,24 @@ impl App {
 
         let selected_model = dialog.selected_model_name().map(|s| s.to_string());
 
+        let session_mode = match dialog.session_mode {
+            crate::ui::management::launch_dialog::DialogSessionMode::Normal => {
+                gwt_core::agent::launch::SessionMode::Normal
+            }
+            crate::ui::management::launch_dialog::DialogSessionMode::Continue => {
+                gwt_core::agent::launch::SessionMode::Continue
+            }
+            crate::ui::management::launch_dialog::DialogSessionMode::Resume => {
+                gwt_core::agent::launch::SessionMode::Resume
+            }
+        };
+
         let config = AgentLaunchBuilder::new(agent_id, &self.repo_root)
             .branch_name(&branch)
             .with_os_env(std::env::vars().collect())
             .model(selected_model.as_deref())
+            .session_mode(session_mode)
+            .skip_permissions(dialog.skip_permissions)
             .interactive(true)
             .auto_worktree(!branch.is_empty() && branch != "main")
             .repo_root(&self.repo_root)
