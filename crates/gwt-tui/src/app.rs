@@ -70,7 +70,7 @@ impl App {
                 TuiEvent::Key(key) => self.handle_key(key)?,
                 TuiEvent::Resize(w, h) => self.handle_resize(w, h)?,
                 TuiEvent::PtyOutput { pane_id, data } => self.handle_pty_output(&pane_id, &data),
-                TuiEvent::Tick => {}
+                TuiEvent::Tick => self.poll_pane_status(),
             }
 
             if self.should_quit {
@@ -261,9 +261,12 @@ impl App {
                     ui::tab_bar::render(buf, layout[0], &self.state);
                     self.render_terminal_area(buf, layout[1]);
                     ui::status_bar::render(buf, layout[2], &self.state);
-                    // Overlay launch dialog — fixed size, centered on full area
+                    // Overlay launch dialog — dynamic height, centered
                     let dialog_w = 50u16.min(area.width.saturating_sub(4));
-                    let dialog_h = 11u16.min(area.height.saturating_sub(4));
+                    let content_rows =
+                        self.state.management.launch_dialog.visible_row_count();
+                    let dialog_h =
+                        (content_rows + 2).min(area.height.saturating_sub(4)); // +2 for border
                     let dialog_x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
                     let dialog_y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
                     let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
@@ -385,7 +388,10 @@ impl App {
         match action {
             KeyAction::Quit => self.should_quit = true,
             KeyAction::NewShellWindow => self.spawn_shell_tab()?,
-            KeyAction::NewAgentWindow => self.state.mode = AppMode::LaunchDialog,
+            KeyAction::NewAgentWindow => {
+                self.load_launch_defaults();
+                self.state.mode = AppMode::LaunchDialog;
+            }
             KeyAction::NextWindow => self.state.next_tab(),
             KeyAction::PrevWindow => self.state.prev_tab(),
             KeyAction::SwitchTab(n) => self.state.set_active_tab(n),
@@ -445,6 +451,7 @@ impl App {
                 self.state.mode = AppMode::Normal;
             }
             KeyCode::Char('n') => {
+                self.load_launch_defaults();
                 self.state.mode = AppMode::LaunchDialog;
             }
             KeyCode::Char('s') => {
@@ -462,74 +469,113 @@ impl App {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::ui::management::launch_dialog::DialogField;
 
-        let field = &self.state.management.launch_dialog.focused_field;
+        let field = self.state.management.launch_dialog.focused_field.clone();
 
         match key.code {
             KeyCode::Esc => {
                 self.state.management.launch_dialog = Default::default();
                 self.state.mode = AppMode::Normal;
             }
-            KeyCode::Tab => self.state.management.launch_dialog.focus_next(),
-            KeyCode::Enter => {
-                match field {
-                    DialogField::CancelButton => {
-                        self.state.management.launch_dialog = Default::default();
-                        self.state.mode = AppMode::Normal;
-                    }
-                    DialogField::LaunchButton => {
-                        self.launch_agent_from_dialog()?;
-                        self.state.management.launch_dialog = Default::default();
-                        self.state.mode = AppMode::Normal;
-                    }
-                    DialogField::Agent => {
-                        // Enter on agent field cycles agent
-                        self.state.management.launch_dialog.next_agent();
-                    }
-                    DialogField::Model => {
-                        // Enter on model field cycles model
-                        self.state.management.launch_dialog.next_model();
-                    }
-                    DialogField::Branch => {
-                        self.state.management.launch_dialog.focus_next();
-                    }
-                    DialogField::SessionMode => {
-                        self.state.management.launch_dialog.next_session_mode();
-                    }
-                    DialogField::SkipPermissions => {
-                        self.state.management.launch_dialog.toggle_skip_permissions();
-                    }
+            KeyCode::Tab => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.state.management.launch_dialog.focus_prev();
+                } else {
+                    self.state.management.launch_dialog.focus_next();
                 }
             }
-            // Agent field: Left/Right or Space to cycle agent
+            KeyCode::BackTab => {
+                self.state.management.launch_dialog.focus_prev();
+            }
+            KeyCode::Enter => match field {
+                DialogField::CancelButton => {
+                    self.state.management.launch_dialog = Default::default();
+                    self.state.mode = AppMode::Normal;
+                }
+                DialogField::LaunchButton => {
+                    self.launch_agent_from_dialog()?;
+                    self.state.management.launch_dialog = Default::default();
+                    self.state.mode = AppMode::Normal;
+                }
+                DialogField::Agent => self.state.management.launch_dialog.next_agent(),
+                DialogField::AgentVersion => self.state.management.launch_dialog.next_version(),
+                DialogField::Model => self.state.management.launch_dialog.next_model(),
+                DialogField::Branch | DialogField::ExtraArgs | DialogField::ResumeSessionId => {
+                    self.state.management.launch_dialog.focus_next();
+                }
+                DialogField::SessionMode => {
+                    self.state.management.launch_dialog.next_session_mode();
+                }
+                DialogField::SkipPermissions => {
+                    self.state.management.launch_dialog.toggle_skip_permissions();
+                }
+                DialogField::FastMode => {
+                    self.state.management.launch_dialog.toggle_fast_mode();
+                }
+                DialogField::ReasoningLevel => {
+                    self.state.management.launch_dialog.next_reasoning_level();
+                }
+            },
+            // Selector fields: Left/Right/Space to cycle
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if *field == DialogField::Agent =>
+                if field == DialogField::Agent =>
             {
                 self.state.management.launch_dialog.next_agent();
             }
-            // Model field: Left/Right or Space to cycle model
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if *field == DialogField::Model =>
+                if field == DialogField::AgentVersion =>
+            {
+                self.state.management.launch_dialog.next_version();
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if field == DialogField::Model =>
             {
                 self.state.management.launch_dialog.next_model();
             }
-            // Session mode field: Left/Right or Space to cycle
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter
-                if *field == DialogField::SessionMode =>
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if field == DialogField::SessionMode =>
             {
                 self.state.management.launch_dialog.next_session_mode();
             }
-            // Skip permissions field: Space or Enter to toggle
-            KeyCode::Char(' ') | KeyCode::Enter
-                if *field == DialogField::SkipPermissions =>
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if field == DialogField::ReasoningLevel =>
             {
+                self.state.management.launch_dialog.next_reasoning_level();
+            }
+            // Toggle fields: Space
+            KeyCode::Char(' ') if field == DialogField::SkipPermissions => {
                 self.state.management.launch_dialog.toggle_skip_permissions();
             }
-            // Branch field: character input
-            KeyCode::Char(c) if *field == DialogField::Branch => {
+            KeyCode::Char(' ') if field == DialogField::FastMode => {
+                self.state.management.launch_dialog.toggle_fast_mode();
+            }
+            // Text input fields: Branch
+            KeyCode::Char(c) if field == DialogField::Branch => {
                 self.state.management.launch_dialog.branch_input.push(c);
             }
-            KeyCode::Backspace if *field == DialogField::Branch => {
+            KeyCode::Backspace if field == DialogField::Branch => {
                 self.state.management.launch_dialog.branch_input.pop();
+            }
+            // Text input fields: ExtraArgs
+            KeyCode::Char(c) if field == DialogField::ExtraArgs => {
+                self.state.management.launch_dialog.extra_args.push(c);
+            }
+            KeyCode::Backspace if field == DialogField::ExtraArgs => {
+                self.state.management.launch_dialog.extra_args.pop();
+            }
+            // Text input fields: ResumeSessionId
+            KeyCode::Char(c) if field == DialogField::ResumeSessionId => {
+                self.state
+                    .management
+                    .launch_dialog
+                    .resume_session_id
+                    .push(c);
+            }
+            KeyCode::Backspace if field == DialogField::ResumeSessionId => {
+                self.state
+                    .management
+                    .launch_dialog
+                    .resume_session_id
+                    .pop();
             }
             _ => {}
         }
@@ -539,13 +585,11 @@ impl App {
     fn launch_agent_from_dialog(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let dialog = &self.state.management.launch_dialog;
 
-        // Map dialog selection to agent_id
-        let agent_id = match dialog.selected_agent {
-            0 => "claude",
-            1 => "codex",
-            2 => "gemini",
-            _ => "claude",
-        };
+        // Save defaults before launching
+        let defaults = dialog.to_defaults();
+        crate::config::launch_defaults::save_defaults(&defaults);
+
+        let agent_id = dialog.current_agent_id().to_string();
 
         let branch = if dialog.branch_input.is_empty() {
             "main".to_string()
@@ -567,16 +611,48 @@ impl App {
             }
         };
 
-        let config = AgentLaunchBuilder::new(agent_id, &self.repo_root)
+        let resume_session_id = if dialog.resume_session_id.is_empty() {
+            None
+        } else {
+            Some(dialog.resume_session_id.clone())
+        };
+
+        // Parse extra_args (space-separated)
+        let extra_args: Vec<String> = dialog
+            .extra_args
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+
+        let reasoning_label = dialog.selected_reasoning_label().to_string();
+
+        let mut builder = AgentLaunchBuilder::new(&agent_id, &self.repo_root)
             .branch_name(&branch)
             .with_os_env(std::env::vars().collect())
             .model(selected_model.as_deref())
             .session_mode(session_mode)
             .skip_permissions(dialog.skip_permissions)
+            .fast_mode(dialog.fast_mode)
+            .reasoning_level(Some(&reasoning_label))
+            .agent_version(dialog.version_for_builder())
+            .extra_args(extra_args)
             .interactive(true)
             .auto_worktree(!branch.is_empty() && branch != "main")
-            .repo_root(&self.repo_root)
-            .build()?;
+            .repo_root(&self.repo_root);
+
+        if let Some(ref id) = resume_session_id {
+            builder = builder.resume_session_id(id);
+        }
+
+        // Parse env_overrides (KEY=VALUE per line)
+        for line in dialog.env_overrides.lines() {
+            let line = line.trim();
+            if let Some((k, v)) = line.split_once('=') {
+                builder = builder.env_var(k.trim(), v.trim());
+            }
+        }
+
+        let config = builder.build()?;
 
         let agent_name = config.agent_name.clone();
         let color = config.agent_color;
@@ -608,6 +684,12 @@ impl App {
         self.state.layout_trees.insert(pane_id, tree);
 
         Ok(())
+    }
+
+    fn load_launch_defaults(&mut self) {
+        let defaults = crate::config::launch_defaults::load_defaults();
+        self.state.management.launch_dialog = Default::default();
+        self.state.management.launch_dialog.apply_defaults(&defaults);
     }
 
     fn sync_management_state(&mut self) {
@@ -643,7 +725,8 @@ impl App {
     fn write_to_focused_pty(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(pane_id) = self.state.focused_pane_id() {
             if let Some(pane) = self.pane_manager.pane_mut_by_id(&pane_id) {
-                pane.write_input(data)?;
+                // Ignore errors — PTY may have closed (agent/shell exited)
+                let _ = pane.write_input(data);
             }
         }
         Ok(())
@@ -666,6 +749,29 @@ impl App {
         }
         if let Some(pane) = self.pane_manager.pane_mut_by_id(pane_id) {
             let _ = pane.process_bytes(data);
+        }
+    }
+
+    fn poll_pane_status(&mut self) {
+        use gwt_core::terminal::pane::PaneStatus;
+
+        for tab in &mut self.state.tabs {
+            if tab.status != PaneStatusIndicator::Running {
+                continue;
+            }
+            if let Some(pane) = self.pane_manager.pane_mut_by_id(&tab.pane_id) {
+                if let Ok(status) = pane.check_status() {
+                    match status {
+                        PaneStatus::Completed(code) => {
+                            tab.status = PaneStatusIndicator::Completed(*code);
+                        }
+                        PaneStatus::Error(msg) => {
+                            tab.status = PaneStatusIndicator::Error(msg.clone());
+                        }
+                        PaneStatus::Running => {}
+                    }
+                }
+            }
         }
     }
 }

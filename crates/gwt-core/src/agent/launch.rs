@@ -175,6 +175,10 @@ pub struct AgentLaunchBuilder {
     interactive: bool,
     auto_worktree: bool,
     repo_root: Option<PathBuf>,
+    fast_mode: bool,
+    reasoning_level: Option<String>,
+    agent_version: Option<String>,
+    extra_args: Vec<String>,
 }
 
 impl AgentLaunchBuilder {
@@ -194,6 +198,10 @@ impl AgentLaunchBuilder {
             interactive: false,
             auto_worktree: false,
             repo_root: None,
+            fast_mode: false,
+            reasoning_level: None,
+            agent_version: None,
+            extra_args: Vec::new(),
         }
     }
 
@@ -263,6 +271,30 @@ impl AgentLaunchBuilder {
         self
     }
 
+    /// Enable or disable Codex fast mode (service_tier=fast).
+    pub fn fast_mode(mut self, fast: bool) -> Self {
+        self.fast_mode = fast;
+        self
+    }
+
+    /// Set the reasoning level for Codex (`low`, `medium`, `high`, `xhigh`).
+    pub fn reasoning_level(mut self, level: Option<&str>) -> Self {
+        self.reasoning_level = level.map(|s| s.to_string());
+        self
+    }
+
+    /// Set the agent version (`None` = installed, `Some("latest")`, `Some("1.2.3")`).
+    pub fn agent_version(mut self, version: Option<&str>) -> Self {
+        self.agent_version = version.map(|s| s.to_string());
+        self
+    }
+
+    /// Append extra CLI arguments to the agent command.
+    pub fn extra_args(mut self, args: Vec<String>) -> Self {
+        self.extra_args = args;
+        self
+    }
+
     /// Build the final [`BuiltinLaunchConfig`].
     ///
     /// Returns [`GwtError::AgentNotFound`] when the *agent_id* is unknown.
@@ -276,6 +308,9 @@ impl AgentLaunchBuilder {
         let mut env_vars = self.collect_env_vars();
         let (command, mut args) = self.resolve_command_and_args(def);
         self.append_agent_args(def, &mut args);
+
+        // Append user-supplied extra arguments
+        args.extend(self.extra_args.iter().cloned());
 
         // Agent-specific environment variables
         if self.agent_id == "claude" {
@@ -359,12 +394,31 @@ impl AgentLaunchBuilder {
         env_vars
     }
 
-    /// Resolve command with bunx/npx fallback.
+    /// Resolve command with bunx/npx fallback and agent_version support.
     fn resolve_command_and_args(&self, def: &AgentDef) -> (String, Vec<String>) {
+        // If agent_version is set to a non-installed value, use bunx/npx
+        if let Some(ref ver) = self.agent_version {
+            if !ver.is_empty() && ver != "installed" {
+                let runner = if which::which("bunx").is_ok() {
+                    "bunx"
+                } else if which::which("npx").is_ok() {
+                    "npx"
+                } else {
+                    "bunx"
+                };
+                let pkg = if ver == "latest" {
+                    def.bunx_package.to_string()
+                } else {
+                    format!("{}@{}", def.bunx_package, ver)
+                };
+                return (runner.to_string(), vec![pkg]);
+            }
+        }
+
+        // Default: resolve installed command with bunx/npx fallback
         let command = which::which(def.command)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| {
-                // Try bunx/npx fallback
                 if which::which("bunx").is_ok() {
                     "bunx".to_string()
                 } else if which::which("npx").is_ok() {
@@ -424,12 +478,22 @@ impl AgentLaunchBuilder {
                     }
                     SessionMode::Normal => {}
                 }
-                if let Some(ref model) = self.model {
-                    args.push("-m".to_string());
-                    args.push(model.clone());
-                }
+
+                // Delegate model/reasoning/fast/sandbox to codex_default_args
+                args.extend(crate::agent::codex::codex_default_args(
+                    self.model.as_deref(),
+                    self.reasoning_level.as_deref(),
+                    None,
+                    self.skip_permissions,
+                    self.fast_mode,
+                    true,
+                    false,
+                ));
+
                 if self.skip_permissions {
-                    args.push("--full-auto".to_string());
+                    args.push(
+                        crate::agent::codex::codex_skip_permissions_flag(None).to_string(),
+                    );
                 }
             }
             "gemini" => {
@@ -698,8 +762,8 @@ mod tests {
             .model(Some("o3"))
             .build()
             .expect("build should succeed");
-        assert!(config.args.contains(&"-m".to_string()));
-        assert!(config.args.contains(&"o3".to_string()));
+        // codex_default_args uses --model= format
+        assert!(config.args.contains(&"--model=o3".to_string()));
     }
 
     #[test]
@@ -708,7 +772,10 @@ mod tests {
             .skip_permissions(true)
             .build()
             .expect("build should succeed");
-        assert!(config.args.contains(&"--full-auto".to_string()));
+        // Now delegated to codex_skip_permissions_flag()
+        assert!(config
+            .args
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     }
 
     #[test]
