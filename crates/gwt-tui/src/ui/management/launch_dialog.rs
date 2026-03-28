@@ -121,23 +121,6 @@ impl LaunchDialogState {
     }
 }
 
-/// Compute a centered popup rect (percentage of parent).
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ])
-    .split(area);
-
-    Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ])
-    .split(vertical[1])[1]
-}
-
 /// Return a style with REVERSED modifier when focused, or the base color otherwise.
 fn button_style(focused: bool, color: Color) -> Style {
     if focused {
@@ -151,10 +134,13 @@ fn button_style(focused: bool, color: Color) -> Style {
 }
 
 /// Render the launch dialog as a centered modal.
+///
+/// The caller is responsible for centering the `area` if needed.
+/// This function renders directly into the given area.
 pub fn render(buf: &mut Buffer, area: Rect, state: &LaunchDialogState) {
-    let popup_area = centered_rect(60, 30, area);
+    Clear.render(area, buf);
 
-    Clear.render(popup_area, buf);
+    let popup_area = area;
 
     let block = Block::default()
         .title(" Launch Agent ")

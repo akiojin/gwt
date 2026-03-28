@@ -261,10 +261,15 @@ impl App {
                     ui::tab_bar::render(buf, layout[0], &self.state);
                     self.render_terminal_area(buf, layout[1]);
                     ui::status_bar::render(buf, layout[2], &self.state);
-                    // Overlay launch dialog
+                    // Overlay launch dialog — fixed size, centered on full area
+                    let dialog_w = 50u16.min(area.width.saturating_sub(4));
+                    let dialog_h = 9u16.min(area.height.saturating_sub(4));
+                    let dialog_x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+                    let dialog_y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+                    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
                     ui::management::launch_dialog::render(
                         buf,
-                        centered_rect(60, 40, area),
+                        dialog_area,
                         &self.state.management.launch_dialog,
                     );
                 }
