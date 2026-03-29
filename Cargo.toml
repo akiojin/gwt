@@ -28,7 +28,7 @@ semver = "1"
 # Self-update payload extraction
 flate2 = "1.0"
 tar = "0.4"
-zip = "8.3"
+zip = "8.4"
 
 # Git operations
 gix = { version = "0.80", default-features = false, features = [
