@@ -1,3 +1,5 @@
+> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here.
+
 # Assistant Send Interrupt and Tab Queue
 
 ## Background

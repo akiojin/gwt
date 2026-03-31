@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ### 背景
 アプリケーション設定を管理する。現状のフラット構造を維持しつつ、新規セクション（Assistant Mode設定、Docker設定、Voice設定）を追加。キーボードショートカットもこのSPEC内で管理する。Studio時代の #1548（HUD＆UIシステム）の設定関連機能を現行スタックで再定義。
 

@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ### 背景
 セッションの保存・復元・永続化機能を提供する。~/.gwt/ディレクトリ管理、config.toml、セッションデータを統合管理する。Assistant Modeの記憶もプロジェクト単位で永続化する。Studio時代の #1542（データ永続化レイヤー）と #1545（エージェント管理・セッション）の機能概念を現行スタックで再定義。
 

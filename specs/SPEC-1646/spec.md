@@ -1,3 +1,5 @@
+> **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC requires adaptation for the gwt-tui migration. GUI-specific references (gwt-tauri, Svelte, xterm.js) should be read as gwt-tui equivalents. See SPEC-1776 for the migration plan.
+
 ### 背景
 AIエージェントの検出・起動・ライフサイクル・バージョン管理を行う。複数エージェント（Claude Code, Codex, Gemini, OpenCode, Copilot）に対応。エージェント異常はAssistant Modeの監視対象。Studio時代の #1545（エージェント管理・セッション）の機能概念を現行スタックで再定義。
 

@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ### 背景
 プロジェクトファイルのベクトル検索機能を提供する。Studio時代の #1554（プロジェクトインデックス＆検索）の機能概念を現行スタックで再定義。
 

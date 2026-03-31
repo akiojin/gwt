@@ -1,3 +1,5 @@
+> **⚠️ DEPRECATED (SPEC-1776)**: This SPEC describes GUI-only functionality (Tauri/Svelte/xterm.js) that has been superseded by the gwt-tui migration. The gwt-tui equivalent is defined in SPEC-1776.
+
 ### 背景
 MergeDialog、ReviewDialog、PRステータス表示、チェックスイート監視を包含するPR管理機能。操作フローはAssistantがAgentに指示する形式。Studio時代の #1544（GitHub連携）のPR関連機能を分離して再定義する。
 

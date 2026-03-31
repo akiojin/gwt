@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ### 背景
 GitHub Issue/Spec 探索、PR 管理、Release/Tag 表示、VersionHistoryPanel、gh CLI 連携を包含する GitHub 連携機能。Studio 時代の #1544（GitHub連携）の機能概念を現行スタックで再定義する。
 

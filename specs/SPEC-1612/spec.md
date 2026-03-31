@@ -1,3 +1,5 @@
+> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here.
+
 ### 背景
 
 PR #1617 で Paste / Voice の terminal action は `TerminalView.svelte` のオーバーレイに統合済みであり、現在の実装は Lucide アイコン、クリップボード画像の staging、voice toggle を提供している。

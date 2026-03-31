@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ### 背景
 GWT内で全面的なDocker管理機能を提供する。コンテナライフサイクル、リソース監視、ネットワーク設定を包含。docker-compose検出、サービス選択、エージェントDocker内実行は実装済み。Studio時代の #1552（Docker/DevContainer サポート）の機能概念を現行スタックで再定義。
 
