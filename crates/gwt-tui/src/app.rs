@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::prelude::*;
 use ratatui::Terminal;
 
@@ -14,6 +16,7 @@ use crate::event::{self, EventLoop, TuiEvent};
 use crate::input::keybind::{self, KeyAction, PrefixState};
 use crate::message::Message;
 use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model};
+use crate::screens::{LogsMessage, SettingsMessage};
 use crate::widgets;
 
 /// Tick interval for background polling.
@@ -72,26 +75,24 @@ pub fn update(model: &mut Model, msg: Message) {
                     // Phase 2: forward to active pane
                 }
                 ActiveLayer::Management => {
-                    let _msg = match model.management_tab {
+                    let sub_msg = match model.management_tab {
                         ManagementTab::Branches => {
-                            crate::screens::branches::handle_key(&key)
-                                .map(Message::BranchesMsg)
+                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
                         }
                         ManagementTab::Issues => {
-                            crate::screens::issues::handle_key(&key)
-                                .map(Message::IssuesMsg)
+                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
                         }
                         ManagementTab::Settings => {
-                            crate::screens::settings::handle_key(&key)
+                            crate::screens::settings::handle_key(&model.settings_state, &key)
                                 .map(Message::SettingsMsg)
                         }
                         ManagementTab::Logs => {
-                            crate::screens::logs::handle_key(&key)
+                            crate::screens::logs::handle_key(&model.logs_state, &key)
                                 .map(Message::LogsMsg)
                         }
                     };
                     // Recursively apply sub-message if any
-                    if let Some(sub_msg) = _msg {
+                    if let Some(sub_msg) = sub_msg {
                         update(model, sub_msg);
                     }
                 }
@@ -126,11 +127,11 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::IssuesMsg(_msg) => {
             // Phase 2: handle issues messages
         }
-        Message::SettingsMsg(_msg) => {
-            // Phase 2: handle settings messages
+        Message::SettingsMsg(msg) => {
+            handle_settings_msg(model, msg);
         }
-        Message::LogsMsg(_msg) => {
-            // Phase 2: handle logs messages
+        Message::LogsMsg(msg) => {
+            handle_logs_msg(model, msg);
         }
     }
 }
@@ -144,7 +145,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     let area = frame.area();
     let layout = Layout::vertical([
         Constraint::Length(1), // Tab bar
-        Constraint::Min(1),   // Main area
+        Constraint::Min(1),    // Main area
         Constraint::Length(1), // Status bar
     ])
     .split(area);
@@ -159,7 +160,8 @@ pub fn view(model: &Model, frame: &mut Frame) {
         ActiveLayer::Main => {
             if model.session_tabs.is_empty() {
                 // Placeholder when no sessions
-                let center = centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
+                let center =
+                    centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
                 let text_area = centered_rect(60, 3, layout[1]);
                 ratatui::widgets::Widget::render(center, text_area, buf);
             } else {
@@ -172,8 +174,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
         ActiveLayer::Management => match model.management_tab {
             ManagementTab::Branches => crate::screens::branches::render(buf, layout[1]),
             ManagementTab::Issues => crate::screens::issues::render(buf, layout[1]),
-            ManagementTab::Settings => crate::screens::settings::render(buf, layout[1]),
-            ManagementTab::Logs => crate::screens::logs::render(buf, layout[1]),
+            ManagementTab::Settings => {
+                crate::screens::settings::render(&model.settings_state, buf, layout[1]);
+            }
+            ManagementTab::Logs => {
+                crate::screens::logs::render(&model.logs_state, buf, layout[1]);
+            }
         },
     }
 
@@ -231,6 +237,267 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)
+}
+
+// ---------------------------------------------------------------------------
+// Settings message handler
+// ---------------------------------------------------------------------------
+
+fn handle_settings_msg(model: &mut Model, msg: SettingsMessage) {
+    let state = &mut model.settings_state;
+    match msg {
+        SettingsMessage::Refresh => {
+            state.load_settings();
+        }
+        SettingsMessage::NextCategory => state.next_category(),
+        SettingsMessage::PrevCategory => state.prev_category(),
+        SettingsMessage::SelectNext => state.select_next(),
+        SettingsMessage::SelectPrev => state.select_prev(),
+        SettingsMessage::Edit => {
+            if state.category == crate::screens::settings::SettingsCategory::CustomAgents {
+                if state.is_add_agent_selected() {
+                    state.enter_add_mode();
+                } else {
+                    state.enter_edit_mode();
+                }
+            }
+        }
+        SettingsMessage::Delete => {
+            if state.category == crate::screens::settings::SettingsCategory::CustomAgents {
+                state.enter_delete_mode();
+            }
+        }
+        SettingsMessage::Save => {
+            if matches!(
+                state.custom_agent_mode,
+                crate::screens::settings::CustomAgentMode::Add
+                    | crate::screens::settings::CustomAgentMode::Edit(_)
+            ) {
+                if let Err(e) = state.save_agent() {
+                    state.error_message = Some(e.to_string());
+                }
+            } else if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::Add
+                    | crate::screens::settings::ProfileMode::Edit(_)
+            ) {
+                if let Err(e) = state.save_profile() {
+                    state.error_message = Some(e.to_string());
+                }
+            }
+        }
+        SettingsMessage::Cancel => {
+            if state.is_form_mode() || state.is_delete_mode() {
+                state.cancel_mode();
+            } else if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::ConfirmDelete(_)
+            ) {
+                state.cancel_profile_mode();
+            } else if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::EnvEdit(_)
+            ) {
+                // Save env edits before leaving
+                let _ = state.persist_env_edit();
+                state.cancel_profile_mode();
+            } else if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::Add
+                    | crate::screens::settings::ProfileMode::Edit(_)
+            ) {
+                state.cancel_profile_mode();
+            }
+        }
+        SettingsMessage::FormChar(c) => {
+            if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::Add
+                    | crate::screens::settings::ProfileMode::Edit(_)
+            ) {
+                state.profile_form.insert_char(c);
+            } else if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::EnvEdit(_)
+            ) {
+                handle_env_edit_char(state, c);
+            } else {
+                state.agent_form.insert_char(c);
+            }
+        }
+        SettingsMessage::FormBackspace => {
+            if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::Add
+                    | crate::screens::settings::ProfileMode::Edit(_)
+            ) {
+                state.profile_form.delete_char();
+            } else if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::EnvEdit(_)
+            ) {
+                handle_env_edit_backspace(state);
+            } else {
+                state.agent_form.delete_char();
+            }
+        }
+        SettingsMessage::FormNextField => {
+            if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::Add
+                    | crate::screens::settings::ProfileMode::Edit(_)
+            ) {
+                state.profile_form.next_field();
+            } else {
+                state.agent_form.next_field();
+            }
+        }
+        SettingsMessage::FormPrevField => {
+            if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::Add
+                    | crate::screens::settings::ProfileMode::Edit(_)
+            ) {
+                state.profile_form.prev_field();
+            } else {
+                state.agent_form.prev_field();
+            }
+        }
+        SettingsMessage::FormCycleType => {
+            state.agent_form.cycle_type();
+        }
+        SettingsMessage::ToggleDeleteConfirm => {
+            if state.is_delete_mode() {
+                state.delete_confirm = !state.delete_confirm;
+            } else if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::ConfirmDelete(_)
+            ) {
+                state.profile_delete_confirm = !state.profile_delete_confirm;
+            }
+        }
+        SettingsMessage::ConfirmDelete => {
+            if state.is_delete_mode() {
+                if state.delete_confirm {
+                    state.delete_agent();
+                } else {
+                    state.cancel_mode();
+                }
+            } else if matches!(
+                state.profile_mode,
+                crate::screens::settings::ProfileMode::ConfirmDelete(_)
+            ) {
+                if state.profile_delete_confirm {
+                    state.delete_profile();
+                } else {
+                    state.cancel_profile_mode();
+                }
+            }
+        }
+        SettingsMessage::Activate => {}
+        SettingsMessage::ProfileAdd => state.enter_profile_add_mode(),
+        SettingsMessage::ProfileEdit => state.enter_profile_edit_mode(),
+        SettingsMessage::ProfileDelete => state.enter_profile_delete_mode(),
+        SettingsMessage::ProfileToggleActive => state.toggle_active_profile(),
+        SettingsMessage::ProfileEnvEdit => state.enter_env_edit_mode(),
+        SettingsMessage::EnvNew => state.env_state.add_new_var(),
+        SettingsMessage::EnvDelete => state.env_state.delete_selected(),
+        SettingsMessage::EnvToggleKeyValue => state.env_state.toggle_key_value(),
+        SettingsMessage::EnvStartEdit => {
+            if !state.env_state.vars.is_empty() {
+                let idx = state.env_state.selected_index;
+                let key_len = state.env_state.vars[idx].0.len();
+                state.env_state.editing = Some(crate::screens::settings::EnvEditMode::Key(key_len));
+            }
+        }
+        SettingsMessage::EnvConfirm => {
+            state.env_state.editing = None;
+        }
+    }
+}
+
+fn handle_env_edit_char(state: &mut crate::screens::SettingsState, c: char) {
+    let idx = state.env_state.selected_index;
+    if idx >= state.env_state.vars.len() {
+        return;
+    }
+    if let Some(ref mode) = state.env_state.editing.clone() {
+        match mode {
+            crate::screens::settings::EnvEditMode::Key(cursor) => {
+                let cursor = *cursor;
+                state.env_state.vars[idx].0.insert(cursor, c);
+                state.env_state.editing =
+                    Some(crate::screens::settings::EnvEditMode::Key(cursor + 1));
+            }
+            crate::screens::settings::EnvEditMode::Value(cursor) => {
+                let cursor = *cursor;
+                state.env_state.vars[idx].1.insert(cursor, c);
+                state.env_state.editing =
+                    Some(crate::screens::settings::EnvEditMode::Value(cursor + 1));
+            }
+        }
+    }
+}
+
+fn handle_env_edit_backspace(state: &mut crate::screens::SettingsState) {
+    let idx = state.env_state.selected_index;
+    if idx >= state.env_state.vars.len() {
+        return;
+    }
+    if let Some(ref mode) = state.env_state.editing.clone() {
+        match mode {
+            crate::screens::settings::EnvEditMode::Key(cursor) => {
+                if *cursor > 0 {
+                    let new_cursor = cursor - 1;
+                    state.env_state.vars[idx].0.remove(new_cursor);
+                    state.env_state.editing =
+                        Some(crate::screens::settings::EnvEditMode::Key(new_cursor));
+                }
+            }
+            crate::screens::settings::EnvEditMode::Value(cursor) => {
+                if *cursor > 0 {
+                    let new_cursor = cursor - 1;
+                    state.env_state.vars[idx].1.remove(new_cursor);
+                    state.env_state.editing =
+                        Some(crate::screens::settings::EnvEditMode::Value(new_cursor));
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logs message handler
+// ---------------------------------------------------------------------------
+
+fn handle_logs_msg(model: &mut Model, msg: LogsMessage) {
+    let state = &mut model.logs_state;
+    match msg {
+        LogsMessage::Refresh => {
+            let entries = crate::screens::logs::load_log_entries();
+            *state = crate::screens::LogsState::new().with_entries(entries);
+        }
+        LogsMessage::SelectPrev => state.select_prev(),
+        LogsMessage::SelectNext => state.select_next(),
+        LogsMessage::PageUp => state.page_up(10),
+        LogsMessage::PageDown => state.page_down(10),
+        LogsMessage::GoHome => state.go_home(),
+        LogsMessage::GoEnd => state.go_end(),
+        LogsMessage::CycleFilter => state.cycle_filter(),
+        LogsMessage::ToggleSearch => state.toggle_search(),
+        LogsMessage::ToggleDetail => state.toggle_detail(),
+        LogsMessage::CloseDetail => state.close_detail(),
+        LogsMessage::SearchChar(c) => {
+            state.search.push(c);
+            state.selected = 0;
+            state.offset = 0;
+        }
+        LogsMessage::SearchBackspace => {
+            state.search.pop();
+            state.selected = 0;
+            state.offset = 0;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,9 +575,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             }
             TuiEvent::Mouse(mouse) => Some(Message::MouseInput(mouse)),
             TuiEvent::Resize(w, h) => Some(Message::Resize(w, h)),
-            TuiEvent::PtyOutput { pane_id, data } => {
-                Some(Message::PtyOutput { pane_id, data })
-            }
+            TuiEvent::PtyOutput { pane_id, data } => Some(Message::PtyOutput { pane_id, data }),
             TuiEvent::Tick => {
                 if last_tick.elapsed() >= TICK_INTERVAL {
                     last_tick = Instant::now();

@@ -8,16 +8,7 @@ pub fn render(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
         return;
     }
 
-    let rendered = renderer::render_screen(screen, area);
-
-    // Blit the rendered buffer into the target buffer
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            if let Some(cell) = rendered.cell((x, y)) {
-                buf[(x, y)] = cell.clone();
-            }
-        }
-    }
+    renderer::render_vt100_screen(buf, area, screen);
 }
 
 #[cfg(test)]
@@ -30,7 +21,6 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, parser.screen());
-        // Should not panic; buffer should be filled
     }
 
     #[test]
@@ -50,7 +40,6 @@ mod tests {
         let area = Rect::new(0, 0, 0, 0);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, parser.screen());
-        // Should not panic
     }
 
     #[test]

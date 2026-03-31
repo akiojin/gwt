@@ -1,4 +1,4 @@
-//! TUI screens (Phase 2-4 stubs)
+//! TUI screens
 
 pub mod agent_pane;
 pub mod branches;
@@ -8,5 +8,5 @@ pub mod settings;
 
 pub use branches::BranchesMessage;
 pub use issues::IssuesMessage;
-pub use logs::LogsMessage;
-pub use settings::SettingsMessage;
+pub use logs::{LogsMessage, LogsState};
+pub use settings::{SettingsMessage, SettingsState};

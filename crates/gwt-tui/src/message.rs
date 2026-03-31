@@ -40,7 +40,10 @@ pub enum Message {
 
     // -- PTY ------------------------------------------------------------------
     /// Output from a PTY pane
-    PtyOutput { pane_id: String, data: Vec<u8> },
+    PtyOutput {
+        pane_id: String,
+        data: Vec<u8>,
+    },
 
     // -- Tick -----------------------------------------------------------------
     /// Periodic tick (~250ms) for background polling
