@@ -55,6 +55,37 @@ pub enum Message {
     /// Dismiss the front-most error
     DismissError,
 
+<<<<<<< HEAD
+    // -- Overlays / dialogs ---------------------------------------------------
+    /// Open the clone wizard
+    OpenCloneWizard,
+    /// Close the clone wizard
+    CloseCloneWizard,
+    /// Open the migration dialog
+    OpenMigrationDialog {
+        source: String,
+        target: String,
+    },
+    /// Close the migration dialog
+    CloseMigrationDialog,
+    /// Open the speckit wizard
+    OpenSpecKitWizard,
+    /// Close the speckit wizard
+    CloseSpecKitWizard,
+    /// Confirm dialog accepted
+    ConfirmAccepted,
+    /// Confirm dialog cancelled
+    ConfirmCancelled,
+    /// Progress advance
+    ProgressAdvance,
+    /// Progress error
+    ProgressError(String),
+=======
+    // -- Wizard ----------------------------------------------------------------
+    /// Key input forwarded to wizard overlay
+    WizardKey(KeyEvent),
+>>>>>>> origin/feature/feature-1776
+
     // -- Screen-specific messages (delegated) ---------------------------------
     BranchesMsg(BranchesMessage),
     IssuesMsg(IssuesMessage),
@@ -80,6 +111,12 @@ mod tests {
             Message::CloseSession,
             Message::NewShell,
             Message::OpenWizard,
+            Message::WizardKey(KeyEvent {
+                code: crossterm::event::KeyCode::Enter,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            }),
             Message::Resize(80, 24),
             Message::PtyOutput {
                 pane_id: "p1".into(),
@@ -91,6 +128,19 @@ mod tests {
                 severity: ErrorSeverity::Minor,
             }),
             Message::DismissError,
+            Message::OpenCloneWizard,
+            Message::CloseCloneWizard,
+            Message::OpenMigrationDialog {
+                source: "src".into(),
+                target: "tgt".into(),
+            },
+            Message::CloseMigrationDialog,
+            Message::OpenSpecKitWizard,
+            Message::CloseSpecKitWizard,
+            Message::ConfirmAccepted,
+            Message::ConfirmCancelled,
+            Message::ProgressAdvance,
+            Message::ProgressError("err".into()),
             Message::BranchesMsg(BranchesMessage::Refresh),
             Message::IssuesMsg(IssuesMessage::Refresh),
             Message::SettingsMsg(SettingsMessage::Refresh),

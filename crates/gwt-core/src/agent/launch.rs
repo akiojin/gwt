@@ -491,9 +491,7 @@ impl AgentLaunchBuilder {
                 ));
 
                 if self.skip_permissions {
-                    args.push(
-                        crate::agent::codex::codex_skip_permissions_flag(None).to_string(),
-                    );
+                    args.push(crate::agent::codex::codex_skip_permissions_flag(None).to_string());
                 }
             }
             "gemini" => {
@@ -839,10 +837,7 @@ mod tests {
             .build()
             .expect("build should succeed");
         assert_eq!(
-            config
-                .env_vars
-                .get("GWT_PROJECT_ROOT")
-                .map(|s| s.as_str()),
+            config.env_vars.get("GWT_PROJECT_ROOT").map(|s| s.as_str()),
             Some("/my/repo")
         );
     }

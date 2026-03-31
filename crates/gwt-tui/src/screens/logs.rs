@@ -296,6 +296,7 @@ pub fn render(state: &LogsState, buf: &mut Buffer, area: Rect) {
     }
 }
 
+<<<<<<< HEAD
 fn render_header(state: &LogsState, buf: &mut Buffer, area: Rect) {
     let filtered = state.filtered_entries();
     let title = format!(
@@ -945,4 +946,9 @@ mod tests {
         assert!(!result.is_empty());
         assert!(result.contains("2024"));
     }
+=======
+/// Handle a key event in the logs screen.
+pub fn handle_key(_key: &crossterm::event::KeyEvent) -> Option<LogsMessage> {
+    None
+>>>>>>> origin/feature/feature-1776
 }

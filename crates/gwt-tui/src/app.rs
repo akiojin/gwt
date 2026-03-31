@@ -15,8 +15,13 @@ use ratatui::Terminal;
 use crate::event::{self, EventLoop, TuiEvent};
 use crate::input::keybind::{self, KeyAction, PrefixState};
 use crate::message::Message;
+<<<<<<< HEAD
 use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model};
 use crate::screens::{LogsMessage, SettingsMessage};
+=======
+use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode};
+use crate::screens;
+>>>>>>> origin/feature/feature-1776
 use crate::widgets;
 
 /// Tick interval for background polling.
@@ -66,7 +71,51 @@ pub fn update(model: &mut Model, msg: Message) {
             // Phase 2: spawn shell PTY and add session tab
         }
         Message::OpenWizard => {
-            // Phase 3: open agent launch wizard
+            // Open wizard for current branch or default
+            let branch = model
+                .session_tabs
+                .get(model.active_session)
+                .and_then(|t| t.branch.clone())
+                .unwrap_or_default();
+            if branch.is_empty() {
+                model.wizard = Some(crate::screens::wizard::WizardState::new());
+            } else {
+                model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
+                    &branch,
+                    vec![],
+                ));
+            }
+        }
+        Message::WizardKey(key) => {
+            use crossterm::event::KeyCode;
+            if let Some(ref mut wiz) = model.wizard {
+                match key.code {
+                    KeyCode::Up => wiz.select_prev(),
+                    KeyCode::Down => wiz.select_next(),
+                    KeyCode::Enter => {
+                        let action = wiz.confirm();
+                        match action {
+                            crate::screens::wizard::WizardAction::Complete => {
+                                // Build config and launch (Phase 3+)
+                                model.wizard = None;
+                            }
+                            crate::screens::wizard::WizardAction::Cancel => {
+                                model.wizard = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Esc => {
+                        let action = wiz.cancel();
+                        if action == crate::screens::wizard::WizardAction::Cancel {
+                            model.wizard = None;
+                        }
+                    }
+                    KeyCode::Backspace => wiz.input_backspace(),
+                    KeyCode::Char(ch) => wiz.input_char(ch),
+                    _ => {}
+                }
+            }
         }
         Message::KeyInput(key) => {
             // Forward to active screen handler
@@ -77,6 +126,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 ActiveLayer::Management => {
                     let sub_msg = match model.management_tab {
                         ManagementTab::Branches => {
+<<<<<<< HEAD
                             crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
                         }
                         ManagementTab::Issues => {
@@ -89,6 +139,34 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Logs => {
                             crate::screens::logs::handle_key(&model.logs_state, &key)
                                 .map(Message::LogsMsg)
+=======
+<<<<<<< HEAD
+                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
+                        }
+                        ManagementTab::Issues => {
+                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
+=======
+<<<<<<< HEAD
+                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
+                        }
+                        ManagementTab::Issues => {
+                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
+=======
+                            crate::screens::branches::handle_key(&model.branches_state, &key)
+                                .map(Message::BranchesMsg)
+                        }
+                        ManagementTab::Issues => {
+                            crate::screens::issues::handle_key(&model.issues_state, &key)
+                                .map(Message::IssuesMsg)
+>>>>>>> origin/feature/feature-1776
+>>>>>>> origin/feature/feature-1776
+                        }
+                        ManagementTab::Settings => {
+                            crate::screens::settings::handle_key(&key).map(Message::SettingsMsg)
+                        }
+                        ManagementTab::Logs => {
+                            crate::screens::logs::handle_key(&key).map(Message::LogsMsg)
+>>>>>>> origin/feature/feature-1776
                         }
                     };
                     // Recursively apply sub-message if any
@@ -120,18 +198,72 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::DismissError => {
             model.dismiss_error();
         }
+        // -- Overlay / dialog messages ------------------------------------------
+        Message::OpenCloneWizard => {
+            model.clone_wizard = Some(screens::clone_wizard::CloneWizardState::new());
+            model.overlay_mode = OverlayMode::CloneWizard;
+        }
+        Message::CloseCloneWizard => {
+            model.clone_wizard = None;
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::OpenMigrationDialog { source, target } => {
+            model.migration_dialog = Some(screens::migration_dialog::MigrationDialogState::new(
+                &source, &target,
+            ));
+            model.overlay_mode = OverlayMode::MigrationDialog;
+        }
+        Message::CloseMigrationDialog => {
+            model.migration_dialog = None;
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::OpenSpecKitWizard => {
+            model.speckit_wizard.open();
+            model.overlay_mode = OverlayMode::SpecKitWizard;
+        }
+        Message::CloseSpecKitWizard => {
+            model.speckit_wizard.close();
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::ConfirmAccepted => {
+            model.confirm = None;
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::ConfirmCancelled => {
+            model.confirm = None;
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::ProgressAdvance => {
+            if let Some(ref mut progress) = model.progress {
+                progress.advance();
+            }
+        }
+        Message::ProgressError(msg) => {
+            if let Some(ref mut progress) = model.progress {
+                progress.set_error(msg);
+            }
+        }
+
         // Screen-specific messages
-        Message::BranchesMsg(_msg) => {
-            // Phase 2: handle branches messages
+        Message::BranchesMsg(msg) => {
+            crate::screens::branches::update(&mut model.branches_state, msg);
         }
-        Message::IssuesMsg(_msg) => {
-            // Phase 2: handle issues messages
+        Message::IssuesMsg(msg) => {
+            crate::screens::issues::update(&mut model.issues_state, msg);
         }
+<<<<<<< HEAD
         Message::SettingsMsg(msg) => {
             handle_settings_msg(model, msg);
         }
         Message::LogsMsg(msg) => {
             handle_logs_msg(model, msg);
+=======
+        Message::SettingsMsg(_msg) => {
+            // Phase 3: handle settings messages
+        }
+        Message::LogsMsg(_msg) => {
+            // Phase 3: handle logs messages
+>>>>>>> origin/feature/feature-1776
         }
     }
 }
@@ -172,6 +304,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
             }
         }
         ActiveLayer::Management => match model.management_tab {
+<<<<<<< HEAD
             ManagementTab::Branches => crate::screens::branches::render(buf, layout[1]),
             ManagementTab::Issues => crate::screens::issues::render(buf, layout[1]),
             ManagementTab::Settings => {
@@ -180,19 +313,60 @@ pub fn view(model: &Model, frame: &mut Frame) {
             ManagementTab::Logs => {
                 crate::screens::logs::render(&model.logs_state, buf, layout[1]);
             }
+=======
+            ManagementTab::Branches => {
+                crate::screens::branches::render(&model.branches_state, buf, layout[1]);
+            }
+            ManagementTab::Issues => {
+                crate::screens::issues::render(&model.issues_state, buf, layout[1]);
+            }
+            ManagementTab::Settings => crate::screens::settings::render(buf, layout[1]),
+            ManagementTab::Logs => crate::screens::logs::render(buf, layout[1]),
+>>>>>>> origin/feature/feature-1776
         },
     }
 
     // Status bar
     widgets::status_bar::render(model, buf, layout[2]);
 
+<<<<<<< HEAD
+    // Overlays (on top of everything, priority order)
+    // Error overlay (v2 queue)
+    if !model.error_queue_v2.is_empty() {
+        screens::error::render_error_with_queue(&model.error_queue_v2, buf, area);
+    } else if !model.error_queue.is_empty() {
+        // Legacy error overlay
+        render_error_overlay(buf, area, &model.error_queue[0]);
+    }
+
+    // Confirm dialog
+    if let Some(ref confirm) = model.confirm {
+        screens::confirm::render_confirm(confirm, buf, area);
+    }
+
+    // Progress modal
+=======
     // Overlays (on top of everything)
+    if let Some(ref wizard) = model.wizard {
+        crate::screens::wizard::render(buf, area, wizard);
+    }
+>>>>>>> origin/feature/feature-1776
     if let Some(ref progress) = model.progress {
         widgets::progress_modal::render(buf, area, progress);
     }
-    if !model.error_queue.is_empty() {
-        render_error_overlay(buf, area, &model.error_queue[0]);
+
+    // Clone wizard
+    if let Some(ref clone_wiz) = model.clone_wizard {
+        screens::clone_wizard::render_clone_wizard(clone_wiz, buf, area);
     }
+
+    // Migration dialog
+    if let Some(ref migration) = model.migration_dialog {
+        screens::migration_dialog::render_migration_dialog(migration, buf, area);
+    }
+
+    // SpecKit wizard
+    screens::speckit_wizard::render_speckit_wizard(&model.speckit_wizard, buf, area);
 }
 
 /// Render a simple error overlay.
@@ -557,7 +731,10 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let evt = event_loop.next()?;
         let msg = match evt {
             TuiEvent::Key(key) => {
-                if keybind::is_ctrl_c(&key) {
+                // When wizard is open, intercept all keys
+                if model.wizard.is_some() {
+                    Some(Message::WizardKey(key))
+                } else if keybind::is_ctrl_c(&key) {
                     if model.handle_ctrl_c() {
                         Some(Message::Quit)
                     } else {
@@ -819,11 +996,10 @@ mod tests {
     #[test]
     fn view_with_progress_renders() {
         let mut model = test_model();
-        model.progress = Some(crate::model::ProgressState {
-            title: "Loading...".into(),
-            detail: Some("step 1".into()),
-            percent: Some(50),
-        });
+        model.progress = Some(crate::widgets::progress_modal::ProgressState::simple(
+            "Loading...",
+            Some("step 1"),
+        ));
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| view(&model, f)).unwrap();
