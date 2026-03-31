@@ -172,11 +172,6 @@ pub fn handle_key(state: &IssuePanelState, key: &KeyEvent) -> Option<IssuesMessa
     }
 }
 
-<<<<<<< HEAD
-/// Handle a key event in the issues screen.
-pub fn handle_key(_key: &crossterm::event::KeyEvent) -> Option<IssuesMessage> {
-    None
-=======
 /// Handle key events in search input mode.
 fn handle_search_key(key: &KeyEvent) -> Option<IssuesMessage> {
     match key.code {
@@ -703,5 +698,4 @@ mod tests {
             })
             .unwrap();
     }
->>>>>>> origin/feature/feature-1776
 }

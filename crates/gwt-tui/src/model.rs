@@ -8,21 +8,15 @@ use std::time::Instant;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::AgentColor;
 
-<<<<<<< HEAD
-use crate::screens::{LogsState, SettingsState};
-=======
-<<<<<<< HEAD
+use crate::screens::branches::BranchListState;
 use crate::screens::clone_wizard::CloneWizardState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::error::ErrorQueue;
+use crate::screens::issues::IssuePanelState;
 use crate::screens::migration_dialog::MigrationDialogState;
 use crate::screens::speckit_wizard::SpecKitState;
+use crate::screens::{LogsState, SettingsState};
 use crate::widgets::progress_modal::ProgressState;
-=======
-use crate::screens::branches::BranchListState;
-use crate::screens::issues::IssuePanelState;
->>>>>>> origin/feature/feature-1776
->>>>>>> origin/feature/feature-1776
 
 // ---------------------------------------------------------------------------
 // Layer / Tab enums
@@ -115,7 +109,6 @@ pub struct ErrorEntry {
     pub severity: ErrorSeverity,
 }
 
-<<<<<<< HEAD
 /// Overlay mode for tracking which overlay is currently shown
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayMode {
@@ -127,25 +120,9 @@ pub enum OverlayMode {
     MigrationDialog,
     SpecKitWizard,
 }
-=======
-#[derive(Debug, Clone)]
-pub struct ProgressState {
-    pub title: String,
-    pub detail: Option<String>,
-    pub percent: Option<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConfirmState {
-    pub title: String,
-    pub message: String,
-    pub confirm_label: String,
-    pub cancel_label: String,
-}
 
 // WizardState is re-exported from screens::wizard
 pub use crate::screens::wizard::WizardState;
->>>>>>> origin/feature/feature-1776
 
 // ---------------------------------------------------------------------------
 // Background channel payloads
@@ -172,15 +149,11 @@ pub struct Model {
     // Management tabs -- Management layer
     pub management_tab: ManagementTab,
 
-<<<<<<< HEAD
-    // Screen states
-    pub settings_state: SettingsState,
-    pub logs_state: LogsState,
-=======
     // Screen states for management tabs
     pub branches_state: BranchListState,
     pub issues_state: IssuePanelState,
->>>>>>> origin/feature/feature-1776
+    pub settings_state: SettingsState,
+    pub logs_state: LogsState,
 
     // PTY management
     pub pane_manager: PaneManager,
@@ -192,6 +165,7 @@ pub struct Model {
     pub error_queue_v2: ErrorQueue,
     pub progress: Option<ProgressState>,
     pub confirm: Option<ConfirmState>,
+    pub wizard: Option<WizardState>,
     pub clone_wizard: Option<CloneWizardState>,
     pub migration_dialog: Option<MigrationDialogState>,
     pub speckit_wizard: SpecKitState,
@@ -217,13 +191,10 @@ impl Model {
             session_tabs: Vec::new(),
             active_session: 0,
             management_tab: ManagementTab::Branches,
-<<<<<<< HEAD
-            settings_state: SettingsState::new(),
-            logs_state: LogsState::new(),
-=======
             branches_state: BranchListState::new(),
             issues_state: IssuePanelState::new(),
->>>>>>> origin/feature/feature-1776
+            settings_state: SettingsState::new(),
+            logs_state: LogsState::new(),
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
             overlay_mode: OverlayMode::None,
@@ -231,6 +202,7 @@ impl Model {
             error_queue_v2: ErrorQueue::new(),
             progress: None,
             confirm: None,
+            wizard: None,
             clone_wizard: None,
             migration_dialog: None,
             speckit_wizard: SpecKitState::new(),

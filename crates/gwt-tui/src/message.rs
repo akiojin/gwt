@@ -55,7 +55,10 @@ pub enum Message {
     /// Dismiss the front-most error
     DismissError,
 
-<<<<<<< HEAD
+    // -- Wizard ----------------------------------------------------------------
+    /// Key input forwarded to wizard overlay
+    WizardKey(KeyEvent),
+
     // -- Overlays / dialogs ---------------------------------------------------
     /// Open the clone wizard
     OpenCloneWizard,
@@ -80,11 +83,6 @@ pub enum Message {
     ProgressAdvance,
     /// Progress error
     ProgressError(String),
-=======
-    // -- Wizard ----------------------------------------------------------------
-    /// Key input forwarded to wizard overlay
-    WizardKey(KeyEvent),
->>>>>>> origin/feature/feature-1776
 
     // -- Screen-specific messages (delegated) ---------------------------------
     BranchesMsg(BranchesMessage),

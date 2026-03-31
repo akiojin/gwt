@@ -15,13 +15,8 @@ use ratatui::Terminal;
 use crate::event::{self, EventLoop, TuiEvent};
 use crate::input::keybind::{self, KeyAction, PrefixState};
 use crate::message::Message;
-<<<<<<< HEAD
-use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model};
-use crate::screens::{LogsMessage, SettingsMessage};
-=======
 use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode};
-use crate::screens;
->>>>>>> origin/feature/feature-1776
+use crate::screens::{self, LogsMessage, SettingsMessage};
 use crate::widgets;
 
 /// Tick interval for background polling.
@@ -126,11 +121,12 @@ pub fn update(model: &mut Model, msg: Message) {
                 ActiveLayer::Management => {
                     let sub_msg = match model.management_tab {
                         ManagementTab::Branches => {
-<<<<<<< HEAD
-                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
+                            crate::screens::branches::handle_key(&model.branches_state, &key)
+                                .map(Message::BranchesMsg)
                         }
                         ManagementTab::Issues => {
-                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
+                            crate::screens::issues::handle_key(&model.issues_state, &key)
+                                .map(Message::IssuesMsg)
                         }
                         ManagementTab::Settings => {
                             crate::screens::settings::handle_key(&model.settings_state, &key)
@@ -139,34 +135,6 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Logs => {
                             crate::screens::logs::handle_key(&model.logs_state, &key)
                                 .map(Message::LogsMsg)
-=======
-<<<<<<< HEAD
-                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
-                        }
-                        ManagementTab::Issues => {
-                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
-=======
-<<<<<<< HEAD
-                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
-                        }
-                        ManagementTab::Issues => {
-                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
-=======
-                            crate::screens::branches::handle_key(&model.branches_state, &key)
-                                .map(Message::BranchesMsg)
-                        }
-                        ManagementTab::Issues => {
-                            crate::screens::issues::handle_key(&model.issues_state, &key)
-                                .map(Message::IssuesMsg)
->>>>>>> origin/feature/feature-1776
->>>>>>> origin/feature/feature-1776
-                        }
-                        ManagementTab::Settings => {
-                            crate::screens::settings::handle_key(&key).map(Message::SettingsMsg)
-                        }
-                        ManagementTab::Logs => {
-                            crate::screens::logs::handle_key(&key).map(Message::LogsMsg)
->>>>>>> origin/feature/feature-1776
                         }
                     };
                     // Recursively apply sub-message if any
@@ -251,19 +219,11 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::IssuesMsg(msg) => {
             crate::screens::issues::update(&mut model.issues_state, msg);
         }
-<<<<<<< HEAD
         Message::SettingsMsg(msg) => {
             handle_settings_msg(model, msg);
         }
         Message::LogsMsg(msg) => {
             handle_logs_msg(model, msg);
-=======
-        Message::SettingsMsg(_msg) => {
-            // Phase 3: handle settings messages
-        }
-        Message::LogsMsg(_msg) => {
-            // Phase 3: handle logs messages
->>>>>>> origin/feature/feature-1776
         }
     }
 }
@@ -304,33 +264,30 @@ pub fn view(model: &Model, frame: &mut Frame) {
             }
         }
         ActiveLayer::Management => match model.management_tab {
-<<<<<<< HEAD
-            ManagementTab::Branches => crate::screens::branches::render(buf, layout[1]),
-            ManagementTab::Issues => crate::screens::issues::render(buf, layout[1]),
-            ManagementTab::Settings => {
-                crate::screens::settings::render(&model.settings_state, buf, layout[1]);
-            }
-            ManagementTab::Logs => {
-                crate::screens::logs::render(&model.logs_state, buf, layout[1]);
-            }
-=======
             ManagementTab::Branches => {
                 crate::screens::branches::render(&model.branches_state, buf, layout[1]);
             }
             ManagementTab::Issues => {
                 crate::screens::issues::render(&model.issues_state, buf, layout[1]);
             }
-            ManagementTab::Settings => crate::screens::settings::render(buf, layout[1]),
-            ManagementTab::Logs => crate::screens::logs::render(buf, layout[1]),
->>>>>>> origin/feature/feature-1776
+            ManagementTab::Settings => {
+                crate::screens::settings::render(&model.settings_state, buf, layout[1]);
+            }
+            ManagementTab::Logs => {
+                crate::screens::logs::render(&model.logs_state, buf, layout[1]);
+            }
         },
     }
 
     // Status bar
     widgets::status_bar::render(model, buf, layout[2]);
 
-<<<<<<< HEAD
     // Overlays (on top of everything, priority order)
+    // Wizard overlay
+    if let Some(ref wizard) = model.wizard {
+        crate::screens::wizard::render(buf, area, wizard);
+    }
+
     // Error overlay (v2 queue)
     if !model.error_queue_v2.is_empty() {
         screens::error::render_error_with_queue(&model.error_queue_v2, buf, area);
@@ -345,12 +302,6 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
 
     // Progress modal
-=======
-    // Overlays (on top of everything)
-    if let Some(ref wizard) = model.wizard {
-        crate::screens::wizard::render(buf, area, wizard);
-    }
->>>>>>> origin/feature/feature-1776
     if let Some(ref progress) = model.progress {
         widgets::progress_modal::render(buf, area, progress);
     }
