@@ -1,6 +1,7 @@
 //! gwt-tui: Terminal UI for Git Worktree Manager
 //!
 //! Built with the Elm Architecture (Model / View / Update) pattern.
+#![allow(dead_code)]
 
 mod app;
 mod config;

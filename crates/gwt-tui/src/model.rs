@@ -114,11 +114,8 @@ pub struct ConfirmState {
     pub cancel_label: String,
 }
 
-/// Placeholder for Phase 3 wizard
-#[derive(Debug, Clone)]
-pub struct WizardState {
-    _private: (),
-}
+// WizardState is re-exported from screens::wizard
+pub use crate::screens::wizard::WizardState;
 
 // ---------------------------------------------------------------------------
 // Background channel payloads

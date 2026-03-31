@@ -8,16 +8,7 @@ pub fn render(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
         return;
     }
 
-    let rendered = renderer::render_screen(screen, area);
-
-    // Blit the rendered buffer into the target buffer
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            if let Some(cell) = rendered.cell((x, y)) {
-                buf[(x, y)] = cell.clone();
-            }
-        }
-    }
+    renderer::render_vt100_screen(buf, area, screen);
 }
 
 #[cfg(test)]

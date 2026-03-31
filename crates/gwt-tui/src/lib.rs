@@ -5,6 +5,13 @@ pub mod app;
 pub mod config;
 pub mod event;
 pub mod input;
+pub mod message;
+pub mod model;
 pub mod renderer;
+pub mod screens;
 pub mod state;
 pub mod ui;
+pub mod widgets;
+
+// Re-export wizard types for library consumers
+pub use screens::wizard;

@@ -40,7 +40,10 @@ pub enum Message {
 
     // -- PTY ------------------------------------------------------------------
     /// Output from a PTY pane
-    PtyOutput { pane_id: String, data: Vec<u8> },
+    PtyOutput {
+        pane_id: String,
+        data: Vec<u8>,
+    },
 
     // -- Tick -----------------------------------------------------------------
     /// Periodic tick (~250ms) for background polling
@@ -51,6 +54,10 @@ pub enum Message {
     PushError(ErrorEntry),
     /// Dismiss the front-most error
     DismissError,
+
+    // -- Wizard ----------------------------------------------------------------
+    /// Key input forwarded to wizard overlay
+    WizardKey(KeyEvent),
 
     // -- Screen-specific messages (delegated) ---------------------------------
     BranchesMsg(BranchesMessage),
@@ -77,6 +84,12 @@ mod tests {
             Message::CloseSession,
             Message::NewShell,
             Message::OpenWizard,
+            Message::WizardKey(KeyEvent {
+                code: crossterm::event::KeyCode::Enter,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            }),
             Message::Resize(80, 24),
             Message::PtyOutput {
                 pane_id: "p1".into(),
