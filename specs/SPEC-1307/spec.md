@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 # バグ修正仕様: Windows Docker Launch で `service "dev" is not running` を防止する
 
 **仕様ID**: `SPEC-17e47ece`
