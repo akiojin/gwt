@@ -1,0 +1,14 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
+# 機能仕様: Windows での外部プロセス実行時コンソール点滅抑止
+
+**仕様ID**: `SPEC-8c6f4a21`  
+**作成日**: 2026-02-13  
+**更新日**: 2026-02-13  
+**ステータス**: ドラフト  
+**カテゴリ**: GUI  
+**依存仕様**:
+
+- [SPEC-a70a1ece](../archive/SPEC-a70a1ece/spec.md)
+
+**入力**: ユーザー説明: "Windowsで動作が不安定なのを解消したい。何するたびに動作が固まる、Gitアクセス？しているせいか、ターミナルのようなウィンドウが頻繁に表示されて、すぐに消える。"

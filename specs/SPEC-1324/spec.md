@@ -1,0 +1,15 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
+# 機能仕様: 設定画面で UI / Terminal フォントファミリーを選択可能にする
+
+**仕様ID**: `SPEC-7b36bdc7`
+**作成日**: 2026-02-20
+**更新日**: 2026-02-20
+**ステータス**: 実装済み
+**カテゴリ**: GUI
+**依存仕様**:
+
+- `SPEC-5cd3bfec`（設定画面タブ構成）
+- `SPEC-f490dded`（ターミナルタブ基盤）
+
+**入力**: ユーザー説明: "フォントを変更できるようにしたい。設定画面で選択可能"
