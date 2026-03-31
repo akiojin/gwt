@@ -1,4 +1,0 @@
-- `LaunchAgentRequest` は agent 共通の `model?: string` を保持し、Codex 固有に `fastMode?: boolean` / `pub fast_mode: Option<bool>` を保持する
-- `LaunchDefaults` は `modelByAgent: Record<string, string>` で agent ごとのモデル ID を保持する
-- `LaunchDefaults` の `fastMode: boolean` は Codex の `gpt-5.4` 選択時のみ利用し、欠損時は `false` へ正規化する
-- `PaneLaunchMeta` に `pub fast_mode: bool` を追加済みである
