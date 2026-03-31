@@ -1,0 +1,28 @@
+[package]
+name = "gwt-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Terminal UI for Git Worktree Manager"
+publish = false
+
+[[bin]]
+name = "gwt-tui"
+path = "src/main.rs"
+
+[dependencies]
+gwt-core.workspace = true
+crossterm = "0.28"
+ratatui = "0.29"
+vt100 = "0.15"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
