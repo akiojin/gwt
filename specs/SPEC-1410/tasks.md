@@ -1,0 +1,4 @@
+- [ ] T001 [U] [S-1] TDD テスト追加（MainArea.test.ts）— "no visibility gap when switching between ready terminal tabs"
+- [ ] T002 [F] [FR-1] `isTerminalTabVisible()` 修正（MainArea.svelte:139-141）
+- [ ] T003 [FIN] テスト全通過確認（`pnpm test`）
+- [ ] T004 [FIN] svelte-check 通過確認

@@ -1,0 +1,12 @@
+### RED Tests to Add
+- `MigrationService_CheckMigrationNeededAsync_NoGwtDir_ReturnsNotNeeded`
+- `MigrationService_CheckMigrationNeededAsync_NoTomlFiles_ReturnsNotNeeded`
+- `MigrationService_CheckMigrationNeededAsync_TomlExists_ReturnsAvailable`
+- `MigrationService_MigrateAsync_CreatesTimestampedBackupDirectory`
+- `MigrationService_MigrateAsync_ConvertsTomlToJson_AndPreservesOriginal`
+- `MigrationService_MigrateAsync_PreservesQuotedValues`
+- `MigrationService_MigrateAsync_IgnoresCommentsAndTableHeaders`
+- `MigrationService_MigrateAsync_Cancellation_StopsBeforePartialDelete`
+- `MigrationService_MigrateAsync_ConvertsAgentsToml`
+- `MigrationService_MigrateAsync_OriginalTomlFilesPreserved`
+- `MigrationResult_Serialization_RoundTrip`

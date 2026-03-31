@@ -1,0 +1,59 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
+### 背景
+アプリケーション設定を管理する。現状のフラット構造を維持しつつ、新規セクション（Assistant Mode設定、Docker設定、Voice設定）を追加。キーボードショートカットもこのSPEC内で管理する。Studio時代の #1548（HUD＆UIシステム）の設定関連機能を現行スタックで再定義。
+
+### ユーザーシナリオとテスト
+
+**S1: 設定画面の表示**
+- Given: ユーザーが設定を開く
+- When: Settings画面が表示される
+- Then: フラット構造でセクションヘッダー付きの設定一覧が表示される
+
+**S2: Assistant Mode設定**
+- Given: Settings画面を開く
+- When: Assistant Modeセクションを表示
+- Then: 監視頻度プリセット（積極的/標準/節約）が設定可能
+
+**S3: Docker設定**
+- Given: Settings画面を開く
+- When: Dockerセクションを表示
+- Then: Docker関連設定が変更可能
+
+**S4: Voice設定**
+- Given: Settings画面を開く
+- When: Voiceセクションを表示
+- Then: 品質プリセット・言語設定が変更可能
+
+**S5: キーボードショートカット**
+- Given: Settings画面を開く
+- When: キーボードショートカットセクションを表示
+- Then: タブ切替、ウィンドウ操作等のホットキーが確認・変更可能
+
+### 機能要件
+
+**FR-01: 構造**
+- フラット構造維持（セクションヘッダーで分離）
+- 既存設定の互換性維持
+
+**FR-02: 新規セクション**
+- Assistant Mode設定（監視頻度プリセット）
+- Docker設定
+- Voice設定（品質・言語）
+
+**FR-03: キーボードショートカット**
+- タブ切替ショートカット
+- ウィンドウ操作ショートカット
+- ホットキー体系管理
+
+**FR-04: 永続化**
+- Session管理SPECと連携
+- config.tomlへの保存
+
+### 成功基準
+
+1. 新規セクションが正しく表示・操作可能
+2. キーボードショートカットが動作する
+3. 設定変更が永続化される
+
+---

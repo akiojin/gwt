@@ -39,6 +39,8 @@ flate2.workspace = true
 tar.workspace = true
 zip.workspace = true
 sysinfo.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 nvml-wrapper = { workspace = true, optional = true }
