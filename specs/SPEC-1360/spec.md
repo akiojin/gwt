@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 # バグ修正仕様: macOS リリースの署名/公証を必須化して Gatekeeper エラーを防止
 
 **仕様ID**: `SPEC-e0e11640`

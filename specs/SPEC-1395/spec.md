@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 gwt は複数プロジェクトを同時に開ける設計だが、以下の3箇所でプロジェクト間の分離が不完全:
