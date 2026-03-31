@@ -15,9 +15,12 @@ pub mod widgets;
 <<<<<<< HEAD
 =======
 <<<<<<< HEAD
+=======
+<<<<<<< HEAD
 
 // Re-export wizard types for library consumers
 pub use screens::wizard;
 =======
+>>>>>>> origin/feature/feature-1776
 >>>>>>> origin/feature/feature-1776
 >>>>>>> origin/feature/feature-1776

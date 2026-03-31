@@ -1690,6 +1690,7 @@ version = "8.17.2"
 dependencies = [
  "chrono",
  "crossterm",
+ "dirs",
  "gwt-core",
  "ratatui",
  "serde",

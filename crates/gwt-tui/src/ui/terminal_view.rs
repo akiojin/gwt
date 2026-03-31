@@ -21,7 +21,6 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, parser.screen());
-        // Should not panic; buffer should be filled
     }
 
     #[test]
@@ -41,7 +40,6 @@ mod tests {
         let area = Rect::new(0, 0, 0, 0);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, parser.screen());
-        // Should not panic
     }
 
     #[test]

@@ -10,11 +10,16 @@ use std::collections::HashMap;
 
 use std::collections::HashMap;
 
+use std::collections::HashMap;
+
 /// Default terminal rows for new PTY sessions.
 pub const DEFAULT_PTY_ROWS: u16 = 24;
 /// Default terminal cols for new PTY sessions.
 pub const DEFAULT_PTY_COLS: u16 = 80;
 
+<<<<<<< HEAD
+/// Persisted launch dialog defaults.
+=======
 <<<<<<< HEAD
 /// Persisted launch dialog defaults
 #[derive(Debug, Clone, Default)]
@@ -42,6 +47,7 @@ pub struct LaunchDefaults {
 =======
 /// Persisted launch dialog defaults.
 >>>>>>> origin/feature/feature-1776
+>>>>>>> origin/feature/feature-1776
 #[derive(Debug, Clone, Default)]
 pub struct LaunchDefaults {
     pub selected_agent: String,
@@ -52,6 +58,9 @@ pub struct LaunchDefaults {
     pub reasoning_level: String,
     pub fast_mode: bool,
     pub extra_args: String,
+<<<<<<< HEAD
+=======
+>>>>>>> origin/feature/feature-1776
 >>>>>>> origin/feature/feature-1776
     pub env_overrides: String,
 }

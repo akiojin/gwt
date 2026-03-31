@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+#![allow(dead_code)] // Phase 2-4 stubs
+
 mod app;
 mod config;
 mod event;

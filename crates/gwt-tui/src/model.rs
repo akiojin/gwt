@@ -9,6 +9,9 @@ use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::AgentColor;
 
 <<<<<<< HEAD
+use crate::screens::{LogsState, SettingsState};
+=======
+<<<<<<< HEAD
 use crate::screens::clone_wizard::CloneWizardState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::error::ErrorQueue;
@@ -18,6 +21,7 @@ use crate::widgets::progress_modal::ProgressState;
 =======
 use crate::screens::branches::BranchListState;
 use crate::screens::issues::IssuePanelState;
+>>>>>>> origin/feature/feature-1776
 >>>>>>> origin/feature/feature-1776
 
 // ---------------------------------------------------------------------------
@@ -168,9 +172,15 @@ pub struct Model {
     // Management tabs -- Management layer
     pub management_tab: ManagementTab,
 
+<<<<<<< HEAD
+    // Screen states
+    pub settings_state: SettingsState,
+    pub logs_state: LogsState,
+=======
     // Screen states for management tabs
     pub branches_state: BranchListState,
     pub issues_state: IssuePanelState,
+>>>>>>> origin/feature/feature-1776
 
     // PTY management
     pub pane_manager: PaneManager,
@@ -207,8 +217,13 @@ impl Model {
             session_tabs: Vec::new(),
             active_session: 0,
             management_tab: ManagementTab::Branches,
+<<<<<<< HEAD
+            settings_state: SettingsState::new(),
+            logs_state: LogsState::new(),
+=======
             branches_state: BranchListState::new(),
             issues_state: IssuePanelState::new(),
+>>>>>>> origin/feature/feature-1776
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
             overlay_mode: OverlayMode::None,
