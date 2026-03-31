@@ -1,3 +1,5 @@
+> **⚠️ DEPRECATED (SPEC-1776)**: This SPEC describes GUI-only functionality (Tauri/Svelte/xterm.js) that has been superseded by the gwt-tui migration. The gwt-tui equivalent is defined in SPEC-1776.
+
 ### 背景
 
 gwt は Launch Agent UI 上で、エージェントごとのモデル候補を明示的に管理している。現在の主な管理箇所は `gwt-gui/src/lib/components/AgentLaunchForm.svelte` であり、Codex / Claude Code / Gemini / Copilot のモデル候補がここで定義されている。
