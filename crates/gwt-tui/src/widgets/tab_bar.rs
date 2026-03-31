@@ -35,11 +35,7 @@ fn render_main_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, tab)| {
-            let marker = if i == model.active_session {
-                "*"
-            } else {
-                " "
-            };
+            let marker = if i == model.active_session { "*" } else { " " };
             Line::from(format!("{marker}{}{marker}", tab.name))
         })
         .collect();
@@ -64,10 +60,7 @@ fn render_management_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
         .divider(Span::raw("|"));
 
     // Prefix with management icon
-    let prefix = Span::styled(
-        format!(" {MGMT_ICON} "),
-        Style::default().fg(Color::Cyan),
-    );
+    let prefix = Span::styled(format!(" {MGMT_ICON} "), Style::default().fg(Color::Cyan));
     buf.set_span(area.x, area.y, &prefix, 4);
 
     let tabs_area = Rect {

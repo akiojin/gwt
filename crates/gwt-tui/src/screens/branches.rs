@@ -14,8 +14,6 @@ pub fn render(_buf: &mut Buffer, _area: Rect) {
 }
 
 /// Handle a key event in the branches screen. Returns an optional message.
-pub fn handle_key(
-    _key: &crossterm::event::KeyEvent,
-) -> Option<BranchesMessage> {
+pub fn handle_key(_key: &crossterm::event::KeyEvent) -> Option<BranchesMessage> {
     None
 }

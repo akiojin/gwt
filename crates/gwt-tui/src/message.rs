@@ -40,7 +40,10 @@ pub enum Message {
 
     // -- PTY ------------------------------------------------------------------
     /// Output from a PTY pane
-    PtyOutput { pane_id: String, data: Vec<u8> },
+    PtyOutput {
+        pane_id: String,
+        data: Vec<u8>,
+    },
 
     // -- Tick -----------------------------------------------------------------
     /// Periodic tick (~250ms) for background polling
@@ -51,6 +54,31 @@ pub enum Message {
     PushError(ErrorEntry),
     /// Dismiss the front-most error
     DismissError,
+
+    // -- Overlays / dialogs ---------------------------------------------------
+    /// Open the clone wizard
+    OpenCloneWizard,
+    /// Close the clone wizard
+    CloseCloneWizard,
+    /// Open the migration dialog
+    OpenMigrationDialog {
+        source: String,
+        target: String,
+    },
+    /// Close the migration dialog
+    CloseMigrationDialog,
+    /// Open the speckit wizard
+    OpenSpecKitWizard,
+    /// Close the speckit wizard
+    CloseSpecKitWizard,
+    /// Confirm dialog accepted
+    ConfirmAccepted,
+    /// Confirm dialog cancelled
+    ConfirmCancelled,
+    /// Progress advance
+    ProgressAdvance,
+    /// Progress error
+    ProgressError(String),
 
     // -- Screen-specific messages (delegated) ---------------------------------
     BranchesMsg(BranchesMessage),
@@ -88,6 +116,19 @@ mod tests {
                 severity: ErrorSeverity::Minor,
             }),
             Message::DismissError,
+            Message::OpenCloneWizard,
+            Message::CloseCloneWizard,
+            Message::OpenMigrationDialog {
+                source: "src".into(),
+                target: "tgt".into(),
+            },
+            Message::CloseMigrationDialog,
+            Message::OpenSpecKitWizard,
+            Message::CloseSpecKitWizard,
+            Message::ConfirmAccepted,
+            Message::ConfirmCancelled,
+            Message::ProgressAdvance,
+            Message::ProgressError("err".into()),
             Message::BranchesMsg(BranchesMessage::Refresh),
             Message::IssuesMsg(IssuesMessage::Refresh),
             Message::SettingsMsg(SettingsMessage::Refresh),
