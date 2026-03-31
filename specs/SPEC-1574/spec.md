@@ -1,3 +1,5 @@
+> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here.
+
 ### 背景
 
 gwt のワークツリー管理は現在すべて手動操作に依存している。利用者がワークツリーの作成・エージェントへの割り当て・進捗監視・PR 作成・マージ・ワークツリー削除を個別に行う必要があり、大規模開発では「どのワークツリーで何をしていたか」が管理不能になる。

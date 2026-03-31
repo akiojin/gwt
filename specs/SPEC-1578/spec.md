@@ -1,3 +1,5 @@
+> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here.
+
 ### 背景
 
 gwt はプロジェクトを開いた際、AI エージェント（Claude Code, Codex, Gemini 等）用のスキル・コマンド・フック・設定ファイルを対象プロジェクトのローカルディレクトリに自動配置する。これらのファイルはユーザーのリポジトリに直接書き込まれるが、**リポジトリの Git 履歴には含めるべきでない**（gwt 固有のファイルであり、プロジェクトのソースコードではない）。

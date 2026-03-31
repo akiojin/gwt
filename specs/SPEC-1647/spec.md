@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ### 背景
 プロジェクトの開閉・作成・マイグレーション・最近のプロジェクト管理を行う。Studio時代の #1557（プロジェクトライフサイクル管理）と #1558（マルチプロジェクト切替）の機能概念を現行スタックで再定義。
 

@@ -1,3 +1,5 @@
+> **⚠️ DEPRECATED (SPEC-1776)**: This SPEC describes GUI-only functionality (Tauri/Svelte/xterm.js) that has been superseded by the gwt-tui migration. The gwt-tui equivalent is defined in SPEC-1776.
+
 ### 背景
 GWTアプリ全体のアイコンをLucide Icons (lucide-svelte) に統一する。現在はUnicode絵文字やCSSアイコンが混在しており、ビジュアルの一貫性とメンテナンス性に課題がある。
 

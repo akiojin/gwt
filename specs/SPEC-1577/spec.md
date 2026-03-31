@@ -1,3 +1,5 @@
+> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here.
+
 ### 背景
 
 Assistant Mode オーケストレーション（#1549）において、Assistant は Responses API を直接呼び出して動作する。Assistant の全機能（SPEC 生成、Agent 管理、Git 操作、コード参照、GitHub 連携、セッション管理）は Responses API の tools 定義を通じて実行される。

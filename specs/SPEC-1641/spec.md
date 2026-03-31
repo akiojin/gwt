@@ -1,3 +1,5 @@
+> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here.
+
 ### 背景
 ターミナルへの音声入力機能を提供する。ローカル ASR（Qwen3-ASR）を使用し、GPU 搭載環境でのみ利用可能。既存実装では設定可能ホットキーとオーバーレイ Voice ボタンが不安定で、起動導線として機能していなかったため、操作モデルを固定 PTT に単純化して安定化する。
 
