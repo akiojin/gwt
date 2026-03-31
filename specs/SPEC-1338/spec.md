@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: 起動時アプリ更新チェックの取りこぼし防止（遅延 + 再試行）
 
 **仕様ID**: `SPEC-a3daf499`

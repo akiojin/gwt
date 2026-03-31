@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: Version History 即時表示（永続キャッシュ + プリフェッチ）
 
 **仕様ID**: `SPEC-c9a2f731`

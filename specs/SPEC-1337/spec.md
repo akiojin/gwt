@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: Launch Agent From Issue ブランチプレフィックスAI判定
 
 **仕様ID**: `SPEC-a2f8e3b1`

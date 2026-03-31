@@ -1,0 +1,3 @@
+- RED: Added `SettingsPanel` tests for paste-only button visibility, Refresh, and reopen persistence; confirmed failure before implementation.
+- RED: Added Playwright tests for pasted API key behavior in `settings-config.spec.ts`; confirmed failure before implementation.
+- GREEN: Implemented paste synchronization in `SettingsPanel.svelte` and verified all new and existing tests pass.
