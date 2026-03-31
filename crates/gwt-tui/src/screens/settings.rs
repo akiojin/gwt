@@ -14,8 +14,6 @@ pub fn render(_buf: &mut Buffer, _area: Rect) {
 }
 
 /// Handle a key event in the settings screen.
-pub fn handle_key(
-    _key: &crossterm::event::KeyEvent,
-) -> Option<SettingsMessage> {
+pub fn handle_key(_key: &crossterm::event::KeyEvent) -> Option<SettingsMessage> {
     None
 }

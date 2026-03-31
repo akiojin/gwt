@@ -98,10 +98,7 @@ fn model_options_for_agents() -> Vec<Vec<String>> {
         // Codex CLI
         vec!["o3".to_string(), "o4-mini".to_string()],
         // Gemini CLI
-        vec![
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash".to_string(),
-        ],
+        vec!["gemini-2.5-pro".to_string(), "gemini-2.5-flash".to_string()],
     ]
 }
 
@@ -197,7 +194,10 @@ impl LaunchDialogState {
     /// Restore state from persisted [`LaunchDefaults`].
     pub fn apply_defaults(&mut self, defaults: &LaunchDefaults) {
         // Restore agent selection
-        if let Some(idx) = AGENT_IDS.iter().position(|id| *id == defaults.selected_agent) {
+        if let Some(idx) = AGENT_IDS
+            .iter()
+            .position(|id| *id == defaults.selected_agent)
+        {
             self.selected_agent = idx;
         }
 
@@ -760,10 +760,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &LaunchDialogState) {
             Span::raw("  "),
             Span::styled(
                 " Cancel ",
-                button_style(
-                    state.focused_field == DialogField::CancelButton,
-                    Color::Red,
-                ),
+                button_style(state.focused_field == DialogField::CancelButton, Color::Red),
             ),
         ]))
         .render(rows[row_idx], buf);
@@ -784,10 +781,7 @@ fn render_selector_row(
             format!("{:<label_w$}", label),
             Style::new().fg(Color::DarkGray),
         ),
-        Span::styled(
-            format!("[{} \u{25bc}]", value),
-            field_style(focused),
-        ),
+        Span::styled(format!("[{} \u{25bc}]", value), field_style(focused)),
     ]))
     .render(area, buf);
 }
@@ -1030,7 +1024,7 @@ mod tests {
     fn test_visible_row_count_codex() {
         let mut state = LaunchDialogState::default();
         state.selected_agent = 1; // Codex
-        // 9 + FastMode + ReasoningLevel = 11
+                                  // 9 + FastMode + ReasoningLevel = 11
         assert_eq!(state.visible_row_count(), 11);
     }
 

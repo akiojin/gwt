@@ -2,11 +2,10 @@
 resolver = "2"
 members = [
     "crates/gwt-core",
-    "crates/gwt-tauri",
     "crates/gwt-tui",
 ]
 default-members = [
-    "crates/gwt-tauri",
+    "crates/gwt-tui",
 ]
 
 [workspace.package]

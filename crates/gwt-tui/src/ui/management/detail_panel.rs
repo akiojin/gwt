@@ -58,7 +58,10 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &ManagementState) {
             "Branch:    ",
             Span::raw(agent.branch.as_deref().unwrap_or("-")),
         ),
-        detail_row("Status:    ", Span::styled(status_str, Style::new().fg(color))),
+        detail_row(
+            "Status:    ",
+            Span::styled(status_str, Style::new().fg(color)),
+        ),
     ];
 
     if let Some(ref spec_id) = agent.spec_id {

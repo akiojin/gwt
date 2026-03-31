@@ -8,6 +8,9 @@ use std::time::Instant;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::AgentColor;
 
+use crate::screens::branches::BranchListState;
+use crate::screens::issues::IssuePanelState;
+
 // ---------------------------------------------------------------------------
 // Layer / Tab enums
 // ---------------------------------------------------------------------------
@@ -145,6 +148,10 @@ pub struct Model {
     // Management tabs -- Management layer
     pub management_tab: ManagementTab,
 
+    // Screen states for management tabs
+    pub branches_state: BranchListState,
+    pub issues_state: IssuePanelState,
+
     // PTY management
     pub pane_manager: PaneManager,
     pub vt_parsers: HashMap<String, vt100::Parser>,
@@ -176,6 +183,8 @@ impl Model {
             session_tabs: Vec::new(),
             active_session: 0,
             management_tab: ManagementTab::Branches,
+            branches_state: BranchListState::new(),
+            issues_state: IssuePanelState::new(),
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
             wizard: None,

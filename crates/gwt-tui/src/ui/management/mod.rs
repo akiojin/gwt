@@ -107,11 +107,8 @@ impl ManagementState {
 ///
 /// Splits horizontally: left 35% for agent list, right 65% for detail panel.
 pub fn render(buf: &mut Buffer, area: Rect, state: &ManagementState) {
-    let layout = Layout::horizontal([
-        Constraint::Percentage(35),
-        Constraint::Percentage(65),
-    ])
-    .split(area);
+    let layout =
+        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
     agent_list::render(buf, layout[0], state);
     detail_panel::render(buf, layout[1], state);
