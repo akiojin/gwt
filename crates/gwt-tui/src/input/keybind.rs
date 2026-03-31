@@ -54,9 +54,7 @@ pub fn process_key(state: &mut PrefixState, key: KeyEvent) -> KeyAction {
     match state {
         PrefixState::Normal => {
             if is_ctrl_g(&key) {
-                *state = PrefixState::Prefix {
-                    at: Instant::now(),
-                };
+                *state = PrefixState::Prefix { at: Instant::now() };
                 KeyAction::None
             } else {
                 KeyAction::Forward(key)
@@ -194,10 +192,7 @@ mod tests {
     fn ctrl_g_ampersand_close_session() {
         let mut state = PrefixState::Normal;
         process_key(&mut state, ctrl_g());
-        assert_eq!(
-            process_key(&mut state, plain('&')),
-            KeyAction::CloseSession
-        );
+        assert_eq!(process_key(&mut state, plain('&')), KeyAction::CloseSession);
     }
 
     #[test]

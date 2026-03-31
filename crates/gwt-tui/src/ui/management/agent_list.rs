@@ -35,9 +35,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &ManagementState) {
         })
         .collect();
 
-    let block = Block::default()
-        .title(" Agents ")
-        .borders(Borders::ALL);
+    let block = Block::default().title(" Agents ").borders(Borders::ALL);
 
     let list = List::new(items)
         .block(block)

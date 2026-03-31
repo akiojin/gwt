@@ -14,8 +14,6 @@ pub fn render(_buf: &mut Buffer, _area: Rect) {
 }
 
 /// Handle a key event in the logs screen.
-pub fn handle_key(
-    _key: &crossterm::event::KeyEvent,
-) -> Option<LogsMessage> {
+pub fn handle_key(_key: &crossterm::event::KeyEvent) -> Option<LogsMessage> {
     None
 }

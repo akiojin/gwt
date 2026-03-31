@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::prelude::*;
 use ratatui::Terminal;
 
@@ -72,26 +74,24 @@ pub fn update(model: &mut Model, msg: Message) {
                     // Phase 2: forward to active pane
                 }
                 ActiveLayer::Management => {
-                    let _msg = match model.management_tab {
+                    let sub_msg = match model.management_tab {
                         ManagementTab::Branches => {
-                            crate::screens::branches::handle_key(&key)
+                            crate::screens::branches::handle_key(&model.branches_state, &key)
                                 .map(Message::BranchesMsg)
                         }
                         ManagementTab::Issues => {
-                            crate::screens::issues::handle_key(&key)
+                            crate::screens::issues::handle_key(&model.issues_state, &key)
                                 .map(Message::IssuesMsg)
                         }
                         ManagementTab::Settings => {
-                            crate::screens::settings::handle_key(&key)
-                                .map(Message::SettingsMsg)
+                            crate::screens::settings::handle_key(&key).map(Message::SettingsMsg)
                         }
                         ManagementTab::Logs => {
-                            crate::screens::logs::handle_key(&key)
-                                .map(Message::LogsMsg)
+                            crate::screens::logs::handle_key(&key).map(Message::LogsMsg)
                         }
                     };
                     // Recursively apply sub-message if any
-                    if let Some(sub_msg) = _msg {
+                    if let Some(sub_msg) = sub_msg {
                         update(model, sub_msg);
                     }
                 }
@@ -120,17 +120,17 @@ pub fn update(model: &mut Model, msg: Message) {
             model.dismiss_error();
         }
         // Screen-specific messages
-        Message::BranchesMsg(_msg) => {
-            // Phase 2: handle branches messages
+        Message::BranchesMsg(msg) => {
+            crate::screens::branches::update(&mut model.branches_state, msg);
         }
-        Message::IssuesMsg(_msg) => {
-            // Phase 2: handle issues messages
+        Message::IssuesMsg(msg) => {
+            crate::screens::issues::update(&mut model.issues_state, msg);
         }
         Message::SettingsMsg(_msg) => {
-            // Phase 2: handle settings messages
+            // Phase 3: handle settings messages
         }
         Message::LogsMsg(_msg) => {
-            // Phase 2: handle logs messages
+            // Phase 3: handle logs messages
         }
     }
 }
@@ -144,7 +144,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     let area = frame.area();
     let layout = Layout::vertical([
         Constraint::Length(1), // Tab bar
-        Constraint::Min(1),   // Main area
+        Constraint::Min(1),    // Main area
         Constraint::Length(1), // Status bar
     ])
     .split(area);
@@ -159,7 +159,8 @@ pub fn view(model: &Model, frame: &mut Frame) {
         ActiveLayer::Main => {
             if model.session_tabs.is_empty() {
                 // Placeholder when no sessions
-                let center = centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
+                let center =
+                    centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
                 let text_area = centered_rect(60, 3, layout[1]);
                 ratatui::widgets::Widget::render(center, text_area, buf);
             } else {
@@ -170,8 +171,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
             }
         }
         ActiveLayer::Management => match model.management_tab {
-            ManagementTab::Branches => crate::screens::branches::render(buf, layout[1]),
-            ManagementTab::Issues => crate::screens::issues::render(buf, layout[1]),
+            ManagementTab::Branches => {
+                crate::screens::branches::render(&model.branches_state, buf, layout[1]);
+            }
+            ManagementTab::Issues => {
+                crate::screens::issues::render(&model.issues_state, buf, layout[1]);
+            }
             ManagementTab::Settings => crate::screens::settings::render(buf, layout[1]),
             ManagementTab::Logs => crate::screens::logs::render(buf, layout[1]),
         },
@@ -308,9 +313,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             }
             TuiEvent::Mouse(mouse) => Some(Message::MouseInput(mouse)),
             TuiEvent::Resize(w, h) => Some(Message::Resize(w, h)),
-            TuiEvent::PtyOutput { pane_id, data } => {
-                Some(Message::PtyOutput { pane_id, data })
-            }
+            TuiEvent::PtyOutput { pane_id, data } => Some(Message::PtyOutput { pane_id, data }),
             TuiEvent::Tick => {
                 if last_tick.elapsed() >= TICK_INTERVAL {
                     last_tick = Instant::now();
