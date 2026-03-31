@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 gwt は複数プロジェクト（Git リポジトリ）を同時に管理し、`Cmd+`` でプロジェクト間を切り替える機能を提供する。Unity 版ではシングルウィンドウ内で、1 スタジオ = 1 プロジェクトの対応で、スタジオ間の切替をフェード/トランジション演出で実現する。

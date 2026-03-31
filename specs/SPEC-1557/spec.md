@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 gwt のプロジェクトライフサイクル管理（プロジェクトの開閉、新規作成、bare リポジトリ移行、アプリケーション終了）は、現行 Rust 版で 8 つの Tauri コマンドとして実装されている。Unity 移行に伴い、これらを C# サービスメソッドとして再実装する必要がある。

@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 gwt (Git Worktree Manager) を Rust/Tauri/Svelte ベースのデスクトップアプリから Unity 6 ベースのトップダウン ¾ ビューゲーム型アプリケーションへ全面移行する。

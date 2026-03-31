@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 gwt は macOS、Windows、Linux 向けのスタンドアロンデスクトップアプリケーションとして配布される。Unity 移行に伴い、ビルドパイプライン（Tauri → Unity Standalone Build）、自動更新メカニズム、システム監視、ログ管理、バグレポート生成を再実装する必要がある。
