@@ -66,7 +66,51 @@ pub fn update(model: &mut Model, msg: Message) {
             // Phase 2: spawn shell PTY and add session tab
         }
         Message::OpenWizard => {
-            // Phase 3: open agent launch wizard
+            // Open wizard for current branch or default
+            let branch = model
+                .session_tabs
+                .get(model.active_session)
+                .and_then(|t| t.branch.clone())
+                .unwrap_or_default();
+            if branch.is_empty() {
+                model.wizard = Some(crate::screens::wizard::WizardState::new());
+            } else {
+                model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
+                    &branch,
+                    vec![],
+                ));
+            }
+        }
+        Message::WizardKey(key) => {
+            use crossterm::event::KeyCode;
+            if let Some(ref mut wiz) = model.wizard {
+                match key.code {
+                    KeyCode::Up => wiz.select_prev(),
+                    KeyCode::Down => wiz.select_next(),
+                    KeyCode::Enter => {
+                        let action = wiz.confirm();
+                        match action {
+                            crate::screens::wizard::WizardAction::Complete => {
+                                // Build config and launch (Phase 3+)
+                                model.wizard = None;
+                            }
+                            crate::screens::wizard::WizardAction::Cancel => {
+                                model.wizard = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Esc => {
+                        let action = wiz.cancel();
+                        if action == crate::screens::wizard::WizardAction::Cancel {
+                            model.wizard = None;
+                        }
+                    }
+                    KeyCode::Backspace => wiz.input_backspace(),
+                    KeyCode::Char(ch) => wiz.input_char(ch),
+                    _ => {}
+                }
+            }
         }
         Message::KeyInput(key) => {
             // Forward to active screen handler
@@ -75,12 +119,28 @@ pub fn update(model: &mut Model, msg: Message) {
                     // Phase 2: forward to active pane
                 }
                 ActiveLayer::Management => {
-                    let _msg = match model.management_tab {
+                    let sub_msg = match model.management_tab {
                         ManagementTab::Branches => {
+<<<<<<< HEAD
                             crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
                         }
                         ManagementTab::Issues => {
                             crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
+=======
+<<<<<<< HEAD
+                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
+                        }
+                        ManagementTab::Issues => {
+                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
+=======
+                            crate::screens::branches::handle_key(&model.branches_state, &key)
+                                .map(Message::BranchesMsg)
+                        }
+                        ManagementTab::Issues => {
+                            crate::screens::issues::handle_key(&model.issues_state, &key)
+                                .map(Message::IssuesMsg)
+>>>>>>> origin/feature/feature-1776
+>>>>>>> origin/feature/feature-1776
                         }
                         ManagementTab::Settings => {
                             crate::screens::settings::handle_key(&key).map(Message::SettingsMsg)
@@ -90,7 +150,7 @@ pub fn update(model: &mut Model, msg: Message) {
                         }
                     };
                     // Recursively apply sub-message if any
-                    if let Some(sub_msg) = _msg {
+                    if let Some(sub_msg) = sub_msg {
                         update(model, sub_msg);
                     }
                 }
@@ -165,17 +225,17 @@ pub fn update(model: &mut Model, msg: Message) {
         }
 
         // Screen-specific messages
-        Message::BranchesMsg(_msg) => {
-            // Phase 2: handle branches messages
+        Message::BranchesMsg(msg) => {
+            crate::screens::branches::update(&mut model.branches_state, msg);
         }
-        Message::IssuesMsg(_msg) => {
-            // Phase 2: handle issues messages
+        Message::IssuesMsg(msg) => {
+            crate::screens::issues::update(&mut model.issues_state, msg);
         }
         Message::SettingsMsg(_msg) => {
-            // Phase 2: handle settings messages
+            // Phase 3: handle settings messages
         }
         Message::LogsMsg(_msg) => {
-            // Phase 2: handle logs messages
+            // Phase 3: handle logs messages
         }
     }
 }
@@ -216,8 +276,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
             }
         }
         ActiveLayer::Management => match model.management_tab {
-            ManagementTab::Branches => crate::screens::branches::render(buf, layout[1]),
-            ManagementTab::Issues => crate::screens::issues::render(buf, layout[1]),
+            ManagementTab::Branches => {
+                crate::screens::branches::render(&model.branches_state, buf, layout[1]);
+            }
+            ManagementTab::Issues => {
+                crate::screens::issues::render(&model.issues_state, buf, layout[1]);
+            }
             ManagementTab::Settings => crate::screens::settings::render(buf, layout[1]),
             ManagementTab::Logs => crate::screens::logs::render(buf, layout[1]),
         },
@@ -226,6 +290,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     // Status bar
     widgets::status_bar::render(model, buf, layout[2]);
 
+<<<<<<< HEAD
     // Overlays (on top of everything, priority order)
     // Error overlay (v2 queue)
     if !model.error_queue_v2.is_empty() {
@@ -241,6 +306,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
 
     // Progress modal
+=======
+    // Overlays (on top of everything)
+    if let Some(ref wizard) = model.wizard {
+        crate::screens::wizard::render(buf, area, wizard);
+    }
+>>>>>>> origin/feature/feature-1776
     if let Some(ref progress) = model.progress {
         widgets::progress_modal::render(buf, area, progress);
     }
@@ -360,7 +431,10 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let evt = event_loop.next()?;
         let msg = match evt {
             TuiEvent::Key(key) => {
-                if keybind::is_ctrl_c(&key) {
+                // When wizard is open, intercept all keys
+                if model.wizard.is_some() {
+                    Some(Message::WizardKey(key))
+                } else if keybind::is_ctrl_c(&key) {
                     if model.handle_ctrl_c() {
                         Some(Message::Quit)
                     } else {

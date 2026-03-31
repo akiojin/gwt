@@ -1023,20 +1023,16 @@ mod tests {
 
     #[test]
     fn test_visible_row_count_codex() {
-        let state = LaunchDialogState {
-            selected_agent: 1, // Codex
-            ..Default::default()
-        };
-        // 9 + FastMode + ReasoningLevel = 11
+        let mut state = LaunchDialogState::default();
+        state.selected_agent = 1; // Codex
+                                  // 9 + FastMode + ReasoningLevel = 11
         assert_eq!(state.visible_row_count(), 11);
     }
 
     #[test]
     fn test_visible_row_count_resume() {
-        let state = LaunchDialogState {
-            session_mode: DialogSessionMode::Resume,
-            ..Default::default()
-        };
+        let mut state = LaunchDialogState::default();
+        state.session_mode = DialogSessionMode::Resume;
         // 9 + ResumeSessionId = 10
         assert_eq!(state.visible_row_count(), 10);
     }

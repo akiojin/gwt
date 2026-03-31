@@ -8,12 +8,17 @@ use std::time::Instant;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::AgentColor;
 
+<<<<<<< HEAD
 use crate::screens::clone_wizard::CloneWizardState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::error::ErrorQueue;
 use crate::screens::migration_dialog::MigrationDialogState;
 use crate::screens::speckit_wizard::SpecKitState;
 use crate::widgets::progress_modal::ProgressState;
+=======
+use crate::screens::branches::BranchListState;
+use crate::screens::issues::IssuePanelState;
+>>>>>>> origin/feature/feature-1776
 
 // ---------------------------------------------------------------------------
 // Layer / Tab enums
@@ -106,6 +111,7 @@ pub struct ErrorEntry {
     pub severity: ErrorSeverity,
 }
 
+<<<<<<< HEAD
 /// Overlay mode for tracking which overlay is currently shown
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayMode {
@@ -117,6 +123,25 @@ pub enum OverlayMode {
     MigrationDialog,
     SpecKitWizard,
 }
+=======
+#[derive(Debug, Clone)]
+pub struct ProgressState {
+    pub title: String,
+    pub detail: Option<String>,
+    pub percent: Option<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfirmState {
+    pub title: String,
+    pub message: String,
+    pub confirm_label: String,
+    pub cancel_label: String,
+}
+
+// WizardState is re-exported from screens::wizard
+pub use crate::screens::wizard::WizardState;
+>>>>>>> origin/feature/feature-1776
 
 // ---------------------------------------------------------------------------
 // Background channel payloads
@@ -142,6 +167,10 @@ pub struct Model {
 
     // Management tabs -- Management layer
     pub management_tab: ManagementTab,
+
+    // Screen states for management tabs
+    pub branches_state: BranchListState,
+    pub issues_state: IssuePanelState,
 
     // PTY management
     pub pane_manager: PaneManager,
@@ -178,6 +207,8 @@ impl Model {
             session_tabs: Vec::new(),
             active_session: 0,
             management_tab: ManagementTab::Branches,
+            branches_state: BranchListState::new(),
+            issues_state: IssuePanelState::new(),
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
             overlay_mode: OverlayMode::None,
