@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ## 背景
 
 Worktree 一覧や tab 表示名は Issue タイトルを必要とするが、現状は `gh issue view` の都度取得と branch 名パースに強く依存しており、rate limit・通信失敗・linkage の曖昧さに弱い。現在の Chroma `issues` index は `gwt-spec` 限定の semantic search 用であり、一般 Issue の exact cache としては使えない。

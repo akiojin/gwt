@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ### 背景
 Tauriビルド（.dmg/.msi/.AppImage）、CI/CDパイプライン、GitHub Releases、自動更新チェック機能を包含する。release.yml、cargo tauri build、更新チェック機能は実装済み。Studio時代の #1553（ビルド・配布・システム監視）の概念を現行Tauriスタックで再定義。
 

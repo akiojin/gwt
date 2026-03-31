@@ -1,7 +1,7 @@
 {
   "id": "1705",
   "title": "gwt-spec: パフォーマンスプロファイリング基盤（tracing + Chrome Trace 出力）",
-  "status": "open",
+  "status": "deprecated",
   "phase": "in",
   "created_at": "2026-03-19T01:30:51Z",
   "updated_at": "2026-03-23T17:27:02Z"

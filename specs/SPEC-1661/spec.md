@@ -1,3 +1,5 @@
+> **📝 HISTORICAL (GUI era)**: This SPEC was written for the gwt-gui (Tauri/Svelte) architecture. The gwt-tui migration (SPEC-1776) supersedes the GUI stack. Retain for historical context.
+
 ### Background
 
 AssistantPanel の textarea で日本語 IME 入力時、変換確定の Enter キーでメッセージが送信されてしまう。

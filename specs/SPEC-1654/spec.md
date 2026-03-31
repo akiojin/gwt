@@ -1,3 +1,5 @@
+> **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC requires adaptation for the gwt-tui migration. GUI-specific references (gwt-tauri, Svelte, xterm.js) should be read as gwt-tui equivalents. See SPEC-1776 for the migration plan.
+
 # Workspace Shell（Agent Canvas・Branch Browser・マルチウィンドウ実行セッション）
 
 ## Background
