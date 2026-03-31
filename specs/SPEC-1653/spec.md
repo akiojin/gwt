@@ -1,3 +1,5 @@
+> **⚠️ DEPRECATED (SPEC-1776)**: This SPEC describes GUI-only functionality (Tauri/Svelte/xterm.js) that has been superseded by the gwt-tui migration. The gwt-tui equivalent is defined in SPEC-1776.
+
 ### 背景
 xterm.js v6統合、portable-pty管理、ANSI処理、リサイズ、パフォーマンスを包含するターミナルコア機能。TerminalView.svelte、PTYコマンド群、ANSI診断機能は実装済み。TerminalオーバーレイUI (#1612) とは分離し、コアはPTY+レンダリングに集中する。Studio時代の #1540（PTY管理）と #1541（ターミナルエミュレータ）の概念を現行スタックで再定義。
 

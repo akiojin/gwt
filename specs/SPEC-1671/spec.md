@@ -1,3 +1,5 @@
+> **📝 HISTORICAL (GUI era)**: This SPEC was written for the gwt-gui (Tauri/Svelte) architecture. The gwt-tui migration (SPEC-1776) supersedes the GUI stack. Retain for historical context.
+
 ### Background
 
 Assistant Mode を開いても、Assistant が自律的に何も始めない。現状の `assistant_start` は engine を作って state に格納するだけで、初回分析を実行しない。そのため、ユーザーが最初のメッセージを送るまで Assistant transcript は空のままで、project open 直後の「参謀」として機能しない。

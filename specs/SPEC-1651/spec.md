@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+
 ### 背景
 トースト通知、OS通知、エラーバス、統合通知アーキテクチャを提供する。Assistantの提案はチャットタイムライン内のアクション付きカードとして表示される。Studio時代の #1548（HUD＆UIシステム）の通知関連機能を現行スタックで再定義。
 

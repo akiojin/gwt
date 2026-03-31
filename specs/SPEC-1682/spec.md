@@ -1,3 +1,5 @@
+> **📝 HISTORICAL (GUI era)**: This SPEC was written for the gwt-gui (Tauri/Svelte) architecture. The gwt-tui migration (SPEC-1776) supersedes the GUI stack. Retain for historical context.
+
 ### Background
 
 Assistant startup analysis は動くが、現在の UI は `Analyzing project...` としか出さず、何をしているかが分からない。また、project を開くたびに同じ初回解析を毎回 LLM でやり直しており、起動体験と API コストの両方が無駄になる。さらに、analysis 結果が markdown で返っても transcript 側で plain text 表示されるため、見出しや箇条書きが崩れる。さらに startup path は user request 前の自動処理なので、write-capable tool を使わせず read-only に限定する必要がある。

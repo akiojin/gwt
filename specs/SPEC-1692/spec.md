@@ -1,3 +1,5 @@
+> **⚠️ DEPRECATED (SPEC-1776)**: This SPEC describes GUI-only functionality (Tauri/Svelte/xterm.js) that has been superseded by the gwt-tui migration. The gwt-tui equivalent is defined in SPEC-1776.
+
 ### Background
 
 Launch Agent ダイアログは gwt の主要機能であり、Worktree 選択時のエージェント起動設定 UI として完全に実装済みである。

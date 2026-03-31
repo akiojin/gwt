@@ -1,3 +1,5 @@
+> **📝 HISTORICAL (GUI era)**: This SPEC was written for the gwt-gui (Tauri/Svelte) architecture. The gwt-tui migration (SPEC-1776) supersedes the GUI stack. Retain for historical context.
+
 ### Background
 
 AssistantPanel のチャット表示で 2 つの UX 崩れがある。1 つ目はメッセージ本文中の改行が保持されず、複数行の内容が 1 行に潰れて表示されること。2 つ目はユーザー入力が `assistant_send_message` 完了まで履歴に反映されず、送信直後に自分の発言が見えないこと。コードや箇条書き、複数段落の応答が読みにくく、送信後のフィードバックも遅れる。加えて、送信済み user message を `ArrowUp` / `ArrowDown` で辿れないため、直前の入力を再利用しにくい。

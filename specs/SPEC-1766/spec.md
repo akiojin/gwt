@@ -1,3 +1,5 @@
+> **⚠️ DEPRECATED (SPEC-1776)**: This SPEC describes GUI-only functionality (Tauri/Svelte/xterm.js) that has been superseded by the gwt-tui migration. The gwt-tui equivalent is defined in SPEC-1776.
+
 <!-- GWT_SPEC_ARTIFACT:doc:spec.md -->
 doc:spec.md
 
