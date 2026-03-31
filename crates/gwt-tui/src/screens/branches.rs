@@ -468,11 +468,6 @@ pub fn handle_key(state: &BranchListState, key: &KeyEvent) -> Option<BranchesMes
     }
 }
 
-<<<<<<< HEAD
-/// Handle a key event in the branches screen. Returns an optional message.
-pub fn handle_key(_key: &crossterm::event::KeyEvent) -> Option<BranchesMessage> {
-    None
-=======
 /// Handle key events while in filter input mode.
 fn handle_filter_key(key: &KeyEvent) -> Option<BranchesMessage> {
     match key.code {
@@ -1288,5 +1283,4 @@ mod tests {
         assert_eq!(SortMode::Name.label(), "Name");
         assert_eq!(SortMode::Updated.label(), "Updated");
     }
->>>>>>> origin/feature/feature-1776
 }
