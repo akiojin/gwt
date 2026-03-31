@@ -15,7 +15,8 @@ use ratatui::Terminal;
 use crate::event::{self, EventLoop, TuiEvent};
 use crate::input::keybind::{self, KeyAction, PrefixState};
 use crate::message::Message;
-use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model};
+use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode};
+use crate::screens;
 use crate::widgets;
 
 /// Tick interval for background polling.
@@ -126,12 +127,19 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Issues => {
                             crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
 =======
+<<<<<<< HEAD
+                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
+                        }
+                        ManagementTab::Issues => {
+                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
+=======
                             crate::screens::branches::handle_key(&model.branches_state, &key)
                                 .map(Message::BranchesMsg)
                         }
                         ManagementTab::Issues => {
                             crate::screens::issues::handle_key(&model.issues_state, &key)
                                 .map(Message::IssuesMsg)
+>>>>>>> origin/feature/feature-1776
 >>>>>>> origin/feature/feature-1776
                         }
                         ManagementTab::Settings => {
@@ -170,6 +178,52 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::DismissError => {
             model.dismiss_error();
         }
+        // -- Overlay / dialog messages ------------------------------------------
+        Message::OpenCloneWizard => {
+            model.clone_wizard = Some(screens::clone_wizard::CloneWizardState::new());
+            model.overlay_mode = OverlayMode::CloneWizard;
+        }
+        Message::CloseCloneWizard => {
+            model.clone_wizard = None;
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::OpenMigrationDialog { source, target } => {
+            model.migration_dialog = Some(screens::migration_dialog::MigrationDialogState::new(
+                &source, &target,
+            ));
+            model.overlay_mode = OverlayMode::MigrationDialog;
+        }
+        Message::CloseMigrationDialog => {
+            model.migration_dialog = None;
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::OpenSpecKitWizard => {
+            model.speckit_wizard.open();
+            model.overlay_mode = OverlayMode::SpecKitWizard;
+        }
+        Message::CloseSpecKitWizard => {
+            model.speckit_wizard.close();
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::ConfirmAccepted => {
+            model.confirm = None;
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::ConfirmCancelled => {
+            model.confirm = None;
+            model.overlay_mode = OverlayMode::None;
+        }
+        Message::ProgressAdvance => {
+            if let Some(ref mut progress) = model.progress {
+                progress.advance();
+            }
+        }
+        Message::ProgressError(msg) => {
+            if let Some(ref mut progress) = model.progress {
+                progress.set_error(msg);
+            }
+        }
+
         // Screen-specific messages
         Message::BranchesMsg(msg) => {
             crate::screens::branches::update(&mut model.branches_state, msg);
@@ -236,16 +290,44 @@ pub fn view(model: &Model, frame: &mut Frame) {
     // Status bar
     widgets::status_bar::render(model, buf, layout[2]);
 
+<<<<<<< HEAD
+    // Overlays (on top of everything, priority order)
+    // Error overlay (v2 queue)
+    if !model.error_queue_v2.is_empty() {
+        screens::error::render_error_with_queue(&model.error_queue_v2, buf, area);
+    } else if !model.error_queue.is_empty() {
+        // Legacy error overlay
+        render_error_overlay(buf, area, &model.error_queue[0]);
+    }
+
+    // Confirm dialog
+    if let Some(ref confirm) = model.confirm {
+        screens::confirm::render_confirm(confirm, buf, area);
+    }
+
+    // Progress modal
+=======
     // Overlays (on top of everything)
     if let Some(ref wizard) = model.wizard {
         crate::screens::wizard::render(buf, area, wizard);
     }
+>>>>>>> origin/feature/feature-1776
     if let Some(ref progress) = model.progress {
         widgets::progress_modal::render(buf, area, progress);
     }
-    if !model.error_queue.is_empty() {
-        render_error_overlay(buf, area, &model.error_queue[0]);
+
+    // Clone wizard
+    if let Some(ref clone_wiz) = model.clone_wizard {
+        screens::clone_wizard::render_clone_wizard(clone_wiz, buf, area);
     }
+
+    // Migration dialog
+    if let Some(ref migration) = model.migration_dialog {
+        screens::migration_dialog::render_migration_dialog(migration, buf, area);
+    }
+
+    // SpecKit wizard
+    screens::speckit_wizard::render_speckit_wizard(&model.speckit_wizard, buf, area);
 }
 
 /// Render a simple error overlay.
@@ -614,11 +696,10 @@ mod tests {
     #[test]
     fn view_with_progress_renders() {
         let mut model = test_model();
-        model.progress = Some(crate::model::ProgressState {
-            title: "Loading...".into(),
-            detail: Some("step 1".into()),
-            percent: Some(50),
-        });
+        model.progress = Some(crate::widgets::progress_modal::ProgressState::simple(
+            "Loading...",
+            Some("step 1"),
+        ));
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| view(&model, f)).unwrap();

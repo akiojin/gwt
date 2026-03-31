@@ -8,8 +8,17 @@ use std::time::Instant;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::AgentColor;
 
+<<<<<<< HEAD
+use crate::screens::clone_wizard::CloneWizardState;
+use crate::screens::confirm::ConfirmState;
+use crate::screens::error::ErrorQueue;
+use crate::screens::migration_dialog::MigrationDialogState;
+use crate::screens::speckit_wizard::SpecKitState;
+use crate::widgets::progress_modal::ProgressState;
+=======
 use crate::screens::branches::BranchListState;
 use crate::screens::issues::IssuePanelState;
+>>>>>>> origin/feature/feature-1776
 
 // ---------------------------------------------------------------------------
 // Layer / Tab enums
@@ -87,7 +96,7 @@ pub struct SessionTab {
 }
 
 // ---------------------------------------------------------------------------
-// Error / overlay state
+// Error / overlay state (legacy types retained for backward compat)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +111,19 @@ pub struct ErrorEntry {
     pub severity: ErrorSeverity,
 }
 
+<<<<<<< HEAD
+/// Overlay mode for tracking which overlay is currently shown
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayMode {
+    None,
+    Error,
+    Confirm,
+    Progress,
+    CloneWizard,
+    MigrationDialog,
+    SpecKitWizard,
+}
+=======
 #[derive(Debug, Clone)]
 pub struct ProgressState {
     pub title: String,
@@ -119,6 +141,7 @@ pub struct ConfirmState {
 
 // WizardState is re-exported from screens::wizard
 pub use crate::screens::wizard::WizardState;
+>>>>>>> origin/feature/feature-1776
 
 // ---------------------------------------------------------------------------
 // Background channel payloads
@@ -154,10 +177,14 @@ pub struct Model {
     pub vt_parsers: HashMap<String, vt100::Parser>,
 
     // Overlay states
-    pub wizard: Option<WizardState>,
+    pub overlay_mode: OverlayMode,
     pub error_queue: Vec<ErrorEntry>,
+    pub error_queue_v2: ErrorQueue,
     pub progress: Option<ProgressState>,
     pub confirm: Option<ConfirmState>,
+    pub clone_wizard: Option<CloneWizardState>,
+    pub migration_dialog: Option<MigrationDialogState>,
+    pub speckit_wizard: SpecKitState,
 
     // Background channels (for async operations)
     pub branch_list_rx: Option<Receiver<BranchListUpdate>>,
@@ -184,10 +211,14 @@ impl Model {
             issues_state: IssuePanelState::new(),
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
-            wizard: None,
+            overlay_mode: OverlayMode::None,
             error_queue: Vec::new(),
+            error_queue_v2: ErrorQueue::new(),
             progress: None,
             confirm: None,
+            clone_wizard: None,
+            migration_dialog: None,
+            speckit_wizard: SpecKitState::new(),
             branch_list_rx: None,
             should_quit: false,
             repo_root,
