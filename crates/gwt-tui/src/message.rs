@@ -55,6 +55,10 @@ pub enum Message {
     /// Dismiss the front-most error
     DismissError,
 
+    // -- Wizard ----------------------------------------------------------------
+    /// Key input forwarded to wizard overlay
+    WizardKey(KeyEvent),
+
     // -- Screen-specific messages (delegated) ---------------------------------
     BranchesMsg(BranchesMessage),
     IssuesMsg(IssuesMessage),
@@ -80,6 +84,12 @@ mod tests {
             Message::CloseSession,
             Message::NewShell,
             Message::OpenWizard,
+            Message::WizardKey(KeyEvent {
+                code: crossterm::event::KeyCode::Enter,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            }),
             Message::Resize(80, 24),
             Message::PtyOutput {
                 pane_id: "p1".into(),

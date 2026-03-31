@@ -65,7 +65,51 @@ pub fn update(model: &mut Model, msg: Message) {
             // Phase 2: spawn shell PTY and add session tab
         }
         Message::OpenWizard => {
-            // Phase 3: open agent launch wizard
+            // Open wizard for current branch or default
+            let branch = model
+                .session_tabs
+                .get(model.active_session)
+                .and_then(|t| t.branch.clone())
+                .unwrap_or_default();
+            if branch.is_empty() {
+                model.wizard = Some(crate::screens::wizard::WizardState::new());
+            } else {
+                model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
+                    &branch,
+                    vec![],
+                ));
+            }
+        }
+        Message::WizardKey(key) => {
+            use crossterm::event::KeyCode;
+            if let Some(ref mut wiz) = model.wizard {
+                match key.code {
+                    KeyCode::Up => wiz.select_prev(),
+                    KeyCode::Down => wiz.select_next(),
+                    KeyCode::Enter => {
+                        let action = wiz.confirm();
+                        match action {
+                            crate::screens::wizard::WizardAction::Complete => {
+                                // Build config and launch (Phase 3+)
+                                model.wizard = None;
+                            }
+                            crate::screens::wizard::WizardAction::Cancel => {
+                                model.wizard = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Esc => {
+                        let action = wiz.cancel();
+                        if action == crate::screens::wizard::WizardAction::Cancel {
+                            model.wizard = None;
+                        }
+                    }
+                    KeyCode::Backspace => wiz.input_backspace(),
+                    KeyCode::Char(ch) => wiz.input_char(ch),
+                    _ => {}
+                }
+            }
         }
         Message::KeyInput(key) => {
             // Forward to active screen handler
@@ -76,12 +120,19 @@ pub fn update(model: &mut Model, msg: Message) {
                 ActiveLayer::Management => {
                     let sub_msg = match model.management_tab {
                         ManagementTab::Branches => {
+<<<<<<< HEAD
+                            crate::screens::branches::handle_key(&key).map(Message::BranchesMsg)
+                        }
+                        ManagementTab::Issues => {
+                            crate::screens::issues::handle_key(&key).map(Message::IssuesMsg)
+=======
                             crate::screens::branches::handle_key(&model.branches_state, &key)
                                 .map(Message::BranchesMsg)
                         }
                         ManagementTab::Issues => {
                             crate::screens::issues::handle_key(&model.issues_state, &key)
                                 .map(Message::IssuesMsg)
+>>>>>>> origin/feature/feature-1776
                         }
                         ManagementTab::Settings => {
                             crate::screens::settings::handle_key(&key).map(Message::SettingsMsg)
@@ -186,6 +237,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
     widgets::status_bar::render(model, buf, layout[2]);
 
     // Overlays (on top of everything)
+    if let Some(ref wizard) = model.wizard {
+        crate::screens::wizard::render(buf, area, wizard);
+    }
     if let Some(ref progress) = model.progress {
         widgets::progress_modal::render(buf, area, progress);
     }
@@ -295,7 +349,10 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let evt = event_loop.next()?;
         let msg = match evt {
             TuiEvent::Key(key) => {
-                if keybind::is_ctrl_c(&key) {
+                // When wizard is open, intercept all keys
+                if model.wizard.is_some() {
+                    Some(Message::WizardKey(key))
+                } else if keybind::is_ctrl_c(&key) {
                     if model.handle_ctrl_c() {
                         Some(Message::Quit)
                     } else {

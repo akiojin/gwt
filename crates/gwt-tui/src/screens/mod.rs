@@ -5,6 +5,7 @@ pub mod branches;
 pub mod issues;
 pub mod logs;
 pub mod settings;
+pub mod wizard;
 
 pub use branches::{
     BranchItem, BranchListState, BranchesMessage, SafetyStatus, SortMode, ViewMode,
