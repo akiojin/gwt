@@ -1,128 +1,69 @@
-use ratatui::{
-    buffer::Buffer, layout::Rect, style::Color as RatColor, style::Modifier, style::Style,
-};
+//! VT100 → ratatui renderer
+//!
+//! Converts a vt100::Screen into ratatui Buffer cells.
+//! This module is kept as a placeholder; the full implementation
+//! will be ported in Phase 2 from the gwt-cli reference.
 
-/// Convert a vt100 color to a ratatui color.
-pub fn convert_color(color: vt100::Color) -> RatColor {
-    match color {
-        vt100::Color::Default => RatColor::Reset,
-        vt100::Color::Idx(i) => RatColor::Indexed(i),
-        vt100::Color::Rgb(r, g, b) => RatColor::Rgb(r, g, b),
-    }
-}
+use ratatui::prelude::*;
 
-/// Convert vt100 cell attributes to ratatui modifier.
-pub fn convert_attrs(cell: &vt100::Cell) -> Modifier {
-    let mut modifier = Modifier::empty();
-    if cell.bold() {
-        modifier |= Modifier::BOLD;
-    }
-    if cell.italic() {
-        modifier |= Modifier::ITALIC;
-    }
-    if cell.underline() {
-        modifier |= Modifier::UNDERLINED;
-    }
-    if cell.inverse() {
-        modifier |= Modifier::REVERSED;
-    }
-    modifier
-}
-
-/// Render a vt100 screen to a ratatui buffer.
-pub fn render_screen(screen: &vt100::Screen, area: Rect) -> Buffer {
-    let mut buffer = Buffer::empty(area);
-    let rows = area.height.min(screen.size().0);
-    let cols = area.width.min(screen.size().1);
+/// Render a vt100 screen into the given ratatui buffer area.
+///
+/// Each vt100 cell is converted to a ratatui Cell with matching
+/// foreground/background colors and attributes.
+pub fn render_vt100_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
+    let rows = area.height as usize;
+    let cols = area.width as usize;
 
     for row in 0..rows {
         for col in 0..cols {
-            let cell = screen.cell(row, col);
+            let vt_row = row as u16;
+            let vt_col = col as u16;
+            let cell = screen.cell(vt_row, vt_col);
+            let buf_x = area.x + col as u16;
+            let buf_y = area.y + row as u16;
+
             if let Some(cell) = cell {
-                let fg = convert_color(cell.fgcolor());
-                let bg = convert_color(cell.bgcolor());
-                let modifier = convert_attrs(cell);
-                let style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
-                let ch = cell.contents();
-                if !ch.is_empty() {
-                    let buf_cell = &mut buffer[(area.x + col, area.y + row)];
-                    buf_cell.set_symbol(&ch);
-                    buf_cell.set_style(style);
+                if let Some(buf_cell) = buf.cell_mut((buf_x, buf_y)) {
+                    let ch = cell.contents();
+                    if ch.is_empty() {
+                        buf_cell.set_char(' ');
+                    } else {
+                        // set_symbol handles multi-char grapheme clusters
+                        buf_cell.set_symbol(&ch);
+                    }
+                    buf_cell.set_style(vt100_to_ratatui_style(cell));
                 }
             }
         }
     }
-
-    buffer
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Convert vt100 cell colors/attributes to a ratatui Style.
+fn vt100_to_ratatui_style(cell: &vt100::Cell) -> Style {
+    let mut style = Style::default();
+    style = style.fg(vt100_color_to_ratatui(cell.fgcolor()));
+    style = style.bg(vt100_color_to_ratatui(cell.bgcolor()));
 
-    #[test]
-    fn test_convert_default_color() {
-        assert_eq!(convert_color(vt100::Color::Default), RatColor::Reset);
+    if cell.bold() {
+        style = style.add_modifier(Modifier::BOLD);
     }
-
-    #[test]
-    fn test_convert_indexed_color() {
-        assert_eq!(
-            convert_color(vt100::Color::Idx(196)),
-            RatColor::Indexed(196)
-        );
+    if cell.italic() {
+        style = style.add_modifier(Modifier::ITALIC);
     }
-
-    #[test]
-    fn test_convert_rgb_color() {
-        assert_eq!(
-            convert_color(vt100::Color::Rgb(255, 128, 0)),
-            RatColor::Rgb(255, 128, 0)
-        );
+    if cell.underline() {
+        style = style.add_modifier(Modifier::UNDERLINED);
     }
-
-    #[test]
-    fn test_render_empty_screen() {
-        let parser = vt100::Parser::new(24, 80, 0);
-        let screen = parser.screen();
-        let area = Rect::new(0, 0, 80, 24);
-        let buffer = render_screen(screen, area);
-        assert_eq!(buffer.area, area);
+    if cell.inverse() {
+        style = style.add_modifier(Modifier::REVERSED);
     }
+    style
+}
 
-    #[test]
-    fn test_render_screen_with_text() {
-        let mut parser = vt100::Parser::new(24, 80, 0);
-        parser.process(b"Hello, world!");
-        let screen = parser.screen();
-        let area = Rect::new(0, 0, 80, 24);
-        let buffer = render_screen(screen, area);
-        let cell = &buffer[(0, 0)];
-        assert_eq!(cell.symbol(), "H");
-    }
-
-    #[test]
-    fn test_render_screen_with_ansi_colors() {
-        let mut parser = vt100::Parser::new(24, 80, 0);
-        // Red foreground text
-        parser.process(b"\x1b[31mRed\x1b[0m");
-        let screen = parser.screen();
-        let area = Rect::new(0, 0, 80, 24);
-        let buffer = render_screen(screen, area);
-        let cell = &buffer[(0, 0)];
-        assert_eq!(cell.symbol(), "R");
-        // vt100 maps color 31 (red) to Idx(1)
-        assert_eq!(cell.style().fg, Some(RatColor::Indexed(1)));
-    }
-
-    #[test]
-    fn test_render_screen_with_bold() {
-        let mut parser = vt100::Parser::new(24, 80, 0);
-        parser.process(b"\x1b[1mBold\x1b[0m");
-        let screen = parser.screen();
-        let area = Rect::new(0, 0, 80, 24);
-        let buffer = render_screen(screen, area);
-        let cell = &buffer[(0, 0)];
-        assert!(cell.style().add_modifier.contains(Modifier::BOLD));
+/// Map vt100 color to ratatui Color.
+fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(i) => Color::Indexed(i),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
 }

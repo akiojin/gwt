@@ -1,1093 +1,566 @@
-use std::collections::HashMap;
-use std::io::{self, Read};
+//! TUI Application with Elm Architecture (Model / View / Update)
+
+use std::io;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    backend::CrosstermBackend,
-    buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::{Paragraph, Widget},
-    Terminal,
-};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::prelude::*;
+use ratatui::Terminal;
 
-use crate::event::{self, EventLoop, PtyOutputSender, TuiEvent};
-use crate::input::keybind::{self, Direction, KeyAction};
-use crate::state::{AppMode, PaneStatusIndicator, TabInfo, TabType, TuiState};
-use crate::ui;
-use crate::ui::split_layout::{LayoutTree, SplitDirection};
-use gwt_core::agent::launch::{AgentLaunchBuilder, ShellLaunchBuilder};
-use gwt_core::terminal::{manager::PaneManager, AgentColor};
+use crate::event::{self, EventLoop, TuiEvent};
+use crate::input::keybind::{self, KeyAction, PrefixState};
+use crate::message::Message;
+use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model};
+use crate::widgets;
 
-pub struct App {
-    state: TuiState,
-    pane_manager: PaneManager,
-    vt_parsers: HashMap<String, vt100::Parser>,
-    pty_tx: PtyOutputSender,
-    should_quit: bool,
-    repo_root: PathBuf,
-    last_ctrl_c: Option<Instant>,
-    terminal_rows: u16,
-    terminal_cols: u16,
-}
+/// Tick interval for background polling.
+const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
-impl App {
-    pub fn new(repo_root: PathBuf) -> Self {
-        let (pty_tx, _) = event::pty_output_channel();
-        Self {
-            state: TuiState::new(),
-            pane_manager: PaneManager::new(),
-            vt_parsers: HashMap::new(),
-            pty_tx,
-            should_quit: false,
-            repo_root,
-            last_ctrl_c: None,
-            terminal_rows: 24,
-            terminal_cols: 80,
+// ---------------------------------------------------------------------------
+// Update
+// ---------------------------------------------------------------------------
+
+/// Apply a message to the model (Elm Architecture update function).
+pub fn update(model: &mut Model, msg: Message) {
+    match msg {
+        Message::Quit => {
+            model.should_quit = true;
         }
-    }
-
-    pub fn run(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (pty_tx, pty_rx) = event::pty_output_channel();
-        self.pty_tx = pty_tx;
-        let mut event_loop = EventLoop::new(pty_rx);
-
-        let size = terminal.size()?;
-        self.terminal_rows = size.height.saturating_sub(2);
-        self.terminal_cols = size.width;
-
-        loop {
-            self.render(terminal)?;
-
-            let evt = event_loop.next()?;
-            match evt {
-                TuiEvent::Key(key) => self.handle_key(key)?,
-                TuiEvent::Resize(w, h) => self.handle_resize(w, h)?,
-                TuiEvent::PtyOutput { pane_id, data } => self.handle_pty_output(&pane_id, &data),
-                TuiEvent::Tick => self.poll_pane_status(),
-            }
-
-            if self.should_quit {
-                let _ = self.pane_manager.kill_all();
-                return Ok(());
+        Message::ToggleLayer => {
+            model.toggle_layer();
+        }
+        Message::SwitchManagementTab(tab) => {
+            model.management_tab = tab;
+            model.active_layer = ActiveLayer::Management;
+        }
+        Message::NextSession => {
+            model.next_session();
+            if !model.session_tabs.is_empty() {
+                model.active_layer = ActiveLayer::Main;
             }
         }
-    }
-
-    // --- Pane lifecycle ---
-
-    fn spawn_shell_pane(&mut self) -> Result<String, Box<dyn std::error::Error>> {
-        let config = ShellLaunchBuilder::new(&self.repo_root).build();
-
-        let pane_id = self.pane_manager.spawn_shell(
-            &self.repo_root,
-            config,
-            self.terminal_rows,
-            self.terminal_cols,
-        )?;
-
-        self.start_pty_reader(&pane_id)?;
-        self.vt_parsers.insert(
-            pane_id.clone(),
-            vt100::Parser::new(self.terminal_rows, self.terminal_cols, 1000),
-        );
-
-        Ok(pane_id)
-    }
-
-    fn spawn_shell_tab(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let pane_id = self.spawn_shell_pane()?;
-        let tree = LayoutTree::new(&pane_id);
-
-        self.state.add_tab(TabInfo {
-            pane_id: pane_id.clone(),
-            name: "shell".to_string(),
-            tab_type: TabType::Shell,
-            color: AgentColor::White,
-            status: PaneStatusIndicator::Running,
-            branch: None,
-            spec_id: None,
-            pane_count: 1,
-        });
-
-        self.state.layout_trees.insert(pane_id, tree);
-        Ok(())
-    }
-
-    fn split_active_pane(
-        &mut self,
-        direction: SplitDirection,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let tab_pane_id = match self.state.active_tab_info() {
-            Some(tab) => tab.pane_id.clone(),
-            None => return Ok(()),
-        };
-
-        let new_pane_id = self.spawn_shell_pane()?;
-
-        if let Some(tree) = self.state.layout_trees.get_mut(&tab_pane_id) {
-            tree.split(direction, &new_pane_id);
-        }
-
-        // Update pane count on tab
-        if let Some(tab) = self.state.tabs.get_mut(self.state.active_tab) {
-            if let Some(tree) = self.state.layout_trees.get(&tab.pane_id) {
-                tab.pane_count = tree.pane_count();
+        Message::PrevSession => {
+            model.prev_session();
+            if !model.session_tabs.is_empty() {
+                model.active_layer = ActiveLayer::Main;
             }
         }
-
-        Ok(())
-    }
-
-    fn close_active_pane(&mut self) {
-        let Some(focused_id) = self.state.focused_pane_id() else {
-            return;
-        };
-        let Some(tab) = self.state.active_tab_info() else {
-            return;
-        };
-        let tab_pane_id = tab.pane_id.clone();
-
-        self.vt_parsers.remove(&focused_id);
-        // Find and kill the pane in PaneManager
-        if let Some(idx) = self
-            .pane_manager
-            .panes()
-            .iter()
-            .position(|p| p.pane_id() == focused_id)
-        {
-            self.pane_manager.close_pane(idx);
+        Message::SwitchSession(index) => {
+            // 1-based → 0-based
+            let idx = index.saturating_sub(1);
+            model.switch_session(idx);
+            if idx < model.session_tabs.len() {
+                model.active_layer = ActiveLayer::Main;
+            }
         }
-
-        if let Some(tree) = self.state.layout_trees.get_mut(&tab_pane_id) {
-            if tree.pane_count() <= 1 {
-                // Last pane in tab — close the whole tab
-                self.state.layout_trees.remove(&tab_pane_id);
-                self.state.remove_tab(self.state.active_tab);
-            } else {
-                tree.remove(&focused_id);
-                if let Some(tab) = self.state.tabs.get_mut(self.state.active_tab) {
-                    tab.pane_count = tree.pane_count();
+        Message::CloseSession => {
+            model.close_active_session();
+        }
+        Message::NewShell => {
+            // Phase 2: spawn shell PTY and add session tab
+        }
+        Message::OpenWizard => {
+            // Phase 3: open agent launch wizard
+        }
+        Message::KeyInput(key) => {
+            // Forward to active screen handler
+            match model.active_layer {
+                ActiveLayer::Main => {
+                    // Phase 2: forward to active pane
                 }
-            }
-        }
-    }
-
-    fn close_active_tab(&mut self) {
-        let Some(tab) = self.state.active_tab_info() else {
-            return;
-        };
-        let tab_pane_id = tab.pane_id.clone();
-
-        // Kill all panes in the tab's layout tree
-        if let Some(tree) = self.state.layout_trees.get(&tab_pane_id) {
-            for id in tree.pane_ids() {
-                self.vt_parsers.remove(&id);
-                if let Some(idx) = self
-                    .pane_manager
-                    .panes()
-                    .iter()
-                    .position(|p| p.pane_id() == id)
-                {
-                    self.pane_manager.close_pane(idx);
-                }
-            }
-        }
-        self.state.layout_trees.remove(&tab_pane_id);
-        self.state.remove_tab(self.state.active_tab);
-    }
-
-    fn start_pty_reader(&self, pane_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let pane = self
-            .pane_manager
-            .panes()
-            .iter()
-            .find(|p| p.pane_id() == pane_id)
-            .ok_or("pane not found")?;
-        let mut reader = pane.take_reader()?;
-        let tx = self.pty_tx.clone();
-        let id = pane_id.to_string();
-
-        std::thread::Builder::new()
-            .name(format!("pty-reader-{id}"))
-            .spawn(move || {
-                let mut buf = [0u8; 4096];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if tx.send((id.clone(), buf[..n].to_vec())).is_err() {
-                                break;
-                            }
+                ActiveLayer::Management => {
+                    let _msg = match model.management_tab {
+                        ManagementTab::Branches => {
+                            crate::screens::branches::handle_key(&key)
+                                .map(Message::BranchesMsg)
                         }
-                        Err(_) => break,
-                    }
-                }
-            })?;
-
-        Ok(())
-    }
-
-    // --- Rendering ---
-
-    fn render(
-        &self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        terminal.draw(|frame| {
-            let area = frame.area();
-            let layout = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
-            let buf = frame.buffer_mut();
-
-            match self.state.mode {
-                AppMode::Management => {
-                    ui::tab_bar::render(buf, layout[0], &self.state);
-                    ui::management::render(buf, layout[1], &self.state.management);
-                    ui::status_bar::render(buf, layout[2], &self.state);
-                }
-                AppMode::LaunchDialog => {
-                    ui::tab_bar::render(buf, layout[0], &self.state);
-                    self.render_terminal_area(buf, layout[1]);
-                    ui::status_bar::render(buf, layout[2], &self.state);
-                    // Overlay launch dialog — dynamic height, centered
-                    let dialog_w = 50u16.min(area.width.saturating_sub(4));
-                    let content_rows =
-                        self.state.management.launch_dialog.visible_row_count();
-                    let dialog_h =
-                        (content_rows + 2).min(area.height.saturating_sub(4)); // +2 for border
-                    let dialog_x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-                    let dialog_y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-                    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
-                    ui::management::launch_dialog::render(
-                        buf,
-                        dialog_area,
-                        &self.state.management.launch_dialog,
-                    );
-                }
-                _ => {
-                    ui::tab_bar::render(buf, layout[0], &self.state);
-                    self.render_terminal_area(buf, layout[1]);
-                    ui::status_bar::render(buf, layout[2], &self.state);
-                }
-            }
-        })?;
-        Ok(())
-    }
-
-    fn render_terminal_area(&self, buf: &mut Buffer, area: Rect) {
-        if self.state.tabs.is_empty() {
-            render_welcome(buf, area);
-            return;
-        }
-
-        let Some(tab) = self.state.active_tab_info() else {
-            return;
-        };
-
-        if self.state.zoomed {
-            // Zoomed: render only focused pane
-            if let Some(focused_id) = self.state.focused_pane_id() {
-                if let Some(parser) = self.vt_parsers.get(&focused_id) {
-                    ui::terminal_view::render(buf, area, parser.screen());
-                }
-            }
-            return;
-        }
-
-        if let Some(tree) = self.state.layout_trees.get(&tab.pane_id) {
-            let areas = tree.calculate_areas(area);
-            if areas.len() <= 1 {
-                // Single pane — no border needed
-                if let Some((pane_id, pane_area)) = areas.first() {
-                    if let Some(parser) = self.vt_parsers.get(pane_id) {
-                        ui::terminal_view::render(buf, *pane_area, parser.screen());
-                    }
-                }
-            } else {
-                let focused = tree.focused_pane().to_string();
-                for (pane_id, pane_area) in &areas {
-                    let is_focused = *pane_id == focused;
-                    let border_color = if is_focused {
-                        Color::Cyan
-                    } else {
-                        Color::DarkGray
+                        ManagementTab::Issues => {
+                            crate::screens::issues::handle_key(&key)
+                                .map(Message::IssuesMsg)
+                        }
+                        ManagementTab::Settings => {
+                            crate::screens::settings::handle_key(&key)
+                                .map(Message::SettingsMsg)
+                        }
+                        ManagementTab::Logs => {
+                            crate::screens::logs::handle_key(&key)
+                                .map(Message::LogsMsg)
+                        }
                     };
-
-                    // Draw border around each pane
-                    draw_pane_border(buf, *pane_area, border_color, is_focused);
-
-                    // Render terminal content inside the border (1px inset)
-                    let inner = Rect::new(
-                        pane_area.x + 1,
-                        pane_area.y + 1,
-                        pane_area.width.saturating_sub(2),
-                        pane_area.height.saturating_sub(2),
-                    );
-                    if inner.width > 0 && inner.height > 0 {
-                        if let Some(parser) = self.vt_parsers.get(pane_id) {
-                            ui::terminal_view::render(buf, inner, parser.screen());
-                        }
+                    // Recursively apply sub-message if any
+                    if let Some(sub_msg) = _msg {
+                        update(model, sub_msg);
                     }
                 }
             }
-        } else if let Some(parser) = self.vt_parsers.get(&tab.pane_id) {
-            ui::terminal_view::render(buf, area, parser.screen());
         }
-    }
-
-    // --- Key handling ---
-
-    fn handle_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
-        // Mode-specific key handling
-        match self.state.mode {
-            AppMode::Management => return self.handle_management_key(key),
-            AppMode::LaunchDialog => return self.handle_launch_dialog_key(key),
-            _ => {}
+        Message::MouseInput(_mouse) => {
+            // Phase 2: mouse handling
         }
-
-        // Ctrl+C handling
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            let is_agent_tab = self
-                .state
-                .active_tab_info()
-                .map(|t| t.tab_type == TabType::Agent)
-                .unwrap_or(false);
-
-            if is_agent_tab {
-                self.write_to_focused_pty(&[0x03])?;
-                self.last_ctrl_c = None;
-                return Ok(());
-            }
-
-            if let Some(last) = self.last_ctrl_c {
-                if last.elapsed().as_millis() < 500 {
-                    self.should_quit = true;
-                    return Ok(());
-                }
-            }
-            self.last_ctrl_c = Some(Instant::now());
-            self.write_to_focused_pty(&[0x03])?;
-            return Ok(());
+        Message::Resize(w, h) => {
+            model.terminal_cols = w;
+            model.terminal_rows = h;
         }
-
-        self.last_ctrl_c = None;
-
-        let action = keybind::process_key(&mut self.state.prefix_state, key);
-        match action {
-            KeyAction::Quit => self.should_quit = true,
-            KeyAction::NewShellWindow => self.spawn_shell_tab()?,
-            KeyAction::NewAgentWindow => {
-                self.load_launch_defaults();
-                self.state.mode = AppMode::LaunchDialog;
-            }
-            KeyAction::NextWindow => self.state.next_tab(),
-            KeyAction::PrevWindow => self.state.prev_tab(),
-            KeyAction::SwitchTab(n) => self.state.set_active_tab(n),
-            KeyAction::CloseWindow => self.close_active_tab(),
-            KeyAction::VerticalSplit => self.split_active_pane(SplitDirection::Vertical)?,
-            KeyAction::HorizontalSplit => self.split_active_pane(SplitDirection::Horizontal)?,
-            KeyAction::FocusPane(dir) => {
-                if let Some(tab) = self.state.active_tab_info() {
-                    let tab_id = tab.pane_id.clone();
-                    if let Some(tree) = self.state.layout_trees.get_mut(&tab_id) {
-                        let (split_dir, first) = match dir {
-                            Direction::Left => (SplitDirection::Horizontal, true),
-                            Direction::Right => (SplitDirection::Horizontal, false),
-                            Direction::Up => (SplitDirection::Vertical, true),
-                            Direction::Down => (SplitDirection::Vertical, false),
-                        };
-                        tree.focus_direction(split_dir, first);
-                    }
-                }
-            }
-            KeyAction::ClosePane => self.close_active_pane(),
-            KeyAction::ZoomPane => self.state.zoomed = !self.state.zoomed,
-            KeyAction::ToggleManagement => {
-                self.state.mode = AppMode::Management;
-                self.sync_management_state();
-            }
-            KeyAction::ScrollMode => {
-                self.state.mode = AppMode::ScrollMode;
-            }
-            KeyAction::Passthrough(key) => {
-                let bytes = key_event_to_bytes(&key);
-                if !bytes.is_empty() {
-                    self.write_to_focused_pty(&bytes)?;
-                }
-            }
-            KeyAction::None => {}
-        }
-        Ok(())
-    }
-
-    fn handle_management_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.state.mode = AppMode::Normal,
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.state.mode = AppMode::Normal;
-            }
-            KeyCode::Up | KeyCode::Char('k') => self.state.management.select_prev(),
-            KeyCode::Down | KeyCode::Char('j') => self.state.management.select_next(),
-            KeyCode::Enter => {
-                // Switch to selected agent's tab
-                if let Some(agent) = self.state.management.selected_agent() {
-                    let pane_id = agent.pane_id.clone();
-                    if let Some(idx) = self.state.tabs.iter().position(|t| t.pane_id == pane_id) {
-                        self.state.set_active_tab(idx);
-                    }
-                }
-                self.state.mode = AppMode::Normal;
-            }
-            KeyCode::Char('n') => {
-                self.load_launch_defaults();
-                self.state.mode = AppMode::LaunchDialog;
-            }
-            KeyCode::Char('s') => {
-                self.spawn_shell_tab()?;
-                self.state.mode = AppMode::Normal;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn handle_launch_dialog_key(
-        &mut self,
-        key: KeyEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::ui::management::launch_dialog::DialogField;
-
-        let field = self.state.management.launch_dialog.focused_field.clone();
-
-        match key.code {
-            KeyCode::Esc => {
-                self.state.management.launch_dialog = Default::default();
-                self.state.mode = AppMode::Normal;
-            }
-            KeyCode::Tab => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.management.launch_dialog.focus_prev();
-                } else {
-                    self.state.management.launch_dialog.focus_next();
-                }
-            }
-            KeyCode::BackTab => {
-                self.state.management.launch_dialog.focus_prev();
-            }
-            KeyCode::Enter => match field {
-                DialogField::CancelButton => {
-                    self.state.management.launch_dialog = Default::default();
-                    self.state.mode = AppMode::Normal;
-                }
-                DialogField::LaunchButton => {
-                    self.launch_agent_from_dialog()?;
-                    self.state.management.launch_dialog = Default::default();
-                    self.state.mode = AppMode::Normal;
-                }
-                DialogField::Agent => self.state.management.launch_dialog.next_agent(),
-                DialogField::AgentVersion => self.state.management.launch_dialog.next_version(),
-                DialogField::Model => self.state.management.launch_dialog.next_model(),
-                DialogField::Branch | DialogField::ExtraArgs | DialogField::ResumeSessionId => {
-                    self.state.management.launch_dialog.focus_next();
-                }
-                DialogField::SessionMode => {
-                    self.state.management.launch_dialog.next_session_mode();
-                }
-                DialogField::SkipPermissions => {
-                    self.state.management.launch_dialog.toggle_skip_permissions();
-                }
-                DialogField::FastMode => {
-                    self.state.management.launch_dialog.toggle_fast_mode();
-                }
-                DialogField::ReasoningLevel => {
-                    self.state.management.launch_dialog.next_reasoning_level();
-                }
-            },
-            // Selector fields: Left/Right/Space to cycle
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if field == DialogField::Agent =>
-            {
-                self.state.management.launch_dialog.next_agent();
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if field == DialogField::AgentVersion =>
-            {
-                self.state.management.launch_dialog.next_version();
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if field == DialogField::Model =>
-            {
-                self.state.management.launch_dialog.next_model();
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if field == DialogField::SessionMode =>
-            {
-                self.state.management.launch_dialog.next_session_mode();
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if field == DialogField::ReasoningLevel =>
-            {
-                self.state.management.launch_dialog.next_reasoning_level();
-            }
-            // Toggle fields: Space
-            KeyCode::Char(' ') if field == DialogField::SkipPermissions => {
-                self.state.management.launch_dialog.toggle_skip_permissions();
-            }
-            KeyCode::Char(' ') if field == DialogField::FastMode => {
-                self.state.management.launch_dialog.toggle_fast_mode();
-            }
-            // Text input fields: Branch
-            KeyCode::Char(c) if field == DialogField::Branch => {
-                self.state.management.launch_dialog.branch_input.push(c);
-            }
-            KeyCode::Backspace if field == DialogField::Branch => {
-                self.state.management.launch_dialog.branch_input.pop();
-            }
-            // Text input fields: ExtraArgs
-            KeyCode::Char(c) if field == DialogField::ExtraArgs => {
-                self.state.management.launch_dialog.extra_args.push(c);
-            }
-            KeyCode::Backspace if field == DialogField::ExtraArgs => {
-                self.state.management.launch_dialog.extra_args.pop();
-            }
-            // Text input fields: ResumeSessionId
-            KeyCode::Char(c) if field == DialogField::ResumeSessionId => {
-                self.state
-                    .management
-                    .launch_dialog
-                    .resume_session_id
-                    .push(c);
-            }
-            KeyCode::Backspace if field == DialogField::ResumeSessionId => {
-                self.state
-                    .management
-                    .launch_dialog
-                    .resume_session_id
-                    .pop();
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn launch_agent_from_dialog(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let dialog = &self.state.management.launch_dialog;
-
-        // Save defaults before launching
-        let defaults = dialog.to_defaults();
-        crate::config::launch_defaults::save_defaults(&defaults);
-
-        let agent_id = dialog.current_agent_id().to_string();
-
-        let branch = if dialog.branch_input.is_empty() {
-            "main".to_string()
-        } else {
-            dialog.branch_input.clone()
-        };
-
-        let selected_model = dialog.selected_model_name().map(|s| s.to_string());
-
-        let session_mode = match dialog.session_mode {
-            crate::ui::management::launch_dialog::DialogSessionMode::Normal => {
-                gwt_core::agent::launch::SessionMode::Normal
-            }
-            crate::ui::management::launch_dialog::DialogSessionMode::Continue => {
-                gwt_core::agent::launch::SessionMode::Continue
-            }
-            crate::ui::management::launch_dialog::DialogSessionMode::Resume => {
-                gwt_core::agent::launch::SessionMode::Resume
-            }
-        };
-
-        let resume_session_id = if dialog.resume_session_id.is_empty() {
-            None
-        } else {
-            Some(dialog.resume_session_id.clone())
-        };
-
-        // Parse extra_args (space-separated)
-        let extra_args: Vec<String> = dialog
-            .extra_args
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-
-        let reasoning_label = dialog.selected_reasoning_label().to_string();
-
-        let mut builder = AgentLaunchBuilder::new(&agent_id, &self.repo_root)
-            .branch_name(&branch)
-            .with_os_env(std::env::vars().collect())
-            .model(selected_model.as_deref())
-            .session_mode(session_mode)
-            .skip_permissions(dialog.skip_permissions)
-            .fast_mode(dialog.fast_mode)
-            .reasoning_level(Some(&reasoning_label))
-            .agent_version(dialog.version_for_builder())
-            .extra_args(extra_args)
-            .interactive(true)
-            .auto_worktree(!branch.is_empty() && branch != "main")
-            .repo_root(&self.repo_root);
-
-        if let Some(ref id) = resume_session_id {
-            builder = builder.resume_session_id(id);
-        }
-
-        // Parse env_overrides (KEY=VALUE per line)
-        for line in dialog.env_overrides.lines() {
-            let line = line.trim();
-            if let Some((k, v)) = line.split_once('=') {
-                builder = builder.env_var(k.trim(), v.trim());
+        Message::PtyOutput { pane_id, data } => {
+            // Feed data to VT100 parser
+            if let Some(parser) = model.vt_parsers.get_mut(&pane_id) {
+                parser.process(&data);
             }
         }
-
-        let config = builder.build()?;
-
-        let agent_name = config.agent_name.clone();
-        let color = config.agent_color;
-
-        let pane_id = self.pane_manager.launch_agent(
-            &self.repo_root,
-            config,
-            self.terminal_rows,
-            self.terminal_cols,
-        )?;
-
-        self.start_pty_reader(&pane_id)?;
-        self.vt_parsers.insert(
-            pane_id.clone(),
-            vt100::Parser::new(self.terminal_rows, self.terminal_cols, 1000),
-        );
-
-        let tree = LayoutTree::new(&pane_id);
-        self.state.add_tab(TabInfo {
-            pane_id: pane_id.clone(),
-            name: agent_name,
-            tab_type: TabType::Agent,
-            color,
-            status: PaneStatusIndicator::Running,
-            branch: Some(branch),
-            spec_id: None,
-            pane_count: 1,
-        });
-        self.state.layout_trees.insert(pane_id, tree);
-
-        Ok(())
-    }
-
-    fn load_launch_defaults(&mut self) {
-        let defaults = crate::config::launch_defaults::load_defaults();
-        self.state.management.launch_dialog = Default::default();
-        self.state.management.launch_dialog.apply_defaults(&defaults);
-    }
-
-    fn sync_management_state(&mut self) {
-        use crate::ui::management::{AgentEntry, AgentStatus};
-
-        self.state.management.agents = self
-            .state
-            .tabs
-            .iter()
-            .map(|tab| AgentEntry {
-                pane_id: tab.pane_id.clone(),
-                agent_name: tab.name.clone(),
-                agent_type: match tab.tab_type {
-                    TabType::Shell => "shell".to_string(),
-                    TabType::Agent => "agent".to_string(),
-                },
-                branch: tab.branch.clone(),
-                status: match &tab.status {
-                    PaneStatusIndicator::Running => AgentStatus::Running,
-                    PaneStatusIndicator::Idle => AgentStatus::Idle,
-                    PaneStatusIndicator::Completed(c) => AgentStatus::Completed(*c),
-                    PaneStatusIndicator::Error(e) => AgentStatus::Error(e.clone()),
-                },
-                uptime: None,
-                pr_url: None,
-                spec_id: tab.spec_id.clone(),
-            })
-            .collect();
-    }
-
-    // --- PTY I/O ---
-
-    fn write_to_focused_pty(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(pane_id) = self.state.focused_pane_id() {
-            if let Some(pane) = self.pane_manager.pane_mut_by_id(&pane_id) {
-                // Ignore errors — PTY may have closed (agent/shell exited)
-                let _ = pane.write_input(data);
-            }
+        Message::Tick => {
+            model.apply_background_updates();
         }
-        Ok(())
-    }
-
-    fn handle_resize(&mut self, width: u16, height: u16) -> Result<(), Box<dyn std::error::Error>> {
-        let rows = height.saturating_sub(2);
-        self.terminal_rows = rows;
-        self.terminal_cols = width;
-        self.pane_manager.resize_all(rows, width)?;
-        for parser in self.vt_parsers.values_mut() {
-            parser.set_size(rows, width);
+        Message::PushError(entry) => {
+            model.push_error(entry);
         }
-        Ok(())
-    }
-
-    fn handle_pty_output(&mut self, pane_id: &str, data: &[u8]) {
-        if let Some(parser) = self.vt_parsers.get_mut(pane_id) {
-            parser.process(data);
+        Message::DismissError => {
+            model.dismiss_error();
         }
-        if let Some(pane) = self.pane_manager.pane_mut_by_id(pane_id) {
-            let _ = pane.process_bytes(data);
+        // Screen-specific messages
+        Message::BranchesMsg(_msg) => {
+            // Phase 2: handle branches messages
         }
-    }
-
-    fn poll_pane_status(&mut self) {
-        use gwt_core::terminal::pane::PaneStatus;
-
-        for tab in &mut self.state.tabs {
-            if tab.status != PaneStatusIndicator::Running {
-                continue;
-            }
-            if let Some(pane) = self.pane_manager.pane_mut_by_id(&tab.pane_id) {
-                if let Ok(status) = pane.check_status() {
-                    match status {
-                        PaneStatus::Completed(code) => {
-                            tab.status = PaneStatusIndicator::Completed(*code);
-                        }
-                        PaneStatus::Error(msg) => {
-                            tab.status = PaneStatusIndicator::Error(msg.clone());
-                        }
-                        PaneStatus::Running => {}
-                    }
-                }
-            }
+        Message::IssuesMsg(_msg) => {
+            // Phase 2: handle issues messages
+        }
+        Message::SettingsMsg(_msg) => {
+            // Phase 2: handle settings messages
+        }
+        Message::LogsMsg(_msg) => {
+            // Phase 2: handle logs messages
         }
     }
 }
 
-// --- Helpers ---
+// ---------------------------------------------------------------------------
+// View
+// ---------------------------------------------------------------------------
 
-fn key_event_to_bytes(key: &KeyEvent) -> Vec<u8> {
-    match key.code {
-        KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                let ctrl_byte = (c as u8).wrapping_sub(b'a').wrapping_add(1);
-                if ctrl_byte <= 26 {
-                    return vec![ctrl_byte];
-                }
+/// Render the model to the terminal frame (Elm Architecture view function).
+pub fn view(model: &Model, frame: &mut Frame) {
+    let area = frame.area();
+    let layout = Layout::vertical([
+        Constraint::Length(1), // Tab bar
+        Constraint::Min(1),   // Main area
+        Constraint::Length(1), // Status bar
+    ])
+    .split(area);
+
+    let buf = frame.buffer_mut();
+
+    // Tab bar
+    widgets::tab_bar::render(model, buf, layout[0]);
+
+    // Main content area
+    match model.active_layer {
+        ActiveLayer::Main => {
+            if model.session_tabs.is_empty() {
+                // Placeholder when no sessions
+                let center = centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
+                let text_area = centered_rect(60, 3, layout[1]);
+                ratatui::widgets::Widget::render(center, text_area, buf);
+            } else {
+                // Phase 2: render active session terminal
+                let pane_id = &model.session_tabs[model.active_session].pane_id;
+                let parser = model.vt_parsers.get(pane_id);
+                crate::screens::agent_pane::render(buf, layout[1], parser);
             }
-            let mut buf = [0u8; 4];
-            c.encode_utf8(&mut buf).as_bytes().to_vec()
         }
-        KeyCode::Enter => vec![b'\r'],
-        KeyCode::Backspace => vec![0x7f],
-        KeyCode::Tab => vec![b'\t'],
-        KeyCode::Esc => vec![0x1b],
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
-        KeyCode::F(n) => match n {
-            1 => b"\x1bOP".to_vec(),
-            2 => b"\x1bOQ".to_vec(),
-            3 => b"\x1bOR".to_vec(),
-            4 => b"\x1bOS".to_vec(),
-            5 => b"\x1b[15~".to_vec(),
-            6 => b"\x1b[17~".to_vec(),
-            7 => b"\x1b[18~".to_vec(),
-            8 => b"\x1b[19~".to_vec(),
-            9 => b"\x1b[20~".to_vec(),
-            10 => b"\x1b[21~".to_vec(),
-            11 => b"\x1b[23~".to_vec(),
-            12 => b"\x1b[24~".to_vec(),
-            _ => vec![],
+        ActiveLayer::Management => match model.management_tab {
+            ManagementTab::Branches => crate::screens::branches::render(buf, layout[1]),
+            ManagementTab::Issues => crate::screens::issues::render(buf, layout[1]),
+            ManagementTab::Settings => crate::screens::settings::render(buf, layout[1]),
+            ManagementTab::Logs => crate::screens::logs::render(buf, layout[1]),
         },
-        _ => vec![],
+    }
+
+    // Status bar
+    widgets::status_bar::render(model, buf, layout[2]);
+
+    // Overlays (on top of everything)
+    if let Some(ref progress) = model.progress {
+        widgets::progress_modal::render(buf, area, progress);
+    }
+    if !model.error_queue.is_empty() {
+        render_error_overlay(buf, area, &model.error_queue[0]);
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let w = area.width * percent_x / 100;
-    let h = area.height * percent_y / 100;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect::new(x, y, w, h)
-}
+/// Render a simple error overlay.
+fn render_error_overlay(buf: &mut Buffer, area: Rect, entry: &ErrorEntry) {
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-fn draw_pane_border(buf: &mut Buffer, area: Rect, color: Color, focused: bool) {
-    if area.width < 2 || area.height < 2 {
-        return;
-    }
+    let modal_width = 60.min(area.width.saturating_sub(4));
+    let modal_height = 5.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
 
-    let style = Style::default().fg(color);
-    let (tl, tr, bl, br, h, v) = if focused {
-        ("┏", "┓", "┗", "┛", "━", "┃")
-    } else {
-        ("┌", "┐", "└", "┘", "─", "│")
+    Clear.render(modal_area, buf);
+
+    let border_color = match entry.severity {
+        ErrorSeverity::Critical => Color::Red,
+        ErrorSeverity::Minor => Color::Yellow,
     };
 
-    // Top edge
-    if let Some(cell) = buf.cell_mut((area.x, area.y)) {
-        cell.set_symbol(tl);
-        cell.set_style(style);
-    }
-    for x in (area.x + 1)..area.right().saturating_sub(1) {
-        if let Some(cell) = buf.cell_mut((x, area.y)) {
-            cell.set_symbol(h);
-            cell.set_style(style);
-        }
-    }
-    if let Some(cell) = buf.cell_mut((area.right().saturating_sub(1), area.y)) {
-        cell.set_symbol(tr);
-        cell.set_style(style);
-    }
+    let para = Paragraph::new(entry.message.as_str())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(" Error (Enter to dismiss) "),
+        )
+        .wrap(Wrap { trim: true });
 
-    // Bottom edge
-    let bottom = area.bottom().saturating_sub(1);
-    if let Some(cell) = buf.cell_mut((area.x, bottom)) {
-        cell.set_symbol(bl);
-        cell.set_style(style);
-    }
-    for x in (area.x + 1)..area.right().saturating_sub(1) {
-        if let Some(cell) = buf.cell_mut((x, bottom)) {
-            cell.set_symbol(h);
-            cell.set_style(style);
-        }
-    }
-    if let Some(cell) = buf.cell_mut((area.right().saturating_sub(1), bottom)) {
-        cell.set_symbol(br);
-        cell.set_style(style);
-    }
+    ratatui::widgets::Widget::render(para, modal_area, buf);
+}
 
-    // Left and right edges
-    for y in (area.y + 1)..bottom {
-        if let Some(cell) = buf.cell_mut((area.x, y)) {
-            cell.set_symbol(v);
-            cell.set_style(style);
+/// Helper: create a centered Paragraph.
+fn centered_text(text: &str) -> ratatui::widgets::Paragraph<'_> {
+    ratatui::widgets::Paragraph::new(text)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray))
+}
+
+/// Helper: create a centered rect within `area`.
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let width = (area.width * percent_x / 100).max(1);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, width, height)
+}
+
+// ---------------------------------------------------------------------------
+// Key → Message conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a KeyAction to an optional Message.
+fn action_to_message(action: KeyAction, key: crossterm::event::KeyEvent) -> Option<Message> {
+    match action {
+        KeyAction::None => None,
+        KeyAction::Forward(k) => Some(Message::KeyInput(k)),
+        KeyAction::ToggleLayer => Some(Message::ToggleLayer),
+        KeyAction::NextSession => Some(Message::NextSession),
+        KeyAction::PrevSession => Some(Message::PrevSession),
+        KeyAction::SwitchSession(n) => Some(Message::SwitchSession(n)),
+        KeyAction::CloseSession => Some(Message::CloseSession),
+        KeyAction::NewShell => Some(Message::NewShell),
+        KeyAction::OpenWizard => Some(Message::OpenWizard),
+        KeyAction::ShowHelp => {
+            // Phase 2: open help screen
+            let _ = key;
+            None
         }
-        if let Some(cell) = buf.cell_mut((area.right().saturating_sub(1), y)) {
-            cell.set_symbol(v);
-            cell.set_style(style);
-        }
+        KeyAction::Quit => Some(Message::Quit),
     }
 }
 
-fn render_welcome(buf: &mut Buffer, area: Rect) {
-    if area.height < 8 || area.width < 40 {
-        return;
+// ---------------------------------------------------------------------------
+// Run (event loop)
+// ---------------------------------------------------------------------------
+
+/// Run the TUI application.
+pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    // Terminal setup
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Initialize model
+    let mut model = Model::new(repo_root);
+
+    // PTY output channel
+    let (_pty_tx, pty_rx) = event::pty_output_channel();
+
+    // Event loop
+    let event_loop = EventLoop::new(pty_rx);
+    let mut prefix_state = PrefixState::default();
+    let mut last_tick = Instant::now();
+
+    loop {
+        // View
+        terminal.draw(|f| view(&model, f))?;
+
+        // Event → Message
+        let evt = event_loop.next()?;
+        let msg = match evt {
+            TuiEvent::Key(key) => {
+                if keybind::is_ctrl_c(&key) {
+                    if model.handle_ctrl_c() {
+                        Some(Message::Quit)
+                    } else {
+                        // Single Ctrl+C: forward to active pane in Main layer
+                        if model.active_layer == ActiveLayer::Main {
+                            Some(Message::KeyInput(key))
+                        } else {
+                            None
+                        }
+                    }
+                } else {
+                    let action = keybind::process_key(&mut prefix_state, key);
+                    action_to_message(action, key)
+                }
+            }
+            TuiEvent::Mouse(mouse) => Some(Message::MouseInput(mouse)),
+            TuiEvent::Resize(w, h) => Some(Message::Resize(w, h)),
+            TuiEvent::PtyOutput { pane_id, data } => {
+                Some(Message::PtyOutput { pane_id, data })
+            }
+            TuiEvent::Tick => {
+                if last_tick.elapsed() >= TICK_INTERVAL {
+                    last_tick = Instant::now();
+                    Some(Message::Tick)
+                } else {
+                    None
+                }
+            }
+        };
+
+        // Update
+        if let Some(msg) = msg {
+            update(&mut model, msg);
+        }
+
+        // Quit check
+        if model.should_quit {
+            break;
+        }
     }
 
-    let center_y = area.y + area.height / 2 - 4;
-    let max_width = 40u16.min(area.width);
-    let text_x = area.x + area.width / 2 - max_width / 2;
-    let text_area = Rect::new(text_x, center_y, max_width, 9);
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
 
-    let lines = vec![
-        Line::from(Span::styled("Welcome to gwt", Style::default().fg(Color::Cyan))),
-        Line::from(""),
-        Line::from(Span::styled(
-            "No agents running. Get started:",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Ctrl+G, c  ", Style::default().fg(Color::Yellow)),
-            Span::styled("Open shell", Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Ctrl+G, n  ", Style::default().fg(Color::Yellow)),
-            Span::styled("Launch agent", Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Ctrl+G, q  ", Style::default().fg(Color::Yellow)),
-            Span::styled("Quit", Style::default().fg(Color::White)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Ctrl+C x2  Quit immediately",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
-    Paragraph::new(lines).render(text_area, buf);
+    Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{
+        ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, SessionStatus, SessionTab,
+        SessionTabType,
+    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use gwt_core::terminal::AgentColor;
 
-    #[test]
-    fn test_app_creation() {
-        let app = App::new(PathBuf::from("/tmp/test"));
-        assert!(!app.should_quit);
-        assert_eq!(app.state.tab_count(), 0);
+    fn test_model() -> Model {
+        Model::new(PathBuf::from("/tmp/test"))
     }
 
-    #[test]
-    fn test_ctrl_c_double_tap_quits() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        app.handle_key(ctrl_c.clone()).unwrap();
-        assert!(!app.should_quit);
-        app.handle_key(ctrl_c).unwrap();
-        assert!(app.should_quit);
+    fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
     }
 
-    #[test]
-    fn test_ctrl_c_agent_tab_never_quits() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
-        app.state.add_tab(TabInfo {
-            pane_id: "p1".into(),
-            name: "claude".into(),
-            tab_type: TabType::Agent,
+    fn test_session(name: &str) -> SessionTab {
+        SessionTab {
+            pane_id: format!("pane-{name}"),
+            name: name.to_string(),
+            tab_type: SessionTabType::Shell,
             color: AgentColor::Green,
-            status: PaneStatusIndicator::Running,
+            status: SessionStatus::Running,
             branch: None,
             spec_id: None,
-            pane_count: 1,
-        });
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        app.handle_key(ctrl_c.clone()).unwrap();
-        app.handle_key(ctrl_c).unwrap();
-        assert!(!app.should_quit); // Agent tab: never quits via Ctrl+C
+        }
+    }
+
+    // -- Update tests ---------------------------------------------------------
+
+    #[test]
+    fn update_quit_sets_should_quit() {
+        let mut m = test_model();
+        update(&mut m, Message::Quit);
+        assert!(m.should_quit);
     }
 
     #[test]
-    fn test_quit_via_prefix() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
-            .unwrap();
-        assert!(app.should_quit);
+    fn update_toggle_layer() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        update(&mut m, Message::ToggleLayer);
+        assert_eq!(m.active_layer, ActiveLayer::Management);
+        update(&mut m, Message::ToggleLayer);
+        assert_eq!(m.active_layer, ActiveLayer::Main);
     }
 
     #[test]
-    fn test_launch_dialog_mode() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
-        // Ctrl+G, n -> LaunchDialog mode
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.state.mode, AppMode::LaunchDialog);
-        // Esc -> back to Normal
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.state.mode, AppMode::Normal);
+    fn update_switch_management_tab() {
+        let mut m = test_model();
+        update(&mut m, Message::SwitchManagementTab(ManagementTab::Logs));
+        assert_eq!(m.management_tab, ManagementTab::Logs);
+        assert_eq!(m.active_layer, ActiveLayer::Management);
     }
 
     #[test]
-    fn test_management_mode() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
-        // Ctrl+G, Ctrl+G -> Management mode
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
-            .unwrap();
-        assert_eq!(app.state.mode, AppMode::Management);
-        // Esc -> back to Normal
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.state.mode, AppMode::Normal);
+    fn update_session_navigation() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        m.add_session(test_session("s2"));
+        m.add_session(test_session("s3"));
+
+        update(&mut m, Message::SwitchSession(1)); // 1-based
+        assert_eq!(m.active_session, 0);
+
+        update(&mut m, Message::NextSession);
+        assert_eq!(m.active_session, 1);
+
+        update(&mut m, Message::PrevSession);
+        assert_eq!(m.active_session, 0);
     }
 
     #[test]
-    fn test_zoom_toggle() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
-        assert!(!app.state.zoomed);
-        // Ctrl+G, z -> zoom
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
-            .unwrap();
-        assert!(app.state.zoomed);
-        // Ctrl+G, z -> unzoom
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
-            .unwrap();
-        assert!(!app.state.zoomed);
+    fn update_close_session() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        assert_eq!(m.session_tabs.len(), 1);
+        update(&mut m, Message::CloseSession);
+        assert!(m.session_tabs.is_empty());
+        assert_eq!(m.active_layer, ActiveLayer::Management);
     }
 
     #[test]
-    fn test_handle_pty_output() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
-        app.vt_parsers
+    fn update_resize() {
+        let mut m = test_model();
+        update(&mut m, Message::Resize(120, 40));
+        assert_eq!(m.terminal_cols, 120);
+        assert_eq!(m.terminal_rows, 40);
+    }
+
+    #[test]
+    fn update_pty_output_feeds_parser() {
+        let mut m = test_model();
+        m.vt_parsers
             .insert("pane-1".to_string(), vt100::Parser::new(24, 80, 0));
-        app.handle_pty_output("pane-1", b"Hello");
-        let screen = app.vt_parsers.get("pane-1").unwrap().screen();
-        assert_eq!(screen.cell(0, 0).unwrap().contents(), "H");
+        update(
+            &mut m,
+            Message::PtyOutput {
+                pane_id: "pane-1".into(),
+                data: b"hello".to_vec(),
+            },
+        );
+        let screen = m.vt_parsers["pane-1"].screen();
+        let row = screen.contents_between(0, 0, 0, 5);
+        assert_eq!(row, "hello");
     }
 
     #[test]
-    fn test_key_event_to_bytes() {
-        assert_eq!(
-            key_event_to_bytes(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
-            b"a"
-        );
-        assert_eq!(
-            key_event_to_bytes(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            b"\r"
-        );
-        assert_eq!(
-            key_event_to_bytes(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
-            vec![0x01]
-        );
-        assert_eq!(
-            key_event_to_bytes(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
-            b"\x1b[A"
-        );
+    fn update_tick_increments() {
+        let mut m = test_model();
+        update(&mut m, Message::Tick);
+        assert_eq!(m.tick_count, 1);
     }
 
     #[test]
-    fn test_centered_rect() {
-        let area = Rect::new(0, 0, 100, 50);
-        let r = centered_rect(60, 40, area);
-        assert_eq!(r.width, 60);
-        assert_eq!(r.height, 20);
-        assert_eq!(r.x, 20);
-        assert_eq!(r.y, 15);
+    fn update_error_push_and_dismiss() {
+        let mut m = test_model();
+        update(
+            &mut m,
+            Message::PushError(ErrorEntry {
+                message: "fail".into(),
+                severity: ErrorSeverity::Critical,
+            }),
+        );
+        assert_eq!(m.error_queue.len(), 1);
+        update(&mut m, Message::DismissError);
+        assert!(m.error_queue.is_empty());
+    }
+
+    // -- Key → Message conversion tests ----------------------------------------
+
+    #[test]
+    fn action_to_message_maps_correctly() {
+        let dummy_key = make_key(KeyCode::Char('x'), KeyModifiers::NONE);
+
+        assert!(action_to_message(KeyAction::None, dummy_key).is_none());
+        assert!(matches!(
+            action_to_message(KeyAction::Quit, dummy_key),
+            Some(Message::Quit)
+        ));
+        assert!(matches!(
+            action_to_message(KeyAction::ToggleLayer, dummy_key),
+            Some(Message::ToggleLayer)
+        ));
+        assert!(matches!(
+            action_to_message(KeyAction::NextSession, dummy_key),
+            Some(Message::NextSession)
+        ));
+        assert!(matches!(
+            action_to_message(KeyAction::NewShell, dummy_key),
+            Some(Message::NewShell)
+        ));
+        assert!(matches!(
+            action_to_message(KeyAction::SwitchSession(3), dummy_key),
+            Some(Message::SwitchSession(3))
+        ));
     }
 
     #[test]
-    fn test_focused_pane_id_no_tabs() {
-        let state = TuiState::new();
-        assert!(state.focused_pane_id().is_none());
+    fn action_forward_produces_key_input() {
+        let key = make_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        let msg = action_to_message(KeyAction::Forward(key), key);
+        assert!(matches!(msg, Some(Message::KeyInput(_))));
+    }
+
+    // -- View smoke test -------------------------------------------------------
+
+    #[test]
+    fn view_renders_without_panic() {
+        let model = test_model();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| view(&model, f)).unwrap();
     }
 
     #[test]
-    fn test_focused_pane_id_with_layout() {
-        let mut state = TuiState::new();
-        state.add_tab(TabInfo {
-            pane_id: "tab1".into(),
-            name: "shell".into(),
-            tab_type: TabType::Shell,
-            color: AgentColor::White,
-            status: PaneStatusIndicator::Running,
-            branch: None,
-            spec_id: None,
-            pane_count: 1,
+    fn view_with_sessions_renders_without_panic() {
+        let mut model = test_model();
+        model.add_session(test_session("shell-1"));
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| view(&model, f)).unwrap();
+    }
+
+    #[test]
+    fn view_with_error_overlay_renders() {
+        let mut model = test_model();
+        model.push_error(ErrorEntry {
+            message: "Something went wrong".into(),
+            severity: ErrorSeverity::Critical,
         });
-        let tree = LayoutTree::new("tab1");
-        state.layout_trees.insert("tab1".to_string(), tree);
-        assert_eq!(state.focused_pane_id(), Some("tab1".to_string()));
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| view(&model, f)).unwrap();
+    }
+
+    #[test]
+    fn view_with_progress_renders() {
+        let mut model = test_model();
+        model.progress = Some(crate::model::ProgressState {
+            title: "Loading...".into(),
+            detail: Some("step 1".into()),
+            percent: Some(50),
+        });
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| view(&model, f)).unwrap();
     }
 }

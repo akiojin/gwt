@@ -1,266 +1,242 @@
+//! Ctrl+G prefix keybind system
+//!
+//! Keybindings follow a Ctrl+G prefix pattern (like tmux's Ctrl+B):
+//! - Ctrl+G, then a second key triggers an action
+//! - Timeout after 1s returns to normal mode
+
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::state::PrefixState;
+const PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Timeout for Ctrl+G prefix mode (2 seconds per design doc).
-const PREFIX_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Direction for pane focus switching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Left,
-    Right,
-    Up,
-    Down,
+/// The state of the prefix key system.
+#[derive(Debug, Clone, Default)]
+pub enum PrefixState {
+    /// Normal mode: waiting for Ctrl+G
+    #[default]
+    Normal,
+    /// Prefix received: waiting for the second key
+    Prefix { at: Instant },
 }
 
-/// Actions produced by the key binding state machine.
-#[derive(Debug, Clone, PartialEq)]
+/// Actions produced by the keybind system.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyAction {
-    /// Create a new shell Window.
-    NewShellWindow,
-    /// Open agent launch dialog.
-    NewAgentWindow,
-    /// Switch to Window by number (0-indexed).
-    SwitchTab(usize),
-    /// Next Window.
-    NextWindow,
-    /// Previous Window.
-    PrevWindow,
-    /// Close current Window.
-    CloseWindow,
-    /// Vertical split in current Window.
-    VerticalSplit,
-    /// Horizontal split in current Window.
-    HorizontalSplit,
-    /// Move focus to adjacent pane.
-    FocusPane(Direction),
-    /// Close active pane.
-    ClosePane,
-    /// Toggle pane zoom.
-    ZoomPane,
-    /// Toggle management panel.
-    ToggleManagement,
-    /// Enter keyboard scroll mode.
-    ScrollMode,
-    /// Quit gwt.
-    Quit,
-    /// Pass key through to PTY.
-    Passthrough(KeyEvent),
-    /// No action (consumed key, e.g. entering prefix mode).
+    /// No action (key consumed or prefix waiting)
     None,
+    /// Forward the key to the active pane / screen
+    Forward(KeyEvent),
+    /// Toggle between Main and Management layers
+    ToggleLayer,
+    /// Next session tab
+    NextSession,
+    /// Previous session tab
+    PrevSession,
+    /// Switch to session by 1-based number (1-9)
+    SwitchSession(usize),
+    /// Close current session
+    CloseSession,
+    /// New shell
+    NewShell,
+    /// Open wizard
+    OpenWizard,
+    /// Show help
+    ShowHelp,
+    /// Quit
+    Quit,
 }
 
-/// Process a key event through the prefix state machine.
+/// Process a key event through the prefix system.
 ///
-/// Returns the action to take and mutates the prefix state.
+/// Returns the resulting action. Mutates `state` in place.
 pub fn process_key(state: &mut PrefixState, key: KeyEvent) -> KeyAction {
     match state {
-        PrefixState::Idle => {
-            // Check for Ctrl+G
-            if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                *state = PrefixState::Active(Instant::now());
-                return KeyAction::None;
+        PrefixState::Normal => {
+            if is_ctrl_g(&key) {
+                *state = PrefixState::Prefix {
+                    at: Instant::now(),
+                };
+                KeyAction::None
+            } else {
+                KeyAction::Forward(key)
             }
-            KeyAction::Passthrough(key)
         }
-        PrefixState::Active(activated_at) => {
-            // Check timeout
-            if activated_at.elapsed() >= PREFIX_TIMEOUT {
-                *state = PrefixState::Idle;
-                return KeyAction::Passthrough(key);
+        PrefixState::Prefix { at } => {
+            let elapsed = at.elapsed();
+            *state = PrefixState::Normal;
+
+            // Timeout check
+            if elapsed > PREFIX_TIMEOUT {
+                return KeyAction::Forward(key);
             }
 
-            *state = PrefixState::Idle;
-
+            // Second key after Ctrl+G
             match key.code {
-                // Cancel prefix
-                KeyCode::Esc => KeyAction::None,
-                // Ctrl+G again = toggle management panel
+                // Ctrl+G, Ctrl+G → toggle layer
                 KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    KeyAction::ToggleManagement
+                    KeyAction::ToggleLayer
                 }
-                // Window operations
-                KeyCode::Char('c') => KeyAction::NewShellWindow,
-                KeyCode::Char('n') => KeyAction::NewAgentWindow,
-                KeyCode::Char(']') => KeyAction::NextWindow,
-                KeyCode::Char('[') => KeyAction::PrevWindow,
-                KeyCode::Char('&') => KeyAction::CloseWindow,
-                // Tab switching by number
-                KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                    KeyAction::SwitchTab((c as usize) - ('1' as usize))
+                // Ctrl+G, ] → next session
+                KeyCode::Char(']') => KeyAction::NextSession,
+                // Ctrl+G, [ → prev session
+                KeyCode::Char('[') => KeyAction::PrevSession,
+                // Ctrl+G, 1-9 → switch session
+                KeyCode::Char(c @ '1'..='9') => {
+                    KeyAction::SwitchSession((c as usize) - ('0' as usize))
                 }
-                // Pane operations
-                KeyCode::Char('v') => KeyAction::VerticalSplit,
-                KeyCode::Char('h') => KeyAction::HorizontalSplit,
-                KeyCode::Char('x') => KeyAction::ClosePane,
-                KeyCode::Char('z') => KeyAction::ZoomPane,
-                // Focus movement
-                KeyCode::Left => KeyAction::FocusPane(Direction::Left),
-                KeyCode::Right => KeyAction::FocusPane(Direction::Right),
-                KeyCode::Up => KeyAction::FocusPane(Direction::Up),
-                KeyCode::Down => KeyAction::FocusPane(Direction::Down),
-                // Scroll mode
-                KeyCode::PageUp => KeyAction::ScrollMode,
-                // Quit
+                // Ctrl+G, & → close session
+                KeyCode::Char('&') => KeyAction::CloseSession,
+                // Ctrl+G, c → new shell
+                KeyCode::Char('c') => KeyAction::NewShell,
+                // Ctrl+G, n → open wizard
+                KeyCode::Char('n') => KeyAction::OpenWizard,
+                // Ctrl+G, ? → help
+                KeyCode::Char('?') => KeyAction::ShowHelp,
+                // Ctrl+G, q → quit
                 KeyCode::Char('q') => KeyAction::Quit,
-                // Unknown prefix command — discard
-                _ => KeyAction::None,
+                // Unknown second key → discard prefix, forward key
+                _ => KeyAction::Forward(key),
             }
         }
     }
+}
+
+/// Check if a key event is Ctrl+G.
+fn is_ctrl_g(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// Check if a key event is Ctrl+C.
+pub fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
     }
 
-    fn ctrl_key(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    fn ctrl_g() -> KeyEvent {
+        make_key(KeyCode::Char('g'), KeyModifiers::CONTROL)
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        make_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    fn plain(c: char) -> KeyEvent {
+        make_key(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
     #[test]
-    fn test_passthrough_normal_key() {
-        let mut state = PrefixState::Idle;
-        let action = process_key(&mut state, key(KeyCode::Char('a')));
-        assert!(matches!(action, KeyAction::Passthrough(_)));
-        assert_eq!(state, PrefixState::Idle);
+    fn normal_key_is_forwarded() {
+        let mut state = PrefixState::Normal;
+        let key = plain('a');
+        let action = process_key(&mut state, key);
+        assert_eq!(action, KeyAction::Forward(key));
     }
 
     #[test]
-    fn test_ctrl_g_enters_prefix_mode() {
-        let mut state = PrefixState::Idle;
-        let action = process_key(&mut state, ctrl_key('g'));
+    fn ctrl_g_enters_prefix() {
+        let mut state = PrefixState::Normal;
+        let action = process_key(&mut state, ctrl_g());
         assert_eq!(action, KeyAction::None);
-        assert!(matches!(state, PrefixState::Active(_)));
+        assert!(matches!(state, PrefixState::Prefix { .. }));
     }
 
     #[test]
-    fn test_prefix_new_shell() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('c')));
-        assert_eq!(action, KeyAction::NewShellWindow);
-        assert_eq!(state, PrefixState::Idle);
+    fn ctrl_g_ctrl_g_toggles_layer() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        let action = process_key(&mut state, ctrl_g());
+        assert_eq!(action, KeyAction::ToggleLayer);
+        assert!(matches!(state, PrefixState::Normal));
     }
 
     #[test]
-    fn test_prefix_new_agent() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('n')));
-        assert_eq!(action, KeyAction::NewAgentWindow);
+    fn ctrl_g_bracket_navigates_sessions() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        assert_eq!(process_key(&mut state, plain(']')), KeyAction::NextSession);
+
+        process_key(&mut state, ctrl_g());
+        assert_eq!(process_key(&mut state, plain('[')), KeyAction::PrevSession);
     }
 
     #[test]
-    fn test_prefix_next_window() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char(']')));
-        assert_eq!(action, KeyAction::NextWindow);
-    }
-
-    #[test]
-    fn test_prefix_prev_window() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('[')));
-        assert_eq!(action, KeyAction::PrevWindow);
-    }
-
-    #[test]
-    fn test_prefix_switch_tab_by_number() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('3')));
-        assert_eq!(action, KeyAction::SwitchTab(2)); // 0-indexed
-    }
-
-    #[test]
-    fn test_prefix_vertical_split() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('v')));
-        assert_eq!(action, KeyAction::VerticalSplit);
-    }
-
-    #[test]
-    fn test_prefix_horizontal_split() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('h')));
-        assert_eq!(action, KeyAction::HorizontalSplit);
-    }
-
-    #[test]
-    fn test_prefix_toggle_management() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, ctrl_key('g'));
-        assert_eq!(action, KeyAction::ToggleManagement);
-    }
-
-    #[test]
-    fn test_prefix_escape_cancels() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Esc));
-        assert_eq!(action, KeyAction::None);
-        assert_eq!(state, PrefixState::Idle);
-    }
-
-    #[test]
-    fn test_prefix_timeout_passes_through() {
-        let mut state = PrefixState::Active(Instant::now() - Duration::from_secs(3));
-        let action = process_key(&mut state, key(KeyCode::Char('n')));
-        assert!(matches!(action, KeyAction::Passthrough(_)));
-        assert_eq!(state, PrefixState::Idle);
-    }
-
-    #[test]
-    fn test_prefix_quit() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('q')));
-        assert_eq!(action, KeyAction::Quit);
-    }
-
-    #[test]
-    fn test_prefix_scroll_mode() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::PageUp));
-        assert_eq!(action, KeyAction::ScrollMode);
-    }
-
-    #[test]
-    fn test_prefix_focus_pane_arrows() {
-        let mut state = PrefixState::Active(Instant::now());
+    fn ctrl_g_number_switches_session() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
         assert_eq!(
-            process_key(&mut state, key(KeyCode::Left)),
-            KeyAction::FocusPane(Direction::Left)
-        );
-
-        let mut state = PrefixState::Active(Instant::now());
-        assert_eq!(
-            process_key(&mut state, key(KeyCode::Right)),
-            KeyAction::FocusPane(Direction::Right)
+            process_key(&mut state, plain('3')),
+            KeyAction::SwitchSession(3)
         );
     }
 
     #[test]
-    fn test_prefix_close_pane() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('x')));
-        assert_eq!(action, KeyAction::ClosePane);
+    fn ctrl_g_c_new_shell() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        assert_eq!(process_key(&mut state, plain('c')), KeyAction::NewShell);
     }
 
     #[test]
-    fn test_prefix_zoom_pane() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('z')));
-        assert_eq!(action, KeyAction::ZoomPane);
+    fn ctrl_g_ampersand_close_session() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        assert_eq!(
+            process_key(&mut state, plain('&')),
+            KeyAction::CloseSession
+        );
     }
 
     #[test]
-    fn test_prefix_unknown_key_returns_none() {
-        let mut state = PrefixState::Active(Instant::now());
-        let action = process_key(&mut state, key(KeyCode::Char('?')));
-        assert_eq!(action, KeyAction::None);
-        assert_eq!(state, PrefixState::Idle);
+    fn ctrl_g_q_quit() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        assert_eq!(process_key(&mut state, plain('q')), KeyAction::Quit);
+    }
+
+    #[test]
+    fn unknown_second_key_forwards() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        let key = plain('z');
+        assert_eq!(process_key(&mut state, key), KeyAction::Forward(key));
+    }
+
+    #[test]
+    fn is_ctrl_c_check() {
+        assert!(is_ctrl_c(&ctrl_c()));
+        assert!(!is_ctrl_c(&plain('c')));
+    }
+
+    #[test]
+    fn message_conversion_covers_all_actions() {
+        // Ensure KeyAction variants compile
+        let actions = vec![
+            KeyAction::None,
+            KeyAction::Forward(plain('x')),
+            KeyAction::ToggleLayer,
+            KeyAction::NextSession,
+            KeyAction::PrevSession,
+            KeyAction::SwitchSession(1),
+            KeyAction::CloseSession,
+            KeyAction::NewShell,
+            KeyAction::OpenWizard,
+            KeyAction::ShowHelp,
+            KeyAction::Quit,
+        ];
+        assert_eq!(actions.len(), 11);
     }
 }

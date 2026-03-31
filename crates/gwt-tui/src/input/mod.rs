@@ -1,4 +1,3 @@
-//! Input handling for the TUI.
+//! Input handling: keybindings and key processing
 
 pub mod keybind;
-pub mod voice;

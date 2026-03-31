@@ -1,93 +1,88 @@
+//! Event loop: polls crossterm events and PTY output into a unified stream
+
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEvent};
-use tokio::sync::mpsc;
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind, MouseEvent};
 
-/// Events produced by the TUI event loop.
+/// Unified TUI event
 #[derive(Debug)]
 pub enum TuiEvent {
-    /// Keyboard input.
+    /// Key press event (only Press kind, not Release/Repeat)
     Key(KeyEvent),
-    /// Terminal resized.
+    /// Mouse event
+    Mouse(MouseEvent),
+    /// Terminal resize
     Resize(u16, u16),
-    /// PTY output from a pane.
+    /// PTY output from a pane
     PtyOutput { pane_id: String, data: Vec<u8> },
-    /// Periodic tick for UI refresh.
+    /// Tick for background polling
     Tick,
 }
 
-/// Sender for PTY output events.
-pub type PtyOutputSender = mpsc::UnboundedSender<(String, Vec<u8>)>;
-
-/// Receiver for PTY output events.
-pub type PtyOutputReceiver = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
-
-/// Create a PTY output channel pair.
-pub fn pty_output_channel() -> (PtyOutputSender, PtyOutputReceiver) {
-    mpsc::unbounded_channel()
+/// PTY output message sent from reader threads to the event loop.
+#[derive(Debug)]
+pub struct PtyOutputMsg {
+    pub pane_id: String,
+    pub data: Vec<u8>,
 }
 
-/// Event loop that multiplexes terminal events, PTY output, and tick timer.
+/// Sender half for PTY output (cloned per reader thread).
+pub type PtyOutputSender = Sender<PtyOutputMsg>;
+/// Receiver half consumed by the event loop.
+pub type PtyOutputReceiver = Receiver<PtyOutputMsg>;
+
+/// Create a channel pair for PTY output.
+pub fn pty_output_channel() -> (PtyOutputSender, PtyOutputReceiver) {
+    mpsc::channel()
+}
+
+/// Event loop that merges crossterm events with PTY output.
 pub struct EventLoop {
     pty_rx: PtyOutputReceiver,
-    tick_rate: Duration,
+    poll_timeout: Duration,
 }
 
 impl EventLoop {
-    /// Create a new event loop with the given PTY output receiver.
+    /// Create a new event loop with the PTY output receiver.
     pub fn new(pty_rx: PtyOutputReceiver) -> Self {
         Self {
             pty_rx,
-            tick_rate: Duration::from_millis(100),
+            // Poll crossterm at 50ms intervals for responsive PTY output
+            poll_timeout: Duration::from_millis(50),
         }
     }
 
-    /// Poll for the next event. This is a blocking call.
-    pub fn next(&mut self) -> Result<TuiEvent, Box<dyn std::error::Error>> {
-        // Check for PTY output first (non-blocking)
-        if let Ok((pane_id, data)) = self.pty_rx.try_recv() {
-            return Ok(TuiEvent::PtyOutput { pane_id, data });
+    /// Block until the next event is available.
+    pub fn next(&self) -> Result<TuiEvent, Box<dyn std::error::Error>> {
+        // First drain any pending PTY output (non-blocking)
+        match self.pty_rx.try_recv() {
+            Ok(msg) => {
+                return Ok(TuiEvent::PtyOutput {
+                    pane_id: msg.pane_id,
+                    data: msg.data,
+                });
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {}
         }
 
-        // Poll for crossterm events with tick rate timeout
-        if event::poll(self.tick_rate)? {
+        // Poll crossterm
+        if event::poll(self.poll_timeout)? {
             match event::read()? {
-                Event::Key(key) => Ok(TuiEvent::Key(key)),
-                Event::Resize(w, h) => Ok(TuiEvent::Resize(w, h)),
-                _ => Ok(TuiEvent::Tick),
+                Event::Key(key) => {
+                    // Only handle Press events (ignore Release/Repeat)
+                    if key.kind == KeyEventKind::Press {
+                        return Ok(TuiEvent::Key(key));
+                    }
+                }
+                Event::Mouse(mouse) => return Ok(TuiEvent::Mouse(mouse)),
+                Event::Resize(w, h) => return Ok(TuiEvent::Resize(w, h)),
+                _ => {}
             }
-        } else {
-            Ok(TuiEvent::Tick)
         }
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pty_output_channel_send_receive() {
-        let (tx, mut rx) = pty_output_channel();
-        tx.send(("pane-1".to_string(), b"hello".to_vec())).unwrap();
-        let (id, data) = rx.try_recv().unwrap();
-        assert_eq!(id, "pane-1");
-        assert_eq!(data, b"hello");
-    }
-
-    #[test]
-    fn test_event_loop_receives_pty_output() {
-        let (tx, rx) = pty_output_channel();
-        let mut event_loop = EventLoop::new(rx);
-        tx.send(("pane-1".to_string(), b"test data".to_vec()))
-            .unwrap();
-        let evt = event_loop.next().unwrap();
-        match evt {
-            TuiEvent::PtyOutput { pane_id, data } => {
-                assert_eq!(pane_id, "pane-1");
-                assert_eq!(data, b"test data");
-            }
-            _ => panic!("Expected PtyOutput event"),
-        }
+        // Nothing happened → tick
+        Ok(TuiEvent::Tick)
     }
 }
