@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### Overview
 
 gwt はエージェント起動時に、起動対象の project/worktree 配下へ gwt 管理の skill/command/hook assets を埋め込む。グローバルな `~/.claude` / `~/.codex` / `~/.gemini` への起動時登録・終了時解除は行わない。

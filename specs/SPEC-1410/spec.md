@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 Windows 環境で gwt のターミナルタブ間（agent-1 → term-1 など）を切り替えると、1フレームの背景フラッシュが発生する。ネイティブメニュー領域までターミナル表示が被るように見える。

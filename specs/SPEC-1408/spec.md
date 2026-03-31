@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 Issue一覧パネル (`IssueListPanel.svelte`) の無限スクロールで「Loading more」状態でUIが固まる。

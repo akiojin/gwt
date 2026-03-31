@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### Background
 Settings > Profiles の API Key 入力で、手入力した値は一時的に使えても Save 後に reopen すると失われる。また、貼り付けた値は UI state に反映されず、Peek/Copy ボタン表示、Refresh、Save に使えない。関連 bug report: #1480。
 

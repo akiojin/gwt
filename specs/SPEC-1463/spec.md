@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 Settings > Profiles で `ai.api_key` を保存しても、macOS 環境で Codex が `Not authenticated` 扱いになる。
