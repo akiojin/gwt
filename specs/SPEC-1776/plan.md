@@ -1,204 +1,183 @@
-# Implementation Plan: SPEC-1776 — Migrate from Tauri GUI to ratatui TUI
+# Implementation Plan: SPEC-1776 — gwt-tui 完全再構築
 
 ## Summary
 
-Replace gwt's Tauri v2 + Svelte 5 GUI with a ratatui + crossterm TUI. Create a new `gwt-tui` crate that serves as the frontend, using gwt-core's existing terminal/git/agent/config APIs unchanged. Delete `gwt-tauri` and `gwt-gui` after migration.
+gwt-tauri (Tauri v2 + Svelte 5 GUI) を gwt-tui (ratatui TUI) に置換する。以前の gwt-cli TUI (38,415行) のアーキテクチャ (Elm Architecture) と全機能を移植し、tmux 依存を内蔵 PTY + vt100 に置換する。
 
 ## Technical Context
 
-### Existing Infrastructure (gwt-core)
+### 参照コードベース
+- **gwt-cli** (commit `becf0aab`): 38,415行の ratatui TUI アプリケーション
+  - `tui/app.rs` (10,898行): Elm Architecture コア、16画面、48状態オブジェクト
+  - `tui/screens/wizard.rs` (5,325行): 15ステップ起動ウィザード
+  - `tui/screens/branch_list.rs` (3,990行): ブランチ一覧 + PR/エージェント状態
+  - `tui/screens/settings.rs` (2,261行): 設定画面（7カテゴリ）
+  - その他 20+ 画面モジュール
 
-- **PaneManager**: Multi-pane lifecycle management with `launch_agent()`, `spawn_shell()`, tab navigation, resize
-- **TerminalPane**: PTY I/O via `write_input()`/`process_bytes()`, status tracking, scrollback persistence
-- **PtyHandle**: Cross-platform PTY via portable-pty v0.9 (macOS, Linux, Windows ConPTY)
-- **AgentColor**: Color enum with named colors + RGB + indexed (maps directly to ratatui::Color)
-- **Git/Worktree**: Full worktree management, branch operations, Issue linking
-- **Agent**: Claude/Codex/Gemini integration, session store, scanner
-- **Config**: Settings, profiles, skills, recent projects
+### 新規要素（gwt-cli にはなかったもの）
+- **内蔵 PTY + vt100 レンダリング**: tmux 不要。renderer.rs (VT100→ratatui変換)
+- **2層タブ構造**: メイン画面 (Agent/Shell) + 管理画面 (Branches/Issues/Settings/Logs)
+- **Ctrl+G プレフィックスキー**: tmux の Ctrl+B 相当
 
-### New Dependencies
+### 維持する現行 gwt-tui コード
+- `renderer.rs`: VT100 → ratatui Cell 変換
+- `event.rs`: EventLoop (crossterm + PTY channel + tick)
+- `input/keybind.rs`: Ctrl+G プレフィックス状態機械
+- `Cargo.toml`: 依存関係
 
-- `ratatui` (latest): TUI rendering framework
-- `crossterm` (latest): Terminal I/O backend
-- `vt100` (existing in gwt-core): VT100 emulator for PTY output parsing
+### gwt-core の活用
+- `config::Settings`, `ProfilesConfig`, `AgentConfig` — 設定ロード
+- `agent::AgentManager` — エージェント検出
+- `agent::launch::AgentLaunchBuilder` — 起動パラメータ構築
+- `agent::session_watcher` — リアルタイム状態更新
+- `agent::session_store` — セッション永続化
+- `agent::codex::codex_default_args()` — Codex 引数構築
+- `worktree::WorktreeManager` — ワークツリー管理
+- `docker::*` — Docker 検出/管理
+- `git::Repository` — Git 操作
+- `ai::*` — AI サマリー/クライアント
+- `logging::init_logger()` — ログ初期化
+- `terminal::PaneManager` — PTY ペイン管理
 
-### Key Decision
+## Architecture
 
-gwt-tui is a thin UI layer. All business logic lives in gwt-core. Logic currently in gwt-tauri's command handlers that belongs in core (agent launch flow, PR polling, session summary triggers) will be extracted to gwt-core modules.
-
-## Constitution Check
-
-No `memory/constitution.md` found. Checked against CLAUDE.md rules:
-
-- **Simplicity**: TUI is simpler than Tauri GUI (no IPC, no web stack, no Svelte). Compliant.
-- **TDD**: Each phase starts with tests. Compliant.
-- **SPEC required**: This SPEC satisfies the requirement. Compliant.
-- **No workarounds**: Clean replacement, not a patch. Compliant.
-- **Existing file maintenance**: gwt-core files are maintained, not duplicated. Compliant.
-
-## Project Structure
+### Elm Architecture (Model/View/Update)
 
 ```text
-crates/
-  gwt-core/         # Unchanged (except business logic extracted from gwt-tauri)
-  gwt-tui/          # NEW — replaces gwt-tauri
-    Cargo.toml
-    src/
-      main.rs
-      app.rs
-      state.rs
-      event.rs
-      renderer.rs
-      ui/
-        mod.rs
-        tab_bar.rs
-        terminal_view.rs
-        status_bar.rs
-        split_layout.rs
-        management/
-          mod.rs
-          agent_list.rs
-          detail_panel.rs
-          pr_dashboard.rs
-          issue_panel.rs
-          launch_dialog.rs
-      input/
-        mod.rs
-        keybind.rs
-        voice.rs
-  gwt-tauri/         # DELETED in Phase 6
-gwt-gui/             # DELETED in Phase 6
+Model: 全アプリ状態を保持する構造体
+  ├── active_layer: MainScreen | ManagementScreen
+  ├── session_tabs: Vec<SessionTab>      // Agent/Shell タブ
+  ├── management_tab: ManagementTab      // Branches/Issues/Settings/Logs
+  ├── wizard: Option<WizardState>        // オーバーレイ
+  ├── error_queue: ErrorQueue            // エラースタック
+  ├── progress: Option<ProgressState>    // 起動プログレス
+  └── pane_manager: PaneManager          // PTY 管理
+
+View: Model → Frame 描画
+  ├── メイン画面: タブバー + PTY ターミナル + ステータスバー
+  ├── 管理画面: タブバー + Branches/Issues/Settings/Logs + ステータスバー
+  └── オーバーレイ: Wizard / Progress / Error / Confirm
+
+Update: Message → Model 変更
+  ├── Key/Mouse/Resize イベント → Message 変換
+  ├── PTY 出力 → vt100 パーサー更新
+  ├── Tick (250ms) → バックグラウンド結果ポーリング
+  └── バックグラウンドチャネル → 状態更新
 ```
 
-## Complexity Tracking
+### Event Loop
 
-| Risk | Mitigation |
-|------|-----------|
-| VT100→ratatui rendering fidelity | Reuse v6.x proven pattern; extensive snapshot tests |
-| Ctrl+G prefix key vs PTY passthrough | Strict state machine; never forward Ctrl+G |
-| Cross-platform PTY differences | Already handled by gwt-core portable-pty |
-| Business logic extraction from gwt-tauri | Incremental; each moved piece gets its own test |
-| Split pane resize math | Dedicated module with property-based tests |
+```text
+loop {
+  terminal.draw(|f| model.view(f));
 
-## Phased Implementation
+  if event::poll(100ms) {
+    match event::read() {
+      Key(key) → model.update(handle_key(key))
+      Mouse(mouse) → model.update(handle_mouse(mouse))
+      Resize(w,h) → model.update(Resize(w,h))
+    }
+  }
 
-### Phase 0: Scaffold (FR-001)
+  // PTY output
+  while let Ok((id, data)) = pty_rx.try_recv() {
+    model.handle_pty_output(id, data);
+  }
 
-**Goal**: gwt-tui crate exists in workspace, compiles, shows empty TUI.
+  // Tick (250ms)
+  if tick_elapsed {
+    model.update(Tick);
+    model.apply_background_updates();
+  }
 
-- Add `crates/gwt-tui/` to Cargo workspace
-- Cargo.toml with dependencies: ratatui, crossterm, tokio, gwt-core
-- `main.rs`: Initialize crossterm raw mode, create ratatui Terminal, run event loop
-- `app.rs`: App struct with empty render cycle
-- Verify: `cargo build -p gwt-tui` succeeds, `cargo run -p gwt-tui` shows blank TUI
+  if model.should_quit { break; }
+}
+```
 
-### Phase 1: Minimal TUI (FR-002, FR-003, FR-007, FR-009, FR-010, FR-016)
+## File Structure
 
-**Goal**: Single shell tab works with full PTY rendering.
+```text
+crates/gwt-tui/src/
+  main.rs                    — エントリーポイント + ログ初期化
+  app.rs                     — Elm Architecture コア (Model/View/Update/EventLoop)
+  model.rs                   — Model 構造体定義
+  message.rs                 — Message enum 定義
+  renderer.rs                — VT100→ratatui変換（維持）
+  event.rs                   — イベントループ（維持）
+  input/
+    keybind.rs               — Ctrl+G プレフィックス（維持）
+    voice.rs                 — whisper-rs 統合
+  screens/
+    mod.rs                   — Screen enum + 共通型
+    branches.rs              — Branches タブ（gwt-cli branch_list.rs 移植）
+    issues.rs                — Issues/SPECs タブ
+    settings.rs              — Settings タブ（gwt-cli settings.rs 移植）
+    logs.rs                  — Logs タブ（gwt-cli logs.rs 移植）
+    agent_pane.rs            — Agent/Shell PTY ターミナル
+    wizard.rs                — 起動ウィザード（gwt-cli wizard.rs 移植）
+    git_view.rs              — Git View サブビュー
+    clone_wizard.rs          — Clone ウィザード
+    speckit_wizard.rs        — SpecKit ウィザード
+    error.rs                 — エラー画面
+    confirm.rs               — 確認ダイアログ
+    environment.rs           — 環境変数編集
+    profiles.rs              — プロファイル管理
+    docker_progress.rs       — Docker 進捗
+    service_select.rs        — Docker サービス選択
+    port_select.rs           — Docker ポート選択
+    migration_dialog.rs      — bare リポジトリ移行
+  widgets/
+    mod.rs
+    progress_modal.rs        — プログレスモーダル
+    tab_bar.rs               — メイン/管理画面タブバー
+    status_bar.rs            — ステータスバー
+    terminal_view.rs         — PTY ターミナル描画
+  config/
+    launch_defaults.rs       — 起動設定の永続化
 
-- `renderer.rs`: VT100 Cell → ratatui Cell conversion (color mapping, attributes)
-- `ui/terminal_view.rs`: Render PTY output buffer to ratatui Frame
-- `ui/tab_bar.rs`: Tab bar with name, branch, status color
-- `ui/status_bar.rs`: Current tab info
-- `state.rs`: TuiState with tabs vector, active index
-- `event.rs`: Key input → PTY write, PTY output → process_bytes, resize events
-- `input/keybind.rs`: Ctrl+G prefix key detection (passthrough vs intercept)
-- Shell tab: Ctrl+G,s spawns shell via PaneManager::spawn_shell()
-- Scrollback: Scroll mode via Ctrl+G,PgUp
-- Verify: Launch gwt-tui, open shell tab, type commands, see output with colors
+## Phased Implementation (5-8 並列エージェント)
 
-### Phase 2: Agent Tabs + Management Panel (FR-004, FR-005, FR-006, FR-015)
+### Phase 1: Core Architecture
+- app.rs + model.rs + message.rs: Elm Architecture コア
+- 2層タブ構造、画面遷移、イベントループ
+- PTY 統合（renderer.rs, event.rs を活用）
 
-**Goal**: Launch agents, toggle management panel.
+### Phase 2: Management Screens (並列)
+- screens/branches.rs: ブランチ一覧 + Git View + Quick Start + Safety Level
+- screens/settings.rs: 設定 + プロファイル + 環境変数 + カスタムエージェント
+- screens/issues.rs: Issues/SPECs タブ
+- screens/logs.rs: ログビューア
 
-- `ui/management/launch_dialog.rs`: Agent type selector, branch/Issue input, directory picker
-- `ui/management/agent_list.rs`: Agent list with status indicators
-- `ui/management/detail_panel.rs`: Selected agent detail (branch, worktree, status, uptime)
-- `ui/management/mod.rs`: Panel layout orchestration
-- Ctrl+G toggle management panel visibility
-- Agent launch: Ctrl+G,n opens dialog → PaneManager::launch_agent() with auto-worktree
-- Quick actions: kill (k), restart (r), switch to tab (Enter)
-- Extract agent launch parameter builder from gwt-tauri to gwt-core
-- Verify: Launch agent, see in management panel, kill/restart, auto-worktree works
+### Phase 3: Wizard + Agent Launch (並列)
+- screens/wizard.rs: 15ステップウィザード完全移植
+- screens/agent_pane.rs: PTY ターミナルエミュレーター
+- widgets/progress_modal.rs: 6段階起動プログレス
 
-### Phase 3: Split Panes (FR-008)
+### Phase 4: Additional Features (並列)
+- Docker 対応 (Compose + DevContainer)
+- Clone/Migration/SpecKit ウィザード
+- ボイス入力 (whisper-rs)
+- ファイルペースト
+- Assistant Mode
 
-**Goal**: Side-by-side terminal views.
+### Phase 5: Polish
+- パフォーマンス最適化
+- マウス完全対応
+- エラーハンドリング (ErrorQueue + モーダル + ステータスバー)
+- スキル登録の自動注入
+- npm 配布
 
-- `ui/split_layout.rs`: LayoutTree (binary tree of splits)
-- Ctrl+G,v for vertical split, Ctrl+G,h for horizontal split
-- Pane focus switching within splits
-- Resize proportional distribution
-- Verify: Split two agents side by side, both render correctly, resize works
+## SPEC 更新
 
-### Phase 4: Extended Features (FR-011, FR-012, FR-013)
+162 SPEC 全てに gwt-tui 移行の注釈を追加:
+- 10 SPEC: deprecated (GUI固有)
+- 5 SPEC: TUI 向けに更新
+- 15 SPEC: バックエンドのみ（変更不要）
+- 132 SPEC: 完了済み（注釈のみ）
 
-**Goal**: PR dashboard, Issue/SPEC panel, AI summaries.
+## Verification
 
-- Extract PR status polling from gwt-tauri to gwt-core::git (new module)
-- Extract session summary trigger from gwt-tauri to gwt-core::ai
-- `ui/management/pr_dashboard.rs`: PR status, CI checks, merge state
-- `ui/management/issue_panel.rs`: Issue/SPEC search and list
-- AI summary: Display in detail panel, periodically updated from scrollback
-- Verify: PR status shows in panel, Issues searchable, summaries generate
-
-### Phase 5: Voice Input (FR-014)
-
-**Goal**: Voice input works in TUI.
-
-- Extract voice runtime from gwt-tauri to gwt-core (new module)
-- `input/voice.rs`: Hotkey activation, audio capture, Qwen3-ASR transcription
-- Transcribed text injected into active PTY
-- Verify: Hold hotkey, speak, text appears in terminal
-
-### Phase 6: Cleanup + Release (SC-007, SC-008)
-
-**Goal**: Remove old code, update all CI/CD pipelines.
-
-#### Code Removal
-
-- Delete `crates/gwt-tauri/`
-- Delete `gwt-gui/` (includes Playwright E2E, vitest, Svelte components)
-- Delete `installers/` (macOS .dmg builder, Windows .msi builder)
-- Delete `tauri.conf.json`
-- Update `Cargo.toml` workspace members
-
-#### CI/CD Pipeline Updates
-
-**test.yml** (currently: cargo test + vitest + Playwright E2E):
-- Keep: `cargo test -p gwt-core -p gwt-tui`
-- Remove: vitest job (no frontend)
-- Remove: Playwright E2E job (no web UI)
-- Remove: Tauri WebDriver E2E job (no Tauri)
-- Add: TUI snapshot tests via `cargo test -p gwt-tui`
-
-**release.yml** (currently: Tauri build → .dmg/.msi/.AppImage):
-- Replace: `cargo tauri build` → `cargo build --release -p gwt-tui`
-- Remove: pnpm/Node.js installation steps
-- Remove: macOS code signing + notarization (`build-installer.sh`)
-- Remove: Windows MSI builder (`build-msi.ps1`)
-- Add: Cross-compile for Linux (x86_64, aarch64), macOS (universal), Windows (x86_64)
-- Artifacts: plain binaries (gwt-tui / gwt-tui.exe), no installers
-
-**lint.yml** (currently: Clippy + svelte-check + markdownlint + commitlint):
-- Keep: Clippy, Rustfmt, markdownlint, commitlint
-- Remove: `svelte-check` job
-
-**coverage.yml** (currently: Rust LCOV + Frontend LCOV):
-- Keep: `cargo llvm-cov` for Rust coverage
-- Remove: vitest coverage job
-- Update: Codecov flags (remove `frontend` flag)
-
-#### Documentation
-
-- Update README.md / README.ja.md (installation = download binary, no Tauri)
-- Update CLAUDE.md (remove Tauri/GUI references, add TUI dev instructions)
-
-#### TUI E2E Testing Strategy
-
-Since Playwright E2E (22 test files) is deleted, TUI testing uses:
-1. **ratatui TestBackend snapshot tests** — verify rendered screen output
-2. **PTY integration tests** — spawn gwt-tui subprocess, send keystrokes via stdin, verify stdout
-3. **gwt-core tests** — unchanged, provide coverage for terminal/git/agent logic
-
-Verify: Full CI passes, release produces correct cross-platform binaries
+- `cargo build -p gwt-tui && cargo test -p gwt-tui && cargo clippy -p gwt-tui -- -D warnings`
+- `cargo test -p gwt-core`
+- 手動: gwt 起動 → Branches タブ → Wizard → Agent タブ → 管理画面トグル
+- 全 SC-001〜SC-011 の達成確認
