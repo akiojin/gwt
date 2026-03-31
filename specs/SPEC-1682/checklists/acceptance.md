@@ -1,0 +1,6 @@
+- [x] startup analysis step message が表示される
+- [x] cache hit path が動く
+- [x] cache miss path が動く
+- [x] startup path が read-only tool set で動く
+- [x] startup analysis markdown が markdown として描画される
+- [x] tests updated and passing

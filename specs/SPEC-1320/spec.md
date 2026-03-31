@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: Host OS 起動時の空タブ防止（Issue #1029）
 
 **仕様ID**: `SPEC-6e2a9d4c`  

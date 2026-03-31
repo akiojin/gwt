@@ -1,0 +1,189 @@
+# Tasks: SPEC-1776 — gwt-tui 完全再構築
+
+## Phase 0: SPEC 更新
+
+- [ ] T001: SPEC-1776 の spec.md/plan.md/tasks.md を完全更新（インタビュー結果反映）
+- [ ] T002: 全 162 SPEC に gwt-tui 移行注釈を追加
+- [ ] T003: 10 GUI 固有 SPEC を deprecated マーク
+- [ ] T004: 5 TUI 適応 SPEC を gwt-tui 向けに更新
+
+## Phase 1: Core Architecture (Elm Architecture)
+
+### Model/View/Update フレームワーク
+
+- [ ] T010: [TDD] model.rs のテスト — Model 構造体、2層タブ構造、画面遷移
+- [ ] T011: model.rs 実装 — Model, ActiveLayer, SessionTab, ManagementTab
+- [ ] T012: [TDD] message.rs のテスト — Message enum, handle_key → Message 変換
+- [ ] T013: message.rs 実装 — 全 Message バリアント定義
+- [ ] T014: [TDD] app.rs のテスト — イベントループ、Model↔View↔Update サイクル
+- [ ] T015: app.rs 実装 — Elm Architecture コア（gwt-cli app.rs から tmux 除去して移植）
+- [ ] T016: main.rs 実装 — エントリーポイント + init_logger() + スキル登録
+
+### PTY 統合
+
+- [ ] T020: [TDD] agent_pane.rs のテスト — PTY 起動、キー転送、vt100 レンダリング
+- [ ] T021: screens/agent_pane.rs 実装 — Agent/Shell タブの PTY ターミナルエミュレーター
+- [ ] T022: PTY リーダースレッド → EventLoop 統合
+- [ ] T023: Ctrl+C ハンドリング（Agent タブ: PTY転送、Shell タブ: 2回押し終了）
+- [ ] T024: ターミナルリサイズ → PaneManager + vt100 同期
+
+### Widgets
+
+- [ ] T030: [TDD] widgets/tab_bar.rs のテスト — メイン/管理画面タブバー描画
+- [ ] T031: widgets/tab_bar.rs 実装 — 2層タブバー（メイン: Sessions, 管理: Branches/Issues/Settings/Logs）
+- [ ] T032: [TDD] widgets/status_bar.rs のテスト
+- [ ] T033: widgets/status_bar.rs 実装
+- [ ] T034: [TDD] widgets/terminal_view.rs のテスト
+- [ ] T035: widgets/terminal_view.rs 実装（renderer.rs を活用）
+- [ ] T036: [TDD] widgets/progress_modal.rs のテスト — 6段階プログレス + キャンセル
+- [ ] T037: widgets/progress_modal.rs 実装
+
+### Phase 1 Verification
+
+- [ ] T040: gwt 起動 → 管理画面 Branches タブ表示
+- [ ] T041: Ctrl+G,Ctrl+G でメイン↔管理画面トグル
+- [ ] T042: Ctrl+G,c でシェルタブ作成、PTY 動作確認
+- [ ] T043: `cargo test -p gwt-tui && cargo test -p gwt-core` 全通過
+
+## Phase 2: Management Screens [P]
+
+### Branches タブ (gwt-cli branch_list.rs 移植)
+
+- [ ] T100: [TDD] screens/branches.rs のテスト — ブランチ一覧表示、フィルタ、ソート
+- [ ] T101: screens/branches.rs 実装 — BranchItem, BranchListState, 表示/フィルタ/ソート
+- [ ] T102: PR 状態統合 (gwt-core git::Repository)
+- [ ] T103: エージェント状態表示（セッションファイルから）
+- [ ] T104: Safety Level 計算 + 表示
+- [ ] T105: Git View サブビュー (diff, commits, working tree)
+- [ ] T106: マルチセレクト + バッチ操作
+- [ ] T107: マウスクリック/スクロール対応
+
+### Issues/SPECs タブ
+
+- [ ] T110: [TDD] screens/issues.rs のテスト — Issue/SPEC 一覧、検索
+- [ ] T111: screens/issues.rs 実装 — GitHub Issue + ローカル SPEC 表示、検索
+- [ ] T112: Issue → ブランチ作成 → エージェント起動フロー
+
+### Settings タブ (gwt-cli settings.rs 移植)
+
+- [ ] T120: [TDD] screens/settings.rs のテスト — 7カテゴリ設定画面
+- [ ] T121: screens/settings.rs 実装 — General, Worktree, Web, Agent, CustomAgents, Environment, AISettings
+- [ ] T122: screens/profiles.rs — プロファイル管理（作成/編集/削除/切替）
+- [ ] T123: screens/environment.rs — 環境変数エディタ (KEY=VALUE)
+- [ ] T124: カスタムエージェント登録 (SPEC-71f2742d)
+
+### Logs タブ (gwt-cli logs.rs 移植)
+
+- [ ] T130: [TDD] screens/logs.rs のテスト
+- [ ] T131: screens/logs.rs 実装 — ~/.gwt/logs/ のログ表示
+
+### Phase 2 Verification
+
+- [ ] T140: Branches タブでブランチ一覧 + PR状態 + エージェント状態 表示
+- [ ] T141: Settings タブで設定変更 → 保存 → 反映
+- [ ] T142: Issues タブで Issue 検索 → 表示
+- [ ] T143: Logs タブでログ表示
+
+## Phase 3: Wizard + Agent Launch [P]
+
+### Wizard (gwt-cli wizard.rs 移植)
+
+- [ ] T200: [TDD] screens/wizard.rs のテスト — 15ステップ遷移、入力バリデーション
+- [ ] T201: WizardStep enum + WizardState 実装（15ステップ）
+- [ ] T202: QuickStart ステップ（前回設定の復元 FR-050）
+- [ ] T203: AgentSelect + ModelSelect + VersionSelect ステップ
+- [ ] T204: BranchAction + BranchTypeSelect + BranchNameInput ステップ
+- [ ] T205: ExecutionMode (Normal/Continue/Resume/Convert) ステップ
+- [ ] T206: SkipPermissions + ReasoningLevel + CollaborationModes ステップ
+- [ ] T207: IssueSelect ステップ (GitHub Issue 連携ブランチ)
+- [ ] T208: AIBranchSuggest ステップ (AI ブランチ名提案)
+- [ ] T209: ConvertAgentSelect + ConvertSessionSelect ステップ
+- [ ] T210: Wizard レンダリング（オーバーレイポップアップ）
+
+### Agent Launch Orchestration
+
+- [ ] T220: 6段階起動パイプライン (fetch → validate → worktree → skills → deps → launch)
+- [ ] T221: キャンセル可能なバックグラウンド起動
+- [ ] T222: セッション履歴の保存 (save_session_entry)
+- [ ] T223: npm バージョン取得 + キャッシュ
+
+### Phase 3 Verification
+
+- [ ] T230: Branches → Enter → Wizard → 各ステップ → Launch → Agent タブ作成
+- [ ] T231: Quick Start → ワンクリック起動
+- [ ] T232: Issue 選択 → ブランチ自動作成 → エージェント起動
+
+## Phase 4: Additional Features [P]
+
+### Docker (gwt-tauri terminal.rs から移植)
+
+- [ ] T300: Docker compose 検出 + サービス選択
+- [ ] T301: DevContainer 検出 + 対応
+- [ ] T302: docker compose up/exec/down ワークフロー
+- [ ] T303: ポート競合検出 + ボリュームマウント
+- [ ] T304: Docker 進捗画面 (docker_progress.rs)
+
+### Clone/Migration/SpecKit
+
+- [ ] T310: Clone Wizard 実装
+- [ ] T311: Migration Dialog (bare リポジトリ移行)
+- [ ] T312: SpecKit Wizard 実装
+
+### Voice Input
+
+- [ ] T320: whisper-rs 統合（ネイティブオーディオキャプチャ + 音声認識）
+- [ ] T321: ホットキー → 録音 → テキスト変換 → PTY 送信
+
+### File Paste
+
+- [ ] T330: クリップボードファイルペースト（専用ショートカット、OS ネイティブ API）
+
+### Assistant Mode
+
+- [ ] T340: LLM 会話 + タスク分割 (gwt-tauri assistant_engine.rs 移植)
+- [ ] T341: タスク → エージェント振り分け
+
+### Error Handling
+
+- [ ] T350: ErrorQueue + ErrorState 実装
+- [ ] T351: 重大エラー → モーダル、軽微 → ステータスバー
+
+### Performance
+
+- [ ] T360: フレームレート制限 (16ms target)
+- [ ] T361: dirty flag + 差分更新
+- [ ] T362: PTY 出力バッチング
+
+### Session Watcher
+
+- [ ] T370: gwt-core session_watcher の統合（リアルタイムエージェント状態更新）
+
+### Skill Registration
+
+- [ ] T380: 起動時スキル登録自動実行（CLAUDE.md/AGENTS.md/GEMINI.md 注入）
+
+## Phase 5: Cleanup + Release
+
+### コード除去
+
+- [ ] T500: 現在の gwt-tui の不要コードを削除（app.rs, state.rs, ui/management/*, etc.）
+- [ ] T501: gwt-tauri/gwt-gui が develop に残っていれば削除
+
+### CI/CD
+
+- [ ] T510: CI ワークフロー更新（gwt-tui テスト + ビルド）
+- [ ] T511: Release ワークフロー更新（クロスコンパイル + npm publish）
+
+### Documentation
+
+- [ ] T520: README.md / README.ja.md 更新
+- [ ] T521: CLAUDE.md 更新
+
+### Phase 5 Verification
+
+- [ ] T530: `cargo build -p gwt-tui` 成功
+- [ ] T531: `cargo test -p gwt-tui && cargo test -p gwt-core` 全通過
+- [ ] T532: `cargo clippy --all-targets --all-features -- -D warnings` クリーン
+- [ ] T533: 手動 E2E テスト（起動 → Branches → Wizard → Agent → 管理画面 → 終了）
+- [ ] T534: npm publish テスト
+- [ ] T535: SC-001〜SC-011 全達成確認

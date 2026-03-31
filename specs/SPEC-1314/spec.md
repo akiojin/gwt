@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: Windows 移行プロジェクトで Docker 起動時に mount エラーを回避する
 
 **仕様ID**: `SPEC-4e2f1028`

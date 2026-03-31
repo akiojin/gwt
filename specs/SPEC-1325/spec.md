@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: GUI Worktree Summary 6タブ + Quick Launchヘッダー再編（Issue #1097）
 
 **仕様ID**: `SPEC-7c0444a8`

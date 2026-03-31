@@ -8,6 +8,7 @@ pub mod issue_classify;
 pub mod session_converter;
 pub mod session_parser;
 pub mod summary;
+pub mod summary_trigger;
 
 pub use agent_history::{AgentHistoryEntry, AgentHistoryError, AgentHistoryStore};
 pub use branch_suggest::{

@@ -1,5 +1,3 @@
-> **⚠️ DEPRECATED (SPEC-1776)**: This SPEC describes GUI-only functionality (Tauri/Svelte/xterm.js) that has been superseded by the gwt-tui migration. The gwt-tui equivalent is defined in SPEC-1776.
-
 # 機能仕様: Terminal ANSI Diagnostics（GUI）
 
 **仕様ID**: `SPEC-5b7a0f9c`  

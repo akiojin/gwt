@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: 全操作時の断続フリーズ抑止（System Monitor 負荷制御）
 
 **仕様ID**: `SPEC-923b33fc`

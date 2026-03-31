@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: Issue連携ブランチのリンク保証と起動フロー一元化
 
 **仕様ID**: `SPEC-54c8e2fa`

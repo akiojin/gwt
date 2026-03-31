@@ -1,5 +1,3 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
-
 # 機能仕様: ネイティブメニュー無反応時の検知性強化と受信経路修復
 
 **仕様ID**: `SPEC-9c1e4d2f`
