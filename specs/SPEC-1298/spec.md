@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 # 機能仕様: 全画面テキストコピー (Cmd+Shift+C)
 
 **仕様ID**: `SPEC-0e6abbb7`

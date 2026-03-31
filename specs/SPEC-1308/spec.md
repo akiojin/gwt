@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 # 機能仕様: Claude Code Hooks 経由の gwt-tauri hook 実行で GUI を起動しない
 
 **仕様ID**: `SPEC-1b98b6d7`
