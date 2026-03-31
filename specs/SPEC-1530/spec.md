@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 Cleanup の branch safety が同一 head branch に紐づく全 PR ではなく、実質的に latest PR 1 件の state を優先して判定している。そのため、同じ branch に `closed/unmerged` または `open` の PR が残っていても、後続の merged PR があると safe 扱いになり、ユーザーが未マージ PR 履歴を見落としたまま branch deletion に進めてしまう。

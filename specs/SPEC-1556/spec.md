@@ -1,3 +1,5 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
 ### 背景
 
 gwt は Rust/Tauri 版から Unity/C# 版へ完全移行する。
