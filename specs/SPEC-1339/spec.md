@@ -1,0 +1,14 @@
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC was completed during the gwt-tauri era. The gwt-tauri frontend has been replaced by gwt-tui (SPEC-1776). GUI-specific references are historical.
+
+# 機能仕様: GitHub リモート起点の Worktree 作成
+
+**仕様ID**: `SPEC-a4fb2db2`
+**作成日**: 2026-02-21
+**更新日**: 2026-02-21
+**ステータス**: 実装済み
+**カテゴリ**: GUI
+**依存仕様**:
+
+- SPEC-c6ba640a（GitHub Issue連携によるブランチ作成）
+
+**入力**: ユーザー説明: "新規ブランチ作成時に GitHub 上にリモートブランチを先に作成し、それを fetch して Worktree にする"
