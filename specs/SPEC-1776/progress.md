@@ -1,5 +1,21 @@
 # Progress: SPEC-1776
 
+## 2026-04-01: Branch view-mode filter fix
+
+### Progress
+
+- Reproduced that `Local / Remote / All` did not react to remote-tracking refs named like `origin/main`
+- Added RED coverage around `BranchItem::from_branch()` so remote refs and local refs are distinguished from the gwt-core branch shape, not from ad-hoc test fixtures
+- Fixed remote detection and protected-branch normalization so `origin/*` and `remotes/origin/*` are both classified correctly in the Branches tab
+
+### Done
+
+- Branches view-mode filtering now works for actual remote branch names returned by git
+
+### Next
+
+- Manual E2E: open Branches and cycle `All / Local / Remote` on a repo with remote-tracking refs to confirm counts and rows update as expected
+
 ## 2026-04-01: Management panel detail polish
 
 ### Progress

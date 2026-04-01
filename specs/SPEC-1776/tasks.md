@@ -92,6 +92,7 @@
 - [x] T145: [TDD] SPECs / Issues の詳細ビューで `SPEC-*` ディレクトリ解決と Markdown 描画を修正
 - [x] T146: [TDD] Versions タブを最新 10 バージョンの range / commit count / summary preview 付き履歴表示へ更新
 - [x] T147: [TDD] Logs タブを workspace JSONL + structured fields (`category` / `event` / `result` / `workspace` / `error_code`) 対応に更新
+- [x] T148: [TDD] Branches タブの `All / Local / Remote` ビューフィルターが `origin/*` remote refs でも正しく切り替わるよう修正
 
 ## Phase 3: Wizard + Agent Launch [P]
 

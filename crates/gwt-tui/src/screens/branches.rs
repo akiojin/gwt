@@ -73,7 +73,8 @@ pub struct BranchItem {
 impl BranchItem {
     /// Create a BranchItem from a gwt-core Branch.
     pub fn from_branch(branch: &Branch) -> Self {
-        let is_protected = is_protected_branch(&branch.name);
+        let is_remote = infer_is_remote(branch);
+        let is_protected = is_protected_branch(&branch.name, is_remote);
         let safety = if is_protected || branch.is_current {
             SafetyStatus::Disabled
         } else {
@@ -94,7 +95,7 @@ impl BranchItem {
             pr_number: None,
             pr_state: None,
             safety_status: safety,
-            is_remote: branch.name.starts_with("remotes/"),
+            is_remote,
             last_commit_timestamp: branch.commit_timestamp,
         }
     }
@@ -143,13 +144,30 @@ impl BranchItem {
     }
 }
 
+fn infer_is_remote(branch: &Branch) -> bool {
+    branch.name.starts_with("remotes/")
+        || (branch.has_remote && branch.upstream.is_none() && branch.name.contains('/'))
+}
+
 /// Check if a branch name is protected (main/master/develop).
-fn is_protected_branch(name: &str) -> bool {
-    let short = name
+fn is_protected_branch(name: &str, is_remote: bool) -> bool {
+    let short = remote_short_name(name, is_remote);
+    matches!(short, "main" | "master" | "develop" | "dev")
+}
+
+fn remote_short_name(name: &str, is_remote: bool) -> &str {
+    if let Some(stripped) = name
         .strip_prefix("remotes/")
         .and_then(|s| s.split_once('/').map(|(_, r)| r))
-        .unwrap_or(name);
-    matches!(short, "main" | "master" | "develop" | "dev")
+    {
+        return stripped;
+    }
+    if is_remote {
+        if let Some((_, rest)) = name.split_once('/') {
+            return rest;
+        }
+    }
+    name
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +303,8 @@ impl BranchListState {
             match sort_mode {
                 SortMode::Default => {
                     // Protected first, then by name type, then worktree, then timestamp.
-                    let type_a = branch_sort_priority(&ba.name);
-                    let type_b = branch_sort_priority(&bb.name);
+                    let type_a = branch_sort_priority(&ba.name, ba.is_remote);
+                    let type_b = branch_sort_priority(&bb.name, bb.is_remote);
                     if type_a != type_b {
                         return type_a.cmp(&type_b);
                     }
@@ -397,12 +415,8 @@ impl BranchListState {
 }
 
 /// Priority for branch name sorting (lower = higher priority).
-fn branch_sort_priority(name: &str) -> u8 {
-    let short = name
-        .strip_prefix("remotes/")
-        .and_then(|s| s.split_once('/').map(|(_, r)| r))
-        .unwrap_or(name)
-        .to_lowercase();
+fn branch_sort_priority(name: &str, is_remote: bool) -> u8 {
+    let short = remote_short_name(name, is_remote).to_lowercase();
     if short == "main" || short == "master" {
         0
     } else if short == "develop" || short == "dev" {
@@ -830,7 +844,7 @@ mod tests {
             worktree_path: None,
             has_changes: false,
             has_unpushed: false,
-            is_protected: is_protected_branch(name),
+            is_protected: is_protected_branch(name, false),
             last_tool_usage: None,
             last_tool_id: None,
             pr_title: None,
@@ -879,6 +893,44 @@ mod tests {
     fn branch_item_empty_filter_matches_all() {
         let b = make_branch("any-branch", false);
         assert!(b.matches_filter(""));
+    }
+
+    #[test]
+    fn from_branch_marks_origin_prefixed_refs_as_remote() {
+        let branch = Branch {
+            name: "origin/main".to_string(),
+            is_current: false,
+            has_remote: true,
+            upstream: None,
+            commit: "abc1234".to_string(),
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+
+        let item = BranchItem::from_branch(&branch);
+        assert!(item.is_remote);
+        assert!(item.is_protected);
+    }
+
+    #[test]
+    fn from_branch_keeps_local_refs_local() {
+        let branch = Branch {
+            name: "feature/auth".to_string(),
+            is_current: false,
+            has_remote: true,
+            upstream: Some("origin/feature/auth".to_string()),
+            commit: "abc1234".to_string(),
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+
+        let item = BranchItem::from_branch(&branch);
+        assert!(!item.is_remote);
+        assert!(!item.is_protected);
     }
 
     #[test]
@@ -1264,12 +1316,13 @@ mod tests {
 
     #[test]
     fn is_protected_branch_detection() {
-        assert!(is_protected_branch("main"));
-        assert!(is_protected_branch("master"));
-        assert!(is_protected_branch("develop"));
-        assert!(is_protected_branch("dev"));
-        assert!(is_protected_branch("remotes/origin/main"));
-        assert!(!is_protected_branch("feature/cool"));
+        assert!(is_protected_branch("main", false));
+        assert!(is_protected_branch("master", false));
+        assert!(is_protected_branch("develop", false));
+        assert!(is_protected_branch("dev", false));
+        assert!(is_protected_branch("remotes/origin/main", true));
+        assert!(is_protected_branch("origin/main", true));
+        assert!(!is_protected_branch("feature/cool", false));
     }
 
     // -- ViewMode / SortMode --
