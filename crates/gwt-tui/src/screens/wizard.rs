@@ -854,15 +854,23 @@ impl WizardState {
     /// Build a launch configuration from the current wizard state.
     pub fn build_launch_config(&self) -> Result<WizardLaunchConfig, String> {
         let agent_id = self.current_agent_id().to_string();
-        let model = if self.model.is_empty() {
-            None
+        let model = if self.model.is_empty()
+            || self.model.starts_with("Default")
+        {
+            None // Don't pass --model for Default/Auto selections
         } else {
             Some(self.model.clone())
         };
-        let version = if self.version == "installed" {
-            None
+        let version = if self.version.is_empty()
+            || self.version == "installed"
+            || self.version.starts_with("installed (")
+            || self.version == "latest"
+        {
+            None // Don't pass version for installed/latest
         } else {
-            Some(self.version.clone())
+            // Strip date suffix if present (e.g., "1.8.0  (2026-03-28)" → "1.8.0")
+            let v = self.version.split_whitespace().next().unwrap_or(&self.version);
+            Some(v.to_string())
         };
         let branch = if self.is_new_branch {
             format!("{}{}", self.branch_type.prefix(), self.new_branch_name)
@@ -1055,7 +1063,8 @@ fn default_model_options(agent_id: &str) -> Vec<String> {
             "haiku".to_string(),
         ],
         "codex" => vec![
-            "Default (Auto)".to_string(),
+            "Default (gpt-5.4)".to_string(),
+            "gpt-5.4".to_string(),
             "gpt-5.3-codex".to_string(),
             "gpt-5.2-codex".to_string(),
             "gpt-5.1-codex-max".to_string(),
