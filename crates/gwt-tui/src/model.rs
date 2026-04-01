@@ -215,6 +215,8 @@ pub struct Model {
     pub clone_wizard: Option<CloneWizardState>,
     pub migration_dialog: Option<MigrationDialogState>,
     pub speckit_wizard: SpecKitState,
+    /// Pending Codex launch config waiting for hooks confirmation (SPEC-1786)
+    pub pending_codex_launch: Option<crate::screens::wizard::WizardLaunchConfig>,
 
     // Background channels (for async operations)
     pub branch_list_rx: Option<Receiver<BranchListUpdate>>,
@@ -259,6 +261,7 @@ impl Model {
             clone_wizard: None,
             migration_dialog: None,
             speckit_wizard: SpecKitState::new(),
+            pending_codex_launch: None,
             branch_list_rx: None,
             should_quit: false,
             repo_root,

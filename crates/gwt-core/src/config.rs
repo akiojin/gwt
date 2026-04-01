@@ -46,8 +46,9 @@ pub use session::{
 };
 pub use settings::{Settings, SkillRegistrationPreferences};
 pub use skill_registration::{
-    generate_managed_skills_block, get_skill_registration_status_with_settings_at_project_root,
-    inject_managed_skills_block, register_agent_skills_with_settings_at_project_root,
+    codex_hooks_needs_update, generate_managed_skills_block,
+    get_skill_registration_status_with_settings_at_project_root, inject_managed_skills_block,
+    register_agent_skills_with_settings_at_project_root,
     register_all_skills_with_settings_at_project_root,
     repair_skill_registration_with_settings_at_project_root, SkillAgentRegistrationStatus,
     SkillAgentType, SkillRegistrationStatus,

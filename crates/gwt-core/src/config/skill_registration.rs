@@ -1414,10 +1414,112 @@ fn managed_codex_hooks_definition() -> Value {
     })
 }
 
-/// Write `.codex/hooks.json` with the managed Codex hooks definition.
+/// Merge managed Codex hooks into an existing hooks JSON value.
 ///
-/// Unlike Claude's `settings.local.json` merge, Codex hooks.json is gwt-owned
-/// and can be overwritten entirely.
+/// 1. Walk each event array and remove entries whose `hooks` commands are all
+///    managed (`gwt-` prefixed scripts).
+/// 2. Append the latest managed hook entries for each event.
+/// 3. Preserve user-defined entries untouched.
+fn merge_managed_codex_hooks(existing: &Value, managed: &Value) -> Value {
+    let managed_hooks_map = match managed.get("hooks").and_then(|v| v.as_object()) {
+        Some(m) => m,
+        None => return existing.clone(),
+    };
+    let managed_hook_commands = managed_hook_commands_from_map(managed_hooks_map);
+
+    // Start from the existing value, defaulting to an empty hooks object.
+    let mut result = if existing.is_object() {
+        existing.clone()
+    } else {
+        serde_json::json!({ "hooks": {} })
+    };
+
+    // Ensure result has a "hooks" object.
+    if !result.get("hooks").map(|v| v.is_object()).unwrap_or(false) {
+        result
+            .as_object_mut()
+            .expect("result must be object")
+            .insert("hooks".to_string(), serde_json::json!({}));
+    }
+
+    let hooks_map = result
+        .get_mut("hooks")
+        .and_then(|v| v.as_object_mut())
+        .expect("hooks must be object after normalization");
+
+    // Prune managed entries from all events (including events not in the new managed set,
+    // to handle removed events on version upgrade).
+    for value in hooks_map.values_mut() {
+        prune_managed_hook_entries(value, &managed_hook_commands);
+    }
+
+    // Add new managed entries for each event.
+    for (event, managed_event_entries) in managed_hooks_map {
+        let mut merged_entries: Vec<Value> = match hooks_map.get(event) {
+            Some(existing_val) => existing_val
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| vec![existing_val.clone()]),
+            None => Vec::new(),
+        };
+
+        if let Some(entries) = managed_event_entries.as_array() {
+            merged_entries.extend(entries.iter().cloned());
+        } else {
+            merged_entries.push(managed_event_entries.clone());
+        }
+
+        hooks_map.insert(event.clone(), Value::Array(merged_entries));
+    }
+
+    // Remove events that became empty arrays after pruning (cleanup).
+    let empty_events: Vec<String> = hooks_map
+        .iter()
+        .filter(|(_, v)| v.as_array().map(|a| a.is_empty()).unwrap_or(false))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in empty_events {
+        hooks_map.remove(&key);
+    }
+
+    result
+}
+
+/// Check whether `.codex/hooks.json` needs to be updated with managed hooks.
+///
+/// Returns `true` when:
+/// - The file does not exist
+/// - The file exists but the merge result differs from the current content
+/// - The file contains invalid JSON
+pub fn codex_hooks_needs_update(codex_root: &Path) -> bool {
+    let hooks_path = codex_root.join("hooks.json");
+
+    let existing_content = match std::fs::read_to_string(&hooks_path) {
+        Ok(content) => content,
+        Err(_) => return true, // File doesn't exist or unreadable
+    };
+
+    let existing: Value = match serde_json::from_str(&existing_content) {
+        Ok(v) => v,
+        Err(_) => return true, // Invalid JSON
+    };
+
+    let managed = managed_codex_hooks_definition();
+    let merged = merge_managed_codex_hooks(&existing, &managed);
+
+    let merged_output = match serde_json::to_string_pretty(&merged) {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
+
+    existing_content != merged_output
+}
+
+/// Write `.codex/hooks.json` with managed hooks merged with user-defined hooks.
+///
+/// - Reads the existing file and merges managed hooks, preserving user entries.
+/// - If the merge result matches the current file content, skips writing (FR-030).
+/// - If the existing file is invalid JSON, backs it up to `.bak` (FR-010).
 fn write_managed_codex_hooks(codex_root: &Path) -> Result<(), GwtError> {
     let hooks_path = codex_root.join("hooks.json");
 
@@ -1431,13 +1533,60 @@ fn write_managed_codex_hooks(codex_root: &Path) -> Result<(), GwtError> {
         })?;
     }
 
-    let definition = managed_codex_hooks_definition();
-    let output =
-        serde_json::to_string_pretty(&definition).map_err(|e| GwtError::ConfigWriteError {
-            reason: e.to_string(),
-        })?;
+    let managed = managed_codex_hooks_definition();
 
-    std::fs::write(&hooks_path, output).map_err(|e| GwtError::ConfigWriteError {
+    let existing = if hooks_path.exists() {
+        match std::fs::read_to_string(&hooks_path) {
+            Ok(content) => match serde_json::from_str::<Value>(&content) {
+                Ok(v) => Some((content, v)),
+                Err(e) => {
+                    // FR-010: invalid JSON — backup and create fresh
+                    warn!(
+                        category = "skills",
+                        path = %hooks_path.display(),
+                        error = %e,
+                        "Codex hooks.json contains invalid JSON; backing up"
+                    );
+                    let bak_path = hooks_path.with_extension("json.bak");
+                    if let Err(bak_err) = std::fs::rename(&hooks_path, &bak_path) {
+                        warn!(
+                            category = "skills",
+                            path = %bak_path.display(),
+                            error = %bak_err,
+                            "Failed to backup invalid hooks.json"
+                        );
+                    }
+                    None
+                }
+            },
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let merged = match &existing {
+        Some((_, parsed)) => merge_managed_codex_hooks(parsed, &managed),
+        None => managed,
+    };
+
+    let output = serde_json::to_string_pretty(&merged).map_err(|e| GwtError::ConfigWriteError {
+        reason: e.to_string(),
+    })?;
+
+    // FR-030: skip write if content is identical (byte-for-byte)
+    if let Some((original_content, _)) = &existing {
+        if *original_content == output {
+            info!(
+                category = "skills",
+                path = %hooks_path.display(),
+                "Codex hooks.json is up-to-date; skipping write"
+            );
+            return Ok(());
+        }
+    }
+
+    std::fs::write(&hooks_path, &output).map_err(|e| GwtError::ConfigWriteError {
         reason: format!(
             "Failed to write Codex hooks {}: {}",
             hooks_path.display(),
@@ -1448,7 +1597,7 @@ fn write_managed_codex_hooks(codex_root: &Path) -> Result<(), GwtError> {
     info!(
         category = "skills",
         path = %hooks_path.display(),
-        "Wrote Codex hooks.json"
+        "Wrote Codex hooks.json (merged with user-defined hooks)"
     );
 
     Ok(())
@@ -3593,6 +3742,353 @@ custom-pattern
         assert!(
             err.to_string().contains("missing end marker"),
             "unexpected error: {err}"
+        );
+    }
+
+    // =========================================================================
+    // SPEC-1786: Codex hooks.json merge tests
+    // =========================================================================
+
+    #[test]
+    fn merge_managed_codex_hooks_preserves_user_hooks() {
+        let managed = managed_codex_hooks_definition();
+        let user_hook = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "my-custom-validator.sh"
+                    }]
+                }]
+            }
+        });
+
+        let merged = merge_managed_codex_hooks(&user_hook, &managed);
+
+        // User hook must be preserved
+        let pre_tool = merged["hooks"]["PreToolUse"].as_array().unwrap();
+        let user_entries: Vec<_> = pre_tool
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .map(|c| c.contains("my-custom-validator"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(user_entries.len(), 1, "user hook must be preserved");
+
+        // Managed hooks must also be present
+        let managed_entries: Vec<_> = pre_tool
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .map(|c| c.contains("gwt-"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !managed_entries.is_empty(),
+            "managed hooks must be present in PreToolUse"
+        );
+    }
+
+    #[test]
+    fn merge_managed_codex_hooks_from_empty() {
+        let managed = managed_codex_hooks_definition();
+        let empty = serde_json::json!({});
+
+        let merged = merge_managed_codex_hooks(&empty, &managed);
+
+        // All managed events should be present
+        let hooks = merged["hooks"].as_object().unwrap();
+        assert!(hooks.contains_key("SessionStart"));
+        assert!(hooks.contains_key("PreToolUse"));
+        assert!(hooks.contains_key("PostToolUse"));
+        assert!(hooks.contains_key("Stop"));
+        assert!(hooks.contains_key("UserPromptSubmit"));
+    }
+
+    #[test]
+    fn merge_managed_codex_hooks_is_idempotent() {
+        let managed = managed_codex_hooks_definition();
+        let empty = serde_json::json!({});
+
+        let first = merge_managed_codex_hooks(&empty, &managed);
+        let second = merge_managed_codex_hooks(&first, &managed);
+
+        let first_str = serde_json::to_string_pretty(&first).unwrap();
+        let second_str = serde_json::to_string_pretty(&second).unwrap();
+        assert_eq!(first_str, second_str, "merge must be idempotent");
+    }
+
+    #[test]
+    fn merge_managed_codex_hooks_replaces_current_managed_and_adds_new() {
+        // Start with the current managed hooks already installed, plus a user hook
+        let managed = managed_codex_hooks_definition();
+        let mut existing = merge_managed_codex_hooks(&serde_json::json!({}), &managed);
+
+        // Add a user hook to PreToolUse
+        let pre_tool = existing["hooks"]["PreToolUse"].as_array_mut().unwrap();
+        pre_tool.insert(
+            0,
+            serde_json::json!({
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": "my-custom-validator.sh"
+                }]
+            }),
+        );
+
+        // Re-merge should prune old managed entries and re-add them,
+        // while preserving the user hook
+        let merged = merge_managed_codex_hooks(&existing, &managed);
+
+        // User hook on PreToolUse must survive
+        let pre_tool_result = merged["hooks"]["PreToolUse"].as_array().unwrap();
+        let user_entries: Vec<_> = pre_tool_result
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .map(|c| c.contains("my-custom-validator"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(user_entries.len(), 1, "user hook must survive re-merge");
+
+        // Managed hooks should not be duplicated
+        let managed_entries: Vec<_> = pre_tool_result
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .map(|c| c.contains("gwt-"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        // The managed definition has 2 PreToolUse entries (matcher:* and matcher:Bash)
+        let expected_managed_pre_tool = managed["hooks"]["PreToolUse"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(
+            managed_entries.len(),
+            expected_managed_pre_tool,
+            "managed hooks should not be duplicated after re-merge"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_needs_update_true_when_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            codex_hooks_needs_update(tmp.path()),
+            "should return true when hooks.json does not exist"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_needs_update_false_when_up_to_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_path = tmp.path().join("hooks.json");
+
+        // Write the expected merged output
+        let managed = managed_codex_hooks_definition();
+        let merged = merge_managed_codex_hooks(&serde_json::json!({}), &managed);
+        let output = serde_json::to_string_pretty(&merged).unwrap();
+        std::fs::write(&hooks_path, &output).unwrap();
+
+        assert!(
+            !codex_hooks_needs_update(tmp.path()),
+            "should return false when file is up-to-date"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_needs_update_true_when_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_path = tmp.path().join("hooks.json");
+
+        // Write stale content
+        std::fs::write(&hooks_path, r#"{"hooks":{}}"#).unwrap();
+
+        assert!(
+            codex_hooks_needs_update(tmp.path()),
+            "should return true when hooks.json differs from merge result"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_needs_update_true_for_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_path = tmp.path().join("hooks.json");
+
+        std::fs::write(&hooks_path, "not valid json!!!").unwrap();
+
+        assert!(
+            codex_hooks_needs_update(tmp.path()),
+            "should return true for invalid JSON"
+        );
+    }
+
+    #[test]
+    fn write_managed_codex_hooks_creates_backup_for_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_root = tmp.path();
+        let hooks_path = codex_root.join("hooks.json");
+        let bak_path = codex_root.join("hooks.json.bak");
+
+        std::fs::write(&hooks_path, "not valid json!!!").unwrap();
+
+        write_managed_codex_hooks(codex_root).unwrap();
+
+        // Backup should exist with the old content
+        assert!(bak_path.exists(), "backup file should be created");
+        let bak_content = std::fs::read_to_string(&bak_path).unwrap();
+        assert_eq!(bak_content, "not valid json!!!");
+
+        // New file should be valid JSON
+        let new_content = std::fs::read_to_string(&hooks_path).unwrap();
+        let parsed: Value = serde_json::from_str(&new_content).unwrap();
+        assert!(parsed["hooks"].is_object());
+    }
+
+    #[test]
+    fn write_managed_codex_hooks_skips_write_when_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_root = tmp.path();
+        let hooks_path = codex_root.join("hooks.json");
+
+        // First write
+        write_managed_codex_hooks(codex_root).unwrap();
+        let mtime_1 = std::fs::metadata(&hooks_path).unwrap().modified().unwrap();
+
+        // Small delay to ensure mtime would change if file were rewritten
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Second write — should be skipped (FR-030)
+        write_managed_codex_hooks(codex_root).unwrap();
+        let mtime_2 = std::fs::metadata(&hooks_path).unwrap().modified().unwrap();
+
+        assert_eq!(
+            mtime_1, mtime_2,
+            "file should not be rewritten when unchanged"
+        );
+    }
+
+    #[test]
+    fn write_managed_codex_hooks_preserves_user_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_root = tmp.path();
+        let hooks_path = codex_root.join("hooks.json");
+
+        // Write a file with user hooks
+        let user_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "my-custom-linter.sh"
+                    }]
+                }]
+            }
+        });
+        std::fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&user_content).unwrap(),
+        )
+        .unwrap();
+
+        write_managed_codex_hooks(codex_root).unwrap();
+
+        let result: Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        let pre_tool = result["hooks"]["PreToolUse"].as_array().unwrap();
+
+        // User hook must survive
+        let has_user = pre_tool.iter().any(|e| {
+            e["hooks"]
+                .as_array()
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .map(|c| c.contains("my-custom-linter"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(has_user, "user hook must be preserved after write");
+
+        // Managed hooks must be present
+        let has_managed = pre_tool.iter().any(|e| {
+            e["hooks"]
+                .as_array()
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .map(|c| c.contains("gwt-"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(has_managed, "managed hooks must be present after write");
+    }
+
+    #[test]
+    fn is_managed_hook_command_recognizes_codex_scripts() {
+        let managed = managed_codex_hooks_definition();
+        let managed_map = managed["hooks"].as_object().unwrap();
+        let commands = managed_hook_commands_from_map(managed_map);
+
+        // Verify that each generated command is recognized as managed
+        for cmd in &commands {
+            assert!(
+                is_managed_hook_command(cmd, &commands),
+                "command should be recognized as managed: {cmd}"
+            );
+        }
+
+        // User command should NOT be recognized as managed
+        assert!(
+            !is_managed_hook_command("my-custom-tool.sh", &commands),
+            "user command should not be recognized as managed"
         );
     }
 }

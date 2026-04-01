@@ -17,6 +17,7 @@ pub enum ConfirmAction {
     DeleteWorktree(String),
     TerminateAgent(String),
     ForceKillAgent(String),
+    EmbedCodexHooks,
     Custom(String),
 }
 
@@ -92,6 +93,23 @@ impl ConfirmState {
             selected_confirm: false,
             is_dangerous: true,
             on_confirm: ConfirmAction::QuitWithAgents,
+        }
+    }
+
+    /// Create confirmation dialog for embedding Codex managed hooks (FR-032, FR-033)
+    pub fn embed_codex_hooks() -> Self {
+        Self {
+            title: "Update Codex Hooks".to_string(),
+            message: "gwt needs to update .codex/hooks.json with managed hooks.".to_string(),
+            details: vec![
+                "This file is tracked by git. Changes will appear in git diff.".to_string(),
+                "You don't need to commit immediately, but may do so.".to_string(),
+            ],
+            confirm_label: "Embed".to_string(),
+            cancel_label: "Skip".to_string(),
+            selected_confirm: true, // Default to Embed (non-dangerous)
+            is_dangerous: false,
+            on_confirm: ConfirmAction::EmbedCodexHooks,
         }
     }
 
@@ -273,6 +291,18 @@ mod tests {
         assert!(state.message.contains("claude"));
         assert!(state.message.contains("feature/test"));
         assert_eq!(state.confirm_label, "Terminate");
+    }
+
+    #[test]
+    fn test_embed_codex_hooks_dialog() {
+        let state = ConfirmState::embed_codex_hooks();
+        assert!(!state.is_dangerous);
+        assert!(state.selected_confirm); // Default to Embed
+        assert_eq!(state.confirm_label, "Embed");
+        assert_eq!(state.cancel_label, "Skip");
+        assert!(state.title.contains("Codex"));
+        assert!(state.message.contains("hooks.json"));
+        assert!(matches!(state.on_confirm, ConfirmAction::EmbedCodexHooks));
     }
 
     #[test]

@@ -653,7 +653,12 @@ pub fn update(model: &mut Model, msg: Message) {
                                 model.wizard = None;
                                 match launch_result {
                                     Ok(config) => {
-                                        if let Err(e) = spawn_agent_session(model, &config) {
+                                        // SPEC-1786: Codex hooks confirmation
+                                        if check_codex_hooks_confirm(model, &config) {
+                                            // Dialog shown; launch deferred
+                                        } else if let Err(e) =
+                                            spawn_agent_session(model, &config, false)
+                                        {
                                             model.push_error(ErrorEntry {
                                                 message: format!("Failed to launch agent: {e}"),
                                                 severity: ErrorSeverity::Critical,
@@ -980,13 +985,39 @@ pub fn update(model: &mut Model, msg: Message) {
             let action = model.confirm.as_ref().map(|c| c.on_confirm.clone());
             model.confirm = None;
             model.overlay_mode = OverlayMode::None;
-            if let Some(crate::screens::confirm::ConfirmAction::QuitWithAgents) = action {
-                model.should_quit = true;
+            match action {
+                Some(crate::screens::confirm::ConfirmAction::QuitWithAgents) => {
+                    model.should_quit = true;
+                }
+                Some(crate::screens::confirm::ConfirmAction::EmbedCodexHooks) => {
+                    // SPEC-1786: Embed accepted — run full skill registration then launch
+                    if let Some(config) = model.pending_codex_launch.take() {
+                        if let Err(e) = spawn_agent_session(model, &config, false) {
+                            model.push_error(ErrorEntry {
+                                message: format!("Failed to launch agent: {e}"),
+                                severity: ErrorSeverity::Critical,
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         Message::ConfirmCancelled => {
+            let action = model.confirm.as_ref().map(|c| c.on_confirm.clone());
             model.confirm = None;
             model.overlay_mode = OverlayMode::None;
+            // SPEC-1786: Skip hooks — launch agent without skill registration
+            if let Some(crate::screens::confirm::ConfirmAction::EmbedCodexHooks) = action {
+                if let Some(config) = model.pending_codex_launch.take() {
+                    if let Err(e) = spawn_agent_session(model, &config, true) {
+                        model.push_error(ErrorEntry {
+                            message: format!("Failed to launch agent: {e}"),
+                            severity: ErrorSeverity::Critical,
+                        });
+                    }
+                }
+            }
         }
         Message::ProgressAdvance => {
             if let Some(ref mut progress) = model.progress {
@@ -1636,9 +1667,38 @@ fn resolve_branch_working_dir(
 // Agent session spawning (from Wizard)
 // ---------------------------------------------------------------------------
 
+/// Check if a Codex agent launch needs hooks confirmation and show the dialog.
+/// Returns `true` if a confirm dialog was shown (launch should be deferred).
+fn check_codex_hooks_confirm(
+    model: &mut Model,
+    wiz_config: &crate::screens::wizard::WizardLaunchConfig,
+) -> bool {
+    if wiz_config.agent_id != "codex" {
+        return false;
+    }
+
+    let working_dir = if !wiz_config.branch_name.is_empty() {
+        resolve_branch_working_dir(&model.repo_root, &wiz_config.branch_name)
+    } else {
+        model.repo_root.clone()
+    };
+
+    let codex_root = working_dir.join(".codex");
+    if gwt_core::config::codex_hooks_needs_update(&codex_root) {
+        // Store pending launch config and show confirmation dialog (FR-031)
+        model.pending_codex_launch = Some(wiz_config.clone());
+        model.confirm = Some(crate::screens::confirm::ConfirmState::embed_codex_hooks());
+        model.overlay_mode = OverlayMode::Confirm;
+        true
+    } else {
+        false
+    }
+}
+
 fn spawn_agent_session(
     model: &mut Model,
     wiz_config: &crate::screens::wizard::WizardLaunchConfig,
+    skip_hooks_registration: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use gwt_core::agent::launch::AgentLaunchBuilder;
     use gwt_core::config::skill_registration::{
@@ -1653,26 +1713,28 @@ fn spawn_agent_session(
     };
 
     // Register managed skills/hooks for this agent (SPEC-1438 FR-REG-001)
-    if let Some(agent_type) = SkillAgentType::from_agent_id(agent_id) {
-        match gwt_core::config::Settings::load(&working_dir) {
-            Ok(settings) => {
-                if let Err(e) = register_agent_skills_with_settings_at_project_root(
-                    agent_type,
-                    &settings,
-                    Some(&working_dir),
-                ) {
+    if !skip_hooks_registration {
+        if let Some(agent_type) = SkillAgentType::from_agent_id(agent_id) {
+            match gwt_core::config::Settings::load(&working_dir) {
+                Ok(settings) => {
+                    if let Err(e) = register_agent_skills_with_settings_at_project_root(
+                        agent_type,
+                        &settings,
+                        Some(&working_dir),
+                    ) {
+                        tracing::warn!(
+                            agent = agent_id,
+                            error = %e,
+                            "Skill registration failed; continuing with agent launch"
+                        );
+                    }
+                }
+                Err(e) => {
                     tracing::warn!(
-                        agent = agent_id,
                         error = %e,
-                        "Skill registration failed; continuing with agent launch"
+                        "Failed to load settings for skill registration; continuing with agent launch"
                     );
                 }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to load settings for skill registration; continuing with agent launch"
-                );
             }
         }
     }
