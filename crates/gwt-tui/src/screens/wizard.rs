@@ -583,6 +583,10 @@ impl WizardState {
             self.step_history.push(self.step);
             self.step = next;
             self.update_model_options_for_agent();
+            // Fetch versions when entering VersionSelect
+            if self.step == WizardStep::VersionSelect {
+                self.fetch_version_options();
+            }
         }
     }
 
@@ -903,6 +907,60 @@ impl WizardState {
             }
         }
     }
+
+    /// Fetch version options for the current agent from npm registry.
+    fn fetch_version_options(&mut self) {
+        let agent_id = self.current_agent_id();
+        let npm_package = match agent_id {
+            "claude" => "@anthropic-ai/claude-code",
+            "codex" => "@openai/codex",
+            "gemini" => "@anthropic-ai/claude-code", // gemini uses different install
+            "opencode" => "opencode",
+            "copilot" => "@github/copilot",
+            _ => return,
+        };
+
+        // Start with installed + latest
+        let mut options = Vec::new();
+
+        // Detect installed version
+        let cmd_name = match agent_id {
+            "claude" => "claude",
+            "codex" => "codex",
+            "gemini" => "gemini",
+            "opencode" => "opencode",
+            "copilot" => "copilot",
+            _ => agent_id,
+        };
+        if let Ok(output) = std::process::Command::new(cmd_name)
+            .arg("--version")
+            .output()
+        {
+            if output.status.success() {
+                let version_str = String::from_utf8_lossy(&output.stdout);
+                if let Some(ver) = extract_version(&version_str) {
+                    options.push(format!("installed ({ver})"));
+                } else {
+                    options.push("installed".to_string());
+                }
+            }
+        }
+
+        options.push("latest".to_string());
+
+        // Fetch from npm registry (with 3s timeout)
+        if let Ok(versions) = fetch_npm_versions(npm_package) {
+            for v in versions.into_iter().take(8) {
+                options.push(v);
+            }
+        }
+
+        self.version_options = options;
+        self.version_index = 0;
+        if let Some(v) = self.version_options.first() {
+            self.version = v.clone();
+        }
+    }
 }
 
 /// Launch configuration produced by the wizard.
@@ -931,6 +989,61 @@ fn default_agents() -> Vec<AgentEntry> {
         AgentEntry::builtin("gemini", "Gemini CLI", Color::Magenta, true),
         AgentEntry::builtin("opencode", "OpenCode", Color::Green, true),
     ]
+}
+
+/// Extract semver-like version from a version string.
+fn extract_version(s: &str) -> Option<String> {
+    for part in s.split_whitespace() {
+        let v = part.trim_start_matches('v');
+        if v.chars().next().is_some_and(|c| c.is_ascii_digit()) && v.contains('.') {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Fetch recent versions from npm registry (3s timeout, max 8 versions).
+fn fetch_npm_versions(package_name: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let encoded = package_name.replace('@', "%40").replace('/', "%2F");
+    let url = format!("https://registry.npmjs.org/{encoded}");
+
+    let output = std::process::Command::new("curl")
+        .args(["-sS", "--max-time", "3", &url])
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    let data: serde_json::Value = serde_json::from_str(&body)?;
+
+    let versions = data["versions"]
+        .as_object()
+        .map(|v| v.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let time = data["time"].as_object();
+
+    // Sort by publish date (newest first)
+    let mut with_time: Vec<(String, String)> = versions
+        .into_iter()
+        .filter_map(|v| {
+            time.and_then(|t| t.get(&v))
+                .and_then(|t| t.as_str())
+                .map(|t| (v, t.to_string()))
+        })
+        .collect();
+    with_time.sort_by(|a, b| b.1.cmp(&a.1));
+
+    Ok(with_time
+        .into_iter()
+        .take(8)
+        .map(|(v, date)| {
+            let short_date = date.split('T').next().unwrap_or(&date);
+            format!("{v}  ({short_date})")
+        })
+        .collect())
 }
 
 fn default_model_options(agent_id: &str) -> Vec<String> {
@@ -1341,8 +1454,14 @@ fn render_toggle(buf: &mut Buffer, area: Rect, title: &str, value: bool) {
 }
 
 fn render_skip_permissions(buf: &mut Buffer, area: Rect, state: &WizardState) {
-    let options = ["No (require approval)", "Yes (skip all approvals)"];
-    let selected = if state.skip_permissions { 1 } else { 0 };
+    let mut options: Vec<(&str, bool)> = vec![
+        ("No (require approval)", !state.skip_permissions),
+        ("Yes (skip all approvals)", state.skip_permissions && (!state.is_codex() || !state.fast_mode)),
+    ];
+
+    if state.is_codex() {
+        options.push(("Yes + Fast mode (service_tier=fast)", state.skip_permissions && state.fast_mode));
+    }
 
     let mut lines: Vec<Line<'_>> = vec![
         Line::from(Span::styled(
@@ -1352,28 +1471,14 @@ fn render_skip_permissions(buf: &mut Buffer, area: Rect, state: &WizardState) {
         Line::from(""),
     ];
 
-    for (i, opt) in options.iter().enumerate() {
-        let marker = if i == selected { ">" } else { " " };
-        let style = if i == selected {
+    for (opt, is_selected) in &options {
+        let marker = if *is_selected { ">" } else { " " };
+        let style = if *is_selected {
             Style::default().fg(Color::Black).bg(Color::Yellow)
         } else {
             Style::default()
         };
         lines.push(Line::from(Span::styled(format!("  {marker} {opt}"), style)));
-    }
-
-    // Fast mode option for Codex
-    if state.is_codex() {
-        lines.push(Line::from(""));
-        let fast_marker = if state.fast_mode { "x" } else { " " };
-        lines.push(Line::from(Span::styled(
-            format!("  [{fast_marker}] Fast mode (service_tier=fast)"),
-            if state.fast_mode {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            },
-        )));
     }
 
     lines.push(Line::from(""));
