@@ -1,4 +1,0 @@
-- [x] T001 [F] [US1] Add Rust tests covering startup-analysis prompt insertion and hidden-system-message filtering.
-- [x] T002 [F] [US1] Implement startup analysis using a hidden startup prompt.
-- [x] T003 [F] [US1] Update session startup to trigger the initial analysis automatically.
-- [x] T004 [FIN] [US1] Run targeted verification and reflect the result in the spec.

@@ -1,2 +1,0 @@
-- 現状 `ensure_defaults` は `profiles.is_empty()` 時のみ `default` を生成し、`default.ai` までは補完しない。
-- `save()` は正規化なしでシリアライズしており、不正形状をそのまま保存できる。

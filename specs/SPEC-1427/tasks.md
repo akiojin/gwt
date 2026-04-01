@@ -1,4 +1,0 @@
-- [x] `chroma_index_runner.py` の文字列定数を一括置換（8箇所）
-- [x] `project_index.rs` にコレクション名検証テストを追加
-- [x] `cargo build -p gwt-tauri` 検証
-- [x] `cargo test -p gwt-tauri commands::project_index` 検証（4 passed）

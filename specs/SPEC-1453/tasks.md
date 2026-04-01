@@ -1,8 +1,0 @@
-- [x] T001 [S] gwt-spec Issue 作成と各セクション初期化
-- [x] T002 [F] GUIテスト追加（IssueListPanel）: 番号部分一致/混在AND/#付き
-- [x] T003 [F] GUIテスト追加（AgentLaunchForm）: 番号部分一致/混在AND/#付き
-- [x] T004 [F] Rustテスト追加（filter_issues_by_title）: 番号部分一致/混在AND/#付き
-- [x] T005 [U] GUI共通検索ユーティリティ実装 + 2コンポーネント適用
-- [x] T006 [U] Rust `filter_issues_by_title` 実装更新
-- [x] T007 [FIN] 検証コマンド実行（GUIテスト + Rustテスト）
-- [x] T008 [FIN] gwt-spec Issue の Task/Acceptance 更新

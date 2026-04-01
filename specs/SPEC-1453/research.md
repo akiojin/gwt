@@ -1,1 +1,0 @@
-- 既存実装は `title.toLowerCase().includes(q)` のみ（Issue番号未対応）。

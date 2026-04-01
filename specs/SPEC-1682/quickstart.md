@@ -1,3 +1,0 @@
-- Open project
-- Open Assistant tab once and observe status messages / cache miss path
-- Close and reopen Assistant tab with unchanged repo state and observe cache hit path

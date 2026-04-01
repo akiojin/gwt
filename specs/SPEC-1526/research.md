@@ -1,4 +1,0 @@
-- `gwt-pr-check` の現仕様は merge commit 祖先判定後に `origin/<head>..HEAD` fallback を優先する前提だが、今回の運用では LLM がその fallback を踏まず誤報告した。
-- 既存の `gwt-spec` Issue 検索では、PR タブ表示や MERGED/CLOSED PR 詳細の仕様は見つかったが、`gwt-pr-check` / `gwt-pr` の post-merge no-op 判定を正本として持つ spec は確認できなかった。
-- 調査の結果、`plugins/gwt/skills/gwt-pr/SKILL.md` にはまだ `origin/<base>..HEAD` へ直行する古い fallback が残っている一方、`gwt-pr-check` は upstream-first fallback を既に記載していた。
-- `plugins/gwt/*` が managed asset の正本で、`.codex/*` / `.claude/*` は agent 向けに展開されるため、回帰テストは `skill_registration.rs` で追加するのが最小である。

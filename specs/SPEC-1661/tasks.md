@@ -1,3 +1,0 @@
-- [x] T001 [F] [US1] Add `AssistantPanel` component tests covering IME confirm Enter, fallback `keyCode === 229`, plain Enter send, and Shift+Enter.
-- [x] T002 [F] [US1] Update `AssistantPanel.svelte` Enter handling to use `KeyboardEvent.isComposing` first, local composing state second, and `229` as a legacy fallback.
-- [x] T003 [FIN] [US1] Run targeted frontend verification and reflect the results in the issue.

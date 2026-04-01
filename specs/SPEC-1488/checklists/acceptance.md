@@ -1,3 +1,0 @@
-- [ ] `gwt-issue-spec-ops` が available skills に露出する
-- [ ] SPEC 作成要求で `gwt-issue-spec-ops` が使われる
-- [ ] `gwt-spec` Issue テンプレート構造が repo 運用と一致する

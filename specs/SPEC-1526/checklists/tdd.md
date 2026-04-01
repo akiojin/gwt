@@ -1,5 +1,0 @@
-- T-001: latest merged PR の merge commit が `HEAD` の祖先でないが `origin/<head>..HEAD = 0` のとき `NO ACTION` を返すテスト
-- T-002: latest merged PR の merge commit が `HEAD` の祖先でなく `origin/<head>..HEAD > 0` のとき `CREATE PR` を返すテスト
-- T-003: `gwt-pr` が同条件で新規 PR を作成しない / 作成する分岐テスト
-- T-004: fallback も失敗したとき `MANUAL CHECK` を返すテスト
-- T-005: generated skill / command asset に ancestor check と `origin/<head>..HEAD` 優先 fallback が含まれるテスト

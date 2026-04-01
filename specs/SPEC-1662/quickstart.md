@@ -1,3 +1,0 @@
-- Open Assistant tab
-- Render a message containing embedded `\n`
-- Confirm line breaks remain visible in the transcript

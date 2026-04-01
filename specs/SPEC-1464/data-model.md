@@ -1,1 +1,0 @@
-- スキーマ変更なし（既存 `Profile.ai: Option<AISettings>` のまま、`default` のみ補完）

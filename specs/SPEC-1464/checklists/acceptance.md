@@ -1,4 +1,0 @@
-- [x] `default` profile が常に存在する
-- [x] `profiles.default.ai` が常に存在する
-- [x] `profiles.default.ai.api_key` は空文字許容のまま
-- [x] 追加した TDD テストが GREEN

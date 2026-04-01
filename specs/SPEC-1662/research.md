@@ -1,2 +1,0 @@
-- `AssistantPanel.svelte` の `.message` / `.message-content` に改行保持用 CSS が見当たらない
-- 既存コンポーネントでは `white-space: pre-wrap;` を使って複数行テキストを表示している箇所がある
