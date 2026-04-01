@@ -135,6 +135,17 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::KeyInput(key) => {
+            // Error overlay: Enter/Esc dismisses the error
+            if !model.error_queue.is_empty() || !model.error_queue_v2.is_empty() {
+                if key.code == crossterm::event::KeyCode::Enter
+                    || key.code == crossterm::event::KeyCode::Esc
+                {
+                    model.dismiss_error();
+                    model.error_queue_v2.dismiss_current();
+                    return;
+                }
+            }
+
             // Management layer: Tab key cycles management tabs
             // BUT only when the active screen is NOT in form/edit mode
             if model.active_layer == ActiveLayer::Management
@@ -147,7 +158,8 @@ pub fn update(model: &mut Model, msg: Message) {
                 if !screen_wants_tab {
                     model.management_tab = match model.management_tab {
                         ManagementTab::Branches => ManagementTab::Issues,
-                        ManagementTab::Issues => ManagementTab::Settings,
+                        ManagementTab::Issues => ManagementTab::Specs,
+                        ManagementTab::Specs => ManagementTab::Settings,
                         ManagementTab::Settings => ManagementTab::Logs,
                         ManagementTab::Logs => ManagementTab::Branches,
                     };
@@ -185,6 +197,14 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Issues => {
                             crate::screens::issues::handle_key(&model.issues_state, &key)
                                 .map(Message::IssuesMsg)
+                        }
+                        ManagementTab::Specs => {
+                            crate::screens::specs::handle_key(&model.specs_state, &key)
+                                .map(|m| {
+                                    crate::screens::specs::update(&mut model.specs_state, m);
+                                    // Return None — update already applied inline
+                                    Message::Tick // dummy, won't cause issues
+                                })
                         }
                         ManagementTab::Settings => {
                             crate::screens::settings::handle_key(&model.settings_state, &key)
@@ -272,6 +292,20 @@ pub fn update(model: &mut Model, msg: Message) {
 
         // Screen-specific messages
         Message::BranchesMsg(msg) => {
+            use crate::screens::branches::BranchesMessage;
+            // Intercept Enter to open Wizard with selected branch
+            if matches!(msg, BranchesMessage::Enter) {
+                let branch = model
+                    .branches_state
+                    .selected_branch_name()
+                    .unwrap_or_default();
+                if !branch.is_empty() {
+                    model.wizard = Some(
+                        crate::screens::wizard::WizardState::open_for_branch(&branch, vec![]),
+                    );
+                }
+                return;
+            }
             crate::screens::branches::update(&mut model.branches_state, msg);
         }
         Message::IssuesMsg(msg) => {
@@ -337,6 +371,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
             }
             ManagementTab::Issues => {
                 crate::screens::issues::render(&model.issues_state, buf, layout[2]);
+            }
+            ManagementTab::Specs => {
+                crate::screens::specs::render(&model.specs_state, buf, layout[2]);
             }
             ManagementTab::Settings => {
                 crate::screens::settings::render(&model.settings_state, buf, layout[2]);
@@ -991,6 +1028,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     model.settings_state.load_settings();
     model.logs_state.entries = crate::screens::logs::load_log_entries();
     model.issues_state.issues = crate::screens::issues::load_specs(&repo_root);
+    model.specs_state.specs = crate::screens::specs::load_specs(&repo_root);
 
     // PTY output channel
     let (pty_tx, pty_rx) = event::pty_output_channel();

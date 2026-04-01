@@ -346,6 +346,10 @@ impl BranchListState {
             .and_then(|&i| self.branches.get(i))
     }
 
+    pub fn selected_branch_name(&self) -> Option<String> {
+        self.selected_branch().map(|b| b.name.clone())
+    }
+
     /// Set branches and reset selection.
     pub fn set_branches(&mut self, branches: Vec<BranchItem>) {
         self.branches = branches;

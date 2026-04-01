@@ -9,6 +9,7 @@ use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::AgentColor;
 
 use crate::screens::branches::BranchListState;
+use crate::screens::specs::SpecsState;
 use crate::screens::clone_wizard::CloneWizardState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::error::ErrorQueue;
@@ -34,14 +35,16 @@ pub enum ActiveLayer {
 pub enum ManagementTab {
     Branches,
     Issues,
+    Specs,
     Settings,
     Logs,
 }
 
 impl ManagementTab {
-    pub const ALL: [ManagementTab; 4] = [
+    pub const ALL: [ManagementTab; 5] = [
         ManagementTab::Branches,
         ManagementTab::Issues,
+        ManagementTab::Specs,
         ManagementTab::Settings,
         ManagementTab::Logs,
     ];
@@ -50,8 +53,9 @@ impl ManagementTab {
         match self {
             ManagementTab::Branches => 0,
             ManagementTab::Issues => 1,
-            ManagementTab::Settings => 2,
-            ManagementTab::Logs => 3,
+            ManagementTab::Specs => 2,
+            ManagementTab::Settings => 3,
+            ManagementTab::Logs => 4,
         }
     }
 
@@ -59,6 +63,7 @@ impl ManagementTab {
         match self {
             ManagementTab::Branches => "Branches",
             ManagementTab::Issues => "Issues",
+            ManagementTab::Specs => "SPECs",
             ManagementTab::Settings => "Settings",
             ManagementTab::Logs => "Logs",
         }
@@ -152,6 +157,7 @@ pub struct Model {
     // Screen states for management tabs
     pub branches_state: BranchListState,
     pub issues_state: IssuePanelState,
+    pub specs_state: SpecsState,
     pub settings_state: SettingsState,
     pub logs_state: LogsState,
 
@@ -194,6 +200,7 @@ impl Model {
             management_tab: ManagementTab::Branches,
             branches_state: BranchListState::new(),
             issues_state: IssuePanelState::new(),
+            specs_state: SpecsState::new(),
             settings_state: SettingsState::new(),
             logs_state: LogsState::new(),
             pane_manager: PaneManager::new(),
@@ -471,7 +478,7 @@ mod tests {
     fn management_tab_metadata() {
         assert_eq!(ManagementTab::Branches.index(), 0);
         assert_eq!(ManagementTab::Logs.label(), "Logs");
-        assert_eq!(ManagementTab::ALL.len(), 4);
+        assert_eq!(ManagementTab::ALL.len(), 5);
     }
 
     #[test]
