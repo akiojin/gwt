@@ -66,6 +66,12 @@ As a developer, I want to be able to identify which hooks in `.codex/hooks.json`
 - FR-020: gwt managed hooks は `command` フィールドに `gwt-` を含むスクリプトパスで識別する（例: `gwt-forward-hook.mjs`, `gwt-block-git-branch-ops.mjs`）
 - FR-021: 将来的にマーカーコメントや metadata フィールドによる識別への移行を妨げない設計とする
 
+### dirty worktree 防止
+
+- FR-030: マージ結果が既存ファイルの内容と byte-for-byte 同一の場合、ファイルを書き換えない（不要な git 差分を防止）
+- FR-031: マージ結果が既存ファイルと異なり実際にファイルを更新した場合、TUI 上でユーザーに通知する。通知内容は「`.codex/hooks.json` が更新されました。コミットの必要はありませんが、コミットしても構いません」に相当するメッセージ
+- FR-032: 通知はステータスバーまたは軽量モーダルで表示し、agent 起動フローをブロックしない
+
 ## Non-Functional Requirements
 
 - NFR-001: マージ処理の実行時間は 10ms 以内（ファイル I/O 除く）
@@ -77,3 +83,5 @@ As a developer, I want to be able to identify which hooks in `.codex/hooks.json`
 - SC-002: gwt managed hooks が正しく追加/更新されていること
 - SC-003: 同じ操作を複数回実行しても hooks が重複しないこと（冪等性）
 - SC-004: 既存の `cargo test -p gwt-core` が全通過すること
+- SC-005: managed hooks に変更がない場合、`.codex/hooks.json` に git 差分が出ないこと
+- SC-006: managed hooks が実際に更新された場合、TUI 上に通知が表示されること
