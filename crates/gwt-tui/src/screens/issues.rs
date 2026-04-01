@@ -157,6 +157,8 @@ pub enum IssuesMessage {
     CloseDetail,
     ScrollDetailUp,
     ScrollDetailDown,
+    /// Launch an agent for the selected issue
+    LaunchAgent,
 }
 
 // ---------------------------------------------------------------------------
@@ -177,11 +179,13 @@ pub fn handle_key(state: &IssuePanelState, key: &KeyEvent) -> Option<IssuesMessa
         return handle_search_key(key);
     }
 
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => Some(IssuesMessage::SelectNext),
         KeyCode::Char('k') | KeyCode::Up => Some(IssuesMessage::SelectPrev),
         KeyCode::Char('/') => Some(IssuesMessage::ToggleSearch),
         KeyCode::Char('r') => Some(IssuesMessage::Refresh),
+        KeyCode::Enter if shift => Some(IssuesMessage::LaunchAgent),
         KeyCode::Enter => Some(IssuesMessage::OpenDetail),
         _ => None,
     }
@@ -246,6 +250,9 @@ pub fn update(state: &mut IssuePanelState, msg: IssuesMessage) {
         }
         IssuesMessage::ScrollDetailDown => {
             state.detail_scroll = state.detail_scroll.saturating_add(1);
+        }
+        IssuesMessage::LaunchAgent => {
+            // Handled by app.rs
         }
     }
 }

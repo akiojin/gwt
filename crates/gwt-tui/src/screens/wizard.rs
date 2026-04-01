@@ -459,6 +459,47 @@ impl WizardState {
         state
     }
 
+    /// Open wizard for an Issue launch (from Issues screen).
+    /// Branch name is derived from the Issue number; skip branch-related steps.
+    pub fn open_for_issue(
+        issue_number: u64,
+        branch_name: &str,
+        is_new_branch: bool,
+        history: Vec<QuickStartEntry>,
+    ) -> Self {
+        let mut state = Self::new();
+        state.branch_name = branch_name.to_string();
+        state.is_new_branch = is_new_branch;
+        state.has_branch_action = false;
+
+        if history.is_empty() {
+            state.step = WizardStep::AgentSelect;
+            state.has_quick_start = false;
+        } else {
+            state.step = WizardStep::QuickStart;
+            state.has_quick_start = true;
+            state.quick_start_entries = history;
+        }
+
+        // Store issue number as spec_id for traceability
+        state.spec_id = Some(format!("issue-{}", issue_number));
+        state
+    }
+
+    /// Open wizard for SPEC drafting on develop branch.
+    /// Launches an agent on develop with SPEC drafting skill context.
+    pub fn open_for_spec_drafting() -> Self {
+        let mut state = Self::new();
+        state.branch_name = "develop".to_string();
+        state.is_new_branch = false;
+        state.has_branch_action = false;
+        state.from_spec = true;
+        state.spec_id = Some("new-spec-draft".to_string());
+        state.step = WizardStep::AgentSelect;
+        state.has_quick_start = false;
+        state
+    }
+
     // -----------------------------------------------------------------------
     // Agent helpers
     // -----------------------------------------------------------------------

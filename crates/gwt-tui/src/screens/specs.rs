@@ -90,6 +90,8 @@ pub enum SpecsMessage {
     CancelBranchSelect,
     BranchSelectPrev,
     BranchSelectNext,
+    /// Create a new SPEC (launch drafting agent on develop)
+    NewSpec,
 }
 
 pub fn handle_key(state: &SpecsState, key: &KeyEvent) -> Option<SpecsMessage> {
@@ -142,6 +144,7 @@ pub fn handle_key(state: &SpecsState, key: &KeyEvent) -> Option<SpecsMessage> {
             KeyCode::Up | KeyCode::Char('k') => Some(SpecsMessage::SelectPrev),
             KeyCode::Down | KeyCode::Char('j') => Some(SpecsMessage::SelectNext),
             KeyCode::Char('/') => Some(SpecsMessage::ToggleSearch),
+            KeyCode::Char('n') => Some(SpecsMessage::NewSpec),
             KeyCode::Enter if shift => Some(SpecsMessage::LaunchAgent),
             KeyCode::Enter => Some(SpecsMessage::OpenDetail),
             _ => None,
@@ -217,6 +220,9 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 state.branch_selected += 1;
             }
         }
+        SpecsMessage::NewSpec => {
+            // Handled by app.rs
+        }
     }
 }
 
@@ -239,7 +245,7 @@ pub fn render(state: &SpecsState, buf: &mut Buffer, area: Rect) {
 
     // Header
     let count = state.visible_specs().len();
-    let header = format!(" SPECs ({count})  [/] Search  [S-Enter] Launch");
+    let header = format!(" SPECs ({count})  [/] Search  [S-Enter] Launch  [n] New SPEC");
     let header_span = Span::styled(header, Style::default().fg(Color::Cyan).bold());
     buf.set_span(layout[0].x, layout[0].y, &header_span, layout[0].width);
 
@@ -247,6 +253,22 @@ pub fn render(state: &SpecsState, buf: &mut Buffer, area: Rect) {
     let visible = state.visible_specs();
     let list_area = layout[1];
     let max_rows = list_area.height as usize;
+
+    // Guide message when empty
+    if visible.is_empty() && !state.search_mode {
+        let guide = " No SPECs yet. Press [n] to create one.";
+        let guide_span = Span::styled(guide, Style::default().fg(Color::DarkGray));
+        let y = list_area.y + list_area.height.saturating_sub(1) / 2;
+        buf.set_span(list_area.x, y, &guide_span, list_area.width);
+
+        // Still render overlays and return
+        if state.confirm_launch {
+            render_confirm_dialog(state, buf, area);
+        } else if state.branch_select_mode {
+            render_branch_select_dialog(state, buf, area);
+        }
+        return;
+    }
 
     // Scroll offset
     let offset = if state.selected >= max_rows {
