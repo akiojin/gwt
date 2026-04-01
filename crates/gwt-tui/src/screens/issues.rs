@@ -448,10 +448,7 @@ pub fn load_specs(repo_root: &std::path::Path) -> Vec<IssueItem> {
             .and_then(|v| v["status"].as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "open".to_string());
 
-        let number = name
-            .trim_start_matches("SPEC-")
-            .parse::<u64>()
-            .unwrap_or(0);
+        let number = name.trim_start_matches("SPEC-").parse::<u64>().unwrap_or(0);
 
         items.push(IssueItem {
             number,

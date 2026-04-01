@@ -690,7 +690,11 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
         .find(|p| p.pane_id() == pane_id)
         .ok_or("pane not found")?;
     let mut reader = pane.take_reader()?;
-    let tx = model.pty_tx.as_ref().ok_or("pty_tx not initialized")?.clone();
+    let tx = model
+        .pty_tx
+        .as_ref()
+        .ok_or("pty_tx not initialized")?
+        .clone();
     let id = pane_id.clone();
     std::thread::Builder::new()
         .name(format!("pty-reader-{id}"))
@@ -849,12 +853,10 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load initial data for management screens
-    model.branches_state.branches =
-        crate::screens::branches::load_branches(&repo_root);
+    model.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
     model.settings_state.load_settings();
     model.logs_state.entries = crate::screens::logs::load_log_entries();
-    model.issues_state.issues =
-        crate::screens::issues::load_specs(&repo_root);
+    model.issues_state.issues = crate::screens::issues::load_specs(&repo_root);
 
     // PTY output channel
     let (pty_tx, pty_rx) = event::pty_output_channel();

@@ -10,8 +10,7 @@ pub fn render(buf: &mut Buffer, area: Rect, parser: Option<&vt100::Parser>) {
         crate::renderer::render_vt100_screen(buf, area, parser.screen());
     } else {
         // No parser yet — show placeholder
-        let text = ratatui::widgets::Paragraph::new("Starting...")
-            .alignment(Alignment::Center);
+        let text = ratatui::widgets::Paragraph::new("Starting...").alignment(Alignment::Center);
         ratatui::widgets::Widget::render(text, area, buf);
     }
 }

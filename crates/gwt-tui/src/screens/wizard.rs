@@ -6,6 +6,8 @@
 //! ConvertSessionSelect, SkipPermissions, BranchTypeSelect, IssueSelect,
 //! AIBranchSuggest, BranchNameInput.
 
+use std::process::Command;
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -240,6 +242,261 @@ impl ReasoningLevel {
     pub const ALL: [ReasoningLevel; 4] = [Self::Low, Self::Medium, Self::High, Self::XHigh];
 }
 
+// ---------------------------------------------------------------------------
+// ModelOption — rich model descriptor
+// ---------------------------------------------------------------------------
+
+/// Model option with description and reasoning level support.
+#[derive(Debug, Clone)]
+pub struct ModelOption {
+    /// Model identifier (empty string for default).
+    pub id: String,
+    /// Display label.
+    pub label: String,
+    /// Human-readable description.
+    pub description: String,
+    /// Whether this is the default model for the agent.
+    pub is_default: bool,
+    /// Supported inference/reasoning levels (Codex models).
+    pub inference_levels: Vec<ReasoningLevel>,
+    /// Default inference level for this model.
+    pub default_inference: Option<ReasoningLevel>,
+}
+
+impl ModelOption {
+    fn new(id: &str, label: &str, description: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            label: label.to_string(),
+            description: description.to_string(),
+            is_default: false,
+            inference_levels: vec![],
+            default_inference: None,
+        }
+    }
+
+    fn default_option(label: &str, description: &str) -> Self {
+        Self {
+            id: String::new(),
+            label: label.to_string(),
+            description: description.to_string(),
+            is_default: true,
+            inference_levels: vec![],
+            default_inference: None,
+        }
+    }
+
+    fn with_base_levels(mut self) -> Self {
+        self.inference_levels = vec![
+            ReasoningLevel::High,
+            ReasoningLevel::Medium,
+            ReasoningLevel::Low,
+        ];
+        self.default_inference = Some(ReasoningLevel::High);
+        self
+    }
+
+    fn with_max_levels(mut self) -> Self {
+        self.inference_levels = vec![
+            ReasoningLevel::XHigh,
+            ReasoningLevel::High,
+            ReasoningLevel::Medium,
+            ReasoningLevel::Low,
+        ];
+        self.default_inference = Some(ReasoningLevel::Medium);
+        self
+    }
+
+    fn with_default_inference(mut self, level: ReasoningLevel) -> Self {
+        self.default_inference = Some(level);
+        self
+    }
+
+    /// Display string for list rendering: "label  description".
+    pub fn display(&self) -> String {
+        format!("{:<28} {}", self.label, self.description)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CodingAgent — builtin agent enum for model/version detection
+// ---------------------------------------------------------------------------
+
+/// Known builtin coding agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CodingAgent {
+    ClaudeCode,
+    CodexCli,
+    GeminiCli,
+    OpenCode,
+}
+
+impl CodingAgent {
+    pub const ALL: [CodingAgent; 4] = [
+        Self::ClaudeCode,
+        Self::CodexCli,
+        Self::GeminiCli,
+        Self::OpenCode,
+    ];
+
+    /// Shell command name for this agent.
+    pub fn command_name(&self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::CodexCli => "codex",
+            Self::GeminiCli => "gemini",
+            Self::OpenCode => "opencode",
+        }
+    }
+
+    /// Agent ID used in wizard state.
+    pub fn agent_id(&self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::CodexCli => "codex",
+            Self::GeminiCli => "gemini",
+            Self::OpenCode => "opencode",
+        }
+    }
+
+    /// Get model options for this agent.
+    pub fn models(&self) -> Vec<ModelOption> {
+        match self {
+            CodingAgent::ClaudeCode => vec![
+                ModelOption::default_option(
+                    "Default (recommended)",
+                    "Opus 4.6 - Most capable for complex work",
+                ),
+                ModelOption::new("opus", "Opus 4.6", "Most capable for complex work"),
+                ModelOption::new("sonnet", "Sonnet 4.5", "Best for everyday tasks"),
+                ModelOption::new("haiku", "Haiku 4.5", "Fastest for quick answers"),
+            ],
+            CodingAgent::CodexCli => vec![
+                ModelOption::default_option("Default (Auto)", "Use Codex default model")
+                    .with_base_levels()
+                    .with_default_inference(ReasoningLevel::High),
+                ModelOption::new(
+                    "gpt-5.3-codex",
+                    "gpt-5.3-codex",
+                    "Latest frontier agentic coding model.",
+                )
+                .with_max_levels()
+                .with_default_inference(ReasoningLevel::High),
+                ModelOption::new(
+                    "gpt-5.2-codex",
+                    "gpt-5.2-codex",
+                    "Codex flagship with extra-high reasoning support.",
+                )
+                .with_max_levels()
+                .with_default_inference(ReasoningLevel::High),
+                ModelOption::new(
+                    "gpt-5.1-codex-max",
+                    "gpt-5.1-codex-max",
+                    "Codex-optimized flagship for deep and fast reasoning.",
+                )
+                .with_max_levels(),
+                ModelOption::new(
+                    "gpt-5.2",
+                    "gpt-5.2",
+                    "Latest frontier model with improvements across knowledge, reasoning and coding",
+                )
+                .with_max_levels(),
+                ModelOption::new(
+                    "gpt-5.1-codex-mini",
+                    "gpt-5.1-codex-mini",
+                    "Optimized for codex. Cheaper, faster, but less capable.",
+                )
+                .with_base_levels(),
+            ],
+            CodingAgent::GeminiCli => vec![
+                ModelOption::default_option("Default (Auto)", "Use Gemini default model"),
+                ModelOption::new(
+                    "gemini-3-pro-preview",
+                    "Pro (gemini-3-pro-preview)",
+                    "Default Pro. Falls back to gemini-2.5-pro when preview is unavailable.",
+                ),
+                ModelOption::new(
+                    "gemini-3-flash-preview",
+                    "Flash (gemini-3-flash-preview)",
+                    "Next-generation high-speed model",
+                ),
+                ModelOption::new(
+                    "gemini-2.5-pro",
+                    "Pro (gemini-2.5-pro)",
+                    "Stable Pro model for deep reasoning and creativity",
+                ),
+                ModelOption::new(
+                    "gemini-2.5-flash",
+                    "Flash (gemini-2.5-flash)",
+                    "Balance of speed and reasoning",
+                ),
+                ModelOption::new(
+                    "gemini-2.5-flash-lite",
+                    "Flash-Lite (gemini-2.5-flash-lite)",
+                    "Fastest for simple tasks",
+                ),
+            ],
+            CodingAgent::OpenCode => vec![
+                ModelOption::default_option("Default (Auto)", "Use OpenCode default model"),
+                ModelOption::new(
+                    "__custom__",
+                    "Custom (provider/model)",
+                    "Enter a provider/model identifier",
+                ),
+            ],
+        }
+    }
+}
+
+/// Installed version information for an agent.
+#[derive(Debug, Clone)]
+pub struct InstalledVersionInfo {
+    pub version: String,
+    pub path: String,
+}
+
+/// Detect installed version of an agent using `--version` flag.
+pub fn detect_installed_version(agent: CodingAgent) -> Option<InstalledVersionInfo> {
+    let cmd_name = agent.command_name();
+
+    // Try to get version using --version flag
+    let output = Command::new(cmd_name).arg("--version").output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    // Parse version from output (format varies: "v1.0.3", "1.0.3", "claude 1.0.3", etc.)
+    let version = version_str.lines().next().and_then(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        parts.iter().find_map(|p| {
+            let v = p.trim_start_matches('v');
+            if v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    })?;
+
+    // Try to get path using 'which' command
+    let path = Command::new("which")
+        .arg(cmd_name)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| cmd_name.to_string());
+
+    Some(InstalledVersionInfo { version, path })
+}
+
 /// GitHub issue item for IssueSelect step.
 #[derive(Debug, Clone)]
 pub struct IssueItem {
@@ -280,7 +537,7 @@ pub struct WizardState {
 
     // Model
     pub model: String,
-    pub model_options: Vec<String>,
+    pub model_options: Vec<ModelOption>,
     pub model_index: usize,
 
     // Version
@@ -356,7 +613,7 @@ impl WizardState {
             agents: default_agents(),
             selected_agent: 0,
             model: String::new(),
-            model_options: default_model_options("claude"),
+            model_options: CodingAgent::ClaudeCode.models(),
             model_index: 0,
             version: "installed".to_string(),
             version_options: vec!["installed".to_string(), "latest".to_string()],
@@ -620,15 +877,14 @@ impl WizardState {
             WizardStep::ModelSelect => {
                 if self.model_index < self.model_options.len().saturating_sub(1) {
                     self.model_index += 1;
-                    if let Some(m) = self.model_options.get(self.model_index) {
-                        self.model = m.clone();
-                    }
+                    self.sync_model_from_index();
                 }
             }
             WizardStep::ReasoningLevel => {
-                if self.reasoning_level_index < ReasoningLevel::ALL.len().saturating_sub(1) {
+                let levels = self.available_reasoning_levels();
+                if self.reasoning_level_index < levels.len().saturating_sub(1) {
                     self.reasoning_level_index += 1;
-                    self.reasoning_level = ReasoningLevel::ALL[self.reasoning_level_index];
+                    self.reasoning_level = levels[self.reasoning_level_index];
                 }
             }
             WizardStep::VersionSelect => {
@@ -701,13 +957,14 @@ impl WizardState {
             }
             WizardStep::ModelSelect => {
                 self.model_index = self.model_index.saturating_sub(1);
-                if let Some(m) = self.model_options.get(self.model_index) {
-                    self.model = m.clone();
-                }
+                self.sync_model_from_index();
             }
             WizardStep::ReasoningLevel => {
                 self.reasoning_level_index = self.reasoning_level_index.saturating_sub(1);
-                self.reasoning_level = ReasoningLevel::ALL[self.reasoning_level_index];
+                let levels = self.available_reasoning_levels();
+                if self.reasoning_level_index < levels.len() {
+                    self.reasoning_level = levels[self.reasoning_level_index];
+                }
             }
             WizardStep::VersionSelect => {
                 self.version_index = self.version_index.saturating_sub(1);
@@ -828,11 +1085,14 @@ impl WizardState {
     /// Build a launch configuration from the current wizard state.
     pub fn build_launch_config(&self) -> Result<WizardLaunchConfig, String> {
         let agent_id = self.current_agent_id().to_string();
-        let model = if self.model.is_empty() {
-            None
-        } else {
-            Some(self.model.clone())
-        };
+        // Use the selected ModelOption's id; empty id means default (None)
+        let model = self.model_options.get(self.model_index).and_then(|opt| {
+            if opt.is_default || opt.id.is_empty() {
+                None
+            } else {
+                Some(opt.id.clone())
+            }
+        });
         let version = if self.version == "installed" {
             None
         } else {
@@ -871,14 +1131,39 @@ impl WizardState {
     /// Update model_options when agent changes.
     fn update_model_options_for_agent(&mut self) {
         if self.step == WizardStep::ModelSelect || self.step == WizardStep::AgentSelect {
-            self.model_options = default_model_options(self.current_agent_id());
+            self.model_options = models_for_agent_id(self.current_agent_id());
             self.model_index = 0;
-            if let Some(m) = self.model_options.first() {
-                self.model = m.clone();
+            self.sync_model_from_index();
+        }
+    }
+
+    /// Sync the `model` string from the currently selected model option.
+    fn sync_model_from_index(&mut self) {
+        if let Some(opt) = self.model_options.get(self.model_index) {
+            self.model = if opt.is_default {
+                String::new()
             } else {
-                self.model.clear();
+                opt.id.clone()
+            };
+        } else {
+            self.model.clear();
+        }
+    }
+
+    /// Get available reasoning levels for the currently selected model.
+    /// Falls back to `ReasoningLevel::ALL` when the selected model has no levels.
+    pub fn available_reasoning_levels(&self) -> Vec<ReasoningLevel> {
+        if let Some(opt) = self.model_options.get(self.model_index) {
+            if !opt.inference_levels.is_empty() {
+                return opt.inference_levels.clone();
             }
         }
+        ReasoningLevel::ALL.to_vec()
+    }
+
+    /// Get the selected `ModelOption`, if any.
+    pub fn selected_model_option(&self) -> Option<&ModelOption> {
+        self.model_options.get(self.model_index)
     }
 }
 
@@ -900,36 +1185,185 @@ pub struct WizardLaunchConfig {
 // Default data
 // ---------------------------------------------------------------------------
 
+/// Build default agent entries with version detection.
 fn default_agents() -> Vec<AgentEntry> {
-    vec![
-        AgentEntry::builtin("claude", "Claude Code", Color::Yellow, true),
-        AgentEntry::builtin("codex", "Codex CLI", Color::Cyan, true),
-        AgentEntry::builtin("gemini", "Gemini CLI", Color::Magenta, true),
-        AgentEntry::builtin("opencode", "OpenCode", Color::Green, true),
-    ]
+    let agents = [
+        (
+            CodingAgent::ClaudeCode,
+            "claude",
+            "Claude Code",
+            Color::Yellow,
+        ),
+        (CodingAgent::CodexCli, "codex", "Codex CLI", Color::Cyan),
+        (
+            CodingAgent::GeminiCli,
+            "gemini",
+            "Gemini CLI",
+            Color::Magenta,
+        ),
+        (CodingAgent::OpenCode, "opencode", "OpenCode", Color::Green),
+    ];
+
+    agents
+        .iter()
+        .map(|(agent, id, name, color)| {
+            let info = detect_installed_version(*agent);
+            let mut entry = AgentEntry::builtin(id, name, *color, info.is_some());
+            if let Some(ref i) = info {
+                entry = entry.with_version(&i.version);
+            }
+            entry
+        })
+        .collect()
 }
 
-fn default_model_options(agent_id: &str) -> Vec<String> {
+/// Get model options for a given agent ID.
+fn models_for_agent_id(agent_id: &str) -> Vec<ModelOption> {
     match agent_id {
-        "claude" => vec![
-            "Default".to_string(),
-            "opus".to_string(),
-            "sonnet".to_string(),
-            "haiku".to_string(),
-        ],
-        "codex" => vec![
-            "Default".to_string(),
-            "o3".to_string(),
-            "o4-mini".to_string(),
-        ],
-        "gemini" => vec![
-            "Default".to_string(),
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash".to_string(),
-        ],
-        "opencode" => vec!["Default".to_string()],
-        _ => vec!["Default".to_string()],
+        "claude" => CodingAgent::ClaudeCode.models(),
+        "codex" => CodingAgent::CodexCli.models(),
+        "gemini" => CodingAgent::GeminiCli.models(),
+        "opencode" => CodingAgent::OpenCode.models(),
+        _ => vec![ModelOption::default_option("Default", "Use default model")],
     }
+}
+
+// ---------------------------------------------------------------------------
+// npm registry version fetch
+// ---------------------------------------------------------------------------
+
+/// Version option for VersionSelect step.
+#[derive(Debug, Clone)]
+pub struct VersionOption {
+    pub label: String,
+    pub value: String,
+    pub description: String,
+    pub is_prerelease: bool,
+}
+
+impl VersionOption {
+    /// "installed" version option.
+    pub fn installed(version: Option<&str>) -> Self {
+        let desc = match version {
+            Some(v) => format!("Currently installed (v{})", v),
+            None => "Currently installed".to_string(),
+        };
+        Self {
+            label: "installed".to_string(),
+            value: "installed".to_string(),
+            description: desc,
+            is_prerelease: false,
+        }
+    }
+
+    /// "latest" version option.
+    pub fn latest() -> Self {
+        Self {
+            label: "latest".to_string(),
+            value: "latest".to_string(),
+            description: "Use latest release".to_string(),
+            is_prerelease: false,
+        }
+    }
+
+    /// Version from npm registry.
+    pub fn from_npm(version: &str, published_at: Option<&str>, is_prerelease: bool) -> Self {
+        let desc = match published_at {
+            Some(ts) => {
+                // Shorten ISO timestamp to date
+                let date = ts.split('T').next().unwrap_or(ts);
+                format!("Published {}", date)
+            }
+            None => String::new(),
+        };
+        let label = if is_prerelease {
+            format!("{} (pre-release)", version)
+        } else {
+            version.to_string()
+        };
+        Self {
+            label,
+            value: version.to_string(),
+            description: desc,
+            is_prerelease,
+        }
+    }
+
+    /// Display string for rendering.
+    pub fn display(&self) -> String {
+        if self.description.is_empty() {
+            self.label.clone()
+        } else {
+            format!("{:<24} {}", self.label, self.description)
+        }
+    }
+}
+
+/// Check if a version string looks like a pre-release.
+fn is_prerelease(version: &str) -> bool {
+    version.contains('-')
+}
+
+#[derive(serde::Deserialize)]
+struct NpmRegistryResponse {
+    versions: Option<std::collections::HashMap<String, serde_json::Value>>,
+    time: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Fetch package versions from the npm registry.
+/// Returns up to 10 recent versions sorted by publish date (newest first).
+pub fn fetch_package_versions(package_name: &str) -> Vec<VersionOption> {
+    const TIMEOUT_SECS: u64 = 3;
+    const LIMIT: usize = 10;
+
+    let url = format!("https://registry.npmjs.org/{}", package_name);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
+        .build();
+
+    let client = match client {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let response = match client.get(&url).send() {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+
+    let data: NpmRegistryResponse = match response.json() {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+
+    let versions = match data.versions {
+        Some(v) => v,
+        None => return vec![],
+    };
+
+    let time = match data.time {
+        Some(t) => t,
+        None => return vec![],
+    };
+
+    // Collect versions with publish times
+    let mut versions_with_time: Vec<(String, String)> = versions
+        .keys()
+        .filter_map(|v| time.get(v).map(|t| (v.clone(), t.clone())))
+        .collect();
+
+    // Sort by publish date (newest first)
+    versions_with_time.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Take top N
+    versions_with_time
+        .into_iter()
+        .take(LIMIT)
+        .map(|(version, published_at)| {
+            VersionOption::from_npm(&version, Some(&published_at), is_prerelease(&version))
+        })
+        .collect()
 }
 
 fn prev_char_boundary(s: &str, cursor: usize) -> usize {
@@ -1013,13 +1447,7 @@ fn render_step_content(buf: &mut Buffer, area: Rect, state: &WizardState) {
         WizardStep::QuickStart => render_quick_start(buf, area, state),
         WizardStep::BranchAction => render_branch_action(buf, area, state),
         WizardStep::AgentSelect => render_agent_select(buf, area, state),
-        WizardStep::ModelSelect => render_list_select(
-            buf,
-            area,
-            "Select Model:",
-            &state.model_options,
-            state.model_index,
-        ),
+        WizardStep::ModelSelect => render_model_select(buf, area, state),
         WizardStep::ReasoningLevel => render_reasoning_level(buf, area, state),
         WizardStep::VersionSelect => render_list_select(
             buf,
@@ -1230,7 +1658,33 @@ fn render_list_select(
     Paragraph::new(lines).render(area, buf);
 }
 
+fn render_model_select(buf: &mut Buffer, area: Rect, state: &WizardState) {
+    let mut lines: Vec<Line<'_>> = vec![
+        Line::from(Span::styled(
+            "Select Model:",
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for (i, opt) in state.model_options.iter().enumerate() {
+        let marker = if i == state.model_index { "> " } else { "  " };
+        let style = if i == state.model_index {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{}", opt.display()),
+            style,
+        )));
+    }
+
+    Paragraph::new(lines).render(area, buf);
+}
+
 fn render_reasoning_level(buf: &mut Buffer, area: Rect, state: &WizardState) {
+    let levels = state.available_reasoning_levels();
     let mut lines: Vec<Line<'_>> = vec![
         Line::from(Span::styled(
             "Reasoning Level:",
@@ -1239,7 +1693,7 @@ fn render_reasoning_level(buf: &mut Buffer, area: Rect, state: &WizardState) {
         Line::from(""),
     ];
 
-    for (i, level) in ReasoningLevel::ALL.iter().enumerate() {
+    for (i, level) in levels.iter().enumerate() {
         let marker = if i == state.reasoning_level_index {
             "> "
         } else {
@@ -1785,10 +2239,11 @@ mod tests {
         let mut state = WizardState::new();
         state.step = WizardStep::ModelSelect;
         state.model_index = 0;
-        state.model = state.model_options[0].clone();
+        state.sync_model_from_index();
         state.select_next();
         assert_eq!(state.model_index, 1);
-        assert_eq!(state.model, state.model_options[1]);
+        // Second option for Claude Code is "opus"
+        assert_eq!(state.model, state.model_options[1].id);
     }
 
     #[test]
@@ -1851,6 +2306,7 @@ mod tests {
     fn select_reasoning_level() {
         let mut state = WizardState::new();
         state.step = WizardStep::ReasoningLevel;
+        // Use ALL levels (default when model has none)
         state.reasoning_level_index = 0;
         state.reasoning_level = ReasoningLevel::Low;
         state.select_next();
@@ -1861,6 +2317,26 @@ mod tests {
         assert_eq!(state.reasoning_level, ReasoningLevel::XHigh);
         state.select_next();
         assert_eq!(state.reasoning_level, ReasoningLevel::XHigh); // clamped
+    }
+
+    #[test]
+    fn select_reasoning_level_codex_model_base_levels() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ReasoningLevel;
+        // Use Codex models (which have base levels: High, Medium, Low)
+        state.model_options = CodingAgent::CodexCli.models();
+        state.model_index = 0; // Default has base levels
+        state.reasoning_level_index = 0;
+        let levels = state.available_reasoning_levels();
+        assert_eq!(levels.len(), 3); // High, Medium, Low
+        assert_eq!(levels[0], ReasoningLevel::High);
+        state.reasoning_level = levels[0];
+        state.select_next();
+        assert_eq!(state.reasoning_level, ReasoningLevel::Medium);
+        state.select_next();
+        assert_eq!(state.reasoning_level, ReasoningLevel::Low);
+        state.select_next();
+        assert_eq!(state.reasoning_level, ReasoningLevel::Low); // clamped
     }
 
     // -- Advance / Go back --
@@ -2186,5 +2662,148 @@ mod tests {
         state.advance(); // -> SkipPermissions
         assert_eq!(state.step, WizardStep::SkipPermissions);
         assert!(state.is_complete());
+    }
+
+    // -- ModelOption --
+
+    #[test]
+    fn model_option_display_includes_description() {
+        let opt = ModelOption::new("opus", "Opus 4.6", "Most capable for complex work");
+        let display = opt.display();
+        assert!(display.contains("Opus 4.6"));
+        assert!(display.contains("Most capable"));
+    }
+
+    #[test]
+    fn model_option_default_has_empty_id() {
+        let opt = ModelOption::default_option("Default", "Use default");
+        assert!(opt.is_default);
+        assert!(opt.id.is_empty());
+    }
+
+    #[test]
+    fn model_option_with_base_levels() {
+        let opt = ModelOption::new("test", "Test", "desc").with_base_levels();
+        assert_eq!(opt.inference_levels.len(), 3);
+        assert_eq!(opt.default_inference, Some(ReasoningLevel::High));
+    }
+
+    #[test]
+    fn model_option_with_max_levels() {
+        let opt = ModelOption::new("test", "Test", "desc").with_max_levels();
+        assert_eq!(opt.inference_levels.len(), 4);
+        assert!(opt.inference_levels.contains(&ReasoningLevel::XHigh));
+        assert_eq!(opt.default_inference, Some(ReasoningLevel::Medium));
+    }
+
+    // -- CodingAgent --
+
+    #[test]
+    fn coding_agent_models_nonempty() {
+        for agent in CodingAgent::ALL {
+            let models = agent.models();
+            assert!(!models.is_empty(), "{:?} has no models", agent);
+            assert!(
+                models[0].is_default,
+                "{:?} first model should be default",
+                agent
+            );
+        }
+    }
+
+    #[test]
+    fn coding_agent_claude_models() {
+        let models = CodingAgent::ClaudeCode.models();
+        assert!(models.len() >= 4);
+        assert_eq!(models[1].id, "opus");
+        assert_eq!(models[2].id, "sonnet");
+        assert_eq!(models[3].id, "haiku");
+    }
+
+    #[test]
+    fn coding_agent_codex_models_have_inference_levels() {
+        let models = CodingAgent::CodexCli.models();
+        for model in &models {
+            assert!(
+                !model.inference_levels.is_empty(),
+                "Codex model {:?} should have inference levels",
+                model.id
+            );
+        }
+    }
+
+    #[test]
+    fn coding_agent_command_names() {
+        assert_eq!(CodingAgent::ClaudeCode.command_name(), "claude");
+        assert_eq!(CodingAgent::CodexCli.command_name(), "codex");
+        assert_eq!(CodingAgent::GeminiCli.command_name(), "gemini");
+        assert_eq!(CodingAgent::OpenCode.command_name(), "opencode");
+    }
+
+    // -- VersionOption --
+
+    #[test]
+    fn version_option_installed_display() {
+        let opt = VersionOption::installed(Some("1.2.3"));
+        assert!(opt.display().contains("1.2.3"));
+    }
+
+    #[test]
+    fn version_option_latest_display() {
+        let opt = VersionOption::latest();
+        assert!(opt.display().contains("latest"));
+    }
+
+    #[test]
+    fn version_option_npm_prerelease() {
+        let opt = VersionOption::from_npm("1.0.0-beta.1", Some("2025-01-01T00:00:00Z"), true);
+        assert!(opt.is_prerelease);
+        assert!(opt.label.contains("pre-release"));
+    }
+
+    #[test]
+    fn is_prerelease_detection() {
+        assert!(is_prerelease("1.0.0-beta.1"));
+        assert!(is_prerelease("2.0.0-rc.1"));
+        assert!(!is_prerelease("1.0.0"));
+    }
+
+    // -- available_reasoning_levels --
+
+    #[test]
+    fn available_reasoning_levels_defaults_to_all() {
+        let state = WizardState::new();
+        // Claude models have no inference levels, so fallback to ALL
+        let levels = state.available_reasoning_levels();
+        assert_eq!(levels.len(), 4);
+    }
+
+    #[test]
+    fn available_reasoning_levels_codex_model() {
+        let mut state = WizardState::new();
+        state.model_options = CodingAgent::CodexCli.models();
+        state.model_index = 1; // gpt-5.3-codex has max levels
+        let levels = state.available_reasoning_levels();
+        assert_eq!(levels.len(), 4); // XHigh, High, Medium, Low
+    }
+
+    // -- build_launch_config model --
+
+    #[test]
+    fn build_launch_config_default_model_is_none() {
+        let mut state = WizardState::new();
+        state.branch_name = "main".to_string();
+        state.model_index = 0; // Default
+        let config = state.build_launch_config().unwrap();
+        assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn build_launch_config_specific_model() {
+        let mut state = WizardState::new();
+        state.branch_name = "main".to_string();
+        state.model_index = 1; // opus
+        let config = state.build_launch_config().unwrap();
+        assert_eq!(config.model, Some("opus".to_string()));
     }
 }
