@@ -49,6 +49,29 @@ AIエージェントの検出・起動・ライフサイクル・バージョン
 - アイドル検出
 - Assistant Mode連携
 
+**FR-05: モデル選択**
+- Default/Auto 選択時は `--model` 引数を渡さない（エージェント側デフォルトに任せる）
+- 対応モデル一覧:
+
+| Agent | Models |
+|-------|--------|
+| Claude Code | Default (Opus 4.6), opus, sonnet, haiku |
+| Codex | Default (gpt-5.4), gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.2, gpt-5.1-codex-mini |
+| Gemini | Default, gemini-3-pro-preview, gemini-3-flash-preview, gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite |
+| OpenCode | Default, Custom (provider/model) |
+
+**FR-06: 推論レベル (Codex only)**
+- ReasoningLevel: Low, Medium, High, XHigh
+- 選択モデルに応じて利用可能なレベルが変わる
+
+**FR-07: Fast mode (Codex only)**
+- `service_tier=fast` を引数に追加
+- SkipPermissions ステップで選択式 (No / Yes / Yes + Fast mode)
+
+**FR-08: バージョン選択**
+- installed (検出バージョン), latest, npm registry から最新8バージョンを表示
+- installed/latest 選択時は `--version` を渡さない
+
 ### 成功基準
 
 1. 対応エージェントの自動検出が動作する

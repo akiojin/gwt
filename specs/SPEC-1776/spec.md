@@ -24,10 +24,10 @@ Reference code: `crates/gwt-cli/` at commit `becf0aab` (38,415 lines)
 W1 | claude | feat/x | running | SPEC-42
 ```
 
-**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / Issues / Settings / Logs の4タブ。ブランチ一覧がデフォルト表示。
+**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / Issues / SPECs / Settings / Logs の5タブ。ブランチ一覧がデフォルト表示。
 
 ```
-[Branches] [Issues] [Settings] [Logs]
+[Branches] [Issues] [SPECs] [Settings] [Logs]
 ─────────────────────────────────────────────
   main              -   ○  #42 open
 * feat/x   Claude   *   ●  #38 merged
@@ -57,7 +57,7 @@ As a developer, I want to launch agents through a full wizard (15 steps: QuickSt
 
 ### US4 - Toggle management panel (P1)
 
-As a developer, I want to toggle a management panel (Ctrl+G,Ctrl+G) with Branches/Issues/Settings/Logs tabs, so that I can manage branches, view issues, and configure settings without leaving gwt.
+As a developer, I want to toggle a management panel (Ctrl+G,Ctrl+G) with Branches/Issues/SPECs/Settings/Logs tabs, so that I can manage branches, view issues, and configure settings without leaving gwt.
 
 ### US5 - Branch management with agent status (P1)
 
@@ -109,14 +109,14 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 6. Ctrl+G, ] / [ → エージェントタブの切替
 7. Ctrl+G, c → 新しいシェルタブが作成される
 8. Ctrl+G, n → Wizard オーバーレイが開く
-9. Ctrl+G, & → アクティブタブが閉じる（ワークツリーの安全チェック付き）
-10. Ctrl+G, q → gwt が終了する（実行中エージェントがあれば確認）
+9. Ctrl+G, x → アクティブタブが閉じる（ワークツリーの安全チェック付き）
+10. Ctrl+C ダブルタップ → gwt が終了する（実行中エージェントがあれば確認）
 11. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
 12. エージェントプロセスが終了 → タブは "Completed" ステータスで残る（スクロールバック閲覧可能）
 13. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
 14. 同じブランチで複数エージェントを起動可能
 15. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
-16. 管理画面内で Tab キーで Branches/Issues/Settings/Logs を切替
+16. 管理画面内で Tab キーで Branches/Issues/SPECs/Settings/Logs を切替
 17. マウスクリックでブランチ選択、スクロールでリスト操作
 18. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
 19. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
@@ -138,7 +138,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 ### Core UI
 
 - FR-001: gwt-tui crate using ratatui + crossterm, Elm Architecture (Model/View/Update)
-- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/Issues/Settings/Logs tabs)
+- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/Issues/SPECs/Settings/Logs tabs)
 - FR-003: Ctrl+G,Ctrl+G トグルで メイン ↔ 管理画面 切替
 - FR-004: Ctrl+G prefix key system (2s timeout) for all management operations
 - FR-005: VT100 emulator buffer to ratatui Cell conversion (renderer)
@@ -151,7 +151,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-011: Shell tab = plain shell PTY (same as agent but shell command)
 - FR-012: Tab creation via Ctrl+G,n (wizard) or Ctrl+G,c (shell)
 - FR-013: Tab switching via Ctrl+G,]/[ and Ctrl+G,1-9
-- FR-014: Tab close via Ctrl+G,& with safety confirmation
+- FR-014: Tab close via Ctrl+G,x with safety confirmation
 - FR-015: Automatic worktree creation on agent launch and cleanup on close
 - FR-016: Session status polling (Running/Completed/Error) via PTY process monitoring
 
@@ -226,7 +226,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - SC-002: Users can launch agents via full 15-step wizard with all parameters
 - SC-003: Agent tabs are full PTY terminal emulators with ANSI color support
 - SC-004: Ctrl+G,Ctrl+G toggles between メイン and 管理画面
-- SC-005: All gwt-cli screens migrated (Branches, Issues, Settings, Logs, Wizard, etc.)
+- SC-005: All gwt-cli screens migrated (Branches, Issues, SPECs, Settings, Logs, Wizard, etc.)
 - SC-006: Docker compose/DevContainer support functional
 - SC-007: All existing gwt-core tests pass without modification
 - SC-008: gwt-tui has >80% test coverage on core modules
