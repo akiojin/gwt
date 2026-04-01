@@ -7,6 +7,7 @@ mod clone;
 mod commit;
 pub mod diff;
 pub mod gh_cli;
+mod hooks;
 pub mod graphql;
 mod issue;
 pub mod issue_cache;
@@ -61,5 +62,6 @@ pub use repository::{
     detect_repo_type, get_header_context, get_main_repo_root, is_empty_dir, is_git_repo,
     is_inside_worktree, HeaderContext, RepoType, Repository, WorktreeInfo,
 };
+pub use hooks::{install_pre_commit_hook, uninstall_pre_commit_hook};
 pub use stash::{get_stash_list, StashEntry};
 pub use submodule::{has_submodules, init_submodules, list_submodules};

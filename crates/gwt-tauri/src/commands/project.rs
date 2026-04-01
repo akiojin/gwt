@@ -52,8 +52,6 @@ pub struct OpenProjectResult {
 pub struct NewProjectRequest {
     pub repo_url: String,
     pub parent_dir: String,
-    #[serde(default)]
-    pub shallow: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -221,6 +219,14 @@ pub fn open_project(
         );
         StructuredError::internal(&e, "open_project")
     })?;
+    // Install develop branch protection hook if not yet installed (SPEC-1787 FR-019)
+    if let Err(e) = gwt_core::git::install_pre_commit_hook(&repo_path) {
+        tracing::debug!(
+            error = %e,
+            "Pre-commit hook installation skipped or failed"
+        );
+    }
+
     let project_root_str = project_root.to_string_lossy().to_string();
     let project_identity = canonical_project_identity(&project_root);
 
@@ -544,8 +550,10 @@ pub fn create_project(
         return Err(StructuredError::internal(&msg, "create_project"));
     }
 
-    let repo_name = git::extract_repo_name(&request.repo_url);
-    let target = parent.join(&repo_name);
+    // For normal clone, use repo name without .git suffix
+    let raw_name = git::extract_repo_name(&request.repo_url);
+    let repo_name = raw_name.strip_suffix(".git").unwrap_or(&raw_name);
+    let target = parent.join(repo_name);
     if target.exists() {
         let msg = format!("Target directory already exists: {}", target.display());
         gwt_core::logging::log_incident(
@@ -557,15 +565,15 @@ pub fn create_project(
         return Err(StructuredError::internal(&msg, "create_project"));
     }
 
-    // Run `git clone --bare --progress` and stream progress via events.
+    // Run `git clone --depth=1 -b develop --progress` and stream progress via events.
+    // Falls back to `--depth=1` without `-b develop` if develop branch doesn't exist.
     let mut args: Vec<String> = vec![
         "clone".to_string(),
-        "--bare".to_string(),
         "--progress".to_string(),
+        "--depth=1".to_string(),
+        "-b".to_string(),
+        "develop".to_string(),
     ];
-    if request.shallow {
-        args.push("--depth=1".to_string());
-    }
     args.push(request.repo_url.clone());
     args.push(target.to_string_lossy().to_string());
 
@@ -685,10 +693,18 @@ pub fn create_project(
         ));
     }
 
-    // Open the project root (FR-304)
+    // Install develop branch protection hook (SPEC-1787 FR-019)
+    if let Err(e) = gwt_core::git::install_pre_commit_hook(&target) {
+        tracing::warn!(
+            error = %e,
+            "Failed to install pre-commit hook after clone"
+        );
+    }
+
+    // Open the cloned project (FR-304)
     // Note: open_project has its own flow logging for the open_project flow
     log_flow_success("project", "create_project");
-    open_project(window, request.parent_dir, state)
+    open_project(window, target.to_string_lossy().to_string(), state)
 }
 
 /// Quit the app (used by forced migration refusal).
