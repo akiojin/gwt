@@ -96,8 +96,25 @@ pub fn update(model: &mut Model, msg: Message) {
                         let action = wiz.confirm();
                         match action {
                             crate::screens::wizard::WizardAction::Complete => {
-                                // Build config and launch (Phase 3+)
+                                // Build config from wizard and launch agent
+                                let launch_result = wiz.build_launch_config();
                                 model.wizard = None;
+                                match launch_result {
+                                    Ok(config) => {
+                                        if let Err(e) = spawn_agent_session(model, &config) {
+                                            model.push_error(ErrorEntry {
+                                                message: format!("Failed to launch agent: {e}"),
+                                                severity: ErrorSeverity::Critical,
+                                            });
+                                        }
+                                    }
+                                    Err(e) => {
+                                        model.push_error(ErrorEntry {
+                                            message: format!("Invalid launch config: {e}"),
+                                            severity: ErrorSeverity::Critical,
+                                        });
+                                    }
+                                }
                             }
                             crate::screens::wizard::WizardAction::Cancel => {
                                 model.wizard = None;
@@ -749,6 +766,107 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
         color: AgentColor::White,
         status: crate::model::SessionStatus::Running,
         branch: None,
+        spec_id: None,
+    });
+
+    // Switch to Main layer
+    model.active_layer = ActiveLayer::Main;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Agent session spawning (from Wizard)
+// ---------------------------------------------------------------------------
+
+fn spawn_agent_session(
+    model: &mut Model,
+    wiz_config: &crate::screens::wizard::WizardLaunchConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use gwt_core::agent::launch::AgentLaunchBuilder;
+    use gwt_core::terminal::AgentColor;
+
+    let agent_id = &wiz_config.agent_id;
+    let working_dir = model.repo_root.clone();
+
+    // Build launch config via gwt-core
+    let mut builder = AgentLaunchBuilder::new(agent_id, &working_dir);
+    if !wiz_config.branch_name.is_empty() {
+        builder = builder.branch_name(&wiz_config.branch_name);
+    }
+    if let Some(ref m) = wiz_config.model {
+        builder = builder.model(Some(m.as_str()));
+    }
+    if let Some(ref v) = wiz_config.version {
+        builder = builder.agent_version(Some(v.as_str()));
+    }
+    builder = builder.skip_permissions(wiz_config.skip_permissions);
+
+    let config = builder.build()?;
+
+    let rows = model.terminal_rows.saturating_sub(3);
+    let cols = model.terminal_cols;
+
+    // Spawn PTY via PaneManager
+    let pane_id = model
+        .pane_manager
+        .spawn_shell(&model.repo_root, config, rows, cols)?;
+
+    // Start PTY reader thread
+    let pane = model
+        .pane_manager
+        .panes()
+        .iter()
+        .find(|p| p.pane_id() == pane_id)
+        .ok_or("pane not found")?;
+    let mut reader = pane.take_reader()?;
+    let tx = model.pty_tx.as_ref().ok_or("pty_tx not initialized")?.clone();
+    let id = pane_id.clone();
+    std::thread::Builder::new()
+        .name(format!("pty-reader-{id}"))
+        .spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut reader, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        use crate::event::PtyOutputMsg;
+                        if tx
+                            .send(PtyOutputMsg {
+                                pane_id: id.clone(),
+                                data: buf[..n].to_vec(),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })?;
+
+    // Register VT100 parser
+    model
+        .vt_parsers
+        .insert(pane_id.clone(), vt100::Parser::new(rows, cols, 1000));
+
+    // Determine display name and color
+    let color = gwt_core::agent::launch::agent_color_for(agent_id);
+    let display_name = format!("{}: {}", agent_id, wiz_config.branch_name);
+
+    // Add session tab
+    model.add_session(crate::model::SessionTab {
+        pane_id,
+        name: display_name,
+        tab_type: crate::model::SessionTabType::Agent,
+        color,
+        status: crate::model::SessionStatus::Running,
+        branch: if wiz_config.branch_name.is_empty() {
+            None
+        } else {
+            Some(wiz_config.branch_name.clone())
+        },
         spec_id: None,
     });
 
