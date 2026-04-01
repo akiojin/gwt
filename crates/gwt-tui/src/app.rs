@@ -278,6 +278,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     let area = frame.area();
     let layout = Layout::vertical([
         Constraint::Length(1), // Tab bar
+        Constraint::Length(1), // Separator line
         Constraint::Min(1),    // Main area
         Constraint::Length(1), // Status bar
     ])
@@ -291,38 +292,46 @@ pub fn view(model: &Model, frame: &mut Frame) {
         // Tab bar
         widgets::tab_bar::render(model, buf, layout[0]);
 
+        // Separator line between tab bar and content
+        for x in layout[1].x..layout[1].right() {
+            if let Some(cell) = buf.cell_mut((x, layout[1].y)) {
+                cell.set_char('\u{2500}'); // horizontal line ─
+                cell.set_style(Style::default().fg(Color::DarkGray));
+            }
+        }
+
         // Main content area
         match model.active_layer {
             ActiveLayer::Main => {
                 if model.session_tabs.is_empty() {
                     let center =
                         centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
-                    let text_area = centered_rect(60, 3, layout[1]);
+                    let text_area = centered_rect(60, 3, layout[2]);
                     ratatui::widgets::Widget::render(center, text_area, buf);
                 } else {
                     let pane_id = &model.session_tabs[model.active_session].pane_id;
                     let parser = model.vt_parsers.get(pane_id);
-                    cursor_pos = crate::screens::agent_pane::render(buf, layout[1], parser);
+                    cursor_pos = crate::screens::agent_pane::render(buf, layout[2], parser);
                 }
             }
         ActiveLayer::Management => match model.management_tab {
             ManagementTab::Branches => {
-                crate::screens::branches::render(&model.branches_state, buf, layout[1]);
+                crate::screens::branches::render(&model.branches_state, buf, layout[2]);
             }
             ManagementTab::Issues => {
-                crate::screens::issues::render(&model.issues_state, buf, layout[1]);
+                crate::screens::issues::render(&model.issues_state, buf, layout[2]);
             }
             ManagementTab::Settings => {
-                crate::screens::settings::render(&model.settings_state, buf, layout[1]);
+                crate::screens::settings::render(&model.settings_state, buf, layout[2]);
             }
             ManagementTab::Logs => {
-                crate::screens::logs::render(&model.logs_state, buf, layout[1]);
+                crate::screens::logs::render(&model.logs_state, buf, layout[2]);
             }
         },
     }
 
     // Status bar
-    widgets::status_bar::render(model, buf, layout[2]);
+    widgets::status_bar::render(model, buf, layout[3]);
 
     // Overlays (on top of everything, priority order)
     // Wizard overlay

@@ -11,6 +11,14 @@ const MGMT_ICON: &str = "\u{2630}"; // Trigram (hamburger)
 
 /// Render the tab bar for the current layer.
 pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
+    // Fill background for tab bar
+    for x in area.x..area.right() {
+        if let Some(cell) = buf.cell_mut((x, area.y)) {
+            cell.set_style(Style::default().bg(Color::DarkGray));
+            cell.set_char(' ');
+        }
+    }
+
     match model.active_layer {
         ActiveLayer::Main => render_main_tabs(model, buf, area),
         ActiveLayer::Management => render_management_tabs(model, buf, area),
@@ -18,49 +26,10 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
 }
 
 fn render_main_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
-    if model.session_tabs.is_empty() {
-        let line = Line::from(vec![
-            Span::styled(
-                format!(" {MAIN_ICON} Sessions "),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(" (no sessions) ", Style::default().fg(Color::DarkGray)),
-        ]);
-        buf.set_line(area.x, area.y, &line, area.width);
-        return;
-    }
-
-    let titles: Vec<Line<'_>> = model
-        .session_tabs
-        .iter()
-        .enumerate()
-        .map(|(i, tab)| {
-            let marker = if i == model.active_session { "*" } else { " " };
-            Line::from(format!("{marker}{}{marker}", tab.name))
-        })
-        .collect();
-
-    let tabs = Tabs::new(titles)
-        .select(model.active_session)
-        .highlight_style(Style::default().fg(Color::Yellow).bold())
-        .divider(Span::raw("|"));
-
-    ratatui::widgets::Widget::render(tabs, area, buf);
-}
-
-fn render_management_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
-    let titles: Vec<Line<'_>> = ManagementTab::ALL
-        .iter()
-        .map(|tab| Line::from(tab.label()))
-        .collect();
-
-    let tabs = Tabs::new(titles)
-        .select(model.management_tab.index())
-        .highlight_style(Style::default().fg(Color::Cyan).bold())
-        .divider(Span::raw("|"));
-
-    // Prefix with management icon
-    let prefix = Span::styled(format!(" {MGMT_ICON} "), Style::default().fg(Color::Cyan));
+    let prefix = Span::styled(
+        format!(" {MAIN_ICON} "),
+        Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+    );
     buf.set_span(area.x, area.y, &prefix, 4);
 
     let tabs_area = Rect {
@@ -69,6 +38,85 @@ fn render_management_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
         width: area.width.saturating_sub(4),
         height: area.height,
     };
+
+    if model.session_tabs.is_empty() {
+        let hint = Span::styled(
+            "(no sessions — Ctrl+G,c: shell | Ctrl+G,n: agent)",
+            Style::default().fg(Color::Gray).bg(Color::DarkGray),
+        );
+        buf.set_span(tabs_area.x, tabs_area.y, &hint, tabs_area.width);
+        return;
+    }
+
+    let titles: Vec<Line<'_>> = model
+        .session_tabs
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            if i == model.active_session {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.name),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .bold(),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.name),
+                    Style::default().fg(Color::White).bg(Color::DarkGray),
+                ))
+            }
+        })
+        .collect();
+
+    let tabs = Tabs::new(titles)
+        .select(model.active_session)
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::Yellow).bold())
+        .style(Style::default().bg(Color::DarkGray))
+        .divider(Span::styled(" ", Style::default().bg(Color::DarkGray)));
+
+    ratatui::widgets::Widget::render(tabs, tabs_area, buf);
+}
+
+fn render_management_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
+    let prefix = Span::styled(
+        format!(" {MGMT_ICON} "),
+        Style::default().fg(Color::Cyan).bg(Color::DarkGray),
+    );
+    buf.set_span(area.x, area.y, &prefix, 4);
+
+    let tabs_area = Rect {
+        x: area.x + 4,
+        y: area.y,
+        width: area.width.saturating_sub(4),
+        height: area.height,
+    };
+
+    let titles: Vec<Line<'_>> = ManagementTab::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            if i == model.management_tab.index() {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.label()),
+                    Style::default().fg(Color::Black).bg(Color::Cyan).bold(),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.label()),
+                    Style::default().fg(Color::White).bg(Color::DarkGray),
+                ))
+            }
+        })
+        .collect();
+
+    let tabs = Tabs::new(titles)
+        .select(model.management_tab.index())
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).bold())
+        .style(Style::default().bg(Color::DarkGray))
+        .divider(Span::styled(" ", Style::default().bg(Color::DarkGray)));
+
     ratatui::widgets::Widget::render(tabs, tabs_area, buf);
 }
 
@@ -82,6 +130,5 @@ mod tests {
         let model = Model::new(PathBuf::from("/tmp/test"));
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 1));
         render(&model, &mut buf, Rect::new(0, 0, 80, 1));
-        // Should not panic; management tab bar rendered
     }
 }
