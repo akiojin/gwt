@@ -83,8 +83,8 @@ pub fn process_key(state: &mut PrefixState, key: KeyEvent) -> KeyAction {
                 KeyCode::Char(c @ '1'..='9') => {
                     KeyAction::SwitchSession((c as usize) - ('0' as usize))
                 }
-                // Ctrl+G, & → close session
-                KeyCode::Char('&') => KeyAction::CloseSession,
+                // Ctrl+G, x → close session
+                KeyCode::Char('x') => KeyAction::CloseSession,
                 // Ctrl+G, c → new shell
                 KeyCode::Char('c') => KeyAction::NewShell,
                 // Ctrl+G, n → open wizard
@@ -192,7 +192,7 @@ mod tests {
     fn ctrl_g_ampersand_close_session() {
         let mut state = PrefixState::Normal;
         process_key(&mut state, ctrl_g());
-        assert_eq!(process_key(&mut state, plain('&')), KeyAction::CloseSession);
+        assert_eq!(process_key(&mut state, plain('x')), KeyAction::CloseSession);
     }
 
     #[test]
