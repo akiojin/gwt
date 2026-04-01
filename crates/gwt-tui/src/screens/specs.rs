@@ -5,6 +5,7 @@ use ratatui::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct SpecItem {
+    pub dir_name: String,
     pub id: String,
     pub title: String,
     pub status: String,
@@ -237,17 +238,12 @@ fn render_detail(state: &SpecsState, buf: &mut Buffer, area: Rect) {
     let header_span = Span::styled(header, Style::default().fg(Color::Cyan).bold());
     buf.set_span(layout[0].x, layout[0].y, &header_span, layout[0].width);
 
-    // Content: wrap spec.md text
-    let lines: Vec<&str> = state.detail_content.lines().collect();
-    let content_area = layout[1];
-    let max_rows = content_area.height as usize;
-    let scroll = state.detail_scroll.min(lines.len().saturating_sub(1));
-
-    for (i, line) in lines.iter().skip(scroll).take(max_rows).enumerate() {
-        let y = content_area.y + i as u16;
-        let span = Span::styled(*line, Style::default().fg(Color::White));
-        buf.set_span(content_area.x, y, &span, content_area.width);
-    }
+    crate::widgets::markdown::render_markdown(
+        buf,
+        layout[1],
+        &state.detail_content,
+        state.detail_scroll,
+    );
 }
 
 /// Load SPEC items from specs/ directory
@@ -288,6 +284,7 @@ pub fn load_specs(repo_root: &std::path::Path) -> Vec<SpecItem> {
         };
 
         items.push(SpecItem {
+            dir_name: name.clone(),
             id: meta["id"].as_str().unwrap_or(&name).to_string(),
             title: meta["title"].as_str().unwrap_or("").to_string(),
             status: meta["status"].as_str().unwrap_or("open").to_string(),
@@ -304,6 +301,12 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    fn line_text(buf: &Buffer, area: Rect, row: u16) -> String {
+        (area.x..area.right())
+            .map(|x| buf[(x, area.y + row)].symbol())
+            .collect::<String>()
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -311,18 +314,21 @@ mod tests {
     fn sample_specs() -> Vec<SpecItem> {
         vec![
             SpecItem {
+                dir_name: "SPEC-1".into(),
                 id: "SPEC-1".into(),
                 title: "Alpha feature".into(),
                 status: "open".into(),
                 phase: "planning".into(),
             },
             SpecItem {
+                dir_name: "SPEC-2".into(),
                 id: "SPEC-2".into(),
                 title: "Beta bugfix".into(),
                 status: "closed".into(),
                 phase: "done".into(),
             },
             SpecItem {
+                dir_name: "SPEC-3".into(),
                 id: "SPEC-3".into(),
                 title: "Gamma refactor".into(),
                 status: "open".into(),
@@ -639,10 +645,31 @@ mod tests {
 
         let items = load_specs(dir.path());
         assert_eq!(items.len(), 2);
+        assert_eq!(items[0].dir_name, "SPEC-100");
         assert_eq!(items[0].id, "SPEC-100");
         assert_eq!(items[1].id, "SPEC-200");
         assert_eq!(items[0].status, "open");
         assert_eq!(items[1].status, "closed");
+    }
+
+    #[test]
+    fn load_specs_preserves_directory_name_when_metadata_id_is_numeric() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        let spec = specs_dir.join("SPEC-1776");
+        std::fs::create_dir(&spec).unwrap();
+        std::fs::write(
+            spec.join("metadata.json"),
+            r#"{"id":"1776","title":"Numeric id","status":"open","phase":"implementing"}"#,
+        )
+        .unwrap();
+
+        let items = load_specs(dir.path());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].dir_name, "SPEC-1776");
+        assert_eq!(items[0].id, "1776");
     }
 
     #[test]
@@ -753,5 +780,23 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         render(&s, &mut buf, area);
+    }
+
+    #[test]
+    fn render_detail_formats_markdown_headings() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.detail_mode = true;
+        s.detail_content = "# SPEC-1\n\n- Bullet item".to_string();
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+
+        render(&s, &mut buf, area);
+
+        let first_content_line = line_text(&buf, area, 1);
+        assert!(
+            !first_content_line.contains('#'),
+            "markdown heading marker should not be rendered literally: {first_content_line:?}"
+        );
     }
 }

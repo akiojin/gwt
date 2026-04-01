@@ -24,10 +24,10 @@ Reference code: `crates/gwt-cli/` at commit `becf0aab` (38,415 lines)
 W1 | claude | feat/x | running | SPEC-42
 ```
 
-**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / Issues / SPECs / Settings / Logs / Versions の6タブ。ブランチ一覧がデフォルト表示。
+**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / SPECs / Issues / Versions / Settings / Logs の6タブ。ブランチ一覧がデフォルト表示。
 
 ```
-[Branches] [Issues] [SPECs] [Settings] [Logs] [Versions]
+[Branches] [SPECs] [Issues] [Versions] [Settings] [Logs]
 ─────────────────────────────────────────────
   main              -   ○  #42 open
 * feat/x   Claude   *   ●  #38 merged
@@ -74,7 +74,7 @@ As a developer, I want to launch agents through a full wizard (15 steps: QuickSt
 
 ### US4 - Toggle management panel (P1)
 
-As a developer, I want to toggle a management panel (Ctrl+G,Ctrl+G) with Branches/Issues/SPECs/Settings/Logs tabs, so that I can manage branches, view issues, and configure settings without leaving gwt.
+As a developer, I want to toggle a management panel (Ctrl+G,Ctrl+G) with Branches/SPECs/Issues/Versions/Settings/Logs tabs, so that I can manage branches, view specs and issues, inspect version history, and configure settings without leaving gwt.
 
 ### US5 - Branch management with agent status (P1)
 
@@ -138,14 +138,16 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 18. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
 19. 同じブランチで複数エージェントを起動可能
 20. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
-21. 管理画面内で Tab キーで Branches/Issues/SPECs/Settings/Logs/Versions を切替
+21. 管理画面内で Tab キーで Branches/SPECs/Issues/Versions/Settings/Logs を切替
 22. 管理画面でマウスクリックによりブランチを選択でき、Logs ではスクロールで履歴を辿れる
 23. SPECs タブで Enter → spec.md の詳細ビューが表示、Esc で戻る
 24. Issues タブで Enter → SPEC の場合は spec.md、それ以外は gh コマンド案内を表示
-25. Versions タブで git タグ一覧を表示、Enter でタグ詳細
-26. 管理画面のステータスバーに実行中セッション数を表示
-27. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
-28. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
+25. Versions タブで最新 10 件の git version tags を表示し、range / commit count / summary preview を一覧表示、Enter で Markdown 詳細を開ける
+26. SPECs / Issues の詳細ビューでは Markdown が見出し・箇条書き・コードブロック付きで表示される
+27. Logs タブでは category / event / result / workspace / error_code を含む構造化ログを検索・詳細表示できる
+28. 管理画面のステータスバーに実行中セッション数を表示
+29. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
+30. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
 
 ## Edge Cases
 
@@ -166,7 +168,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 ### Core UI
 
 - FR-001: gwt-tui crate using ratatui + crossterm, Elm Architecture (Model/View/Update)
-- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/Issues/SPECs/Settings/Logs/Versions tabs)
+- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/SPECs/Issues/Versions/Settings/Logs tabs)
 - FR-003: Ctrl+G,Ctrl+G トグルで メイン ↔ 管理画面 切替
 - FR-004: Ctrl+G prefix key system (2s timeout) for all management operations
 - FR-005: VT100 emulator buffer to ratatui Cell conversion (renderer)
@@ -225,7 +227,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 
 ### Management Panel — Logs Tab
 
-- FR-060: Log viewer for ~/.gwt/logs/ (gwt-cli logs.rs migration)
+- FR-060: Log viewer for `~/.gwt/logs/{workspace}/gwt.jsonl.*` with structured fields (`category`, `event`, `result`, `workspace`, `error_code`) and searchable detail view
 - FR-061: init_logger() call on startup
 
 ### Additional Features
@@ -238,10 +240,10 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-075: File paste from clipboard (dedicated shortcut, OS-native API)
 - FR-076: Mouse support for management panels (click selection, scroll) and PTY copy mode
 - FR-077: Error handling: ErrorQueue + modal (critical) + status bar (minor)
-- FR-078: Versions tab — git tag list with detail view (git show)
+- FR-078: Versions tab — latest 10 semantic version tags with range label, commit count, changelog-derived summary preview, and Markdown detail view
 - FR-079: Session history saving (ToolSessionEntry) on agent/shell spawn
 - FR-083: Quit confirmation dialog when running agents exist (Ctrl+C×2)
-- FR-081: SPECs/Issues detail view — Enter to view spec.md or issue details, Esc to return
+- FR-081: SPECs/Issues detail view — Enter to view `spec.md` or issue guidance, Esc to return, with Markdown rendering for headings/lists/code fences
 - FR-082: Status bar shows running agent session count in management layer
 
 ### npm Distribution

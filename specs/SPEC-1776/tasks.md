@@ -34,7 +34,7 @@
 ### Widgets
 
 - [x] T030: [TDD] widgets/tab_bar.rs のテスト — メイン/管理画面タブバー描画
-- [x] T031: widgets/tab_bar.rs 実装 — 2層タブバー（メイン: Sessions, 管理: Branches/Issues/Settings/Logs）
+- [x] T031: widgets/tab_bar.rs 実装 — 2層タブバー（メイン: Sessions, 管理: Branches/SPECs/Issues/Versions/Settings/Logs）
 - [x] T032: [TDD] widgets/status_bar.rs のテスト
 - [x] T033: widgets/status_bar.rs 実装
 - [x] T034: [TDD] widgets/terminal_view.rs のテスト
@@ -88,6 +88,10 @@
 - [x] T141: Settings タブで設定変更 → 保存 → 反映
 - [x] T142: Issues タブで Issue 検索 → 表示
 - [x] T143: Logs タブでログ表示
+- [x] T144: [TDD] 管理タブ順序を `Branches / SPECs / Issues / Versions / Settings / Logs` に固定
+- [x] T145: [TDD] SPECs / Issues の詳細ビューで `SPEC-*` ディレクトリ解決と Markdown 描画を修正
+- [x] T146: [TDD] Versions タブを最新 10 バージョンの range / commit count / summary preview 付き履歴表示へ更新
+- [x] T147: [TDD] Logs タブを workspace JSONL + structured fields (`category` / `event` / `result` / `workspace` / `error_code`) 対応に更新
 
 ## Phase 3: Wizard + Agent Launch [P]
 

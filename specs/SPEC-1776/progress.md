@@ -1,5 +1,25 @@
 # Progress: SPEC-1776
 
+## 2026-04-01: Management panel detail polish
+
+### Progress
+
+- Reordered the management tabs to `Branches / SPECs / Issues / Versions / Settings / Logs` so keyboard traversal matches the intended information architecture
+- Fixed SPEC detail resolution by keeping the real `SPEC-*` directory name separate from the display ID in `metadata.json`
+- Replaced plain-text detail rendering in SPECs / Issues / Versions with a shared Markdown renderer for headings, lists, blockquotes, and code fences
+- Reworked Versions into a lightweight version-history view with the latest 10 semantic tags, range labels, commit counts, changelog-derived preview text, and Markdown detail
+- Switched Logs loading to workspace JSONL files under `~/.gwt/logs/{workspace}/` and surfaced structured fields plus new UI flow logs for tab switches, detail opens, refreshes, and version summary failures
+
+### Done
+
+- SPEC / Issue details now open reliably and render as readable Markdown
+- Versions now show useful summaries without requiring raw `git show` output
+- Logs now contain and display enough structured context to debug management-panel flows
+
+### Next
+
+- Run full repo verification (`cargo test -p gwt-core -p gwt-tui`, `cargo clippy --all-targets --all-features -- -D warnings`) and confirm manual TUI behavior
+
 ## 2026-04-01: Constitution path unified under `.gwt`
 
 ### Progress

@@ -462,17 +462,12 @@ fn render_detail(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
     let header_span = Span::styled(header, Style::default().fg(Color::Cyan).bold());
     buf.set_span(layout[0].x, layout[0].y, &header_span, layout[0].width);
 
-    // Content
-    let lines: Vec<&str> = state.detail_content.lines().collect();
-    let content_area = layout[1];
-    let max_rows = content_area.height as usize;
-    let scroll = state.detail_scroll.min(lines.len().saturating_sub(1));
-
-    for (i, line) in lines.iter().skip(scroll).take(max_rows).enumerate() {
-        let y = content_area.y + i as u16;
-        let span = Span::styled(*line, Style::default().fg(Color::White));
-        buf.set_span(content_area.x, y, &span, content_area.width);
-    }
+    crate::widgets::markdown::render_markdown(
+        buf,
+        layout[1],
+        &state.detail_content,
+        state.detail_scroll,
+    );
 }
 
 // ---------------------------------------------------------------------------

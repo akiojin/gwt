@@ -1,6 +1,7 @@
 //! TUI Application with Elm Architecture (Model / View / Update)
 
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,55 @@ fn content_area_rect(cols: u16, rows: u16) -> Rect {
     ])
     .split(area);
     layout[2]
+}
+
+fn markdown_read_error(path: &Path, err: &std::io::Error) -> String {
+    format!(
+        "## Error\nCould not read `{}`.\n\n- Reason: `{}`\n",
+        path.display(),
+        err
+    )
+}
+
+fn read_detail_markdown(path: &Path, event: &str, detail_kind: &str) -> String {
+    tracing::info!(
+        message = "flow_start",
+        category = "ui",
+        event = event,
+        result = "start",
+        workspace = "default",
+        detail_kind = detail_kind,
+        path = %path.display(),
+    );
+
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            tracing::info!(
+                message = "flow_success",
+                category = "ui",
+                event = event,
+                result = "success",
+                workspace = "default",
+                detail_kind = detail_kind,
+                path = %path.display(),
+            );
+            content
+        }
+        Err(err) => {
+            tracing::warn!(
+                message = "flow_failure",
+                category = "ui",
+                event = event,
+                result = "failure",
+                workspace = "default",
+                detail_kind = detail_kind,
+                path = %path.display(),
+                error_code = "DETAIL_READ_FAILED",
+                error_detail = %err,
+            );
+            markdown_read_error(path, &err)
+        }
+    }
 }
 
 fn wants_mouse_capture(model: &Model) -> bool {
@@ -350,10 +400,26 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::ToggleLayer => {
             model.toggle_layer();
+            tracing::info!(
+                message = "flow_success",
+                category = "ui",
+                event = "toggle_management_layer",
+                result = "success",
+                workspace = "default",
+                active_layer = ?model.active_layer,
+            );
         }
         Message::SwitchManagementTab(tab) => {
             model.management_tab = tab;
             model.active_layer = ActiveLayer::Management;
+            tracing::info!(
+                message = "flow_success",
+                category = "ui",
+                event = "switch_management_tab",
+                result = "success",
+                workspace = "default",
+                tab = model.management_tab.label(),
+            );
         }
         Message::NextSession => {
             model.next_session();
@@ -463,12 +529,12 @@ pub fn update(model: &mut Model, msg: Message) {
                 };
                 if !screen_wants_tab {
                     model.management_tab = match model.management_tab {
-                        ManagementTab::Branches => ManagementTab::Issues,
-                        ManagementTab::Issues => ManagementTab::Specs,
-                        ManagementTab::Specs => ManagementTab::Settings,
+                        ManagementTab::Branches => ManagementTab::Specs,
+                        ManagementTab::Specs => ManagementTab::Issues,
+                        ManagementTab::Issues => ManagementTab::Versions,
+                        ManagementTab::Versions => ManagementTab::Settings,
                         ManagementTab::Settings => ManagementTab::Logs,
-                        ManagementTab::Logs => ManagementTab::Versions,
-                        ManagementTab::Versions => ManagementTab::Branches,
+                        ManagementTab::Logs => ManagementTab::Branches,
                     };
                     return;
                 }
@@ -490,7 +556,7 @@ pub fn update(model: &mut Model, msg: Message) {
                             let msg = crate::screens::issues::handle_key(&model.issues_state, &key);
                             // Intercept OpenDetail to load content
                             if let Some(crate::screens::issues::IssuesMessage::OpenDetail) = &msg {
-                                if let Some(issue) = model.issues_state.selected_issue() {
+                                if let Some(issue) = model.issues_state.selected_issue().cloned() {
                                     if issue.is_spec {
                                         let spec_id = issue.spec_id.as_deref().unwrap_or("");
                                         let spec_path = model
@@ -498,19 +564,23 @@ pub fn update(model: &mut Model, msg: Message) {
                                             .join("specs")
                                             .join(spec_id)
                                             .join("spec.md");
-                                        model.issues_state.detail_content =
-                                            std::fs::read_to_string(&spec_path).unwrap_or_else(
-                                                |_| {
-                                                    format!(
-                                                        "(Could not read {})",
-                                                        spec_path.display()
-                                                    )
-                                                },
-                                            );
+                                        model.issues_state.detail_content = read_detail_markdown(
+                                            &spec_path,
+                                            "open_issue_spec_detail",
+                                            "issue_spec",
+                                        );
                                     } else {
                                         model.issues_state.detail_content = format!(
-                                            "(GitHub Issue detail - run `gh issue view {}` for details)",
+                                            "## GitHub Issue\nFull GitHub issue content is not loaded in the TUI.\n\nRun `gh issue view {}` for details.\n",
                                             issue.number
+                                        );
+                                        tracing::info!(
+                                            message = "flow_success",
+                                            category = "ui",
+                                            event = "open_github_issue_detail",
+                                            result = "success",
+                                            workspace = "default",
+                                            issue_number = issue.number,
                                         );
                                     }
                                 }
@@ -526,14 +596,13 @@ pub fn update(model: &mut Model, msg: Message) {
                                         let spec_path = model
                                             .repo_root
                                             .join("specs")
-                                            .join(&spec.id)
+                                            .join(&spec.dir_name)
                                             .join("spec.md");
-                                        model.specs_state.detail_content = std::fs::read_to_string(
+                                        model.specs_state.detail_content = read_detail_markdown(
                                             &spec_path,
-                                        )
-                                        .unwrap_or_else(|_| {
-                                            format!("(Could not read {})", spec_path.display())
-                                        });
+                                            "open_spec_detail",
+                                            "spec",
+                                        );
                                     }
                                 }
                                 crate::screens::specs::update(&mut model.specs_state, m);
@@ -561,11 +630,27 @@ pub fn update(model: &mut Model, msg: Message) {
                                             .tags
                                             .get(model.versions_state.selected)
                                         {
+                                            tracing::info!(
+                                                message = "flow_start",
+                                                category = "ui",
+                                                event = "open_version_detail",
+                                                result = "start",
+                                                workspace = "default",
+                                                tag = tag.label.as_str(),
+                                            );
                                             model.versions_state.detail_content =
                                                 crate::screens::versions::load_tag_detail(
                                                     &model.repo_root,
-                                                    &tag.name,
+                                                    &tag.label,
                                                 );
+                                            tracing::info!(
+                                                message = "flow_success",
+                                                category = "ui",
+                                                event = "open_version_detail",
+                                                result = "success",
+                                                workspace = "default",
+                                                tag = tag.label.as_str(),
+                                            );
                                         }
                                     }
                                     crate::screens::versions::update(&mut model.versions_state, m);
@@ -1125,8 +1210,23 @@ fn handle_logs_msg(model: &mut Model, msg: LogsMessage) {
     let state = &mut model.logs_state;
     match msg {
         LogsMessage::Refresh => {
-            let entries = crate::screens::logs::load_log_entries();
+            tracing::info!(
+                message = "flow_start",
+                category = "ui",
+                event = "refresh_logs",
+                result = "start",
+                workspace = "default",
+            );
+            let entries = crate::screens::logs::load_log_entries(&model.repo_root);
             *state = crate::screens::LogsState::new().with_entries(entries);
+            tracing::info!(
+                message = "flow_success",
+                category = "ui",
+                event = "refresh_logs",
+                result = "success",
+                workspace = "default",
+                entry_count = state.entries.len(),
+            );
         }
         LogsMessage::SelectPrev => state.select_prev(),
         LogsMessage::SelectNext => state.select_next(),
@@ -1136,7 +1236,18 @@ fn handle_logs_msg(model: &mut Model, msg: LogsMessage) {
         LogsMessage::GoEnd => state.go_end(),
         LogsMessage::CycleFilter => state.cycle_filter(),
         LogsMessage::ToggleSearch => state.toggle_search(),
-        LogsMessage::ToggleDetail => state.toggle_detail(),
+        LogsMessage::ToggleDetail => {
+            state.toggle_detail();
+            if state.show_detail {
+                tracing::info!(
+                    message = "flow_success",
+                    category = "ui",
+                    event = "open_log_detail",
+                    result = "success",
+                    workspace = "default",
+                );
+            }
+        }
         LogsMessage::CloseDetail => state.close_detail(),
         LogsMessage::SearchChar(c) => {
             state.search.push(c);
@@ -1647,12 +1758,30 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load initial data for management screens
+    tracing::info!(
+        message = "flow_start",
+        category = "ui",
+        event = "load_management_data",
+        result = "start",
+        workspace = "default",
+    );
     model.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
     model.settings_state.load_settings();
-    model.logs_state.entries = crate::screens::logs::load_log_entries();
+    model.logs_state.entries = crate::screens::logs::load_log_entries(&repo_root);
     model.issues_state.issues = crate::screens::issues::load_specs(&repo_root);
     model.specs_state.specs = crate::screens::specs::load_specs(&repo_root);
     model.versions_state.tags = crate::screens::versions::load_tags(&repo_root);
+    tracing::info!(
+        message = "flow_success",
+        category = "ui",
+        event = "load_management_data",
+        result = "success",
+        workspace = "default",
+        logs = model.logs_state.entries.len(),
+        specs = model.specs_state.specs.len(),
+        issues = model.issues_state.issues.len(),
+        versions = model.versions_state.tags.len(),
+    );
 
     // PTY output channel
     let (pty_tx, pty_rx) = event::pty_output_channel();
@@ -1785,7 +1914,7 @@ mod tests {
     };
     use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
     use gwt_core::terminal::AgentColor;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1820,8 +1949,13 @@ mod tests {
             level: "INFO".to_string(),
             message: message.to_string(),
             target: "gwt".to_string(),
-            category: None,
-            extra: HashMap::new(),
+            category: Some("ui".to_string()),
+            event: Some("refresh_logs".to_string()),
+            result: Some("success".to_string()),
+            workspace: Some("feature-1776".to_string()),
+            error_code: None,
+            error_detail: None,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -2206,6 +2340,83 @@ mod tests {
         let mut m = test_model();
         update(&mut m, Message::Tick);
         assert_eq!(m.tick_count, 1);
+    }
+
+    #[test]
+    fn management_tab_tab_key_cycles_in_expected_order() {
+        let mut m = test_model();
+        m.active_layer = ActiveLayer::Management;
+        m.management_tab = ManagementTab::Branches;
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Specs);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Issues);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Versions);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Settings);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Logs);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Branches);
+    }
+
+    #[test]
+    fn specs_detail_reads_spec_file_when_metadata_id_is_numeric() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        let spec_dir = specs_dir.join("SPEC-100");
+        std::fs::create_dir(&spec_dir).unwrap();
+        std::fs::write(
+            spec_dir.join("metadata.json"),
+            r#"{"id":"100","title":"Numeric id spec","status":"open","phase":"planning"}"#,
+        )
+        .unwrap();
+        std::fs::write(spec_dir.join("spec.md"), "# Heading\n\nBody line\n").unwrap();
+
+        let mut m = Model::new(dir.path().to_path_buf());
+        m.active_layer = ActiveLayer::Management;
+        m.management_tab = ManagementTab::Specs;
+        m.specs_state.specs = crate::screens::specs::load_specs(dir.path());
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        assert!(m.specs_state.detail_mode);
+        assert!(m.specs_state.detail_content.contains("# Heading"));
+        assert!(
+            !m.specs_state.detail_content.contains("Could not read"),
+            "detail content should load spec.md, got: {}",
+            m.specs_state.detail_content
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ gwt-tauri (Tauri v2 + Svelte 5 GUI) を gwt-tui (ratatui TUI) に置換する。
 
 ### 新規要素（gwt-cli にはなかったもの）
 - **内蔵 PTY + vt100 レンダリング**: tmux 不要。renderer.rs (VT100→ratatui変換)
-- **2層タブ構造**: メイン画面 (Agent/Shell) + 管理画面 (Branches/Issues/Settings/Logs)
+- **2層タブ構造**: メイン画面 (Agent/Shell) + 管理画面 (Branches/SPECs/Issues/Versions/Settings/Logs)
 - **Ctrl+G プレフィックスキー**: tmux の Ctrl+B 相当
 
 ### 維持する現行 gwt-tui コード
@@ -47,7 +47,7 @@ gwt-tauri (Tauri v2 + Svelte 5 GUI) を gwt-tui (ratatui TUI) に置換する。
 Model: 全アプリ状態を保持する構造体
   ├── active_layer: MainScreen | ManagementScreen
   ├── session_tabs: Vec<SessionTab>      // Agent/Shell タブ
-  ├── management_tab: ManagementTab      // Branches/Issues/Settings/Logs
+  ├── management_tab: ManagementTab      // Branches/SPECs/Issues/Versions/Settings/Logs
   ├── wizard: Option<WizardState>        // オーバーレイ
   ├── error_queue: ErrorQueue            // エラースタック
   ├── progress: Option<ProgressState>    // 起動プログレス
@@ -55,7 +55,7 @@ Model: 全アプリ状態を保持する構造体
 
 View: Model → Frame 描画
   ├── メイン画面: タブバー + PTY ターミナル + ステータスバー
-  ├── 管理画面: タブバー + Branches/Issues/Settings/Logs + ステータスバー
+  ├── 管理画面: タブバー + Branches/SPECs/Issues/Versions/Settings/Logs + ステータスバー
   └── オーバーレイ: Wizard / Progress / Error / Confirm
 
 Update: Message → Model 変更

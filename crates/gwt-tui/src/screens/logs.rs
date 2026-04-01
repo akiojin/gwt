@@ -4,8 +4,11 @@
 
 use chrono::{DateTime, Local};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use gwt_core::logging::LogReader;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
+use std::collections::BTreeMap;
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Log entry
@@ -19,10 +22,123 @@ pub struct LogEntry {
     pub message: String,
     pub target: String,
     pub category: Option<String>,
-    pub extra: std::collections::HashMap<String, String>,
+    pub event: Option<String>,
+    pub result: Option<String>,
+    pub workspace: Option<String>,
+    pub error_code: Option<String>,
+    pub error_detail: Option<String>,
+    pub extra: BTreeMap<String, String>,
 }
 
 impl LogEntry {
+    pub fn from_core_entry(
+        entry: gwt_core::logging::LogEntry,
+        workspace_hint: Option<&str>,
+    ) -> Self {
+        let message = entry.message().to_string();
+        let category = entry.category().map(ToString::to_string);
+        let event = entry.event().map(ToString::to_string);
+        let result = entry.result().map(ToString::to_string);
+        let workspace = entry
+            .workspace()
+            .map(ToString::to_string)
+            .or_else(|| workspace_hint.map(ToString::to_string));
+        let error_code = entry.error_code().map(ToString::to_string);
+        let error_detail = entry.error_detail().map(ToString::to_string);
+        let extra = entry
+            .fields
+            .extra
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    serde_json::to_string(value).unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        Self {
+            timestamp: entry.timestamp,
+            level: entry.level,
+            message,
+            target: entry.target,
+            category,
+            event,
+            result,
+            workspace,
+            error_code,
+            error_detail,
+            extra,
+        }
+    }
+
+    pub fn searchable_text(&self) -> String {
+        let mut fields = vec![
+            self.timestamp.as_str(),
+            self.level.as_str(),
+            self.message.as_str(),
+            self.target.as_str(),
+        ];
+
+        if let Some(category) = &self.category {
+            fields.push(category);
+        }
+        if let Some(event) = &self.event {
+            fields.push(event);
+        }
+        if let Some(result) = &self.result {
+            fields.push(result);
+        }
+        if let Some(workspace) = &self.workspace {
+            fields.push(workspace);
+        }
+        if let Some(error_code) = &self.error_code {
+            fields.push(error_code);
+        }
+        if let Some(error_detail) = &self.error_detail {
+            fields.push(error_detail);
+        }
+
+        let mut out = fields.join("\n");
+        for (key, value) in &self.extra {
+            out.push('\n');
+            out.push_str(key);
+            out.push('=');
+            out.push_str(value);
+        }
+        out
+    }
+
+    fn summary_context(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(category) = &self.category {
+            if let Some(event) = &self.event {
+                parts.push(format!("{category}/{event}"));
+            } else {
+                parts.push(category.clone());
+            }
+        } else if let Some(event) = &self.event {
+            parts.push(event.clone());
+        }
+        if let Some(result) = &self.result {
+            parts.push(result.clone());
+        }
+        if let Some(error_code) = &self.error_code {
+            parts.push(error_code.clone());
+        }
+        parts.join(" ")
+    }
+
+    fn summary_message(&self) -> String {
+        if !self.message.trim().is_empty() {
+            self.message.clone()
+        } else if let Some(event) = &self.event {
+            event.replace('_', " ")
+        } else {
+            self.target.clone()
+        }
+    }
+
     /// Format for clipboard copy.
     pub fn to_clipboard_string(&self) -> String {
         let mut json = serde_json::json!({
@@ -34,6 +150,21 @@ impl LogEntry {
 
         if let Some(ref cat) = self.category {
             json["category"] = serde_json::json!(cat);
+        }
+        if let Some(ref event) = self.event {
+            json["event"] = serde_json::json!(event);
+        }
+        if let Some(ref result) = self.result {
+            json["result"] = serde_json::json!(result);
+        }
+        if let Some(ref workspace) = self.workspace {
+            json["workspace"] = serde_json::json!(workspace);
+        }
+        if let Some(ref error_code) = self.error_code {
+            json["error_code"] = serde_json::json!(error_code);
+        }
+        if let Some(ref error_detail) = self.error_detail {
+            json["error_detail"] = serde_json::json!(error_detail);
         }
         if !self.extra.is_empty() {
             json["extra"] = serde_json::json!(self.extra);
@@ -148,8 +279,7 @@ impl LogsState {
                     true
                 } else {
                     let search_lower = self.search.to_lowercase();
-                    e.message.to_lowercase().contains(&search_lower)
-                        || e.level.to_lowercase().contains(&search_lower)
+                    e.searchable_text().to_lowercase().contains(&search_lower)
                 }
             })
             .collect()
@@ -379,16 +509,23 @@ fn render_log_entry(entry: &LogEntry, is_selected: bool) -> ListItem<'static> {
 
     let time_display = format_timestamp_local(&entry.timestamp);
 
-    let spans = vec![
+    let context = entry.summary_context();
+    let message = entry.summary_message();
+
+    let mut spans = vec![
         Span::styled(
             format!("[{}]", time_display),
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw(" "),
         Span::styled(format!("{:5}", entry.level), level_style),
-        Span::raw(" "),
-        Span::raw(entry.message.clone()),
     ];
+    if !context.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(context, Style::default().fg(Color::Cyan)));
+    }
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(message));
 
     let style = if is_selected {
         Style::default().add_modifier(Modifier::REVERSED)
@@ -450,6 +587,36 @@ fn render_detail_view(entry: &LogEntry, buf: &mut Buffer, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled("Category:  ", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(category.clone(), Style::default().fg(Color::Cyan)),
+        ]));
+    }
+    if let Some(ref event) = entry.event {
+        lines.push(Line::from(vec![
+            Span::styled("Event:     ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(event.clone()),
+        ]));
+    }
+    if let Some(ref result) = entry.result {
+        lines.push(Line::from(vec![
+            Span::styled("Result:    ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(result.clone()),
+        ]));
+    }
+    if let Some(ref workspace) = entry.workspace {
+        lines.push(Line::from(vec![
+            Span::styled("Workspace: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(workspace.clone()),
+        ]));
+    }
+    if let Some(ref error_code) = entry.error_code {
+        lines.push(Line::from(vec![
+            Span::styled("ErrorCode: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(error_code.clone(), Style::default().fg(Color::Red)),
+        ]));
+    }
+    if let Some(ref error_detail) = entry.error_detail {
+        lines.push(Line::from(vec![
+            Span::styled("Error:     ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(error_detail.clone()),
         ]));
     }
 
@@ -530,110 +697,77 @@ pub fn handle_key(state: &LogsState, key: &KeyEvent) -> Option<LogsMessage> {
 // Log file loading
 // ---------------------------------------------------------------------------
 
-/// Load log entries from `~/.gwt/logs/` directory.
-pub fn load_log_entries() -> Vec<LogEntry> {
-    let log_dir = dirs::home_dir()
-        .map(|h| h.join(".gwt").join("logs"))
-        .unwrap_or_default();
+const MAX_LOG_ENTRIES: usize = 1000;
+const MAX_LOG_FILES: usize = 14;
+const MAX_LOG_FILE_LINES: usize = 10_000;
 
-    if !log_dir.is_dir() {
+/// Load log entries from the current workspace's `~/.gwt/logs/{workspace}/` directory.
+pub fn load_log_entries(repo_root: &Path) -> Vec<LogEntry> {
+    let Some(log_root) = dirs::home_dir().map(|h| h.join(".gwt").join("logs")) else {
+        return Vec::new();
+    };
+    let workspace_name = repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToString::to_string);
+    load_log_entries_from_root(&log_root, workspace_name.as_deref())
+}
+
+fn load_log_entries_from_root(log_root: &Path, workspace_name: Option<&str>) -> Vec<LogEntry> {
+    if !log_root.is_dir() {
         return Vec::new();
     }
 
     let mut entries = Vec::new();
 
-    // Recursively scan subdirectories for log files
-    // Log files are stored as ~/.gwt/logs/{branch}/gwt.jsonl.{date}
-    fn scan_dir(dir: &std::path::Path, entries: &mut Vec<LogEntry>, depth: usize) {
-        if depth > 3 {
-            return;
-        }
-        let read_dir = match std::fs::read_dir(dir) {
-            Ok(rd) => rd,
-            Err(_) => return,
+    if let Some(workspace_name) = workspace_name {
+        let workspace_dir = log_root.join(workspace_name);
+        entries.extend(load_entries_from_dir(&workspace_dir, Some(workspace_name)));
+    }
+
+    if entries.is_empty() {
+        let read_dir = match std::fs::read_dir(log_root) {
+            Ok(read_dir) => read_dir,
+            Err(_) => return entries,
         };
+
         for entry in read_dir.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                scan_dir(&path, entries, depth + 1);
-            } else if path.is_file() {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                // Match: *.log, *.json, *.jsonl, gwt.jsonl.* (date-suffixed)
-                if name.ends_with(".log")
-                    || name.ends_with(".json")
-                    || name.ends_with(".jsonl")
-                    || name.contains(".jsonl.")
-                {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        for line in content.lines().rev().take(200) {
-                            if let Some(entry) = parse_json_log_line(line) {
-                                entries.push(entry);
-                            }
-                        }
-                    }
-                }
+                let hint = path.file_name().and_then(|name| name.to_str());
+                entries.extend(load_entries_from_dir(&path, hint));
             }
         }
     }
 
-    scan_dir(&log_dir, &mut entries, 0);
-
-    // Sort newest first
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    entries.truncate(MAX_LOG_ENTRIES);
     entries
 }
 
-/// Parse a single JSON log line (tracing-subscriber JSON format).
-fn parse_json_log_line(line: &str) -> Option<LogEntry> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    let obj = value.as_object()?;
-
-    let timestamp = obj
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let level = obj
-        .get("level")
-        .and_then(|v| v.as_str())
-        .unwrap_or("INFO")
-        .to_string();
-    let message = obj
-        .get("fields")
-        .and_then(|f| f.get("message"))
-        .and_then(|v| v.as_str())
-        .or_else(|| obj.get("message").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let target = obj
-        .get("target")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let category = obj
-        .get("fields")
-        .and_then(|f| f.get("category"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    // Collect extra fields
-    let mut extra = std::collections::HashMap::new();
-    if let Some(fields) = obj.get("fields").and_then(|f| f.as_object()) {
-        for (k, v) in fields {
-            if k != "message" && k != "category" {
-                extra.insert(k.clone(), v.to_string());
-            }
-        }
+fn load_entries_from_dir(log_dir: &Path, workspace_hint: Option<&str>) -> Vec<LogEntry> {
+    if !log_dir.is_dir() {
+        return Vec::new();
     }
 
-    Some(LogEntry {
-        timestamp,
-        level,
-        message,
-        target,
-        category,
-        extra,
-    })
+    let reader = LogReader::new(log_dir);
+    let files = match reader.list_files() {
+        Ok(files) => files,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut entries = Vec::new();
+    for file in files.into_iter().take(MAX_LOG_FILES) {
+        let Ok((file_entries, _)) = LogReader::read_entries(&file, 0, MAX_LOG_FILE_LINES) else {
+            continue;
+        };
+        entries.extend(
+            file_entries
+                .into_iter()
+                .map(|entry| LogEntry::from_core_entry(entry, workspace_hint)),
+        );
+    }
+    entries
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +777,9 @@ fn parse_json_log_line(line: &str) -> Option<LogEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use tempfile::TempDir;
 
     fn create_test_entries() -> Vec<LogEntry> {
         vec![
@@ -652,15 +789,25 @@ mod tests {
                 message: "Test message 1".to_string(),
                 target: "test".to_string(),
                 category: Some("worktree".to_string()),
-                extra: std::collections::HashMap::new(),
+                event: Some("refresh".to_string()),
+                result: Some("success".to_string()),
+                workspace: Some("feature-1776".to_string()),
+                error_code: None,
+                error_detail: None,
+                extra: BTreeMap::new(),
             },
             LogEntry {
                 timestamp: "2024-01-01T12:00:01Z".to_string(),
                 level: "ERROR".to_string(),
                 message: "Error message".to_string(),
                 target: "test".to_string(),
-                category: None,
-                extra: std::collections::HashMap::new(),
+                category: Some("ui".to_string()),
+                event: Some("open_spec_detail".to_string()),
+                result: Some("failure".to_string()),
+                workspace: Some("feature-1776".to_string()),
+                error_code: Some("SPEC_READ_FAILED".to_string()),
+                error_detail: Some("missing spec.md".to_string()),
+                extra: BTreeMap::new(),
             },
             LogEntry {
                 timestamp: "2024-01-01T12:00:02Z".to_string(),
@@ -668,9 +815,19 @@ mod tests {
                 message: "Debug message".to_string(),
                 target: "test".to_string(),
                 category: Some("git".to_string()),
-                extra: std::collections::HashMap::new(),
+                event: Some("refresh_logs".to_string()),
+                result: Some("start".to_string()),
+                workspace: Some("feature-1776".to_string()),
+                error_code: None,
+                error_detail: None,
+                extra: BTreeMap::new(),
             },
         ]
+    }
+
+    fn parse_core_log(line: &str, workspace_hint: Option<&str>) -> LogEntry {
+        let entry: gwt_core::logging::LogEntry = serde_json::from_str(line).unwrap();
+        LogEntry::from_core_entry(entry, workspace_hint)
     }
 
     #[test]
@@ -808,29 +965,37 @@ mod tests {
             message: "Test message".to_string(),
             target: "test".to_string(),
             category: Some("worktree".to_string()),
-            extra: std::collections::HashMap::new(),
+            event: Some("refresh".to_string()),
+            result: Some("success".to_string()),
+            workspace: Some("feature-1776".to_string()),
+            error_code: None,
+            error_detail: None,
+            extra: BTreeMap::new(),
         };
 
         let json = entry.to_clipboard_string();
         assert!(json.contains("Test message"));
         assert!(json.contains("worktree"));
+        assert!(json.contains("feature-1776"));
     }
 
     #[test]
-    fn test_parse_json_log_line() {
+    fn test_from_core_entry_preserves_structured_fields() {
         let line = r#"{"timestamp":"2024-01-01T12:00:00Z","level":"INFO","target":"test","fields":{"message":"hello","category":"git"}}"#;
-        let entry = parse_json_log_line(line);
-        assert!(entry.is_some());
-        let entry = entry.unwrap();
+        let entry = parse_core_log(line, Some("feature-1776"));
         assert_eq!(entry.level, "INFO");
         assert_eq!(entry.message, "hello");
         assert_eq!(entry.category, Some("git".to_string()));
+        assert_eq!(entry.workspace, Some("feature-1776".to_string()));
     }
 
     #[test]
-    fn test_parse_json_log_line_invalid() {
-        assert!(parse_json_log_line("not json").is_none());
-        assert!(parse_json_log_line("").is_none());
+    fn test_search_filter_matches_event_and_error_code() {
+        let mut state = LogsState::new().with_entries(create_test_entries());
+        state.search = "SPEC_READ_FAILED".to_string();
+        assert_eq!(state.filtered_entries().len(), 1);
+        state.search = "open_spec_detail".to_string();
+        assert_eq!(state.filtered_entries().len(), 1);
     }
 
     #[test]
@@ -963,5 +1128,50 @@ mod tests {
         let result = format_full_timestamp_local("2024-01-15T10:30:00Z");
         assert!(!result.is_empty());
         assert!(result.contains("2024"));
+    }
+
+    #[test]
+    fn load_log_entries_from_root_prefers_current_workspace_dir() {
+        let temp = TempDir::new().unwrap();
+        let feature_dir = temp.path().join("feature-1776");
+        let other_dir = temp.path().join("other-workspace");
+        fs::create_dir_all(&feature_dir).unwrap();
+        fs::create_dir_all(&other_dir).unwrap();
+
+        fs::write(
+            feature_dir.join("gwt.jsonl.2026-04-01"),
+            concat!(
+                "{\"timestamp\":\"2026-04-01T01:00:00Z\",\"level\":\"INFO\",\"target\":\"gwt\",\"fields\":{\"message\":\"flow_start\",\"category\":\"ui\",\"event\":\"refresh_logs\",\"result\":\"start\",\"workspace\":\"feature-1776\"}}\n",
+                "{\"timestamp\":\"2026-04-01T01:00:01Z\",\"level\":\"INFO\",\"target\":\"gwt\",\"fields\":{\"message\":\"flow_success\",\"category\":\"ui\",\"event\":\"refresh_logs\",\"result\":\"success\",\"workspace\":\"feature-1776\"}}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            other_dir.join("gwt.jsonl.2026-04-01"),
+            "{\"timestamp\":\"2026-04-01T02:00:00Z\",\"level\":\"INFO\",\"target\":\"gwt\",\"fields\":{\"message\":\"other\",\"workspace\":\"other-workspace\"}}\n",
+        )
+        .unwrap();
+
+        let entries = load_log_entries_from_root(temp.path(), Some("feature-1776"));
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .all(|entry| entry.workspace.as_deref() == Some("feature-1776")));
+    }
+
+    #[test]
+    fn load_log_entries_from_root_falls_back_to_any_workspace() {
+        let temp = TempDir::new().unwrap();
+        let other_dir = temp.path().join("other-workspace");
+        fs::create_dir_all(&other_dir).unwrap();
+        fs::write(
+            other_dir.join("gwt.jsonl.2026-04-01"),
+            "{\"timestamp\":\"2026-04-01T02:00:00Z\",\"level\":\"INFO\",\"target\":\"gwt\",\"fields\":{\"message\":\"other\",\"category\":\"ui\",\"event\":\"switch_management_tab\",\"result\":\"success\"}}\n",
+        )
+        .unwrap();
+
+        let entries = load_log_entries_from_root(temp.path(), Some("missing-workspace"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].workspace.as_deref(), Some("other-workspace"));
     }
 }

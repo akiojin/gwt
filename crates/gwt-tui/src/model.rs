@@ -35,42 +35,42 @@ pub enum ActiveLayer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementTab {
     Branches,
-    Issues,
     Specs,
+    Issues,
+    Versions,
     Settings,
     Logs,
-    Versions,
 }
 
 impl ManagementTab {
     pub const ALL: [ManagementTab; 6] = [
         ManagementTab::Branches,
-        ManagementTab::Issues,
         ManagementTab::Specs,
+        ManagementTab::Issues,
+        ManagementTab::Versions,
         ManagementTab::Settings,
         ManagementTab::Logs,
-        ManagementTab::Versions,
     ];
 
     pub fn index(self) -> usize {
         match self {
             ManagementTab::Branches => 0,
-            ManagementTab::Issues => 1,
-            ManagementTab::Specs => 2,
-            ManagementTab::Settings => 3,
-            ManagementTab::Logs => 4,
-            ManagementTab::Versions => 5,
+            ManagementTab::Specs => 1,
+            ManagementTab::Issues => 2,
+            ManagementTab::Versions => 3,
+            ManagementTab::Settings => 4,
+            ManagementTab::Logs => 5,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             ManagementTab::Branches => "Branches",
-            ManagementTab::Issues => "Issues",
             ManagementTab::Specs => "SPECs",
+            ManagementTab::Issues => "Issues",
+            ManagementTab::Versions => "Versions",
             ManagementTab::Settings => "Settings",
             ManagementTab::Logs => "Logs",
-            ManagementTab::Versions => "Versions",
         }
     }
 }
@@ -701,7 +701,14 @@ mod tests {
     #[test]
     fn management_tab_metadata() {
         assert_eq!(ManagementTab::Branches.index(), 0);
-        assert_eq!(ManagementTab::Logs.label(), "Logs");
+        assert_eq!(ManagementTab::Specs.index(), 1);
+        assert_eq!(ManagementTab::Issues.index(), 2);
+        assert_eq!(ManagementTab::Versions.index(), 3);
+        assert_eq!(ManagementTab::Settings.index(), 4);
+        assert_eq!(ManagementTab::Logs.index(), 5);
+        assert_eq!(ManagementTab::ALL[1].label(), "SPECs");
+        assert_eq!(ManagementTab::ALL[2].label(), "Issues");
+        assert_eq!(ManagementTab::ALL[3].label(), "Versions");
         assert_eq!(ManagementTab::ALL.len(), 6);
     }
 
