@@ -1530,19 +1530,17 @@ pub fn handle_key(state: &SettingsState, key: &KeyEvent) -> Option<SettingsMessa
         KeyCode::Right | KeyCode::Char('l') => Some(SettingsMessage::NextCategory),
         KeyCode::Up | KeyCode::Char('k') => Some(SettingsMessage::SelectPrev),
         KeyCode::Down | KeyCode::Char('j') => Some(SettingsMessage::SelectNext),
-        KeyCode::Enter => {
-            match state.category {
-                SettingsCategory::CustomAgents => Some(SettingsMessage::Edit),
-                SettingsCategory::Environment => {
-                    if state.is_add_profile_selected() {
-                        Some(SettingsMessage::ProfileAdd)
-                    } else {
-                        Some(SettingsMessage::ProfileEnvEdit)
-                    }
+        KeyCode::Enter => match state.category {
+            SettingsCategory::CustomAgents => Some(SettingsMessage::Edit),
+            SettingsCategory::Environment => {
+                if state.is_add_profile_selected() {
+                    Some(SettingsMessage::ProfileAdd)
+                } else {
+                    Some(SettingsMessage::ProfileEnvEdit)
                 }
-                _ => None,
             }
-        }
+            _ => None,
+        },
         KeyCode::Char('d') | KeyCode::Char('D') => match state.category {
             SettingsCategory::CustomAgents if !state.is_add_agent_selected() => {
                 Some(SettingsMessage::Delete)
