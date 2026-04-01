@@ -63,7 +63,12 @@ pub fn update(model: &mut Model, msg: Message) {
             model.close_active_session();
         }
         Message::NewShell => {
-            // Phase 2: spawn shell PTY and add session tab
+            if let Err(e) = spawn_shell_session(model) {
+                model.push_error(ErrorEntry {
+                    message: format!("Failed to spawn shell: {e}"),
+                    severity: ErrorSeverity::Critical,
+                });
+            }
         }
         Message::OpenWizard => {
             // Open wizard for current branch or default
@@ -647,6 +652,78 @@ fn handle_logs_msg(model: &mut Model, msg: LogsMessage) {
 }
 
 // ---------------------------------------------------------------------------
+// Shell session spawning
+// ---------------------------------------------------------------------------
+
+fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Error>> {
+    use gwt_core::agent::launch::ShellLaunchBuilder;
+    use gwt_core::terminal::AgentColor;
+
+    let config = ShellLaunchBuilder::new(&model.repo_root).build();
+    let rows = model.terminal_rows.saturating_sub(2);
+    let cols = model.terminal_cols;
+
+    let pane_id = model
+        .pane_manager
+        .spawn_shell(&model.repo_root, config, rows, cols)?;
+
+    // Start PTY reader thread
+    let pane = model
+        .pane_manager
+        .panes()
+        .iter()
+        .find(|p| p.pane_id() == pane_id)
+        .ok_or("pane not found")?;
+    let mut reader = pane.take_reader()?;
+    let tx = model.pty_tx.as_ref().ok_or("pty_tx not initialized")?.clone();
+    let id = pane_id.clone();
+    std::thread::Builder::new()
+        .name(format!("pty-reader-{id}"))
+        .spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut reader, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        use crate::event::PtyOutputMsg;
+                        if tx
+                            .send(PtyOutputMsg {
+                                pane_id: id.clone(),
+                                data: buf[..n].to_vec(),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })?;
+
+    // Register VT100 parser
+    model
+        .vt_parsers
+        .insert(pane_id.clone(), vt100::Parser::new(rows, cols, 1000));
+
+    // Add session tab
+    model.add_session(crate::model::SessionTab {
+        pane_id,
+        name: "shell".to_string(),
+        tab_type: crate::model::SessionTabType::Shell,
+        color: AgentColor::White,
+        status: crate::model::SessionStatus::Running,
+        branch: None,
+        spec_id: None,
+    });
+
+    // Switch to Main layer
+    model.active_layer = ActiveLayer::Main;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Key → bytes conversion (for PTY input)
 // ---------------------------------------------------------------------------
 
@@ -722,7 +799,8 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let mut model = Model::new(repo_root);
 
     // PTY output channel
-    let (_pty_tx, pty_rx) = event::pty_output_channel();
+    let (pty_tx, pty_rx) = event::pty_output_channel();
+    model.pty_tx = Some(pty_tx);
 
     // Event loop
     let event_loop = EventLoop::new(pty_rx);

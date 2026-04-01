@@ -158,6 +158,7 @@ pub struct Model {
     // PTY management
     pub pane_manager: PaneManager,
     pub vt_parsers: HashMap<String, vt100::Parser>,
+    pub pty_tx: Option<crate::event::PtyOutputSender>,
 
     // Overlay states
     pub overlay_mode: OverlayMode,
@@ -197,6 +198,7 @@ impl Model {
             logs_state: LogsState::new(),
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
+            pty_tx: None,
             overlay_mode: OverlayMode::None,
             error_queue: Vec::new(),
             error_queue_v2: ErrorQueue::new(),
