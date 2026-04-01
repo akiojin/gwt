@@ -2150,6 +2150,15 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             issues = model.issues_state.issues.len(),
             versions = model.versions_state.tags.len(),
         );
+        // Install develop branch protection hook if not already installed
+        if !gwt_core::git::hooks::is_develop_guard_installed(&repo_root) {
+            if let Err(e) = gwt_core::git::hooks::install_pre_commit_hook(&repo_root) {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to install develop branch protection hook"
+                );
+            }
+        }
     } else {
         // In Initialization mode, auto-open the clone wizard
         model.clone_wizard = Some(screens::clone_wizard::CloneWizardState::new());

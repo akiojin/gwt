@@ -8,6 +8,7 @@ mod commit;
 pub mod diff;
 pub mod gh_cli;
 pub mod graphql;
+pub mod hooks;
 mod issue;
 pub mod issue_cache;
 pub mod issue_linkage;
