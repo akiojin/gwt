@@ -99,14 +99,26 @@ pub struct SelectionPoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PtyCopyMode {
-    pub pane_id: String,
+pub struct TerminalViewportState {
+    pub follow_live: bool,
     pub scrollback: usize,
     pub max_scrollback: usize,
-    pub cursor: SelectionPoint,
     pub selection_anchor: Option<SelectionPoint>,
     pub selection_focus: Option<SelectionPoint>,
     pub dragging: bool,
+}
+
+impl Default for TerminalViewportState {
+    fn default() -> Self {
+        Self {
+            follow_live: true,
+            scrollback: 0,
+            max_scrollback: 0,
+            selection_anchor: None,
+            selection_focus: None,
+            dragging: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -188,8 +200,9 @@ pub struct Model {
     pub pane_manager: PaneManager,
     pub vt_parsers: HashMap<String, vt100::Parser>,
     pub pty_tx: Option<crate::event::PtyOutputSender>,
-    pub pty_copy_mode: Option<PtyCopyMode>,
-    pub pty_copy_parser: Option<vt100::Parser>,
+    pub terminal_viewports: HashMap<String, TerminalViewportState>,
+    pub active_history_pane_id: Option<String>,
+    pub active_history_parser: Option<vt100::Parser>,
     pub pending_resume_panes: HashSet<String>,
 
     // Overlay states
@@ -233,8 +246,9 @@ impl Model {
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
             pty_tx: None,
-            pty_copy_mode: None,
-            pty_copy_parser: None,
+            terminal_viewports: HashMap::new(),
+            active_history_pane_id: None,
+            active_history_parser: None,
             pending_resume_panes: HashSet::new(),
             overlay_mode: OverlayMode::None,
             error_queue: Vec::new(),
@@ -259,7 +273,7 @@ impl Model {
 
     /// Add a new session tab and switch to it.
     pub fn add_session(&mut self, tab: SessionTab) {
-        self.clear_pty_copy_mode();
+        self.clear_active_history_view();
         self.session_tabs.push(tab);
         self.active_session = self.session_tabs.len() - 1;
         self.active_layer = ActiveLayer::Main;
@@ -271,13 +285,10 @@ impl Model {
             return None;
         }
         let tab = self.session_tabs.remove(index);
-        if self
-            .pty_copy_mode
-            .as_ref()
-            .is_some_and(|copy_mode| copy_mode.pane_id == tab.pane_id)
-        {
-            self.clear_pty_copy_mode();
+        if self.active_history_pane_id.as_deref() == Some(tab.pane_id.as_str()) {
+            self.clear_active_history_view();
         }
+        self.terminal_viewports.remove(&tab.pane_id);
         self.vt_parsers.remove(&tab.pane_id);
         self.pending_resume_panes.remove(&tab.pane_id);
         let pane_index = self
@@ -334,7 +345,7 @@ impl Model {
         if self.session_tabs.is_empty() {
             return;
         }
-        self.clear_pty_copy_mode();
+        self.clear_active_history_view();
         self.active_session = (self.active_session + 1) % self.session_tabs.len();
     }
 
@@ -343,7 +354,7 @@ impl Model {
         if self.session_tabs.is_empty() {
             return;
         }
-        self.clear_pty_copy_mode();
+        self.clear_active_history_view();
         self.active_session = if self.active_session == 0 {
             self.session_tabs.len() - 1
         } else {
@@ -354,7 +365,7 @@ impl Model {
     /// Switch to session by 0-based index.
     pub fn switch_session(&mut self, index: usize) {
         if index < self.session_tabs.len() {
-            self.clear_pty_copy_mode();
+            self.clear_active_history_view();
             self.active_session = index;
         }
     }
@@ -365,7 +376,7 @@ impl Model {
     pub fn toggle_layer(&mut self) {
         self.active_layer = match self.active_layer {
             ActiveLayer::Main => {
-                self.clear_pty_copy_mode();
+                self.clear_active_history_view();
                 ActiveLayer::Management
             }
             ActiveLayer::Management => {
@@ -444,9 +455,19 @@ impl Model {
         }
     }
 
-    pub fn clear_pty_copy_mode(&mut self) {
-        self.pty_copy_mode = None;
-        self.pty_copy_parser = None;
+    pub fn terminal_viewport_mut(&mut self, pane_id: &str) -> &mut TerminalViewportState {
+        self.terminal_viewports
+            .entry(pane_id.to_string())
+            .or_default()
+    }
+
+    pub fn terminal_viewport(&self, pane_id: &str) -> Option<&TerminalViewportState> {
+        self.terminal_viewports.get(pane_id)
+    }
+
+    pub fn clear_active_history_view(&mut self) {
+        self.active_history_pane_id = None;
+        self.active_history_parser = None;
     }
 }
 

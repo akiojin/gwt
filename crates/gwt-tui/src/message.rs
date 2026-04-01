@@ -28,7 +28,7 @@ pub enum Message {
     CloseSession,
     /// Open a new shell tab (Ctrl+G, c)
     NewShell,
-    /// Toggle PTY copy mode for the active terminal pane
+    /// Legacy shortcut: return the active terminal viewport to the live tail
     TogglePtyCopyMode,
 
     // -- Input events ---------------------------------------------------------

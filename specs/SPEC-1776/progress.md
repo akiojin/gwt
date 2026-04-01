@@ -1,5 +1,25 @@
 # Progress: SPEC-1776
 
+## 2026-04-02: Normal-mode virtual terminal viewport
+
+### Progress
+
+- Replaced the explicit PTY copy mode with an always-on transcript-backed viewport for Agent and Shell tabs
+- Enabled mouse capture in the Main layer so wheel / trackpad scroll and drag-selection work directly in normal mode
+- Kept session-scoped raw PTY transcripts as the source of truth for history rendering, while preserving live follow at the bottom
+- Added RED/GREEN coverage for keyboard scrollback, wheel scrollback, drag-copy, viewport freeze during new PTY output, and historical ANSI rendering
+- Updated the status bar to surface `LIVE` / `SCROLLED` state instead of a modal copy-mode hint
+
+### Done
+
+- Agent/Shell tabs now support scrollback and drag-copy directly in normal mode
+- Scrolling away from the live tail no longer snaps back when new PTY output arrives
+- Returning to the bottom or pressing `End` restores live follow
+
+### Next
+
+- Manual E2E: run a chatty agent, scroll up with the trackpad, confirm the viewport stays fixed while output continues, then drag-copy text and return to live with `End`
+
 ## 2026-04-01: Workspace parent directory bare repo auto-detection
 
 ### Progress
@@ -119,7 +139,7 @@
 
 - Manual E2E: paste multi-line text into an Agent/Shell tab in Terminal.app and confirm the full payload arrives without splitting into per-key behavior
 
-## 2026-04-01: Main PTY copy mode
+## 2026-04-01: Main PTY copy mode (superseded by 2026-04-02 normal-mode viewport)
 
 ### Progress
 

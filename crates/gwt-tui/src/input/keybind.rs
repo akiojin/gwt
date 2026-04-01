@@ -39,7 +39,7 @@ pub enum KeyAction {
     CloseSession,
     /// New shell
     NewShell,
-    /// Toggle PTY copy mode
+    /// Legacy shortcut: return the active terminal viewport to the live tail
     TogglePtyCopyMode,
     /// Show help
     ShowHelp,
@@ -87,7 +87,7 @@ pub fn process_key(state: &mut PrefixState, key: KeyEvent) -> KeyAction {
                 KeyCode::Char('x') => KeyAction::CloseSession,
                 // Ctrl+G, c → new shell
                 KeyCode::Char('c') => KeyAction::NewShell,
-                // Ctrl+G, m → PTY copy mode
+                // Ctrl+G, m → legacy live-tail shortcut
                 KeyCode::Char('m') => KeyAction::TogglePtyCopyMode,
                 // Ctrl+G, ? → help
                 KeyCode::Char('?') => KeyAction::ShowHelp,
@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_g_m_toggles_pty_copy_mode() {
+    fn ctrl_g_m_triggers_legacy_live_tail_shortcut() {
         let mut state = PrefixState::Normal;
         process_key(&mut state, ctrl_g());
         assert_eq!(

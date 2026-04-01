@@ -126,15 +126,15 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 6. Ctrl+G, Ctrl+G → 管理画面 ↔ メイン画面をトグル
 7. Ctrl+G, ] / [ → エージェントタブの切替
 8. Ctrl+G, c → 新しいシェルタブが作成される
-9. Ctrl+G, m → アクティブな Agent/Shell タブが copy mode に入る
-10. copy mode 中に PgUp/PgDn/矢印/Home/End/トラックパッド・ホイール → scrollback を移動できる
-11. copy mode 中にドラッグ選択 → マウスボタンを離すとシステムクリップボードへコピーされる
-12. copy mode 中に Esc / q → copy mode を終了し、表示は最新位置へ戻る
+9. Agent/Shell タブ通常モードで PgUp/PgDn/Home/End/トラックパッド・ホイール → transcript-backed viewport をスクロールできる
+10. スクロール中に新しい PTY 出力が届いても viewport は勝手に最下端へ戻らない
+11. Agent/Shell タブ通常モードでドラッグ選択 → マウスボタンを離すとシステムクリップボードへコピーされる
+12. End または最下端まで戻る操作で live follow に復帰する
 13. Ctrl+G, x → アクティブタブが閉じる（ワークツリーの安全チェック付き）
 14. Ctrl+C ダブルタップ → 実行中セッションがある場合は確認ダイアログ表示
 15. 確認ダイアログで Enter(確定)/Esc(キャンセル)/Left-Right(選択切替)
 16. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
-17. エージェントまたはシェルのプロセスが終了 → 対応するタブは自動で閉じる
+17. エージェントまたはシェルのプロセスが終了 → 対応するタブは completed/error 状態のまま残り、ユーザーが手動で閉じられる
 18. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
 19. 同じブランチで複数エージェントを起動可能
 20. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
@@ -149,14 +149,14 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 29. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
 30. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
 31. Branches タブでは `origin` のような remote HEAD alias をブランチとして表示しない
-32. Agent/Shell PTY copy mode では live parser の保持量を超えた古い出力も session-scoped file-backed transcript から辿れる
+32. Agent/Shell PTY 通常モードでは live parser の保持量を超えた古い出力も session-scoped file-backed transcript から辿れる
 
 ## Edge Cases
 
 - Terminal size below 80x24: display warning
 - Agent/Shell PTY exit or crash: the corresponding tab remains visible with completed/error state so the final transcript and error output can be inspected before manual close
-- Main PTY normal mode: terminal-native selection/copy must remain available because mouse capture stays disabled
-- PTY output arriving during copy mode: parser keeps ingesting bytes, but the visible viewport stays fixed until copy mode exits
+- Main PTY normal mode: mouse capture stays enabled so gwt owns scroll / drag selection / clipboard copy; terminal-native selection is intentionally not used
+- PTY output arriving while the viewport is scrolled away from the bottom: parser keeps ingesting bytes, but the visible viewport stays fixed until the user returns to live follow
 - Agent / Shell session files are not a scrollback source; pane transcript must remain available while the session tab is alive even when no agent session file exists
 - Session transcript is temporary: pane close or gwt shutdown may discard it without affecting session-file based resume
 - Worktree creation failure: error shown in modal, tab not created
@@ -181,16 +181,16 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 
 ### Agent/Shell Sessions
 
-- FR-010: Agent tab = full PTY terminal emulator (all keys and pasted text forwarded except Ctrl+G); normal mode keeps mouse capture disabled so terminal-native selection/copy still works
+- FR-010: Agent tab = full PTY terminal emulator (all keys and pasted text forwarded except Ctrl+G); normal mode keeps mouse capture enabled so gwt controls scrollback and drag-copy behavior
 - FR-011: Shell tab = plain shell PTY (same as agent but shell command)
 - FR-012: Tab creation via Branches Enter (wizard for selected branch) or Ctrl+G,c (shell)
 - FR-013: Tab switching via Ctrl+G,]/[ and Ctrl+G,1-9
 - FR-014: Tab close via Ctrl+G,x with safety confirmation
 - FR-015: Automatic worktree creation on agent launch and cleanup on close
 - FR-016: Session termination polling via PTY process monitoring, updating session state to completed/error while keeping the tab open until the user closes it
-- FR-017: Active Agent/Shell tab enters PTY copy mode via Ctrl+G,m
-- FR-018: Active Agent/Shell PTY copy mode supports keyboard scrollback navigation (Up/Down/Left/Right/PgUp/PgDn/Home/End) across both live parser history and the session-scoped file-backed pane transcript, and exits with Esc/q, restoring the live viewport
-- FR-019: PTY copy mode supports mouse wheel and trackpad scroll plus drag selection, copying the selected text to the system clipboard on release/confirm
+- FR-017: Active Agent/Shell tab exposes a transcript-backed terminal viewport in normal mode without requiring a separate copy mode
+- FR-018: Active Agent/Shell terminal viewport supports PgUp/PgDn/Home/End plus mouse wheel and trackpad scroll across both live parser history and the session-scoped file-backed pane transcript while the viewport is scrolled away from the live tail
+- FR-019: Active Agent/Shell terminal viewport supports drag selection in normal mode and copies the selected text to the system clipboard on release; `End` or returning to the bottom restores live follow
 
 ### Wizard (Agent Launch)
 
@@ -242,7 +242,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-073: Skill registration auto-execution on startup (CLAUDE.md/AGENTS.md/GEMINI.md)
 - FR-074: Voice input via whisper-rs (native audio capture + transcription)
 - FR-075: File paste from clipboard (dedicated shortcut, OS-native API)
-- FR-076: Mouse support for management panels (click selection, scroll) and PTY copy mode
+- FR-076: Mouse support for management panels (click selection, scroll) and normal-mode PTY viewport interactions
 - FR-077: Error handling: ErrorQueue + modal (critical) + status bar (minor)
 - FR-078: Versions tab — latest 10 semantic version tags with range label, commit count, changelog-derived summary preview, and Markdown detail view
 - FR-079: Session history saving (ToolSessionEntry) on agent/shell spawn

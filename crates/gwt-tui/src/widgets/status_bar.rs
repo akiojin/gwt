@@ -17,17 +17,18 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
     let left = match model.active_layer {
         ActiveLayer::Main => {
             if model.session_tabs.is_empty() {
-                " Enter on Branches: Agent | Ctrl+G,c: Shell".to_string()
-            } else if model.pty_copy_mode.is_some() {
-                let tab = &model.session_tabs[model.active_session];
-                format!(" COPY MODE | {}", tab.name)
+                " No sessions".to_string()
             } else {
                 let tab = &model.session_tabs[model.active_session];
                 let branch = tab.branch.as_deref().unwrap_or("");
+                let viewport_label = model
+                    .terminal_viewport(&tab.pane_id)
+                    .map(|view| if view.follow_live { "LIVE" } else { "SCROLLED" })
+                    .unwrap_or("LIVE");
                 if branch.is_empty() {
-                    format!(" {}", tab.name)
+                    format!(" {viewport_label} | {}", tab.name)
                 } else {
-                    format!(" {} | {}", tab.name, branch)
+                    format!(" {viewport_label} | {} | {}", tab.name, branch)
                 }
             }
         }
@@ -43,24 +44,27 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
     };
 
     let hints = match model.active_layer {
-        ActiveLayer::Main if model.pty_copy_mode.is_some() => {
-            " Drag: Copy | Space: Select | Enter/y: Copy | Esc/q: Exit "
+        ActiveLayer::Main if model.session_tabs.is_empty() => {
+            " Enter on Branches: Agent | Ctrl+G,c: Shell | Ctrl+G,Ctrl+G: Manage "
         }
         ActiveLayer::Main => {
-            " Ctrl+G,m: Copy | Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close | Ctrl+C×2: Quit "
+            " Wheel: Scroll | PgUp/PgDn: History | Drag: Copy | End: Live | Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close "
         }
         ActiveLayer::Management => " Tab: Switch | Ctrl+G,Ctrl+G: Terminal | Ctrl+C×2: Quit ",
     };
 
-    let right_width = hints.len() as u16;
-    let left_width = area.width.saturating_sub(right_width);
+    let preferred_left_width = left.chars().count().min(usize::from(area.width)) as u16;
+    let left_width = preferred_left_width;
+    let right_width = area.width.saturating_sub(left_width);
 
     let left_span = Span::styled(left, Style::default().fg(Color::White).bg(Color::DarkGray));
     buf.set_span(area.x, area.y, &left_span, left_width);
 
-    let right_span = Span::styled(hints, Style::default().fg(Color::Gray).bg(Color::DarkGray));
-    let right_x = area.x + left_width;
-    buf.set_span(right_x, area.y, &right_span, right_width);
+    if right_width > 0 {
+        let right_span = Span::styled(hints, Style::default().fg(Color::Gray).bg(Color::DarkGray));
+        let right_x = area.x + left_width;
+        buf.set_span(right_x, area.y, &right_span, right_width);
+    }
 }
 
 #[cfg(test)]

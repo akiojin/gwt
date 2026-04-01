@@ -20,15 +20,14 @@ use crate::event::{self, EventLoop, TuiEvent};
 use crate::input::keybind::{self, KeyAction, PrefixState};
 use crate::message::Message;
 use crate::model::{
-    ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode, PtyCopyMode,
-    SelectionPoint,
+    ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode, SelectionPoint,
+    TerminalViewportState,
 };
 use crate::screens::{self, LogsMessage, SettingsMessage};
 use crate::widgets;
 
 /// Tick interval for background polling.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
-const DEFAULT_LIVE_COPY_SCROLLBACK_MAX: usize = 1000;
 
 #[cfg(test)]
 thread_local! {
@@ -97,39 +96,28 @@ fn read_detail_markdown(path: &Path, event: &str, detail_kind: &str) -> String {
 }
 
 fn wants_mouse_capture(model: &Model) -> bool {
-    model.active_layer == ActiveLayer::Management || model.pty_copy_mode.is_some()
+    model.active_layer == ActiveLayer::Management
+        || (model.active_layer == ActiveLayer::Main && !model.session_tabs.is_empty())
 }
 
-fn active_copy_parser<'a>(model: &'a Model, pane_id: &str) -> Option<&'a vt100::Parser> {
-    if model
-        .pty_copy_mode
-        .as_ref()
-        .is_some_and(|copy_mode| copy_mode.pane_id == pane_id)
-    {
+fn active_pane_id(model: &Model) -> Option<&str> {
+    model
+        .session_tabs
+        .get(model.active_session)
+        .map(|tab| tab.pane_id.as_str())
+}
+
+fn active_terminal_parser<'a>(model: &'a Model, pane_id: &str) -> Option<&'a vt100::Parser> {
+    if model.active_history_pane_id.as_deref() == Some(pane_id) {
         return model
-            .pty_copy_parser
+            .active_history_parser
             .as_ref()
             .or_else(|| model.vt_parsers.get(pane_id));
     }
     model.vt_parsers.get(pane_id)
 }
 
-fn active_copy_parser_mut<'a>(
-    model: &'a mut Model,
-    pane_id: &str,
-) -> Option<&'a mut vt100::Parser> {
-    if model
-        .pty_copy_mode
-        .as_ref()
-        .is_some_and(|copy_mode| copy_mode.pane_id == pane_id)
-        && model.pty_copy_parser.is_some()
-    {
-        return model.pty_copy_parser.as_mut();
-    }
-    model.vt_parsers.get_mut(pane_id)
-}
-
-fn build_copy_history_parser(model: &mut Model, pane_id: &str) -> Option<(vt100::Parser, usize)> {
+fn build_history_view_parser(model: &mut Model, pane_id: &str) -> Option<(vt100::Parser, usize)> {
     let viewport = content_area_rect(model.terminal_cols, model.terminal_rows);
     let rows = viewport.height.max(1);
     let cols = viewport.width.max(1);
@@ -169,114 +157,143 @@ fn build_copy_history_parser(model: &mut Model, pane_id: &str) -> Option<(vt100:
     Some((parser, max_scrollback))
 }
 
-fn set_copy_mode_scrollback(model: &mut Model, desired: usize) {
-    let Some((pane_id, max_scrollback)) = model
-        .pty_copy_mode
-        .as_ref()
-        .map(|copy_mode| (copy_mode.pane_id.clone(), copy_mode.max_scrollback))
-    else {
+fn selection_active(view: &TerminalViewportState) -> bool {
+    view.dragging || view.selection_anchor.is_some() || view.selection_focus.is_some()
+}
+
+fn active_terminal_parser_mut<'a>(
+    model: &'a mut Model,
+    pane_id: &str,
+) -> Option<&'a mut vt100::Parser> {
+    if model.active_history_pane_id.as_deref() == Some(pane_id)
+        && model.active_history_parser.is_some()
+    {
+        return model.active_history_parser.as_mut();
+    }
+    model.vt_parsers.get_mut(pane_id)
+}
+
+fn sync_active_terminal_history(model: &mut Model) {
+    let Some(pane_id) = active_pane_id(model).map(str::to_string) else {
+        model.clear_active_history_view();
         return;
     };
 
-    let target = desired.min(max_scrollback);
-    if model
-        .pty_copy_mode
-        .as_ref()
-        .is_some_and(|copy_mode| copy_mode.pane_id == pane_id)
-        && model.pty_copy_parser.is_some()
-    {
-        if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
-            copy_mode.scrollback = target;
-        }
+    if model.active_layer != ActiveLayer::Main {
+        model.clear_active_history_view();
         return;
     }
 
-    let Some(parser) = active_copy_parser_mut(model, &pane_id) else {
+    let should_use_history = model
+        .terminal_viewport(&pane_id)
+        .is_some_and(|view| !view.follow_live || selection_active(view));
+
+    if !should_use_history {
+        model.clear_active_history_view();
         return;
-    };
-    parser.set_scrollback(target);
-    let actual = parser.screen().scrollback();
-    if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
-        copy_mode.scrollback = actual;
+    }
+
+    if model.active_history_pane_id.as_deref() != Some(pane_id.as_str())
+        || model.active_history_parser.is_none()
+    {
+        if let Some((parser, max_scrollback)) = build_history_view_parser(model, &pane_id) {
+            model.active_history_pane_id = Some(pane_id.clone());
+            model.active_history_parser = Some(parser);
+            let view = model.terminal_viewport_mut(&pane_id);
+            view.max_scrollback = max_scrollback;
+            view.scrollback = view.scrollback.min(max_scrollback);
+        } else {
+            model.clear_active_history_view();
+        }
+    }
+
+    if let Some(parser) = model.active_history_parser.as_ref() {
+        let area = content_area_rect(model.terminal_cols, model.terminal_rows);
+        let max_scrollback = history_parser_max_scrollback(parser, area.height.max(1));
+        let view = model.terminal_viewport_mut(&pane_id);
+        view.max_scrollback = max_scrollback;
+        view.scrollback = view.scrollback.min(max_scrollback);
     }
 }
 
-fn toggle_pty_copy_mode(model: &mut Model) {
-    if model.pty_copy_mode.is_some() {
-        exit_pty_copy_mode(model);
-        return;
-    }
-
-    if model.active_layer != ActiveLayer::Main || model.session_tabs.is_empty() {
-        return;
-    }
-
-    let pane_id = model.session_tabs[model.active_session].pane_id.clone();
-    let (initial_scrollback, max_scrollback) = if let Some((history_parser, history_scrollback)) =
-        build_copy_history_parser(model, &pane_id)
+fn set_terminal_follow_live(model: &mut Model, pane_id: &str, follow_live: bool) {
     {
-        let scrollback = history_parser.screen().scrollback();
-        model.pty_copy_parser = Some(history_parser);
-        tracing::info!(
-            message = "flow_success",
-            category = "ui",
-            event = "enter_copy_mode",
-            result = "success",
-            workspace = "default",
-            pane_id = pane_id.as_str(),
-            copy_source = "file_scrollback",
-        );
-        (scrollback, history_scrollback)
+        let view = model.terminal_viewport_mut(pane_id);
+        view.follow_live = follow_live;
+        if follow_live {
+            view.scrollback = 0;
+            view.max_scrollback = 0;
+        }
+    }
+    sync_active_terminal_history(model);
+}
+
+fn freeze_terminal_view(model: &mut Model, pane_id: &str) {
+    {
+        let view = model.terminal_viewport_mut(pane_id);
+        view.follow_live = false;
+    }
+    sync_active_terminal_history(model);
+}
+
+fn set_terminal_scrollback(model: &mut Model, pane_id: &str, desired: usize) {
+    let should_follow_live = desired == 0
+        && !model
+            .terminal_viewport(pane_id)
+            .is_some_and(selection_active);
+    if should_follow_live {
+        set_terminal_follow_live(model, pane_id, true);
+        return;
+    }
+
+    freeze_terminal_view(model, pane_id);
+    let max_scrollback = model
+        .terminal_viewport(pane_id)
+        .map(|view| view.max_scrollback)
+        .unwrap_or(0);
+    let view = model.terminal_viewport_mut(pane_id);
+    view.scrollback = desired.min(max_scrollback);
+    view.follow_live = false;
+}
+
+fn adjust_terminal_scrollback(model: &mut Model, pane_id: &str, delta: isize) {
+    if delta == 0 {
+        return;
+    }
+
+    if delta.is_positive() {
+        freeze_terminal_view(model, pane_id);
+    }
+
+    let current_scrollback = model
+        .terminal_viewport(pane_id)
+        .map(|view| view.scrollback)
+        .unwrap_or(0);
+    let desired = if delta.is_negative() {
+        current_scrollback.saturating_sub(delta.unsigned_abs())
     } else {
-        let Some(parser) = model.vt_parsers.get_mut(&pane_id) else {
-            return;
-        };
-        parser.set_scrollback(0);
-        tracing::info!(
-            message = "flow_success",
-            category = "ui",
-            event = "enter_copy_mode",
-            result = "success",
-            workspace = "default",
-            pane_id = pane_id.as_str(),
-            copy_source = "live_parser",
-        );
-        (
-            parser.screen().scrollback(),
-            DEFAULT_LIVE_COPY_SCROLLBACK_MAX,
-        )
+        let max_scrollback = model
+            .terminal_viewport(pane_id)
+            .map(|view| view.max_scrollback)
+            .unwrap_or(0);
+        current_scrollback
+            .saturating_add(delta as usize)
+            .min(max_scrollback)
     };
-
-    if model.pty_copy_parser.is_none() && !model.vt_parsers.contains_key(&pane_id) {
-        return;
-    }
-
-    model.pty_copy_mode = Some(PtyCopyMode {
-        pane_id,
-        scrollback: initial_scrollback,
-        max_scrollback,
-        cursor: SelectionPoint { row: 0, col: 0 },
-        selection_anchor: None,
-        selection_focus: None,
-        dragging: false,
-    });
+    set_terminal_scrollback(model, pane_id, desired);
 }
 
-fn exit_pty_copy_mode(model: &mut Model) {
-    if let Some(copy_mode) = model.pty_copy_mode.take() {
-        if let Some(parser) = model.vt_parsers.get_mut(&copy_mode.pane_id) {
-            parser.set_scrollback(0);
-        }
-        model.pty_copy_parser = None;
-        tracing::info!(
-            message = "flow_success",
-            category = "ui",
-            event = "exit_copy_mode",
-            result = "success",
-            workspace = "default",
-            pane_id = copy_mode.pane_id,
-        );
-    }
+fn scroll_terminal_to_top(model: &mut Model, pane_id: &str) {
+    freeze_terminal_view(model, pane_id);
+    let max_scrollback = model
+        .terminal_viewport(pane_id)
+        .map(|view| view.max_scrollback)
+        .unwrap_or(0);
+    set_terminal_scrollback(model, pane_id, max_scrollback);
+}
+
+fn scroll_terminal_to_bottom(model: &mut Model, pane_id: &str) {
+    set_terminal_scrollback(model, pane_id, 0);
 }
 
 fn clamp_point(point: SelectionPoint, rows: u16, cols: u16) -> SelectionPoint {
@@ -301,42 +318,9 @@ fn main_area_point(model: &Model, mouse: MouseEvent) -> Option<SelectionPoint> {
     })
 }
 
-fn adjust_copy_mode_scrollback(model: &mut Model, delta: isize) {
-    let Some((current_scrollback, max_scrollback)) = model
-        .pty_copy_mode
-        .as_ref()
-        .map(|copy_mode| (copy_mode.scrollback, copy_mode.max_scrollback))
-    else {
-        return;
-    };
-    let desired = if delta.is_negative() {
-        current_scrollback.saturating_sub(delta.unsigned_abs())
-    } else {
-        current_scrollback.saturating_add(delta as usize)
-    }
-    .min(max_scrollback);
-    set_copy_mode_scrollback(model, desired);
-}
-
-fn scroll_copy_mode_to_top(model: &mut Model) {
-    let Some(max_scrollback) = model
-        .pty_copy_mode
-        .as_ref()
-        .map(|copy_mode| copy_mode.max_scrollback)
-    else {
-        return;
-    };
-    set_copy_mode_scrollback(model, max_scrollback);
-}
-
-fn scroll_copy_mode_to_bottom(model: &mut Model) {
-    set_copy_mode_scrollback(model, 0);
-}
-
-fn copy_mode_view_origin(copy_mode: &PtyCopyMode) -> u16 {
-    copy_mode
-        .max_scrollback
-        .saturating_sub(copy_mode.scrollback)
+fn terminal_view_origin(view: &TerminalViewportState) -> u16 {
+    view.max_scrollback
+        .saturating_sub(view.scrollback)
         .min(usize::from(u16::MAX)) as u16
 }
 
@@ -348,74 +332,43 @@ fn history_parser_max_scrollback(parser: &vt100::Parser, viewport_rows: u16) -> 
         .saturating_sub(usize::from(viewport_rows))
 }
 
-fn copy_mode_view_size(model: &Model, pane_id: &str) -> Option<(u16, u16)> {
-    if model
-        .pty_copy_mode
-        .as_ref()
-        .is_some_and(|copy_mode| copy_mode.pane_id == pane_id)
-        && model.pty_copy_parser.is_some()
+fn terminal_view_size(model: &Model, pane_id: &str) -> Option<(u16, u16)> {
+    if model.active_history_pane_id.as_deref() == Some(pane_id)
+        && model.active_history_parser.is_some()
     {
         let area = content_area_rect(model.terminal_cols, model.terminal_rows);
         return Some((area.height.max(1), area.width.max(1)));
     }
-    active_copy_parser(model, pane_id).map(|parser| parser.screen().size())
+    active_terminal_parser(model, pane_id).map(|parser| parser.screen().size())
 }
 
-fn update_copy_cursor(model: &mut Model, row_delta: i16, col_delta: i16, update_selection: bool) {
-    let Some((pane_id, cursor, selecting)) = model.pty_copy_mode.as_ref().map(|copy_mode| {
-        (
-            copy_mode.pane_id.clone(),
-            copy_mode.cursor,
-            copy_mode.selection_anchor.is_some(),
-        )
-    }) else {
-        return;
+fn viewport_point_to_absolute(
+    model: &Model,
+    pane_id: &str,
+    point: SelectionPoint,
+) -> SelectionPoint {
+    let row = if let Some(view) = model.terminal_viewport(pane_id) {
+        point.row.saturating_add(terminal_view_origin(view))
+    } else {
+        point.row
     };
-    let Some((rows, cols)) = copy_mode_view_size(model, &pane_id) else {
-        return;
-    };
-    let next_row = (i32::from(cursor.row) + i32::from(row_delta))
-        .clamp(0, i32::from(rows.saturating_sub(1))) as u16;
-    let next_col = (i32::from(cursor.col) + i32::from(col_delta))
-        .clamp(0, i32::from(cols.saturating_sub(1))) as u16;
-    if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
-        copy_mode.cursor = SelectionPoint {
-            row: next_row,
-            col: next_col,
-        };
-        if update_selection && selecting {
-            copy_mode.selection_focus = Some(copy_mode.cursor);
-        }
+    SelectionPoint {
+        row,
+        col: point.col,
     }
 }
 
-fn copy_current_selection(model: &mut Model) {
-    let Some(copy_mode) = model.pty_copy_mode.as_ref() else {
+fn copy_current_selection(model: &mut Model, pane_id: &str) {
+    let Some(view) = model.terminal_viewport(pane_id) else {
         return;
     };
-    let (Some(anchor), Some(focus)) = (copy_mode.selection_anchor, copy_mode.selection_focus)
-    else {
+    let (Some(anchor), Some(focus)) = (view.selection_anchor, view.selection_focus) else {
         return;
     };
-    let Some(parser) = active_copy_parser(model, &copy_mode.pane_id) else {
+    let Some(parser) = active_terminal_parser(model, pane_id) else {
         return;
     };
-    let text = if model.pty_copy_parser.is_some() {
-        let origin = copy_mode_view_origin(copy_mode);
-        crate::screens::agent_pane::selected_text(
-            parser,
-            SelectionPoint {
-                row: anchor.row.saturating_add(origin),
-                col: anchor.col,
-            },
-            SelectionPoint {
-                row: focus.row.saturating_add(origin),
-                col: focus.col,
-            },
-        )
-    } else {
-        crate::screens::agent_pane::selected_text(parser, anchor, focus)
-    };
+    let text = crate::screens::agent_pane::selected_text(parser, anchor, focus);
     if text.is_empty() {
         return;
     }
@@ -427,91 +380,85 @@ fn copy_current_selection(model: &mut Model) {
     }
 }
 
-fn handle_copy_mode_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
-    let Some(copy_mode) = model.pty_copy_mode.as_ref() else {
-        return false;
-    };
-    if model.active_layer != ActiveLayer::Main
-        || model
-            .session_tabs
-            .get(model.active_session)
-            .map(|tab| tab.pane_id.as_str())
-            != Some(copy_mode.pane_id.as_str())
-    {
-        exit_pty_copy_mode(model);
+fn handle_terminal_view_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
+    if model.active_layer != ActiveLayer::Main {
         return false;
     }
 
-    let selecting = copy_mode.selection_anchor.is_some();
+    let Some(pane_id) = active_pane_id(model).map(str::to_string) else {
+        return false;
+    };
     let page = usize::from(model.terminal_rows.saturating_sub(4).max(1));
 
     match key.code {
-        crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q') => {
-            exit_pty_copy_mode(model);
+        crossterm::event::KeyCode::PageUp => {
+            adjust_terminal_scrollback(model, &pane_id, page as isize);
+            true
         }
-        crossterm::event::KeyCode::PageUp => adjust_copy_mode_scrollback(model, page as isize),
-        crossterm::event::KeyCode::PageDown => adjust_copy_mode_scrollback(model, -(page as isize)),
-        crossterm::event::KeyCode::Home => scroll_copy_mode_to_top(model),
-        crossterm::event::KeyCode::End => scroll_copy_mode_to_bottom(model),
-        crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
-            update_copy_cursor(model, -1, 0, selecting);
+        crossterm::event::KeyCode::PageDown => {
+            adjust_terminal_scrollback(model, &pane_id, -(page as isize));
+            true
         }
-        crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
-            update_copy_cursor(model, 1, 0, selecting);
+        crossterm::event::KeyCode::Home => {
+            scroll_terminal_to_top(model, &pane_id);
+            true
         }
-        crossterm::event::KeyCode::Left | crossterm::event::KeyCode::Char('h') => {
-            update_copy_cursor(model, 0, -1, selecting);
+        crossterm::event::KeyCode::End => {
+            scroll_terminal_to_bottom(model, &pane_id);
+            true
         }
-        crossterm::event::KeyCode::Right | crossterm::event::KeyCode::Char('l') => {
-            update_copy_cursor(model, 0, 1, selecting);
-        }
-        crossterm::event::KeyCode::Char(' ') => {
-            if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
-                if copy_mode.selection_anchor.is_some() {
-                    copy_mode.selection_anchor = None;
-                    copy_mode.selection_focus = None;
-                } else {
-                    copy_mode.selection_anchor = Some(copy_mode.cursor);
-                    copy_mode.selection_focus = Some(copy_mode.cursor);
+        crossterm::event::KeyCode::Esc => {
+            let had_selection = model
+                .terminal_viewport(&pane_id)
+                .is_some_and(selection_active);
+            if had_selection {
+                let view = model.terminal_viewport_mut(&pane_id);
+                view.selection_anchor = None;
+                view.selection_focus = None;
+                view.dragging = false;
+                if view.scrollback == 0 {
+                    view.follow_live = true;
+                    view.max_scrollback = 0;
                 }
+                true
+            } else {
+                false
             }
         }
-        crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char('y') => {
-            copy_current_selection(model);
-        }
-        _ => {}
+        _ => false,
     }
-
-    true
 }
 
-fn handle_copy_mode_mouse(model: &mut Model, mouse: MouseEvent) -> bool {
-    let Some(copy_mode) = model.pty_copy_mode.as_ref() else {
+fn handle_terminal_view_mouse(model: &mut Model, mouse: MouseEvent) -> bool {
+    if model.active_layer != ActiveLayer::Main {
+        return false;
+    }
+
+    let Some(pane_id) = active_pane_id(model).map(str::to_string) else {
         return false;
     };
-    let pane_id = copy_mode.pane_id.clone();
-    let Some((rows, cols)) = copy_mode_view_size(model, &pane_id) else {
+    let Some((rows, cols)) = terminal_view_size(model, &pane_id) else {
         return false;
     };
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            adjust_copy_mode_scrollback(model, 1);
+            adjust_terminal_scrollback(model, &pane_id, 1);
             true
         }
         MouseEventKind::ScrollDown => {
-            adjust_copy_mode_scrollback(model, -1);
+            adjust_terminal_scrollback(model, &pane_id, -1);
             true
         }
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(point) = main_area_point(model, mouse) {
                 let point = clamp_point(point, rows, cols);
-                if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
-                    copy_mode.cursor = point;
-                    copy_mode.selection_anchor = Some(point);
-                    copy_mode.selection_focus = Some(point);
-                    copy_mode.dragging = true;
-                }
+                freeze_terminal_view(model, &pane_id);
+                let absolute = viewport_point_to_absolute(model, &pane_id, point);
+                let view = model.terminal_viewport_mut(&pane_id);
+                view.selection_anchor = Some(absolute);
+                view.selection_focus = Some(absolute);
+                view.dragging = true;
                 return true;
             }
             false
@@ -519,12 +466,14 @@ fn handle_copy_mode_mouse(model: &mut Model, mouse: MouseEvent) -> bool {
         MouseEventKind::Drag(MouseButton::Left) => {
             if let Some(point) = main_area_point(model, mouse) {
                 let point = clamp_point(point, rows, cols);
-                if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
-                    if copy_mode.dragging {
-                        copy_mode.cursor = point;
-                        copy_mode.selection_focus = Some(point);
+                let absolute = viewport_point_to_absolute(model, &pane_id, point);
+                if let Some(view) = model.terminal_viewport(&pane_id) {
+                    if !view.dragging {
+                        return false;
                     }
                 }
+                let view = model.terminal_viewport_mut(&pane_id);
+                view.selection_focus = Some(absolute);
                 return true;
             }
             false
@@ -532,14 +481,33 @@ fn handle_copy_mode_mouse(model: &mut Model, mouse: MouseEvent) -> bool {
         MouseEventKind::Up(MouseButton::Left) => {
             if let Some(point) = main_area_point(model, mouse) {
                 let point = clamp_point(point, rows, cols);
-                if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
-                    if copy_mode.dragging {
-                        copy_mode.cursor = point;
-                        copy_mode.selection_focus = Some(point);
-                        copy_mode.dragging = false;
+                let absolute = viewport_point_to_absolute(model, &pane_id, point);
+                let should_copy = model.terminal_viewport(&pane_id).is_some_and(|view| {
+                    view.dragging
+                        && view
+                            .selection_anchor
+                            .is_some_and(|anchor| anchor != absolute)
+                });
+                let return_to_live = model
+                    .terminal_viewport(&pane_id)
+                    .is_some_and(|view| view.scrollback == 0);
+                {
+                    let view = model.terminal_viewport_mut(&pane_id);
+                    if view.dragging {
+                        view.selection_focus = Some(absolute);
                     }
+                    view.dragging = false;
                 }
-                copy_current_selection(model);
+                if should_copy {
+                    copy_current_selection(model, &pane_id);
+                }
+                let view = model.terminal_viewport_mut(&pane_id);
+                view.selection_anchor = None;
+                view.selection_focus = None;
+                if return_to_live {
+                    view.follow_live = true;
+                    view.max_scrollback = 0;
+                }
                 return true;
             }
             false
@@ -665,7 +633,10 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::TogglePtyCopyMode => {
-            toggle_pty_copy_mode(model);
+            // Keep the legacy shortcut as a "jump back to live tail" alias.
+            if let Some(pane_id) = active_pane_id(model).map(str::to_string) {
+                scroll_terminal_to_bottom(model, &pane_id);
+            }
         }
         Message::WizardKey(key) => {
             use crossterm::event::KeyCode;
@@ -723,10 +694,12 @@ pub fn update(model: &mut Model, msg: Message) {
             {
                 model.dismiss_error();
                 model.error_queue_v2.dismiss_current();
+                sync_active_terminal_history(model);
                 return;
             }
 
-            if handle_copy_mode_key(model, key) {
+            if handle_terminal_view_key(model, key) {
+                sync_active_terminal_history(model);
                 return;
             }
 
@@ -748,6 +721,7 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Settings => ManagementTab::Logs,
                         ManagementTab::Logs => ManagementTab::Branches,
                     };
+                    sync_active_terminal_history(model);
                     return;
                 }
                 // Fall through to screen handler when in form mode
@@ -879,12 +853,13 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::Paste(text) => {
-            if model.active_layer == ActiveLayer::Main && model.pty_copy_mode.is_none() {
+            if model.active_layer == ActiveLayer::Main {
                 write_bytes_to_active_pane(model, text.as_bytes());
             }
         }
         Message::MouseInput(mouse) => {
-            if handle_copy_mode_mouse(model, mouse) {
+            if handle_terminal_view_mouse(model, mouse) {
+                sync_active_terminal_history(model);
                 return;
             }
             if model.active_layer == ActiveLayer::Management
@@ -927,33 +902,40 @@ pub fn update(model: &mut Model, msg: Message) {
                 parser.process(&data);
             }
 
-            if let Some(copy_mode) = model.pty_copy_mode.as_ref() {
-                if copy_mode.pane_id == pane_id {
-                    let updated_state = if let Some(copy_parser) = model.pty_copy_parser.as_mut() {
-                        let area = content_area_rect(model.terminal_cols, model.terminal_rows);
-                        let old_max = copy_mode.max_scrollback;
-                        let old_scroll = copy_mode.scrollback;
-                        let old_top = old_max.saturating_sub(old_scroll);
+            if model.active_history_pane_id.as_deref() == Some(pane_id.as_str()) {
+                let follow_live = model
+                    .terminal_viewport(&pane_id)
+                    .map(|view| view.follow_live)
+                    .unwrap_or(true);
+                if !follow_live {
+                    let old_max = model
+                        .terminal_viewport(&pane_id)
+                        .map(|view| view.max_scrollback)
+                        .unwrap_or(0);
+                    let old_scroll = model
+                        .terminal_viewport(&pane_id)
+                        .map(|view| view.scrollback)
+                        .unwrap_or(0);
+                    let updated_state =
+                        if let Some(copy_parser) = model.active_history_parser.as_mut() {
+                            let area = content_area_rect(model.terminal_cols, model.terminal_rows);
+                            let old_top = old_max.saturating_sub(old_scroll);
 
-                        copy_parser.process(&data);
+                            copy_parser.process(&data);
 
-                        let new_max =
-                            history_parser_max_scrollback(copy_parser, area.height.max(1));
-                        let new_scroll = new_max.saturating_sub(old_top).min(new_max);
-                        Some((new_scroll, new_max))
-                    } else {
-                        model.vt_parsers.get(&pane_id).map(|parser| {
-                            (
-                                parser.screen().scrollback(),
-                                DEFAULT_LIVE_COPY_SCROLLBACK_MAX,
-                            )
-                        })
-                    };
-                    if let (Some(copy_mode), Some((scrollback, max_scrollback))) =
-                        (model.pty_copy_mode.as_mut(), updated_state)
-                    {
-                        copy_mode.scrollback = scrollback;
-                        copy_mode.max_scrollback = max_scrollback;
+                            let new_max =
+                                history_parser_max_scrollback(copy_parser, area.height.max(1));
+                            let new_scroll = new_max.saturating_sub(old_top).min(new_max);
+                            Some((new_scroll, new_max))
+                        } else {
+                            model.vt_parsers.get(&pane_id).map(|parser| {
+                                (parser.screen().scrollback(), parser.screen().scrollback())
+                            })
+                        };
+                    if let Some((scrollback, max_scrollback)) = updated_state {
+                        let view = model.terminal_viewport_mut(&pane_id);
+                        view.scrollback = scrollback;
+                        view.max_scrollback = max_scrollback;
                     }
                 }
             }
@@ -1032,6 +1014,7 @@ pub fn update(model: &mut Model, msg: Message) {
                         &branch, history,
                     ));
                 }
+                sync_active_terminal_history(model);
                 return;
             }
             crate::screens::branches::update(&mut model.branches_state, msg);
@@ -1049,6 +1032,8 @@ pub fn update(model: &mut Model, msg: Message) {
             handle_logs_msg(model, msg);
         }
     }
+
+    sync_active_terminal_history(model);
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,46 +1078,25 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     ratatui::widgets::Widget::render(center, text_area, buf);
                 } else {
                     let pane_id = &model.session_tabs[model.active_session].pane_id;
-                    let parser = active_copy_parser(model, pane_id);
-                    let copy_mode = model
-                        .pty_copy_mode
-                        .as_ref()
-                        .filter(|copy_mode| copy_mode.pane_id == *pane_id);
-                    let copy_cursor = model
-                        .pty_copy_mode
-                        .as_ref()
-                        .filter(|copy_mode| copy_mode.pane_id == *pane_id)
-                        .map(|copy_mode| copy_mode.cursor);
-                    let selection = model
-                        .pty_copy_mode
-                        .as_ref()
-                        .filter(|copy_mode| copy_mode.pane_id == *pane_id)
-                        .and_then(|copy_mode| {
-                            copy_mode.selection_anchor.zip(copy_mode.selection_focus)
-                        });
-                    cursor_pos = if model
-                        .pty_copy_parser
-                        .as_ref()
-                        .is_some_and(|_| copy_mode.is_some())
+                    let parser = active_terminal_parser(model, pane_id);
+                    let view = model.terminal_viewport(pane_id);
+                    let selection =
+                        view.and_then(|view| view.selection_anchor.zip(view.selection_focus));
+                    cursor_pos = if model.active_history_pane_id.as_deref()
+                        == Some(pane_id.as_str())
+                        && model.active_history_parser.is_some()
                     {
                         parser.and_then(|parser| {
                             crate::screens::agent_pane::render_history(
                                 buf,
                                 layout[2],
                                 parser,
-                                copy_mode.map(copy_mode_view_origin).unwrap_or_default(),
-                                copy_cursor,
+                                view.map(terminal_view_origin).unwrap_or_default(),
                                 selection,
                             )
                         })
                     } else {
-                        crate::screens::agent_pane::render(
-                            buf,
-                            layout[2],
-                            parser,
-                            copy_cursor,
-                            selection,
-                        )
+                        crate::screens::agent_pane::render(buf, layout[2], parser, selection)
                     };
                 }
             }
@@ -1650,7 +1614,10 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
 /// Returns the existing worktree path if one is already checked out for
 /// *branch_name*, creates a new worktree otherwise, and falls back to
 /// *repo_root* when neither succeeds.
-fn resolve_branch_working_dir(repo_root: &std::path::Path, branch_name: &str) -> std::path::PathBuf {
+fn resolve_branch_working_dir(
+    repo_root: &std::path::Path,
+    branch_name: &str,
+) -> std::path::PathBuf {
     use gwt_core::worktree::WorktreeManager;
     match WorktreeManager::new(repo_root) {
         Ok(wt_manager) => match wt_manager.get_by_branch(branch_name) {
@@ -2206,8 +2173,8 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::model::{
-        ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, OverlayMode, SelectionPoint,
-        SessionStatus, SessionTab, SessionTabType,
+        ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, OverlayMode, SessionStatus,
+        SessionTab, SessionTabType,
     };
     use crate::screens::logs::LogEntry;
     use crossterm::event::{
@@ -2326,6 +2293,25 @@ mod tests {
         reader
     }
 
+    fn seed_session_transcript(model: &mut Model, name: &str, lines: usize) {
+        let _reader = add_cat_session(model, name);
+        let pane_id = format!("pane-{name}");
+        let area = content_area_rect(model.terminal_cols, model.terminal_rows);
+        model.vt_parsers.insert(
+            pane_id.clone(),
+            vt100::Parser::new(area.height.max(1), area.width.max(1), 2),
+        );
+        for index in 0..lines {
+            update(
+                model,
+                Message::PtyOutput {
+                    pane_id: pane_id.clone(),
+                    data: format!("line-{index}\r\n").into_bytes(),
+                },
+            );
+        }
+    }
+
     fn read_from_reader_with_timeout(
         reader: Box<dyn std::io::Read + Send>,
         timeout: Duration,
@@ -2420,65 +2406,77 @@ mod tests {
     }
 
     #[test]
-    fn update_toggle_pty_copy_mode_enters_for_active_session() {
+    fn update_terminal_view_scrolls_scrollback_with_keyboard() {
         let mut m = test_model();
-        m.add_session(test_session("s1"));
+        m.terminal_cols = 20;
+        m.terminal_rows = 10;
+        seed_session_transcript(&mut m, "s1", 15);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
+        );
+
+        let viewport = m.terminal_viewport("pane-s1").expect("viewport state");
+        assert_eq!(viewport.scrollback, 6);
+        assert!(!viewport.follow_live);
+        assert_eq!(m.active_history_pane_id.as_deref(), Some("pane-s1"));
+    }
+
+    #[test]
+    fn update_terminal_view_end_returns_to_live_follow() {
+        let mut m = test_model();
+        m.terminal_cols = 20;
+        m.terminal_rows = 10;
+        seed_session_transcript(&mut m, "s1", 15);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
+        );
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::End, KeyModifiers::NONE)),
+        );
+
+        let viewport = m.terminal_viewport("pane-s1").expect("viewport state");
+        assert_eq!(viewport.scrollback, 0);
+        assert!(viewport.follow_live);
+        assert!(m.active_history_parser.is_none());
+    }
+
+    #[test]
+    fn update_terminal_view_mouse_scroll_uses_transcript_history() {
+        let mut m = test_model();
+        m.terminal_cols = 40;
+        m.terminal_rows = 10;
+        let _reader = add_cat_session(&mut m, "s1");
+        m.active_session = 0;
         m.vt_parsers
-            .insert("pane-s1".to_string(), vt100::Parser::new(8, 20, 100));
+            .insert("pane-s1".to_string(), vt100::Parser::new(6, 40, 2));
+        for index in 0..12 {
+            update(
+                &mut m,
+                Message::PtyOutput {
+                    pane_id: "pane-s1".into(),
+                    data: format!("line-{index}\r\n").into_bytes(),
+                },
+            );
+        }
 
-        update(&mut m, Message::TogglePtyCopyMode);
+        update(
+            &mut m,
+            Message::MouseInput(make_mouse(MouseEventKind::ScrollUp)),
+        );
 
-        let copy_mode = m
-            .pty_copy_mode
-            .as_ref()
-            .expect("copy mode should be active");
-        assert_eq!(copy_mode.pane_id, "pane-s1");
-        assert_eq!(copy_mode.cursor, SelectionPoint { row: 0, col: 0 });
+        let viewport = m.terminal_viewport("pane-s1").expect("viewport state");
+        assert_eq!(viewport.scrollback, 1);
+        assert!(!viewport.follow_live);
+        assert_eq!(m.active_history_pane_id.as_deref(), Some("pane-s1"));
     }
 
     #[test]
-    fn update_copy_mode_scrolls_scrollback_with_keyboard() {
-        let mut m = test_model();
-        m.add_session(test_session("s1"));
-        let mut parser = vt100::Parser::new(4, 20, 100);
-        seed_scrollback(&mut parser, 12);
-        m.vt_parsers.insert("pane-s1".to_string(), parser);
-
-        update(&mut m, Message::TogglePtyCopyMode);
-        update(
-            &mut m,
-            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
-        );
-
-        let parser = m.vt_parsers.get("pane-s1").unwrap();
-        assert!(parser.screen().scrollback() > 0);
-    }
-
-    #[test]
-    fn update_copy_mode_exits_and_resets_scrollback() {
-        let mut m = test_model();
-        m.add_session(test_session("s1"));
-        let mut parser = vt100::Parser::new(4, 20, 100);
-        seed_scrollback(&mut parser, 12);
-        m.vt_parsers.insert("pane-s1".to_string(), parser);
-
-        update(&mut m, Message::TogglePtyCopyMode);
-        update(
-            &mut m,
-            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
-        );
-        update(
-            &mut m,
-            Message::KeyInput(make_key(KeyCode::Esc, KeyModifiers::NONE)),
-        );
-
-        assert!(m.pty_copy_mode.is_none());
-        let parser = m.vt_parsers.get("pane-s1").unwrap();
-        assert_eq!(parser.screen().scrollback(), 0);
-    }
-
-    #[test]
-    fn update_copy_mode_mouse_drag_copies_selection() {
+    fn update_terminal_view_mouse_drag_copies_selection() {
         clear_test_clipboard();
 
         let mut m = test_model();
@@ -2489,7 +2487,6 @@ mod tests {
         parser.process(b"hello world");
         m.vt_parsers.insert("pane-s1".to_string(), parser);
 
-        update(&mut m, Message::TogglePtyCopyMode);
         update(
             &mut m,
             Message::MouseInput(MouseEvent {
@@ -2522,48 +2519,62 @@ mod tests {
     }
 
     #[test]
-    fn update_copy_mode_keyboard_selection_copies_to_clipboard() {
-        clear_test_clipboard();
-
+    fn update_terminal_view_drag_at_bottom_returns_to_live_follow() {
         let mut m = test_model();
+        m.terminal_cols = 40;
+        m.terminal_rows = 10;
         m.add_session(test_session("s1"));
         let mut parser = vt100::Parser::new(7, 40, 100);
         parser.process(b"hello world");
         m.vt_parsers.insert("pane-s1".to_string(), parser);
 
-        update(&mut m, Message::TogglePtyCopyMode);
         update(
             &mut m,
-            Message::KeyInput(make_key(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
         );
-        for _ in 0..4 {
-            update(
-                &mut m,
-                Message::KeyInput(make_key(KeyCode::Right, KeyModifiers::NONE)),
-            );
-        }
         update(
             &mut m,
-            Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)),
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 4,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        update(
+            &mut m,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 4,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
         );
 
-        assert_eq!(take_test_clipboard(), vec!["hello".to_string()]);
+        let viewport = m.terminal_viewport("pane-s1").expect("viewport state");
+        assert!(viewport.follow_live);
+        assert_eq!(viewport.scrollback, 0);
+        assert!(viewport.selection_anchor.is_none());
+        assert!(viewport.selection_focus.is_none());
     }
 
     #[test]
-    fn update_copy_mode_preserves_viewport_on_pty_output() {
+    fn update_terminal_view_preserves_viewport_on_pty_output() {
         let mut m = test_model();
-        m.add_session(test_session("s1"));
-        let mut parser = vt100::Parser::new(4, 20, 100);
-        seed_scrollback(&mut parser, 12);
-        m.vt_parsers.insert("pane-s1".to_string(), parser);
+        m.terminal_cols = 20;
+        m.terminal_rows = 10;
+        seed_session_transcript(&mut m, "s1", 15);
 
-        update(&mut m, Message::TogglePtyCopyMode);
         update(
             &mut m,
             Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
         );
-        let before = m.vt_parsers["pane-s1"].screen().scrollback();
+        let before = m.terminal_viewport("pane-s1").unwrap().scrollback;
 
         update(
             &mut m,
@@ -2573,14 +2584,14 @@ mod tests {
             },
         );
 
-        let after = m.vt_parsers["pane-s1"].screen().scrollback();
+        let after = m.terminal_viewport("pane-s1").unwrap().scrollback;
         assert!(before > 0);
         assert!(after >= before);
-        assert_eq!(m.pty_copy_mode.as_ref().unwrap().scrollback, after);
+        assert_eq!(after, before + 1);
     }
 
     #[test]
-    fn update_copy_mode_renders_old_lines_from_file_backed_scrollback() {
+    fn update_terminal_view_renders_old_lines_from_file_backed_scrollback() {
         let mut m = test_model();
         m.terminal_cols = 40;
         m.terminal_rows = 10;
@@ -2599,7 +2610,6 @@ mod tests {
             );
         }
 
-        update(&mut m, Message::TogglePtyCopyMode);
         update(
             &mut m,
             Message::KeyInput(make_key(KeyCode::Home, KeyModifiers::NONE)),
@@ -2617,7 +2627,7 @@ mod tests {
     }
 
     #[test]
-    fn update_copy_mode_preserves_ansi_style_from_file_backed_scrollback() {
+    fn update_terminal_view_preserves_ansi_style_from_file_backed_scrollback() {
         let mut m = test_model();
         m.terminal_cols = 40;
         m.terminal_rows = 10;
@@ -2645,7 +2655,6 @@ mod tests {
             );
         }
 
-        update(&mut m, Message::TogglePtyCopyMode);
         update(
             &mut m,
             Message::KeyInput(make_key(KeyCode::Home, KeyModifiers::NONE)),
@@ -2662,16 +2671,11 @@ mod tests {
     }
 
     #[test]
-    fn wants_mouse_capture_only_in_management_or_copy_mode() {
+    fn wants_mouse_capture_in_main_with_sessions() {
         let mut m = test_model();
         assert!(wants_mouse_capture(&m));
 
         m.add_session(test_session("s1"));
-        assert!(!wants_mouse_capture(&m));
-
-        m.vt_parsers
-            .insert("pane-s1".to_string(), vt100::Parser::new(8, 20, 100));
-        update(&mut m, Message::TogglePtyCopyMode);
         assert!(wants_mouse_capture(&m));
     }
 

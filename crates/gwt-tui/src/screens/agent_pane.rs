@@ -12,19 +12,12 @@ pub fn render(
     buf: &mut Buffer,
     area: Rect,
     parser: Option<&vt100::Parser>,
-    copy_cursor: Option<SelectionPoint>,
     selection: Option<(SelectionPoint, SelectionPoint)>,
 ) -> Option<(u16, u16)> {
     if let Some(parser) = parser {
         let screen = parser.screen();
         crate::renderer::render_vt100_screen(buf, area, screen);
-        render_selection(buf, area, selection);
-
-        if let Some(cursor) = copy_cursor {
-            let x = area.x + cursor.col.min(area.width.saturating_sub(1));
-            let y = area.y + cursor.row.min(area.height.saturating_sub(1));
-            return Some((x, y));
-        }
+        render_selection(buf, area, selection, 0);
 
         // Return cursor position if visible
         if !screen.hide_cursor() {
@@ -49,7 +42,6 @@ pub fn render_history(
     area: Rect,
     parser: &vt100::Parser,
     view_top: u16,
-    copy_cursor: Option<SelectionPoint>,
     selection: Option<(SelectionPoint, SelectionPoint)>,
 ) -> Option<(u16, u16)> {
     let screen = parser.screen();
@@ -77,13 +69,7 @@ pub fn render_history(
         }
     }
 
-    render_selection(buf, area, selection);
-
-    if let Some(cursor) = copy_cursor {
-        let x = area.x + cursor.col.min(area.width.saturating_sub(1));
-        let y = area.y + cursor.row.min(area.height.saturating_sub(1));
-        return Some((x, y));
-    }
+    render_selection(buf, area, selection, view_top);
 
     None
 }
@@ -111,13 +97,24 @@ fn render_selection(
     buf: &mut Buffer,
     area: Rect,
     selection: Option<(SelectionPoint, SelectionPoint)>,
+    view_top: u16,
 ) {
     let Some((start, end)) = selection else {
         return;
     };
     let (start, end) = normalize_selection(start, end);
 
-    for row in start.row..=end.row {
+    if end.row < view_top {
+        return;
+    }
+
+    let visible_start = start.row.max(view_top);
+    let visible_end = end
+        .row
+        .min(view_top.saturating_add(area.height.saturating_sub(1)));
+
+    for row in visible_start..=visible_end {
+        let row_in_view = row.saturating_sub(view_top);
         let col_start = if row == start.row { start.col } else { 0 };
         let col_end = if row == end.row {
             end.col
@@ -126,7 +123,7 @@ fn render_selection(
         };
         for col in col_start..=col_end {
             let x = area.x + col;
-            let y = area.y + row;
+            let y = area.y + row_in_view;
             if x < area.right() && y < area.bottom() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     let style = cell.style().add_modifier(Modifier::REVERSED);
@@ -146,7 +143,7 @@ mod tests {
     fn render_none_shows_starting_placeholder() {
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        let result = render(&mut buf, area, None, None, None);
+        let result = render(&mut buf, area, None, None);
         assert!(result.is_none());
         // "Starting..." should appear somewhere in the buffer
         let text: String = (0..area.width)
@@ -169,7 +166,7 @@ mod tests {
         parser.process(b"Hello, world!");
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        let result = render(&mut buf, area, Some(&parser), None, None);
+        let result = render(&mut buf, area, Some(&parser), None);
         // Cursor is visible by default in vt100, so we get Some
         assert!(result.is_some());
     }
@@ -181,7 +178,7 @@ mod tests {
         parser.process(b"\x1b[?25lHidden cursor");
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        let result = render(&mut buf, area, Some(&parser), None, None);
+        let result = render(&mut buf, area, Some(&parser), None);
         assert!(result.is_none());
     }
 
@@ -192,7 +189,7 @@ mod tests {
         parser.process(b"\x1b[3;6HX");
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        let result = render(&mut buf, area, Some(&parser), None, None);
+        let result = render(&mut buf, area, Some(&parser), None);
         if let Some((x, y)) = result {
             // Cursor is after the 'X' we wrote at (row=2, col=6) in 0-based
             assert!(x < area.right());
@@ -206,7 +203,7 @@ mod tests {
         parser.process(b"TestOutput");
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, Some(&parser), None, None);
+        render(&mut buf, area, Some(&parser), None);
         let row: String = (0..10)
             .map(|x| {
                 buf.cell((x, 0))
@@ -238,7 +235,6 @@ mod tests {
             &mut buf,
             area,
             Some(&parser),
-            None,
             Some((
                 SelectionPoint { row: 0, col: 1 },
                 SelectionPoint { row: 0, col: 3 },

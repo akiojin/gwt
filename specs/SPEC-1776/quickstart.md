@@ -21,12 +21,12 @@ cargo run -p gwt-tui
 # Inside TUI:
 # - Type shell commands, verify output renders with colors
 # - Paste multi-line text, verify the full payload reaches the PTY
-# - Ctrl+G, s → opens new shell tab
+# - Ctrl+G, c → opens new shell tab
 # - Ctrl+G, ] → switch to next tab
 # - Ctrl+G, [ → switch to previous tab
-# - Ctrl+G, m → enter copy mode
-# - In copy mode: wheel / trackpad / PgUp / PgDn / arrows scroll scrollback
-# - In copy mode: drag to copy selection, Esc or q to exit
+# - In normal mode: wheel / trackpad / PgUp / PgDn / Home scroll transcript history
+# - In normal mode: drag to copy selection, release to copy
+# - End or scrolling back to bottom returns to live follow
 # - Ctrl+G, x → close tab
 # - Ctrl+C twice → quit
 ```
