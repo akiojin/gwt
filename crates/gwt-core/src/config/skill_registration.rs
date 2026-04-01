@@ -701,7 +701,6 @@ const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.gwt/",
     "/.codex/skills/gwt-*/",
     "/.codex/hooks/scripts/gwt-*.mjs",
-    "/.codex/hooks.json",
     "/.gemini/skills/gwt-*/",
     "/.claude/skills/gwt-*/",
     "/.claude/commands/gwt-*.md",
