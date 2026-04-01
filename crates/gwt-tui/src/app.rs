@@ -283,27 +283,28 @@ pub fn view(model: &Model, frame: &mut Frame) {
     ])
     .split(area);
 
-    let buf = frame.buffer_mut();
+    let mut cursor_pos: Option<(u16, u16)> = None;
 
-    // Tab bar
-    widgets::tab_bar::render(model, buf, layout[0]);
+    {
+        let buf = frame.buffer_mut();
 
-    // Main content area
-    match model.active_layer {
-        ActiveLayer::Main => {
-            if model.session_tabs.is_empty() {
-                // Placeholder when no sessions
-                let center =
-                    centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
-                let text_area = centered_rect(60, 3, layout[1]);
-                ratatui::widgets::Widget::render(center, text_area, buf);
-            } else {
-                // Phase 2: render active session terminal
-                let pane_id = &model.session_tabs[model.active_session].pane_id;
-                let parser = model.vt_parsers.get(pane_id);
-                crate::screens::agent_pane::render(buf, layout[1], parser);
+        // Tab bar
+        widgets::tab_bar::render(model, buf, layout[0]);
+
+        // Main content area
+        match model.active_layer {
+            ActiveLayer::Main => {
+                if model.session_tabs.is_empty() {
+                    let center =
+                        centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
+                    let text_area = centered_rect(60, 3, layout[1]);
+                    ratatui::widgets::Widget::render(center, text_area, buf);
+                } else {
+                    let pane_id = &model.session_tabs[model.active_session].pane_id;
+                    let parser = model.vt_parsers.get(pane_id);
+                    cursor_pos = crate::screens::agent_pane::render(buf, layout[1], parser);
+                }
             }
-        }
         ActiveLayer::Management => match model.management_tab {
             ManagementTab::Branches => {
                 crate::screens::branches::render(&model.branches_state, buf, layout[1]);
@@ -359,6 +360,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
     // SpecKit wizard
     screens::speckit_wizard::render_speckit_wizard(&model.speckit_wizard, buf, area);
+    } // end buf borrow scope
+
+    // Set cursor position (outside buf borrow)
+    if let Some((cx, cy)) = cursor_pos {
+        frame.set_cursor_position((cx, cy));
+    }
 }
 
 /// Render a simple error overlay.

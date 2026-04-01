@@ -91,8 +91,8 @@ pub fn process_key(state: &mut PrefixState, key: KeyEvent) -> KeyAction {
                 KeyCode::Char('n') => KeyAction::OpenWizard,
                 // Ctrl+G, ? → help
                 KeyCode::Char('?') => KeyAction::ShowHelp,
-                // Ctrl+G, q → quit
-                KeyCode::Char('q') => KeyAction::Quit,
+                // Ctrl+G, q → no longer used for quit (Ctrl+C double-tap instead)
+                KeyCode::Char('q') => KeyAction::Forward(key),
                 // Unknown second key → discard prefix, forward key
                 _ => KeyAction::Forward(key),
             }
@@ -196,10 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_g_q_quit() {
+    fn ctrl_g_q_forwards() {
+        // Ctrl+G, q no longer quits — forwards to screen instead
         let mut state = PrefixState::Normal;
         process_key(&mut state, ctrl_g());
-        assert_eq!(process_key(&mut state, plain('q')), KeyAction::Quit);
+        assert!(matches!(
+            process_key(&mut state, plain('q')),
+            KeyAction::Forward(_)
+        ));
     }
 
     #[test]
