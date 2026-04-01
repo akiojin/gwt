@@ -34,11 +34,13 @@ As a developer, I want to be able to identify which hooks in `.codex/hooks.json`
 
 ## Acceptance Scenarios
 
-1. `.codex/hooks.json` にユーザー定義の PreToolUse hook が存在する状態で agent を起動 → ユーザー定義 hook が保持され、gwt managed hooks が追加/更新される
-2. `.codex/hooks.json` が存在しない状態で agent を起動 → gwt managed hooks のみで新規作成される
-3. 既に gwt managed hooks が書き込まれた `.codex/hooks.json` で再度 agent を起動 → gwt managed hooks が重複しない（冪等性）
+1. `.codex/hooks.json` にユーザー定義の PreToolUse hook が存在する状態で Codex agent を起動 → 確認ダイアログで Embed を選択 → ユーザー定義 hook が保持され、gwt managed hooks が追加/更新される
+2. `.codex/hooks.json` が存在しない状態で Codex agent を起動 → 確認ダイアログで Embed を選択 → gwt managed hooks のみで新規作成される
+3. 既に gwt managed hooks が書き込まれた `.codex/hooks.json` で再度 Codex agent を起動 → 変更なしのため確認ダイアログは表示されず、そのまま起動される
 4. ユーザーが gwt managed hook と同じ event（例: PreToolUse）にカスタム hook を追加 → 両方が保持される
-5. gwt managed hooks のバージョンが更新された場合 → 古い gwt managed hooks が新しいものに置き換わる
+5. gwt managed hooks のバージョンが更新された場合 → 確認ダイアログで Embed を選択 → 古い gwt managed hooks が新しいものに置き換わる
+6. 確認ダイアログで Skip を選択 → hooks の書き込みをスキップし、agent がそのまま起動される
+7. Claude Code agent を起動 → 確認ダイアログは表示されない（settings.local.json は gitignored）
 
 ## Edge Cases
 
@@ -69,8 +71,15 @@ As a developer, I want to be able to identify which hooks in `.codex/hooks.json`
 ### dirty worktree 防止
 
 - FR-030: マージ結果が既存ファイルの内容と byte-for-byte 同一の場合、ファイルを書き換えない（不要な git 差分を防止）
-- FR-031: マージ結果が既存ファイルと異なり実際にファイルを更新した場合、TUI 上でユーザーに通知する。通知内容は「`.codex/hooks.json` が更新されました。コミットの必要はありませんが、コミットしても構いません」に相当するメッセージ
-- FR-032: 通知はステータスバーまたは軽量モーダルで表示し、agent 起動フローをブロックしない
+
+### 事前確認（tracked file 更新の同意）
+
+- FR-031: Codex agent 起動時、skill registration 実行前に `.codex/hooks.json` への変更有無を事前チェックする。変更がある場合のみ確認ダイアログを表示する
+- FR-032: 確認ダイアログは英語で表示し、以下の選択肢を提供する:
+  - **Embed** — gwt managed hooks を `.codex/hooks.json` に書き込み、agent を起動する
+  - **Skip** — hooks の書き込みをスキップし、そのまま agent を起動する
+- FR-033: 確認ダイアログには `.codex/hooks.json` が tracked file であり git 差分が出ること、コミットの必要はないがコミットしても構わないことを英語で説明する
+- FR-034: 確認ダイアログは Wizard 完了後、`spawn_agent_session()` 内の skill registration 実行前に表示する。Codex 以外の agent（Claude Code, Gemini 等）では表示しない（Claude Code は settings.local.json で gitignored、Gemini も同様の仕組み）
 
 ## Non-Functional Requirements
 
@@ -83,5 +92,7 @@ As a developer, I want to be able to identify which hooks in `.codex/hooks.json`
 - SC-002: gwt managed hooks が正しく追加/更新されていること
 - SC-003: 同じ操作を複数回実行しても hooks が重複しないこと（冪等性）
 - SC-004: 既存の `cargo test -p gwt-core` が全通過すること
-- SC-005: managed hooks に変更がない場合、`.codex/hooks.json` に git 差分が出ないこと
-- SC-006: managed hooks が実際に更新された場合、TUI 上に通知が表示されること
+- SC-005: managed hooks に変更がない場合、`.codex/hooks.json` に git 差分が出ず、確認ダイアログも表示されないこと
+- SC-006: managed hooks に変更がある場合、Codex agent 起動前に英語の確認ダイアログが表示されること
+- SC-007: 確認ダイアログで Skip を選択した場合、hooks が書き換えられず agent が起動すること
+- SC-008: Claude Code / Gemini agent 起動時には確認ダイアログが表示されないこと
