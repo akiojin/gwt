@@ -62,6 +62,9 @@ pub struct IssuePanelState {
     pub search_query: String,
     pub search_mode: bool,
     pub loading: bool,
+    pub detail_mode: bool,
+    pub detail_content: String,
+    pub detail_scroll: usize,
 }
 
 impl IssuePanelState {
@@ -150,6 +153,10 @@ pub enum IssuesMessage {
     SearchClear,
     Enter,
     Loaded(Vec<IssueItem>),
+    OpenDetail,
+    CloseDetail,
+    ScrollDetailUp,
+    ScrollDetailDown,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +165,14 @@ pub enum IssuesMessage {
 
 /// Handle a key event for the issues screen.
 pub fn handle_key(state: &IssuePanelState, key: &KeyEvent) -> Option<IssuesMessage> {
+    if state.detail_mode {
+        return match key.code {
+            KeyCode::Esc => Some(IssuesMessage::CloseDetail),
+            KeyCode::Up | KeyCode::Char('k') => Some(IssuesMessage::ScrollDetailUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(IssuesMessage::ScrollDetailDown),
+            _ => None,
+        };
+    }
     if state.search_mode {
         return handle_search_key(key);
     }
@@ -167,7 +182,7 @@ pub fn handle_key(state: &IssuePanelState, key: &KeyEvent) -> Option<IssuesMessa
         KeyCode::Char('k') | KeyCode::Up => Some(IssuesMessage::SelectPrev),
         KeyCode::Char('/') => Some(IssuesMessage::ToggleSearch),
         KeyCode::Char('r') => Some(IssuesMessage::Refresh),
-        KeyCode::Enter => Some(IssuesMessage::Enter),
+        KeyCode::Enter => Some(IssuesMessage::OpenDetail),
         _ => None,
     }
 }
@@ -212,7 +227,25 @@ pub fn update(state: &mut IssuePanelState, msg: IssuesMessage) {
             state.set_issues(issues);
         }
         IssuesMessage::Enter => {
-            // Handled at app level.
+            // Handled at app level (intercepted for OpenDetail).
+        }
+        IssuesMessage::OpenDetail => {
+            if state.selected_issue().is_some() {
+                state.detail_mode = true;
+                state.detail_scroll = 0;
+                // detail_content is populated by app.rs intercept
+            }
+        }
+        IssuesMessage::CloseDetail => {
+            state.detail_mode = false;
+            state.detail_content.clear();
+            state.detail_scroll = 0;
+        }
+        IssuesMessage::ScrollDetailUp => {
+            state.detail_scroll = state.detail_scroll.saturating_sub(1);
+        }
+        IssuesMessage::ScrollDetailDown => {
+            state.detail_scroll = state.detail_scroll.saturating_add(1);
         }
     }
 }
@@ -224,6 +257,11 @@ pub fn update(state: &mut IssuePanelState, msg: IssuesMessage) {
 /// Render the issues screen.
 pub fn render(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
     if area.height < 3 || area.width < 10 {
+        return;
+    }
+
+    if state.detail_mode {
+        render_detail(state, buf, area);
         return;
     }
 
@@ -405,6 +443,36 @@ fn render_search_bar(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
         ),
     ]);
     buf.set_line(area.x, area.y, &line, area.width);
+}
+
+/// Render detail view for a selected issue.
+fn render_detail(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
+    let issue = state.selected_issue();
+    let title = issue.map(|i| i.title.as_str()).unwrap_or("?");
+    let number = issue.map(|i| i.number).unwrap_or(0);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // Header
+        Constraint::Min(1),    // Content
+    ])
+    .split(area);
+
+    // Header
+    let header = format!(" #{number} {title}  [Esc] Back");
+    let header_span = Span::styled(header, Style::default().fg(Color::Cyan).bold());
+    buf.set_span(layout[0].x, layout[0].y, &header_span, layout[0].width);
+
+    // Content
+    let lines: Vec<&str> = state.detail_content.lines().collect();
+    let content_area = layout[1];
+    let max_rows = content_area.height as usize;
+    let scroll = state.detail_scroll.min(lines.len().saturating_sub(1));
+
+    for (i, line) in lines.iter().skip(scroll).take(max_rows).enumerate() {
+        let y = content_area.y + i as u16;
+        let span = Span::styled(*line, Style::default().fg(Color::White));
+        buf.set_span(content_area.x, y, &span, content_area.width);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +815,70 @@ mod tests {
     fn render_small_area_does_not_panic() {
         let state = IssuePanelState::new();
         let backend = TestBackend::new(5, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f.buffer_mut(), area);
+            })
+            .unwrap();
+    }
+
+    // -- Detail mode tests --
+
+    #[test]
+    fn detail_open_close() {
+        let mut state = IssuePanelState::new();
+        state.issues = vec![make_issue(1, "Test", "open")];
+        update(&mut state, IssuesMessage::OpenDetail);
+        assert!(state.detail_mode);
+        assert_eq!(state.detail_scroll, 0);
+        state.detail_content = "detail text".to_string();
+        update(&mut state, IssuesMessage::CloseDetail);
+        assert!(!state.detail_mode);
+        assert!(state.detail_content.is_empty());
+    }
+
+    #[test]
+    fn detail_scroll() {
+        let mut state = IssuePanelState::new();
+        state.detail_mode = true;
+        update(&mut state, IssuesMessage::ScrollDetailDown);
+        assert_eq!(state.detail_scroll, 1);
+        update(&mut state, IssuesMessage::ScrollDetailUp);
+        assert_eq!(state.detail_scroll, 0);
+        update(&mut state, IssuesMessage::ScrollDetailUp);
+        assert_eq!(state.detail_scroll, 0);
+    }
+
+    #[test]
+    fn handle_key_detail_mode() {
+        let mut state = IssuePanelState::new();
+        state.detail_mode = true;
+        let key_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(
+            handle_key(&state, &key_esc),
+            Some(IssuesMessage::CloseDetail)
+        ));
+        let key_up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert!(matches!(
+            handle_key(&state, &key_up),
+            Some(IssuesMessage::ScrollDetailUp)
+        ));
+        let key_down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert!(matches!(
+            handle_key(&state, &key_down),
+            Some(IssuesMessage::ScrollDetailDown)
+        ));
+    }
+
+    #[test]
+    fn render_detail_mode() {
+        let mut state = IssuePanelState::new();
+        state.issues = vec![make_issue(1, "Bug Fix", "open")];
+        state.detail_mode = true;
+        state.detail_content = "Detail line 1\nDetail line 2".to_string();
+        let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {

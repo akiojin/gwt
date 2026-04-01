@@ -1015,7 +1015,8 @@ impl WizardState {
         let mut options = Vec::new();
 
         // Detect installed version
-        if let Ok(output) = std::process::Command::new(agent_id)
+        let cmd_name = agent_id;
+        if let Ok(output) = std::process::Command::new(cmd_name)
             .arg("--version")
             .output()
         {

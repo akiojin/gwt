@@ -3,6 +3,7 @@
 use crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::model::{ErrorEntry, ManagementTab};
+use crate::screens::versions::VersionsMessage;
 use crate::screens::{BranchesMessage, IssuesMessage, LogsMessage, SettingsMessage};
 
 /// All messages that can flow through the Elm Architecture update loop.
@@ -91,6 +92,7 @@ pub enum Message {
     IssuesMsg(IssuesMessage),
     SettingsMsg(SettingsMessage),
     LogsMsg(LogsMessage),
+    VersionsMsg(VersionsMessage),
 }
 
 #[cfg(test)]
@@ -146,6 +148,7 @@ mod tests {
             Message::IssuesMsg(IssuesMessage::Refresh),
             Message::SettingsMsg(SettingsMessage::Refresh),
             Message::LogsMsg(LogsMessage::Refresh),
+            Message::VersionsMsg(VersionsMessage::SelectNext),
         ];
         assert!(msgs.len() > 10);
     }

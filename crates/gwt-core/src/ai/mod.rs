@@ -6,6 +6,7 @@ pub(crate) mod claude_paths;
 pub mod client;
 pub mod issue_classify;
 pub mod session_converter;
+pub mod session_detect;
 pub mod session_parser;
 pub mod summary;
 pub mod summary_trigger;
@@ -26,6 +27,7 @@ pub use session_converter::{
     ConversionError, ConversionMetadata, ConversionMetadataStore, ConversionResult, GeminiEncoder,
     LossInfo, MetadataStoreError, OpenCodeEncoder, SessionEncoder,
 };
+pub use session_detect::detect_session_id_for_tool;
 pub use session_parser::{
     AgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, MessageRole,
     OpenCodeSessionParser, ParsedSession, SessionListEntry, SessionMessage, SessionParseError,

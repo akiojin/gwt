@@ -24,10 +24,10 @@ Reference code: `crates/gwt-cli/` at commit `becf0aab` (38,415 lines)
 W1 | claude | feat/x | running | SPEC-42
 ```
 
-**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / Issues / SPECs / Settings / Logs の5タブ。ブランチ一覧がデフォルト表示。
+**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / Issues / SPECs / Settings / Logs / Versions の6タブ。ブランチ一覧がデフォルト表示。
 
 ```
-[Branches] [Issues] [SPECs] [Settings] [Logs]
+[Branches] [Issues] [SPECs] [Settings] [Logs] [Versions]
 ─────────────────────────────────────────────
   main              -   ○  #42 open
 * feat/x   Claude   *   ●  #38 merged
@@ -131,16 +131,21 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 11. copy mode 中にドラッグ選択 → マウスボタンを離すとシステムクリップボードへコピーされる
 12. copy mode 中に Esc / q → copy mode を終了し、表示は最新位置へ戻る
 13. Ctrl+G, x → アクティブタブが閉じる（ワークツリーの安全チェック付き）
-14. Ctrl+C ダブルタップ → gwt が終了する（実行中エージェントがあれば確認）
-15. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
-16. エージェントまたはシェルのプロセスが終了 → 対応するタブは自動で閉じる
-17. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
-18. 同じブランチで複数エージェントを起動可能
-19. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
-20. 管理画面内で Tab キーで Branches/Issues/SPECs/Settings/Logs を切替
-21. 管理画面でマウスクリックによりブランチを選択でき、Logs ではスクロールで履歴を辿れる
-22. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
-23. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
+14. Ctrl+C ダブルタップ → 実行中セッションがある場合は確認ダイアログ表示
+15. 確認ダイアログで Enter(確定)/Esc(キャンセル)/Left-Right(選択切替)
+16. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
+17. エージェントまたはシェルのプロセスが終了 → 対応するタブは自動で閉じる
+18. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
+19. 同じブランチで複数エージェントを起動可能
+20. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
+21. 管理画面内で Tab キーで Branches/Issues/SPECs/Settings/Logs/Versions を切替
+22. 管理画面でマウスクリックによりブランチを選択でき、Logs ではスクロールで履歴を辿れる
+23. SPECs タブで Enter → spec.md の詳細ビューが表示、Esc で戻る
+24. Issues タブで Enter → SPEC の場合は spec.md、それ以外は gh コマンド案内を表示
+25. Versions タブで git タグ一覧を表示、Enter でタグ詳細
+26. 管理画面のステータスバーに実行中セッション数を表示
+27. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
+28. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
 
 ## Edge Cases
 
@@ -161,7 +166,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 ### Core UI
 
 - FR-001: gwt-tui crate using ratatui + crossterm, Elm Architecture (Model/View/Update)
-- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/Issues/SPECs/Settings/Logs tabs)
+- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/Issues/SPECs/Settings/Logs/Versions tabs)
 - FR-003: Ctrl+G,Ctrl+G トグルで メイン ↔ 管理画面 切替
 - FR-004: Ctrl+G prefix key system (2s timeout) for all management operations
 - FR-005: VT100 emulator buffer to ratatui Cell conversion (renderer)
@@ -233,6 +238,11 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-075: File paste from clipboard (dedicated shortcut, OS-native API)
 - FR-076: Mouse support for management panels (click selection, scroll) and PTY copy mode
 - FR-077: Error handling: ErrorQueue + modal (critical) + status bar (minor)
+- FR-078: Versions tab — git tag list with detail view (git show)
+- FR-079: Session history saving (ToolSessionEntry) on agent/shell spawn
+- FR-083: Quit confirmation dialog when running agents exist (Ctrl+C×2)
+- FR-081: SPECs/Issues detail view — Enter to view spec.md or issue details, Esc to return
+- FR-082: Status bar shows running agent session count in management layer
 
 ### npm Distribution
 

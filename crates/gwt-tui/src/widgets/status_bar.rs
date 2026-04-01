@@ -35,7 +35,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
             let tab_name = model.management_tab.label();
             let running = model.running_session_count();
             if running > 0 {
-                format!(" {tab_name} | {running} sessions running")
+                format!(" {tab_name} | {running} running")
             } else {
                 format!(" {tab_name}")
             }
@@ -159,6 +159,54 @@ mod tests {
         assert!(
             text.contains("feature/test"),
             "Expected branch in: {text:?}"
+        );
+    }
+
+    #[test]
+    fn render_management_with_running_agents() {
+        let mut model = test_model();
+        use crate::model::{SessionStatus, SessionTab, SessionTabType};
+        use gwt_core::terminal::AgentColor;
+        model.session_tabs.push(SessionTab {
+            pane_id: "p1".into(),
+            name: "Agent #1".into(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Blue,
+            status: SessionStatus::Running,
+            branch: Some("feature/test".into()),
+            spec_id: None,
+        });
+        model.session_tabs.push(SessionTab {
+            pane_id: "p2".into(),
+            name: "Agent #2".into(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: None,
+            spec_id: None,
+        });
+        // Stay in management layer
+        model.active_layer = ActiveLayer::Management;
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text = buf_row_text(&buf, 0, 120);
+        assert!(
+            text.contains("2 running"),
+            "Expected '2 running' in: {text:?}"
+        );
+    }
+
+    #[test]
+    fn render_management_no_running_agents() {
+        let model = test_model();
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text = buf_row_text(&buf, 0, 120);
+        assert!(
+            !text.contains("running"),
+            "Expected no 'running' in: {text:?}"
         );
     }
 

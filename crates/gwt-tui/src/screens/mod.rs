@@ -11,6 +11,7 @@ pub mod migration_dialog;
 pub mod settings;
 pub mod speckit_wizard;
 pub mod specs;
+pub mod versions;
 pub mod wizard;
 
 pub use branches::{

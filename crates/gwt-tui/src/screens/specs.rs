@@ -18,6 +18,9 @@ pub struct SpecsState {
     pub search_query: String,
     pub search_mode: bool,
     pub offset: usize,
+    pub detail_mode: bool,
+    pub detail_content: String,
+    pub detail_scroll: usize,
 }
 
 impl Default for SpecsState {
@@ -34,10 +37,13 @@ impl SpecsState {
             search_query: String::new(),
             search_mode: false,
             offset: 0,
+            detail_mode: false,
+            detail_content: String::new(),
+            detail_scroll: 0,
         }
     }
 
-    fn visible_specs(&self) -> Vec<&SpecItem> {
+    pub fn visible_specs(&self) -> Vec<&SpecItem> {
         if self.search_query.is_empty() {
             self.specs.iter().collect()
         } else {
@@ -60,9 +66,21 @@ pub enum SpecsMessage {
     ToggleSearch,
     SearchChar(char),
     SearchBackspace,
+    OpenDetail,
+    CloseDetail,
+    ScrollDetailUp,
+    ScrollDetailDown,
 }
 
 pub fn handle_key(state: &SpecsState, key: &KeyEvent) -> Option<SpecsMessage> {
+    if state.detail_mode {
+        return match key.code {
+            KeyCode::Esc => Some(SpecsMessage::CloseDetail),
+            KeyCode::Up | KeyCode::Char('k') => Some(SpecsMessage::ScrollDetailUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(SpecsMessage::ScrollDetailDown),
+            _ => None,
+        };
+    }
     if state.search_mode {
         match key.code {
             KeyCode::Esc | KeyCode::Enter => Some(SpecsMessage::ToggleSearch),
@@ -75,6 +93,7 @@ pub fn handle_key(state: &SpecsState, key: &KeyEvent) -> Option<SpecsMessage> {
             KeyCode::Up | KeyCode::Char('k') => Some(SpecsMessage::SelectPrev),
             KeyCode::Down | KeyCode::Char('j') => Some(SpecsMessage::SelectNext),
             KeyCode::Char('/') => Some(SpecsMessage::ToggleSearch),
+            KeyCode::Enter => Some(SpecsMessage::OpenDetail),
             _ => None,
         }
     }
@@ -106,11 +125,34 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
             state.search_query.pop();
             state.selected = 0;
         }
+        SpecsMessage::OpenDetail => {
+            if !state.visible_specs().is_empty() {
+                state.detail_mode = true;
+                state.detail_scroll = 0;
+                // detail_content is populated by app.rs intercept
+            }
+        }
+        SpecsMessage::CloseDetail => {
+            state.detail_mode = false;
+            state.detail_content.clear();
+            state.detail_scroll = 0;
+        }
+        SpecsMessage::ScrollDetailUp => {
+            state.detail_scroll = state.detail_scroll.saturating_sub(1);
+        }
+        SpecsMessage::ScrollDetailDown => {
+            state.detail_scroll = state.detail_scroll.saturating_add(1);
+        }
     }
 }
 
 pub fn render(state: &SpecsState, buf: &mut Buffer, area: Rect) {
     if area.height < 3 {
+        return;
+    }
+
+    if state.detail_mode {
+        render_detail(state, buf, area);
         return;
     }
 
@@ -170,6 +212,41 @@ pub fn render(state: &SpecsState, buf: &mut Buffer, area: Rect) {
         let search_line = format!(" Search: {}_", state.search_query);
         let span = Span::styled(search_line, Style::default().fg(Color::Yellow));
         buf.set_span(layout[2].x, layout[2].y, &span, layout[2].width);
+    }
+}
+
+fn render_detail(state: &SpecsState, buf: &mut Buffer, area: Rect) {
+    let visible = state.visible_specs();
+    let spec_id = visible
+        .get(state.selected)
+        .map(|s| s.id.as_str())
+        .unwrap_or("?");
+    let spec_title = visible
+        .get(state.selected)
+        .map(|s| s.title.as_str())
+        .unwrap_or("");
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // Header
+        Constraint::Min(1),    // Content
+    ])
+    .split(area);
+
+    // Header
+    let header = format!(" {spec_id} - {spec_title}  [Esc] Back");
+    let header_span = Span::styled(header, Style::default().fg(Color::Cyan).bold());
+    buf.set_span(layout[0].x, layout[0].y, &header_span, layout[0].width);
+
+    // Content: wrap spec.md text
+    let lines: Vec<&str> = state.detail_content.lines().collect();
+    let content_area = layout[1];
+    let max_rows = content_area.height as usize;
+    let scroll = state.detail_scroll.min(lines.len().saturating_sub(1));
+
+    for (i, line) in lines.iter().skip(scroll).take(max_rows).enumerate() {
+        let y = content_area.y + i as u16;
+        let span = Span::styled(*line, Style::default().fg(Color::White));
+        buf.set_span(content_area.x, y, &span, content_area.width);
     }
 }
 
@@ -591,5 +668,90 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let items = load_specs(dir.path());
         assert!(items.is_empty());
+    }
+
+    // -- detail_mode tests --
+
+    #[test]
+    fn detail_open_sets_flag() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        update(&mut s, SpecsMessage::OpenDetail);
+        assert!(s.detail_mode);
+        assert_eq!(s.detail_scroll, 0);
+    }
+
+    #[test]
+    fn detail_close_clears_state() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.detail_mode = true;
+        s.detail_content = "some content".into();
+        s.detail_scroll = 5;
+        update(&mut s, SpecsMessage::CloseDetail);
+        assert!(!s.detail_mode);
+        assert!(s.detail_content.is_empty());
+        assert_eq!(s.detail_scroll, 0);
+    }
+
+    #[test]
+    fn detail_scroll_up_down() {
+        let mut s = SpecsState::new();
+        s.detail_mode = true;
+        update(&mut s, SpecsMessage::ScrollDetailDown);
+        assert_eq!(s.detail_scroll, 1);
+        update(&mut s, SpecsMessage::ScrollDetailDown);
+        assert_eq!(s.detail_scroll, 2);
+        update(&mut s, SpecsMessage::ScrollDetailUp);
+        assert_eq!(s.detail_scroll, 1);
+        update(&mut s, SpecsMessage::ScrollDetailUp);
+        assert_eq!(s.detail_scroll, 0);
+        // Saturates at zero
+        update(&mut s, SpecsMessage::ScrollDetailUp);
+        assert_eq!(s.detail_scroll, 0);
+    }
+
+    #[test]
+    fn handle_key_detail_mode_esc_closes() {
+        let mut s = SpecsState::new();
+        s.detail_mode = true;
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Esc)),
+            Some(SpecsMessage::CloseDetail)
+        ));
+    }
+
+    #[test]
+    fn handle_key_detail_mode_scroll() {
+        let mut s = SpecsState::new();
+        s.detail_mode = true;
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Up)),
+            Some(SpecsMessage::ScrollDetailUp)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Down)),
+            Some(SpecsMessage::ScrollDetailDown)
+        ));
+    }
+
+    #[test]
+    fn handle_key_enter_opens_detail() {
+        let s = SpecsState::new();
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Enter)),
+            Some(SpecsMessage::OpenDetail)
+        ));
+    }
+
+    #[test]
+    fn render_detail_mode_no_panic() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.detail_mode = true;
+        s.detail_content = "# SPEC-1\n\nTest content\nLine 2".to_string();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&s, &mut buf, area);
     }
 }
