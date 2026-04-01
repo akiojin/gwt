@@ -503,7 +503,6 @@ fn handle_copy_mode_mouse(model: &mut Model, mouse: MouseEvent) -> bool {
             adjust_copy_mode_scrollback(model, -1);
             true
         }
-        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => true,
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(point) = main_area_point(model, mouse) {
                 let point = clamp_point(point, rows, cols);
@@ -680,25 +679,9 @@ pub fn update(model: &mut Model, msg: Message) {
                             crate::screens::wizard::WizardAction::Complete => {
                                 // Build config from wizard and launch agent
                                 let launch_result = wiz.build_launch_config();
-                                let from_spec = wiz.from_spec;
-                                let spec_id = wiz.spec_id.clone();
                                 model.wizard = None;
                                 match launch_result {
                                     Ok(config) => {
-                                        // Save branch to SPEC metadata (SPEC-1785 FR-031)
-                                        if from_spec {
-                                            if let Some(ref sid) = spec_id {
-                                                let dir_name = format!(
-                                                    "SPEC-{}",
-                                                    sid.trim_start_matches("SPEC-")
-                                                );
-                                                crate::screens::specs::save_spec_branch(
-                                                    &model.repo_root,
-                                                    &dir_name,
-                                                    &config.branch_name,
-                                                );
-                                            }
-                                        }
                                         if let Err(e) = spawn_agent_session(model, &config) {
                                             model.push_error(ErrorEntry {
                                                 message: format!("Failed to launch agent: {e}"),
@@ -818,47 +801,23 @@ pub fn update(model: &mut Model, msg: Message) {
                         }
                         ManagementTab::Specs => {
                             crate::screens::specs::handle_key(&model.specs_state, &key).map(|m| {
-                                use crate::screens::specs::SpecsMessage;
-                                match m {
-                                    SpecsMessage::OpenDetail => {
-                                        let visible = model.specs_state.visible_specs();
-                                        if let Some(spec) = visible.get(model.specs_state.selected)
-                                        {
-                                            let spec_path = model
-                                                .repo_root
-                                                .join("specs")
-                                                .join(&spec.dir_name)
-                                                .join("spec.md");
-                                            model.specs_state.detail_content = read_detail_markdown(
-                                                &spec_path,
-                                                "open_spec_detail",
-                                                "spec",
-                                            );
-                                        }
-                                        crate::screens::specs::update(&mut model.specs_state, m);
-                                    }
-                                    SpecsMessage::LaunchAgent => {
-                                        handle_specs_launch_agent(model);
-                                    }
-                                    SpecsMessage::ConfirmLaunch => {
-                                        model.specs_state.confirm_launch = false;
-                                        handle_specs_resolve_branch_and_open_wizard(model);
-                                    }
-                                    SpecsMessage::SelectBranch => {
-                                        let idx = model.specs_state.branch_selected;
-                                        let candidates =
-                                            model.specs_state.branch_candidates.clone();
-                                        model.specs_state.branch_select_mode = false;
-                                        handle_specs_open_wizard_with_branch(
-                                            model,
-                                            &candidates,
-                                            idx,
+                                // Intercept OpenDetail to load spec.md content
+                                if matches!(m, crate::screens::specs::SpecsMessage::OpenDetail) {
+                                    let visible = model.specs_state.visible_specs();
+                                    if let Some(spec) = visible.get(model.specs_state.selected) {
+                                        let spec_path = model
+                                            .repo_root
+                                            .join("specs")
+                                            .join(&spec.dir_name)
+                                            .join("spec.md");
+                                        model.specs_state.detail_content = read_detail_markdown(
+                                            &spec_path,
+                                            "open_spec_detail",
+                                            "spec",
                                         );
                                     }
-                                    _ => {
-                                        crate::screens::specs::update(&mut model.specs_state, m);
-                                    }
                                 }
+                                crate::screens::specs::update(&mut model.specs_state, m);
                                 Message::Tick // dummy
                             })
                         }
@@ -961,18 +920,6 @@ pub fn update(model: &mut Model, msg: Message) {
                         error_detail = %error,
                     );
                 }
-            }
-
-            if model.pending_resume_panes.remove(&pane_id) {
-                tracing::info!(
-                    message = "flow_success",
-                    category = "ui",
-                    event = "first_pty_output_after_resume",
-                    result = "success",
-                    workspace = "default",
-                    pane_id = pane_id.as_str(),
-                    bytes = data.len(),
-                );
             }
 
             // Feed data to VT100 parser
@@ -1703,10 +1650,7 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
 /// Returns the existing worktree path if one is already checked out for
 /// *branch_name*, creates a new worktree otherwise, and falls back to
 /// *repo_root* when neither succeeds.
-fn resolve_branch_working_dir(
-    repo_root: &std::path::Path,
-    branch_name: &str,
-) -> std::path::PathBuf {
+fn resolve_branch_working_dir(repo_root: &std::path::Path, branch_name: &str) -> std::path::PathBuf {
     use gwt_core::worktree::WorktreeManager;
     match WorktreeManager::new(repo_root) {
         Ok(wt_manager) => match wt_manager.get_by_branch(branch_name) {
@@ -1740,22 +1684,6 @@ fn spawn_agent_session(
     } else {
         model.repo_root.clone()
     };
-
-    if matches!(
-        wiz_config.execution_mode,
-        crate::screens::wizard::WizardExecutionMode::Resume
-    ) {
-        tracing::info!(
-            message = "flow_start",
-            category = "ui",
-            event = "resume_requested",
-            result = "start",
-            workspace = "default",
-            agent_id = agent_id.as_str(),
-            branch = wiz_config.branch_name.as_str(),
-            session_id = wiz_config.session_id.as_deref().unwrap_or("latest"),
-        );
-    }
 
     // Register managed skills/hooks for this agent (SPEC-1438 FR-REG-001)
     if let Some(agent_type) = SkillAgentType::from_agent_id(agent_id) {
@@ -1879,7 +1807,7 @@ fn spawn_agent_session(
 
     // Add session tab
     model.add_session(crate::model::SessionTab {
-        pane_id: pane_id.clone(),
+        pane_id,
         name: display_name,
         tab_type: crate::model::SessionTabType::Agent,
         color,
@@ -1894,24 +1822,6 @@ fn spawn_agent_session(
 
     // Switch to Main layer
     model.active_layer = ActiveLayer::Main;
-
-    if matches!(
-        wiz_config.execution_mode,
-        crate::screens::wizard::WizardExecutionMode::Resume
-    ) {
-        model.pending_resume_panes.insert(pane_id.clone());
-        tracing::info!(
-            message = "flow_success",
-            category = "ui",
-            event = "resume_attached",
-            result = "success",
-            workspace = "default",
-            agent_id = agent_id.as_str(),
-            pane_id = pane_id.as_str(),
-            branch = wiz_config.branch_name.as_str(),
-            session_id = wiz_config.session_id.as_deref().unwrap_or("latest"),
-        );
-    }
 
     // Save session entry for branch tool history (populates Quick Start)
     let agent_label = gwt_core::agent::launch::find_agent_def(agent_id)
@@ -2005,112 +1915,6 @@ fn spawn_agent_session(
     }
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// SPECs screen → Agent launch helpers (SPEC-1785)
-// ---------------------------------------------------------------------------
-
-/// Extract selected SPEC data (id, phase, branches) to avoid borrow conflicts.
-fn selected_spec_data(model: &Model) -> Option<(String, String, Vec<String>)> {
-    let visible = model.specs_state.visible_specs();
-    visible
-        .get(model.specs_state.selected)
-        .map(|s| (s.id.clone(), s.phase.clone(), s.branches.clone()))
-}
-
-/// Handle SpecsMessage::LaunchAgent — phase check, then branch resolution.
-fn handle_specs_launch_agent(model: &mut Model) {
-    let Some((_, phase, _)) = selected_spec_data(model) else {
-        return;
-    };
-
-    // Phase gate: draft/blocked require confirmation
-    let phase_lower = phase.to_lowercase();
-    if phase_lower == "draft" || phase_lower == "blocked" {
-        model.specs_state.confirm_launch = true;
-        model.specs_state.confirm_spec_index = model.specs_state.selected;
-        return;
-    }
-
-    handle_specs_resolve_branch_and_open_wizard(model);
-}
-
-/// Resolve branch for the selected SPEC, then open wizard or branch select dialog.
-fn handle_specs_resolve_branch_and_open_wizard(model: &mut Model) {
-    let Some((spec_id, _, branches)) = selected_spec_data(model) else {
-        return;
-    };
-
-    // Collect branch candidates from metadata + git
-    let mut candidates: Vec<String> = branches;
-
-    // Fallback: search git branches containing the SPEC ID
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["branch", "--list", &format!("*{}*", spec_id)])
-        .current_dir(&model.repo_root)
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let branch = line.trim().trim_start_matches("* ");
-                if !branch.is_empty() && !candidates.contains(&branch.to_string()) {
-                    candidates.push(branch.to_string());
-                }
-            }
-        }
-    }
-
-    match candidates.len() {
-        0 => {
-            // No existing branch — create new
-            let branch_name = format!("feature/{}", spec_id);
-            open_spec_wizard(model, &spec_id, &branch_name, true);
-        }
-        1 => {
-            // Single candidate — auto-select
-            let branch_name = candidates[0].clone();
-            open_spec_wizard(model, &spec_id, &branch_name, false);
-        }
-        _ => {
-            // Multiple candidates — show selection dialog
-            model.specs_state.branch_candidates = candidates;
-            model.specs_state.branch_selected = 0;
-            model.specs_state.branch_select_mode = true;
-        }
-    }
-}
-
-/// Handle branch selection from dialog (or new branch creation).
-fn handle_specs_open_wizard_with_branch(
-    model: &mut Model,
-    candidates: &[String],
-    selected_idx: usize,
-) {
-    let Some((spec_id, _, _)) = selected_spec_data(model) else {
-        return;
-    };
-
-    if selected_idx >= candidates.len() {
-        // "Create new" option (last item beyond candidates)
-        let branch_name = format!("feature/{}", spec_id);
-        open_spec_wizard(model, &spec_id, &branch_name, true);
-    } else {
-        let branch_name = candidates[selected_idx].clone();
-        open_spec_wizard(model, &spec_id, &branch_name, false);
-    }
-}
-
-/// Open the wizard for a SPEC launch with resolved branch.
-fn open_spec_wizard(model: &mut Model, spec_id: &str, branch_name: &str, is_new_branch: bool) {
-    let history = load_quick_start_history(&model.repo_root, branch_name);
-    model.wizard = Some(crate::screens::wizard::WizardState::open_for_spec(
-        spec_id,
-        branch_name,
-        is_new_branch,
-        history,
-    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -2391,8 +2195,6 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     terminal.show_cursor()?;
 
-    let _ = gwt_core::terminal::scrollback::ScrollbackFile::cleanup_all();
-
     Ok(())
 }
 
@@ -2650,44 +2452,6 @@ mod tests {
 
         let parser = m.vt_parsers.get("pane-s1").unwrap();
         assert!(parser.screen().scrollback() > 0);
-    }
-
-    #[test]
-    fn update_copy_mode_mouse_scrolls_transcript_history() {
-        let mut m = test_model();
-        m.terminal_cols = 40;
-        m.terminal_rows = 10;
-
-        let _reader = add_cat_session(&mut m, "mouse-history");
-        m.vt_parsers.insert(
-            "pane-mouse-history".to_string(),
-            vt100::Parser::new(6, 40, 2),
-        );
-
-        for index in 0..12 {
-            update(
-                &mut m,
-                Message::PtyOutput {
-                    pane_id: "pane-mouse-history".into(),
-                    data: format!("line-{index}\r\n").into_bytes(),
-                },
-            );
-        }
-
-        update(&mut m, Message::TogglePtyCopyMode);
-        assert_eq!(m.pty_copy_mode.as_ref().unwrap().scrollback, 0);
-
-        update(
-            &mut m,
-            Message::MouseInput(make_mouse(MouseEventKind::ScrollUp)),
-        );
-        assert!(m.pty_copy_mode.as_ref().unwrap().scrollback > 0);
-
-        update(
-            &mut m,
-            Message::MouseInput(make_mouse(MouseEventKind::ScrollDown)),
-        );
-        assert_eq!(m.pty_copy_mode.as_ref().unwrap().scrollback, 0);
     }
 
     #[test]
