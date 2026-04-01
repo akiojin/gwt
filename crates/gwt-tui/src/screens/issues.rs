@@ -408,6 +408,66 @@ fn render_search_bar(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+
+/// Scan `specs/SPEC-*/metadata.json` to populate the issue list with local SPECs.
+pub fn load_specs(repo_root: &std::path::Path) -> Vec<IssueItem> {
+    let specs_dir = repo_root.join("specs");
+    let mut items = Vec::new();
+
+    let entries = match std::fs::read_dir(&specs_dir) {
+        Ok(e) => e,
+        Err(_) => return items,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if !name.starts_with("SPEC-") {
+            continue;
+        }
+
+        let metadata_path = path.join("metadata.json");
+        let title = std::fs::read_to_string(&metadata_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["title"].as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| name.clone());
+
+        let status = std::fs::read_to_string(&metadata_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["status"].as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "open".to_string());
+
+        let number = name
+            .trim_start_matches("SPEC-")
+            .parse::<u64>()
+            .unwrap_or(0);
+
+        items.push(IssueItem {
+            number,
+            title,
+            is_spec: true,
+            spec_id: Some(name),
+            state: status,
+            labels: vec!["spec".to_string()],
+        });
+    }
+
+    items.sort_by(|a, b| b.number.cmp(&a.number));
+    items
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

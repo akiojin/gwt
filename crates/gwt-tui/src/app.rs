@@ -796,7 +796,15 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Initialize model
-    let mut model = Model::new(repo_root);
+    let mut model = Model::new(repo_root.clone());
+
+    // Load initial data for management screens
+    model.branches_state.branches =
+        crate::screens::branches::load_branches(&repo_root);
+    model.settings_state.load_settings();
+    model.logs_state.entries = crate::screens::logs::load_log_entries();
+    model.issues_state.issues =
+        crate::screens::issues::load_specs(&repo_root);
 
     // PTY output channel
     let (pty_tx, pty_rx) = event::pty_output_channel();
