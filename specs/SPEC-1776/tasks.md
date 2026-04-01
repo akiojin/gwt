@@ -94,9 +94,7 @@
 - [x] T147: [TDD] Logs タブを workspace JSONL + structured fields (`category` / `event` / `result` / `workspace` / `error_code`) 対応に更新
 - [x] T148: [TDD] Branches タブの `All / Local / Remote` ビューフィルターが `origin/*` remote refs でも正しく切り替わるよう修正
 - [x] T149: [TDD] Branches 一覧で `refs/remotes/<remote>/HEAD` 由来の `origin` alias を除外
-- [x] T150: [TDD] Agent/Shell PTY copy mode で session-scoped file-backed ANSI transcript を読み、live parser を超える過去出力も表示
-- [x] T151: [TDD] chatty PTY 出力が続いても copy mode の trackpad / mouse scroll が terminal input starvation で詰まらないよう EventLoop を調整
-- [x] T152: [TDD] pane close / app shutdown 時に session-scoped transcript を cleanup する
+- [x] T150: [TDD] Main PTY copy mode で file-backed ANSI transcript を読み、live parser を超える過去出力も表示
 
 ## Phase 3: Wizard + Agent Launch [P]
 
@@ -120,6 +118,9 @@
   - [x] T220a: [TDD] AgentLaunchBuilder の auto_worktree テスト — worktree なし時のフォールバック確認
   - [x] T220b: [TDD] spawn_agent_session の worktree 解決テスト — branch 指定時に resolve_branch_working_dir が呼ばれることの確認
   - [x] T220c: spawn_agent_session でブランチ指定時に worktree パスを解決し、skill registration と builder の両方で使用する
+  - [x] T220d: [TDD] resolve_repo_root テスト — 非gitディレクトリからbare repo自動検出
+  - [x] T220e: [TDD] load_branches の bare repo 対応テスト
+  - [x] T220f: main.rs に resolve_repo_root を実装、branches.rs の load_branches を bare repo 対応
 - [ ] T221: キャンセル可能なバックグラウンド起動
 - [ ] T222: セッション履歴の保存 (save_session_entry)
 - [ ] T223: npm バージョン取得 + キャッシュ
