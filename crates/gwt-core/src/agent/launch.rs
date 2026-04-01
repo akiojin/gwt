@@ -889,4 +889,29 @@ mod tests {
             assert!(cmd.starts_with('/') || cmd.contains("sh"));
         }
     }
+
+    #[test]
+    fn test_agent_launch_builder_auto_worktree_fallback_on_invalid_repo() {
+        // auto_worktree(true) but repo_root is not a valid git repository;
+        // working_dir should fall back to the original value.
+        let config = AgentLaunchBuilder::new("claude", "/tmp/not-a-real-repo")
+            .branch_name("develop")
+            .repo_root(std::path::Path::new("/tmp/not-a-real-repo"))
+            .auto_worktree(true)
+            .build()
+            .expect("build should succeed");
+        assert_eq!(config.working_dir, PathBuf::from("/tmp/not-a-real-repo"));
+    }
+
+    #[test]
+    fn test_agent_launch_builder_without_auto_worktree_keeps_working_dir() {
+        // Without auto_worktree, working_dir stays as the initial value
+        // even when branch_name and repo_root are set.
+        let config = AgentLaunchBuilder::new("claude", "/tmp/original")
+            .branch_name("feature/test")
+            .repo_root(std::path::Path::new("/tmp/original"))
+            .build()
+            .expect("build should succeed");
+        assert_eq!(config.working_dir, PathBuf::from("/tmp/original"));
+    }
 }

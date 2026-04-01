@@ -93,6 +93,8 @@
 - [x] T146: [TDD] Versions タブを最新 10 バージョンの range / commit count / summary preview 付き履歴表示へ更新
 - [x] T147: [TDD] Logs タブを workspace JSONL + structured fields (`category` / `event` / `result` / `workspace` / `error_code`) 対応に更新
 - [x] T148: [TDD] Branches タブの `All / Local / Remote` ビューフィルターが `origin/*` remote refs でも正しく切り替わるよう修正
+- [x] T149: [TDD] Branches 一覧で `refs/remotes/<remote>/HEAD` 由来の `origin` alias を除外
+- [x] T150: [TDD] Main PTY copy mode で file-backed ANSI transcript を読み、live parser を超える過去出力も表示
 
 ## Phase 3: Wizard + Agent Launch [P]
 
@@ -113,6 +115,9 @@
 ### Agent Launch Orchestration
 
 - [ ] T220: 6段階起動パイプライン (fetch → validate → worktree → skills → deps → launch)
+  - [x] T220a: [TDD] AgentLaunchBuilder の auto_worktree テスト — worktree なし時のフォールバック確認
+  - [x] T220b: [TDD] spawn_agent_session の worktree 解決テスト — branch 指定時に resolve_branch_working_dir が呼ばれることの確認
+  - [x] T220c: spawn_agent_session でブランチ指定時に worktree パスを解決し、skill registration と builder の両方で使用する
 - [ ] T221: キャンセル可能なバックグラウンド起動
 - [ ] T222: セッション履歴の保存 (save_session_entry)
 - [ ] T223: npm バージョン取得 + キャッシュ

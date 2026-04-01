@@ -1,5 +1,39 @@
 # Progress: SPEC-1776
 
+## 2026-04-01: Agent launch worktree resolution fix
+
+### Progress
+
+- `spawn_agent_session` でブランチ選択時に `working_dir` が常に `model.repo_root` に固定されていたバグを修正
+- `resolve_branch_working_dir` ヘルパーで `WorktreeManager` を使い、対象ブランチの worktree パスを builder・skill registration より前に解決
+- `launch.rs` に auto_worktree フォールバックのユニットテストを追加
+
+### Done
+
+- Branches → ブランチ選択 → Launch Agent → 対象ブランチの worktree ディレクトリで agent が起動
+
+### Next
+
+- 手動 E2E: Branches → develop 選択 → Launch Agent → agent の cwd が develop worktree であることを確認
+
+## 2026-04-01: Remote HEAD alias and deep PTY scrollback
+
+### Progress
+
+- Confirmed that `origin` in Branches was not a real branch but `refs/remotes/origin/HEAD` collapsing to `%(refname:short)` during remote ref listing
+- Moved the fix to `gwt-core` remote branch enumeration so `origin` is filtered before the TUI builds Branch items
+- Confirmed that Main PTY copy mode only used `vt100::Parser` in-memory history and never read the pane transcript persisted on disk
+- Wired `Message::PtyOutput` to persist raw PTY bytes into pane scrollback files, then built a dedicated copy-mode history parser from that transcript so old output remains visible with ANSI styling intact
+
+### Done
+
+- Branches no longer shows the fake `origin` row from remote HEAD aliases
+- Main PTY copy mode can now scroll into output older than the live parser buffer while preserving ANSI colors
+
+### Next
+
+- Manual E2E: open a long-running agent pane, enter copy mode, jump to the oldest visible output, and confirm historical colored output still renders correctly
+
 ## 2026-04-01: Branch view-mode filter fix
 
 ### Progress
