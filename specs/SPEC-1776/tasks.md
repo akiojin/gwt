@@ -95,6 +95,7 @@
 - [x] T148: [TDD] Branches タブの `All / Local / Remote` ビューフィルターが `origin/*` remote refs でも正しく切り替わるよう修正
 - [x] T149: [TDD] Branches 一覧で `refs/remotes/<remote>/HEAD` 由来の `origin` alias を除外
 - [x] T150: [TDD] Main PTY copy mode で file-backed ANSI transcript を読み、live parser を超える過去出力も表示
+- [x] T151: [TDD] PTY 終了時に Agent/Shell タブを自動 close せず completed/error 状態のまま残し、最終 transcript を読めるように修正
 
 ## Phase 3: Wizard + Agent Launch [P]
 

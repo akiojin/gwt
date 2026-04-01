@@ -419,7 +419,7 @@ impl Model {
             }
         }
 
-        let mut exited_panes = Vec::new();
+        let mut session_status_updates = Vec::new();
         for pane in self.pane_manager.panes_mut() {
             let status = match pane.check_status() {
                 Ok(status) => status.clone(),
@@ -430,20 +430,33 @@ impl Model {
                 }
             };
 
-            if !matches!(status, PaneStatus::Running) {
-                exited_panes.push(pane.pane_id().to_string());
-            }
+            session_status_updates.push((pane.pane_id().to_string(), map_pane_status(&status)));
         }
 
-        // Close in reverse order to keep indices stable for earlier entries.
-        for pane_id in exited_panes.into_iter().rev() {
-            let _ = self.close_session_by_pane_id(&pane_id);
+        for (pane_id, status) in session_status_updates {
+            if let Some(tab) = self
+                .session_tabs
+                .iter_mut()
+                .find(|tab| tab.pane_id == pane_id)
+            {
+                tab.status = status;
+            }
         }
     }
 
     pub fn clear_pty_copy_mode(&mut self) {
         self.pty_copy_mode = None;
         self.pty_copy_parser = None;
+    }
+}
+
+fn map_pane_status(status: &gwt_core::terminal::pane::PaneStatus) -> SessionStatus {
+    match status {
+        gwt_core::terminal::pane::PaneStatus::Running => SessionStatus::Running,
+        gwt_core::terminal::pane::PaneStatus::Completed(code) => SessionStatus::Completed(*code),
+        gwt_core::terminal::pane::PaneStatus::Error(message) => {
+            SessionStatus::Error(message.clone())
+        }
     }
 }
 
@@ -494,7 +507,7 @@ mod tests {
             .expect("failed to attach pane");
     }
 
-    fn wait_for_auto_close(model: &mut Model, expected_sessions: usize) {
+    fn wait_for_session_count(model: &mut Model, expected_sessions: usize) {
         for _ in 0..50 {
             model.apply_background_updates();
             if model.session_tabs.len() == expected_sessions {
@@ -507,6 +520,22 @@ mod tests {
             expected_sessions,
             model.session_tabs.len()
         );
+    }
+
+    fn wait_for_session_status(model: &mut Model, pane_id: &str, expected: SessionStatus) {
+        for _ in 0..50 {
+            model.apply_background_updates();
+            if model
+                .session_tabs
+                .iter()
+                .find(|tab| tab.pane_id == pane_id)
+                .is_some_and(|tab| tab.status == expected)
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!("expected {pane_id} to reach status {:?}", expected);
     }
 
     #[test]
@@ -609,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_background_updates_auto_closes_completed_agent_session() {
+    fn apply_background_updates_keeps_completed_agent_session_visible() {
         let mut m = test_model();
         attach_test_pane(&mut m, "pane-agent", "/usr/bin/true", &[]);
         m.add_session(SessionTab {
@@ -622,14 +651,16 @@ mod tests {
             spec_id: None,
         });
 
-        wait_for_auto_close(&mut m, 0);
+        wait_for_session_count(&mut m, 1);
+        wait_for_session_status(&mut m, "pane-agent", SessionStatus::Completed(0));
 
-        assert!(m.session_tabs.is_empty());
-        assert_eq!(m.active_layer, ActiveLayer::Management);
+        assert_eq!(m.active_layer, ActiveLayer::Main);
+        assert_eq!(m.session_tabs.len(), 1);
+        assert_eq!(m.session_tabs[0].status, SessionStatus::Completed(0));
     }
 
     #[test]
-    fn apply_background_updates_auto_closes_completed_shell_session() {
+    fn apply_background_updates_keeps_completed_shell_session_visible() {
         let mut m = test_model();
         attach_test_pane(&mut m, "pane-shell", "/usr/bin/true", &[]);
         m.add_session(SessionTab {
@@ -642,14 +673,38 @@ mod tests {
             spec_id: None,
         });
 
-        wait_for_auto_close(&mut m, 0);
+        wait_for_session_count(&mut m, 1);
+        wait_for_session_status(&mut m, "pane-shell", SessionStatus::Completed(0));
 
-        assert!(m.session_tabs.is_empty());
-        assert_eq!(m.active_layer, ActiveLayer::Management);
+        assert_eq!(m.active_layer, ActiveLayer::Main);
+        assert_eq!(m.session_tabs.len(), 1);
+        assert_eq!(m.session_tabs[0].status, SessionStatus::Completed(0));
     }
 
     #[test]
-    fn apply_background_updates_closes_active_completed_session_and_keeps_neighbor_focused() {
+    fn apply_background_updates_keeps_failed_session_visible() {
+        let mut m = test_model();
+        attach_test_pane(&mut m, "pane-failed", "/usr/bin/false", &[]);
+        m.add_session(SessionTab {
+            pane_id: "pane-failed".to_string(),
+            name: "shell".to_string(),
+            tab_type: SessionTabType::Shell,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: None,
+            spec_id: None,
+        });
+
+        wait_for_session_count(&mut m, 1);
+        wait_for_session_status(&mut m, "pane-failed", SessionStatus::Completed(1));
+
+        assert_eq!(m.active_layer, ActiveLayer::Main);
+        assert_eq!(m.session_tabs.len(), 1);
+        assert_eq!(m.session_tabs[0].status, SessionStatus::Completed(1));
+    }
+
+    #[test]
+    fn apply_background_updates_keeps_completed_session_focused() {
         let mut m = test_model();
         attach_test_pane(&mut m, "pane-slow", "/bin/sleep", &["60"]);
         m.add_session(SessionTab {
@@ -672,11 +727,15 @@ mod tests {
             spec_id: None,
         });
 
-        wait_for_auto_close(&mut m, 1);
+        wait_for_session_count(&mut m, 2);
+        wait_for_session_status(&mut m, "pane-done", SessionStatus::Completed(0));
 
         assert_eq!(m.active_layer, ActiveLayer::Main);
-        assert_eq!(m.active_session, 0);
+        assert_eq!(m.active_session, 1);
         assert_eq!(m.session_tabs[0].pane_id, "pane-slow");
+        assert_eq!(m.session_tabs[0].status, SessionStatus::Running);
+        assert_eq!(m.session_tabs[1].pane_id, "pane-done");
+        assert_eq!(m.session_tabs[1].status, SessionStatus::Completed(0));
 
         let _ = m.close_active_session();
     }

@@ -154,7 +154,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 ## Edge Cases
 
 - Terminal size below 80x24: display warning
-- Agent/Shell PTY exit or crash: the corresponding tab closes automatically
+- Agent/Shell PTY exit or crash: the corresponding tab remains visible with completed/error state so the final transcript and error output can be inspected before manual close
 - Main PTY normal mode: terminal-native selection/copy must remain available because mouse capture stays disabled
 - PTY output arriving during copy mode: parser keeps ingesting bytes, but the visible viewport stays fixed until copy mode exits
 - Agent / Shell session files are not a scrollback source; pane transcript must remain available while the session tab is alive even when no agent session file exists
@@ -187,7 +187,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-013: Tab switching via Ctrl+G,]/[ and Ctrl+G,1-9
 - FR-014: Tab close via Ctrl+G,x with safety confirmation
 - FR-015: Automatic worktree creation on agent launch and cleanup on close
-- FR-016: Session termination polling via PTY process monitoring, with automatic tab close on exit
+- FR-016: Session termination polling via PTY process monitoring, updating session state to completed/error while keeping the tab open until the user closes it
 - FR-017: Active Agent/Shell tab enters PTY copy mode via Ctrl+G,m
 - FR-018: Active Agent/Shell PTY copy mode supports keyboard scrollback navigation (Up/Down/Left/Right/PgUp/PgDn/Home/End) across both live parser history and the session-scoped file-backed pane transcript, and exits with Esc/q, restoring the live viewport
 - FR-019: PTY copy mode supports mouse wheel and trackpad scroll plus drag selection, copying the selected text to the system clipboard on release/confirm

@@ -151,21 +151,37 @@
 ### Next
 
 - Manual E2E: open Logs tab and confirm trackpad scrolling moves through historical entries
-## 2026-04-01: Session auto-close on exit
+## 2026-04-01: Session auto-close on exit (superseded)
 
 ### Progress
 
 - Added PTY termination polling in `Model::apply_background_updates()`
-- Automatically close Agent and Shell tabs when their underlying process exits
-- Removed the previous Completed-tab retention behavior from the session lifecycle
+- Tried automatically closing Agent and Shell tabs when their underlying process exited
+- This behavior was later reverted the same day because it hid the final transcript/error output before the user could inspect it
 
 ### Done
 
-- Exited Agent and Shell sessions now close their tabs automatically
+- Superseded by the follow-up change below: exited Agent and Shell sessions now stay visible with completed/error state until manual close
 
 ### Next
 
-- Manual E2E: launch agent/shell, exit the process, confirm tab disappears cleanly
+- No further action for this approach; preserved only as historical context
+
+## 2026-04-01: Preserve exited session tabs for error inspection
+
+### Progress
+
+- Reproduced the user-facing failure mode: a short-lived agent/shell process printed its final error and then `Model::apply_background_updates()` immediately removed the session tab, sending the UI back to Branches before the message could be read
+- Replaced the auto-close path with session-status updates so `PaneStatus::Completed` / `PaneStatus::Error` are reflected into `SessionTab.status` while the tab and transcript remain visible
+- Added RED/GREEN coverage for completed agent and shell sessions plus focus retention on the exited tab
+
+### Done
+
+- Exited Agent and Shell sessions now remain open with completed/error state until the user closes them explicitly
+
+### Next
+
+- Manual E2E: launch an agent or shell that exits immediately, confirm the final output stays visible in the tab, then close it with `Ctrl+G,x`
 
 ## 2026-03-27: Phase 0 + Phase 1 Core Implementation
 
