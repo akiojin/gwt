@@ -1024,6 +1024,10 @@ fn remove_legacy_project_local_managed_asset(
         return Ok(());
     }
 
+    if legacy_project_local_asset_is_repo_tracked(project_root, legacy_path) {
+        return Ok(());
+    }
+
     if legacy_path.is_dir() {
         std::fs::remove_dir_all(legacy_path).map_err(|e| GwtError::ConfigWriteError {
             reason: format!(
@@ -1070,6 +1074,20 @@ fn remove_legacy_project_local_managed_asset(
     }
 
     Ok(())
+}
+
+fn legacy_project_local_asset_is_repo_tracked(project_root: &Path, legacy_path: &Path) -> bool {
+    let Ok(relative_path) = legacy_path.strip_prefix(project_root) else {
+        return false;
+    };
+
+    crate::process::command("git")
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(relative_path)
+        .current_dir(project_root)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn write_managed_asset(root: &Path, asset: &ManagedAsset, root_name: &str) -> Result<(), GwtError> {
@@ -3203,6 +3221,43 @@ OPENAI_API_KEY = "legacy-key"
         assert!(project_local_constitution_path(temp.path()).exists());
         assert!(!legacy_path.exists());
         assert!(!temp.path().join("memory").exists());
+    }
+
+    #[test]
+    fn registration_writes_repo_constitution_body_to_project_local_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        init_test_git_dir(temp.path());
+
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+
+        let written =
+            std::fs::read_to_string(project_local_constitution_path(temp.path())).unwrap();
+        assert_eq!(written, PROJECT_LOCAL_MANAGED_ASSETS[0].body);
+    }
+
+    #[test]
+    fn registration_preserves_tracked_repo_constitution_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("memory")).unwrap();
+        std::fs::write(repo_root.join("memory").join("constitution.md"), "repo constitution").unwrap();
+
+        run_git(temp.path(), &["init", repo_root.to_str().unwrap()]);
+        run_git(&repo_root, &["config", "user.name", "Test User"]);
+        run_git(&repo_root, &["config", "user.email", "test@example.com"]);
+        run_git(&repo_root, &["add", "memory/constitution.md"]);
+        run_git(&repo_root, &["commit", "-m", "test: track constitution"]);
+
+        let settings = registration_settings();
+        register_all_skills_with_settings_at_project_root(&settings, Some(&repo_root)).unwrap();
+
+        assert!(repo_root.join("memory").join("constitution.md").exists());
+        assert!(project_local_constitution_path(&repo_root).exists());
+        assert_eq!(
+            std::fs::read_to_string(repo_root.join("memory").join("constitution.md")).unwrap(),
+            "repo constitution"
+        );
     }
 
     #[test]
