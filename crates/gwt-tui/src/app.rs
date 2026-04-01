@@ -503,6 +503,7 @@ fn handle_copy_mode_mouse(model: &mut Model, mouse: MouseEvent) -> bool {
             adjust_copy_mode_scrollback(model, -1);
             true
         }
+        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => true,
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(point) = main_area_point(model, mouse) {
                 let point = clamp_point(point, rows, cols);
@@ -920,6 +921,18 @@ pub fn update(model: &mut Model, msg: Message) {
                         error_detail = %error,
                     );
                 }
+            }
+
+            if model.pending_resume_panes.remove(&pane_id) {
+                tracing::info!(
+                    message = "flow_success",
+                    category = "ui",
+                    event = "first_pty_output_after_resume",
+                    result = "success",
+                    workspace = "default",
+                    pane_id = pane_id.as_str(),
+                    bytes = data.len(),
+                );
             }
 
             // Feed data to VT100 parser
@@ -1685,6 +1698,22 @@ fn spawn_agent_session(
         model.repo_root.clone()
     };
 
+    if matches!(
+        wiz_config.execution_mode,
+        crate::screens::wizard::WizardExecutionMode::Resume
+    ) {
+        tracing::info!(
+            message = "flow_start",
+            category = "ui",
+            event = "resume_requested",
+            result = "start",
+            workspace = "default",
+            agent_id = agent_id.as_str(),
+            branch = wiz_config.branch_name.as_str(),
+            session_id = wiz_config.session_id.as_deref().unwrap_or("latest"),
+        );
+    }
+
     // Register managed skills/hooks for this agent (SPEC-1438 FR-REG-001)
     if let Some(agent_type) = SkillAgentType::from_agent_id(agent_id) {
         match gwt_core::config::Settings::load(&working_dir) {
@@ -1807,7 +1836,7 @@ fn spawn_agent_session(
 
     // Add session tab
     model.add_session(crate::model::SessionTab {
-        pane_id,
+        pane_id: pane_id.clone(),
         name: display_name,
         tab_type: crate::model::SessionTabType::Agent,
         color,
@@ -1822,6 +1851,24 @@ fn spawn_agent_session(
 
     // Switch to Main layer
     model.active_layer = ActiveLayer::Main;
+
+    if matches!(
+        wiz_config.execution_mode,
+        crate::screens::wizard::WizardExecutionMode::Resume
+    ) {
+        model.pending_resume_panes.insert(pane_id.clone());
+        tracing::info!(
+            message = "flow_success",
+            category = "ui",
+            event = "resume_attached",
+            result = "success",
+            workspace = "default",
+            agent_id = agent_id.as_str(),
+            pane_id = pane_id.as_str(),
+            branch = wiz_config.branch_name.as_str(),
+            session_id = wiz_config.session_id.as_deref().unwrap_or("latest"),
+        );
+    }
 
     // Save session entry for branch tool history (populates Quick Start)
     let agent_label = gwt_core::agent::launch::find_agent_def(agent_id)
@@ -2195,6 +2242,8 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     terminal.show_cursor()?;
 
+    let _ = gwt_core::terminal::scrollback::ScrollbackFile::cleanup_all();
+
     Ok(())
 }
 
@@ -2452,6 +2501,41 @@ mod tests {
 
         let parser = m.vt_parsers.get("pane-s1").unwrap();
         assert!(parser.screen().scrollback() > 0);
+    }
+
+    #[test]
+    fn update_copy_mode_mouse_scrolls_transcript_history() {
+        let mut m = test_model();
+        m.terminal_cols = 40;
+        m.terminal_rows = 10;
+
+        let _reader = add_cat_session(&mut m, "mouse-history");
+        m.vt_parsers.insert("pane-mouse-history".to_string(), vt100::Parser::new(6, 40, 2));
+
+        for index in 0..12 {
+            update(
+                &mut m,
+                Message::PtyOutput {
+                    pane_id: "pane-mouse-history".into(),
+                    data: format!("line-{index}\r\n").into_bytes(),
+                },
+            );
+        }
+
+        update(&mut m, Message::TogglePtyCopyMode);
+        assert_eq!(m.pty_copy_mode.as_ref().unwrap().scrollback, 0);
+
+        update(
+            &mut m,
+            Message::MouseInput(make_mouse(MouseEventKind::ScrollUp)),
+        );
+        assert!(m.pty_copy_mode.as_ref().unwrap().scrollback > 0);
+
+        update(
+            &mut m,
+            Message::MouseInput(make_mouse(MouseEventKind::ScrollDown)),
+        );
+        assert_eq!(m.pty_copy_mode.as_ref().unwrap().scrollback, 0);
     }
 
     #[test]

@@ -339,6 +339,11 @@ pub struct WizardState {
     pub branch_action_index: usize,
     pub has_branch_action: bool,
 
+    /// Whether this wizard was opened from the SPECs screen
+    pub from_spec: bool,
+    /// SPEC ID when launched from SPECs screen (e.g., "SPEC-1785")
+    pub spec_id: Option<String>,
+
     // Error / loading
     pub error: Option<String>,
     pub loading: bool,
@@ -393,6 +398,8 @@ impl WizardState {
             convert_session_index: 0,
             branch_action_index: 0,
             has_branch_action: false,
+            from_spec: false,
+            spec_id: None,
             error: None,
             loading: false,
         }
@@ -407,6 +414,32 @@ impl WizardState {
 
         if history.is_empty() {
             state.step = WizardStep::BranchAction;
+            state.has_quick_start = false;
+        } else {
+            state.step = WizardStep::QuickStart;
+            state.has_quick_start = true;
+            state.quick_start_entries = history;
+        }
+        state
+    }
+
+    /// Open wizard for a SPEC launch (from SPECs screen).
+    /// Branch name is pre-resolved; skip all branch-related steps.
+    pub fn open_for_spec(
+        spec_id: &str,
+        branch_name: &str,
+        is_new_branch: bool,
+        history: Vec<QuickStartEntry>,
+    ) -> Self {
+        let mut state = Self::new();
+        state.from_spec = true;
+        state.spec_id = Some(spec_id.to_string());
+        state.branch_name = branch_name.to_string();
+        state.is_new_branch = is_new_branch;
+        state.has_branch_action = false;
+
+        if history.is_empty() {
+            state.step = WizardStep::AgentSelect;
             state.has_quick_start = false;
         } else {
             state.step = WizardStep::QuickStart;
@@ -455,6 +488,8 @@ impl WizardState {
                 // we skip ahead to SkipPermissions (caller applies settings)
                 if self.quick_start_index < self.quick_start_entries.len() * 2 {
                     WizardStep::SkipPermissions
+                } else if self.from_spec {
+                    WizardStep::AgentSelect // Skip BranchAction for spec launches
                 } else {
                     WizardStep::BranchAction
                 }
@@ -493,8 +528,20 @@ impl WizardState {
                 }
             }
             WizardStep::ReasoningLevel => WizardStep::VersionSelect,
-            WizardStep::VersionSelect => WizardStep::ExecutionMode,
-            WizardStep::CollaborationModes => WizardStep::ExecutionMode,
+            WizardStep::VersionSelect => {
+                if self.from_spec {
+                    WizardStep::SkipPermissions
+                } else {
+                    WizardStep::ExecutionMode
+                }
+            }
+            WizardStep::CollaborationModes => {
+                if self.from_spec {
+                    WizardStep::SkipPermissions
+                } else {
+                    WizardStep::ExecutionMode
+                }
+            }
             WizardStep::ExecutionMode => WizardStep::SkipPermissions,
             WizardStep::ConvertAgentSelect => WizardStep::ConvertSessionSelect,
             WizardStep::ConvertSessionSelect => WizardStep::SkipPermissions,
@@ -532,6 +579,12 @@ impl WizardState {
             WizardStep::AgentSelect => {
                 if self.is_new_branch {
                     Some(WizardStep::BranchNameInput)
+                } else if self.from_spec {
+                    if self.has_quick_start {
+                        Some(WizardStep::QuickStart)
+                    } else {
+                        None // Close wizard — no branch steps to go back to
+                    }
                 } else if self.has_branch_action {
                     Some(WizardStep::BranchAction)
                 } else if self.has_quick_start {
@@ -561,7 +614,17 @@ impl WizardState {
             }
             WizardStep::ConvertAgentSelect => Some(WizardStep::ExecutionMode),
             WizardStep::ConvertSessionSelect => Some(WizardStep::ConvertAgentSelect),
-            WizardStep::SkipPermissions => Some(WizardStep::ExecutionMode),
+            WizardStep::SkipPermissions => {
+                if self.from_spec {
+                    if self.is_codex() && self.collaboration_modes {
+                        Some(WizardStep::CollaborationModes)
+                    } else {
+                        Some(WizardStep::VersionSelect)
+                    }
+                } else {
+                    Some(WizardStep::ExecutionMode)
+                }
+            }
         }
     }
 
@@ -2443,5 +2506,107 @@ mod tests {
         state.advance(); // -> SkipPermissions
         assert_eq!(state.step, WizardStep::SkipPermissions);
         assert!(state.is_complete());
+    }
+
+    // -- open_for_spec --
+
+    fn spec_quick_start_entry() -> QuickStartEntry {
+        QuickStartEntry {
+            tool_id: "claude".into(),
+            tool_label: "Claude Code".into(),
+            model: Some("opus".into()),
+            version: None,
+            session_id: Some("abc12345".into()),
+            skip_permissions: Some(true),
+            reasoning_level: None,
+            fast_mode: None,
+            collaboration_modes: None,
+            branch: "feature/SPEC-100".into(),
+        }
+    }
+
+    #[test]
+    fn open_for_spec_with_history_starts_at_quick_start() {
+        let history = vec![spec_quick_start_entry()];
+        let state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, history);
+        assert_eq!(state.step, WizardStep::QuickStart);
+        assert!(state.from_spec);
+        assert_eq!(state.spec_id, Some("SPEC-100".to_string()));
+        assert_eq!(state.branch_name, "feature/SPEC-100");
+        assert!(!state.is_new_branch);
+        assert!(state.has_quick_start);
+    }
+
+    #[test]
+    fn open_for_spec_without_history_starts_at_agent_select() {
+        let state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        assert_eq!(state.step, WizardStep::AgentSelect);
+        assert!(state.from_spec);
+        assert!(!state.has_quick_start);
+    }
+
+    #[test]
+    fn open_for_spec_new_branch() {
+        let state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", true, vec![]);
+        assert!(state.is_new_branch);
+        assert_eq!(state.branch_name, "feature/SPEC-100");
+    }
+
+    #[test]
+    fn next_step_from_spec_quick_start_choose_different_goes_to_agent_select() {
+        let history = vec![spec_quick_start_entry()];
+        let mut state =
+            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, history);
+        state.quick_start_index = state.quick_start_entries.len() * 2;
+        assert_eq!(state.next_step(), WizardStep::AgentSelect);
+    }
+
+    #[test]
+    fn next_step_from_spec_version_select_skips_execution_mode() {
+        let mut state =
+            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        state.step = WizardStep::VersionSelect;
+        assert_eq!(state.next_step(), WizardStep::SkipPermissions);
+    }
+
+    #[test]
+    fn next_step_from_spec_collaboration_modes_skips_execution_mode() {
+        let mut state =
+            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        state.step = WizardStep::CollaborationModes;
+        assert_eq!(state.next_step(), WizardStep::SkipPermissions);
+    }
+
+    #[test]
+    fn prev_step_from_spec_agent_select_without_quick_start_returns_none() {
+        let state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        assert_eq!(state.prev_step(), None);
+    }
+
+    #[test]
+    fn prev_step_from_spec_agent_select_with_quick_start_returns_quick_start() {
+        let history = vec![spec_quick_start_entry()];
+        let mut state =
+            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, history);
+        state.step = WizardStep::AgentSelect;
+        assert_eq!(state.prev_step(), Some(WizardStep::QuickStart));
+    }
+
+    #[test]
+    fn prev_step_from_spec_skip_permissions_goes_to_version_select() {
+        let mut state =
+            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        state.step = WizardStep::SkipPermissions;
+        assert_eq!(state.prev_step(), Some(WizardStep::VersionSelect));
+    }
+
+    #[test]
+    fn build_launch_config_from_spec() {
+        let mut state =
+            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        state.step = WizardStep::SkipPermissions;
+        let config = state.build_launch_config().unwrap();
+        assert_eq!(config.branch_name, "feature/SPEC-100");
+        assert!(!config.is_new_branch);
     }
 }
