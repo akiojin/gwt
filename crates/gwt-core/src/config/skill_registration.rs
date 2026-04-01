@@ -36,6 +36,7 @@ pub fn generate_managed_skills_block() -> String {
         "gwt-spec-analyze",
         "gwt-spec-ops",
         "gwt-spec-implement",
+        "gwt-spec-draft",
     ];
     const PR_SKILLS: &[&str] = &["gwt-pr", "gwt-pr-check", "gwt-pr-fix"];
     // Everything else goes to Utilities.
@@ -196,6 +197,7 @@ const MANAGED_SKILL_NAMES: &[&str] = &[
     "gwt-spec-search",
     "gwt-agent-dispatch",
     "gwt-spec-to-issue-migration",
+    "gwt-spec-draft",
 ];
 
 const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
@@ -405,6 +407,15 @@ const PROJECT_SKILL_ASSETS: &[ManagedAsset] = &[
         )),
         executable: false,
         rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "skills/gwt-spec-draft/SKILL.md",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.claude/skills/gwt-spec-draft/SKILL.md"
+        )),
+        executable: false,
+        rewrite_for_project: true,
     },
 ];
 
