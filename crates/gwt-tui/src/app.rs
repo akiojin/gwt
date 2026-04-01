@@ -4,7 +4,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -34,8 +34,7 @@ pub fn update(model: &mut Model, msg: Message) {
     match msg {
         Message::Quit => {
             let has_running_agents = model.session_tabs.iter().any(|t| {
-                t.tab_type == SessionTabType::Agent
-                    && matches!(t.status, SessionStatus::Running)
+                t.tab_type == SessionTabType::Agent && matches!(t.status, SessionStatus::Running)
             });
             if has_running_agents && model.confirm.is_none() {
                 let agent_count = model
@@ -158,14 +157,13 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::KeyInput(key) => {
             // Error overlay: Enter/Esc dismisses the error
-            if !model.error_queue.is_empty() || !model.error_queue_v2.is_empty() {
-                if key.code == crossterm::event::KeyCode::Enter
-                    || key.code == crossterm::event::KeyCode::Esc
-                {
-                    model.dismiss_error();
-                    model.error_queue_v2.dismiss_current();
-                    return;
-                }
+            if (!model.error_queue.is_empty() || !model.error_queue_v2.is_empty())
+                && (key.code == crossterm::event::KeyCode::Enter
+                    || key.code == crossterm::event::KeyCode::Esc)
+            {
+                model.dismiss_error();
+                model.error_queue_v2.dismiss_current();
+                return;
             }
 
             // Management layer: Tab key cycles management tabs
@@ -200,10 +198,12 @@ pub fn update(model: &mut Model, msg: Message) {
                             if !bytes.is_empty() {
                                 if let Err(e) = pane.write_input(&bytes) {
                                     // Mark session as errored when PTY write fails
-                                    if let Some(s) = model.session_tabs.get_mut(model.active_session) {
-                                        s.status = crate::model::SessionStatus::Error(
-                                            format!("PTY write failed: {e}"),
-                                        );
+                                    if let Some(s) =
+                                        model.session_tabs.get_mut(model.active_session)
+                                    {
+                                        s.status = crate::model::SessionStatus::Error(format!(
+                                            "PTY write failed: {e}"
+                                        ));
                                     }
                                 }
                             }
@@ -221,12 +221,11 @@ pub fn update(model: &mut Model, msg: Message) {
                                 .map(Message::IssuesMsg)
                         }
                         ManagementTab::Specs => {
-                            crate::screens::specs::handle_key(&model.specs_state, &key)
-                                .map(|m| {
-                                    crate::screens::specs::update(&mut model.specs_state, m);
-                                    // Return None — update already applied inline
-                                    Message::Tick // dummy, won't cause issues
-                                })
+                            crate::screens::specs::handle_key(&model.specs_state, &key).map(|m| {
+                                crate::screens::specs::update(&mut model.specs_state, m);
+                                // Return None — update already applied inline
+                                Message::Tick // dummy, won't cause issues
+                            })
                         }
                         ManagementTab::Settings => {
                             crate::screens::settings::handle_key(&model.settings_state, &key)
@@ -244,8 +243,21 @@ pub fn update(model: &mut Model, msg: Message) {
                 }
             }
         }
-        Message::MouseInput(_mouse) => {
-            // Phase 2: mouse handling
+        Message::MouseInput(mouse) => {
+            if model.active_layer == ActiveLayer::Management
+                && model.management_tab == ManagementTab::Logs
+                && model.overlay_mode == OverlayMode::None
+            {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        handle_logs_msg(model, LogsMessage::SelectPrev);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        handle_logs_msg(model, LogsMessage::SelectNext);
+                    }
+                    _ => {}
+                }
+            }
         }
         Message::Resize(w, h) => {
             model.terminal_cols = w;
@@ -326,9 +338,10 @@ pub fn update(model: &mut Model, msg: Message) {
                     .selected_branch_name()
                     .unwrap_or_default();
                 if !branch.is_empty() {
-                    model.wizard = Some(
-                        crate::screens::wizard::WizardState::open_for_branch(&branch, vec![]),
-                    );
+                    model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
+                        &branch,
+                        vec![],
+                    ));
                 }
                 return;
             }
@@ -381,8 +394,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
         match model.active_layer {
             ActiveLayer::Main => {
                 if model.session_tabs.is_empty() {
-                    let center =
-                        centered_text("No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.");
+                    let center = centered_text(
+                        "No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.",
+                    );
                     let text_area = centered_rect(60, 3, layout[2]);
                     ratatui::widgets::Widget::render(center, text_area, buf);
                 } else {
@@ -391,64 +405,64 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     cursor_pos = crate::screens::agent_pane::render(buf, layout[2], parser);
                 }
             }
-        ActiveLayer::Management => match model.management_tab {
-            ManagementTab::Branches => {
-                crate::screens::branches::render(&model.branches_state, buf, layout[2]);
-            }
-            ManagementTab::Issues => {
-                crate::screens::issues::render(&model.issues_state, buf, layout[2]);
-            }
-            ManagementTab::Specs => {
-                crate::screens::specs::render(&model.specs_state, buf, layout[2]);
-            }
-            ManagementTab::Settings => {
-                crate::screens::settings::render(&model.settings_state, buf, layout[2]);
-            }
-            ManagementTab::Logs => {
-                crate::screens::logs::render(&model.logs_state, buf, layout[2]);
-            }
-        },
-    }
+            ActiveLayer::Management => match model.management_tab {
+                ManagementTab::Branches => {
+                    crate::screens::branches::render(&model.branches_state, buf, layout[2]);
+                }
+                ManagementTab::Issues => {
+                    crate::screens::issues::render(&model.issues_state, buf, layout[2]);
+                }
+                ManagementTab::Specs => {
+                    crate::screens::specs::render(&model.specs_state, buf, layout[2]);
+                }
+                ManagementTab::Settings => {
+                    crate::screens::settings::render(&model.settings_state, buf, layout[2]);
+                }
+                ManagementTab::Logs => {
+                    crate::screens::logs::render(&model.logs_state, buf, layout[2]);
+                }
+            },
+        }
 
-    // Status bar
-    widgets::status_bar::render(model, buf, layout[3]);
+        // Status bar
+        widgets::status_bar::render(model, buf, layout[3]);
 
-    // Overlays (on top of everything, priority order)
-    // Wizard overlay
-    if let Some(ref wizard) = model.wizard {
-        crate::screens::wizard::render(buf, area, wizard);
-    }
+        // Overlays (on top of everything, priority order)
+        // Wizard overlay
+        if let Some(ref wizard) = model.wizard {
+            crate::screens::wizard::render(buf, area, wizard);
+        }
 
-    // Error overlay (v2 queue)
-    if !model.error_queue_v2.is_empty() {
-        screens::error::render_error_with_queue(&model.error_queue_v2, buf, area);
-    } else if !model.error_queue.is_empty() {
-        // Legacy error overlay
-        render_error_overlay(buf, area, &model.error_queue[0]);
-    }
+        // Error overlay (v2 queue)
+        if !model.error_queue_v2.is_empty() {
+            screens::error::render_error_with_queue(&model.error_queue_v2, buf, area);
+        } else if !model.error_queue.is_empty() {
+            // Legacy error overlay
+            render_error_overlay(buf, area, &model.error_queue[0]);
+        }
 
-    // Confirm dialog
-    if let Some(ref confirm) = model.confirm {
-        screens::confirm::render_confirm(confirm, buf, area);
-    }
+        // Confirm dialog
+        if let Some(ref confirm) = model.confirm {
+            screens::confirm::render_confirm(confirm, buf, area);
+        }
 
-    // Progress modal
-    if let Some(ref progress) = model.progress {
-        widgets::progress_modal::render(buf, area, progress);
-    }
+        // Progress modal
+        if let Some(ref progress) = model.progress {
+            widgets::progress_modal::render(buf, area, progress);
+        }
 
-    // Clone wizard
-    if let Some(ref clone_wiz) = model.clone_wizard {
-        screens::clone_wizard::render_clone_wizard(clone_wiz, buf, area);
-    }
+        // Clone wizard
+        if let Some(ref clone_wiz) = model.clone_wizard {
+            screens::clone_wizard::render_clone_wizard(clone_wiz, buf, area);
+        }
 
-    // Migration dialog
-    if let Some(ref migration) = model.migration_dialog {
-        screens::migration_dialog::render_migration_dialog(migration, buf, area);
-    }
+        // Migration dialog
+        if let Some(ref migration) = model.migration_dialog {
+            screens::migration_dialog::render_migration_dialog(migration, buf, area);
+        }
 
-    // SpecKit wizard
-    screens::speckit_wizard::render_speckit_wizard(&model.speckit_wizard, buf, area);
+        // SpecKit wizard
+        screens::speckit_wizard::render_speckit_wizard(&model.speckit_wizard, buf, area);
     } // end buf borrow scope
 
     // Set cursor position (outside buf borrow)
@@ -876,10 +890,37 @@ fn spawn_agent_session(
     wiz_config: &crate::screens::wizard::WizardLaunchConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use gwt_core::agent::launch::AgentLaunchBuilder;
-    use gwt_core::terminal::AgentColor;
+    use gwt_core::config::skill_registration::{
+        register_agent_skills_with_settings_at_project_root, SkillAgentType,
+    };
 
     let agent_id = &wiz_config.agent_id;
     let working_dir = model.repo_root.clone();
+
+    // Register managed skills/hooks for this agent (SPEC-1438 FR-REG-001)
+    if let Some(agent_type) = SkillAgentType::from_agent_id(agent_id) {
+        match gwt_core::config::Settings::load(&working_dir) {
+            Ok(settings) => {
+                if let Err(e) = register_agent_skills_with_settings_at_project_root(
+                    agent_type,
+                    &settings,
+                    Some(&working_dir),
+                ) {
+                    tracing::warn!(
+                        agent = agent_id,
+                        error = %e,
+                        "Skill registration failed; continuing with agent launch"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to load settings for skill registration; continuing with agent launch"
+                );
+            }
+        }
+    }
 
     // Build launch config via gwt-core
     let mut builder = AgentLaunchBuilder::new(agent_id, &working_dir);
@@ -912,7 +953,11 @@ fn spawn_agent_session(
         .find(|p| p.pane_id() == pane_id)
         .ok_or("pane not found")?;
     let mut reader = pane.take_reader()?;
-    let tx = model.pty_tx.as_ref().ok_or("pty_tx not initialized")?.clone();
+    let tx = model
+        .pty_tx
+        .as_ref()
+        .ok_or("pty_tx not initialized")?
+        .clone();
     let id = pane_id.clone();
     std::thread::Builder::new()
         .name(format!("pty-reader-{id}"))
@@ -1006,7 +1051,8 @@ fn key_event_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
 
     // Alt modifier: send ESC prefix + the key bytes
     if key.modifiers.contains(KeyModifiers::ALT) {
-        let inner_key = crossterm::event::KeyEvent::new(key.code, key.modifiers - KeyModifiers::ALT);
+        let inner_key =
+            crossterm::event::KeyEvent::new(key.code, key.modifiers - KeyModifiers::ALT);
         let inner = key_event_to_bytes(&inner_key);
         if !inner.is_empty() {
             let mut out = vec![0x1b]; // ESC prefix for Alt
@@ -1198,11 +1244,15 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::model::{
-        ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, SessionStatus, SessionTab,
-        SessionTabType,
+        ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, OverlayMode, SessionStatus,
+        SessionTab, SessionTabType,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use crate::screens::logs::LogEntry;
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+    };
     use gwt_core::terminal::AgentColor;
+    use std::collections::HashMap;
 
     fn test_model() -> Model {
         Model::new(PathBuf::from("/tmp/test"))
@@ -1226,6 +1276,26 @@ mod tests {
             status: SessionStatus::Running,
             branch: None,
             spec_id: None,
+        }
+    }
+
+    fn test_log_entry(timestamp: &str, message: &str) -> LogEntry {
+        LogEntry {
+            timestamp: timestamp.to_string(),
+            level: "INFO".to_string(),
+            message: message.to_string(),
+            target: "gwt".to_string(),
+            category: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    fn make_mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
         }
     }
 
@@ -1289,6 +1359,45 @@ mod tests {
         update(&mut m, Message::Resize(120, 40));
         assert_eq!(m.terminal_cols, 120);
         assert_eq!(m.terminal_rows, 40);
+    }
+
+    #[test]
+    fn update_mouse_scroll_down_moves_logs_selection() {
+        let mut m = test_model();
+        m.active_layer = ActiveLayer::Management;
+        m.management_tab = ManagementTab::Logs;
+        m.overlay_mode = OverlayMode::None;
+        m.logs_state.entries = vec![
+            test_log_entry("2026-04-01T00:00:01Z", "first"),
+            test_log_entry("2026-04-01T00:00:00Z", "second"),
+        ];
+
+        update(
+            &mut m,
+            Message::MouseInput(make_mouse(MouseEventKind::ScrollDown)),
+        );
+
+        assert_eq!(m.logs_state.selected, 1);
+    }
+
+    #[test]
+    fn update_mouse_scroll_up_moves_logs_selection() {
+        let mut m = test_model();
+        m.active_layer = ActiveLayer::Management;
+        m.management_tab = ManagementTab::Logs;
+        m.overlay_mode = OverlayMode::None;
+        m.logs_state.entries = vec![
+            test_log_entry("2026-04-01T00:00:01Z", "first"),
+            test_log_entry("2026-04-01T00:00:00Z", "second"),
+        ];
+        m.logs_state.selected = 1;
+
+        update(
+            &mut m,
+            Message::MouseInput(make_mouse(MouseEventKind::ScrollUp)),
+        );
+
+        assert_eq!(m.logs_state.selected, 0);
     }
 
     #[test]

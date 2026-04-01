@@ -759,6 +759,21 @@ impl SkillAgentType {
             SkillAgentType::Gemini => "Gemini",
         }
     }
+
+    /// Resolve a `SkillAgentType` from an agent identifier string
+    /// (e.g. `"claude-code"`, `"codex-cli"`, `"gemini-cli"`).
+    pub fn from_agent_id(agent_id: &str) -> Option<Self> {
+        let lower = agent_id.to_lowercase();
+        if lower.contains("claude") {
+            Some(SkillAgentType::Claude)
+        } else if lower.contains("codex") {
+            Some(SkillAgentType::Codex)
+        } else if lower.contains("gemini") {
+            Some(SkillAgentType::Gemini)
+        } else {
+            None
+        }
+    }
 }
 
 /// Per-agent registration status.
