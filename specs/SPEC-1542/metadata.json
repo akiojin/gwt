@@ -1,8 +1,8 @@
 {
   "id": "1542",
-  "title": "機能仕様: データ永続化レイヤー (~/.gwt/ 互換)",
+  "title": "gwt-spec: Data Persistence Layer (~/.gwt/)",
   "status": "closed",
   "phase": "draft",
   "created_at": "2026-03-09T15:06:19Z",
-  "updated_at": "2026-03-18T14:55:11Z"
+  "updated_at": "2026-04-01T04:26:09Z"
 }

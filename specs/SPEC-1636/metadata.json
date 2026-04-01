@@ -1,8 +1,8 @@
 {
   "id": "1636",
-  "title": "Assistant Send Interrupt and Tab Queue (PTY ベース)",
+  "title": "gwt-spec: Assistant Mode (PTY-based)",
   "status": "open",
   "phase": "draft",
   "created_at": "2026-03-16T06:05:35Z",
-  "updated_at": "2026-04-01T00:00:00Z"
+  "updated_at": "2026-04-01T04:26:09Z"
 }

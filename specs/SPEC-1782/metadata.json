@@ -1,1 +1,8 @@
-{"id": "SPEC-1782", "title": "Quick Start（前回設定復元）", "status": "open", "priority": "P1", "created": "2026-04-01"}
+{
+  "id": "SPEC-1782",
+  "title": "gwt-spec: Quick Start (Previous Settings Recall)",
+  "status": "open",
+  "phase": "Specify",
+  "created_at": "2026-04-01",
+  "updated_at": "2026-04-01T04:26:09Z"
+}
