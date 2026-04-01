@@ -49,3 +49,113 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
     let right_x = area.x + left_width;
     buf.set_span(right_x, area.y, &right_span, right_width);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Model;
+    use ratatui::prelude::*;
+    use std::path::PathBuf;
+
+    fn test_model() -> Model {
+        Model::new(PathBuf::from("/tmp/test-repo"))
+    }
+
+    fn buf_row_text(buf: &Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| {
+                buf.cell((x, y))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn render_management_layer_smoke() {
+        let model = test_model();
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text = buf_row_text(&buf, 0, 120);
+        // Management tab label should appear
+        assert!(text.contains("Branches"), "Expected 'Branches' in: {text:?}");
+        // Hint text should appear
+        assert!(text.contains("Tab: Switch"), "Expected hint text in: {text:?}");
+    }
+
+    #[test]
+    fn render_main_layer_no_sessions_smoke() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text = buf_row_text(&buf, 0, 120);
+        assert!(
+            text.contains("Ctrl+G,c: Shell"),
+            "Expected session creation hint in: {text:?}"
+        );
+    }
+
+    #[test]
+    fn render_main_layer_with_session_no_branch() {
+        let mut model = test_model();
+        use crate::model::{SessionTab, SessionTabType, SessionStatus};
+        use gwt_core::terminal::AgentColor;
+        model.add_session(SessionTab {
+            pane_id: "p1".into(),
+            name: "Shell #1".into(),
+            tab_type: SessionTabType::Shell,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: None,
+            spec_id: None,
+        });
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text = buf_row_text(&buf, 0, 120);
+        assert!(text.contains("Shell #1"), "Expected tab name in: {text:?}");
+    }
+
+    #[test]
+    fn render_main_layer_with_session_and_branch() {
+        let mut model = test_model();
+        use crate::model::{SessionTab, SessionTabType, SessionStatus};
+        use gwt_core::terminal::AgentColor;
+        model.add_session(SessionTab {
+            pane_id: "p2".into(),
+            name: "Agent #1".into(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Blue,
+            status: SessionStatus::Running,
+            branch: Some("feature/test".into()),
+            spec_id: None,
+        });
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text = buf_row_text(&buf, 0, 120);
+        assert!(text.contains("Agent #1"), "Expected tab name in: {text:?}");
+        assert!(text.contains("feature/test"), "Expected branch in: {text:?}");
+    }
+
+    #[test]
+    fn render_all_management_tabs_no_panic() {
+        let mut model = test_model();
+        let area = Rect::new(0, 0, 120, 1);
+        for tab in ManagementTab::ALL {
+            model.management_tab = tab;
+            model.active_layer = ActiveLayer::Management;
+            let mut buf = Buffer::empty(area);
+            render(&model, &mut buf, area);
+            let text = buf_row_text(&buf, 0, 120);
+            assert!(
+                text.contains(tab.label()),
+                "Expected '{}' in: {text:?}",
+                tab.label()
+            );
+        }
+    }
+}
