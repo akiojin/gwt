@@ -1271,36 +1271,6 @@ mod tests {
     }
 
     #[test]
-    fn repo_path_for_issue_index_resolves_bare_repo_from_project_config() {
-        let temp = tempdir().expect("create tempdir");
-        let root = temp.path();
-
-        fs::create_dir_all(root.join(".gwt")).expect("create .gwt");
-        fs::write(
-            root.join(".gwt/project.toml"),
-            "bare_repo_name = \"repo.git\"\nlocation = \"sibling\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n",
-        )
-        .expect("write project.toml");
-
-        let bare = root.join("repo.git");
-        let output = command_os("git")
-            .arg("init")
-            .arg("--bare")
-            .arg(&bare)
-            .output()
-            .expect("run git init --bare");
-        assert!(
-            output.status.success(),
-            "git init --bare failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let resolved =
-            repo_path_for_issue_index(&root.to_string_lossy()).expect("resolve issue index repo");
-        assert_eq!(resolved, bare);
-    }
-
-    #[test]
     fn crash_recovery_detector_matches_sigsegv_signatures() {
         assert!(is_recoverable_chroma_db_error(
             "Chroma helper failed (status=signal: 11, signal=11): <no stderr>"

@@ -10,7 +10,7 @@ use std::{
 
 use gwt_core::{
     config::{agent_has_hook_support, infer_agent_status, AgentStatus, Session},
-    git::{fetch_issue_detail, is_bare_repository, Branch, Remote},
+    git::{fetch_issue_detail, Branch, Remote},
     terminal::pane::PaneStatus,
     worktree::WorktreeManager,
     StructuredError,
@@ -1074,13 +1074,8 @@ fn list_remote_branches_impl(
     let summary_cache = summary_cache_guard.as_ref().and_then(|g| g.get(&repo_key));
     let remotes = Remote::list(&repo_path).unwrap_or_default();
 
-    let branches = if is_bare_repository(&repo_path) {
-        Branch::list_remote_from_origin(&repo_path)
-            .map_err(|e| StructuredError::from_gwt_error(&e, "list_remote_branches"))?
-    } else {
-        Branch::list_remote(&repo_path)
-            .map_err(|e| StructuredError::from_gwt_error(&e, "list_remote_branches"))?
-    };
+    let branches = Branch::list_remote(&repo_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "list_remote_branches"))?;
     let normalized_branch_names = branches
         .iter()
         .map(|branch| strip_known_remote_prefix(&branch.name, &remotes).to_string())
@@ -1122,13 +1117,8 @@ fn list_remote_inventory_branches_impl(
     let project_root = Path::new(project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "list_branch_inventory"))?;
-    let branches = if is_bare_repository(&repo_path) {
-        Branch::list_remote_from_origin(&repo_path)
-            .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?
-    } else {
-        Branch::list_remote(&repo_path)
-            .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?
-    };
+    let branches = Branch::list_remote(&repo_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "list_branch_inventory"))?;
     Ok(branches.into_iter().map(BranchInfo::from).collect())
 }
 

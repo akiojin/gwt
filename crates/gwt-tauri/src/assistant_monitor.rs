@@ -214,26 +214,8 @@ fn collect_project_panes(state: &AppState, repo_path: &Path) -> Result<Vec<PaneS
     Ok(panes)
 }
 
-fn resolve_worktree_path(repo_path: &Path, current_branch: Option<&Branch>) -> Option<PathBuf> {
-    if !git::is_bare_repository(repo_path) {
-        return Some(repo_path.to_path_buf());
-    }
-
-    let manager = gwt_core::worktree::WorktreeManager::new(repo_path).ok()?;
-    let worktrees = manager.list_basic().ok()?;
-
-    if let Some(branch_name) = current_branch.map(|branch| branch.name.as_str()) {
-        if let Some(worktree) = worktrees.iter().find(|worktree| {
-            worktree.is_active() && worktree.branch.as_deref() == Some(branch_name)
-        }) {
-            return Some(worktree.path.clone());
-        }
-    }
-
-    worktrees
-        .iter()
-        .find(|worktree| worktree.is_active() && !worktree.is_main)
-        .map(|worktree| worktree.path.clone())
+fn resolve_worktree_path(repo_path: &Path, _current_branch: Option<&Branch>) -> Option<PathBuf> {
+    Some(repo_path.to_path_buf())
 }
 
 fn hash_scrollback_bytes(bytes: &[u8]) -> u64 {

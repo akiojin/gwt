@@ -9,11 +9,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum WorktreeLocation {
     /// Traditional: place worktrees under `.worktrees/` subdirectory
-    /// Default for backward compatibility
     #[default]
     Subdir,
-    /// Bare-based: place worktrees as siblings to the bare repository
-    Sibling,
 }
 
 impl WorktreeLocation {
@@ -21,7 +18,6 @@ impl WorktreeLocation {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Subdir => ".worktrees/ (traditional)",
-            Self::Sibling => "sibling (bare-based)",
         }
     }
 }
@@ -40,9 +36,5 @@ mod tests {
         let subdir = WorktreeLocation::Subdir;
         let json = serde_json::to_string(&subdir).unwrap();
         assert_eq!(json, "\"subdir\"");
-
-        let sibling = WorktreeLocation::Sibling;
-        let json = serde_json::to_string(&sibling).unwrap();
-        assert_eq!(json, "\"sibling\"");
     }
 }

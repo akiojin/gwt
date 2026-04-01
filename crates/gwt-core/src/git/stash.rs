@@ -1,10 +1,9 @@
 //! Git stash operations for GitView
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{is_bare_repository, Repository};
 use crate::error::{GwtError, Result};
 
 /// A stash entry with metadata
@@ -15,42 +14,16 @@ pub struct StashEntry {
     pub file_count: usize,
 }
 
-fn find_any_worktree_path(repo_path: &Path) -> Option<PathBuf> {
-    let repo = Repository::discover(repo_path).ok()?;
-    let worktrees = repo.list_worktrees().ok()?;
-    worktrees
-        .into_iter()
-        .find(|wt| !wt.is_bare && wt.path.exists())
-        .map(|wt| wt.path)
-}
-
 /// Get the list of stash entries with file counts
 pub fn get_stash_list(repo_path: &Path) -> Result<Vec<StashEntry>> {
-    let mut exec_path = repo_path.to_path_buf();
-    let mut output = crate::process::command("git")
+    let output = crate::process::command("git")
         .args(["stash", "list", "--format=%gd%x00%gs"])
-        .current_dir(&exec_path)
+        .current_dir(repo_path)
         .output()
         .map_err(|e| GwtError::GitOperationFailed {
             operation: "stash list".to_string(),
             details: e.to_string(),
         })?;
-
-    // Bare repositories require a worktree for stash operations. If we were given a bare repo,
-    // retry with any existing worktree to list stashes correctly.
-    if !output.status.success() && is_bare_repository(repo_path) {
-        if let Some(wt_path) = find_any_worktree_path(repo_path) {
-            exec_path = wt_path;
-            output = crate::process::command("git")
-                .args(["stash", "list", "--format=%gd%x00%gs"])
-                .current_dir(&exec_path)
-                .output()
-                .map_err(|e| GwtError::GitOperationFailed {
-                    operation: "stash list".to_string(),
-                    details: e.to_string(),
-                })?;
-        }
-    }
 
     if !output.status.success() {
         return Err(GwtError::GitOperationFailed {
@@ -83,7 +56,7 @@ pub fn get_stash_list(repo_path: &Path) -> Result<Vec<StashEntry>> {
             .unwrap_or(0);
 
         // Get file count for this stash entry
-        let file_count = get_stash_file_count(&exec_path, index);
+        let file_count = get_stash_file_count(repo_path, index);
 
         entries.push(StashEntry {
             index,
@@ -134,15 +107,6 @@ mod tests {
         );
     }
 
-    fn get_current_branch_name(repo_path: &Path) -> String {
-        let output = crate::process::command("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
     fn create_test_repo() -> TempDir {
         let temp = TempDir::new().unwrap();
         run_git(temp.path(), &["init"]);
@@ -190,55 +154,5 @@ mod tests {
 
         let stashes = get_stash_list(temp.path()).unwrap();
         assert!(stashes.is_empty());
-    }
-
-    // T-STASH-003: Bare repo should list stashes via any existing worktree
-    #[test]
-    fn test_get_stash_list_from_bare_repo() {
-        let temp = TempDir::new().unwrap();
-
-        // Create a normal repo (source)
-        let src = temp.path().join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        run_git(&src, &["init"]);
-        run_git(&src, &["config", "user.email", "test@test.com"]);
-        run_git(&src, &["config", "user.name", "Test User"]);
-        std::fs::write(src.join("README.md"), "# Test\n").unwrap();
-        run_git(&src, &["add", "."]);
-        run_git(&src, &["commit", "-m", "initial commit"]);
-
-        let base = get_current_branch_name(&src);
-
-        // Clone as bare repo (gwt bare project style)
-        let bare = temp.path().join("repo.git");
-        let status = crate::process::command("git")
-            .args(["clone", "--bare"])
-            .arg(&src)
-            .arg(&bare)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git clone --bare failed");
-
-        // Create a worktree so stash operations are possible
-        let wt = temp.path().join("wt");
-        let status = crate::process::command("git")
-            .args(["worktree", "add"])
-            .arg(&wt)
-            .arg(&base)
-            .current_dir(&bare)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git worktree add failed");
-
-        run_git(&wt, &["config", "user.email", "test@test.com"]);
-        run_git(&wt, &["config", "user.name", "Test User"]);
-        std::fs::write(wt.join("README.md"), "# Test\nstash change\n").unwrap();
-        run_git(&wt, &["add", "README.md"]);
-        run_git(&wt, &["stash", "push", "-m", "wip"]);
-
-        let stashes = get_stash_list(&bare).unwrap();
-        assert_eq!(stashes.len(), 1);
-        assert!(stashes[0].message.contains("wip"));
-        assert!(stashes[0].file_count >= 1);
     }
 }

@@ -768,7 +768,6 @@ pub fn build_app(
             crate::commands::project::open_project,
             crate::commands::project::probe_path,
             crate::commands::project::create_project,
-            crate::commands::project::start_migration_job,
             crate::commands::project::close_project,
             crate::commands::project::get_project_info,
             crate::commands::project::is_git_repo,

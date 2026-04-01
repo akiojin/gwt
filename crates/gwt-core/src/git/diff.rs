@@ -2,25 +2,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use serde::{Deserialize, Serialize};
 
-use super::{is_bare_repository, Repository};
 use crate::error::{GwtError, Result};
 
 const DIFF_LINE_LIMIT: usize = 1000;
 const DEFAULT_BASE_BRANCH_CANDIDATES: [&str; 3] = ["main", "master", "develop"];
-
-fn find_any_worktree_path(repo_path: &Path) -> Option<PathBuf> {
-    let repo = Repository::discover(repo_path).ok()?;
-    let worktrees = repo.list_worktrees().ok()?;
-    worktrees
-        .into_iter()
-        .find(|wt| !wt.is_bare && wt.path.exists())
-        .map(|wt| wt.path)
-}
 
 fn normalize_numstat_path(path: &str) -> String {
     // git diff --numstat uses "old => new" notation for renames, sometimes with brace expansion:
@@ -663,29 +653,14 @@ pub fn get_git_change_summary(
     };
 
     // Stash count
-    let mut stash_exec_path = repo_path.to_path_buf();
-    let mut stash_output = crate::process::command("git")
+    let stash_output = crate::process::command("git")
         .args(["stash", "list"])
-        .current_dir(&stash_exec_path)
+        .current_dir(repo_path)
         .output()
         .map_err(|e| GwtError::GitOperationFailed {
             operation: "stash list".to_string(),
             details: e.to_string(),
         })?;
-
-    // Bare repositories require a worktree for stash operations. Retry with any existing worktree.
-    if !stash_output.status.success() && is_bare_repository(repo_path) {
-        if let Some(wt_path) = find_any_worktree_path(repo_path) {
-            stash_exec_path = wt_path;
-            if let Ok(o2) = crate::process::command("git")
-                .args(["stash", "list"])
-                .current_dir(&stash_exec_path)
-                .output()
-            {
-                stash_output = o2;
-            }
-        }
-    }
 
     let stash_count = if stash_output.status.success() {
         String::from_utf8_lossy(&stash_output.stdout)
@@ -1094,102 +1069,6 @@ mod tests {
         assert_eq!(summary.commit_count, 3);
         assert_eq!(summary.stash_count, 0);
         assert_eq!(summary.base_branch, base);
-    }
-
-    // T-DIFF-051: Bare repo should report stash_count via a worktree
-    #[test]
-    fn test_get_git_change_summary_stash_count_from_bare_repo() {
-        let temp = TempDir::new().unwrap();
-
-        // Create a normal repo (source)
-        let src = temp.path().join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        run_git(&src, &["init"]);
-        run_git(&src, &["config", "user.email", "test@test.com"]);
-        run_git(&src, &["config", "user.name", "Test User"]);
-        std::fs::write(src.join("README.md"), "# Test\n").unwrap();
-        run_git(&src, &["add", "."]);
-        run_git(&src, &["commit", "-m", "initial commit"]);
-
-        let base = get_current_branch_name(&src);
-
-        // Clone as bare repo
-        let bare = temp.path().join("repo.git");
-        let status = crate::process::command("git")
-            .args(["clone", "--bare"])
-            .arg(&src)
-            .arg(&bare)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git clone --bare failed");
-
-        // Create a worktree so stash operations are possible
-        let wt = temp.path().join("wt");
-        let status = crate::process::command("git")
-            .args(["worktree", "add"])
-            .arg(&wt)
-            .arg(&base)
-            .current_dir(&bare)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git worktree add failed");
-
-        run_git(&wt, &["config", "user.email", "test@test.com"]);
-        run_git(&wt, &["config", "user.name", "Test User"]);
-        std::fs::write(wt.join("README.md"), "# Test\nstash change\n").unwrap();
-        run_git(&wt, &["add", "README.md"]);
-        run_git(&wt, &["stash", "push", "-m", "wip"]);
-
-        let summary = get_git_change_summary(&bare, &base, &base).unwrap();
-        assert_eq!(summary.stash_count, 1);
-    }
-
-    // T-DIFF-052: Resolve remote-like branch refs and missing main fallback in bare repos
-    #[test]
-    fn test_remote_like_branch_and_missing_main_fallback() {
-        let temp = TempDir::new().unwrap();
-
-        let src = temp.path().join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        run_git(&src, &["init"]);
-        run_git(&src, &["config", "user.email", "test@test.com"]);
-        run_git(&src, &["config", "user.name", "Test User"]);
-
-        std::fs::write(src.join("README.md"), "# Test\n").unwrap();
-        run_git(&src, &["add", "."]);
-        run_git(&src, &["commit", "-m", "initial"]);
-
-        let current = get_current_branch_name(&src);
-        if current != "master" {
-            run_git(&src, &["branch", "-m", "master"]);
-        }
-
-        run_git(&src, &["checkout", "-b", "develop"]);
-        std::fs::write(src.join("develop.txt"), "develop changes\n").unwrap();
-        run_git(&src, &["add", "develop.txt"]);
-        run_git(&src, &["commit", "-m", "develop changes"]);
-        run_git(&src, &["checkout", "master"]);
-
-        let bare = temp.path().join("repo.git");
-        let status = crate::process::command("git")
-            .args(["clone", "--bare"])
-            .arg(&src)
-            .arg(&bare)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git clone --bare failed");
-
-        // Bare clone does not guarantee refs/remotes/origin/*, but local branches exist.
-        assert!(!ref_exists(&bare, "main").unwrap());
-        assert!(!ref_exists(&bare, "origin/develop").unwrap());
-        assert!(ref_exists(&bare, "develop").unwrap());
-        assert!(ref_exists(&bare, "master").unwrap());
-
-        let files = get_branch_diff_files(&bare, "origin/develop", "main").unwrap();
-        assert!(files.iter().any(|f| f.path == "develop.txt"));
-
-        let summary = get_git_change_summary(&bare, "origin/develop", "main").unwrap();
-        assert_eq!(summary.base_branch, "master");
     }
 
     // --- normalize_numstat_path ---

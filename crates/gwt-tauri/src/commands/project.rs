@@ -14,16 +14,11 @@ use gwt_core::{
     },
     git::{self, Branch},
     logging::{log_flow_start, log_flow_success},
-    migration::{
-        derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig,
-        MigrationState,
-    },
     StructuredError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{instrument, warn};
-use uuid::Uuid;
 
 use crate::state::AppState;
 
@@ -67,37 +62,10 @@ pub struct CloneProgress {
     pub percent: u8,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct ProjectTomlConfig {
-    pub bare_repo_name: String,
-}
-
-fn read_bare_repo_name(project_root: &Path) -> Option<String> {
-    let gwt_dir = project_root.join(".gwt");
-    if !gwt_dir.is_dir() {
-        return None;
-    }
-
-    let toml_path = gwt_dir.join("project.toml");
-    if let Ok(content) = std::fs::read_to_string(&toml_path) {
-        if let Ok(cfg) = toml::from_str::<ProjectTomlConfig>(&content) {
-            if !cfg.bare_repo_name.trim().is_empty() {
-                return Some(cfg.bare_repo_name);
-            }
-        }
-    }
-
-    None
-}
-
 pub(crate) fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
     if git::is_git_repo(selected) {
-        if git::is_bare_repository(selected) {
-            selected.parent().unwrap_or(selected).to_path_buf()
-        } else {
-            // If selected is a worktree, this resolves to the bare project's root directory.
-            git::get_main_repo_root(selected)
-        }
+        // If selected is a worktree, this resolves to the main repository's root directory.
+        git::get_main_repo_root(selected)
     } else {
         selected.to_path_buf()
     }
@@ -144,22 +112,7 @@ pub(crate) fn resolve_repo_path_for_project_root(
         return Ok(project_root.to_path_buf());
     }
 
-    if let Some(bare_repo_name) = read_bare_repo_name(project_root) {
-        let candidate = project_root.join(&bare_repo_name);
-        if candidate.exists() && git::is_bare_repository(&candidate) {
-            return Ok(candidate);
-        }
-    }
-
-    // Fallback: try to detect a bare repo under the selected directory.
-    if let Some(bare) = git::find_bare_repo_in_dir(project_root) {
-        return Ok(bare);
-    }
-
-    Err(format!(
-        "Not a gwt project: bare repository not found in {}",
-        project_root.display()
-    ))
+    Err(format!("Not a git repository: {}", project_root.display()))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -209,25 +162,12 @@ pub fn probe_path(path: String) -> ProbePathResult {
     let project_root = resolve_project_root(p);
 
     match resolve_repo_path_for_project_root(&project_root) {
-        Ok(repo_path) => {
-            if git::is_bare_repository(&repo_path) {
-                return ProbePathResult {
-                    kind: "gwtProject".to_string(),
-                    project_path: Some(project_root.to_string_lossy().to_string()),
-                    migration_source_root: None,
-                    message: None,
-                };
-            }
-
-            // Not a bare repo: enforce migration (gwt-spec issue US7).
-            let source_root = git::get_main_repo_root(&repo_path);
-            ProbePathResult {
-                kind: "migrationRequired".to_string(),
-                project_path: None,
-                migration_source_root: Some(source_root.to_string_lossy().to_string()),
-                message: Some("Migration to a bare gwt project is required.".to_string()),
-            }
-        }
+        Ok(_repo_path) => ProbePathResult {
+            kind: "gwtProject".to_string(),
+            project_path: Some(project_root.to_string_lossy().to_string()),
+            migration_source_root: None,
+            message: None,
+        },
         Err(err) => {
             if project_root.is_dir() && dir_is_empty(&project_root) {
                 return ProbePathResult {
@@ -281,15 +221,6 @@ pub fn open_project(
         );
         StructuredError::internal(&e, "open_project")
     })?;
-    if git::is_git_repo(&repo_path) && !git::is_bare_repository(&repo_path) {
-        gwt_core::logging::log_incident(
-            "project",
-            "open_project",
-            Some("PROJECT_MIGRATION_REQUIRED"),
-            "Normal repositories are not supported. Migration to bare gwt project required.",
-        );
-        return Err(StructuredError::internal("Migration required: normal repositories are not supported. Please migrate to a bare gwt project.", "open_project"));
-    }
     let project_root_str = project_root.to_string_lossy().to_string();
     let project_identity = canonical_project_identity(&project_root);
 
@@ -760,155 +691,6 @@ pub fn create_project(
     open_project(window, request.parent_dir, state)
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationProgressPayload {
-    pub job_id: String,
-    pub state: String,
-    pub current: Option<usize>,
-    pub total: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationFinishedPayload {
-    pub job_id: String,
-    pub ok: bool,
-    pub error: Option<String>,
-    pub project_path: Option<String>,
-}
-
-fn encode_migration_state(state: &MigrationState) -> (String, Option<usize>, Option<usize>) {
-    match state {
-        MigrationState::Pending => ("pending".to_string(), None, None),
-        MigrationState::Validating => ("validating".to_string(), None, None),
-        MigrationState::BackingUp => ("backingUp".to_string(), None, None),
-        MigrationState::CreatingBareRepo => ("creatingBareRepo".to_string(), None, None),
-        MigrationState::MigratingWorktrees { current, total } => (
-            "migratingWorktrees".to_string(),
-            Some(current.saturating_add(1)),
-            Some(*total),
-        ),
-        MigrationState::CleaningUp => ("cleaningUp".to_string(), None, None),
-        MigrationState::Completed => ("completed".to_string(), None, None),
-        MigrationState::RollingBack => ("rollingBack".to_string(), None, None),
-        MigrationState::Cancelled => ("cancelled".to_string(), None, None),
-        MigrationState::Failed => ("failed".to_string(), None, None),
-    }
-}
-
-/// Start a bare migration job for a normal repository (gwt-spec issue US7).
-#[instrument(skip_all, fields(command = "start_migration_job", window_label = window.label()))]
-#[tauri::command]
-pub fn start_migration_job(
-    window: tauri::Window,
-    path: String,
-    state: State<AppState>,
-    app_handle: AppHandle,
-) -> Result<String, StructuredError> {
-    log_flow_start("migration", "start_migration_job");
-    let selected = Path::new(&path);
-    if !selected.exists() {
-        let msg = format!("Path does not exist: {}", path);
-        gwt_core::logging::log_incident(
-            "migration",
-            "start_migration_job",
-            Some("MIGRATION_PATH_NOT_FOUND"),
-            &msg,
-        );
-        return Err(StructuredError::internal(&msg, "start_migration_job"));
-    }
-
-    let source_root = git::get_main_repo_root(selected);
-    if !git::is_git_repo(&source_root) {
-        gwt_core::logging::log_incident(
-            "migration",
-            "start_migration_job",
-            Some("MIGRATION_NOT_GIT_REPO"),
-            "Not a git repository",
-        );
-        return Err(StructuredError::internal(
-            "Not a git repository",
-            "start_migration_job",
-        ));
-    }
-    if git::is_bare_repository(&source_root) {
-        gwt_core::logging::log_incident(
-            "migration",
-            "start_migration_job",
-            Some("MIGRATION_ALREADY_BARE"),
-            "Repository is already bare",
-        );
-        return Err(StructuredError::internal(
-            "Repository is already bare",
-            "start_migration_job",
-        ));
-    }
-
-    let job_id = Uuid::new_v4().to_string();
-    let window_label = window.label().to_string();
-    let source_root_str = source_root.to_string_lossy().to_string();
-    state.set_window_migration(&window_label, job_id.clone(), source_root_str);
-    let _ = crate::menu::rebuild_menu(window.app_handle());
-
-    let job_id_thread = job_id.clone();
-    let window_label_thread = window_label.clone();
-    let app = app_handle.clone();
-    let source_root_thread = source_root.clone();
-
-    std::thread::spawn(move || {
-        let bare_repo_name = derive_bare_repo_name(&source_root_thread.to_string_lossy());
-        let config = MigrationConfig::new(
-            source_root_thread.clone(),
-            source_root_thread.clone(),
-            bare_repo_name,
-        );
-
-        let progress_job = job_id_thread.clone();
-        let app_progress = app.clone();
-        let progress_cb = Box::new(move |state: MigrationState| {
-            let (s, current, total) = encode_migration_state(&state);
-            let payload = MigrationProgressPayload {
-                job_id: progress_job.clone(),
-                state: s,
-                current,
-                total,
-            };
-            let _ = app_progress.emit("migration-progress", &payload);
-        });
-
-        let result = execute_migration(&config, Some(progress_cb));
-
-        let (ok, error) = match result {
-            Ok(()) => (true, None),
-            Err(err) => {
-                let err_msg = err.to_string();
-                let rollback = rollback_migration(&config).map_err(|e| e.to_string());
-                let msg = match rollback {
-                    Ok(()) => err_msg,
-                    Err(rollback_err) => format!("{err_msg}\n\nRollback failed: {rollback_err}"),
-                };
-                (false, Some(msg))
-            }
-        };
-
-        app.state::<AppState>()
-            .clear_window_migration_if_job(&window_label_thread, &job_id_thread);
-        let _ = crate::menu::rebuild_menu(&app);
-
-        let finished = MigrationFinishedPayload {
-            job_id: job_id_thread.clone(),
-            ok,
-            error,
-            project_path: ok.then_some(source_root_thread.to_string_lossy().to_string()),
-        };
-        let _ = app.emit("migration-finished", &finished);
-    });
-
-    log_flow_success("migration", "start_migration_job");
-    Ok(job_id)
-}
-
 /// Quit the app (used by forced migration refusal).
 #[instrument(skip_all, fields(command = "quit_app"))]
 #[tauri::command]
@@ -1002,49 +784,6 @@ mod tests {
             parse_clone_progress_line("Cloning into 'repo.git'..."),
             None
         );
-    }
-
-    #[test]
-    fn test_resolve_repo_path_for_project_root_from_project_toml() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
-
-        std::fs::create_dir_all(root.join(".gwt")).expect("create .gwt dir");
-        std::fs::write(
-            root.join(".gwt").join("project.toml"),
-            "bare_repo_name = \"repo.git\"\nlocation = \"sibling\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n",
-        )
-        .expect("write project.toml");
-
-        let bare = root.join("repo.git");
-        let status = gwt_core::process::command("git")
-            .args(["init", "--bare"])
-            .arg(&bare)
-            .status()
-            .expect("git init --bare");
-        assert!(status.success());
-
-        let resolved =
-            resolve_repo_path_for_project_root(root).expect("should resolve bare repo path");
-        assert_eq!(resolved, bare);
-    }
-
-    #[test]
-    fn test_resolve_repo_path_for_project_root_fallback_scans_for_bare_repo() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
-
-        let bare = root.join("repo.git");
-        let status = gwt_core::process::command("git")
-            .args(["init", "--bare"])
-            .arg(&bare)
-            .status()
-            .expect("git init --bare");
-        assert!(status.success());
-
-        let resolved =
-            resolve_repo_path_for_project_root(root).expect("should resolve bare repo path");
-        assert_eq!(resolved, bare);
     }
 
     #[test]

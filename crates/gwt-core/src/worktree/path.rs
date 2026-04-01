@@ -18,29 +18,13 @@ impl WorktreePath {
     /// Generate a worktree path with specified location strategy (gwt-spec issue T401-T403)
     ///
     /// - Subdir: {repo_root}/.worktrees/{sanitized_branch_name}
-    /// - Sibling: {repo_root_parent}/{branch_name_with_subdirs}
     pub fn generate_with_location(
         repo_root: &Path,
         branch_name: &str,
-        location: WorktreeLocation,
+        _location: WorktreeLocation,
     ) -> PathBuf {
-        match location {
-            WorktreeLocation::Subdir => {
-                let sanitized = Self::sanitize_branch_name(branch_name);
-                repo_root.join(".worktrees").join(sanitized)
-            }
-            WorktreeLocation::Sibling => {
-                // For sibling method, create worktree next to the bare repo
-                // Branch name is preserved as-is (slash becomes subdirectory)
-                if let Some(parent) = repo_root.parent() {
-                    parent.join(branch_name)
-                } else {
-                    // Fallback to subdir if no parent
-                    let sanitized = Self::sanitize_branch_name(branch_name);
-                    repo_root.join(".worktrees").join(sanitized)
-                }
-            }
-        }
+        let sanitized = Self::sanitize_branch_name(branch_name);
+        repo_root.join(".worktrees").join(sanitized)
     }
 
     /// Sanitize branch name for use as directory name
@@ -65,25 +49,6 @@ mod tests {
         let root = PathBuf::from("/project/repo.git");
         let path = WorktreePath::generate_with_location(&root, "main", WorktreeLocation::Subdir);
         assert_eq!(path, PathBuf::from("/project/repo.git/.worktrees/main"));
-    }
-
-    #[test]
-    fn test_generate_path_sibling() {
-        let root = PathBuf::from("/project/repo.git");
-        let path = WorktreePath::generate_with_location(&root, "main", WorktreeLocation::Sibling);
-        assert_eq!(path, PathBuf::from("/project/main"));
-    }
-
-    #[test]
-    fn test_generate_path_sibling_with_slash() {
-        // gwt-spec issue T403: slash becomes subdirectory in sibling mode
-        let root = PathBuf::from("/project/repo.git");
-        let path = WorktreePath::generate_with_location(
-            &root,
-            "feature/branch-name",
-            WorktreeLocation::Sibling,
-        );
-        assert_eq!(path, PathBuf::from("/project/feature/branch-name"));
     }
 
     #[test]

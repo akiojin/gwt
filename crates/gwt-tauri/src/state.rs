@@ -607,6 +607,7 @@ impl AppState {
         map.get(window_label).cloned().unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub fn set_window_migration(&self, window_label: &str, job_id: String, source_root: String) {
         if let Ok(mut map) = self.window_migrations.lock() {
             map.insert(
@@ -619,6 +620,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn clear_window_migration_if_job(&self, window_label: &str, job_id: &str) {
         if let Ok(mut map) = self.window_migrations.lock() {
             let remove = map

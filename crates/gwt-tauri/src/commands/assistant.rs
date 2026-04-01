@@ -8,7 +8,6 @@ use gwt_core::{
     logging::{log_flow_failure, log_flow_start, log_flow_success},
     process::command as process_command,
     terminal::pane::PaneStatus,
-    worktree::WorktreeManager,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -1958,27 +1957,9 @@ fn build_git_dashboard(state: &AppState, window_label: &str) -> Result<GitDashbo
 
 fn resolve_dashboard_worktree_path(
     repo_path: &Path,
-    current_branch: Option<&Branch>,
+    _current_branch: Option<&Branch>,
 ) -> Option<PathBuf> {
-    if !git::is_bare_repository(repo_path) {
-        return Some(repo_path.to_path_buf());
-    }
-
-    let manager = WorktreeManager::new(repo_path).ok()?;
-    let worktrees = manager.list_basic().ok()?;
-
-    if let Some(branch_name) = current_branch.map(|branch| branch.name.as_str()) {
-        if let Some(worktree) = worktrees.iter().find(|worktree| {
-            worktree.is_active() && worktree.branch.as_deref() == Some(branch_name)
-        }) {
-            return Some(worktree.path.clone());
-        }
-    }
-
-    worktrees
-        .iter()
-        .find(|worktree| worktree.is_active() && !worktree.is_main)
-        .map(|worktree| worktree.path.clone())
+    Some(repo_path.to_path_buf())
 }
 
 fn build_messages_from_conversation(engine: &AssistantEngine) -> Vec<AssistantMessage> {
