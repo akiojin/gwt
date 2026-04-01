@@ -15,6 +15,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
     }
 
     let left = match model.active_layer {
+        ActiveLayer::Initialization => " Initialization".to_string(),
         ActiveLayer::Main => {
             if model.session_tabs.is_empty() {
                 " No sessions".to_string()
@@ -40,6 +41,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
     };
 
     let hints = match model.active_layer {
+        ActiveLayer::Initialization => " Enter: Clone | Esc: Quit ",
         ActiveLayer::Main if model.session_tabs.is_empty() => {
             " Enter on Branches: Agent | Ctrl+G,c: Shell | Ctrl+G,Ctrl+G: Manage "
         }
@@ -70,7 +72,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_model() -> Model {
-        Model::new(PathBuf::from("/tmp/test-repo"))
+        let mut m = Model::new(PathBuf::from("/tmp/test-repo"));
+        m.active_layer = ActiveLayer::Management; // Force Management for tests
+        m
     }
 
     fn buf_row_text(buf: &Buffer, y: u16, width: u16) -> String {

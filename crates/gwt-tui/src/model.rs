@@ -26,6 +26,8 @@ use crate::widgets::progress_modal::ProgressState;
 /// Top-level layer: Main (sessions) vs Management (branches/issues/settings/logs)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveLayer {
+    /// Initialization screen (shown when no repo is detected)
+    Initialization,
     Main,
     Management,
 }
@@ -229,10 +231,19 @@ pub struct Model {
 
 impl Model {
     /// Create a new Model with default state.
-    /// Starts in Management layer with Branches tab active.
+    /// Detects repo type and starts in Initialization layer if no repo is found,
+    /// otherwise starts in Management layer with Branches tab active.
     pub fn new(repo_root: PathBuf) -> Self {
+        use gwt_core::git::{detect_repo_type, RepoType};
+
+        let repo_type = detect_repo_type(&repo_root);
+        let active_layer = match repo_type {
+            RepoType::Normal | RepoType::Worktree => ActiveLayer::Management,
+            RepoType::Empty | RepoType::NonRepo => ActiveLayer::Initialization,
+        };
+
         Self {
-            active_layer: ActiveLayer::Management,
+            active_layer,
             session_tabs: Vec::new(),
             active_session: 0,
             management_tab: ManagementTab::Branches,
@@ -266,6 +277,31 @@ impl Model {
             last_ctrl_c: None,
             tick_count: 0,
         }
+    }
+
+    /// Reset the model for a new repository root.
+    /// Clears session state, reloads all management screen data,
+    /// and transitions to Management layer with SPECs tab active.
+    pub fn reset(&mut self, new_repo_root: std::path::PathBuf) {
+        self.repo_root = new_repo_root;
+        self.session_tabs.clear();
+        self.active_session = 0;
+        self.active_layer = ActiveLayer::Management;
+        self.management_tab = ManagementTab::Specs;
+        self.overlay_mode = OverlayMode::None;
+        self.clone_wizard = None;
+        self.load_all_data();
+    }
+
+    /// Load all management screen data from the current repo_root.
+    pub fn load_all_data(&mut self) {
+        let repo_root = self.repo_root.clone();
+        self.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
+        self.settings_state.load_settings();
+        self.logs_state.entries = crate::screens::logs::load_log_entries(&repo_root);
+        self.issues_state.issues = crate::screens::issues::load_specs(&repo_root);
+        self.specs_state.specs = crate::screens::specs::load_specs(&repo_root);
+        self.versions_state.tags = crate::screens::versions::load_tags(&repo_root);
     }
 
     // ---- Session tab helpers ------------------------------------------------
@@ -374,6 +410,7 @@ impl Model {
     /// Toggle between Main and Management layers.
     pub fn toggle_layer(&mut self) {
         self.active_layer = match self.active_layer {
+            ActiveLayer::Initialization => ActiveLayer::Initialization, // Blocked during init
             ActiveLayer::Main => {
                 self.clear_active_history_view();
                 ActiveLayer::Management
@@ -488,7 +525,9 @@ mod tests {
     use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
 
     fn test_model() -> Model {
-        Model::new(PathBuf::from("/tmp/test-repo"))
+        let mut m = Model::new(PathBuf::from("/tmp/test-repo"));
+        m.active_layer = ActiveLayer::Management; // Force Management for tests
+        m
     }
 
     fn test_session(name: &str, tab_type: SessionTabType) -> SessionTab {

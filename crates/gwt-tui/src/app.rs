@@ -589,6 +589,10 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::ToggleLayer => {
+            // Block layer toggle during Initialization (modal)
+            if model.active_layer == ActiveLayer::Initialization {
+                return;
+            }
             model.toggle_layer();
             tracing::info!(
                 message = "flow_success",
@@ -702,6 +706,33 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::KeyInput(key) => {
+            // Initialization layer: handle clone wizard keys or Esc to quit
+            if model.active_layer == ActiveLayer::Initialization {
+                if key.code == crossterm::event::KeyCode::Esc {
+                    model.should_quit = true;
+                    return;
+                }
+                if let Some(ref mut clone_wiz) = model.clone_wizard {
+                    match key.code {
+                        crossterm::event::KeyCode::Enter => {
+                            clone_wiz.next();
+                        }
+                        crossterm::event::KeyCode::Backspace => {
+                            if clone_wiz.step == screens::clone_wizard::CloneStep::Failed {
+                                clone_wiz.prev();
+                            } else {
+                                clone_wiz.handle_backspace();
+                            }
+                        }
+                        crossterm::event::KeyCode::Char(c) => {
+                            clone_wiz.handle_char(c);
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            }
+
             // Error overlay: Enter/Esc dismisses the error
             if (!model.error_queue.is_empty() || !model.error_queue_v2.is_empty())
                 && (key.code == crossterm::event::KeyCode::Enter
@@ -743,6 +774,7 @@ pub fn update(model: &mut Model, msg: Message) {
             }
             // Forward to active screen handler
             match model.active_layer {
+                ActiveLayer::Initialization => {} // Handled above
                 ActiveLayer::Main => {
                     let bytes = key_event_to_bytes(&key);
                     if !bytes.is_empty() {
@@ -1108,6 +1140,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
         // Main content area
         match model.active_layer {
+            ActiveLayer::Initialization => {
+                // Fullscreen clone wizard for initialization
+                if let Some(ref clone_wiz) = model.clone_wizard {
+                    screens::clone_wizard::render_fullscreen(clone_wiz, buf, area);
+                }
+            }
             ActiveLayer::Main => {
                 if model.session_tabs.is_empty() {
                     let center = centered_text(
@@ -2091,31 +2129,31 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         model.terminal_rows = rows;
     }
 
-    // Load initial data for management screens
-    tracing::info!(
-        message = "flow_start",
-        category = "ui",
-        event = "load_management_data",
-        result = "start",
-        workspace = "default",
-    );
-    model.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
-    model.settings_state.load_settings();
-    model.logs_state.entries = crate::screens::logs::load_log_entries(&repo_root);
-    model.issues_state.issues = crate::screens::issues::load_specs(&repo_root);
-    model.specs_state.specs = crate::screens::specs::load_specs(&repo_root);
-    model.versions_state.tags = crate::screens::versions::load_tags(&repo_root);
-    tracing::info!(
-        message = "flow_success",
-        category = "ui",
-        event = "load_management_data",
-        result = "success",
-        workspace = "default",
-        logs = model.logs_state.entries.len(),
-        specs = model.specs_state.specs.len(),
-        issues = model.issues_state.issues.len(),
-        versions = model.versions_state.tags.len(),
-    );
+    // Load initial data for management screens (skip if in Initialization mode)
+    if model.active_layer != ActiveLayer::Initialization {
+        tracing::info!(
+            message = "flow_start",
+            category = "ui",
+            event = "load_management_data",
+            result = "start",
+            workspace = "default",
+        );
+        model.load_all_data();
+        tracing::info!(
+            message = "flow_success",
+            category = "ui",
+            event = "load_management_data",
+            result = "success",
+            workspace = "default",
+            logs = model.logs_state.entries.len(),
+            specs = model.specs_state.specs.len(),
+            issues = model.issues_state.issues.len(),
+            versions = model.versions_state.tags.len(),
+        );
+    } else {
+        // In Initialization mode, auto-open the clone wizard
+        model.clone_wizard = Some(screens::clone_wizard::CloneWizardState::new());
+    }
 
     // PTY output channel
     let (pty_tx, pty_rx) = event::pty_output_channel();
@@ -2253,7 +2291,9 @@ mod tests {
     use std::time::Duration;
 
     fn test_model() -> Model {
-        Model::new(PathBuf::from("/tmp/test"))
+        let mut m = Model::new(PathBuf::from("/tmp/test"));
+        m.active_layer = crate::model::ActiveLayer::Management; // Force Management for tests
+        m
     }
 
     fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {

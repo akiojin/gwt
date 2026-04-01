@@ -20,6 +20,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
     }
 
     match model.active_layer {
+        ActiveLayer::Initialization => {} // No tab bar during initialization
         ActiveLayer::Main => render_main_tabs(model, buf, area),
         ActiveLayer::Management => render_management_tabs(model, buf, area),
     }
