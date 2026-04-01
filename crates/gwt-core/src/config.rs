@@ -7,6 +7,7 @@ mod bare_project;
 mod claude_hook_events;
 mod claude_hooks;
 mod claude_plugins;
+mod codex_hook_events;
 pub mod migration;
 pub mod os_env;
 mod profile;
@@ -31,6 +32,7 @@ pub use claude_plugins::{
     setup_gwt_plugin, setup_gwt_plugin_at, GWT_MARKETPLACE_NAME, GWT_MARKETPLACE_REPO,
     GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
 };
+pub use codex_hook_events::process_codex_hook_event;
 pub use migration::{backup_broken_file, ensure_config_dir, write_atomic};
 pub use os_env::{capture_login_shell_env, EnvSource, OsEnvResult, ShellType};
 pub use profile::{

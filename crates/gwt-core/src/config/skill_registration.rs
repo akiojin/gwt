@@ -629,6 +629,54 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
     },
 ];
 
+const CODEX_HOOK_ASSETS: &[ManagedAsset] = &[
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-forward-hook.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-forward-hook.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-block-git-branch-ops.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-block-git-branch-ops.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-block-cd-command.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-block-cd-command.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-block-file-ops.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-block-file-ops.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-block-git-dir-override.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-block-git-dir-override.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+];
+
 const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
     "skills/gwt-fix-issue",
     "skills/gwt-fix-pr",
@@ -652,6 +700,8 @@ const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER: &str = "# END gwt managed 
 const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.gwt/",
     "/.codex/skills/gwt-*/",
+    "/.codex/hooks/scripts/gwt-*.mjs",
+    "/.codex/hooks.json",
     "/.gemini/skills/gwt-*/",
     "/.claude/skills/gwt-*/",
     "/.claude/commands/gwt-*.md",
@@ -850,6 +900,20 @@ fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
 fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
     write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")?;
     register_project_local_managed_assets(root)
+}
+
+fn register_codex_assets_at(project_root: &Path) -> Result<(), GwtError> {
+    let root = project_root.join(".codex");
+
+    // Write skill + hook script assets
+    write_managed_assets(
+        &root,
+        PROJECT_SKILL_ASSETS.iter().chain(CODEX_HOOK_ASSETS.iter()),
+        ".codex",
+    )?;
+
+    // Write hooks.json
+    write_managed_codex_hooks(&root)
 }
 
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
@@ -1237,6 +1301,126 @@ fn hook_script_command(script: &str, args: &str) -> String {
     } else {
         format!("{base}{script}\" {args}")
     }
+}
+
+/// Build a Codex hook command that resolves the git repository root at runtime.
+/// Same pattern as Claude but uses `.codex/hooks/scripts/` path.
+fn codex_hook_script_command(script: &str, args: &str) -> String {
+    let base = "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/";
+    if args.is_empty() {
+        format!("{base}{script}\"")
+    } else {
+        format!("{base}{script}\" {args}")
+    }
+}
+
+/// Codex hooks definition for 5 supported events:
+/// SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop.
+///
+/// Notification is not supported by Codex (FR-HOOK-004).
+fn managed_codex_hooks_definition() -> Value {
+    serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": codex_hook_script_command("gwt-forward-hook.mjs", "SessionStart")
+                }]
+            }],
+            "UserPromptSubmit": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": codex_hook_script_command("gwt-forward-hook.mjs", "UserPromptSubmit")
+                }]
+            }],
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": codex_hook_script_command("gwt-forward-hook.mjs", "PreToolUse")
+                    }]
+                },
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": codex_hook_script_command("gwt-block-git-branch-ops.mjs", "")
+                        },
+                        {
+                            "type": "command",
+                            "command": codex_hook_script_command("gwt-block-cd-command.mjs", "")
+                        },
+                        {
+                            "type": "command",
+                            "command": codex_hook_script_command("gwt-block-file-ops.mjs", "")
+                        },
+                        {
+                            "type": "command",
+                            "command": codex_hook_script_command("gwt-block-git-dir-override.mjs", "")
+                        }
+                    ]
+                }
+            ],
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": codex_hook_script_command("gwt-forward-hook.mjs", "PostToolUse")
+                }]
+            }],
+            "Stop": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": codex_hook_script_command("gwt-forward-hook.mjs", "Stop")
+                }]
+            }]
+        }
+    })
+}
+
+/// Write `.codex/hooks.json` with the managed Codex hooks definition.
+///
+/// Unlike Claude's `settings.local.json` merge, Codex hooks.json is gwt-owned
+/// and can be overwritten entirely.
+fn write_managed_codex_hooks(codex_root: &Path) -> Result<(), GwtError> {
+    let hooks_path = codex_root.join("hooks.json");
+
+    if let Some(parent) = hooks_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to create Codex directory {}: {}",
+                parent.display(),
+                e
+            ),
+        })?;
+    }
+
+    let definition = managed_codex_hooks_definition();
+    let output =
+        serde_json::to_string_pretty(&definition).map_err(|e| GwtError::ConfigWriteError {
+            reason: e.to_string(),
+        })?;
+
+    std::fs::write(&hooks_path, output).map_err(|e| GwtError::ConfigWriteError {
+        reason: format!(
+            "Failed to write Codex hooks {}: {}",
+            hooks_path.display(),
+            e
+        ),
+    })?;
+
+    info!(
+        category = "skills",
+        path = %hooks_path.display(),
+        "Wrote Codex hooks.json"
+    );
+
+    Ok(())
 }
 
 fn managed_hooks_definition() -> Value {
@@ -1650,7 +1834,8 @@ pub fn register_agent_skills_with_settings_at_project_root(
 
     match agent {
         SkillAgentType::Claude => register_claude_assets_at(project_root),
-        SkillAgentType::Codex | SkillAgentType::Gemini => {
+        SkillAgentType::Codex => register_codex_assets_at(project_root),
+        SkillAgentType::Gemini => {
             let Some(root) = agent_root_for(agent, Some(project_root)) else {
                 return Err(GwtError::ConfigWriteError {
                     reason: format!("{} asset root could not be resolved.", agent.label()),

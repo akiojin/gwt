@@ -270,14 +270,17 @@ impl Session {
 /// Agents without hook support need pane output analysis for status inference.
 pub fn agent_has_hook_support(agent_id: Option<&str>) -> bool {
     match agent_id {
-        Some(id) => id.to_lowercase().contains("claude"),
+        Some(id) => {
+            let lower = id.to_lowercase();
+            lower.contains("claude") || lower.contains("codex")
+        }
         None => false,
     }
 }
 
 /// Infer agent status from pane output tail and process liveness.
 ///
-/// Used for agents that lack Hook API support (Codex, Gemini, OpenCode).
+/// Used for agents that lack Hook API support (Gemini, OpenCode).
 /// Heuristics (FR-831):
 /// 1. Process dead → Stopped
 /// 2. Prompt pattern at end of output → WaitingInput
@@ -887,8 +890,13 @@ updated_at = "2026-01-20T00:00:00Z"
     }
 
     #[test]
-    fn non_claude_no_hook_support() {
-        assert!(!agent_has_hook_support(Some("codex-cli")));
+    fn codex_has_hook_support() {
+        assert!(agent_has_hook_support(Some("codex-cli")));
+        assert!(agent_has_hook_support(Some("Codex")));
+    }
+
+    #[test]
+    fn non_hook_agents_no_support() {
         assert!(!agent_has_hook_support(Some("gemini-cli")));
         assert!(!agent_has_hook_support(Some("opencode")));
         assert!(!agent_has_hook_support(None));
