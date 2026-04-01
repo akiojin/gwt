@@ -43,6 +43,51 @@ pub fn render(
     }
 }
 
+/// Render a large history parser using a manual viewport offset.
+pub fn render_history(
+    buf: &mut Buffer,
+    area: Rect,
+    parser: &vt100::Parser,
+    view_top: u16,
+    copy_cursor: Option<SelectionPoint>,
+    selection: Option<(SelectionPoint, SelectionPoint)>,
+) -> Option<(u16, u16)> {
+    let screen = parser.screen();
+    let rows = area.height as usize;
+    let cols = area.width as usize;
+
+    for row in 0..rows {
+        for col in 0..cols {
+            let source_row = view_top.saturating_add(row as u16);
+            let source_col = col as u16;
+            let buf_x = area.x + col as u16;
+            let buf_y = area.y + row as u16;
+
+            if let Some(cell) = screen.cell(source_row, source_col) {
+                if let Some(buf_cell) = buf.cell_mut((buf_x, buf_y)) {
+                    let ch = cell.contents();
+                    if ch.is_empty() {
+                        buf_cell.set_char(' ');
+                    } else {
+                        buf_cell.set_symbol(&ch);
+                    }
+                    buf_cell.set_style(crate::renderer::vt100_to_ratatui_style(cell));
+                }
+            }
+        }
+    }
+
+    render_selection(buf, area, selection);
+
+    if let Some(cursor) = copy_cursor {
+        let x = area.x + cursor.col.min(area.width.saturating_sub(1));
+        let y = area.y + cursor.row.min(area.height.saturating_sub(1));
+        return Some((x, y));
+    }
+
+    None
+}
+
 pub fn selected_text(parser: &vt100::Parser, start: SelectionPoint, end: SelectionPoint) -> String {
     let screen = parser.screen();
     let (_, cols) = screen.size();

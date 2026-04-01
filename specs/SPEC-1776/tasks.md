@@ -94,7 +94,9 @@
 - [x] T147: [TDD] Logs タブを workspace JSONL + structured fields (`category` / `event` / `result` / `workspace` / `error_code`) 対応に更新
 - [x] T148: [TDD] Branches タブの `All / Local / Remote` ビューフィルターが `origin/*` remote refs でも正しく切り替わるよう修正
 - [x] T149: [TDD] Branches 一覧で `refs/remotes/<remote>/HEAD` 由来の `origin` alias を除外
-- [x] T150: [TDD] Main PTY copy mode で file-backed ANSI transcript を読み、live parser を超える過去出力も表示
+- [x] T150: [TDD] Agent/Shell PTY copy mode で session-scoped file-backed ANSI transcript を読み、live parser を超える過去出力も表示
+- [x] T151: [TDD] chatty PTY 出力が続いても copy mode の trackpad / mouse scroll が terminal input starvation で詰まらないよう EventLoop を調整
+- [x] T152: [TDD] pane close / app shutdown 時に session-scoped transcript を cleanup する
 
 ## Phase 3: Wizard + Agent Launch [P]
 

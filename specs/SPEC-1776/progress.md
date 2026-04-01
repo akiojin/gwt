@@ -16,6 +16,25 @@
 
 - 手動 E2E: Branches → develop 選択 → Launch Agent → agent の cwd が develop worktree であることを確認
 
+## 2026-04-01: Session-scoped PTY scrollback and terminal input fairness
+
+### Progress
+
+- Confirmed that the real scrollback source must be the session tab's raw PTY transcript for both Agent and Shell panes, not the parsed session file
+- Found a second root cause for copy-mode scrolling: the event loop always preferred pending PTY output, so chatty panes could starve trackpad / mouse scroll input
+- Reworked the event loop to prefer already-ready terminal input before draining PTY output, keeping copy-mode scroll responsive while preserving PTY throughput
+- Added cleanup for session-scoped transcript files on pane close and on normal gwt shutdown so scrollback remains temporary
+
+### Done
+
+- Agent/Shell copy mode now uses session-scoped PTY transcript history instead of only the live parser buffer
+- Copy-mode scroll input is no longer blocked behind continuously arriving PTY output
+- Session transcript files are removed when the pane closes or gwt exits normally
+
+### Next
+
+- Manual E2E: open a chatty agent or shell pane, enter copy mode, scroll with trackpad, and confirm historical output stays responsive and matches the real transcript
+
 ## 2026-04-01: Remote HEAD alias and deep PTY scrollback
 
 ### Progress

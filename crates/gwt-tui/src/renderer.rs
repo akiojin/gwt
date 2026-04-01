@@ -39,7 +39,7 @@ pub fn render_vt100_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen)
 }
 
 /// Convert vt100 cell colors/attributes to a ratatui Style.
-fn vt100_to_ratatui_style(cell: &vt100::Cell) -> Style {
+pub(crate) fn vt100_to_ratatui_style(cell: &vt100::Cell) -> Style {
     let mut style = Style::default();
     style = style.fg(vt100_color_to_ratatui(cell.fgcolor()));
     style = style.bg(vt100_color_to_ratatui(cell.bgcolor()));

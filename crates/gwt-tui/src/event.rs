@@ -55,34 +55,53 @@ impl EventLoop {
         }
     }
 
-    /// Block until the next event is available.
-    pub fn next(&self) -> Result<TuiEvent, Box<dyn std::error::Error>> {
-        // First drain any pending PTY output (non-blocking)
-        match self.pty_rx.try_recv() {
-            Ok(msg) => {
-                return Ok(TuiEvent::PtyOutput {
-                    pane_id: msg.pane_id,
-                    data: msg.data,
-                });
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {}
+    fn read_ready_terminal_event(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<TuiEvent>, Box<dyn std::error::Error>> {
+        if !event::poll(timeout)? {
+            return Ok(None);
         }
 
-        // Poll crossterm
-        if event::poll(self.poll_timeout)? {
-            match event::read()? {
-                Event::Key(key) => {
-                    // Only handle Press events (ignore Release/Repeat)
-                    if key.kind == KeyEventKind::Press {
-                        return Ok(TuiEvent::Key(key));
-                    }
-                }
-                Event::Paste(data) => return Ok(TuiEvent::Paste(data)),
-                Event::Mouse(mouse) => return Ok(TuiEvent::Mouse(mouse)),
-                Event::Resize(w, h) => return Ok(TuiEvent::Resize(w, h)),
-                _ => {}
-            }
+        let event = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => Some(TuiEvent::Key(key)),
+            Event::Paste(data) => Some(TuiEvent::Paste(data)),
+            Event::Mouse(mouse) => Some(TuiEvent::Mouse(mouse)),
+            Event::Resize(w, h) => Some(TuiEvent::Resize(w, h)),
+            _ => None,
+        };
+
+        Ok(event)
+    }
+
+    fn try_recv_pty(&self) -> Option<TuiEvent> {
+        match self.pty_rx.try_recv() {
+            Ok(msg) => Some(TuiEvent::PtyOutput {
+                pane_id: msg.pane_id,
+                data: msg.data,
+            }),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
+        }
+    }
+
+    /// Block until the next event is available.
+    pub fn next(&self) -> Result<TuiEvent, Box<dyn std::error::Error>> {
+        // Prefer already-ready terminal input over PTY output so copy-mode
+        // scrolling and selection don't get starved by chatty panes.
+        if let Some(event) = self.read_ready_terminal_event(Duration::ZERO)? {
+            return Ok(event);
+        }
+
+        if let Some(event) = self.try_recv_pty() {
+            return Ok(event);
+        }
+
+        if let Some(event) = self.read_ready_terminal_event(self.poll_timeout)? {
+            return Ok(event);
+        }
+
+        if let Some(event) = self.try_recv_pty() {
+            return Ok(event);
         }
 
         // Nothing happened → tick

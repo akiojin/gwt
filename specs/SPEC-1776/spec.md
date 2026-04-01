@@ -148,6 +148,8 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 28. 管理画面のステータスバーに実行中セッション数を表示
 29. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
 30. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
+31. Branches タブでは `origin` のような remote HEAD alias をブランチとして表示しない
+32. Agent/Shell PTY copy mode では live parser の保持量を超えた古い出力も session-scoped file-backed transcript から辿れる
 
 ## Edge Cases
 
@@ -155,13 +157,15 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - Agent/Shell PTY exit or crash: the corresponding tab closes automatically
 - Main PTY normal mode: terminal-native selection/copy must remain available because mouse capture stays disabled
 - PTY output arriving during copy mode: parser keeps ingesting bytes, but the visible viewport stays fixed until copy mode exits
+- Agent / Shell session files are not a scrollback source; pane transcript must remain available while the session tab is alive even when no agent session file exists
+- Session transcript is temporary: pane close or gwt shutdown may discard it without affecting session-file based resume
 - Worktree creation failure: error shown in modal, tab not created
 - GitHub API unreachable: PR/Issue panels show offline state, background retry
 - Ctrl+G: prefix key must never be forwarded to PTY
 - Ctrl+C on agent tab: always forward to PTY (never quit gwt)
 - Ctrl+C double-tap on shell tab: quit gwt (with confirmation if agents running)
 - Multiple agents on same branch: allowed, each gets unique pane_id
-- Long-running gwt: scrollback file-based (not memory), parser memory bounded
+- Long-running gwt: scrollback remains file-based (not memory) while each session is alive, parser memory stays bounded
 
 ## Functional Requirements
 
@@ -185,8 +189,8 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-015: Automatic worktree creation on agent launch and cleanup on close
 - FR-016: Session termination polling via PTY process monitoring, with automatic tab close on exit
 - FR-017: Active Agent/Shell tab enters PTY copy mode via Ctrl+G,m
-- FR-018: PTY copy mode supports keyboard scrollback navigation (Up/Down/Left/Right/PgUp/PgDn/Home/End) and exits with Esc/q, restoring the live viewport
-- FR-019: PTY copy mode supports mouse wheel scroll and drag selection, copying the selected text to the system clipboard on release/confirm
+- FR-018: Active Agent/Shell PTY copy mode supports keyboard scrollback navigation (Up/Down/Left/Right/PgUp/PgDn/Home/End) across both live parser history and the session-scoped file-backed pane transcript, and exits with Esc/q, restoring the live viewport
+- FR-019: PTY copy mode supports mouse wheel and trackpad scroll plus drag selection, copying the selected text to the system clipboard on release/confirm
 
 ### Wizard (Agent Launch)
 
@@ -253,7 +257,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 ## Non-Functional Requirements
 
 - NFR-001: Rendering optimized with frame rate limiting, dirty flags, differential updates
-- NFR-002: Memory usage bounded (scrollback file-based via gwt-core ScrollbackFile)
+- NFR-002: Memory usage bounded (scrollback stays file-based via gwt-core ScrollbackFile and is cleaned up when the session ends)
 - NFR-003: Cross-platform support (macOS, Linux, Windows) via crossterm
 - NFR-004: Startup time under 500ms to first interactive frame
 - NFR-005: gwt-core API changes limited to new modules (no breaking changes)

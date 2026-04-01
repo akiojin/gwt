@@ -1,6 +1,6 @@
 //! Central Model: all application state lives here (Elm Architecture)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
@@ -102,6 +102,7 @@ pub struct SelectionPoint {
 pub struct PtyCopyMode {
     pub pane_id: String,
     pub scrollback: usize,
+    pub max_scrollback: usize,
     pub cursor: SelectionPoint,
     pub selection_anchor: Option<SelectionPoint>,
     pub selection_focus: Option<SelectionPoint>,
@@ -188,6 +189,8 @@ pub struct Model {
     pub vt_parsers: HashMap<String, vt100::Parser>,
     pub pty_tx: Option<crate::event::PtyOutputSender>,
     pub pty_copy_mode: Option<PtyCopyMode>,
+    pub pty_copy_parser: Option<vt100::Parser>,
+    pub pending_resume_panes: HashSet<String>,
 
     // Overlay states
     pub overlay_mode: OverlayMode,
@@ -231,6 +234,8 @@ impl Model {
             vt_parsers: HashMap::new(),
             pty_tx: None,
             pty_copy_mode: None,
+            pty_copy_parser: None,
+            pending_resume_panes: HashSet::new(),
             overlay_mode: OverlayMode::None,
             error_queue: Vec::new(),
             error_queue_v2: ErrorQueue::new(),
@@ -274,6 +279,7 @@ impl Model {
             self.clear_pty_copy_mode();
         }
         self.vt_parsers.remove(&tab.pane_id);
+        self.pending_resume_panes.remove(&tab.pane_id);
         let pane_index = self
             .pane_manager
             .panes()
@@ -437,6 +443,7 @@ impl Model {
 
     pub fn clear_pty_copy_mode(&mut self) {
         self.pty_copy_mode = None;
+        self.pty_copy_parser = None;
     }
 }
 
