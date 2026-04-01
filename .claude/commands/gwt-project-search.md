@@ -16,7 +16,7 @@ Use this command to run semantic search against the project structure index.
 
 ## Steps
 
-1. Load `skills/gwt-project-search/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-project-search/SKILL.md` and follow the workflow.
 2. If index status is unknown, check index health before searching.
 3. Run semantic search and return top results with short rationale:
    - path

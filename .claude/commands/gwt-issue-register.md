@@ -21,7 +21,7 @@ Hard routing rule: when the user asks to issue-file or register new work without
 
 ## Steps
 
-1. Load `skills/gwt-issue-register/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-issue-register/SKILL.md` and follow the workflow.
 2. Normalize the request and classify the work type.
 3. Run `gwt-issue-search` first with at least 2 semantic queries.
 4. If a clear existing Issue or `gwt-spec` already owns the request, continue with that workflow instead of creating a duplicate.

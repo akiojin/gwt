@@ -16,7 +16,7 @@ Use this command to run semantic search against the GitHub Issues index.
 
 ## Steps
 
-1. Load `skills/gwt-issue-search/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-issue-search/SKILL.md` and follow the workflow.
 2. If index status is unknown, check index health before searching.
 3. Run semantic Issue search and return top results with short rationale:
    - issue number and title

@@ -29,6 +29,19 @@
 - A task is not complete until the relevant checks have run successfully or an explicit exception
   is documented with reason, fallback verification, and residual risk.
 
+### 6. SPEC vs Issue Separation
+
+- **SPEC = Feature specification.** Defines new functionality, design, or architecture.
+  One SPEC per cohesive feature (e.g., "Voice Input", "Docker Support", not "fix voice crash").
+- **Issue = Work item.** Bug fixes, tasks, and improvements are GitHub Issues linked to a SPEC.
+  Never create a SPEC for a bug fix — file an Issue against the relevant SPEC instead.
+- **Granularity rule:** A SPEC should be decomposable into 3-15 tasks. If fewer, merge into
+  a parent SPEC. If more, split into child SPECs with clear scope boundaries.
+- **No duplicate scope:** Before creating a SPEC, search existing SPECs (`gwt-spec-search`)
+  and Issues (`gwt-issue-search`). Reuse an existing owner when one clearly fits.
+- **SPEC categories:** CORE-TUI, AGENT, GIT, DOCKER, GITHUB, CONFIG, ASSISTANT, SEARCH,
+  BUILD, NOTIFICATION, VOICE, DESIGN. Each SPEC belongs to exactly one category.
+
 ## Required Plan Gates
 
 Every `plan.md` must answer these questions:

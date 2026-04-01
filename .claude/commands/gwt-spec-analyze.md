@@ -16,7 +16,7 @@ Use this command as the final gate before implementation.
 
 ## Steps
 
-1. Load `skills/gwt-spec-analyze/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-spec-analyze/SKILL.md` and follow the workflow.
 2. Check `spec.md`, `plan.md`, `tasks.md`, and `.gwt/memory/constitution.md`.
 3. Report missing traceability, unresolved clarifications, or constitution gaps, and classify them as `CLEAR`, `AUTO-FIXABLE`, or `NEEDS-DECISION`.
 4. Treat `CLEAR` as execution readiness only, not as proof of final completion.

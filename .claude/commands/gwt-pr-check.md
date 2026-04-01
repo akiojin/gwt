@@ -16,7 +16,7 @@ Use this command to inspect PR status for the current branch with the gh CLI.
 
 ## Steps
 
-1. Load `skills/gwt-pr-check/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-pr-check/SKILL.md` and follow the workflow.
 2. Run `python3 ".claude/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "."`.
 3. Prefer the REST pull-request list endpoint as the primary transport for PR discovery.
 4. Ensure `gh auth status` succeeds before running PR checks, or continue with token-backed REST auth when `GH_TOKEN` / `GITHUB_TOKEN` is already provided.
