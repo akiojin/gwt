@@ -26,6 +26,10 @@
 - [x] T022: PTY リーダースレッド → EventLoop 統合
 - [x] T023: Ctrl+C ハンドリング（Agent タブ: PTY転送、Shell タブ: 2回押し終了）
 - [x] T024: ターミナルリサイズ → PaneManager + vt100 同期
+- [x] T025: [TDD] app.rs / agent_pane.rs のテスト — PTY copy mode のキーボード/マウス操作、クリップボードコピー、viewport 固定
+- [x] T026: PTY copy mode 実装 — `Ctrl+G,m`、動的 mouse capture、scrollback 移動、ドラッグコピー
+- [x] T027: [TDD] bracketed paste のテスト — 改行を含む pasted text を PTY に一括転送
+- [x] T028: bracketed paste 実装 — `Event::Paste` 配線、PTY への raw payload 転送
 
 ### Widgets
 
@@ -44,6 +48,7 @@
 - [x] T041: Ctrl+G,Ctrl+G でメイン↔管理画面トグル
 - [x] T042: Ctrl+G,c でシェルタブ作成、PTY 動作確認
 - [x] T043: `cargo test -p gwt-tui && cargo test -p gwt-core` 全通過
+- [x] T044: Main PTY copy mode — `Ctrl+G,m` でスクロール/コピー、終了時に live viewport 復帰
 
 ## Phase 2: Management Screens [P]
 

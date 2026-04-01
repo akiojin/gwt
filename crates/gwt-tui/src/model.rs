@@ -9,13 +9,13 @@ use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::AgentColor;
 
 use crate::screens::branches::BranchListState;
-use crate::screens::specs::SpecsState;
 use crate::screens::clone_wizard::CloneWizardState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::error::ErrorQueue;
 use crate::screens::issues::IssuePanelState;
 use crate::screens::migration_dialog::MigrationDialogState;
 use crate::screens::speckit_wizard::SpecKitState;
+use crate::screens::specs::SpecsState;
 use crate::screens::{LogsState, SettingsState};
 use crate::widgets::progress_modal::ProgressState;
 
@@ -85,6 +85,22 @@ pub enum SessionStatus {
     Running,
     Completed(i32),
     Error(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionPoint {
+    pub row: u16,
+    pub col: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtyCopyMode {
+    pub pane_id: String,
+    pub scrollback: usize,
+    pub cursor: SelectionPoint,
+    pub selection_anchor: Option<SelectionPoint>,
+    pub selection_focus: Option<SelectionPoint>,
+    pub dragging: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +181,7 @@ pub struct Model {
     pub pane_manager: PaneManager,
     pub vt_parsers: HashMap<String, vt100::Parser>,
     pub pty_tx: Option<crate::event::PtyOutputSender>,
+    pub pty_copy_mode: Option<PtyCopyMode>,
 
     // Overlay states
     pub overlay_mode: OverlayMode,
@@ -206,6 +223,7 @@ impl Model {
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
             pty_tx: None,
+            pty_copy_mode: None,
             overlay_mode: OverlayMode::None,
             error_queue: Vec::new(),
             error_queue_v2: ErrorQueue::new(),
@@ -229,6 +247,7 @@ impl Model {
 
     /// Add a new session tab and switch to it.
     pub fn add_session(&mut self, tab: SessionTab) {
+        self.clear_pty_copy_mode();
         self.session_tabs.push(tab);
         self.active_session = self.session_tabs.len() - 1;
         self.active_layer = ActiveLayer::Main;
@@ -240,7 +259,22 @@ impl Model {
             return None;
         }
         let tab = self.session_tabs.remove(index);
-        let _ = self.pane_manager.close_pane(index);
+        if self
+            .pty_copy_mode
+            .as_ref()
+            .is_some_and(|copy_mode| copy_mode.pane_id == tab.pane_id)
+        {
+            self.clear_pty_copy_mode();
+        }
+        self.vt_parsers.remove(&tab.pane_id);
+        let pane_index = self
+            .pane_manager
+            .panes()
+            .iter()
+            .position(|pane| pane.pane_id() == tab.pane_id);
+        if let Some(pane_index) = pane_index {
+            let _ = self.pane_manager.close_pane(pane_index);
+        }
         if self.session_tabs.is_empty() {
             self.active_session = 0;
             self.active_layer = ActiveLayer::Management;
@@ -258,11 +292,36 @@ impl Model {
         self.close_session(self.active_session)
     }
 
+    pub fn close_session_by_pane_id(&mut self, pane_id: &str) -> Option<SessionTab> {
+        let index = self
+            .session_tabs
+            .iter()
+            .position(|tab| tab.pane_id == pane_id)?;
+        self.close_session(index)
+    }
+
+    pub fn running_session_count(&self) -> usize {
+        self.session_tabs
+            .iter()
+            .filter(|t| matches!(t.status, SessionStatus::Running))
+            .count()
+    }
+
+    pub fn running_agent_count(&self) -> usize {
+        self.session_tabs
+            .iter()
+            .filter(|t| {
+                t.tab_type == SessionTabType::Agent && matches!(t.status, SessionStatus::Running)
+            })
+            .count()
+    }
+
     /// Switch to next session (wraps).
     pub fn next_session(&mut self) {
         if self.session_tabs.is_empty() {
             return;
         }
+        self.clear_pty_copy_mode();
         self.active_session = (self.active_session + 1) % self.session_tabs.len();
     }
 
@@ -271,6 +330,7 @@ impl Model {
         if self.session_tabs.is_empty() {
             return;
         }
+        self.clear_pty_copy_mode();
         self.active_session = if self.active_session == 0 {
             self.session_tabs.len() - 1
         } else {
@@ -281,6 +341,7 @@ impl Model {
     /// Switch to session by 0-based index.
     pub fn switch_session(&mut self, index: usize) {
         if index < self.session_tabs.len() {
+            self.clear_pty_copy_mode();
             self.active_session = index;
         }
     }
@@ -290,7 +351,10 @@ impl Model {
     /// Toggle between Main and Management layers.
     pub fn toggle_layer(&mut self) {
         self.active_layer = match self.active_layer {
-            ActiveLayer::Main => ActiveLayer::Management,
+            ActiveLayer::Main => {
+                self.clear_pty_copy_mode();
+                ActiveLayer::Management
+            }
             ActiveLayer::Management => {
                 if self.session_tabs.is_empty() {
                     // Stay in Management if no sessions exist
@@ -332,6 +396,8 @@ impl Model {
     // ---- Background update polling -------------------------------------------
 
     pub fn apply_background_updates(&mut self) {
+        use gwt_core::terminal::pane::PaneStatus;
+
         self.tick_count += 1;
         // Poll branch list updates
         if let Some(ref rx) = self.branch_list_rx {
@@ -339,13 +405,40 @@ impl Model {
                 // Phase 2: apply branch list data to screens
             }
         }
+
+        let mut exited_panes = Vec::new();
+        for pane in self.pane_manager.panes_mut() {
+            let status = match pane.check_status() {
+                Ok(status) => status.clone(),
+                Err(err) => {
+                    let message = err.to_string();
+                    pane.mark_error(message.clone());
+                    PaneStatus::Error(message)
+                }
+            };
+
+            if !matches!(status, PaneStatus::Running) {
+                exited_panes.push(pane.pane_id().to_string());
+            }
+        }
+
+        // Close in reverse order to keep indices stable for earlier entries.
+        for pane_id in exited_panes.into_iter().rev() {
+            let _ = self.close_session_by_pane_id(&pane_id);
+        }
+    }
+
+    pub fn clear_pty_copy_mode(&mut self) {
+        self.pty_copy_mode = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::{collections::HashMap, path::PathBuf, thread, time::Duration};
+
+    use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
 
     fn test_model() -> Model {
         Model::new(PathBuf::from("/tmp/test-repo"))
@@ -361,6 +454,45 @@ mod tests {
             branch: None,
             spec_id: None,
         }
+    }
+
+    fn attach_test_pane(model: &mut Model, pane_id: &str, command: &str, args: &[&str]) {
+        let pane = TerminalPane::new(PaneConfig {
+            pane_id: pane_id.to_string(),
+            command: command.to_string(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            working_dir: std::env::temp_dir(),
+            branch_name: "test-branch".to_string(),
+            agent_name: "test-agent".to_string(),
+            agent_color: AgentColor::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+            terminal_shell: None,
+            interactive: false,
+            windows_force_utf8: false,
+            project_root: model.repo_root.clone(),
+        })
+        .expect("failed to create test pane");
+        model
+            .pane_manager
+            .add_pane(pane)
+            .expect("failed to attach pane");
+    }
+
+    fn wait_for_auto_close(model: &mut Model, expected_sessions: usize) {
+        for _ in 0..50 {
+            model.apply_background_updates();
+            if model.session_tabs.len() == expected_sessions {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!(
+            "expected {} sessions after auto-close, got {}",
+            expected_sessions,
+            model.session_tabs.len()
+        );
     }
 
     #[test]
@@ -448,6 +580,91 @@ mod tests {
         m.close_session(2);
         assert_eq!(m.active_session, 1);
         assert_eq!(m.session_tabs.len(), 2);
+    }
+
+    #[test]
+    fn close_session_removes_matching_vt_parser() {
+        let mut m = test_model();
+        m.add_session(test_session("s1", SessionTabType::Shell));
+        m.vt_parsers
+            .insert("pane-s1".to_string(), vt100::Parser::new(24, 80, 0));
+
+        m.close_active_session();
+
+        assert!(!m.vt_parsers.contains_key("pane-s1"));
+    }
+
+    #[test]
+    fn apply_background_updates_auto_closes_completed_agent_session() {
+        let mut m = test_model();
+        attach_test_pane(&mut m, "pane-agent", "/usr/bin/true", &[]);
+        m.add_session(SessionTab {
+            pane_id: "pane-agent".to_string(),
+            name: "agent".to_string(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: Some("feature/test".to_string()),
+            spec_id: None,
+        });
+
+        wait_for_auto_close(&mut m, 0);
+
+        assert!(m.session_tabs.is_empty());
+        assert_eq!(m.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn apply_background_updates_auto_closes_completed_shell_session() {
+        let mut m = test_model();
+        attach_test_pane(&mut m, "pane-shell", "/usr/bin/true", &[]);
+        m.add_session(SessionTab {
+            pane_id: "pane-shell".to_string(),
+            name: "shell".to_string(),
+            tab_type: SessionTabType::Shell,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: None,
+            spec_id: None,
+        });
+
+        wait_for_auto_close(&mut m, 0);
+
+        assert!(m.session_tabs.is_empty());
+        assert_eq!(m.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn apply_background_updates_closes_active_completed_session_and_keeps_neighbor_focused() {
+        let mut m = test_model();
+        attach_test_pane(&mut m, "pane-slow", "/bin/sleep", &["60"]);
+        m.add_session(SessionTab {
+            pane_id: "pane-slow".to_string(),
+            name: "shell".to_string(),
+            tab_type: SessionTabType::Shell,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: None,
+            spec_id: None,
+        });
+        attach_test_pane(&mut m, "pane-done", "/usr/bin/true", &[]);
+        m.add_session(SessionTab {
+            pane_id: "pane-done".to_string(),
+            name: "agent".to_string(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: Some("feature/test".to_string()),
+            spec_id: None,
+        });
+
+        wait_for_auto_close(&mut m, 1);
+
+        assert_eq!(m.active_layer, ActiveLayer::Main);
+        assert_eq!(m.active_session, 0);
+        assert_eq!(m.session_tabs[0].pane_id, "pane-slow");
+
+        let _ = m.close_active_session();
     }
 
     #[test]

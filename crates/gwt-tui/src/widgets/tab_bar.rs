@@ -41,7 +41,7 @@ fn render_main_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
 
     if model.session_tabs.is_empty() {
         let hint = Span::styled(
-            "(no sessions — Ctrl+G,c: shell | Ctrl+G,n: agent)",
+            "(no sessions — Enter on Branches: agent | Ctrl+G,c: shell)",
             Style::default().fg(Color::Gray).bg(Color::DarkGray),
         );
         buf.set_span(tabs_area.x, tabs_area.y, &hint, tabs_area.width);
@@ -56,10 +56,7 @@ fn render_main_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
             if i == model.active_session {
                 Line::from(Span::styled(
                     format!(" {} ", tab.name),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .bold(),
+                    Style::default().fg(Color::Black).bg(Color::Yellow).bold(),
                 ))
             } else {
                 Line::from(Span::styled(

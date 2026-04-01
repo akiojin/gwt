@@ -10,6 +10,8 @@ use crossterm::event::{self, Event, KeyEvent, KeyEventKind, MouseEvent};
 pub enum TuiEvent {
     /// Key press event (only Press kind, not Release/Repeat)
     Key(KeyEvent),
+    /// Pasted text from the terminal
+    Paste(String),
     /// Mouse event
     Mouse(MouseEvent),
     /// Terminal resize
@@ -76,6 +78,7 @@ impl EventLoop {
                         return Ok(TuiEvent::Key(key));
                     }
                 }
+                Event::Paste(data) => return Ok(TuiEvent::Paste(data)),
                 Event::Mouse(mouse) => return Ok(TuiEvent::Mouse(mouse)),
                 Event::Resize(w, h) => return Ok(TuiEvent::Resize(w, h)),
                 _ => {}

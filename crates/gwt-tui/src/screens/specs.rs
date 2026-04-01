@@ -2,7 +2,6 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
 
 #[derive(Debug, Clone)]
 pub struct SpecItem {
@@ -19,6 +18,12 @@ pub struct SpecsState {
     pub search_query: String,
     pub search_mode: bool,
     pub offset: usize,
+}
+
+impl Default for SpecsState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SpecsState {
@@ -111,7 +116,7 @@ pub fn render(state: &SpecsState, buf: &mut Buffer, area: Rect) {
 
     let layout = Layout::vertical([
         Constraint::Length(1), // Header
-        Constraint::Min(1),   // List
+        Constraint::Min(1),    // List
         Constraint::Length(if state.search_mode { 1 } else { 0 }),
     ])
     .split(area);
@@ -140,8 +145,8 @@ pub fn render(state: &SpecsState, buf: &mut Buffer, area: Rect) {
 
         let marker = if is_selected { ">" } else { " " };
         let status_icon = match spec.status.as_str() {
-            "open" => "\u{25CB}",    // ○
-            "closed" => "\u{25CF}",  // ●
+            "open" => "\u{25CB}",   // ○
+            "closed" => "\u{25CF}", // ●
             _ => "\u{25CB}",
         };
 
@@ -183,7 +188,11 @@ pub fn load_specs(repo_root: &std::path::Path) -> Vec<SpecItem> {
         if !path.is_dir() {
             continue;
         }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if !name.starts_with("SPEC-") {
             continue;
         }
@@ -217,7 +226,6 @@ pub fn load_specs(repo_root: &std::path::Path) -> Vec<SpecItem> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::prelude::*;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -310,31 +318,46 @@ mod tests {
     #[test]
     fn handle_key_up_returns_select_prev() {
         let s = SpecsState::new();
-        assert!(matches!(handle_key(&s, &key(KeyCode::Up)), Some(SpecsMessage::SelectPrev)));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Up)),
+            Some(SpecsMessage::SelectPrev)
+        ));
     }
 
     #[test]
     fn handle_key_k_returns_select_prev() {
         let s = SpecsState::new();
-        assert!(matches!(handle_key(&s, &key(KeyCode::Char('k'))), Some(SpecsMessage::SelectPrev)));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Char('k'))),
+            Some(SpecsMessage::SelectPrev)
+        ));
     }
 
     #[test]
     fn handle_key_down_returns_select_next() {
         let s = SpecsState::new();
-        assert!(matches!(handle_key(&s, &key(KeyCode::Down)), Some(SpecsMessage::SelectNext)));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Down)),
+            Some(SpecsMessage::SelectNext)
+        ));
     }
 
     #[test]
     fn handle_key_j_returns_select_next() {
         let s = SpecsState::new();
-        assert!(matches!(handle_key(&s, &key(KeyCode::Char('j'))), Some(SpecsMessage::SelectNext)));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Char('j'))),
+            Some(SpecsMessage::SelectNext)
+        ));
     }
 
     #[test]
     fn handle_key_slash_returns_toggle_search() {
         let s = SpecsState::new();
-        assert!(matches!(handle_key(&s, &key(KeyCode::Char('/'))), Some(SpecsMessage::ToggleSearch)));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Char('/'))),
+            Some(SpecsMessage::ToggleSearch)
+        ));
     }
 
     #[test]
@@ -349,28 +372,40 @@ mod tests {
     fn handle_key_search_char() {
         let mut s = SpecsState::new();
         s.search_mode = true;
-        assert!(matches!(handle_key(&s, &key(KeyCode::Char('a'))), Some(SpecsMessage::SearchChar('a'))));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Char('a'))),
+            Some(SpecsMessage::SearchChar('a'))
+        ));
     }
 
     #[test]
     fn handle_key_search_backspace() {
         let mut s = SpecsState::new();
         s.search_mode = true;
-        assert!(matches!(handle_key(&s, &key(KeyCode::Backspace)), Some(SpecsMessage::SearchBackspace)));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Backspace)),
+            Some(SpecsMessage::SearchBackspace)
+        ));
     }
 
     #[test]
     fn handle_key_search_esc_toggles() {
         let mut s = SpecsState::new();
         s.search_mode = true;
-        assert!(matches!(handle_key(&s, &key(KeyCode::Esc)), Some(SpecsMessage::ToggleSearch)));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Esc)),
+            Some(SpecsMessage::ToggleSearch)
+        ));
     }
 
     #[test]
     fn handle_key_search_enter_toggles() {
         let mut s = SpecsState::new();
         s.search_mode = true;
-        assert!(matches!(handle_key(&s, &key(KeyCode::Enter)), Some(SpecsMessage::ToggleSearch)));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Enter)),
+            Some(SpecsMessage::ToggleSearch)
+        ));
     }
 
     // -- update() --

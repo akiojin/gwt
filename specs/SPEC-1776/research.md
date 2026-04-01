@@ -23,13 +23,15 @@ The pre-v7.0.0 TUI used `vt100` crate + `ratatui` with a renderer that converts 
 
 ### State Machine
 
-```
+```text
 Idle → [Ctrl+G pressed] → PrefixActive
-PrefixActive → [n/s/1-9/v/h/x/q/[/]/PgUp] → Execute action → Idle
+PrefixActive → [c/m/x/?/1-9/[/]] → Execute action → Idle
 PrefixActive → [Ctrl+G again] → Toggle management panel → Idle
 PrefixActive → [Escape or timeout 2s] → Cancel → Idle
 PrefixActive → [any other key] → Ignore → Idle
 ```
+
+Agent launch is no longer bound to a prefix shortcut; it starts from the selected branch with `Enter`.
 
 ### Why Ctrl+G
 

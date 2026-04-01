@@ -4,7 +4,10 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, MouseEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -16,14 +19,316 @@ use crate::event::{self, EventLoop, TuiEvent};
 use crate::input::keybind::{self, KeyAction, PrefixState};
 use crate::message::Message;
 use crate::model::{
-    ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode, SessionStatus,
-    SessionTabType,
+    ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode, PtyCopyMode,
+    SelectionPoint,
 };
 use crate::screens::{self, LogsMessage, SettingsMessage};
 use crate::widgets;
 
 /// Tick interval for background polling.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CLIPBOARD: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn content_area_rect(cols: u16, rows: u16) -> Rect {
+    let area = Rect::new(0, 0, cols, rows);
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    layout[2]
+}
+
+fn wants_mouse_capture(model: &Model) -> bool {
+    model.active_layer == ActiveLayer::Management || model.pty_copy_mode.is_some()
+}
+
+fn toggle_pty_copy_mode(model: &mut Model) {
+    if model.pty_copy_mode.is_some() {
+        exit_pty_copy_mode(model);
+        return;
+    }
+
+    if model.active_layer != ActiveLayer::Main || model.session_tabs.is_empty() {
+        return;
+    }
+
+    let pane_id = model.session_tabs[model.active_session].pane_id.clone();
+    let Some(parser) = model.vt_parsers.get_mut(&pane_id) else {
+        return;
+    };
+    parser.set_scrollback(0);
+    model.pty_copy_mode = Some(PtyCopyMode {
+        pane_id,
+        scrollback: parser.screen().scrollback(),
+        cursor: SelectionPoint { row: 0, col: 0 },
+        selection_anchor: None,
+        selection_focus: None,
+        dragging: false,
+    });
+}
+
+fn exit_pty_copy_mode(model: &mut Model) {
+    if let Some(copy_mode) = model.pty_copy_mode.take() {
+        if let Some(parser) = model.vt_parsers.get_mut(&copy_mode.pane_id) {
+            parser.set_scrollback(0);
+        }
+    }
+}
+
+fn clamp_point(point: SelectionPoint, rows: u16, cols: u16) -> SelectionPoint {
+    SelectionPoint {
+        row: point.row.min(rows.saturating_sub(1)),
+        col: point.col.min(cols.saturating_sub(1)),
+    }
+}
+
+fn main_area_point(model: &Model, mouse: MouseEvent) -> Option<SelectionPoint> {
+    let area = content_area_rect(model.terminal_cols, model.terminal_rows);
+    if mouse.column < area.x
+        || mouse.column >= area.right()
+        || mouse.row < area.y
+        || mouse.row >= area.bottom()
+    {
+        return None;
+    }
+    Some(SelectionPoint {
+        row: mouse.row.saturating_sub(area.y),
+        col: mouse.column.saturating_sub(area.x),
+    })
+}
+
+fn adjust_copy_mode_scrollback(model: &mut Model, delta: isize) {
+    let Some(copy_mode) = model.pty_copy_mode.as_mut() else {
+        return;
+    };
+    let Some(parser) = model.vt_parsers.get_mut(&copy_mode.pane_id) else {
+        return;
+    };
+    let desired = if delta.is_negative() {
+        copy_mode.scrollback.saturating_sub(delta.unsigned_abs())
+    } else {
+        copy_mode.scrollback.saturating_add(delta as usize)
+    };
+    parser.set_scrollback(desired);
+    copy_mode.scrollback = parser.screen().scrollback();
+}
+
+fn update_copy_cursor(model: &mut Model, row_delta: i16, col_delta: i16, update_selection: bool) {
+    let Some(copy_mode) = model.pty_copy_mode.as_mut() else {
+        return;
+    };
+    let Some(parser) = model.vt_parsers.get(&copy_mode.pane_id) else {
+        return;
+    };
+    let (rows, cols) = parser.screen().size();
+    let next_row = (i32::from(copy_mode.cursor.row) + i32::from(row_delta))
+        .clamp(0, i32::from(rows.saturating_sub(1))) as u16;
+    let next_col = (i32::from(copy_mode.cursor.col) + i32::from(col_delta))
+        .clamp(0, i32::from(cols.saturating_sub(1))) as u16;
+    copy_mode.cursor = SelectionPoint {
+        row: next_row,
+        col: next_col,
+    };
+    if update_selection && copy_mode.selection_anchor.is_some() {
+        copy_mode.selection_focus = Some(copy_mode.cursor);
+    }
+}
+
+fn copy_current_selection(model: &mut Model) {
+    let Some(copy_mode) = model.pty_copy_mode.as_ref() else {
+        return;
+    };
+    let (Some(anchor), Some(focus)) = (copy_mode.selection_anchor, copy_mode.selection_focus)
+    else {
+        return;
+    };
+    let Some(parser) = model.vt_parsers.get(&copy_mode.pane_id) else {
+        return;
+    };
+    let text = crate::screens::agent_pane::selected_text(parser, anchor, focus);
+    if text.is_empty() {
+        return;
+    }
+    if let Err(error) = copy_text_to_clipboard(&text) {
+        model.push_error(ErrorEntry {
+            message: format!("Clipboard copy failed: {error}"),
+            severity: ErrorSeverity::Minor,
+        });
+    }
+}
+
+fn handle_copy_mode_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
+    let Some(copy_mode) = model.pty_copy_mode.as_ref() else {
+        return false;
+    };
+    if model.active_layer != ActiveLayer::Main
+        || model
+            .session_tabs
+            .get(model.active_session)
+            .map(|tab| tab.pane_id.as_str())
+            != Some(copy_mode.pane_id.as_str())
+    {
+        exit_pty_copy_mode(model);
+        return false;
+    }
+
+    let selecting = copy_mode.selection_anchor.is_some();
+    let page = usize::from(model.terminal_rows.saturating_sub(4).max(1));
+
+    match key.code {
+        crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q') => {
+            exit_pty_copy_mode(model);
+        }
+        crossterm::event::KeyCode::PageUp => adjust_copy_mode_scrollback(model, page as isize),
+        crossterm::event::KeyCode::PageDown => adjust_copy_mode_scrollback(model, -(page as isize)),
+        crossterm::event::KeyCode::Home => adjust_copy_mode_scrollback(model, isize::MAX / 4),
+        crossterm::event::KeyCode::End => adjust_copy_mode_scrollback(model, isize::MIN / 4),
+        crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+            update_copy_cursor(model, -1, 0, selecting);
+        }
+        crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+            update_copy_cursor(model, 1, 0, selecting);
+        }
+        crossterm::event::KeyCode::Left | crossterm::event::KeyCode::Char('h') => {
+            update_copy_cursor(model, 0, -1, selecting);
+        }
+        crossterm::event::KeyCode::Right | crossterm::event::KeyCode::Char('l') => {
+            update_copy_cursor(model, 0, 1, selecting);
+        }
+        crossterm::event::KeyCode::Char(' ') => {
+            if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
+                if copy_mode.selection_anchor.is_some() {
+                    copy_mode.selection_anchor = None;
+                    copy_mode.selection_focus = None;
+                } else {
+                    copy_mode.selection_anchor = Some(copy_mode.cursor);
+                    copy_mode.selection_focus = Some(copy_mode.cursor);
+                }
+            }
+        }
+        crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char('y') => {
+            copy_current_selection(model);
+        }
+        _ => {}
+    }
+
+    true
+}
+
+fn handle_copy_mode_mouse(model: &mut Model, mouse: MouseEvent) -> bool {
+    let Some(copy_mode) = model.pty_copy_mode.as_ref() else {
+        return false;
+    };
+    let pane_id = copy_mode.pane_id.clone();
+    let Some(parser) = model.vt_parsers.get(&pane_id) else {
+        return false;
+    };
+    let (rows, cols) = parser.screen().size();
+
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            adjust_copy_mode_scrollback(model, 1);
+            true
+        }
+        MouseEventKind::ScrollDown => {
+            adjust_copy_mode_scrollback(model, -1);
+            true
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(point) = main_area_point(model, mouse) {
+                let point = clamp_point(point, rows, cols);
+                if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
+                    copy_mode.cursor = point;
+                    copy_mode.selection_anchor = Some(point);
+                    copy_mode.selection_focus = Some(point);
+                    copy_mode.dragging = true;
+                }
+                return true;
+            }
+            false
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(point) = main_area_point(model, mouse) {
+                let point = clamp_point(point, rows, cols);
+                if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
+                    if copy_mode.dragging {
+                        copy_mode.cursor = point;
+                        copy_mode.selection_focus = Some(point);
+                    }
+                }
+                return true;
+            }
+            false
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(point) = main_area_point(model, mouse) {
+                let point = clamp_point(point, rows, cols);
+                if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
+                    if copy_mode.dragging {
+                        copy_mode.cursor = point;
+                        copy_mode.selection_focus = Some(point);
+                        copy_mode.dragging = false;
+                    }
+                }
+                copy_current_selection(model);
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        TEST_CLIPBOARD.with(|storage| storage.borrow_mut().push(text.to_string()));
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    {
+        let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+        clipboard
+            .set_text(text.to_string())
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn write_bytes_to_active_pane(model: &mut Model, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+
+    if let Some(session) = model.session_tabs.get(model.active_session) {
+        let pane_id = session.pane_id.clone();
+        if let Some(pane) = model.pane_manager.pane_mut_by_id(&pane_id) {
+            if let Err(error) = pane.write_input(bytes) {
+                if let Some(active) = model.session_tabs.get_mut(model.active_session) {
+                    active.status =
+                        crate::model::SessionStatus::Error(format!("PTY write failed: {error}"));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn clear_test_clipboard() {
+    TEST_CLIPBOARD.with(|storage| storage.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn take_test_clipboard() -> Vec<String> {
+    TEST_CLIPBOARD.with(|storage| storage.take())
+}
 
 // ---------------------------------------------------------------------------
 // Update
@@ -33,18 +338,8 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 pub fn update(model: &mut Model, msg: Message) {
     match msg {
         Message::Quit => {
-            let has_running_agents = model.session_tabs.iter().any(|t| {
-                t.tab_type == SessionTabType::Agent && matches!(t.status, SessionStatus::Running)
-            });
-            if has_running_agents && model.confirm.is_none() {
-                let agent_count = model
-                    .session_tabs
-                    .iter()
-                    .filter(|t| {
-                        t.tab_type == SessionTabType::Agent
-                            && matches!(t.status, SessionStatus::Running)
-                    })
-                    .count();
+            let agent_count = model.running_agent_count();
+            if agent_count > 0 && model.confirm.is_none() {
                 model.confirm = Some(
                     crate::screens::confirm::ConfirmState::exit_with_running_agents(agent_count),
                 );
@@ -91,21 +386,8 @@ pub fn update(model: &mut Model, msg: Message) {
                 });
             }
         }
-        Message::OpenWizard => {
-            // Open wizard for current branch or default
-            let branch = model
-                .session_tabs
-                .get(model.active_session)
-                .and_then(|t| t.branch.clone())
-                .unwrap_or_default();
-            if branch.is_empty() {
-                model.wizard = Some(crate::screens::wizard::WizardState::new());
-            } else {
-                model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
-                    &branch,
-                    vec![],
-                ));
-            }
+        Message::TogglePtyCopyMode => {
+            toggle_pty_copy_mode(model);
         }
         Message::WizardKey(key) => {
             use crossterm::event::KeyCode;
@@ -166,6 +448,10 @@ pub fn update(model: &mut Model, msg: Message) {
                 return;
             }
 
+            if handle_copy_mode_key(model, key) {
+                return;
+            }
+
             // Management layer: Tab key cycles management tabs
             // BUT only when the active screen is NOT in form/edit mode
             if model.active_layer == ActiveLayer::Management
@@ -190,25 +476,8 @@ pub fn update(model: &mut Model, msg: Message) {
             // Forward to active screen handler
             match model.active_layer {
                 ActiveLayer::Main => {
-                    // Forward to active PTY pane
-                    if let Some(session) = model.session_tabs.get(model.active_session) {
-                        let pane_id = session.pane_id.clone();
-                        if let Some(pane) = model.pane_manager.pane_mut_by_id(&pane_id) {
-                            let bytes = key_event_to_bytes(&key);
-                            if !bytes.is_empty() {
-                                if let Err(e) = pane.write_input(&bytes) {
-                                    // Mark session as errored when PTY write fails
-                                    if let Some(s) =
-                                        model.session_tabs.get_mut(model.active_session)
-                                    {
-                                        s.status = crate::model::SessionStatus::Error(format!(
-                                            "PTY write failed: {e}"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let bytes = key_event_to_bytes(&key);
+                    write_bytes_to_active_pane(model, &bytes);
                 }
                 ActiveLayer::Management => {
                     let sub_msg = match model.management_tab {
@@ -243,7 +512,15 @@ pub fn update(model: &mut Model, msg: Message) {
                 }
             }
         }
+        Message::Paste(text) => {
+            if model.active_layer == ActiveLayer::Main && model.pty_copy_mode.is_none() {
+                write_bytes_to_active_pane(model, text.as_bytes());
+            }
+        }
         Message::MouseInput(mouse) => {
+            if handle_copy_mode_mouse(model, mouse) {
+                return;
+            }
             if model.active_layer == ActiveLayer::Management
                 && model.management_tab == ManagementTab::Logs
                 && model.overlay_mode == OverlayMode::None
@@ -267,6 +544,11 @@ pub fn update(model: &mut Model, msg: Message) {
             // Feed data to VT100 parser
             if let Some(parser) = model.vt_parsers.get_mut(&pane_id) {
                 parser.process(&data);
+                if let Some(copy_mode) = model.pty_copy_mode.as_mut() {
+                    if copy_mode.pane_id == pane_id {
+                        copy_mode.scrollback = parser.screen().scrollback();
+                    }
+                }
             }
         }
         Message::Tick => {
@@ -338,9 +620,9 @@ pub fn update(model: &mut Model, msg: Message) {
                     .selected_branch_name()
                     .unwrap_or_default();
                 if !branch.is_empty() {
+                    let history = load_quick_start_history(&model.repo_root, &branch);
                     model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
-                        &branch,
-                        vec![],
+                        &branch, history,
                     ));
                 }
                 return;
@@ -395,14 +677,32 @@ pub fn view(model: &Model, frame: &mut Frame) {
             ActiveLayer::Main => {
                 if model.session_tabs.is_empty() {
                     let center = centered_text(
-                        "No sessions. Press Ctrl+G, c for shell or Ctrl+G, n for agent.",
+                        "No sessions. Press Enter on Branches for agent or Ctrl+G, c for shell.",
                     );
                     let text_area = centered_rect(60, 3, layout[2]);
                     ratatui::widgets::Widget::render(center, text_area, buf);
                 } else {
                     let pane_id = &model.session_tabs[model.active_session].pane_id;
                     let parser = model.vt_parsers.get(pane_id);
-                    cursor_pos = crate::screens::agent_pane::render(buf, layout[2], parser);
+                    let copy_cursor = model
+                        .pty_copy_mode
+                        .as_ref()
+                        .filter(|copy_mode| copy_mode.pane_id == *pane_id)
+                        .map(|copy_mode| copy_mode.cursor);
+                    let selection = model
+                        .pty_copy_mode
+                        .as_ref()
+                        .filter(|copy_mode| copy_mode.pane_id == *pane_id)
+                        .and_then(|copy_mode| {
+                            copy_mode.selection_anchor.zip(copy_mode.selection_focus)
+                        });
+                    cursor_pos = crate::screens::agent_pane::render(
+                        buf,
+                        layout[2],
+                        parser,
+                        copy_cursor,
+                        selection,
+                    );
                 }
             }
             ActiveLayer::Management => match model.management_tab {
@@ -935,6 +1235,31 @@ fn spawn_agent_session(
     }
     builder = builder.skip_permissions(wiz_config.skip_permissions);
 
+    // Apply execution mode
+    let session_mode = match wiz_config.execution_mode {
+        crate::screens::wizard::WizardExecutionMode::Normal
+        | crate::screens::wizard::WizardExecutionMode::Convert => {
+            gwt_core::agent::launch::SessionMode::Normal
+        }
+        crate::screens::wizard::WizardExecutionMode::Resume => {
+            gwt_core::agent::launch::SessionMode::Resume
+        }
+    };
+    builder = builder.session_mode(session_mode);
+    if let Some(ref id) = wiz_config.session_id {
+        builder = builder.resume_session_id(id.clone());
+    }
+
+    // Apply fast mode (Codex)
+    if wiz_config.fast_mode {
+        builder = builder.fast_mode(true);
+    }
+
+    // Apply reasoning level (Codex)
+    if let Some(ref level) = wiz_config.reasoning_level {
+        builder = builder.reasoning_level(Some(level.label()));
+    }
+
     let config = builder.build()?;
 
     let rows = model.terminal_rows.saturating_sub(3);
@@ -1010,18 +1335,24 @@ fn spawn_agent_session(
     // Switch to Main layer
     model.active_layer = ActiveLayer::Main;
 
-    // Save session entry for branch tool history
+    // Save session entry for branch tool history (populates Quick Start)
+    let agent_label = gwt_core::agent::launch::find_agent_def(agent_id)
+        .map(|d| d.display_name.to_string())
+        .unwrap_or_else(|| agent_id.to_string());
     let _ = gwt_core::config::save_session_entry(
         &model.repo_root,
         gwt_core::config::ToolSessionEntry {
             branch: wiz_config.branch_name.clone(),
             worktree_path: Some(model.repo_root.to_string_lossy().to_string()),
             tool_id: wiz_config.agent_id.clone(),
-            tool_label: wiz_config.agent_id.clone(),
-            session_id: None,
-            mode: None,
+            tool_label: agent_label,
+            session_id: wiz_config.session_id.clone(),
+            mode: Some(wiz_config.execution_mode.label().to_string()),
             model: wiz_config.model.clone(),
-            reasoning_level: None,
+            reasoning_level: wiz_config
+                .reasoning_level
+                .as_ref()
+                .map(|r| r.label().to_string()),
             skip_permissions: Some(wiz_config.skip_permissions),
             tool_version: wiz_config.version.clone(),
             collaboration_modes: None,
@@ -1039,7 +1370,94 @@ fn spawn_agent_session(
         },
     );
 
+    // Background session_id detection (SPEC-1782 FR-050, NFR-002)
+    {
+        let repo_root = model.repo_root.clone();
+        let tool_id = wiz_config.agent_id.clone();
+        let branch = wiz_config.branch_name.clone();
+        let agent_label_bg = gwt_core::agent::launch::find_agent_def(&tool_id)
+            .map(|d| d.display_name.to_string())
+            .unwrap_or_else(|| tool_id.clone());
+        let model_str = wiz_config.model.clone();
+        let version_str = wiz_config.version.clone();
+        let skip_perm = wiz_config.skip_permissions;
+        let reasoning = wiz_config
+            .reasoning_level
+            .as_ref()
+            .map(|r| r.label().to_string());
+
+        std::thread::Builder::new()
+            .name("session-id-detect".into())
+            .spawn(move || {
+                // Wait for the agent to initialize and create a session file
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                if let Some(session_id) =
+                    gwt_core::ai::detect_session_id_for_tool(&tool_id, &repo_root)
+                {
+                    let _ = gwt_core::config::save_session_entry(
+                        &repo_root,
+                        gwt_core::config::ToolSessionEntry {
+                            branch,
+                            worktree_path: Some(repo_root.to_string_lossy().to_string()),
+                            tool_id,
+                            tool_label: agent_label_bg,
+                            session_id: Some(session_id),
+                            mode: Some("Normal".to_string()),
+                            model: model_str,
+                            reasoning_level: reasoning,
+                            skip_permissions: Some(skip_perm),
+                            tool_version: version_str,
+                            collaboration_modes: None,
+                            docker_service: None,
+                            docker_force_host: None,
+                            docker_recreate: None,
+                            docker_build: None,
+                            docker_keep: None,
+                            docker_container_name: None,
+                            docker_compose_args: None,
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0),
+                        },
+                    );
+                }
+            })
+            .ok();
+    }
+
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Quick Start history loading
+// ---------------------------------------------------------------------------
+
+/// Load branch tool history from gwt-core and convert to QuickStartEntry.
+/// Load Quick Start history: find the latest tool with a session_id (SPEC-1782 FR-001, FR-002).
+/// Returns at most 1 entry. Returns empty if no session_id exists.
+fn load_quick_start_history(
+    repo_root: &std::path::Path,
+    branch: &str,
+) -> Vec<crate::screens::wizard::QuickStartEntry> {
+    let history = gwt_core::config::get_branch_tool_history(repo_root, branch);
+    // Find the first entry (newest) that has a session_id
+    let entry = history.into_iter().find(|e| e.session_id.is_some());
+    match entry {
+        Some(e) => vec![crate::screens::wizard::QuickStartEntry {
+            tool_id: e.tool_id,
+            tool_label: e.tool_label,
+            model: e.model,
+            version: e.tool_version,
+            session_id: e.session_id,
+            skip_permissions: e.skip_permissions,
+            reasoning_level: e.reasoning_level,
+            fast_mode: None, // not stored in ToolSessionEntry yet
+            collaboration_modes: e.collaboration_modes,
+            branch: e.branch,
+        }],
+        None => vec![],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,7 +1539,7 @@ fn action_to_message(action: KeyAction, key: crossterm::event::KeyEvent) -> Opti
         KeyAction::SwitchSession(n) => Some(Message::SwitchSession(n)),
         KeyAction::CloseSession => Some(Message::CloseSession),
         KeyAction::NewShell => Some(Message::NewShell),
-        KeyAction::OpenWizard => Some(Message::OpenWizard),
+        KeyAction::TogglePtyCopyMode => Some(Message::TogglePtyCopyMode),
         KeyAction::ShowHelp => {
             // Phase 2: open help screen
             let _ = key;
@@ -1140,7 +1558,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1168,6 +1586,12 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new(pty_rx);
     let mut prefix_state = PrefixState::default();
     let mut last_tick = Instant::now();
+    let mut mouse_capture_enabled = false;
+
+    if wants_mouse_capture(&model) {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+        mouse_capture_enabled = true;
+    }
 
     loop {
         // View
@@ -1200,6 +1624,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                     action_to_message(action, key)
                 }
             }
+            TuiEvent::Paste(text) => Some(Message::Paste(text)),
             TuiEvent::Mouse(mouse) => Some(Message::MouseInput(mouse)),
             TuiEvent::Resize(w, h) => Some(Message::Resize(w, h)),
             TuiEvent::PtyOutput { pane_id, data } => Some(Message::PtyOutput { pane_id, data }),
@@ -1216,6 +1641,15 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         // Update
         if let Some(msg) = msg {
             update(&mut model, msg);
+            let desired_mouse_capture = wants_mouse_capture(&model);
+            if desired_mouse_capture != mouse_capture_enabled {
+                if desired_mouse_capture {
+                    execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                } else {
+                    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                }
+                mouse_capture_enabled = desired_mouse_capture;
+            }
         }
 
         // Quit check
@@ -1229,7 +1663,8 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
 
@@ -1244,15 +1679,19 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::model::{
-        ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, OverlayMode, SessionStatus,
-        SessionTab, SessionTabType,
+        ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, OverlayMode, SelectionPoint,
+        SessionStatus, SessionTab, SessionTabType,
     };
     use crate::screens::logs::LogEntry;
     use crossterm::event::{
-        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     };
+    use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
     use gwt_core::terminal::AgentColor;
     use std::collections::HashMap;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     fn test_model() -> Model {
         Model::new(PathBuf::from("/tmp/test"))
@@ -1294,9 +1733,69 @@ mod tests {
         MouseEvent {
             kind,
             column: 0,
-            row: 0,
+            row: 2,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    fn seed_scrollback(parser: &mut vt100::Parser, lines: usize) {
+        for index in 0..lines {
+            parser.process(format!("line-{index}\r\n").as_bytes());
+        }
+    }
+
+    fn add_cat_session(model: &mut Model, name: &str) -> Box<dyn std::io::Read + Send> {
+        let pane_id = format!("pane-{name}");
+        let pane = TerminalPane::new(PaneConfig {
+            pane_id: pane_id.clone(),
+            command: "/bin/cat".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "feature/test".to_string(),
+            agent_name: "test-agent".to_string(),
+            agent_color: AgentColor::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+            terminal_shell: None,
+            interactive: false,
+            windows_force_utf8: false,
+            project_root: std::env::temp_dir(),
+        })
+        .expect("pane should be created");
+
+        let reader = pane.take_reader().expect("reader should be available");
+        model
+            .pane_manager
+            .add_pane(pane)
+            .expect("pane should be added");
+        model.add_session(SessionTab {
+            pane_id,
+            name: name.to_string(),
+            tab_type: SessionTabType::Shell,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: None,
+            spec_id: None,
+        });
+        model.active_layer = ActiveLayer::Main;
+        reader
+    }
+
+    fn read_from_reader_with_timeout(
+        reader: Box<dyn std::io::Read + Send>,
+        timeout: Duration,
+    ) -> Vec<u8> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buf = [0u8; 4096];
+            let result = std::io::Read::read(&mut reader, &mut buf)
+                .map(|n| buf[..n].to_vec())
+                .unwrap_or_default();
+            let _ = tx.send(result);
+        });
+        rx.recv_timeout(timeout).expect("reader timed out")
     }
 
     // -- Update tests ---------------------------------------------------------
@@ -1354,11 +1853,200 @@ mod tests {
     }
 
     #[test]
+    fn update_paste_writes_raw_text_to_active_pane() {
+        let mut m = test_model();
+        let reader = add_cat_session(&mut m, "paste");
+
+        update(&mut m, Message::Paste("hello\nworld".to_string()));
+
+        let output = read_from_reader_with_timeout(reader, Duration::from_secs(5));
+        let output_str = String::from_utf8_lossy(&output).replace("\r\n", "\n");
+        assert!(
+            output_str.contains("hello\nworld"),
+            "expected pasted text in output, got: {output_str:?}"
+        );
+    }
+
+    #[test]
     fn update_resize() {
         let mut m = test_model();
         update(&mut m, Message::Resize(120, 40));
         assert_eq!(m.terminal_cols, 120);
         assert_eq!(m.terminal_rows, 40);
+    }
+
+    #[test]
+    fn update_toggle_pty_copy_mode_enters_for_active_session() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        m.vt_parsers
+            .insert("pane-s1".to_string(), vt100::Parser::new(8, 20, 100));
+
+        update(&mut m, Message::TogglePtyCopyMode);
+
+        let copy_mode = m
+            .pty_copy_mode
+            .as_ref()
+            .expect("copy mode should be active");
+        assert_eq!(copy_mode.pane_id, "pane-s1");
+        assert_eq!(copy_mode.cursor, SelectionPoint { row: 0, col: 0 });
+    }
+
+    #[test]
+    fn update_copy_mode_scrolls_scrollback_with_keyboard() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        seed_scrollback(&mut parser, 12);
+        m.vt_parsers.insert("pane-s1".to_string(), parser);
+
+        update(&mut m, Message::TogglePtyCopyMode);
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
+        );
+
+        let parser = m.vt_parsers.get("pane-s1").unwrap();
+        assert!(parser.screen().scrollback() > 0);
+    }
+
+    #[test]
+    fn update_copy_mode_exits_and_resets_scrollback() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        seed_scrollback(&mut parser, 12);
+        m.vt_parsers.insert("pane-s1".to_string(), parser);
+
+        update(&mut m, Message::TogglePtyCopyMode);
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
+        );
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(m.pty_copy_mode.is_none());
+        let parser = m.vt_parsers.get("pane-s1").unwrap();
+        assert_eq!(parser.screen().scrollback(), 0);
+    }
+
+    #[test]
+    fn update_copy_mode_mouse_drag_copies_selection() {
+        clear_test_clipboard();
+
+        let mut m = test_model();
+        m.terminal_cols = 40;
+        m.terminal_rows = 10;
+        m.add_session(test_session("s1"));
+        let mut parser = vt100::Parser::new(7, 40, 100);
+        parser.process(b"hello world");
+        m.vt_parsers.insert("pane-s1".to_string(), parser);
+
+        update(&mut m, Message::TogglePtyCopyMode);
+        update(
+            &mut m,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        update(
+            &mut m,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 4,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        update(
+            &mut m,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 4,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(take_test_clipboard(), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn update_copy_mode_keyboard_selection_copies_to_clipboard() {
+        clear_test_clipboard();
+
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        let mut parser = vt100::Parser::new(7, 40, 100);
+        parser.process(b"hello world");
+        m.vt_parsers.insert("pane-s1".to_string(), parser);
+
+        update(&mut m, Message::TogglePtyCopyMode);
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+        for _ in 0..4 {
+            update(
+                &mut m,
+                Message::KeyInput(make_key(KeyCode::Right, KeyModifiers::NONE)),
+            );
+        }
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        assert_eq!(take_test_clipboard(), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn update_copy_mode_preserves_viewport_on_pty_output() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        seed_scrollback(&mut parser, 12);
+        m.vt_parsers.insert("pane-s1".to_string(), parser);
+
+        update(&mut m, Message::TogglePtyCopyMode);
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
+        );
+        let before = m.vt_parsers["pane-s1"].screen().scrollback();
+
+        update(
+            &mut m,
+            Message::PtyOutput {
+                pane_id: "pane-s1".into(),
+                data: b"later line\r\n".to_vec(),
+            },
+        );
+
+        let after = m.vt_parsers["pane-s1"].screen().scrollback();
+        assert!(before > 0);
+        assert!(after >= before);
+        assert_eq!(m.pty_copy_mode.as_ref().unwrap().scrollback, after);
+    }
+
+    #[test]
+    fn wants_mouse_capture_only_in_management_or_copy_mode() {
+        let mut m = test_model();
+        assert!(wants_mouse_capture(&m));
+
+        m.add_session(test_session("s1"));
+        assert!(!wants_mouse_capture(&m));
+
+        m.vt_parsers
+            .insert("pane-s1".to_string(), vt100::Parser::new(8, 20, 100));
+        update(&mut m, Message::TogglePtyCopyMode);
+        assert!(wants_mouse_capture(&m));
     }
 
     #[test]

@@ -20,12 +20,15 @@ cargo run -p gwt-tui
 
 # Inside TUI:
 # - Type shell commands, verify output renders with colors
+# - Paste multi-line text, verify the full payload reaches the PTY
 # - Ctrl+G, s → opens new shell tab
 # - Ctrl+G, ] → switch to next tab
 # - Ctrl+G, [ → switch to previous tab
-# - Ctrl+G, PgUp → scroll mode
+# - Ctrl+G, m → enter copy mode
+# - In copy mode: wheel / trackpad / PgUp / PgDn / arrows scroll scrollback
+# - In copy mode: drag to copy selection, Esc or q to exit
 # - Ctrl+G, x → close tab
-# - Ctrl+G, q → quit
+# - Ctrl+C twice → quit
 ```
 
 ### Phase 2 (Agent + Management)
@@ -34,8 +37,8 @@ cargo run -p gwt-tui
 cargo run -p gwt-tui
 
 # Inside TUI:
-# - Ctrl+G, n → agent launch dialog
-# - Select Claude Code, choose branch → agent starts in new tab
+# - Select a branch in Branches and press Enter → agent launch dialog
+# - Select Claude Code, choose options → agent starts in new tab
 # - Ctrl+G → management panel visible
 # - Arrow keys to navigate agents
 # - k → kill agent

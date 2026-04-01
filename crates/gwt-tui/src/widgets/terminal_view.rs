@@ -12,7 +12,6 @@ pub fn render(_buf: &mut Buffer, _area: Rect, _parser: Option<&vt100::Parser>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::prelude::*;
 
     #[test]
     fn render_none_smoke() {

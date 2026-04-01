@@ -27,12 +27,14 @@ pub enum Message {
     CloseSession,
     /// Open a new shell tab (Ctrl+G, c)
     NewShell,
-    /// Open the agent launch wizard (Ctrl+G, n)
-    OpenWizard,
+    /// Toggle PTY copy mode for the active terminal pane
+    TogglePtyCopyMode,
 
     // -- Input events ---------------------------------------------------------
     /// Raw key input (forwarded to active pane or screen handler)
     KeyInput(KeyEvent),
+    /// Pasted text input
+    Paste(String),
     /// Mouse input
     MouseInput(MouseEvent),
     /// Terminal resize
@@ -108,13 +110,14 @@ mod tests {
             Message::SwitchSession(0),
             Message::CloseSession,
             Message::NewShell,
-            Message::OpenWizard,
+            Message::TogglePtyCopyMode,
             Message::WizardKey(KeyEvent {
                 code: crossterm::event::KeyCode::Enter,
                 modifiers: crossterm::event::KeyModifiers::NONE,
                 kind: crossterm::event::KeyEventKind::Press,
                 state: crossterm::event::KeyEventState::NONE,
             }),
+            Message::Paste("hello\nworld".to_string()),
             Message::Resize(80, 24),
             Message::PtyOutput {
                 pane_id: "p1".into(),

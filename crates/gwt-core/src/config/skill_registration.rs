@@ -414,7 +414,7 @@ const PROJECT_LOCAL_MANAGED_ASSETS: &[ManagedAsset] = &[ManagedAsset {
     relative_path: "memory/constitution.md",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../memory/constitution.md"
+        "/../../.gwt/memory/constitution.md"
     )),
     executable: false,
     rewrite_for_project: false,
@@ -900,7 +900,6 @@ fn project_local_managed_asset_display_path(relative_path: &str) -> String {
 
 fn project_local_managed_asset_exists(project_root: &Path, relative_path: &str) -> bool {
     project_local_managed_asset_path(project_root, relative_path).exists()
-        || legacy_project_local_managed_asset_path(project_root, relative_path).exists()
 }
 
 fn claude_root_for(project_root: Option<&Path>) -> Option<PathBuf> {
@@ -3237,11 +3236,15 @@ OPENAI_API_KEY = "legacy-key"
     }
 
     #[test]
-    fn registration_preserves_tracked_repo_constitution_source() {
+    fn registration_preserves_tracked_legacy_repo_constitution_file() {
         let temp = tempfile::tempdir().unwrap();
         let repo_root = temp.path().join("repo");
         std::fs::create_dir_all(repo_root.join("memory")).unwrap();
-        std::fs::write(repo_root.join("memory").join("constitution.md"), "repo constitution").unwrap();
+        std::fs::write(
+            repo_root.join("memory").join("constitution.md"),
+            "repo constitution",
+        )
+        .unwrap();
 
         run_git(temp.path(), &["init", repo_root.to_str().unwrap()]);
         run_git(&repo_root, &["config", "user.name", "Test User"]);
@@ -3261,7 +3264,7 @@ OPENAI_API_KEY = "legacy-key"
     }
 
     #[test]
-    fn status_accepts_legacy_project_local_asset_during_migration() {
+    fn status_requires_gwt_project_local_asset_instead_of_legacy_root() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
 
@@ -3279,7 +3282,7 @@ OPENAI_API_KEY = "legacy-key"
             .iter()
             .find(|agent| agent.agent_id == "codex")
             .unwrap();
-        assert!(!codex
+        assert!(codex
             .missing_skills
             .contains(&".gwt/memory/constitution.md".to_string()));
     }

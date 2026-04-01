@@ -102,21 +102,22 @@ impl WizardStep {
 // Supporting types
 // ---------------------------------------------------------------------------
 
-/// Execution mode for agent launch.
+/// Execution mode for agent launch (SPEC-1782: Continue removed, Convert deferred).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WizardExecutionMode {
     #[default]
     Normal,
-    Continue,
     Resume,
     Convert,
 }
 
 impl WizardExecutionMode {
+    /// Modes shown in the ExecutionMode wizard step (Normal + Resume only).
+    pub const ALL: [Self; 2] = [Self::Normal, Self::Resume];
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Normal => "Normal",
-            Self::Continue => "Continue",
             Self::Resume => "Resume",
             Self::Convert => "Convert",
         }
@@ -124,15 +125,11 @@ impl WizardExecutionMode {
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Normal => "Start a new session",
-            Self::Continue => "Continue from last session",
-            Self::Resume => "Resume a specific session",
-            Self::Convert => "Convert session from another agent",
+            Self::Normal => "Start a fresh session",
+            Self::Resume => "Resume a specific saved session",
+            Self::Convert => "Convert an existing session to this agent",
         }
     }
-
-    pub const ALL: [WizardExecutionMode; 4] =
-        [Self::Normal, Self::Continue, Self::Resume, Self::Convert];
 }
 
 /// Branch type prefix for new branches.
@@ -176,6 +173,9 @@ pub struct QuickStartEntry {
     pub version: Option<String>,
     pub session_id: Option<String>,
     pub skip_permissions: Option<bool>,
+    pub reasoning_level: Option<String>,
+    pub fast_mode: Option<bool>,
+    pub collaboration_modes: Option<bool>,
     pub branch: String,
 }
 
@@ -495,13 +495,7 @@ impl WizardState {
             WizardStep::ReasoningLevel => WizardStep::VersionSelect,
             WizardStep::VersionSelect => WizardStep::ExecutionMode,
             WizardStep::CollaborationModes => WizardStep::ExecutionMode,
-            WizardStep::ExecutionMode => {
-                if self.execution_mode == WizardExecutionMode::Convert {
-                    WizardStep::ConvertAgentSelect
-                } else {
-                    WizardStep::SkipPermissions
-                }
-            }
+            WizardStep::ExecutionMode => WizardStep::SkipPermissions,
             WizardStep::ConvertAgentSelect => WizardStep::ConvertSessionSelect,
             WizardStep::ConvertSessionSelect => WizardStep::SkipPermissions,
             WizardStep::SkipPermissions => WizardStep::SkipPermissions, // terminal
@@ -558,16 +552,16 @@ impl WizardState {
                 }
             }
             WizardStep::CollaborationModes => Some(WizardStep::VersionSelect),
-            WizardStep::ExecutionMode => Some(WizardStep::VersionSelect),
-            WizardStep::ConvertAgentSelect => Some(WizardStep::ExecutionMode),
-            WizardStep::ConvertSessionSelect => Some(WizardStep::ConvertAgentSelect),
-            WizardStep::SkipPermissions => {
-                if self.execution_mode == WizardExecutionMode::Convert {
-                    Some(WizardStep::ConvertSessionSelect)
+            WizardStep::ExecutionMode => {
+                if self.is_codex() && self.collaboration_modes {
+                    Some(WizardStep::CollaborationModes)
                 } else {
-                    Some(WizardStep::ExecutionMode)
+                    Some(WizardStep::VersionSelect)
                 }
             }
+            WizardStep::ConvertAgentSelect => Some(WizardStep::ExecutionMode),
+            WizardStep::ConvertSessionSelect => Some(WizardStep::ConvertAgentSelect),
+            WizardStep::SkipPermissions => Some(WizardStep::ExecutionMode),
         }
     }
 
@@ -578,6 +572,11 @@ impl WizardState {
 
     /// Advance to the next step, pushing current step to history.
     pub fn advance(&mut self) {
+        // When advancing from QuickStart, apply the selected entry's settings
+        if self.step == WizardStep::QuickStart {
+            self.apply_quick_start_selection();
+        }
+
         let next = self.next_step();
         if next != self.step {
             self.step_history.push(self.step);
@@ -586,6 +585,79 @@ impl WizardState {
             // Fetch versions when entering VersionSelect
             if self.step == WizardStep::VersionSelect {
                 self.fetch_version_options();
+            }
+        }
+    }
+
+    /// Apply the selected Quick Start entry's settings to the wizard state.
+    fn apply_quick_start_selection(&mut self) {
+        let entry_count = self.quick_start_entries.len();
+        if self.quick_start_index >= entry_count * 2 {
+            // "Choose different" selected — no settings to apply
+            return;
+        }
+
+        let entry_idx = self.quick_start_index / 2;
+        let is_resume = self.quick_start_index.is_multiple_of(2);
+
+        if let Some(entry) = self.quick_start_entries.get(entry_idx).cloned() {
+            // Set agent
+            if let Some(pos) = self.agents.iter().position(|a| a.id == entry.tool_id) {
+                self.selected_agent = pos;
+            }
+
+            // Set model
+            self.update_model_options_for_agent();
+            if let Some(ref m) = entry.model {
+                if let Some(pos) = self.model_options.iter().position(|o| o == m) {
+                    self.model_index = pos;
+                }
+                self.model = m.clone();
+            }
+
+            // Set version
+            if let Some(ref v) = entry.version {
+                self.version = v.clone();
+            }
+
+            // Set skip_permissions
+            if let Some(sp) = entry.skip_permissions {
+                self.skip_permissions = sp;
+            }
+
+            // Set reasoning_level (Codex)
+            if let Some(ref level) = entry.reasoning_level {
+                self.reasoning_level = match level.as_str() {
+                    "low" => ReasoningLevel::Low,
+                    "medium" => ReasoningLevel::Medium,
+                    "high" => ReasoningLevel::High,
+                    "xhigh" => ReasoningLevel::XHigh,
+                    _ => ReasoningLevel::Medium,
+                };
+            }
+
+            // Set fast_mode (Codex)
+            if let Some(fm) = entry.fast_mode {
+                self.fast_mode = fm;
+            }
+
+            // Set collaboration_modes (Codex)
+            if let Some(cm) = entry.collaboration_modes {
+                self.collaboration_modes = cm;
+            }
+
+            // Set execution mode and session_id
+            if is_resume {
+                self.execution_mode = WizardExecutionMode::Resume;
+                self.execution_mode_index = WizardExecutionMode::ALL
+                    .iter()
+                    .position(|mode| *mode == self.execution_mode)
+                    .unwrap_or(0);
+                self.session_id = entry.session_id;
+            } else {
+                self.execution_mode = WizardExecutionMode::Normal;
+                self.execution_mode_index = 0;
+                self.session_id = None;
             }
         }
     }
@@ -648,8 +720,7 @@ impl WizardState {
                 }
             }
             WizardStep::ExecutionMode => {
-                let max = WizardExecutionMode::ALL.len().saturating_sub(1);
-                if self.execution_mode_index < max {
+                if self.execution_mode_index < WizardExecutionMode::ALL.len().saturating_sub(1) {
                     self.execution_mode_index += 1;
                     self.execution_mode = WizardExecutionMode::ALL[self.execution_mode_index];
                 }
@@ -783,6 +854,16 @@ impl WizardState {
         if self.is_complete() {
             return WizardAction::Complete;
         }
+
+        // Quick Start: Resume and Start New are one-click launches (FR-050)
+        if self.step == WizardStep::QuickStart
+            && self.quick_start_index < self.quick_start_entries.len() * 2
+        {
+            self.apply_quick_start_selection();
+            self.step = WizardStep::SkipPermissions;
+            return WizardAction::Complete;
+        }
+
         self.advance();
         WizardAction::Advance
     }
@@ -854,9 +935,7 @@ impl WizardState {
     /// Build a launch configuration from the current wizard state.
     pub fn build_launch_config(&self) -> Result<WizardLaunchConfig, String> {
         let agent_id = self.current_agent_id().to_string();
-        let model = if self.model.is_empty()
-            || self.model.starts_with("Default")
-        {
+        let model = if self.model.is_empty() || self.model.starts_with("Default") {
             None // Don't pass --model for Default/Auto selections
         } else {
             Some(self.model.clone())
@@ -869,7 +948,11 @@ impl WizardState {
             None // Don't pass version for installed/latest
         } else {
             // Strip date suffix if present (e.g., "1.8.0  (2026-03-28)" → "1.8.0")
-            let v = self.version.split_whitespace().next().unwrap_or(&self.version);
+            let v = self
+                .version
+                .split_whitespace()
+                .next()
+                .unwrap_or(&self.version);
             Some(v.to_string())
         };
         let branch = if self.is_new_branch {
@@ -932,15 +1015,7 @@ impl WizardState {
         let mut options = Vec::new();
 
         // Detect installed version
-        let cmd_name = match agent_id {
-            "claude" => "claude",
-            "codex" => "codex",
-            "gemini" => "gemini",
-            "opencode" => "opencode",
-            "copilot" => "copilot",
-            _ => agent_id,
-        };
-        if let Ok(output) = std::process::Command::new(cmd_name)
+        if let Ok(output) = std::process::Command::new(agent_id)
             .arg("--version")
             .output()
         {
@@ -1465,11 +1540,17 @@ fn render_toggle(buf: &mut Buffer, area: Rect, title: &str, value: bool) {
 fn render_skip_permissions(buf: &mut Buffer, area: Rect, state: &WizardState) {
     let mut options: Vec<(&str, bool)> = vec![
         ("No (require approval)", !state.skip_permissions),
-        ("Yes (skip all approvals)", state.skip_permissions && (!state.is_codex() || !state.fast_mode)),
+        (
+            "Yes (skip all approvals)",
+            state.skip_permissions && (!state.is_codex() || !state.fast_mode),
+        ),
     ];
 
     if state.is_codex() {
-        options.push(("Yes + Fast mode (service_tier=fast)", state.skip_permissions && state.fast_mode));
+        options.push((
+            "Yes + Fast mode (service_tier=fast)",
+            state.skip_permissions && state.fast_mode,
+        ));
     }
 
     let mut lines: Vec<Line<'_>> = vec![
@@ -1735,22 +1816,6 @@ mod tests {
     }
 
     #[test]
-    fn next_step_execution_mode_normal_to_skip_permissions() {
-        let mut state = WizardState::new();
-        state.step = WizardStep::ExecutionMode;
-        state.execution_mode = WizardExecutionMode::Normal;
-        assert_eq!(state.next_step(), WizardStep::SkipPermissions);
-    }
-
-    #[test]
-    fn next_step_execution_mode_convert_to_convert_agent() {
-        let mut state = WizardState::new();
-        state.step = WizardStep::ExecutionMode;
-        state.execution_mode = WizardExecutionMode::Convert;
-        assert_eq!(state.next_step(), WizardStep::ConvertAgentSelect);
-    }
-
-    #[test]
     fn next_step_convert_agent_to_convert_session() {
         let mut state = WizardState::new();
         state.step = WizardStep::ConvertAgentSelect;
@@ -1818,18 +1883,9 @@ mod tests {
     }
 
     #[test]
-    fn prev_step_skip_permissions_from_convert() {
+    fn prev_step_skip_permissions_goes_to_execution_mode() {
         let mut state = WizardState::new();
         state.step = WizardStep::SkipPermissions;
-        state.execution_mode = WizardExecutionMode::Convert;
-        assert_eq!(state.prev_step(), Some(WizardStep::ConvertSessionSelect));
-    }
-
-    #[test]
-    fn prev_step_skip_permissions_from_normal() {
-        let mut state = WizardState::new();
-        state.step = WizardStep::SkipPermissions;
-        state.execution_mode = WizardExecutionMode::Normal;
         assert_eq!(state.prev_step(), Some(WizardStep::ExecutionMode));
     }
 
@@ -1894,6 +1950,9 @@ mod tests {
             version: None,
             session_id: None,
             skip_permissions: None,
+            reasoning_level: None,
+            fast_mode: None,
+            collaboration_modes: None,
             branch: "main".to_string(),
         });
         // 1 entry * 2 options + 1 "Choose different" = 3
@@ -1911,6 +1970,9 @@ mod tests {
             version: None,
             session_id: None,
             skip_permissions: None,
+            reasoning_level: None,
+            fast_mode: None,
+            collaboration_modes: None,
             branch: "main".to_string(),
         });
         state.quick_start_index = 0; // Resume with first entry
@@ -1928,6 +1990,9 @@ mod tests {
             version: None,
             session_id: None,
             skip_permissions: None,
+            reasoning_level: None,
+            fast_mode: None,
+            collaboration_modes: None,
             branch: "main".to_string(),
         });
         state.quick_start_index = 2; // "Choose different"
@@ -1982,19 +2047,17 @@ mod tests {
     }
 
     #[test]
-    fn select_next_execution_mode() {
+    fn execution_mode_step_cycles_normal_resume() {
         let mut state = WizardState::new();
         state.step = WizardStep::ExecutionMode;
-        state.execution_mode_index = 0;
-        state.select_next();
-        assert_eq!(state.execution_mode, WizardExecutionMode::Continue);
+        assert_eq!(state.execution_mode, WizardExecutionMode::Normal);
+
         state.select_next();
         assert_eq!(state.execution_mode, WizardExecutionMode::Resume);
-        state.select_next();
-        assert_eq!(state.execution_mode, WizardExecutionMode::Convert);
-        state.select_next();
-        // Clamped at last
-        assert_eq!(state.execution_mode, WizardExecutionMode::Convert);
+        state.select_next(); // clamped at Resume
+        assert_eq!(state.execution_mode, WizardExecutionMode::Resume);
+        state.select_prev();
+        assert_eq!(state.execution_mode, WizardExecutionMode::Normal);
     }
 
     #[test]
@@ -2222,6 +2285,9 @@ mod tests {
             version: None,
             session_id: None,
             skip_permissions: None,
+            reasoning_level: None,
+            fast_mode: None,
+            collaboration_modes: None,
             branch: "main".to_string(),
         }];
         let state = WizardState::open_for_branch("main", history);
@@ -2285,6 +2351,9 @@ mod tests {
                     version: None,
                     session_id: None,
                     skip_permissions: None,
+                    reasoning_level: None,
+                    fast_mode: None,
+                    collaboration_modes: None,
                     branch: "main".to_string(),
                 });
             }
@@ -2320,11 +2389,10 @@ mod tests {
         state.advance();
         assert_eq!(state.step, WizardStep::VersionSelect);
 
-        // VersionSelect
+        // VersionSelect → ExecutionMode → SkipPermissions
         state.advance();
         assert_eq!(state.step, WizardStep::ExecutionMode);
 
-        // ExecutionMode: normal
         state.advance();
         assert_eq!(state.step, WizardStep::SkipPermissions);
 
@@ -2351,27 +2419,25 @@ mod tests {
         assert_eq!(state.step, WizardStep::VersionSelect);
 
         state.advance(); // -> ExecutionMode
+        assert_eq!(state.step, WizardStep::ExecutionMode);
+
         state.advance(); // -> SkipPermissions
         assert!(state.is_complete());
     }
 
     #[test]
-    fn full_convert_workflow() {
+    fn full_wizard_resume_via_execution_mode() {
         let mut state = WizardState::open_for_branch("main", vec![]);
         state.branch_action_index = 0;
         state.advance(); // -> AgentSelect
         state.advance(); // -> ModelSelect
         state.advance(); // -> VersionSelect
         state.advance(); // -> ExecutionMode
+        assert_eq!(state.step, WizardStep::ExecutionMode);
 
-        // Select Convert mode
-        state.execution_mode = WizardExecutionMode::Convert;
-        state.execution_mode_index = 3;
-        state.advance(); // -> ConvertAgentSelect
-        assert_eq!(state.step, WizardStep::ConvertAgentSelect);
-
-        state.advance(); // -> ConvertSessionSelect
-        assert_eq!(state.step, WizardStep::ConvertSessionSelect);
+        // Select Resume
+        state.select_next();
+        assert_eq!(state.execution_mode, WizardExecutionMode::Resume);
 
         state.advance(); // -> SkipPermissions
         assert_eq!(state.step, WizardStep::SkipPermissions);

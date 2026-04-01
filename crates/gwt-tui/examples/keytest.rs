@@ -35,30 +35,25 @@ fn main() {
 
     loop {
         if event::poll(std::time::Duration::from_millis(200)).unwrap() {
-            match event::read().unwrap() {
-                Event::Key(key) => {
-                    count += 1;
-                    let line = format!(
-                        "{:3}: code={:?}  mod={:?}  kind={:?}",
-                        count, key.code, key.modifiers, key.kind
-                    );
-                    writeln!(log, "{}", line).unwrap();
-                    log.flush().unwrap();
-                    print!("{}\r\n", line);
-                    stdout.flush().unwrap();
+            if let Event::Key(key) = event::read().unwrap() {
+                count += 1;
+                let line = format!(
+                    "{:3}: code={:?}  mod={:?}  kind={:?}",
+                    count, key.code, key.modifiers, key.kind
+                );
+                writeln!(log, "{}", line).unwrap();
+                log.flush().unwrap();
+                print!("{}\r\n", line);
+                stdout.flush().unwrap();
 
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        if last_ctrl_c {
-                            break;
-                        }
-                        last_ctrl_c = true;
-                    } else {
-                        last_ctrl_c = false;
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if last_ctrl_c {
+                        break;
                     }
+                    last_ctrl_c = true;
+                } else {
+                    last_ctrl_c = false;
                 }
-                _ => {}
             }
         }
     }

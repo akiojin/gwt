@@ -11,8 +11,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = std::env::current_dir().unwrap_or_default();
 
     // Note: Skill registration (FR-073) is deferred to agent launch time,
-    // not at gwt-tui startup. Running it at startup against the CWD can
-    // delete files needed for compilation (memory/constitution.md).
+    // not at gwt-tui startup. Startup should avoid mutating project-local
+    // managed assets under .gwt while the binary is running from source.
 
     gwt_tui::app::run(repo_root)
 }

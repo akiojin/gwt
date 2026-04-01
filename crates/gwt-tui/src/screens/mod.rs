@@ -9,8 +9,8 @@ pub mod issues;
 pub mod logs;
 pub mod migration_dialog;
 pub mod settings;
-pub mod specs;
 pub mod speckit_wizard;
+pub mod specs;
 pub mod wizard;
 
 pub use branches::{

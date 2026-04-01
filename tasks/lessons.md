@@ -31,3 +31,54 @@
    定数文字列の存在チェックは Rust の `assert!(SCRIPT.contains("..."))` で書ける。
    「Python だからテストしにくい」は誤り。
 3. 計画（Plan）実行時に「仕様策定・TDD は済んでいるか？」を必ずチェックリストで確認してから実装に着手する。
+
+## 2026-04-01 — fix: PTY スクロールとコピーの両立
+
+### 事象
+
+Logs タブのスクロール修正後も、ユーザーが求めていたのはメイン PTY の trackpad / mouse wheel scroll だった。さらに、常時 mouse capture を有効にすると terminal-native copy が壊れた。
+
+### 原因
+
+- 「どの画面でスクロールしたいのか」を最初に切り分けず、管理画面の Logs とメイン PTY を同じ問題として扱った。
+- crossterm の mouse capture 制約により、フルスクリーン TUI の PTY で「常時ホイールスクロール」と「端末エミュレータの通常選択コピー」は両立しない前提を、先に設計へ反映していなかった。
+
+### 再発防止策
+
+1. スクロール不具合は、まず「管理画面のリスト」か「メイン PTY」かを分離して再現確認する。
+2. PTY でマウス UX を追加する場合は、先に `mouse capture` のオン/オフと terminal-native copy の両立可否を確認する。
+3. 両立しない場合は、常時 capture を避け、tmux 風の一時 copy mode など明示的な操作モードへ寄せる。
+
+## 2026-04-01 — fix: PTY paste は key input と別経路で扱う
+
+### 事象
+
+Main PTY で通常キー入力は動くのに、Terminal.app からのペーストが安定せず、改行を含む payload が期待通りに届かなかった。
+
+### 原因
+
+- `Enter` は `key_event_to_bytes()` で `\r` に正規化していた一方、ターミナルの `Event::Paste(String)` はイベントループで無視していた。
+- そのため、paste は key input の延長として扱われず、専用経路が欠落していた。
+
+### 再発防止策
+
+1. PTY 入力の不具合では、まず `Key` と `Paste` が同じ経路か別経路かを確認する。
+2. `crossterm` を使う場合は `EnableBracketedPaste` の有無と `Event::Paste` の処理有無を必ず点検する。
+3. 改行を含む paste は `/bin/cat` など実 PTY を使ったテストで payload 全体を検証する。
+
+## 2026-04-01 — fix: constitution の正本パスは compile-time / runtime で一致させる
+
+### 事象
+
+運用上の正本は `.gwt/memory/constitution.md` だったが、`gwt-core` の managed asset 埋め込みだけが `memory/constitution.md` を読んでいた。そのため、ローカル検証で legacy ファイルを補わないとビルド前提が崩れる状態になっていた。
+
+### 原因
+
+- runtime の canonical path と compile-time `include_str!` の参照元を別々に管理していた。
+- status 判定も legacy root path を許容しており、「移行用互換」と「現在の正本」が混ざっていた。
+
+### 再発防止策
+
+1. managed asset の正本パスを変える場合は、`include_str!`・status 判定・cleanup/migration テストを同時に点検する。
+2. migration 用の legacy path は cleanup 専用に留め、登録済み判定の成功条件には使わない。
+3. compile-time と runtime の canonical path が一致していることを RED テストで確認してから実装する。

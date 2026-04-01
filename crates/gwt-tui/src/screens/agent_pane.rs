@@ -4,12 +4,27 @@
 
 use ratatui::prelude::*;
 
+use crate::model::SelectionPoint;
+
 /// Render a terminal pane using the VT100 parser screen.
 /// Returns the cursor position (x, y) relative to the frame if visible.
-pub fn render(buf: &mut Buffer, area: Rect, parser: Option<&vt100::Parser>) -> Option<(u16, u16)> {
+pub fn render(
+    buf: &mut Buffer,
+    area: Rect,
+    parser: Option<&vt100::Parser>,
+    copy_cursor: Option<SelectionPoint>,
+    selection: Option<(SelectionPoint, SelectionPoint)>,
+) -> Option<(u16, u16)> {
     if let Some(parser) = parser {
         let screen = parser.screen();
         crate::renderer::render_vt100_screen(buf, area, screen);
+        render_selection(buf, area, selection);
+
+        if let Some(cursor) = copy_cursor {
+            let x = area.x + cursor.col.min(area.width.saturating_sub(1));
+            let y = area.y + cursor.row.min(area.height.saturating_sub(1));
+            return Some((x, y));
+        }
 
         // Return cursor position if visible
         if !screen.hide_cursor() {
@@ -28,22 +43,72 @@ pub fn render(buf: &mut Buffer, area: Rect, parser: Option<&vt100::Parser>) -> O
     }
 }
 
+pub fn selected_text(parser: &vt100::Parser, start: SelectionPoint, end: SelectionPoint) -> String {
+    let screen = parser.screen();
+    let (_, cols) = screen.size();
+    let (start, end) = normalize_selection(start, end);
+    let end_col = end.col.saturating_add(1).min(cols);
+    screen.contents_between(start.row, start.col, end.row, end_col)
+}
+
+fn normalize_selection(
+    start: SelectionPoint,
+    end: SelectionPoint,
+) -> (SelectionPoint, SelectionPoint) {
+    if (start.row, start.col) <= (end.row, end.col) {
+        (start, end)
+    } else {
+        (end, start)
+    }
+}
+
+fn render_selection(
+    buf: &mut Buffer,
+    area: Rect,
+    selection: Option<(SelectionPoint, SelectionPoint)>,
+) {
+    let Some((start, end)) = selection else {
+        return;
+    };
+    let (start, end) = normalize_selection(start, end);
+
+    for row in start.row..=end.row {
+        let col_start = if row == start.row { start.col } else { 0 };
+        let col_end = if row == end.row {
+            end.col
+        } else {
+            area.width.saturating_sub(1)
+        };
+        for col in col_start..=col_end {
+            let x = area.x + col;
+            let y = area.y + row;
+            if x < area.right() && y < area.bottom() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let style = cell.style().add_modifier(Modifier::REVERSED);
+                    cell.set_style(style);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::prelude::*;
+    use ratatui::style::Modifier;
 
     #[test]
     fn render_none_shows_starting_placeholder() {
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        let result = render(&mut buf, area, None);
+        let result = render(&mut buf, area, None, None, None);
         assert!(result.is_none());
         // "Starting..." should appear somewhere in the buffer
         let text: String = (0..area.width)
-            .map(|x| buf.cell((x, area.y)).map_or(' ', |c| {
-                c.symbol().chars().next().unwrap_or(' ')
-            }))
+            .map(|x| {
+                buf.cell((x, area.y))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
             .collect();
         // The paragraph is center-aligned, so it may have padding
         assert!(
@@ -59,7 +124,7 @@ mod tests {
         parser.process(b"Hello, world!");
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        let result = render(&mut buf, area, Some(&parser));
+        let result = render(&mut buf, area, Some(&parser), None, None);
         // Cursor is visible by default in vt100, so we get Some
         assert!(result.is_some());
     }
@@ -71,7 +136,7 @@ mod tests {
         parser.process(b"\x1b[?25lHidden cursor");
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        let result = render(&mut buf, area, Some(&parser));
+        let result = render(&mut buf, area, Some(&parser), None, None);
         assert!(result.is_none());
     }
 
@@ -82,7 +147,7 @@ mod tests {
         parser.process(b"\x1b[3;6HX");
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        let result = render(&mut buf, area, Some(&parser));
+        let result = render(&mut buf, area, Some(&parser), None, None);
         if let Some((x, y)) = result {
             // Cursor is after the 'X' we wrote at (row=2, col=6) in 0-based
             assert!(x < area.right());
@@ -96,12 +161,46 @@ mod tests {
         parser.process(b"TestOutput");
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, Some(&parser));
+        render(&mut buf, area, Some(&parser), None, None);
         let row: String = (0..10)
-            .map(|x| buf.cell((x, 0)).map_or(' ', |c| {
-                c.symbol().chars().next().unwrap_or(' ')
-            }))
+            .map(|x| {
+                buf.cell((x, 0))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
             .collect();
         assert_eq!(row, "TestOutput");
+    }
+
+    #[test]
+    fn selected_text_returns_single_line_range() {
+        let mut parser = vt100::Parser::new(4, 20, 10);
+        parser.process(b"hello world");
+        let text = selected_text(
+            &parser,
+            SelectionPoint { row: 0, col: 0 },
+            SelectionPoint { row: 0, col: 4 },
+        );
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn render_with_selection_reverses_selected_cells() {
+        let mut parser = vt100::Parser::new(4, 20, 10);
+        parser.process(b"hello");
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buf = Buffer::empty(area);
+        render(
+            &mut buf,
+            area,
+            Some(&parser),
+            None,
+            Some((
+                SelectionPoint { row: 0, col: 1 },
+                SelectionPoint { row: 0, col: 3 },
+            )),
+        );
+        assert!(buf[(1, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(2, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(3, 0)].modifier.contains(Modifier::REVERSED));
     }
 }

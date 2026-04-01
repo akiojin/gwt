@@ -2,7 +2,7 @@
 
 use ratatui::prelude::*;
 
-use crate::model::{ActiveLayer, ManagementTab, Model};
+use crate::model::{ActiveLayer, Model};
 
 /// Render the status bar.
 pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
@@ -17,7 +17,10 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
     let left = match model.active_layer {
         ActiveLayer::Main => {
             if model.session_tabs.is_empty() {
-                " Ctrl+G,c: Shell | Ctrl+G,n: Agent".to_string()
+                " Enter on Branches: Agent | Ctrl+G,c: Shell".to_string()
+            } else if model.pty_copy_mode.is_some() {
+                let tab = &model.session_tabs[model.active_session];
+                format!(" COPY MODE | {}", tab.name)
             } else {
                 let tab = &model.session_tabs[model.active_session];
                 let branch = tab.branch.as_deref().unwrap_or("");
@@ -30,12 +33,22 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
         }
         ActiveLayer::Management => {
             let tab_name = model.management_tab.label();
-            format!(" {tab_name}")
+            let running = model.running_session_count();
+            if running > 0 {
+                format!(" {tab_name} | {running} sessions running")
+            } else {
+                format!(" {tab_name}")
+            }
         }
     };
 
     let hints = match model.active_layer {
-        ActiveLayer::Main => " Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close | Ctrl+C×2: Quit ",
+        ActiveLayer::Main if model.pty_copy_mode.is_some() => {
+            " Drag: Copy | Space: Select | Enter/y: Copy | Esc/q: Exit "
+        }
+        ActiveLayer::Main => {
+            " Ctrl+G,m: Copy | Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close | Ctrl+C×2: Quit "
+        }
         ActiveLayer::Management => " Tab: Switch | Ctrl+G,Ctrl+G: Terminal | Ctrl+C×2: Quit ",
     };
 
@@ -53,8 +66,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Model;
-    use ratatui::prelude::*;
+    use crate::model::{ManagementTab, Model};
     use std::path::PathBuf;
 
     fn test_model() -> Model {
@@ -79,9 +91,15 @@ mod tests {
         render(&model, &mut buf, area);
         let text = buf_row_text(&buf, 0, 120);
         // Management tab label should appear
-        assert!(text.contains("Branches"), "Expected 'Branches' in: {text:?}");
+        assert!(
+            text.contains("Branches"),
+            "Expected 'Branches' in: {text:?}"
+        );
         // Hint text should appear
-        assert!(text.contains("Tab: Switch"), "Expected hint text in: {text:?}");
+        assert!(
+            text.contains("Tab: Switch"),
+            "Expected hint text in: {text:?}"
+        );
     }
 
     #[test]
@@ -101,7 +119,7 @@ mod tests {
     #[test]
     fn render_main_layer_with_session_no_branch() {
         let mut model = test_model();
-        use crate::model::{SessionTab, SessionTabType, SessionStatus};
+        use crate::model::{SessionStatus, SessionTab, SessionTabType};
         use gwt_core::terminal::AgentColor;
         model.add_session(SessionTab {
             pane_id: "p1".into(),
@@ -122,7 +140,7 @@ mod tests {
     #[test]
     fn render_main_layer_with_session_and_branch() {
         let mut model = test_model();
-        use crate::model::{SessionTab, SessionTabType, SessionStatus};
+        use crate::model::{SessionStatus, SessionTab, SessionTabType};
         use gwt_core::terminal::AgentColor;
         model.add_session(SessionTab {
             pane_id: "p2".into(),
@@ -138,7 +156,10 @@ mod tests {
         render(&model, &mut buf, area);
         let text = buf_row_text(&buf, 0, 120);
         assert!(text.contains("Agent #1"), "Expected tab name in: {text:?}");
-        assert!(text.contains("feature/test"), "Expected branch in: {text:?}");
+        assert!(
+            text.contains("feature/test"),
+            "Expected branch in: {text:?}"
+        );
     }
 
     #[test]

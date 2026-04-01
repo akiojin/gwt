@@ -39,8 +39,8 @@ pub enum KeyAction {
     CloseSession,
     /// New shell
     NewShell,
-    /// Open wizard
-    OpenWizard,
+    /// Toggle PTY copy mode
+    TogglePtyCopyMode,
     /// Show help
     ShowHelp,
     /// Quit
@@ -87,8 +87,8 @@ pub fn process_key(state: &mut PrefixState, key: KeyEvent) -> KeyAction {
                 KeyCode::Char('x') => KeyAction::CloseSession,
                 // Ctrl+G, c → new shell
                 KeyCode::Char('c') => KeyAction::NewShell,
-                // Ctrl+G, n → open wizard
-                KeyCode::Char('n') => KeyAction::OpenWizard,
+                // Ctrl+G, m → PTY copy mode
+                KeyCode::Char('m') => KeyAction::TogglePtyCopyMode,
                 // Ctrl+G, ? → help
                 KeyCode::Char('?') => KeyAction::ShowHelp,
                 // Ctrl+G, q → no longer used for quit (Ctrl+C double-tap instead)
@@ -189,6 +189,26 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_g_m_toggles_pty_copy_mode() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        assert_eq!(
+            process_key(&mut state, plain('m')),
+            KeyAction::TogglePtyCopyMode
+        );
+    }
+
+    #[test]
+    fn ctrl_g_n_forwards_after_shortcut_removal() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        assert!(matches!(
+            process_key(&mut state, plain('n')),
+            KeyAction::Forward(_)
+        ));
+    }
+
+    #[test]
     fn ctrl_g_ampersand_close_session() {
         let mut state = PrefixState::Normal;
         process_key(&mut state, ctrl_g());
@@ -232,7 +252,7 @@ mod tests {
             KeyAction::SwitchSession(1),
             KeyAction::CloseSession,
             KeyAction::NewShell,
-            KeyAction::OpenWizard,
+            KeyAction::TogglePtyCopyMode,
             KeyAction::ShowHelp,
             KeyAction::Quit,
         ];

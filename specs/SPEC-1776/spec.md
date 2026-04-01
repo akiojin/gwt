@@ -39,7 +39,24 @@ Ctrl+G,Ctrl+G でメインに戻る
 
 ### Wizard (エージェント起動ウィザード)
 
-管理画面上のオーバーレイポップアップとして表示。gwt-cli の15ステップウィザードを完全移植。
+管理画面上のオーバーレイポップアップとして表示。gwt-cli の15ステップウィザードを移植（一部変更あり）。
+
+### Quick Start
+
+ブランチに対して過去にエージェントを起動し、session_id が保存されている場合のみ表示される。直近ではなく session_id がある最新のツールを探索して 1 ツールのみ表示。フラット 3 項目 UI:
+
+```
+Quick Start — Claude Code (opus)
+
+> Resume session (abc123...)
+  Start new session
+  Choose different settings
+```
+
+- **Resume**: `--resume <id>` で全設定（agent, model, version, skip_permissions, reasoning_level, fast_mode, collaboration_modes）を復元してワンクリック起動
+- **Start New**: 全設定を復元して Normal モード（新規セッション）でワンクリック起動
+- **Choose Different**: フルウィザードへ進む（BranchAction から開始）
+- session_id がない場合: Quick Start ステップをスキップ
 
 ## User Stories
 
@@ -105,26 +122,32 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 2. Branches で Enter → Wizard オーバーレイが開く
 3. Wizard で Launch → Agent タブが作成され、メイン画面に自動遷移
 4. Agent タブでキー入力 → PTY に転送される
-5. Ctrl+G, Ctrl+G → 管理画面 ↔ メイン画面をトグル
-6. Ctrl+G, ] / [ → エージェントタブの切替
-7. Ctrl+G, c → 新しいシェルタブが作成される
-8. Ctrl+G, n → Wizard オーバーレイが開く
-9. Ctrl+G, x → アクティブタブが閉じる（ワークツリーの安全チェック付き）
-10. Ctrl+C ダブルタップ → gwt が終了する（実行中エージェントがあれば確認）
-11. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
-12. エージェントプロセスが終了 → タブは "Completed" ステータスで残る（スクロールバック閲覧可能）
-13. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
-14. 同じブランチで複数エージェントを起動可能
-15. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
-16. 管理画面内で Tab キーで Branches/Issues/SPECs/Settings/Logs を切替
-17. マウスクリックでブランチ選択、スクロールでリスト操作
-18. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
-19. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
+5. Agent/Shell タブへテキストをペースト → 改行を含む payload 全体が PTY に転送される
+6. Ctrl+G, Ctrl+G → 管理画面 ↔ メイン画面をトグル
+7. Ctrl+G, ] / [ → エージェントタブの切替
+8. Ctrl+G, c → 新しいシェルタブが作成される
+9. Ctrl+G, m → アクティブな Agent/Shell タブが copy mode に入る
+10. copy mode 中に PgUp/PgDn/矢印/Home/End/トラックパッド・ホイール → scrollback を移動できる
+11. copy mode 中にドラッグ選択 → マウスボタンを離すとシステムクリップボードへコピーされる
+12. copy mode 中に Esc / q → copy mode を終了し、表示は最新位置へ戻る
+13. Ctrl+G, x → アクティブタブが閉じる（ワークツリーの安全チェック付き）
+14. Ctrl+C ダブルタップ → gwt が終了する（実行中エージェントがあれば確認）
+15. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
+16. エージェントまたはシェルのプロセスが終了 → 対応するタブは自動で閉じる
+17. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
+18. 同じブランチで複数エージェントを起動可能
+19. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
+20. 管理画面内で Tab キーで Branches/Issues/SPECs/Settings/Logs を切替
+21. 管理画面でマウスクリックによりブランチを選択でき、Logs ではスクロールで履歴を辿れる
+22. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
+23. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
 
 ## Edge Cases
 
 - Terminal size below 80x24: display warning
-- Agent PTY crash: tab remains with error indicator, restart option
+- Agent/Shell PTY exit or crash: the corresponding tab closes automatically
+- Main PTY normal mode: terminal-native selection/copy must remain available because mouse capture stays disabled
+- PTY output arriving during copy mode: parser keeps ingesting bytes, but the visible viewport stays fixed until copy mode exits
 - Worktree creation failure: error shown in modal, tab not created
 - GitHub API unreachable: PR/Issue panels show offline state, background retry
 - Ctrl+G: prefix key must never be forwarded to PTY
@@ -147,13 +170,16 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 
 ### Agent/Shell Sessions
 
-- FR-010: Agent tab = full PTY terminal emulator (all keys forwarded except Ctrl+G)
+- FR-010: Agent tab = full PTY terminal emulator (all keys and pasted text forwarded except Ctrl+G); normal mode keeps mouse capture disabled so terminal-native selection/copy still works
 - FR-011: Shell tab = plain shell PTY (same as agent but shell command)
-- FR-012: Tab creation via Ctrl+G,n (wizard) or Ctrl+G,c (shell)
+- FR-012: Tab creation via Branches Enter (wizard for selected branch) or Ctrl+G,c (shell)
 - FR-013: Tab switching via Ctrl+G,]/[ and Ctrl+G,1-9
 - FR-014: Tab close via Ctrl+G,x with safety confirmation
 - FR-015: Automatic worktree creation on agent launch and cleanup on close
-- FR-016: Session status polling (Running/Completed/Error) via PTY process monitoring
+- FR-016: Session termination polling via PTY process monitoring, with automatic tab close on exit
+- FR-017: Active Agent/Shell tab enters PTY copy mode via Ctrl+G,m
+- FR-018: PTY copy mode supports keyboard scrollback navigation (Up/Down/Left/Right/PgUp/PgDn/Home/End) and exits with Esc/q, restoring the live viewport
+- FR-019: PTY copy mode supports mouse wheel scroll and drag selection, copying the selected text to the system clipboard on release/confirm
 
 ### Wizard (Agent Launch)
 
@@ -205,7 +231,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-073: Skill registration auto-execution on startup (CLAUDE.md/AGENTS.md/GEMINI.md)
 - FR-074: Voice input via whisper-rs (native audio capture + transcription)
 - FR-075: File paste from clipboard (dedicated shortcut, OS-native API)
-- FR-076: Mouse support (click selection, scroll, double-click)
+- FR-076: Mouse support for management panels (click selection, scroll) and PTY copy mode
 - FR-077: Error handling: ErrorQueue + modal (critical) + status bar (minor)
 
 ### npm Distribution
