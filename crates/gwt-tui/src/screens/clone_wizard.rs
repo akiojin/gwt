@@ -218,8 +218,8 @@ fn render_url_input(state: &CloneWizardState, buf: &mut Buffer, area: Rect) {
         ])
         .split(area);
 
-    let title = Paragraph::new("Enter repository URL to clone")
-        .style(Style::default().fg(Color::White));
+    let title =
+        Paragraph::new("Enter repository URL to clone").style(Style::default().fg(Color::White));
     title.render(chunks[0], buf);
 
     let url_block = Block::default()
@@ -246,8 +246,8 @@ fn render_url_input(state: &CloneWizardState, buf: &mut Buffer, area: Rect) {
         .block(url_block);
     url_paragraph.render(chunks[2], buf);
 
-    let help = Paragraph::new("[Enter] Clone  [Esc] Cancel")
-        .style(Style::default().fg(Color::DarkGray));
+    let help =
+        Paragraph::new("[Enter] Clone  [Esc] Cancel").style(Style::default().fg(Color::DarkGray));
     help.render(chunks[4], buf);
 }
 
@@ -294,8 +294,7 @@ fn render_complete(state: &CloneWizardState, buf: &mut Buffer, area: Rect) {
         path_info.render(chunks[1], buf);
     }
 
-    let help = Paragraph::new("[Enter] Continue")
-        .style(Style::default().fg(Color::DarkGray));
+    let help = Paragraph::new("[Enter] Continue").style(Style::default().fg(Color::DarkGray));
     help.render(chunks[3], buf);
 }
 

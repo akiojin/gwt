@@ -156,9 +156,8 @@ mod tests {
     fn test_install_replaces_existing_guard() {
         let temp = create_test_repo();
         let hook_path = temp.path().join(".git/hooks/pre-commit");
-        let old_content = format!(
-            "#!/bin/sh\n# gwt-develop-guard-start\nold guard\n# gwt-develop-guard-end\n"
-        );
+        let old_content =
+            format!("#!/bin/sh\n# gwt-develop-guard-start\nold guard\n# gwt-develop-guard-end\n");
         std::fs::write(&hook_path, &old_content).unwrap();
 
         install_pre_commit_hook(temp.path()).unwrap();
