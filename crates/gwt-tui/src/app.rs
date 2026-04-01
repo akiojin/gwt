@@ -158,14 +158,13 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::KeyInput(key) => {
             // Error overlay: Enter/Esc dismisses the error
-            if !model.error_queue.is_empty() || !model.error_queue_v2.is_empty() {
-                if key.code == crossterm::event::KeyCode::Enter
-                    || key.code == crossterm::event::KeyCode::Esc
-                {
-                    model.dismiss_error();
-                    model.error_queue_v2.dismiss_current();
-                    return;
-                }
+            if (!model.error_queue.is_empty() || !model.error_queue_v2.is_empty())
+                && (key.code == crossterm::event::KeyCode::Enter
+                    || key.code == crossterm::event::KeyCode::Esc)
+            {
+                model.dismiss_error();
+                model.error_queue_v2.dismiss_current();
+                return;
             }
 
             // Management layer: Tab key cycles management tabs
@@ -183,7 +182,8 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Issues => ManagementTab::Specs,
                         ManagementTab::Specs => ManagementTab::Settings,
                         ManagementTab::Settings => ManagementTab::Logs,
-                        ManagementTab::Logs => ManagementTab::Branches,
+                        ManagementTab::Logs => ManagementTab::Versions,
+                        ManagementTab::Versions => ManagementTab::Branches,
                     };
                     return;
                 }
@@ -217,15 +217,39 @@ pub fn update(model: &mut Model, msg: Message) {
                                 .map(Message::BranchesMsg)
                         }
                         ManagementTab::Issues => {
-                            crate::screens::issues::handle_key(&model.issues_state, &key)
-                                .map(Message::IssuesMsg)
+                            let msg = crate::screens::issues::handle_key(&model.issues_state, &key);
+                            // Intercept OpenDetail to load content
+                            if let Some(crate::screens::issues::IssuesMessage::OpenDetail) = &msg {
+                                if let Some(issue) = model.issues_state.selected_issue() {
+                                    if issue.is_spec {
+                                        let spec_id = issue.spec_id.as_deref().unwrap_or("");
+                                        let spec_path = model.repo_root.join("specs").join(spec_id).join("spec.md");
+                                        model.issues_state.detail_content = std::fs::read_to_string(&spec_path)
+                                            .unwrap_or_else(|_| format!("(Could not read {})", spec_path.display()));
+                                    } else {
+                                        model.issues_state.detail_content = format!(
+                                            "(GitHub Issue detail - run `gh issue view {}` for details)",
+                                            issue.number
+                                        );
+                                    }
+                                }
+                            }
+                            msg.map(Message::IssuesMsg)
                         }
                         ManagementTab::Specs => {
                             crate::screens::specs::handle_key(&model.specs_state, &key)
                                 .map(|m| {
+                                    // Intercept OpenDetail to load spec.md content
+                                    if matches!(m, crate::screens::specs::SpecsMessage::OpenDetail) {
+                                        let visible = model.specs_state.visible_specs();
+                                        if let Some(spec) = visible.get(model.specs_state.selected) {
+                                            let spec_path = model.repo_root.join("specs").join(&spec.id).join("spec.md");
+                                            model.specs_state.detail_content = std::fs::read_to_string(&spec_path)
+                                                .unwrap_or_else(|_| format!("(Could not read {})", spec_path.display()));
+                                        }
+                                    }
                                     crate::screens::specs::update(&mut model.specs_state, m);
-                                    // Return None — update already applied inline
-                                    Message::Tick // dummy, won't cause issues
+                                    Message::Tick // dummy
                                 })
                         }
                         ManagementTab::Settings => {
@@ -235,6 +259,20 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Logs => {
                             crate::screens::logs::handle_key(&model.logs_state, &key)
                                 .map(Message::LogsMsg)
+                        }
+                        ManagementTab::Versions => {
+                            crate::screens::versions::handle_key(&model.versions_state, &key)
+                                .map(|m| {
+                                    // Intercept OpenDetail to load tag detail
+                                    if matches!(m, crate::screens::versions::VersionsMessage::OpenDetail) {
+                                        if let Some(tag) = model.versions_state.tags.get(model.versions_state.selected) {
+                                            model.versions_state.detail_content =
+                                                crate::screens::versions::load_tag_detail(&model.repo_root, &tag.name);
+                                        }
+                                    }
+                                    crate::screens::versions::update(&mut model.versions_state, m);
+                                    Message::Tick // dummy
+                                })
                         }
                     };
                     // Recursively apply sub-message if any
@@ -337,6 +375,9 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::IssuesMsg(msg) => {
             crate::screens::issues::update(&mut model.issues_state, msg);
         }
+        Message::VersionsMsg(_) => {
+            // Versions messages are handled inline via the key handler
+        }
         Message::SettingsMsg(msg) => {
             handle_settings_msg(model, msg);
         }
@@ -406,6 +447,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
             }
             ManagementTab::Logs => {
                 crate::screens::logs::render(&model.logs_state, buf, layout[2]);
+            }
+            ManagementTab::Versions => {
+                crate::screens::versions::render(&model.versions_state, buf, layout[2]);
             }
         },
     }
@@ -876,7 +920,6 @@ fn spawn_agent_session(
     wiz_config: &crate::screens::wizard::WizardLaunchConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use gwt_core::agent::launch::AgentLaunchBuilder;
-    use gwt_core::terminal::AgentColor;
 
     let agent_id = &wiz_config.agent_id;
     let working_dir = model.repo_root.clone();
@@ -1113,6 +1156,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     model.logs_state.entries = crate::screens::logs::load_log_entries();
     model.issues_state.issues = crate::screens::issues::load_specs(&repo_root);
     model.specs_state.specs = crate::screens::specs::load_specs(&repo_root);
+    model.versions_state.tags = crate::screens::versions::load_tags(&repo_root);
 
     // PTY output channel
     let (pty_tx, pty_rx) = event::pty_output_channel();
@@ -1134,6 +1178,26 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 // Only handle key Press events (ignore Release/Repeat/IME)
                 if key.kind != crossterm::event::KeyEventKind::Press {
                     None
+                }
+                // When confirm dialog is open, intercept all keys
+                else if model.confirm.is_some() {
+                    match key.code {
+                        crossterm::event::KeyCode::Enter => {
+                            if model.confirm.as_ref().is_some_and(|c| c.selected_confirm) {
+                                Some(Message::ConfirmAccepted)
+                            } else {
+                                Some(Message::ConfirmCancelled)
+                            }
+                        }
+                        crossterm::event::KeyCode::Esc => Some(Message::ConfirmCancelled),
+                        crossterm::event::KeyCode::Left | crossterm::event::KeyCode::Right => {
+                            if let Some(ref mut c) = model.confirm {
+                                c.toggle_selection();
+                            }
+                            None
+                        }
+                        _ => None,
+                    }
                 }
                 // When wizard is open, intercept all keys
                 else if model.wizard.is_some() {
@@ -1404,6 +1468,66 @@ mod tests {
             "Loading...",
             Some("step 1"),
         ));
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| view(&model, f)).unwrap();
+    }
+
+    // -- Quit confirmation tests ------------------------------------------------
+
+    #[test]
+    fn quit_with_running_agents_shows_confirm() {
+        let mut m = test_model();
+        m.add_session(SessionTab {
+            pane_id: "p1".into(),
+            name: "Agent #1".into(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Blue,
+            status: SessionStatus::Running,
+            branch: Some("feature/test".into()),
+            spec_id: None,
+        });
+        update(&mut m, Message::Quit);
+        assert!(!m.should_quit, "Should not quit immediately with running agents");
+        assert!(m.confirm.is_some(), "Confirm dialog should appear");
+        assert_eq!(m.overlay_mode, OverlayMode::Confirm);
+    }
+
+    #[test]
+    fn quit_without_agents_exits_immediately() {
+        let mut m = test_model();
+        // Only shell sessions — no agents
+        m.add_session(test_session("shell-1"));
+        update(&mut m, Message::Quit);
+        assert!(m.should_quit, "Should quit immediately with no running agents");
+    }
+
+    #[test]
+    fn confirm_accepted_quits() {
+        let mut m = test_model();
+        m.confirm = Some(crate::screens::confirm::ConfirmState::exit_with_running_agents(1));
+        m.overlay_mode = OverlayMode::Confirm;
+        update(&mut m, Message::ConfirmAccepted);
+        assert!(m.should_quit);
+        assert!(m.confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_cancelled_does_not_quit() {
+        let mut m = test_model();
+        m.confirm = Some(crate::screens::confirm::ConfirmState::exit_with_running_agents(1));
+        m.overlay_mode = OverlayMode::Confirm;
+        update(&mut m, Message::ConfirmCancelled);
+        assert!(!m.should_quit);
+        assert!(m.confirm.is_none());
+    }
+
+    // -- Versions tab view test -------------------------------------------------
+
+    #[test]
+    fn view_versions_tab_renders() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Versions;
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| view(&model, f)).unwrap();

@@ -24,10 +24,10 @@ Reference code: `crates/gwt-cli/` at commit `becf0aab` (38,415 lines)
 W1 | claude | feat/x | running | SPEC-42
 ```
 
-**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / Issues / SPECs / Settings / Logs の5タブ。ブランチ一覧がデフォルト表示。
+**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / Issues / SPECs / Settings / Logs / Versions の6タブ。ブランチ一覧がデフォルト表示。
 
 ```
-[Branches] [Issues] [SPECs] [Settings] [Logs]
+[Branches] [Issues] [SPECs] [Settings] [Logs] [Versions]
 ─────────────────────────────────────────────
   main              -   ○  #42 open
 * feat/x   Claude   *   ●  #38 merged
@@ -116,10 +116,16 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 13. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
 14. 同じブランチで複数エージェントを起動可能
 15. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
-16. 管理画面内で Tab キーで Branches/Issues/SPECs/Settings/Logs を切替
+16. 管理画面内で Tab キーで Branches/Issues/SPECs/Settings/Logs/Versions を切替
 17. マウスクリックでブランチ選択、スクロールでリスト操作
 18. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
 19. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
+20. SPECs タブで Enter → spec.md の詳細ビューが表示、Esc で戻る
+21. Issues タブで Enter → SPEC の場合は spec.md、それ以外は gh コマンド案内を表示
+22. Ctrl+C ダブルタップ → 実行中エージェントがある場合は確認ダイアログ表示
+23. 確認ダイアログで Enter(確定)/Esc(キャンセル)/Left-Right(選択切替)
+24. Versions タブで git タグ一覧を表示、Enter でタグ詳細
+25. 管理画面のステータスバーに実行中セッション数を表示
 
 ## Edge Cases
 
@@ -138,7 +144,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 ### Core UI
 
 - FR-001: gwt-tui crate using ratatui + crossterm, Elm Architecture (Model/View/Update)
-- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/Issues/SPECs/Settings/Logs tabs)
+- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/Issues/SPECs/Settings/Logs/Versions tabs)
 - FR-003: Ctrl+G,Ctrl+G トグルで メイン ↔ 管理画面 切替
 - FR-004: Ctrl+G prefix key system (2s timeout) for all management operations
 - FR-005: VT100 emulator buffer to ratatui Cell conversion (renderer)
@@ -207,6 +213,11 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-075: File paste from clipboard (dedicated shortcut, OS-native API)
 - FR-076: Mouse support (click selection, scroll, double-click)
 - FR-077: Error handling: ErrorQueue + modal (critical) + status bar (minor)
+- FR-078: Versions tab — git tag list with detail view (git show)
+- FR-079: Session history saving (ToolSessionEntry) on agent/shell spawn
+- FR-083: Quit confirmation dialog when running agents exist (Ctrl+C×2)
+- FR-081: SPECs/Issues detail view — Enter to view spec.md or issue details, Esc to return
+- FR-082: Status bar shows running agent session count in management layer
 
 ### npm Distribution
 

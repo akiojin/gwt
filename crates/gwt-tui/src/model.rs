@@ -16,6 +16,7 @@ use crate::screens::error::ErrorQueue;
 use crate::screens::issues::IssuePanelState;
 use crate::screens::migration_dialog::MigrationDialogState;
 use crate::screens::speckit_wizard::SpecKitState;
+use crate::screens::versions::VersionsState;
 use crate::screens::{LogsState, SettingsState};
 use crate::widgets::progress_modal::ProgressState;
 
@@ -38,15 +39,17 @@ pub enum ManagementTab {
     Specs,
     Settings,
     Logs,
+    Versions,
 }
 
 impl ManagementTab {
-    pub const ALL: [ManagementTab; 5] = [
+    pub const ALL: [ManagementTab; 6] = [
         ManagementTab::Branches,
         ManagementTab::Issues,
         ManagementTab::Specs,
         ManagementTab::Settings,
         ManagementTab::Logs,
+        ManagementTab::Versions,
     ];
 
     pub fn index(self) -> usize {
@@ -56,6 +59,7 @@ impl ManagementTab {
             ManagementTab::Specs => 2,
             ManagementTab::Settings => 3,
             ManagementTab::Logs => 4,
+            ManagementTab::Versions => 5,
         }
     }
 
@@ -66,6 +70,7 @@ impl ManagementTab {
             ManagementTab::Specs => "SPECs",
             ManagementTab::Settings => "Settings",
             ManagementTab::Logs => "Logs",
+            ManagementTab::Versions => "Versions",
         }
     }
 }
@@ -160,6 +165,7 @@ pub struct Model {
     pub specs_state: SpecsState,
     pub settings_state: SettingsState,
     pub logs_state: LogsState,
+    pub versions_state: VersionsState,
 
     // PTY management
     pub pane_manager: PaneManager,
@@ -203,6 +209,7 @@ impl Model {
             specs_state: SpecsState::new(),
             settings_state: SettingsState::new(),
             logs_state: LogsState::new(),
+            versions_state: VersionsState::new(),
             pane_manager: PaneManager::new(),
             vt_parsers: HashMap::new(),
             pty_tx: None,
@@ -478,7 +485,7 @@ mod tests {
     fn management_tab_metadata() {
         assert_eq!(ManagementTab::Branches.index(), 0);
         assert_eq!(ManagementTab::Logs.label(), "Logs");
-        assert_eq!(ManagementTab::ALL.len(), 5);
+        assert_eq!(ManagementTab::ALL.len(), 6);
     }
 
     #[test]
