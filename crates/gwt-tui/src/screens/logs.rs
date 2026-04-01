@@ -542,22 +542,41 @@ pub fn load_log_entries() -> Vec<LogEntry> {
 
     let mut entries = Vec::new();
 
-    if let Ok(read_dir) = std::fs::read_dir(&log_dir) {
+    // Recursively scan subdirectories for log files
+    // Log files are stored as ~/.gwt/logs/{branch}/gwt.jsonl.{date}
+    fn scan_dir(dir: &std::path::Path, entries: &mut Vec<LogEntry>, depth: usize) {
+        if depth > 3 {
+            return;
+        }
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => return,
+        };
         for entry in read_dir.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("log")
-                || path.extension().and_then(|e| e.to_str()) == Some("json")
-            {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    for line in content.lines() {
-                        if let Some(entry) = parse_json_log_line(line) {
-                            entries.push(entry);
+            if path.is_dir() {
+                scan_dir(&path, entries, depth + 1);
+            } else if path.is_file() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                // Match: *.log, *.json, *.jsonl, gwt.jsonl.* (date-suffixed)
+                if name.ends_with(".log")
+                    || name.ends_with(".json")
+                    || name.ends_with(".jsonl")
+                    || name.contains(".jsonl.")
+                {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        for line in content.lines().rev().take(200) {
+                            if let Some(entry) = parse_json_log_line(line) {
+                                entries.push(entry);
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    scan_dir(&log_dir, &mut entries, 0);
 
     // Sort newest first
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));

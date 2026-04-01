@@ -15,7 +15,10 @@ use ratatui::Terminal;
 use crate::event::{self, EventLoop, TuiEvent};
 use crate::input::keybind::{self, KeyAction, PrefixState};
 use crate::message::Message;
-use crate::model::{ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode};
+use crate::model::{
+    ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode, SessionStatus,
+    SessionTabType,
+};
 use crate::screens::{self, LogsMessage, SettingsMessage};
 use crate::widgets;
 
@@ -30,7 +33,26 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 pub fn update(model: &mut Model, msg: Message) {
     match msg {
         Message::Quit => {
-            model.should_quit = true;
+            let has_running_agents = model.session_tabs.iter().any(|t| {
+                t.tab_type == SessionTabType::Agent
+                    && matches!(t.status, SessionStatus::Running)
+            });
+            if has_running_agents && model.confirm.is_none() {
+                let agent_count = model
+                    .session_tabs
+                    .iter()
+                    .filter(|t| {
+                        t.tab_type == SessionTabType::Agent
+                            && matches!(t.status, SessionStatus::Running)
+                    })
+                    .count();
+                model.confirm = Some(
+                    crate::screens::confirm::ConfirmState::exit_with_running_agents(agent_count),
+                );
+                model.overlay_mode = OverlayMode::Confirm;
+            } else {
+                model.should_quit = true;
+            }
         }
         Message::ToggleLayer => {
             model.toggle_layer();
@@ -272,8 +294,12 @@ pub fn update(model: &mut Model, msg: Message) {
             model.overlay_mode = OverlayMode::None;
         }
         Message::ConfirmAccepted => {
+            let action = model.confirm.as_ref().map(|c| c.on_confirm.clone());
             model.confirm = None;
             model.overlay_mode = OverlayMode::None;
+            if let Some(crate::screens::confirm::ConfirmAction::QuitWithAgents) = action {
+                model.should_quit = true;
+            }
         }
         Message::ConfirmCancelled => {
             model.confirm = None;
@@ -809,6 +835,35 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
     // Switch to Main layer
     model.active_layer = ActiveLayer::Main;
 
+    // Save session entry for branch tool history (agent_id = "shell")
+    let _ = gwt_core::config::save_session_entry(
+        &model.repo_root,
+        gwt_core::config::ToolSessionEntry {
+            branch: "terminal".to_string(),
+            worktree_path: Some(model.repo_root.to_string_lossy().to_string()),
+            tool_id: "shell".to_string(),
+            tool_label: "Shell".to_string(),
+            session_id: None,
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: None,
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        },
+    );
+
     Ok(())
 }
 
@@ -909,6 +964,35 @@ fn spawn_agent_session(
 
     // Switch to Main layer
     model.active_layer = ActiveLayer::Main;
+
+    // Save session entry for branch tool history
+    let _ = gwt_core::config::save_session_entry(
+        &model.repo_root,
+        gwt_core::config::ToolSessionEntry {
+            branch: wiz_config.branch_name.clone(),
+            worktree_path: Some(model.repo_root.to_string_lossy().to_string()),
+            tool_id: wiz_config.agent_id.clone(),
+            tool_label: wiz_config.agent_id.clone(),
+            session_id: None,
+            mode: None,
+            model: wiz_config.model.clone(),
+            reasoning_level: None,
+            skip_permissions: Some(wiz_config.skip_permissions),
+            tool_version: wiz_config.version.clone(),
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        },
+    );
 
     Ok(())
 }
