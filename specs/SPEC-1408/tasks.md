@@ -1,6 +1,0 @@
-- [ ] T001 [S] TDD テスト作成（Rust + Frontend）
-- [ ] T002 [F] [US1] Fix 1 - Issue コマンド async 化（fetch_github_issues, find_existing_issue_branches_bulk, fetch_github_issue_detail, fetch_branch_linked_issue）
-- [ ] T003 [U] [US4] Fix 2 - ブランチリンク検索の非同期化（IssueListPanel.svelte）
-- [ ] T004 [U] [US3] Fix 3 - IntersectionObserver の信頼性修正（IssueListPanel.svelte）
-- [ ] T005 [F] [US2] Fix 4 - O(1) ページネーション（Search API）
-- [ ] T006 [FIN] 全テスト GREEN 確認 + lint + 型チェック

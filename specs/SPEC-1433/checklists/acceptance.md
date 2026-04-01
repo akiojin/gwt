@@ -1,6 +1,0 @@
-- [ ] macOS/Windows で API Key ボタンの表示要件を満たす実装である
-- [x] API Key ボタンは実体SVGアイコンを持つ
-- [x] `_` を含む API Key 表示回帰テストがGREEN
-- [x] 既存 API key peek/copy テストが回帰なし
-- [x] `svelte-check` が成功
-- [x] API Key peek/copy の E2E シナリオが追加され、実行成功している

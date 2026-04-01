@@ -1,5 +1,0 @@
-- 設定画面 Save 後に `config.toml` の canonical profile data から再読込される
-- active profile 切替で参照する endpoint / api_key / model が切り替わる
-- `list_ai_models` が canonical profile data を使う
-- launch env 注入が canonical profile data を使う
-- sidecar file が存在しても AI runtime behavior に影響しない

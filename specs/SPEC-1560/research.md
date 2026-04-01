@@ -1,4 +1,0 @@
-- Current repo implementation and existing tests must be compared against this spec before changes land.
-- Dependency / plugin / asset constraints specific to `機能仕様: サウンドシステム (BGM・効果音・UI音)` should be captured here as they are validated.
-- Any divergence between the issue body and the current code should be recorded here before implementation.
-- **サウンドアセット調達**: AI生成（Suno/Udio等）で調達予定。商用利用ライセンスの確認が必要。各サービスの利用規約を事前調査すること。

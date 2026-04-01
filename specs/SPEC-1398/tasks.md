@@ -1,4 +1,0 @@
-- [x] T001 [F] [US1] 過去 merged PR のみ返るケースで `No PR` になる回帰テストを追加する。
-- [x] T002 [F] [US2] `prNumber` が `latestBranchPr` より優先される回帰テストを追加する。
-- [x] T003 [U] [US1] [US2] `resolvedPrNumber` の選択ロジックを修正する。
-- [x] T004 [FIN] 追加テスト実行と結果を TDD セクションに記録する。

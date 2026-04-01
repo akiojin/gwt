@@ -1,8 +1,0 @@
-{
-  "id": "1349",
-  "title": "機能仕様: マイグレーション時の `Directory not empty` を非致命化",
-  "status": "closed",
-  "phase": "draft",
-  "created_at": "2026-02-27T10:28:32Z",
-  "updated_at": "2026-03-16T07:19:02Z"
-}
