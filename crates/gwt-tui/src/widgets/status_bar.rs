@@ -21,14 +21,10 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
             } else {
                 let tab = &model.session_tabs[model.active_session];
                 let branch = tab.branch.as_deref().unwrap_or("");
-                let viewport_label = model
-                    .terminal_viewport(&tab.pane_id)
-                    .map(|view| if view.follow_live { "LIVE" } else { "SCROLLED" })
-                    .unwrap_or("LIVE");
                 if branch.is_empty() {
-                    format!(" {viewport_label} | {}", tab.name)
+                    format!(" {}", tab.name)
                 } else {
-                    format!(" {viewport_label} | {} | {}", tab.name, branch)
+                    format!(" {} | {}", tab.name, branch)
                 }
             }
         }
@@ -48,7 +44,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
             " Enter on Branches: Agent | Ctrl+G,c: Shell | Ctrl+G,Ctrl+G: Manage "
         }
         ActiveLayer::Main => {
-            " Wheel: Scroll | PgUp/PgDn: History | Drag: Copy | End: Live | Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close "
+            " Wheel: Scroll | PgUp/PgDn: History | Drag: Copy | Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close "
         }
         ActiveLayer::Management => " Tab: Switch | Ctrl+G,Ctrl+G: Terminal | Ctrl+C×2: Quit ",
     };
@@ -139,6 +135,11 @@ mod tests {
         render(&model, &mut buf, area);
         let text = buf_row_text(&buf, 0, 120);
         assert!(text.contains("Shell #1"), "Expected tab name in: {text:?}");
+        assert!(!text.contains("LIVE"), "Unexpected LIVE label in: {text:?}");
+        assert!(
+            !text.contains("SCROLLED"),
+            "Unexpected SCROLLED label in: {text:?}"
+        );
     }
 
     #[test]
@@ -163,6 +164,11 @@ mod tests {
         assert!(
             text.contains("feature/test"),
             "Expected branch in: {text:?}"
+        );
+        assert!(!text.contains("LIVE"), "Unexpected LIVE label in: {text:?}");
+        assert!(
+            !text.contains("SCROLLED"),
+            "Unexpected SCROLLED label in: {text:?}"
         );
     }
 

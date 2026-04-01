@@ -8,13 +8,14 @@
 - Enabled mouse capture in the Main layer so wheel / trackpad scroll and drag-selection work directly in normal mode
 - Kept session-scoped raw PTY transcripts as the source of truth for history rendering, while preserving live follow at the bottom
 - Added RED/GREEN coverage for keyboard scrollback, wheel scrollback, drag-copy, viewport freeze during new PTY output, and historical ANSI rendering
-- Updated the status bar to surface `LIVE` / `SCROLLED` state instead of a modal copy-mode hint
+- Removed the `LIVE` / `SCROLLED` status label after it proved to be diagnostic noise, and made PTY-bound key input / paste immediately snap the viewport back to the live tail
 
 ### Done
 
 - Agent/Shell tabs now support scrollback and drag-copy directly in normal mode
 - Scrolling away from the live tail no longer snaps back when new PTY output arrives
 - Returning to the bottom or pressing `End` restores live follow
+- Typing or pasting while scrolled back immediately restores the live viewport before forwarding the input
 
 ### Next
 

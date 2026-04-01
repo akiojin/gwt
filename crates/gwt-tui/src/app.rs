@@ -228,6 +228,16 @@ fn set_terminal_follow_live(model: &mut Model, pane_id: &str, follow_live: bool)
     sync_active_terminal_history(model);
 }
 
+fn jump_terminal_to_live(model: &mut Model, pane_id: &str) {
+    {
+        let view = model.terminal_viewport_mut(pane_id);
+        view.selection_anchor = None;
+        view.selection_focus = None;
+        view.dragging = false;
+    }
+    set_terminal_follow_live(model, pane_id, true);
+}
+
 fn freeze_terminal_view(model: &mut Model, pane_id: &str) {
     {
         let view = model.terminal_viewport_mut(pane_id);
@@ -635,7 +645,7 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::TogglePtyCopyMode => {
             // Keep the legacy shortcut as a "jump back to live tail" alias.
             if let Some(pane_id) = active_pane_id(model).map(str::to_string) {
-                scroll_terminal_to_bottom(model, &pane_id);
+                jump_terminal_to_live(model, &pane_id);
             }
         }
         Message::WizardKey(key) => {
@@ -735,6 +745,11 @@ pub fn update(model: &mut Model, msg: Message) {
             match model.active_layer {
                 ActiveLayer::Main => {
                     let bytes = key_event_to_bytes(&key);
+                    if !bytes.is_empty() {
+                        if let Some(pane_id) = active_pane_id(model).map(str::to_string) {
+                            jump_terminal_to_live(model, &pane_id);
+                        }
+                    }
                     write_bytes_to_active_pane(model, &bytes);
                 }
                 ActiveLayer::Management => {
@@ -859,6 +874,9 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Paste(text) => {
             if model.active_layer == ActiveLayer::Main {
+                if let Some(pane_id) = active_pane_id(model).map(str::to_string) {
+                    jump_terminal_to_live(model, &pane_id);
+                }
                 write_bytes_to_active_pane(model, text.as_bytes());
             }
         }
@@ -2457,6 +2475,89 @@ mod tests {
             output_str.contains("hello\nworld"),
             "expected pasted text in output, got: {output_str:?}"
         );
+    }
+
+    #[test]
+    fn update_terminal_view_typing_returns_to_live_follow() {
+        let mut m = test_model();
+        m.terminal_cols = 20;
+        m.terminal_rows = 10;
+        let reader = add_cat_session(&mut m, "typed");
+        m.vt_parsers
+            .insert("pane-typed".to_string(), vt100::Parser::new(6, 20, 2));
+        for index in 0..15 {
+            update(
+                &mut m,
+                Message::PtyOutput {
+                    pane_id: "pane-typed".into(),
+                    data: format!("line-{index}\r\n").into_bytes(),
+                },
+            );
+        }
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
+        );
+        assert!(!m.terminal_viewport("pane-typed").unwrap().follow_live);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Char('a'), KeyModifiers::NONE)),
+        );
+
+        let output = read_from_reader_with_timeout(reader, Duration::from_secs(5));
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains('a'),
+            "expected typed input in output, got: {output_str:?}"
+        );
+
+        let viewport = m.terminal_viewport("pane-typed").expect("viewport state");
+        assert!(viewport.follow_live);
+        assert_eq!(viewport.scrollback, 0);
+        assert!(m.active_history_parser.is_none());
+    }
+
+    #[test]
+    fn update_terminal_view_paste_returns_to_live_follow() {
+        let mut m = test_model();
+        m.terminal_cols = 20;
+        m.terminal_rows = 10;
+        let reader = add_cat_session(&mut m, "paste-live");
+        m.vt_parsers
+            .insert("pane-paste-live".to_string(), vt100::Parser::new(6, 20, 2));
+        for index in 0..15 {
+            update(
+                &mut m,
+                Message::PtyOutput {
+                    pane_id: "pane-paste-live".into(),
+                    data: format!("line-{index}\r\n").into_bytes(),
+                },
+            );
+        }
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::PageUp, KeyModifiers::NONE)),
+        );
+        assert!(!m.terminal_viewport("pane-paste-live").unwrap().follow_live);
+
+        update(&mut m, Message::Paste("hello".to_string()));
+
+        let output = read_from_reader_with_timeout(reader, Duration::from_secs(5));
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains("hello"),
+            "expected pasted input in output, got: {output_str:?}"
+        );
+
+        let viewport = m
+            .terminal_viewport("pane-paste-live")
+            .expect("viewport state");
+        assert!(viewport.follow_live);
+        assert_eq!(viewport.scrollback, 0);
+        assert!(m.active_history_parser.is_none());
     }
 
     #[test]

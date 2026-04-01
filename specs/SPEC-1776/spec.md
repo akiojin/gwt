@@ -130,26 +130,27 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 10. スクロール中に新しい PTY 出力が届いても viewport は勝手に最下端へ戻らない
 11. Agent/Shell タブ通常モードでドラッグ選択 → マウスボタンを離すとシステムクリップボードへコピーされる
 12. End または最下端まで戻る操作で live follow に復帰する
-13. Ctrl+G, x → アクティブタブが閉じる（ワークツリーの安全チェック付き）
-14. Ctrl+C ダブルタップ → 実行中セッションがある場合は確認ダイアログ表示
-15. 確認ダイアログで Enter(確定)/Esc(キャンセル)/Left-Right(選択切替)
-16. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
-17. エージェントまたはシェルのプロセスが終了 → 対応するタブは completed/error 状態のまま残り、ユーザーが手動で閉じられる
-18. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
-19. 同じブランチで複数エージェントを起動可能
-20. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
-21. 管理画面内で Tab キーで Branches/SPECs/Issues/Versions/Settings/Logs を切替
-22. 管理画面でマウスクリックによりブランチを選択でき、Logs ではスクロールで履歴を辿れる
-23. SPECs タブで Enter → spec.md の詳細ビューが表示、Esc で戻る
-24. Issues タブで Enter → SPEC の場合は spec.md、それ以外は gh コマンド案内を表示
-25. Versions タブで最新 10 件の git version tags を表示し、range / commit count / summary preview を一覧表示、Enter で Markdown 詳細を開ける
-26. SPECs / Issues の詳細ビューでは Markdown が見出し・箇条書き・コードブロック付きで表示される
-27. Logs タブでは category / event / result / workspace / error_code を含む構造化ログを検索・詳細表示できる
-28. 管理画面のステータスバーに実行中セッション数を表示
-29. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
-30. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
-31. Branches タブでは `origin` のような remote HEAD alias をブランチとして表示しない
-32. Agent/Shell PTY 通常モードでは live parser の保持量を超えた古い出力も session-scoped file-backed transcript から辿れる
+13. 履歴表示中に PTY へ送るキー入力または paste が発生したら、viewport は即座に live follow に戻り、その入力結果が見える
+14. Ctrl+G, x → アクティブタブが閉じる（ワークツリーの安全チェック付き）
+15. Ctrl+C ダブルタップ → 実行中セッションがある場合は確認ダイアログ表示
+16. 確認ダイアログで Enter(確定)/Esc(キャンセル)/Left-Right(選択切替)
+17. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
+18. エージェントまたはシェルのプロセスが終了 → 対応するタブは completed/error 状態のまま残り、ユーザーが手動で閉じられる
+19. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
+20. 同じブランチで複数エージェントを起動可能
+21. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
+22. 管理画面内で Tab キーで Branches/SPECs/Issues/Versions/Settings/Logs を切替
+23. 管理画面でマウスクリックによりブランチを選択でき、Logs ではスクロールで履歴を辿れる
+24. SPECs タブで Enter → spec.md の詳細ビューが表示、Esc で戻る
+25. Issues タブで Enter → SPEC の場合は spec.md、それ以外は gh コマンド案内を表示
+26. Versions タブで最新 10 件の git version tags を表示し、range / commit count / summary preview を一覧表示、Enter で Markdown 詳細を開ける
+27. SPECs / Issues の詳細ビューでは Markdown が見出し・箇条書き・コードブロック付きで表示される
+28. Logs タブでは category / event / result / workspace / error_code を含む構造化ログを検索・詳細表示できる
+29. 管理画面のステータスバーに実行中セッション数を表示
+30. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
+31. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
+32. Branches タブでは `origin` のような remote HEAD alias をブランチとして表示しない
+33. Agent/Shell PTY 通常モードでは live parser の保持量を超えた古い出力も session-scoped file-backed transcript から辿れる
 
 ## Edge Cases
 
@@ -157,6 +158,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - Agent/Shell PTY exit or crash: the corresponding tab remains visible with completed/error state so the final transcript and error output can be inspected before manual close
 - Main PTY normal mode: mouse capture stays enabled so gwt owns scroll / drag selection / clipboard copy; terminal-native selection is intentionally not used
 - PTY output arriving while the viewport is scrolled away from the bottom: parser keeps ingesting bytes, but the visible viewport stays fixed until the user returns to live follow
+- Key input or paste while scrolled back: the viewport immediately snaps to live follow before the PTY input is forwarded
 - Agent / Shell session files are not a scrollback source; pane transcript must remain available while the session tab is alive even when no agent session file exists
 - Session transcript is temporary: pane close or gwt shutdown may discard it without affecting session-file based resume
 - Worktree creation failure: error shown in modal, tab not created
@@ -191,6 +193,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-017: Active Agent/Shell tab exposes a transcript-backed terminal viewport in normal mode without requiring a separate copy mode
 - FR-018: Active Agent/Shell terminal viewport supports PgUp/PgDn/Home/End plus mouse wheel and trackpad scroll across both live parser history and the session-scoped file-backed pane transcript while the viewport is scrolled away from the live tail
 - FR-019: Active Agent/Shell terminal viewport supports drag selection in normal mode and copies the selected text to the system clipboard on release; `End` or returning to the bottom restores live follow
+- FR-019a: Any PTY-bound key input or paste in an Agent/Shell tab immediately restores live follow before forwarding the input, so the resulting output is visible without an extra navigation step
 
 ### Wizard (Agent Launch)
 

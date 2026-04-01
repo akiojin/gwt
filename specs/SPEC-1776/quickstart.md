@@ -26,7 +26,8 @@ cargo run -p gwt-tui
 # - Ctrl+G, [ → switch to previous tab
 # - In normal mode: wheel / trackpad / PgUp / PgDn / Home scroll transcript history
 # - In normal mode: drag to copy selection, release to copy
-# - End or scrolling back to bottom returns to live follow
+# - Scrolling back to the bottom returns to live follow
+# - If you type or paste while scrolled back, the viewport jumps to live output first
 # - Ctrl+G, x → close tab
 # - Ctrl+C twice → quit
 ```
