@@ -119,16 +119,24 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::KeyInput(key) => {
             // Management layer: Tab key cycles management tabs
+            // BUT only when the active screen is NOT in form/edit mode
             if model.active_layer == ActiveLayer::Management
                 && key.code == crossterm::event::KeyCode::Tab
             {
-                model.management_tab = match model.management_tab {
-                    ManagementTab::Branches => ManagementTab::Issues,
-                    ManagementTab::Issues => ManagementTab::Settings,
-                    ManagementTab::Settings => ManagementTab::Logs,
-                    ManagementTab::Logs => ManagementTab::Branches,
+                let screen_wants_tab = match model.management_tab {
+                    ManagementTab::Settings => model.settings_state.is_form_mode(),
+                    _ => false,
                 };
-                return;
+                if !screen_wants_tab {
+                    model.management_tab = match model.management_tab {
+                        ManagementTab::Branches => ManagementTab::Issues,
+                        ManagementTab::Issues => ManagementTab::Settings,
+                        ManagementTab::Settings => ManagementTab::Logs,
+                        ManagementTab::Logs => ManagementTab::Branches,
+                    };
+                    return;
+                }
+                // Fall through to screen handler when in form mode
             }
             // Forward to active screen handler
             match model.active_layer {
@@ -139,7 +147,14 @@ pub fn update(model: &mut Model, msg: Message) {
                         if let Some(pane) = model.pane_manager.pane_mut_by_id(&pane_id) {
                             let bytes = key_event_to_bytes(&key);
                             if !bytes.is_empty() {
-                                let _ = pane.write_input(&bytes);
+                                if let Err(e) = pane.write_input(&bytes) {
+                                    // Mark session as errored when PTY write fails
+                                    if let Some(s) = model.session_tabs.get_mut(model.active_session) {
+                                        s.status = crate::model::SessionStatus::Error(
+                                            format!("PTY write failed: {e}"),
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -729,6 +744,18 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
 
 fn key_event_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    // Alt modifier: send ESC prefix + the key bytes
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        let inner_key = crossterm::event::KeyEvent::new(key.code, key.modifiers - KeyModifiers::ALT);
+        let inner = key_event_to_bytes(&inner_key);
+        if !inner.is_empty() {
+            let mut out = vec![0x1b]; // ESC prefix for Alt
+            out.extend_from_slice(&inner);
+            return out;
+        }
+    }
+
     match key.code {
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -743,6 +770,7 @@ fn key_event_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Esc => vec![0x1b],
         KeyCode::Up => b"\x1b[A".to_vec(),
         KeyCode::Down => b"\x1b[B".to_vec(),
@@ -753,6 +781,22 @@ fn key_event_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
         KeyCode::PageUp => b"\x1b[5~".to_vec(),
         KeyCode::PageDown => b"\x1b[6~".to_vec(),
         KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::F(n) => match n {
+            1 => b"\x1bOP".to_vec(),
+            2 => b"\x1bOQ".to_vec(),
+            3 => b"\x1bOR".to_vec(),
+            4 => b"\x1bOS".to_vec(),
+            5 => b"\x1b[15~".to_vec(),
+            6 => b"\x1b[17~".to_vec(),
+            7 => b"\x1b[18~".to_vec(),
+            8 => b"\x1b[19~".to_vec(),
+            9 => b"\x1b[20~".to_vec(),
+            10 => b"\x1b[21~".to_vec(),
+            11 => b"\x1b[23~".to_vec(),
+            12 => b"\x1b[24~".to_vec(),
+            _ => vec![],
+        },
         _ => vec![],
     }
 }
@@ -797,6 +841,12 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize model
     let mut model = Model::new(repo_root.clone());
+
+    // Sync terminal size from actual terminal
+    if let Ok((cols, rows)) = crossterm::terminal::size() {
+        model.terminal_cols = cols;
+        model.terminal_rows = rows;
+    }
 
     // Load initial data for management screens
     model.branches_state.branches =
