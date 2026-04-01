@@ -36,7 +36,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
 
     let hints = match model.active_layer {
         ActiveLayer::Main => " Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close | Ctrl+C×2: Quit ",
-        ActiveLayer::Management => " Tab: Switch | Ctrl+G,Ctrl+G: Back | Ctrl+C×2: Quit ",
+        ActiveLayer::Management => " Tab: Switch | Ctrl+G,Ctrl+G: Terminal | Ctrl+C×2: Quit ",
     };
 
     let right_width = hints.len() as u16;
