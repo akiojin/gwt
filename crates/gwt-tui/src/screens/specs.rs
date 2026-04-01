@@ -212,3 +212,349 @@ pub fn load_specs(repo_root: &std::path::Path) -> Vec<SpecItem> {
     items.sort_by(|a, b| a.id.cmp(&b.id));
     items
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::prelude::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn sample_specs() -> Vec<SpecItem> {
+        vec![
+            SpecItem {
+                id: "SPEC-1".into(),
+                title: "Alpha feature".into(),
+                status: "open".into(),
+                phase: "planning".into(),
+            },
+            SpecItem {
+                id: "SPEC-2".into(),
+                title: "Beta bugfix".into(),
+                status: "closed".into(),
+                phase: "done".into(),
+            },
+            SpecItem {
+                id: "SPEC-3".into(),
+                title: "Gamma refactor".into(),
+                status: "open".into(),
+                phase: "implementation".into(),
+            },
+        ]
+    }
+
+    // -- SpecsState::new() --
+
+    #[test]
+    fn new_state_is_empty() {
+        let s = SpecsState::new();
+        assert!(s.specs.is_empty());
+        assert_eq!(s.selected, 0);
+        assert!(s.search_query.is_empty());
+        assert!(!s.search_mode);
+        assert_eq!(s.offset, 0);
+    }
+
+    // -- visible_specs() --
+
+    #[test]
+    fn visible_specs_returns_all_when_query_empty() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        assert_eq!(s.visible_specs().len(), 3);
+    }
+
+    #[test]
+    fn visible_specs_filters_by_id() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.search_query = "SPEC-2".into();
+        let v = s.visible_specs();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, "SPEC-2");
+    }
+
+    #[test]
+    fn visible_specs_filters_by_title_case_insensitive() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.search_query = "alpha".into();
+        let v = s.visible_specs();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].title, "Alpha feature");
+    }
+
+    #[test]
+    fn visible_specs_filters_by_status() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.search_query = "closed".into();
+        let v = s.visible_specs();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, "SPEC-2");
+    }
+
+    #[test]
+    fn visible_specs_returns_empty_on_no_match() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.search_query = "nonexistent".into();
+        assert!(s.visible_specs().is_empty());
+    }
+
+    // -- handle_key() normal mode --
+
+    #[test]
+    fn handle_key_up_returns_select_prev() {
+        let s = SpecsState::new();
+        assert!(matches!(handle_key(&s, &key(KeyCode::Up)), Some(SpecsMessage::SelectPrev)));
+    }
+
+    #[test]
+    fn handle_key_k_returns_select_prev() {
+        let s = SpecsState::new();
+        assert!(matches!(handle_key(&s, &key(KeyCode::Char('k'))), Some(SpecsMessage::SelectPrev)));
+    }
+
+    #[test]
+    fn handle_key_down_returns_select_next() {
+        let s = SpecsState::new();
+        assert!(matches!(handle_key(&s, &key(KeyCode::Down)), Some(SpecsMessage::SelectNext)));
+    }
+
+    #[test]
+    fn handle_key_j_returns_select_next() {
+        let s = SpecsState::new();
+        assert!(matches!(handle_key(&s, &key(KeyCode::Char('j'))), Some(SpecsMessage::SelectNext)));
+    }
+
+    #[test]
+    fn handle_key_slash_returns_toggle_search() {
+        let s = SpecsState::new();
+        assert!(matches!(handle_key(&s, &key(KeyCode::Char('/'))), Some(SpecsMessage::ToggleSearch)));
+    }
+
+    #[test]
+    fn handle_key_unknown_returns_none() {
+        let s = SpecsState::new();
+        assert!(handle_key(&s, &key(KeyCode::Char('z'))).is_none());
+    }
+
+    // -- handle_key() search mode --
+
+    #[test]
+    fn handle_key_search_char() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        assert!(matches!(handle_key(&s, &key(KeyCode::Char('a'))), Some(SpecsMessage::SearchChar('a'))));
+    }
+
+    #[test]
+    fn handle_key_search_backspace() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        assert!(matches!(handle_key(&s, &key(KeyCode::Backspace)), Some(SpecsMessage::SearchBackspace)));
+    }
+
+    #[test]
+    fn handle_key_search_esc_toggles() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        assert!(matches!(handle_key(&s, &key(KeyCode::Esc)), Some(SpecsMessage::ToggleSearch)));
+    }
+
+    #[test]
+    fn handle_key_search_enter_toggles() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        assert!(matches!(handle_key(&s, &key(KeyCode::Enter)), Some(SpecsMessage::ToggleSearch)));
+    }
+
+    // -- update() --
+
+    #[test]
+    fn update_select_prev_saturates_at_zero() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.selected = 0;
+        update(&mut s, SpecsMessage::SelectPrev);
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn update_select_prev_decrements() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.selected = 2;
+        update(&mut s, SpecsMessage::SelectPrev);
+        assert_eq!(s.selected, 1);
+    }
+
+    #[test]
+    fn update_select_next_increments() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.selected = 0;
+        update(&mut s, SpecsMessage::SelectNext);
+        assert_eq!(s.selected, 1);
+    }
+
+    #[test]
+    fn update_select_next_stops_at_max() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.selected = 2;
+        update(&mut s, SpecsMessage::SelectNext);
+        assert_eq!(s.selected, 2);
+    }
+
+    #[test]
+    fn update_toggle_search_enters_search_mode() {
+        let mut s = SpecsState::new();
+        assert!(!s.search_mode);
+        update(&mut s, SpecsMessage::ToggleSearch);
+        assert!(s.search_mode);
+    }
+
+    #[test]
+    fn update_toggle_search_exits_and_clears_query() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        s.search_query = "test".into();
+        s.selected = 1;
+        update(&mut s, SpecsMessage::ToggleSearch);
+        assert!(!s.search_mode);
+        assert!(s.search_query.is_empty());
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn update_search_char_appends_and_resets_selection() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        s.selected = 2;
+        update(&mut s, SpecsMessage::SearchChar('a'));
+        assert_eq!(s.search_query, "a");
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn update_search_backspace_removes_last_char() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        s.search_query = "abc".into();
+        update(&mut s, SpecsMessage::SearchBackspace);
+        assert_eq!(s.search_query, "ab");
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn update_search_backspace_on_empty_is_safe() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        update(&mut s, SpecsMessage::SearchBackspace);
+        assert!(s.search_query.is_empty());
+    }
+
+    // -- render() --
+
+    #[test]
+    fn render_smoke_no_specs() {
+        let s = SpecsState::new();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&s, &mut buf, area);
+        // No panic
+    }
+
+    #[test]
+    fn render_smoke_with_specs() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&s, &mut buf, area);
+        // No panic
+    }
+
+    #[test]
+    fn render_smoke_search_mode() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.search_mode = true;
+        s.search_query = "alpha".into();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&s, &mut buf, area);
+        // No panic
+    }
+
+    #[test]
+    fn render_small_area_returns_early() {
+        let s = SpecsState::new();
+        let area = Rect::new(0, 0, 80, 2);
+        let mut buf = Buffer::empty(area);
+        render(&s, &mut buf, area);
+        // No panic, early return for height < 3
+    }
+
+    // -- load_specs() --
+
+    #[test]
+    fn load_specs_from_tempdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        let spec1 = specs_dir.join("SPEC-100");
+        std::fs::create_dir(&spec1).unwrap();
+        std::fs::write(
+            spec1.join("metadata.json"),
+            r#"{"id":"SPEC-100","title":"Test spec","status":"open","phase":"planning"}"#,
+        )
+        .unwrap();
+
+        let spec2 = specs_dir.join("SPEC-200");
+        std::fs::create_dir(&spec2).unwrap();
+        std::fs::write(
+            spec2.join("metadata.json"),
+            r#"{"id":"SPEC-200","title":"Another spec","status":"closed","phase":"done"}"#,
+        )
+        .unwrap();
+
+        let items = load_specs(dir.path());
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "SPEC-100");
+        assert_eq!(items[1].id, "SPEC-200");
+        assert_eq!(items[0].status, "open");
+        assert_eq!(items[1].status, "closed");
+    }
+
+    #[test]
+    fn load_specs_ignores_non_spec_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        // Non-SPEC directory
+        let other = specs_dir.join("not-a-spec");
+        std::fs::create_dir(&other).unwrap();
+
+        // SPEC dir without metadata.json
+        let no_meta = specs_dir.join("SPEC-999");
+        std::fs::create_dir(&no_meta).unwrap();
+
+        let items = load_specs(dir.path());
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn load_specs_missing_specs_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let items = load_specs(dir.path());
+        assert!(items.is_empty());
+    }
+}
