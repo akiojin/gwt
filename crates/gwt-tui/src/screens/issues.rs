@@ -1,5 +1,7 @@
 //! Issues/SPECs screen — list GitHub Issues and local SPECs with search
 
+use std::path::Path;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -405,6 +407,38 @@ fn render_search_bar(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
         ),
     ]);
     buf.set_line(area.x, area.y, &line, area.width);
+}
+
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+
+/// Load issues from local SPEC directories (`specs/SPEC-*/metadata.json`).
+pub fn load_initial_issues(repo_root: &Path) -> Vec<IssueItem> {
+    let specs = gwt_core::git::local_spec::list_local_specs(repo_root).unwrap_or_default();
+
+    let mut items: Vec<IssueItem> = specs
+        .iter()
+        .map(|spec| {
+            let number = spec
+                .id
+                .trim_start_matches("SPEC-")
+                .parse::<u64>()
+                .unwrap_or(0);
+            IssueItem {
+                number,
+                title: spec.title.clone(),
+                is_spec: true,
+                spec_id: Some(spec.id.clone()),
+                state: spec.status.clone(),
+                labels: vec!["spec".to_string()],
+            }
+        })
+        .collect();
+
+    // Sort by number descending (newest first)
+    items.sort_by(|a, b| b.number.cmp(&a.number));
+    items
 }
 
 // ---------------------------------------------------------------------------

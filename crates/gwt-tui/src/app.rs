@@ -240,10 +240,26 @@ pub fn update(model: &mut Model, msg: Message) {
 
         // Screen-specific messages
         Message::BranchesMsg(msg) => {
-            crate::screens::branches::update(&mut model.branches_state, msg);
+            if matches!(msg, crate::screens::branches::BranchesMessage::Refresh) {
+                let branches = crate::screens::branches::load_branches(&model.repo_root);
+                crate::screens::branches::update(
+                    &mut model.branches_state,
+                    crate::screens::branches::BranchesMessage::Loaded(branches),
+                );
+            } else {
+                crate::screens::branches::update(&mut model.branches_state, msg);
+            }
         }
         Message::IssuesMsg(msg) => {
-            crate::screens::issues::update(&mut model.issues_state, msg);
+            if matches!(msg, crate::screens::issues::IssuesMessage::Refresh) {
+                let issues = crate::screens::issues::load_initial_issues(&model.repo_root);
+                crate::screens::issues::update(
+                    &mut model.issues_state,
+                    crate::screens::issues::IssuesMessage::Loaded(issues),
+                );
+            } else {
+                crate::screens::issues::update(&mut model.issues_state, msg);
+            }
         }
         Message::SettingsMsg(msg) => {
             handle_settings_msg(model, msg);
@@ -796,7 +812,17 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Initialize model
-    let mut model = Model::new(repo_root);
+    let mut model = Model::new(repo_root.clone());
+
+    // Load initial data for management tabs
+    let initial_branches = crate::screens::branches::load_branches(&repo_root);
+    model.branches_state.branches = initial_branches;
+
+    let initial_issues = crate::screens::issues::load_initial_issues(&repo_root);
+    model.issues_state.set_issues(initial_issues);
+
+    let initial_logs = crate::screens::logs::load_log_entries();
+    model.logs_state = crate::screens::LogsState::new().with_entries(initial_logs);
 
     // PTY output channel
     let (pty_tx, pty_rx) = event::pty_output_channel();
