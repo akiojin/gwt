@@ -113,10 +113,31 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::KeyInput(key) => {
+            // Management layer: Tab key cycles management tabs
+            if model.active_layer == ActiveLayer::Management
+                && key.code == crossterm::event::KeyCode::Tab
+            {
+                model.management_tab = match model.management_tab {
+                    ManagementTab::Branches => ManagementTab::Issues,
+                    ManagementTab::Issues => ManagementTab::Settings,
+                    ManagementTab::Settings => ManagementTab::Logs,
+                    ManagementTab::Logs => ManagementTab::Branches,
+                };
+                return;
+            }
             // Forward to active screen handler
             match model.active_layer {
                 ActiveLayer::Main => {
-                    // Phase 2: forward to active pane
+                    // Forward to active PTY pane
+                    if let Some(session) = model.session_tabs.get(model.active_session) {
+                        let pane_id = session.pane_id.clone();
+                        if let Some(pane) = model.pane_manager.pane_mut_by_id(&pane_id) {
+                            let bytes = key_event_to_bytes(&key);
+                            if !bytes.is_empty() {
+                                let _ = pane.write_input(&bytes);
+                            }
+                        }
+                    }
                 }
                 ActiveLayer::Management => {
                     let sub_msg = match model.management_tab {
@@ -622,6 +643,40 @@ fn handle_logs_msg(model: &mut Model, msg: LogsMessage) {
             state.selected = 0;
             state.offset = 0;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Key → bytes conversion (for PTY input)
+// ---------------------------------------------------------------------------
+
+fn key_event_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Char(c) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                let ctrl_byte = (c as u8).wrapping_sub(b'a').wrapping_add(1);
+                if ctrl_byte <= 26 {
+                    return vec![ctrl_byte];
+                }
+            }
+            let mut buf = [0u8; 4];
+            c.encode_utf8(&mut buf).as_bytes().to_vec()
+        }
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        _ => vec![],
     }
 }
 
