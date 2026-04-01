@@ -158,7 +158,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 ### Wizard (Agent Launch)
 
 - FR-020: 15-step wizard as overlay popup (gwt-cli wizard.rs complete migration)
-- FR-021: Steps: QuickStart → BranchAction → AgentSelect → ModelSelect → ReasoningLevel → VersionSelect → CollaborationModes → ExecutionMode → ConvertAgentSelect → ConvertSessionSelect → SkipPermissions → BranchTypeSelect → IssueSelect → AIBranchSuggest → BranchNameInput
+- FR-021: Steps: QuickStart → BranchAction → AgentSelect → ModelSelect → ReasoningLevel → VersionSelect → CollaborationModes → ExecutionMode → ConvertAgentSelect → ConvertSessionSelect → SkipPermissions (with Codex fast mode option) → BranchTypeSelect → IssueSelect → AIBranchSuggest → BranchNameInput
 - FR-022: Quick Start — recall previous launch settings per branch (FR-050)
 - FR-023: Session modes: Normal, Continue, Resume, Convert
 - FR-024: Agent version detection via which + npm registry fallback (bunx/npx)

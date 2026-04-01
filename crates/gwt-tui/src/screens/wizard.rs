@@ -315,6 +315,9 @@ pub struct WizardState {
     // Collaboration modes (Codex)
     pub collaboration_modes: bool,
 
+    // Fast mode (Codex: service_tier=fast)
+    pub fast_mode: bool,
+
     // Issue linking
     pub issues: Vec<IssueItem>,
     pub issue_index: usize,
@@ -376,6 +379,7 @@ impl WizardState {
             reasoning_level: ReasoningLevel::default(),
             reasoning_level_index: 1, // Medium
             collaboration_modes: false,
+            fast_mode: false,
             issues: Vec::new(),
             issue_index: 0,
             issue_search: String::new(),
@@ -647,7 +651,15 @@ impl WizardState {
                 }
             }
             WizardStep::SkipPermissions => {
-                self.skip_permissions = !self.skip_permissions;
+                // Cycle: No → Yes → (Codex: +fast) → No
+                if !self.skip_permissions {
+                    self.skip_permissions = true;
+                } else if self.is_codex() && !self.fast_mode {
+                    self.fast_mode = true;
+                } else {
+                    self.skip_permissions = false;
+                    self.fast_mode = false;
+                }
             }
             WizardStep::BranchTypeSelect => {
                 let idx = BranchType::ALL
@@ -720,7 +732,17 @@ impl WizardState {
                 self.execution_mode = WizardExecutionMode::ALL[self.execution_mode_index];
             }
             WizardStep::SkipPermissions => {
-                self.skip_permissions = !self.skip_permissions;
+                // Reverse cycle
+                if self.is_codex() && self.fast_mode {
+                    self.fast_mode = false;
+                } else if self.skip_permissions {
+                    self.skip_permissions = false;
+                } else if self.is_codex() {
+                    self.skip_permissions = true;
+                    self.fast_mode = true;
+                } else {
+                    self.skip_permissions = true;
+                }
             }
             WizardStep::BranchTypeSelect => {
                 let idx = BranchType::ALL
@@ -856,6 +878,7 @@ impl WizardState {
             execution_mode: self.execution_mode,
             session_id: self.session_id.clone(),
             skip_permissions: self.skip_permissions,
+            fast_mode: self.fast_mode,
             reasoning_level: if self.is_codex() {
                 Some(self.reasoning_level)
             } else {
@@ -893,6 +916,7 @@ pub struct WizardLaunchConfig {
     pub execution_mode: WizardExecutionMode,
     pub session_id: Option<String>,
     pub skip_permissions: bool,
+    pub fast_mode: bool,
     pub reasoning_level: Option<ReasoningLevel>,
 }
 
@@ -1055,9 +1079,7 @@ fn render_step_content(buf: &mut Buffer, area: Rect, state: &WizardState) {
             &state.convert_sessions,
             state.convert_session_index,
         ),
-        WizardStep::SkipPermissions => {
-            render_toggle(buf, area, "Skip Permissions:", state.skip_permissions)
-        }
+        WizardStep::SkipPermissions => render_skip_permissions(buf, area, state),
         WizardStep::BranchTypeSelect => render_branch_type_select(buf, area, state),
         WizardStep::IssueSelect => render_issue_select(buf, area, state),
         WizardStep::AIBranchSuggest => render_ai_branch_suggest(buf, area, state),
@@ -1315,6 +1337,51 @@ fn render_toggle(buf: &mut Buffer, area: Rect, title: &str, value: bool) {
             Style::new().fg(Color::DarkGray),
         )),
     ];
+    Paragraph::new(lines).render(area, buf);
+}
+
+fn render_skip_permissions(buf: &mut Buffer, area: Rect, state: &WizardState) {
+    let options = ["No (require approval)", "Yes (skip all approvals)"];
+    let selected = if state.skip_permissions { 1 } else { 0 };
+
+    let mut lines: Vec<Line<'_>> = vec![
+        Line::from(Span::styled(
+            "Skip Permissions:",
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for (i, opt) in options.iter().enumerate() {
+        let marker = if i == selected { ">" } else { " " };
+        let style = if i == selected {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("  {marker} {opt}"), style)));
+    }
+
+    // Fast mode option for Codex
+    if state.is_codex() {
+        lines.push(Line::from(""));
+        let fast_marker = if state.fast_mode { "x" } else { " " };
+        lines.push(Line::from(Span::styled(
+            format!("  [{fast_marker}] Fast mode (service_tier=fast)"),
+            if state.fast_mode {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑/↓ to select, Enter to confirm",
+        Style::new().fg(Color::DarkGray),
+    )));
+
     Paragraph::new(lines).render(area, buf);
 }
 
