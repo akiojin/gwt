@@ -1,7 +1,8 @@
 //! SPECs tab — browse and search local SPEC files
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, Clear};
 
 #[derive(Debug, Clone)]
 pub struct SpecItem {
@@ -10,6 +11,7 @@ pub struct SpecItem {
     pub title: String,
     pub status: String,
     pub phase: String,
+    pub branches: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +24,11 @@ pub struct SpecsState {
     pub detail_mode: bool,
     pub detail_content: String,
     pub detail_scroll: usize,
+    pub confirm_launch: bool,
+    pub confirm_spec_index: usize,
+    pub branch_select_mode: bool,
+    pub branch_candidates: Vec<String>,
+    pub branch_selected: usize,
 }
 
 impl Default for SpecsState {
@@ -41,6 +48,11 @@ impl SpecsState {
             detail_mode: false,
             detail_content: String::new(),
             detail_scroll: 0,
+            confirm_launch: false,
+            confirm_spec_index: 0,
+            branch_select_mode: false,
+            branch_candidates: Vec::new(),
+            branch_selected: 0,
         }
     }
 
@@ -71,20 +83,56 @@ pub enum SpecsMessage {
     CloseDetail,
     ScrollDetailUp,
     ScrollDetailDown,
+    LaunchAgent,
+    ConfirmLaunch,
+    CancelLaunch,
+    SelectBranch,
+    CancelBranchSelect,
+    BranchSelectPrev,
+    BranchSelectNext,
 }
 
 pub fn handle_key(state: &SpecsState, key: &KeyEvent) -> Option<SpecsMessage> {
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    // Branch selection mode takes priority
+    if state.branch_select_mode {
+        return match key.code {
+            KeyCode::Down | KeyCode::Char('j') => Some(SpecsMessage::BranchSelectNext),
+            KeyCode::Up | KeyCode::Char('k') => Some(SpecsMessage::BranchSelectPrev),
+            KeyCode::Enter => Some(SpecsMessage::SelectBranch),
+            KeyCode::Esc => Some(SpecsMessage::CancelBranchSelect),
+            _ => None,
+        };
+    }
+
+    // Confirm launch dialog
+    if state.confirm_launch {
+        return match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                Some(SpecsMessage::ConfirmLaunch)
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                Some(SpecsMessage::CancelLaunch)
+            }
+            _ => None,
+        };
+    }
+
     if state.detail_mode {
         return match key.code {
             KeyCode::Esc => Some(SpecsMessage::CloseDetail),
             KeyCode::Up | KeyCode::Char('k') => Some(SpecsMessage::ScrollDetailUp),
             KeyCode::Down | KeyCode::Char('j') => Some(SpecsMessage::ScrollDetailDown),
+            KeyCode::Enter if shift => Some(SpecsMessage::LaunchAgent),
             _ => None,
         };
     }
     if state.search_mode {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => Some(SpecsMessage::ToggleSearch),
+            KeyCode::Esc => Some(SpecsMessage::ToggleSearch),
+            KeyCode::Enter if !shift => Some(SpecsMessage::ToggleSearch),
+            KeyCode::Enter if shift => None, // Shift+Enter ignored in search
             KeyCode::Char(c) => Some(SpecsMessage::SearchChar(c)),
             KeyCode::Backspace => Some(SpecsMessage::SearchBackspace),
             _ => None,
@@ -94,6 +142,7 @@ pub fn handle_key(state: &SpecsState, key: &KeyEvent) -> Option<SpecsMessage> {
             KeyCode::Up | KeyCode::Char('k') => Some(SpecsMessage::SelectPrev),
             KeyCode::Down | KeyCode::Char('j') => Some(SpecsMessage::SelectNext),
             KeyCode::Char('/') => Some(SpecsMessage::ToggleSearch),
+            KeyCode::Enter if shift => Some(SpecsMessage::LaunchAgent),
             KeyCode::Enter => Some(SpecsMessage::OpenDetail),
             _ => None,
         }
@@ -144,6 +193,30 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
         SpecsMessage::ScrollDetailDown => {
             state.detail_scroll = state.detail_scroll.saturating_add(1);
         }
+        SpecsMessage::LaunchAgent => {
+            // Handled by app.rs
+        }
+        SpecsMessage::ConfirmLaunch => {
+            // Handled by app.rs
+        }
+        SpecsMessage::CancelLaunch => {
+            state.confirm_launch = false;
+        }
+        SpecsMessage::SelectBranch => {
+            // Handled by app.rs
+        }
+        SpecsMessage::CancelBranchSelect => {
+            state.branch_select_mode = false;
+        }
+        SpecsMessage::BranchSelectPrev => {
+            state.branch_selected = state.branch_selected.saturating_sub(1);
+        }
+        SpecsMessage::BranchSelectNext => {
+            let max = state.branch_candidates.len(); // includes "+ Create" option
+            if state.branch_selected < max {
+                state.branch_selected += 1;
+            }
+        }
     }
 }
 
@@ -166,7 +239,7 @@ pub fn render(state: &SpecsState, buf: &mut Buffer, area: Rect) {
 
     // Header
     let count = state.visible_specs().len();
-    let header = format!(" SPECs ({count})  [/] Search");
+    let header = format!(" SPECs ({count})  [/] Search  [S-Enter] Launch");
     let header_span = Span::styled(header, Style::default().fg(Color::Cyan).bold());
     buf.set_span(layout[0].x, layout[0].y, &header_span, layout[0].width);
 
@@ -214,6 +287,13 @@ pub fn render(state: &SpecsState, buf: &mut Buffer, area: Rect) {
         let span = Span::styled(search_line, Style::default().fg(Color::Yellow));
         buf.set_span(layout[2].x, layout[2].y, &span, layout[2].width);
     }
+
+    // Overlay dialogs
+    if state.confirm_launch {
+        render_confirm_dialog(state, buf, area);
+    } else if state.branch_select_mode {
+        render_branch_select_dialog(state, buf, area);
+    }
 }
 
 fn render_detail(state: &SpecsState, buf: &mut Buffer, area: Rect) {
@@ -234,7 +314,7 @@ fn render_detail(state: &SpecsState, buf: &mut Buffer, area: Rect) {
     .split(area);
 
     // Header
-    let header = format!(" {spec_id} - {spec_title}  [Esc] Back");
+    let header = format!(" {spec_id} - {spec_title}  [S-Enter] Launch  [Esc] Back");
     let header_span = Span::styled(header, Style::default().fg(Color::Cyan).bold());
     buf.set_span(layout[0].x, layout[0].y, &header_span, layout[0].width);
 
@@ -244,6 +324,124 @@ fn render_detail(state: &SpecsState, buf: &mut Buffer, area: Rect) {
         &state.detail_content,
         state.detail_scroll,
     );
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+fn render_confirm_dialog(state: &SpecsState, buf: &mut Buffer, area: Rect) {
+    let visible = state.visible_specs();
+    let spec = visible.get(state.confirm_spec_index);
+    let spec_id = spec.map(|s| s.id.as_str()).unwrap_or("?");
+    let phase = spec.map(|s| s.phase.as_str()).unwrap_or("unknown");
+
+    let line1 = format!("SPEC-{spec_id} is in '{phase}' phase.");
+    let line2 = "Launch agent anyway? [Y/n]";
+    let width = (line1.len().max(line2.len()) + 4) as u16;
+    let dialog = centered_rect(width, 6, area);
+
+    Clear.render(dialog, buf);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Confirm Launch ");
+    block.render(dialog, buf);
+
+    let inner = dialog.inner(ratatui::layout::Margin::new(1, 1));
+    if inner.height >= 2 {
+        let s1 = Span::styled(&line1, Style::default().fg(Color::White));
+        buf.set_span(inner.x, inner.y, &s1, inner.width);
+        let s2 = Span::styled(line2, Style::default().fg(Color::Yellow).bold());
+        buf.set_span(inner.x, inner.y + 1, &s2, inner.width);
+    }
+}
+
+fn render_branch_select_dialog(state: &SpecsState, buf: &mut Buffer, area: Rect) {
+    let visible = state.visible_specs();
+    let spec = visible.get(state.confirm_spec_index);
+    let spec_id = spec.map(|s| s.id.as_str()).unwrap_or("?");
+
+    let create_label = format!("+ Create feature/SPEC-{spec_id}");
+    let total = state.branch_candidates.len() + 1; // +1 for create option
+    let max_label_len = state
+        .branch_candidates
+        .iter()
+        .map(|b| b.len())
+        .chain(std::iter::once(create_label.len()))
+        .max()
+        .unwrap_or(20);
+
+    let width = (max_label_len + 6) as u16;
+    let height = (total + 4) as u16; // borders + title + padding
+    let dialog = centered_rect(width, height, area);
+
+    Clear.render(dialog, buf);
+    let title = format!(" Select branch for SPEC-{spec_id} ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
+    block.render(dialog, buf);
+
+    let inner = dialog.inner(ratatui::layout::Margin::new(1, 1));
+    for (i, label) in state
+        .branch_candidates
+        .iter()
+        .map(|b| b.as_str())
+        .chain(std::iter::once(create_label.as_str()))
+        .enumerate()
+    {
+        if i as u16 >= inner.height {
+            break;
+        }
+        let is_sel = i == state.branch_selected;
+        let style = if is_sel {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        let marker = if is_sel { "> " } else { "  " };
+        let line = format!("{marker}{label}");
+        let span = Span::styled(line, style);
+        buf.set_span(inner.x, inner.y + i as u16, &span, inner.width);
+    }
+}
+
+/// Save a branch name to a SPEC's metadata.json branches array
+pub fn save_spec_branch(repo_root: &std::path::Path, spec_dir_name: &str, branch_name: &str) {
+    let metadata_path = repo_root
+        .join("specs")
+        .join(spec_dir_name)
+        .join("metadata.json");
+
+    let mut meta: serde_json::Value = match std::fs::read_to_string(&metadata_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => return,
+    };
+
+    let branches = meta.as_object_mut().and_then(|obj| {
+        if !obj.contains_key("branches") {
+            obj.insert("branches".to_string(), serde_json::Value::Array(Vec::new()));
+        }
+        obj.get_mut("branches").and_then(|v| v.as_array_mut())
+    });
+
+    if let Some(arr) = branches {
+        let val = serde_json::Value::String(branch_name.to_string());
+        if !arr.contains(&val) {
+            arr.push(val);
+        }
+    }
+
+    if let Ok(json_str) = serde_json::to_string_pretty(&meta) {
+        let _ = std::fs::write(&metadata_path, json_str);
+    }
 }
 
 /// Load SPEC items from specs/ directory
@@ -283,12 +481,22 @@ pub fn load_specs(repo_root: &std::path::Path) -> Vec<SpecItem> {
             None => continue,
         };
 
+        let branches = meta["branches"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         items.push(SpecItem {
             dir_name: name.clone(),
             id: meta["id"].as_str().unwrap_or(&name).to_string(),
             title: meta["title"].as_str().unwrap_or("").to_string(),
             status: meta["status"].as_str().unwrap_or("open").to_string(),
             phase: meta["phase"].as_str().unwrap_or("").to_string(),
+            branches,
         });
     }
 
@@ -319,6 +527,7 @@ mod tests {
                 title: "Alpha feature".into(),
                 status: "open".into(),
                 phase: "planning".into(),
+                branches: vec![],
             },
             SpecItem {
                 dir_name: "SPEC-2".into(),
@@ -326,6 +535,7 @@ mod tests {
                 title: "Beta bugfix".into(),
                 status: "closed".into(),
                 phase: "done".into(),
+                branches: vec!["feature/SPEC-2".into()],
             },
             SpecItem {
                 dir_name: "SPEC-3".into(),
@@ -333,6 +543,7 @@ mod tests {
                 title: "Gamma refactor".into(),
                 status: "open".into(),
                 phase: "implementation".into(),
+                branches: vec![],
             },
         ]
     }
@@ -798,5 +1009,282 @@ mod tests {
             !first_content_line.contains('#'),
             "markdown heading marker should not be rendered literally: {first_content_line:?}"
         );
+    }
+
+    // -- T001: branches field tests --
+
+    #[test]
+    fn load_specs_reads_branches_from_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        let spec = specs_dir.join("SPEC-500");
+        std::fs::create_dir(&spec).unwrap();
+        std::fs::write(
+            spec.join("metadata.json"),
+            r#"{"id":"SPEC-500","title":"With branches","status":"open","phase":"planning","branches":["feature/SPEC-500","fix/hotfix"]}"#,
+        )
+        .unwrap();
+
+        let items = load_specs(dir.path());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].branches, vec!["feature/SPEC-500", "fix/hotfix"]);
+    }
+
+    #[test]
+    fn load_specs_empty_branches_when_field_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        let spec = specs_dir.join("SPEC-501");
+        std::fs::create_dir(&spec).unwrap();
+        std::fs::write(
+            spec.join("metadata.json"),
+            r#"{"id":"SPEC-501","title":"No branches","status":"open","phase":"planning"}"#,
+        )
+        .unwrap();
+
+        let items = load_specs(dir.path());
+        assert_eq!(items.len(), 1);
+        assert!(items[0].branches.is_empty());
+    }
+
+    // -- T002: save_spec_branch tests --
+
+    #[test]
+    fn save_spec_branch_adds_to_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        let spec = specs_dir.join("SPEC-600");
+        std::fs::create_dir(&spec).unwrap();
+        std::fs::write(
+            spec.join("metadata.json"),
+            r#"{"id":"SPEC-600","title":"Test","status":"open","phase":"planning","branches":[]}"#,
+        )
+        .unwrap();
+
+        save_spec_branch(dir.path(), "SPEC-600", "feature/SPEC-600");
+
+        let items = load_specs(dir.path());
+        assert_eq!(items[0].branches, vec!["feature/SPEC-600"]);
+    }
+
+    #[test]
+    fn save_spec_branch_no_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        let spec = specs_dir.join("SPEC-601");
+        std::fs::create_dir(&spec).unwrap();
+        std::fs::write(
+            spec.join("metadata.json"),
+            r#"{"id":"SPEC-601","title":"Test","status":"open","phase":"planning","branches":["feature/SPEC-601"]}"#,
+        )
+        .unwrap();
+
+        save_spec_branch(dir.path(), "SPEC-601", "feature/SPEC-601");
+
+        let items = load_specs(dir.path());
+        assert_eq!(items[0].branches.len(), 1);
+    }
+
+    #[test]
+    fn save_spec_branch_creates_branches_field_if_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir(&specs_dir).unwrap();
+
+        let spec = specs_dir.join("SPEC-602");
+        std::fs::create_dir(&spec).unwrap();
+        std::fs::write(
+            spec.join("metadata.json"),
+            r#"{"id":"SPEC-602","title":"Test","status":"open","phase":"planning"}"#,
+        )
+        .unwrap();
+
+        save_spec_branch(dir.path(), "SPEC-602", "feature/new-branch");
+
+        let items = load_specs(dir.path());
+        assert_eq!(items[0].branches, vec!["feature/new-branch"]);
+    }
+
+    // -- T003: handle_key launch agent tests --
+
+    fn shift_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn handle_key_shift_enter_returns_launch_agent() {
+        let s = SpecsState::new();
+        assert!(matches!(
+            handle_key(&s, &shift_enter()),
+            Some(SpecsMessage::LaunchAgent)
+        ));
+    }
+
+    #[test]
+    fn handle_key_detail_shift_enter_returns_launch_agent() {
+        let mut s = SpecsState::new();
+        s.detail_mode = true;
+        assert!(matches!(
+            handle_key(&s, &shift_enter()),
+            Some(SpecsMessage::LaunchAgent)
+        ));
+    }
+
+    #[test]
+    fn handle_key_shift_enter_in_search_mode_returns_none() {
+        let mut s = SpecsState::new();
+        s.search_mode = true;
+        assert!(handle_key(&s, &shift_enter()).is_none());
+    }
+
+    #[test]
+    fn handle_key_normal_enter_still_opens_detail() {
+        let s = SpecsState::new();
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Enter)),
+            Some(SpecsMessage::OpenDetail)
+        ));
+    }
+
+    #[test]
+    fn handle_key_confirm_y_returns_confirm_launch() {
+        let mut s = SpecsState::new();
+        s.confirm_launch = true;
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Char('y'))),
+            Some(SpecsMessage::ConfirmLaunch)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Enter)),
+            Some(SpecsMessage::ConfirmLaunch)
+        ));
+    }
+
+    #[test]
+    fn handle_key_confirm_esc_returns_cancel_launch() {
+        let mut s = SpecsState::new();
+        s.confirm_launch = true;
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Esc)),
+            Some(SpecsMessage::CancelLaunch)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Char('n'))),
+            Some(SpecsMessage::CancelLaunch)
+        ));
+    }
+
+    #[test]
+    fn handle_key_branch_select_navigation() {
+        let mut s = SpecsState::new();
+        s.branch_select_mode = true;
+        s.branch_candidates = vec!["branch-a".into(), "branch-b".into()];
+
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Down)),
+            Some(SpecsMessage::BranchSelectNext)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Char('j'))),
+            Some(SpecsMessage::BranchSelectNext)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Up)),
+            Some(SpecsMessage::BranchSelectPrev)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Char('k'))),
+            Some(SpecsMessage::BranchSelectPrev)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Enter)),
+            Some(SpecsMessage::SelectBranch)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Esc)),
+            Some(SpecsMessage::CancelBranchSelect)
+        ));
+    }
+
+    // -- T005: state field defaults --
+
+    #[test]
+    fn new_state_has_launch_fields_defaulted() {
+        let s = SpecsState::new();
+        assert!(!s.confirm_launch);
+        assert_eq!(s.confirm_spec_index, 0);
+        assert!(!s.branch_select_mode);
+        assert!(s.branch_candidates.is_empty());
+        assert_eq!(s.branch_selected, 0);
+    }
+
+    // -- T006: overlay render no-panic tests --
+
+    #[test]
+    fn render_confirm_launch_no_panic() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.confirm_launch = true;
+        s.confirm_spec_index = 0;
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&s, &mut buf, area);
+    }
+
+    #[test]
+    fn render_branch_select_no_panic() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.branch_select_mode = true;
+        s.confirm_spec_index = 0;
+        s.branch_candidates = vec!["feature/SPEC-1".into(), "fix/hotfix".into()];
+        s.branch_selected = 0;
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&s, &mut buf, area);
+    }
+
+    // -- update() cancel tests --
+
+    #[test]
+    fn update_cancel_launch_clears_flag() {
+        let mut s = SpecsState::new();
+        s.confirm_launch = true;
+        update(&mut s, SpecsMessage::CancelLaunch);
+        assert!(!s.confirm_launch);
+    }
+
+    #[test]
+    fn update_cancel_branch_select_clears_flag() {
+        let mut s = SpecsState::new();
+        s.branch_select_mode = true;
+        update(&mut s, SpecsMessage::CancelBranchSelect);
+        assert!(!s.branch_select_mode);
+    }
+
+    #[test]
+    fn update_branch_select_navigation() {
+        let mut s = SpecsState::new();
+        s.branch_select_mode = true;
+        s.branch_candidates = vec!["a".into(), "b".into()];
+        s.branch_selected = 0;
+
+        update(&mut s, SpecsMessage::BranchSelectNext);
+        assert_eq!(s.branch_selected, 1);
+
+        update(&mut s, SpecsMessage::BranchSelectPrev);
+        assert_eq!(s.branch_selected, 0);
+
+        // Saturates at 0
+        update(&mut s, SpecsMessage::BranchSelectPrev);
+        assert_eq!(s.branch_selected, 0);
     }
 }
