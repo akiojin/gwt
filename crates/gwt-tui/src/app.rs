@@ -737,8 +737,12 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let evt = event_loop.next()?;
         let msg = match evt {
             TuiEvent::Key(key) => {
+                // Only handle key Press events (ignore Release/Repeat/IME)
+                if key.kind != crossterm::event::KeyEventKind::Press {
+                    None
+                }
                 // When wizard is open, intercept all keys
-                if model.wizard.is_some() {
+                else if model.wizard.is_some() {
                     Some(Message::WizardKey(key))
                 } else if keybind::is_ctrl_c(&key) {
                     if model.handle_ctrl_c() {
